@@ -1,0 +1,15 @@
+[server]
+bind_addr = "0.0.0.0:37000"
+default_token = "dev-tunnel-token"
+heartbeat_interval = 30
+
+[server.transport]
+type = "tcp"
+
+[server.transport.tcp]
+nodelay = true
+keepalive_secs = 20
+keepalive_interval = 8
+
+[server.services]
+

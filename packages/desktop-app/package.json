@@ -1,0 +1,110 @@
+{
+  "name": "@instafy/desktop-app",
+  "private": true,
+  "version": "0.2.0",
+  "license": "AGPL-3.0-only",
+  "description": "Instafy Studio desktop app (Electron).",
+  "type": "commonjs",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "pnpm --filter @instafy/desktop-runtime-agent build && tsup && node scripts/sync-frontend-host-scripts.mjs && node scripts/download-speech-bootstrap-assets.mjs",
+    "start": "pnpm --filter @instafy/desktop-runtime-agent build && pnpm build && node scripts/launch.mjs",
+    "smoke:voice:host": "pnpm build && node scripts/voice-host-smoke.mjs",
+    "smoke:voice:host:bootstrap": "pnpm build && node scripts/voice-host-smoke.mjs --bootstrap-clean",
+    "test": "pnpm build && node --test test/*.test.mjs",
+    "stage:runtime-agent": "node scripts/stage-runtime-agent.mjs",
+    "dist": "pnpm build && pnpm stage:runtime-agent && electron-builder --publish never",
+    "verify:packaged-runtime-agent": "node scripts/verify-packaged-runtime-agent.mjs",
+    "verify:release-artifacts": "node scripts/verify-release-artifacts.mjs",
+    "lint": "eslint src --ext .ts"
+  },
+  "dependencies": {
+    "@instafy/desktop-runtime-agent": "workspace:*",
+    "@instafy/provider-client": "workspace:*",
+    "@instafy/provider-contract": "workspace:*",
+    "@instafy/sdk": "workspace:*",
+    "electron-updater": "^6.8.9"
+  },
+  "devDependencies": {
+    "@electron/notarize": "^3.1.1",
+    "@types/node": "^22.18.0",
+    "electron": "^43.1.1",
+    "electron-builder": "^26.15.3",
+    "electron-builder-squirrel-windows": "^26.15.3",
+    "eslint": "^8.57.0",
+    "tsup": "^7.3.0",
+    "typescript": "^5.4.5"
+  },
+  "build": {
+    "appId": "dev.instafy.studio",
+    "productName": "Instafy Studio",
+    "directories": {
+      "output": "release"
+    },
+    "publish": {
+      "provider": "generic",
+      "url": "https://downloads.instafy.dev/desktop-app/stable"
+    },
+    "artifactName": "instafy-studio-${version}-${os}.${ext}",
+    "afterPack": "scripts/finalize-runtime-agent-manifest.cjs",
+    "afterSign": "scripts/notarize.cjs",
+    "files": [
+      "dist/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/runtime-agent",
+        "to": "runtime-agent",
+        "filter": [
+          "runtime-agent*"
+        ]
+      }
+    ],
+    "asarUnpack": [
+      "dist/native/**"
+    ],
+    "protocols": [
+      {
+        "name": "Instafy",
+        "schemes": [
+          "instafy"
+        ]
+      }
+    ],
+    "mac": {
+      "artifactName": "instafy-studio-${version}-mac-${arch}.${ext}",
+      "category": "public.app-category.developer-tools",
+      "icon": "assets/icon.png",
+      "binaries": [
+        "Contents/Resources/runtime-agent/runtime-agent"
+      ],
+      "extendInfo": {
+        "NSBluetoothAlwaysUsageDescription": "Instafy Studio uses Bluetooth to connect to hardware selected by you.",
+        "NSBluetoothPeripheralUsageDescription": "Instafy Studio uses Bluetooth to connect to hardware selected by you."
+      },
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "linux": {
+      "category": "Development",
+      "icon": "assets/icon.png",
+      "target": [
+        "AppImage"
+      ]
+    },
+    "win": {
+      "icon": "assets/icon.png",
+      "signExts": [
+        "runtime-agent.exe"
+      ],
+      "target": [
+        "nsis"
+      ]
+    }
+  }
+}

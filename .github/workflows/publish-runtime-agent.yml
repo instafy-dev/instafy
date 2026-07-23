@@ -1,0 +1,194 @@
+name: Publish runtime-agent images
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_namespace:
+        description: "GHCR namespace/org (default: instafy-dev)"
+        required: false
+        type: string
+        default: instafy-dev
+      update_channel_tags:
+        description: "Also move the mutable latest/webdev convenience tags"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-runtime-agent-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish-runtime-agent:
+    name: Publish ${{ matrix.flavor }} runtime
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        include:
+          - flavor: base
+            target: runtime
+            tag_prefix: ""
+            channel_tag: latest
+          - flavor: webdev
+            target: runtime-webdev
+            tag_prefix: webdev-
+            channel_tag: webdev
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Resolve image references
+        id: refs
+        shell: bash
+        env:
+          IMAGE_NAMESPACE: ${{ inputs.image_namespace || 'instafy-dev' }}
+          TAG_PREFIX: ${{ matrix.tag_prefix }}
+          CHANNEL_TAG: ${{ matrix.channel_tag }}
+          UPDATE_CHANNEL_TAGS: ${{ inputs.update_channel_tags }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$IMAGE_NAMESPACE" =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
+            echo "::error::image_namespace must be a lowercase GHCR namespace."
+            exit 1
+          fi
+
+          image="ghcr.io/${IMAGE_NAMESPACE}/instafy-runtime-agent"
+          release_tag="${image}:${TAG_PREFIX}${GITHUB_SHA}"
+          tags="$release_tag"
+          if [ "$UPDATE_CHANNEL_TAGS" = "true" ]; then
+            tags="${tags}"$'\n'"${image}:${CHANNEL_TAG}"
+          fi
+
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          {
+            echo "tags<<EOF"
+            echo "$tags"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned Trivy
+        env:
+          TRIVY_VERSION: "0.72.0"
+          TRIVY_LINUX_X64_SHA256: "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/trivy.tar.gz"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+            --output "$archive"
+          printf '%s  %s\n' "$TRIVY_LINUX_X64_SHA256" "$archive" | sha256sum --check --status
+          tar -xzf "$archive" -C "$RUNNER_TEMP" trivy
+          sudo install -m 0755 "$RUNNER_TEMP/trivy" /usr/local/bin/trivy
+          test "$(trivy --version | awk 'NR == 1 { print $2 }')" = "$TRIVY_VERSION"
+
+      # Both release architectures use the same pinned base manifest, apt/npm
+      # inputs and Go module graph. Scan the native build before any registry
+      # login or push so a finding cannot leave a partially published release.
+      - name: Build native audit image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/runtime/Dockerfile
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          tags: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.sha }}
+          build-args: |
+            BUILD_PROFILE=release
+            BUILD_ARTIFACT_DIR=release
+          cache-from: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}
+          load: true
+          push: false
+          provenance: false
+          sbom: false
+
+      - name: Scan native audit image
+        env:
+          AUDIT_IMAGE: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          empty_config="$RUNNER_TEMP/trivy.empty.yaml"
+          empty_ignore="$RUNNER_TEMP/trivy.empty-ignore"
+          printf '{}\n' > "$empty_config"
+          : > "$empty_ignore"
+          trivy image \
+            --config "$empty_config" \
+            --scanners vuln,secret \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --ignorefile "$empty_ignore" \
+            --exit-code 1 \
+            --skip-version-check \
+            --no-progress \
+            "$AUDIT_IMAGE"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push multi-arch image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/runtime/Dockerfile
+          target: ${{ matrix.target }}
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.refs.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.sha }}
+          build-args: |
+            BUILD_PROFILE=release
+            BUILD_ARTIFACT_DIR=release
+          cache-from: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}
+          cache-to: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }},mode=max
+          push: true
+          provenance: mode=max
+          sbom: true
+
+      - name: Verify and report immutable image
+        shell: bash
+        env:
+          IMAGE: ${{ steps.refs.outputs.image }}
+          RELEASE_TAG: ${{ steps.refs.outputs.release_tag }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          FLAVOR: ${{ matrix.flavor }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Build did not return a valid OCI manifest digest."
+            exit 1
+          fi
+
+          immutable_image="${IMAGE}@${DIGEST}"
+          docker buildx imagetools inspect "$immutable_image" >/dev/null
+          {
+            echo "### ${FLAVOR} runtime-agent"
+            echo
+            echo "- Release tag: \`${RELEASE_TAG}\`"
+            echo "- Immutable image: \`${immutable_image}\`"
+            echo "- Platforms: \`linux/amd64\`, \`linux/arm64\`"
+          } >> "$GITHUB_STEP_SUMMARY"

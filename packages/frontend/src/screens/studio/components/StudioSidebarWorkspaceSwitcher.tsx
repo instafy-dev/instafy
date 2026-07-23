@@ -1,0 +1,320 @@
+import { Plus, Search, Settings } from "iconoir-react";
+import { IconButton } from "../../../components/Button";
+import { MenuItemContent } from "../../../components/MenuItemContent";
+import { SearchInput } from "../../../components/SearchInput";
+import { SidebarMenuSection } from "../../../components/SidebarMenuSection";
+import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
+import { Text } from "../../../components/Text";
+import {
+  DRAWER_ICON_BUTTON_TONE_CLASS,
+  DRAWER_LIST_ROW_TEXT_CLASS,
+} from "../../../components/listRowStyles";
+import type { MergedProjectListItem } from "../../../projects/useMergedControllerProjects";
+import { getOrgInitials } from "../../../org/orgNaming";
+import { AttentionBadge } from "../../../components/AttentionBadge";
+
+const WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS = `h-8 w-8 ${DRAWER_ICON_BUTTON_TONE_CLASS}`;
+const WORKSPACE_SWITCHER_ACTION_ICON_CLASS = "h-4 w-4";
+// Row geometry shared by every list row in this panel so left edges align.
+const SWITCHER_MENU_ROW_CLASS = "rounded-xl px-3.5 py-2";
+
+export const SIDEBAR_WORKSPACE_SWITCHER_DEFAULT_VISIBLE_LIMIT = 40;
+export const SIDEBAR_WORKSPACE_SWITCHER_SEARCH_VISIBLE_LIMIT = 80;
+
+export function getVisibleSidebarWorkspaceProjects<TProject>({
+  projects,
+  visibleLimit,
+}: {
+  projects: TProject[];
+  visibleLimit: number;
+}) {
+  const limit = Math.max(1, visibleLimit);
+  const visibleProjects = projects.slice(0, limit);
+  return {
+    visibleProjects,
+    hiddenProjectCount: Math.max(0, projects.length - visibleProjects.length),
+  };
+}
+
+export type SidebarWorkspaceOrgOption = {
+  key: string;
+  name: string;
+  label: string;
+  slug: string | null;
+  count: number;
+  avatarUrl?: string | null;
+};
+
+type StudioSidebarWorkspaceSwitcherProps = {
+  orgOptions: SidebarWorkspaceOrgOption[];
+  workspaceOrgKey: string;
+  onWorkspaceOrgChange: (orgKey: string) => void;
+  onOpenOrgSettings?: () => void;
+  canSearchSpaces: boolean;
+  showProjectSearch: boolean;
+  workspaceProjectSearchOpen: boolean;
+  workspaceProjectQuery: string;
+  onWorkspaceProjectQueryChange: (value: string) => void;
+  onToggleProjectSearch: () => void;
+  onCreateProject?: () => void;
+  currentOrgProject: MergedProjectListItem | null;
+  switcherProjects: MergedProjectListItem[];
+  onOpenProjectSettings?: () => void;
+  onProjectMenuAction: (key: string | number) => void;
+  projectAttentionCounts?: Record<string, number>;
+  orgAttentionCounts?: Record<string, number>;
+};
+
+/**
+ * The spaces panel. Teams are a flat chip strip (mirroring the sidebar team
+ * rail) rather than a nested dropdown — one interaction language, no popover
+ * inside a popover. Everything below is a single spaces list with the active
+ * space as its first, selected row.
+ */
+export function StudioSidebarWorkspaceSwitcher({
+  orgOptions,
+  workspaceOrgKey,
+  onWorkspaceOrgChange,
+  onOpenOrgSettings,
+  canSearchSpaces,
+  showProjectSearch,
+  workspaceProjectSearchOpen,
+  workspaceProjectQuery,
+  onWorkspaceProjectQueryChange,
+  onToggleProjectSearch,
+  onCreateProject,
+  currentOrgProject,
+  switcherProjects,
+  onOpenProjectSettings,
+  onProjectMenuAction,
+  projectAttentionCounts = {},
+  orgAttentionCounts = {},
+}: StudioSidebarWorkspaceSwitcherProps) {
+  const trimmedWorkspaceProjectQuery = workspaceProjectQuery.trim();
+  const projectVisibleLimit =
+    trimmedWorkspaceProjectQuery.length > 0
+      ? SIDEBAR_WORKSPACE_SWITCHER_SEARCH_VISIBLE_LIMIT
+      : SIDEBAR_WORKSPACE_SWITCHER_DEFAULT_VISIBLE_LIMIT;
+  const { visibleProjects, hiddenProjectCount } = getVisibleSidebarWorkspaceProjects({
+    projects: switcherProjects,
+    visibleLimit: projectVisibleLimit,
+  });
+
+  const selectedOrg =
+    orgOptions.find((org) => org.key === workspaceOrgKey) ?? orgOptions[0] ?? null;
+  // The Team section itself always renders: with a single org its settings
+  // entry is the only path to members/invites/leave (invited users land in
+  // exactly one org). Only the switcher CHIPS are noise in the solo case.
+  const showTeamChips = orgOptions.length > 1;
+
+  const renderProjectRow = (project: MergedProjectListItem, options: { current: boolean }) => (
+    <StudioMenuItem
+      key={`project:${project.id}`}
+      id={`project:${project.id}`}
+      data-testid={
+        options.current
+          ? `sidebar-project-current-${project.id}`
+          : `sidebar-project-switcher-item-${project.id}`
+      }
+      className={[
+        DRAWER_LIST_ROW_TEXT_CLASS,
+        SWITCHER_MENU_ROW_CLASS,
+        options.current
+          ? "bg-slate-100 font-medium text-slate-900 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-50"
+          : "",
+        "data-[selected]:bg-slate-100 dark:data-[selected]:bg-[var(--color-studio-dark-active)]",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+    >
+      <MenuItemContent>
+        <span className="flex w-full items-center justify-between gap-2">
+          <span className="min-w-0 truncate">{project.name || "Untitled space"}</span>
+          <span className="flex shrink-0 items-center gap-1.5">
+            {options.current ? (
+              <span className="text-3xs font-medium uppercase tracking-[0.08em] text-slate-400 dark:text-slate-500">
+                Current
+              </span>
+            ) : null}
+            <AttentionBadge
+              count={projectAttentionCounts[project.id] ?? 0}
+              className="shrink-0"
+              testId={`sidebar-project-attention-${project.id}`}
+            />
+          </span>
+        </span>
+      </MenuItemContent>
+    </StudioMenuItem>
+  );
+
+  return (
+    <>
+      <SidebarMenuSection
+        label="Team"
+        headerClassName="pr-0"
+        actions={
+          <IconButton
+            variant="ghost"
+            size="sm"
+            radius="full"
+            aria-label="Team settings"
+            data-testid="sidebar-org-settings-button"
+            isDisabled={!onOpenOrgSettings}
+            onPress={onOpenOrgSettings}
+            className={`shrink-0 ${WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}`}
+          >
+            <Settings className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
+          </IconButton>
+        }
+      >
+        {showTeamChips ? (
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            {orgOptions.map((org) => {
+              const isSelected = org.key === workspaceOrgKey;
+              return (
+                <button
+                  key={org.key}
+                  type="button"
+                  title={org.label}
+                  aria-label={`Show team ${org.label}`}
+                  aria-pressed={isSelected}
+                  data-testid={`sidebar-org-chip-${org.key}`}
+                  onClick={() => onWorkspaceOrgChange(org.key)}
+                  className={[
+                    "relative flex h-8 min-w-8 shrink-0 items-center justify-center rounded-lg px-1.5 text-xxs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-400/60",
+                    isSelected
+                      ? "bg-primary-600 text-white dark:bg-primary-500"
+                      : "bg-slate-200/80 text-slate-600 hover:bg-slate-300/70 hover:text-slate-800 dark:bg-white/[0.08] dark:text-slate-300 dark:hover:bg-white/[0.14] dark:hover:text-slate-100",
+                  ].join(" ")}
+                >
+                  {org.key === "all" ? (
+                    "All"
+                  ) : org.avatarUrl ? (
+                    <img
+                      src={org.avatarUrl}
+                      alt=""
+                      aria-hidden="true"
+                      className="h-8 w-8 rounded-lg object-cover"
+                      draggable={false}
+                    />
+                  ) : (
+                    getOrgInitials(org.name)
+                  )}
+                  <AttentionBadge
+                    count={
+                      org.key === "all"
+                        ? Object.values(orgAttentionCounts).reduce((sum, value) => sum + value, 0)
+                        : orgAttentionCounts[org.key] ?? 0
+                    }
+                    aria-hidden
+                    testId={`sidebar-org-attention-${org.key}`}
+                    className="absolute -right-1 -top-1 ring-2 ring-white dark:ring-[color:var(--color-studio-dark-floating)]"
+                  />
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+        <Text
+          as="div"
+          variant="caption"
+          tone="muted"
+          data-testid="sidebar-org-selector"
+          className="mt-2 truncate"
+        >
+          {selectedOrg?.label ?? ""}
+        </Text>
+      </SidebarMenuSection>
+
+      <SidebarMenuSection
+        className="mt-4"
+        label="Spaces"
+        headerClassName="pr-0"
+        actions={
+          <div className="flex items-center gap-1">
+            {canSearchSpaces ? (
+              <IconButton
+                variant="ghost"
+                size="sm"
+                radius="full"
+                aria-label={showProjectSearch ? "Clear space search" : "Search spaces"}
+                data-testid="sidebar-project-search-toggle"
+                onPress={onToggleProjectSearch}
+                className={WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}
+              >
+                <Search className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
+              </IconButton>
+            ) : null}
+            {onOpenProjectSettings && currentOrgProject ? (
+              <IconButton
+                variant="ghost"
+                size="sm"
+                radius="full"
+                aria-label="Current space settings"
+                data-testid="sidebar-project-settings"
+                onPress={onOpenProjectSettings}
+                className={WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}
+              >
+                <Settings className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
+              </IconButton>
+            ) : null}
+            {onCreateProject ? (
+              <IconButton
+                variant="ghost"
+                size="sm"
+                radius="full"
+                aria-label="New space"
+                data-testid="sidebar-project-new"
+                onPress={onCreateProject}
+                className={WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}
+              >
+                <Plus className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
+              </IconButton>
+            ) : null}
+          </div>
+        }
+      >
+        {showProjectSearch && canSearchSpaces ? (
+          <div className="mt-2">
+            <SearchInput
+              id="sidebar-project-switcher-search"
+              label="Search spaces"
+              value={workspaceProjectQuery}
+              onChange={(event) => onWorkspaceProjectQueryChange(event.target.value)}
+              placeholder="Search spaces…"
+              data-testid="sidebar-project-search"
+              autoFocus={workspaceProjectSearchOpen}
+            />
+          </div>
+        ) : null}
+      </SidebarMenuSection>
+
+      {!currentOrgProject && switcherProjects.length === 0 ? (
+        <div className="mt-2 px-2 text-sm text-slate-500 dark:text-slate-400">No spaces yet.</div>
+      ) : (
+        <>
+          <StudioMenu
+            aria-label="Spaces"
+            selectionMode="single"
+            onAction={onProjectMenuAction}
+            className="mt-2 space-y-1"
+          >
+            {currentOrgProject ? renderProjectRow(currentOrgProject, { current: true }) : null}
+            {visibleProjects.map((project) => renderProjectRow(project, { current: false }))}
+          </StudioMenu>
+          {hiddenProjectCount > 0 ? (
+            <div
+              className="mt-3 rounded-xl border border-slate-200/70 bg-slate-50/70 px-3.5 py-2 text-sm text-slate-500 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)] dark:text-slate-400"
+              data-testid="sidebar-project-switcher-list-truncated"
+            >
+              Showing {visibleProjects.length} of {switcherProjects.length} spaces.{" "}
+              {trimmedWorkspaceProjectQuery.length > 0
+                ? "Refine the search to narrow the results."
+                : "Use search to find older spaces."}
+            </div>
+          ) : null}
+        </>
+      )}
+    </>
+  );
+}

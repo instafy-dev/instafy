@@ -1,0 +1,83 @@
+name: Publish Provider Contract
+
+on:
+  push:
+    paths:
+      - ".github/workflows/publish-provider-contract.yml"
+      - "packages/provider-contract/**"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref or sha to publish (optional)
+        required: false
+        type: string
+      publish:
+        description: Actually publish to npm (otherwise validate package contents only)
+        required: false
+        default: false
+        type: boolean
+      dist_tag:
+        description: npm dist-tag
+        required: false
+        default: latest
+        type: string
+      skip_duplicate:
+        description: Skip publish if this exact version already exists on npm
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  publish-provider-contract:
+    name: Publish @instafy/provider-contract
+    runs-on: ubuntu-latest
+    env:
+      DIST_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.dist_tag || 'latest' }}
+      SKIP_DUPLICATE: ${{ github.event_name == 'workflow_dispatch' && inputs.skip_duplicate || 'true' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Validate package contents
+        run: |
+          set -euo pipefail
+          cd packages/provider-contract
+          npm pack --dry-run
+
+      - name: Publish package to npm
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::Missing NPM_TOKEN secret."
+            exit 1
+          fi
+
+          cd packages/provider-contract
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+
+          if [ "${SKIP_DUPLICATE}" = "true" ]; then
+            if npm view "${name}@${version}" version >/dev/null 2>&1; then
+              echo "Already published ${name}@${version}; skipping."
+              exit 0
+            fi
+          fi
+
+          npm publish --tag "${DIST_TAG}" --access public

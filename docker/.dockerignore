@@ -1,0 +1,13 @@
+node_modules
+dist
+.turbo
+.pnpm-store
+.git
+.gitignore
+Dockerfile
+**/.DS_Store
+**/*.log
+tmp
+target
+**/target
+packages/frontend/test-results

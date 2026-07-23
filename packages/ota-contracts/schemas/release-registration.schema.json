@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://instafy.dev/schemas/ota/release-registration.schema.json",
+  "title": "Instafy OTA Release Registration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "release_id",
+    "platform",
+    "channel",
+    "bundle_version",
+    "git_sha",
+    "native_version",
+    "min_supported_native_version",
+    "artifact_url",
+    "artifact_sha256",
+    "artifact_size_bytes",
+    "artifact_type",
+    "rollout_percentage",
+    "status",
+    "published_at",
+    "published_by"
+  ],
+  "properties": {
+    "release_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "platform": {
+      "type": "string",
+      "enum": ["ios", "android"]
+    },
+    "channel": {
+      "type": "string",
+      "minLength": 1
+    },
+    "bundle_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "git_sha": {
+      "type": "string",
+      "minLength": 7
+    },
+    "native_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "min_supported_native_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "artifact_url": {
+      "type": "string",
+      "format": "uri"
+    },
+    "artifact_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "artifact_size_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "artifact_type": {
+      "type": "string",
+      "enum": ["zip"]
+    },
+    "signature": {
+      "type": ["string", "null"]
+    },
+    "rollout_percentage": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "status": {
+      "type": "string",
+      "enum": ["draft", "live", "paused", "rolled_back", "archived"]
+    },
+    "published_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "published_by": {
+      "type": "string",
+      "minLength": 1
+    },
+    "notes": {
+      "type": ["string", "null"]
+    }
+  }
+}

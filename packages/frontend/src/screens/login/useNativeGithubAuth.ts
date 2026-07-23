@@ -1,0 +1,546 @@
+import { useCallback, useEffect, useRef } from "react";
+import { Capacitor } from "@capacitor/core";
+import {
+  clearNativeAuthCallbackAttemptId,
+  clearPendingNativeAuthAttempt,
+  createPendingNativeAuthAttempt,
+  NATIVE_AUTH_ERROR_EVENT,
+  NATIVE_AUTH_SUCCESS_EVENT,
+  parseNativeAuthCallbackUrl,
+  readNativeAuthCallbackAttemptId,
+  readPendingNativeAuthAttempt,
+  readNativeAuthError,
+  resolveSupabaseRedirectTo,
+  type PendingNativeAuthAttempt,
+  writeNativeAuthCallbackAttemptId,
+  writePendingNativeAuthAttempt,
+  writeNativeAuthError,
+} from "../../auth/nativeAuth";
+import { hasSupabaseConfig, supabase, supabaseAnonKey } from "../../lib/supabaseClient";
+import { postAuthTelemetryEvent } from "../../services/runtimeController/authTelemetry";
+
+export const OAUTH_REDIRECT_TARGET_KEY = "instafy.login.oauthRedirectTarget";
+
+interface UseNativeGithubAuthOptions {
+  redirectTarget: string;
+  setError: (value: string | null) => void;
+  setMessage: (value: string | null) => void;
+  setSubmitting: (value: boolean) => void;
+}
+
+/**
+ * All GitHub OAuth plumbing for the login screen — web redirect flow plus the
+ * Capacitor native flow (custom tabs, deep-link callback handling, resume
+ * timeouts, telemetry). Owns no UI: status surfaces through the setters the
+ * page passes in, so the page's error/message/submitting state stays shared
+ * with the email/OTP flows.
+ */
+export function useNativeGithubAuth({
+  redirectTarget,
+  setError,
+  setMessage,
+  setSubmitting,
+}: UseNativeGithubAuthOptions) {
+  const nativeAuthBrowserListenerRef = useRef<{ remove: () => Promise<void> | void } | null>(null);
+  const nativeAuthBrowserFinishedTimeoutRef = useRef<number | null>(null);
+  const nativeAuthResumeListenerRef = useRef<{ remove: () => Promise<void> | void } | null>(null);
+
+  const postGithubAuthTelemetry = (
+    kind: string,
+    level: "info" | "warning" | "error",
+    message: string | null,
+    attempt: PendingNativeAuthAttempt | null,
+    metadata: Record<string, unknown> = {},
+  ) => {
+    void postAuthTelemetryEvent({
+      kind,
+      level,
+      message,
+      metadata: {
+        provider: attempt?.provider ?? "github",
+        attemptId: attempt?.attemptId ?? null,
+        startedAt: attempt?.startedAt ?? null,
+        platform: attempt?.platform ?? Capacitor.getPlatform(),
+        ...metadata,
+      },
+    });
+  };
+
+  const clearNativeAuthLaunchState = () => {
+    if (nativeAuthBrowserFinishedTimeoutRef.current !== null) {
+      window.clearTimeout(nativeAuthBrowserFinishedTimeoutRef.current);
+      nativeAuthBrowserFinishedTimeoutRef.current = null;
+    }
+    void nativeAuthBrowserListenerRef.current?.remove?.();
+    nativeAuthBrowserListenerRef.current = null;
+    void nativeAuthResumeListenerRef.current?.remove?.();
+    nativeAuthResumeListenerRef.current = null;
+  };
+
+  /** Clears every pending-native-attempt marker; part of the page's transient-state reset. */
+  const resetNativeAuthState = useCallback(() => {
+    if (nativeAuthBrowserFinishedTimeoutRef.current !== null) {
+      window.clearTimeout(nativeAuthBrowserFinishedTimeoutRef.current);
+      nativeAuthBrowserFinishedTimeoutRef.current = null;
+    }
+    clearNativeAuthCallbackAttemptId();
+    clearPendingNativeAuthAttempt();
+    void nativeAuthBrowserListenerRef.current?.remove?.();
+    nativeAuthBrowserListenerRef.current = null;
+    void nativeAuthResumeListenerRef.current?.remove?.();
+    nativeAuthResumeListenerRef.current = null;
+  }, []);
+
+  const failPendingGithubLoginAttempt = useCallback(
+    (
+      kind: string,
+      nextMessage: string,
+      metadata: Record<string, unknown> = {},
+    ) => {
+      const pendingAttempt = readPendingNativeAuthAttempt();
+      clearNativeAuthCallbackAttemptId();
+      clearPendingNativeAuthAttempt();
+      clearNativeAuthLaunchState();
+      writeNativeAuthError(nextMessage);
+      setMessage(null);
+      setError(nextMessage);
+      setSubmitting(false);
+      postGithubAuthTelemetry(kind, "warning", nextMessage, pendingAttempt, metadata);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
+  const completePendingGithubLoginAttempt = useCallback(
+    (
+      completionMethod: "exchange_code_for_session" | "set_session",
+      nextUserEmail: string | null,
+    ) => {
+      const pendingAttempt = readPendingNativeAuthAttempt();
+      postGithubAuthTelemetry("auth.login.github.completed", "info", null, pendingAttempt, {
+        completionMethod,
+        userEmail: nextUserEmail,
+        source: "login_page_direct_plugins",
+      });
+      clearNativeAuthCallbackAttemptId();
+      clearPendingNativeAuthAttempt();
+      clearNativeAuthLaunchState();
+      writeNativeAuthError(null);
+      setMessage(null);
+      setError(null);
+      setSubmitting(false);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
+  const scheduleNativeAuthCompletionCheck = (
+    expectedAttemptId: string,
+    source: "app_resume" | "browser_finished",
+  ) => {
+    if (nativeAuthBrowserFinishedTimeoutRef.current !== null) {
+      window.clearTimeout(nativeAuthBrowserFinishedTimeoutRef.current);
+    }
+    nativeAuthBrowserFinishedTimeoutRef.current = window.setTimeout(() => {
+      nativeAuthBrowserFinishedTimeoutRef.current = null;
+      const pendingAttempt = readPendingNativeAuthAttempt();
+      if (!pendingAttempt || pendingAttempt.attemptId !== expectedAttemptId) {
+        return;
+      }
+      if (readNativeAuthCallbackAttemptId() === expectedAttemptId) {
+        return;
+      }
+      failPendingGithubLoginAttempt(
+        "auth.login.github.browser_finished_without_completion",
+        "GitHub sign-in did not complete. Try again.",
+        { source },
+      );
+    }, 1500);
+  };
+
+  const installAndroidNativeAuthResumeListener = async (expectedAttemptId: string) => {
+    try {
+      const { App } = await import("@capacitor/app");
+      nativeAuthResumeListenerRef.current = await App.addListener("resume", () => {
+        scheduleNativeAuthCompletionCheck(expectedAttemptId, "app_resume");
+      });
+    } catch {
+      // ignore missing app plugin / listener failures
+    }
+  };
+
+  // Surface a native auth error persisted by a previous launch.
+  useEffect(() => {
+    const nativeAuthError = readNativeAuthError();
+    if (!nativeAuthError) {
+      return;
+    }
+    clearNativeAuthCallbackAttemptId();
+    clearPendingNativeAuthAttempt();
+    writeNativeAuthError(null);
+    setError(nativeAuthError);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    if (!Capacitor.isNativePlatform()) {
+      return;
+    }
+
+    const handleError = (event: Event) => {
+      const message = (event as CustomEvent<string>).detail;
+      if (typeof message !== "string" || message.trim().length === 0) {
+        return;
+      }
+      if (nativeAuthBrowserFinishedTimeoutRef.current !== null) {
+        window.clearTimeout(nativeAuthBrowserFinishedTimeoutRef.current);
+        nativeAuthBrowserFinishedTimeoutRef.current = null;
+      }
+      clearNativeAuthCallbackAttemptId();
+      clearPendingNativeAuthAttempt();
+      clearNativeAuthLaunchState();
+      setMessage(null);
+      setError(message);
+      setSubmitting(false);
+    };
+
+    const handleSuccess = () => {
+      if (nativeAuthBrowserFinishedTimeoutRef.current !== null) {
+        window.clearTimeout(nativeAuthBrowserFinishedTimeoutRef.current);
+        nativeAuthBrowserFinishedTimeoutRef.current = null;
+      }
+      clearNativeAuthCallbackAttemptId();
+      clearPendingNativeAuthAttempt();
+      clearNativeAuthLaunchState();
+      setMessage(null);
+      setError(null);
+      setSubmitting(false);
+    };
+
+    window.addEventListener(NATIVE_AUTH_ERROR_EVENT, handleError);
+    window.addEventListener(NATIVE_AUTH_SUCCESS_EVENT, handleSuccess);
+
+    return () => {
+      window.removeEventListener(NATIVE_AUTH_ERROR_EVENT, handleError);
+      window.removeEventListener(NATIVE_AUTH_SUCCESS_EVENT, handleSuccess);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (nativeAuthBrowserFinishedTimeoutRef.current !== null) {
+        window.clearTimeout(nativeAuthBrowserFinishedTimeoutRef.current);
+        nativeAuthBrowserFinishedTimeoutRef.current = null;
+      }
+      void nativeAuthBrowserListenerRef.current?.remove?.();
+      nativeAuthBrowserListenerRef.current = null;
+      void nativeAuthResumeListenerRef.current?.remove?.();
+      nativeAuthResumeListenerRef.current = null;
+    };
+  }, []);
+
+  // Direct-plugin callback handling: consume deep-link/launch URLs delivered
+  // while the OAuth custom tab was in the foreground.
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    if (!Capacitor.isNativePlatform()) {
+      return;
+    }
+    if (!hasSupabaseConfig || !supabase?.auth) {
+      return;
+    }
+
+    type DirectPluginListenerHandle = { remove?: () => Promise<void> | void };
+    type DirectAppPlugin = {
+      addListener?: (
+        eventName: "appUrlOpen" | "resume",
+        listenerFunc: (event?: { url?: string | null }) => void,
+      ) => Promise<DirectPluginListenerHandle> | DirectPluginListenerHandle;
+      getLaunchUrl?: () => Promise<{ url?: string | null } | null>;
+    };
+    type DirectNativeAuthBridgePlugin = {
+      addListener?: (
+        eventName: "urlOpen",
+        listenerFunc: (event?: { url?: string | null }) => void,
+      ) => Promise<DirectPluginListenerHandle> | DirectPluginListenerHandle;
+      consumePendingUrl?: () => Promise<{ url?: string | null } | null>;
+    };
+
+    const capacitorPlugins = (window as typeof window & {
+      Capacitor?: {
+        Plugins?: {
+          App?: DirectAppPlugin;
+          InstafyAuthBridge?: DirectNativeAuthBridgePlugin;
+        };
+      };
+    }).Capacitor?.Plugins;
+
+    const appPlugin = capacitorPlugins?.App;
+    const nativeAuthBridgePlugin = capacitorPlugins?.InstafyAuthBridge;
+    if (!appPlugin || !nativeAuthBridgePlugin) {
+      return;
+    }
+
+    let cancelled = false;
+    const handled = new Set<string>();
+    let inFlight = false;
+    let bridgeListener: DirectPluginListenerHandle | null = null;
+    let appUrlListener: DirectPluginListenerHandle | null = null;
+    let resumeListener: DirectPluginListenerHandle | null = null;
+    let resumeDrainTimeout: number | null = null;
+
+    const extractAuthParam = (
+      url: URL,
+      hashParams: URLSearchParams,
+      key: string,
+    ): string | null => {
+      const fromSearch = url.searchParams.get(key);
+      if (typeof fromSearch === "string" && fromSearch.trim().length > 0) {
+        return fromSearch.trim();
+      }
+      const fromHash = hashParams.get(key);
+      if (typeof fromHash === "string" && fromHash.trim().length > 0) {
+        return fromHash.trim();
+      }
+      return null;
+    };
+
+    const handleCallbackUrl = async (rawUrl: string) => {
+      if (cancelled) {
+        return;
+      }
+      const trimmed = (rawUrl ?? "").trim();
+      if (!trimmed || handled.has(trimmed) || inFlight) {
+        return;
+      }
+
+      const parsed = parseNativeAuthCallbackUrl(trimmed);
+      if (!parsed) {
+        return;
+      }
+
+      const pendingAttempt = readPendingNativeAuthAttempt();
+      if (pendingAttempt?.attemptId) {
+        writeNativeAuthCallbackAttemptId(pendingAttempt.attemptId);
+      }
+
+      inFlight = true;
+      handled.add(trimmed);
+      try {
+        const hash = parsed.hash.startsWith("#") ? parsed.hash.slice(1) : parsed.hash;
+        const hashParams = new URLSearchParams(hash);
+        const code = extractAuthParam(parsed, hashParams, "code");
+        const accessToken = extractAuthParam(parsed, hashParams, "access_token");
+        const refreshToken = extractAuthParam(parsed, hashParams, "refresh_token");
+        const oauthError =
+          extractAuthParam(parsed, hashParams, "error_description") ??
+          extractAuthParam(parsed, hashParams, "error") ??
+          null;
+
+        postGithubAuthTelemetry("auth.login.github.callback_received", "info", null, pendingAttempt, {
+          hasCode: Boolean(code),
+          hasAccessToken: Boolean(accessToken),
+          hasRefreshToken: Boolean(refreshToken),
+          hasError: Boolean(oauthError),
+          source: "login_page_direct_plugins",
+        });
+
+        if (oauthError) {
+          failPendingGithubLoginAttempt("auth.login.github.callback_error", oauthError, {
+            phase: "callback",
+            source: "login_page_direct_plugins",
+          });
+          return;
+        }
+
+        if (code) {
+          const result = await supabase.auth.exchangeCodeForSession(code);
+          if (result.error) {
+            failPendingGithubLoginAttempt("auth.login.github.exchange_failed", result.error.message, {
+              phase: "exchange_code_for_session",
+              source: "login_page_direct_plugins",
+            });
+            return;
+          }
+          completePendingGithubLoginAttempt(
+            "exchange_code_for_session",
+            result.data.user?.email ?? result.data.session?.user?.email ?? null,
+          );
+          return;
+        }
+
+        if (accessToken && refreshToken) {
+          const result = await supabase.auth.setSession({
+            access_token: accessToken,
+            refresh_token: refreshToken,
+          });
+          if (result.error) {
+            failPendingGithubLoginAttempt("auth.login.github.session_failed", result.error.message, {
+              phase: "set_session",
+              source: "login_page_direct_plugins",
+            });
+            return;
+          }
+          completePendingGithubLoginAttempt(
+            "set_session",
+            result.data.session?.user?.email ?? result.data.user?.email ?? null,
+          );
+          return;
+        }
+
+        failPendingGithubLoginAttempt(
+          "auth.login.github.callback_incomplete",
+          "GitHub sign-in returned to the app without completing. Try again.",
+          {
+            phase: "callback",
+            source: "login_page_direct_plugins",
+          },
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        failPendingGithubLoginAttempt("auth.login.github.callback_handler_failed", message, {
+          phase: "callback_handler",
+          source: "login_page_direct_plugins",
+        });
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    const drainPendingBridgeUrl = async () => {
+      const result = await nativeAuthBridgePlugin.consumePendingUrl?.();
+      const pendingUrl = typeof result?.url === "string" ? result.url.trim() : "";
+      if (pendingUrl) {
+        await handleCallbackUrl(pendingUrl);
+      }
+    };
+
+    (async () => {
+      bridgeListener = (await nativeAuthBridgePlugin.addListener?.("urlOpen", (event) => {
+        const url = typeof event?.url === "string" ? event.url : "";
+        void handleCallbackUrl(url);
+      })) ?? null;
+      await drainPendingBridgeUrl();
+      const launchUrl = await appPlugin.getLaunchUrl?.();
+      if (typeof launchUrl?.url === "string" && launchUrl.url.trim().length > 0) {
+        await handleCallbackUrl(launchUrl.url);
+      }
+      appUrlListener = (await appPlugin.addListener?.("appUrlOpen", (event) => {
+        const url = typeof event?.url === "string" ? event.url : "";
+        void handleCallbackUrl(url);
+      })) ?? null;
+      resumeListener = (await appPlugin.addListener?.("resume", () => {
+        if (resumeDrainTimeout !== null) {
+          window.clearTimeout(resumeDrainTimeout);
+        }
+        resumeDrainTimeout = window.setTimeout(() => {
+          resumeDrainTimeout = null;
+          void drainPendingBridgeUrl();
+        }, 0);
+      })) ?? null;
+    })().catch(() => {
+      // ignore installation failures; the provider-level listener remains a fallback
+    });
+
+    return () => {
+      cancelled = true;
+      if (resumeDrainTimeout !== null) {
+        window.clearTimeout(resumeDrainTimeout);
+      }
+      void bridgeListener?.remove?.();
+      void appUrlListener?.remove?.();
+      void resumeListener?.remove?.();
+    };
+  }, [completePendingGithubLoginAttempt, failPendingGithubLoginAttempt]);
+
+  const handleGithubLogin = useCallback(async () => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    if (!hasSupabaseConfig || !supabase?.auth || typeof supabase.auth.signInWithOAuth !== "function") {
+      setError("GitHub login is not available.");
+      return;
+    }
+    resetNativeAuthState();
+    setError(null);
+    setMessage(null);
+    setSubmitting(true);
+    let nativeAttempt: PendingNativeAuthAttempt | null = null;
+    try {
+      const redirectTo = resolveSupabaseRedirectTo("/login");
+      const queryParams = supabaseAnonKey ? { apikey: supabaseAnonKey } : undefined;
+      if (redirectTarget.startsWith("/") && !redirectTarget.startsWith("//")) {
+        try {
+          window.sessionStorage?.setItem(OAUTH_REDIRECT_TARGET_KEY, redirectTarget);
+        } catch {
+          // ignore session storage failures
+        }
+      }
+      if (Capacitor.isNativePlatform()) {
+        const nativePlatform = Capacitor.getPlatform();
+        nativeAttempt = createPendingNativeAuthAttempt("github");
+        const result = await supabase.auth.signInWithOAuth({
+          provider: "github",
+          options: { redirectTo, queryParams, skipBrowserRedirect: true },
+        });
+        if (result.error) {
+          throw result.error;
+        }
+        const url = result.data?.url;
+        if (!url) {
+          throw new Error("Unable to start GitHub login.");
+        }
+        writePendingNativeAuthAttempt(nativeAttempt);
+        postGithubAuthTelemetry("auth.login.github.started", "info", null, nativeAttempt, {
+          launchMode: nativePlatform === "android" ? "custom_tab" : "custom_tab",
+        });
+        if (nativePlatform === "android") {
+          await installAndroidNativeAuthResumeListener(nativeAttempt.attemptId);
+        }
+        const { Browser } = await import("@capacitor/browser");
+        await Browser.close().catch(() => undefined);
+        try {
+          nativeAuthBrowserListenerRef.current = await Browser.addListener("browserFinished", () => {
+            if (!nativeAttempt?.attemptId) {
+              return;
+            }
+            scheduleNativeAuthCompletionCheck(nativeAttempt.attemptId, "browser_finished");
+          });
+        } catch {
+          // ignore browsers that do not support browserFinished
+        }
+        await Browser.open({ url });
+        setSubmitting(false);
+        return;
+      }
+
+      const result = await supabase.auth.signInWithOAuth({
+        provider: "github",
+        options: { redirectTo, queryParams },
+      });
+      if (result.error) {
+        throw result.error;
+      }
+      setMessage("Redirecting to GitHub…");
+    } catch (err) {
+      const details = err instanceof Error ? err.message : "Unable to continue with GitHub.";
+      if (nativeAttempt) {
+        clearNativeAuthCallbackAttemptId();
+        clearPendingNativeAuthAttempt();
+        clearNativeAuthLaunchState();
+        postGithubAuthTelemetry("auth.login.github.start_failed", "error", details, nativeAttempt);
+      }
+      setError(details);
+      setSubmitting(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [redirectTarget, resetNativeAuthState]);
+
+  return { handleGithubLogin, resetNativeAuthState };
+}

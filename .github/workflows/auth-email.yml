@@ -1,0 +1,89 @@
+name: Auth Email E2E
+
+# Guards the signup -> confirmation-email -> activate flow and our custom auth
+# email templates. Boots the local Supabase stack (via `supabase start`, which
+# includes GoTrue + the mail catcher) — no runtime controller/agent images — so
+# it stays far cheaper than the full e2e stack. Path-triggered so a broken
+# template or a changed OTP/config knob fails here instead of in a stranger's
+# inbox. The supabase CLI version (package.json/lockfile) is included because it
+# determines the bundled mail catcher (Mailpit vs Inbucket) and template loading.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/auth-email.yml"
+      - "scripts/auth-email-smoke.mjs"
+      - "scripts/supabase-stack.mjs"
+      - "scripts/lib/localSupabaseEnv.mjs"
+      - "supabase/supabase/templates/**"
+      - "supabase/supabase/config.toml"
+      - "package.json"
+      - "pnpm-lock.yaml"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/auth-email.yml"
+      - "scripts/auth-email-smoke.mjs"
+      - "scripts/supabase-stack.mjs"
+      - "scripts/lib/localSupabaseEnv.mjs"
+      - "supabase/supabase/templates/**"
+      - "supabase/supabase/config.toml"
+      - "package.json"
+      - "pnpm-lock.yaml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auth-email-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  auth-email:
+    name: signup -> email -> activate
+    runs-on: ubuntu-latest
+    # `supabase start` pulls several Docker images on a cold runner; cap the job
+    # so a hung pull can't burn the 6h default.
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          set-safe-directory: true
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify Supabase CLI
+        run: pnpm exec supabase --version
+
+      # Force a clean start so GoTrue reloads the email templates from config.
+      # `supabase:up` reuses an already-running stack and only re-applies
+      # migrations; explicitly reset so future runner-image changes cannot leave
+      # stale templates and let a template regression pass. No-op on a fresh runner.
+      - name: Ensure no stale Supabase stack
+        run: pnpm supabase:down || true
+
+      - name: Start local Supabase (GoTrue + mail catcher)
+        run: pnpm supabase:up
+
+      - name: Run auth email smoke (signup -> email -> activate)
+        run: pnpm test:auth:email
+
+      - name: Stop local Supabase
+        if: always()
+        run: pnpm supabase:down || true

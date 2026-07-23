@@ -1,0 +1,42 @@
+{
+  "originHash" : "353f9c1a11af7e07dfd7d7555952955b7d66570967a1d4b2a813f50516b38b8d",
+  "pins" : [
+    {
+      "identity" : "alamofire",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Alamofire/Alamofire.git",
+      "state" : {
+        "revision" : "513364f870f6bfc468f9d2ff0a95caccc10044c5",
+        "version" : "5.10.2"
+      }
+    },
+    {
+      "identity" : "capacitor-swift-pm",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/ionic-team/capacitor-swift-pm.git",
+      "state" : {
+        "revision" : "596259033e94829dffc552a40e7129262122995e",
+        "version" : "8.0.0"
+      }
+    },
+    {
+      "identity" : "ion-ios-geolocation",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/ionic-team/ion-ios-geolocation.git",
+      "state" : {
+        "revision" : "db363927d3a954e3ea24d2e72b6e9814769a84be",
+        "version" : "2.1.1"
+      }
+    },
+    {
+      "identity" : "zipfoundation",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/weichsel/ZIPFoundation.git",
+      "state" : {
+        "revision" : "22787ffb59de99e5dc1fbfe80b19c97a904ad48d",
+        "version" : "0.9.20"
+      }
+    }
+  ],
+  "version" : 3
+}

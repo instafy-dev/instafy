@@ -1,0 +1,26 @@
+{
+  "defaultProviderId": "simulated-devices",
+  "providers": [
+    {
+      "type": "simulated_devices",
+      "id": "simulated-devices",
+      "enabled": true,
+      "title": "Simulated devices",
+      "description": "Local simulated-device provider used for simple provider-backed examples like the desk lamp."
+    },
+    {
+      "type": "camera",
+      "id": "camera",
+      "enabled": true,
+      "title": "Camera",
+      "description": "First-party camera observation provider. Native phone capture is available on Android and iPhone, with room for later webcam and virtual-camera backends."
+    },
+    {
+      "type": "speech",
+      "id": "speech",
+      "enabled": true,
+      "title": "Speech",
+      "description": "Generic speech provider for self-hosted or tunneled transcription and text-to-speech backends."
+    }
+  ]
+}

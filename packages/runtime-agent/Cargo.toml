@@ -1,0 +1,61 @@
+[package]
+name = "runtime-agent"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+
+[dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time", "fs", "process", "io-util", "io-std"] }
+reqwest = { version = "0.11", features = ["json", "multipart", "rustls-tls"] }
+runtime-contracts = { path = "../runtime-contracts" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+anyhow = "1"
+uuid = { version = "1", features = ["serde", "v4"] }
+thiserror = "1"
+codex-core = { path = "../../codex/codex-rs/core" }
+codex-config = { path = "../../codex/codex-rs/config" }
+codex-extension-api = { path = "../../codex/codex-rs/ext/extension-api" }
+codex-exec-server = { path = "../../codex/codex-rs/exec-server" }
+codex-features = { path = "../../codex/codex-rs/features" }
+codex-git-utils = { path = "../../codex/codex-rs/git-utils" }
+codex-login = { path = "../../codex/codex-rs/login" }
+codex-model-provider-info = { path = "../../codex/codex-rs/model-provider-info" }
+codex-models-manager = { path = "../../codex/codex-rs/models-manager" }
+codex-protocol = { path = "../../codex/codex-rs/protocol" }
+codex-process-hardening = { path = "../../codex/codex-rs/process-hardening" }
+codex-rmcp-client = { path = "../../codex/codex-rs/rmcp-client" }
+codex-utils-absolute-path = { path = "../../codex/codex-rs/utils/absolute-path" }
+codex-utils-path-uri = { path = "../../codex/codex-rs/utils/path-uri" }
+parking_lot = "0.12"
+base64 = "0.21"
+tempfile = "3"
+once_cell = "1"
+codex-arg0 = { path = "../../codex/codex-rs/arg0" }
+codex-apply-patch = { path = "../../codex/codex-rs/apply-patch" }
+origin-http-server = { path = "../origin-http-server" }
+jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+sysinfo = "0.30"
+zip = { version = "1", default-features = false, features = ["deflate"] }
+rmcp = { version = "1.7.0", default-features = false, features = ["server", "transport-async-rw"] }
+
+[lib]
+name = "runtime_agent"
+path = "src/lib.rs"
+
+[dev-dependencies]
+axum = { version = "0.7", default-features = false, features = ["json", "tokio", "http1"] }
+openai-proxy-server = { path = "../openai-proxy-server" }
+futures-util = "0.3"
+libc = "0.2"
+ring = { version = "0.17", features = ["std"] }
+
+[patch.crates-io]
+tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "132f5b39c862e3a970f731d709608b3e6276d5f6" }
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "9200079d3b54a1ff51072e24d81fd354f085156f" }
+
+[patch."ssh://git@github.com/openai-oss-forks/tungstenite-rs.git"]
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "9200079d3b54a1ff51072e24d81fd354f085156f" }

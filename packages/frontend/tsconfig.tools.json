@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "module": "nodenext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+    "skipLibCheck": true
+  },
+  "include": ["vite.config.ts", "playwright.config.ts", "tailwind.config.ts", "tests/**/*.ts"]
+}

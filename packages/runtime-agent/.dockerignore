@@ -1,0 +1,13 @@
+target
+**/target
+**/*.log
+tmp
+node_modules
+.git
+.github
+.vscode
+packages/infra
+packages/frontend
+packages/templates
+packages/openai-proxy-server
+packages/runtime-contracts/target

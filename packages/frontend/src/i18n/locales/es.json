@@ -1,0 +1,34 @@
+{
+  "i18n": {
+    "language": "Idioma"
+  },
+  "marketing": {
+    "menu": {
+      "open": "Abrir menú",
+      "ariaLabel": "Menú"
+    },
+    "nav": {
+      "home": "Inicio",
+      "install": "Instalar",
+      "news": "Novedades",
+      "openStudio": "Abrir Studio",
+      "getStarted": "Empezar",
+      "subscribeUpdates": "Suscribirse a novedades",
+      "signIn": "Iniciar sesión"
+    },
+    "footer": {
+      "terms": "Términos de uso",
+      "privacy": "Política de privacidad",
+      "crafted": "Hecho con cariño."
+    }
+  },
+  "legal": {
+    "back": "Volver",
+    "disclaimerEnglishControls": "Traducción por conveniencia. Si hay conflicto, prevalece la versión en inglés.",
+    "lastUpdated": "Última actualización: {{date}}"
+  },
+  "status": {
+    "dismiss": "Cerrar notificación"
+  }
+}
+

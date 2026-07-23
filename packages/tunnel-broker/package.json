@@ -1,0 +1,25 @@
+{
+  "name": "tunnel-broker",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "test": "cargo test --manifest-path crates/tunnel-broker/Cargo.toml --tests",
+    "test:ingress": "pnpm -s run ingress:up:build && pnpm -s run smoke:ingress && pnpm -s run ingress:down",
+    "test:ingress:reachability": "pnpm -s run ingress:up:build && pnpm -s run smoke:ingress:reachability && pnpm -s run ingress:down",
+    "test:pdns": "pnpm -s run pdns:up:build && pnpm -s run smoke:pdns && pnpm -s run pdns:down",
+    "test:pdns:api": "pnpm -s run pdns:up:build && pnpm -s run smoke:pdns:api && pnpm -s run pdns:down",
+    "ingress:up": "docker compose --profile ingress up -d postgres broker rathole traefik && docker compose --profile ingress up -d rathole-sidecar",
+    "ingress:up:build": "docker compose --profile ingress up -d --build postgres broker rathole traefik && docker compose --profile ingress up -d --build rathole-sidecar",
+    "ingress:down": "docker compose --profile ingress --profile ingress-smoke down",
+    "smoke:ingress": "bash ./scripts/ingress-smoke.sh",
+    "smoke:ingress:reachability": "bash ./scripts/ingress-reachability-smoke.sh",
+    "pdns:up": "docker compose --profile pdns up -d postgres broker pdns",
+    "pdns:up:build": "docker compose --profile pdns up -d --build postgres broker pdns",
+    "pdns:down": "docker compose --profile pdns down",
+    "smoke:pdns": "bash ./scripts/pdns-smoke.sh",
+    "smoke:pdns:api": "bash ./scripts/pdns-api-smoke.sh",
+    "smoke:delegation": "bash ./scripts/delegation-check.sh",
+    "fmt": "cargo fmt --all --manifest-path crates/tunnel-broker/Cargo.toml",
+    "check": "cargo check --all --manifest-path crates/tunnel-broker/Cargo.toml"
+  }
+}

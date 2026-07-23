@@ -1,0 +1,143 @@
+syntax = "proto3";
+
+package instafy.runtime;
+
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+message ProxyEnvelope {
+  string url = 1;
+  string token = 2;
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+message RuntimeEnsureRequest {
+  string project_id = 1;
+  string type = 2;
+  uint32 idle_ttl_seconds = 3;
+}
+
+message RuntimeEnsureResponse {
+  string runtime_id = 1;
+  string status = 2;
+  string type = 3;
+}
+
+message RuntimeRegisterRequest {
+  string project_id = 1;
+  string type = 2;
+  string version = 3;
+  google.protobuf.Struct capabilities = 4;
+  google.protobuf.Struct metadata = 5;
+  string endpoint_url = 6;
+  string task_ref = 7;
+}
+
+message RuntimeRegisterResponse {
+  string runtime_id = 1;
+  string agent_token = 2;
+  string lease_url = 3;
+  string heartbeat_url = 4;
+  string stop_url = 5;
+  ProxyEnvelope proxy = 6;
+  repeated string agent_token_scopes = 7;
+  google.protobuf.Timestamp agent_token_issued_at = 8;
+  google.protobuf.Timestamp agent_token_expires_at = 9;
+  int64 agent_token_ttl = 10;
+}
+
+message RuntimeHeartbeatRequest {
+  string runtime_id = 1;
+  string status = 2;
+  string endpoint_url = 3;
+  string task_ref = 4;
+  google.protobuf.Struct metrics = 5;
+}
+
+message RuntimeHeartbeatResponse {
+  bool ok = 1;
+  string status = 2;
+  bool lease_active = 3;
+}
+
+message RuntimeStopRequest {
+  string runtime_id = 1;
+  string reason = 2;
+}
+
+message RuntimeStopResponse {
+  bool ok = 1;
+}
+
+message AgentLeaseRequest {
+  string project_id = 1;
+  uint32 max = 2;
+  uint32 lease_seconds = 3;
+  string runtime_id = 4;
+}
+
+message AgentJobPayload {
+  string id = 1;
+  string project_id = 2;
+  string run_id = 3;
+  google.protobuf.Struct payload = 4;
+  string intent = 5;
+  string status = 6;
+  uint32 lease_attempts = 7;
+  google.protobuf.Timestamp created_at = 8;
+  ProxyEnvelope proxy = 9;
+  string controller_token = 10;
+  repeated string controller_token_scopes = 11;
+  google.protobuf.Timestamp controller_token_expires_at = 12;
+}
+
+message AgentLeaseResponse {
+  repeated AgentJobPayload jobs = 1;
+}
+
+message AgentHeartbeatRequest {
+  string job_id = 1;
+  uint32 extend_seconds = 2;
+}
+
+message AgentHeartbeatResponse {
+  bool ok = 1;
+  google.protobuf.Timestamp lease_expires_at = 2;
+}
+
+message AgentCompleteRequest {
+  string job_id = 1;
+  string outcome = 2;
+  string summary = 3;
+  google.protobuf.Struct artifacts = 4;
+  google.protobuf.Struct proxy_metadata = 5;
+  google.protobuf.Struct error = 6;
+  string run_id = 7;
+  string runtime_id = 8;
+}
+
+message CreditEventRequest {
+  string request_id = 1;
+  string action = 2; // burn | refill | status
+  string project_id = 3;
+  string runtime_id = 4;
+  string run_id = 5;
+  string provider = 6;
+  google.protobuf.Struct metadata = 7;
+  int32 amount = 8;
+  int32 credit_limit = 9;
+  string reason = 10;
+}
+
+message CreditSnapshot {
+  int32 balance = 1;
+  int32 credit_limit = 2;
+  google.protobuf.Timestamp last_burn_at = 3;
+  google.protobuf.Timestamp last_refill_at = 4;
+}
+
+message CreditEventResponse {
+  CreditSnapshot snapshot = 1;
+}
+
+message EmptyResponse {}

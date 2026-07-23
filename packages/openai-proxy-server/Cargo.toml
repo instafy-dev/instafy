@@ -1,0 +1,24 @@
+[package]
+name = "openai-proxy-server"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net", "sync", "time"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+axum = { version = "0.7", features = ["json"] }
+futures-util = "0.3"
+jsonwebtoken = "9"
+runtime-contracts = { path = "../runtime-contracts" }
+prost-types = "0.13"
+prost = "0.13"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[dev-dependencies]
+serial_test = "2"

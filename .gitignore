@@ -1,0 +1,95 @@
+# Dependencies
+node_modules/
+pnpm-debug.log*
+npm-debug.log*
+yarn-error.log*
+
+# Environment files
+.env
+# direnv / local agent auth — never commit a token file
+.envrc
+.env.*
+!.env.example
+!.env.stripe.example
+!.env.hetzner.example
+!.env.supabase.example
+!.env.vapid.example
+!.env.apns.example
+!.env.pulumi.example
+!.env.local.example
+!.env.ghcr.example
+!.env.cloudflare.example
+!.env.github.example
+!.env.github-testing.example
+!.env.github-oauth.example
+!.env.deepseek.example
+!.env.open-vsx.example
+!.env.user.example
+!.env.user.operator.example
+!.env.ssh.example
+!.env.zai.example
+!.env.scaleway.example
+!.env.google-play.example
+!.env.openai.example
+packages/frontend/.env
+packages/frontend/.env.*
+!packages/frontend/.env.example
+supabase/.env*
+!supabase/.env.dev.example
+packages/frontend/supabase/.env*
+!packages/frontend/supabase/.env.dev.example
+
+# Build artifacts
+dist/
+build/
+.turbo/
+.vercel/
+.cache/
+.vite/
+coverage/
+packages/**/test-results/**
+packages/**/playwright-report/**
+test-results/
+playwright-report/
+packages/**/dist/**
+packages/desktop-app/release/
+packages/**/target/**
+tmp/
+.tmp-trace/
+packages/infra/cdk.out/
+packages/infra/config/runtime-config.ts
+**/.vscode-test/
+
+# Tooling
+.vscode/
+.idea/
+.claude/
+.playwright-mcp/
+.supabase/
+.instafy/
+.wrangler/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+
+# Supabase CLI state and temp files
+supabase/.supabase/
+supabase/.temp/
+supabase/.branches.json
+supabase/.metadata.json
+supabase/.secrets.deploy
+
+# Local env / secrets
+supabase/.env*
+!supabase/.env.dev.example
+!supabase/.env.production.example
+
+# Local migrations or seeds you generate during dev
+supabase/migrations/.tmp/
+supabase/seed/.tmp/
+supabase/supabase/migrations/
+
+# TypeScript incremental build state
+*.tsbuildinfo

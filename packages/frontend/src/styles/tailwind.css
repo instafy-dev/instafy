@@ -1,0 +1,355 @@
+@import "tailwindcss";
+@config "../../tailwind.config.ts";
+
+@theme {
+  /* Canonical Instafy brand colors. See docs/Brand.md. */
+  --color-brand-ink: #0f172a;
+  --color-brand-navy: var(--color-brand-ink);
+  --color-brand-paper: #ffffff;
+  --color-brand-blue: #007acc;
+  --color-brand-blue-dark: #3794ff;
+  --color-brand-sand: #d7b686;
+  --color-brand-sand-dark: #e0c49a;
+
+  --color-shell: #f4f6fb;
+  --color-panel: #ffffff;
+  /* Compatibility alias: use brand-ink for new brand work. */
+  --color-midnight: var(--color-brand-ink);
+  --color-dusk: #16203a;
+  --color-ink: #1e293b;
+  --color-smoke: oklch(0.55 0.012 80);
+  --color-mist: #e5e9f5;
+  --color-veil: #f1f4fb;
+  --color-rosy: #ffe9ef;
+
+  --color-slate-50: oklch(0.985 0.004 80);
+  --color-slate-100: oklch(0.965 0.006 80);
+  --color-slate-200: oklch(0.93 0.008 80);
+  --color-slate-300: oklch(0.86 0.01 80);
+  --color-slate-400: oklch(0.76 0.012 80);
+  --color-slate-500: oklch(0.66 0.014 80);
+  --color-slate-600: oklch(0.55 0.012 80);
+  --color-slate-700: oklch(0.44 0.01 80);
+  --color-slate-800: oklch(0.31 0.008 80);
+  --color-slate-900: oklch(0.18 0.006 80);
+  --color-slate-950: oklch(0.14 0.004 80);
+
+  --color-studio-dark-canvas: #141414;
+  --color-studio-dark-rail: #181818;
+  --color-studio-dark-rail-muted: rgb(24 24 24 / 0.92);
+  --color-studio-dark-rail-blur: rgb(24 24 24 / 0.82);
+  --color-studio-dark-panel: #1d1d1d;
+  --color-studio-dark-panel-strong: rgb(31 31 31 / 0.96);
+  --color-studio-dark-panel-soft: rgb(31 31 31 / 0.62);
+  --color-studio-dark-floating: #262626;
+  --color-studio-dark-floating-solid: rgb(38 38 38 / 0.985);
+  --color-studio-dark-raised-control: #1a1a1a;
+  --color-studio-dark-active: #2a2a2a;
+  --color-studio-dark-divider: rgb(255 255 255 / 0.095);
+  --color-studio-dark-panel-border: rgb(255 255 255 / 0.105);
+  --color-studio-dark-floating-border: rgb(255 255 255 / 0.055);
+  --color-studio-dark-raised-control-border: rgb(255 255 255 / 0.13);
+  --color-studio-dark-active-border: rgb(255 255 255 / 0.105);
+  --color-studio-dark-rail-hover: rgb(255 255 255 / 0.075);
+  --color-studio-dark-control-hover: rgb(255 255 255 / 0.09);
+
+  --color-primary-500: var(--color-brand-blue);
+  --color-primary: var(--color-primary-500);
+  --color-primary-50: color-mix(in oklch, var(--color-primary-500), white 94%);
+  --color-primary-100: color-mix(in oklch, var(--color-primary-500), white 88%);
+  --color-primary-200: color-mix(in oklch, var(--color-primary-500), white 76%);
+  --color-primary-300: color-mix(in oklch, var(--color-primary-500), white 62%);
+  --color-primary-400: color-mix(in oklch, var(--color-primary-500), white 40%);
+  --color-primary-600: color-mix(in oklch, var(--color-primary-500), black 12%);
+  --color-primary-700: color-mix(in oklch, var(--color-primary-500), black 26%);
+  --color-primary-800: color-mix(in oklch, var(--color-primary-500), black 42%);
+  --color-primary-900: color-mix(in oklch, var(--color-primary-500), black 58%);
+  --color-primary-950: color-mix(in oklch, var(--color-primary-500), black 72%);
+
+  --color-secondary-500: var(--color-brand-sand);
+  --color-secondary: var(--color-secondary-500);
+  --color-secondary-50: color-mix(in oklch, var(--color-secondary-500), white 92%);
+  --color-secondary-100: color-mix(in oklch, var(--color-secondary-500), white 85%);
+  --color-secondary-200: color-mix(in oklch, var(--color-secondary-500), white 72%);
+  --color-secondary-300: color-mix(in oklch, var(--color-secondary-500), white 58%);
+  --color-secondary-400: color-mix(in oklch, var(--color-secondary-500), white 36%);
+  --color-secondary-600: color-mix(in oklch, var(--color-secondary-500), black 12%);
+  --color-secondary-700: color-mix(in oklch, var(--color-secondary-500), black 26%);
+  --color-secondary-800: color-mix(in oklch, var(--color-secondary-500), black 42%);
+  --color-secondary-900: color-mix(in oklch, var(--color-secondary-500), black 58%);
+  --color-secondary-950: color-mix(in oklch, var(--color-secondary-500), black 72%);
+
+  --color-accentPink: #ff5f7d;
+  --color-accentOrange: #ff9f43;
+  --color-accentYellow: #ffd366;
+  --color-accentGreen: #78e6b5;
+  --color-accentBlue: #7aa7ff;
+  --color-accentLavender: #c7b9ff;
+
+  --color-bubblegum: #ffc1cc;
+  --color-lavender: #c7b9ff;
+  --color-mint: #a0f0d0;
+  --color-sunshine: #ffd166;
+
+  --font-instafy: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --text-xxs: 0.6875rem;
+  --text-xxs--line-height: 1rem;
+  --text-3xs: 0.625rem;
+  --text-3xs--line-height: 0.875rem;
+
+  --background-image-studio-gradient: linear-gradient(180deg, rgba(248,250,252,1) 0%, rgba(255,255,255,1) 100%);
+  --background-image-studio-accent: linear-gradient(120deg, #007acc 0%, #3794ff 55%, #8abfff 100%);
+  --background-image-studio-pill: linear-gradient(135deg, rgba(0,122,204,0.12) 0%, rgba(55,148,255,0.2) 100%);
+  --shadow-modal: 0 24px 80px -28px rgba(2, 6, 23, 0.5);
+  --shadow-card-lg: 0 24px 80px rgba(15, 23, 42, 0.12);
+  --shadow-glass: 0 28px 60px -30px rgba(15, 23, 42, 0.35);
+  --shadow-badge: 0 14px 35px rgba(0, 122, 204, 0.25);
+  --shadow-soft: 0 20px 45px -28px rgba(15, 26, 42, 0.35);
+  --shadow-inset: inset 0 1px 0 rgba(255,255,255,0.65);
+  --shadow-hover: 0 18px 38px -24px rgba(55, 148, 255, 0.45);
+  --shadow-studio-dark-panel: 0 18px 42px -30px rgba(0,0,0,0.78), inset 0 1px 0 rgba(255,255,255,0.045);
+  --shadow-studio-dark-floating: 0 24px 60px -30px rgba(0,0,0,0.82);
+  --shadow-studio-dark-inset: inset 0 1px 0 rgba(255,255,255,0.05);
+}
+
+.dark {
+  --color-primary-500: var(--color-brand-blue-dark);
+  --color-secondary-500: var(--color-brand-sand-dark);
+}
+
+:root {
+  /* Capacitor 8 exposes native system-bar insets as custom properties on
+     Android. Browsers continue to use the env() fallback. */
+  --instafy-safe-area-inset-top: var(--safe-area-inset-top, env(safe-area-inset-top, 0px));
+  --instafy-safe-area-inset-right: var(--safe-area-inset-right, env(safe-area-inset-right, 0px));
+  --instafy-safe-area-inset-bottom: var(--safe-area-inset-bottom, env(safe-area-inset-bottom, 0px));
+  --instafy-safe-area-inset-left: var(--safe-area-inset-left, env(safe-area-inset-left, 0px));
+}
+
+body {
+  @apply bg-white text-slate-800;
+  font-family: var(--font-sans);
+  @apply overscroll-none overflow-x-hidden;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+  width: 100%;
+}
+
+html.dark body,
+body.dark {
+  background-color: var(--color-studio-dark-canvas);
+  @apply text-slate-200;
+}
+
+/* Prevent iOS/WebKit from auto-zooming focused text-entry controls on mobile. */
+@media (max-width: 639px) {
+  input:not([type="button"]):not([type="checkbox"]):not([type="color"]):not([type="file"]):not([type="hidden"]):not([type="image"]):not([type="radio"]):not([type="range"]):not([type="reset"]):not([type="submit"]),
+  textarea,
+  select,
+  [contenteditable="true"][role="textbox"] {
+    font-size: 16px;
+    line-height: 1.25rem;
+  }
+}
+
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* Opt-in dark scrollbars for dense studio surfaces. Keep them visible and
+   narrow so nested scrollers remain discoverable without a bright native rail. */
+.studio-dark-scrollbar {
+  scrollbar-color: rgb(148 163 184 / 0.35) transparent;
+  scrollbar-width: thin;
+}
+
+.studio-dark-scrollbar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.studio-dark-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.studio-dark-scrollbar::-webkit-scrollbar-thumb {
+  min-height: 2.5rem;
+  border: 2px solid transparent;
+  border-radius: 9999px;
+  background: rgb(148 163 184 / 0.35);
+  background-clip: content-box;
+}
+
+.studio-dark-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: rgb(148 163 184 / 0.55);
+}
+
+@keyframes toast-slide-in-top {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes toast-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes status-sweep {
+  0% {
+    background-position: 220% 0;
+  }
+  100% {
+    background-position: -180% 0;
+  }
+}
+
+@keyframes compact-event-pill-in {
+  0% {
+    opacity: 0;
+    transform: translateX(8px) scale(0.88);
+    filter: saturate(0.92);
+  }
+  70% {
+    opacity: 1;
+    transform: translateX(-1px) scale(1.03);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+    filter: saturate(1);
+  }
+}
+
+@keyframes compact-overflow-pill-in {
+  0% {
+    opacity: 0;
+    transform: translateX(10px) scale(0.8);
+  }
+  60% {
+    opacity: 1;
+    transform: translateX(-1px) scale(1.04);
+  }
+  100% {
+    opacity: 1;
+    transform: translateX(0) scale(1);
+  }
+}
+
+@keyframes compact-event-pill-live {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px color-mix(in oklch, var(--color-primary-500), transparent 72%),
+      0 10px 22px -18px color-mix(in oklch, var(--color-primary-500), transparent 28%);
+    filter: saturate(1) brightness(1);
+  }
+  50% {
+    box-shadow:
+      0 0 0 2px color-mix(in oklch, var(--color-primary-500), transparent 52%),
+      0 14px 28px -16px color-mix(in oklch, var(--color-primary-500), transparent 12%);
+    filter: saturate(1.08) brightness(1.08);
+  }
+}
+
+.toast-slide-in-top {
+  animation: toast-slide-in-top 160ms ease-out both;
+}
+
+.toast-fade-in {
+  animation: toast-fade-in 140ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .octo-mark[data-octo-motion="thinking"] [data-octo-part] {
+    animation: none;
+    transform: none;
+    transition: none;
+    will-change: auto;
+  }
+}
+
+.instafy-status-sweep {
+  position: relative;
+  display: inline-block;
+  color: color-mix(in oklch, var(--color-slate-600), var(--color-primary-500) 22%);
+}
+
+.instafy-status-sweep::after {
+  content: attr(data-sweep-text);
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  white-space: inherit;
+  overflow: inherit;
+  text-overflow: inherit;
+  background-image: linear-gradient(
+    110deg,
+    transparent 0%,
+    color-mix(in oklch, var(--color-primary-500), white 28%) 42%,
+    color-mix(in oklch, var(--color-secondary-300), white 36%) 50%,
+    color-mix(in oklch, var(--color-primary-500), white 28%) 58%,
+    transparent 100%
+  );
+  background-size: 220% 100%;
+  background-repeat: no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  opacity: 0.9;
+  animation: status-sweep 3.2s ease-in-out infinite;
+}
+
+.instafy-compact-event-pill {
+  animation: compact-event-pill-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+
+.instafy-compact-overflow-pill {
+  animation: compact-overflow-pill-in 250ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+}
+
+.instafy-compact-event-pill-live {
+  animation:
+    compact-event-pill-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both,
+    compact-event-pill-live 2.2s ease-in-out 220ms infinite;
+  will-change: box-shadow, filter;
+}
+
+.dark .instafy-status-sweep {
+  color: color-mix(in oklch, var(--color-slate-300), var(--color-slate-600) 42%);
+}
+
+.dark .instafy-status-sweep::after {
+  background-image: linear-gradient(
+    110deg,
+    transparent 0%,
+    color-mix(in oklch, var(--color-primary-100), white 8%) 44%,
+    color-mix(in oklch, var(--color-secondary-100), white 4%) 50%,
+    color-mix(in oklch, var(--color-primary-100), white 8%) 56%,
+    transparent 100%
+  );
+  opacity: 0.96;
+  filter: saturate(1.14) brightness(1.12);
+}

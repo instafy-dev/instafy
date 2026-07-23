@@ -1,0 +1,539 @@
+import {
+  useEffect,
+  useRef,
+  useState,
+  type Dispatch,
+  type MutableRefObject,
+} from "react";
+import { controllerClient } from "../sdk/instafy";
+import type { ControllerProjectConversation } from "../services/runtimeController/conversations";
+import {
+  extractConversationGoalFromMetadata,
+  shouldApplyConversationGoalSnapshot,
+} from "./conversationGoals";
+import {
+  DEFAULT_CONVERSATION_ROUTING_PREFERENCES,
+  extractConversationRoutingPreferences,
+  type ConversationRoutingPreferences,
+} from "./conversationRoutingMetadata";
+import {
+  extractConversationDelegatedByAgentIdFromMetadata,
+  extractConversationLifecycleFromMetadata,
+  extractConversationLocalIdFromMetadata,
+  extractConversationOriginMessageIdFromMetadata,
+  extractConversationOwnerAgentFromMetadata,
+  extractConversationTitleFromMetadata,
+  isPlainObject,
+  parseTimestamp,
+  resolveConversationVisibility,
+} from "./conversationMetadata";
+import {
+  isAttachableConversation,
+  isEmptyConversationPlaceholder,
+  type ConversationState,
+  type ConversationsAction,
+  type ConversationsState,
+} from "./conversationState";
+import { isUuid } from "./conversationMessageUtils";
+import { controllerConversationHasRemoteMessages } from "./conversationRemoteHistory";
+
+const CONTROLLER_CONVERSATION_BACKFILL_INTERVAL_MS = 30_000;
+const runtimeControllerEnabled = controllerClient.core.enabled;
+
+type ControllerConversationFetcher = (args: {
+  projectId: string;
+  limit: number;
+}) => Promise<ControllerProjectConversation[] | null>;
+
+type ControllerConversationMetadataUpdater = (args: {
+  conversationId: string;
+  metadata: Record<string, unknown>;
+}) => Promise<unknown>;
+
+interface ControllerSyncArgs {
+  state: ConversationsState;
+  currentUserId: string | null;
+  controllerProjectMissing: boolean;
+  projectAccessPending: boolean;
+  projectAccessBlocked: boolean;
+  latestStateRef: MutableRefObject<ConversationsState>;
+  dispatch: Dispatch<ConversationsAction>;
+  controllerConversationSyncEpoch: number;
+  bumpControllerConversationSyncEpoch: () => void;
+  fetchProjectConversationsFromController: ControllerConversationFetcher;
+  updateControllerConversationMetadata: ControllerConversationMetadataUpdater;
+}
+
+function conversationsRoutingPreferencesChanged(
+  conversation: ConversationState,
+  preferences: ConversationRoutingPreferences,
+): boolean {
+  return (
+    conversation.assistantEnabled !== preferences.assistantEnabled ||
+    conversation.extraAgentHandles.length !== preferences.extraAgentHandles.length ||
+    conversation.extraAgentHandles.some(
+      (handle, index) => handle !== preferences.extraAgentHandles[index],
+    )
+  );
+}
+
+export function useConversationControllerSync({
+  state,
+  currentUserId,
+  controllerProjectMissing,
+  projectAccessPending,
+  projectAccessBlocked,
+  latestStateRef,
+  dispatch,
+  controllerConversationSyncEpoch,
+  bumpControllerConversationSyncEpoch,
+  fetchProjectConversationsFromController,
+  updateControllerConversationMetadata,
+}: ControllerSyncArgs) {
+  const hydratedScopesRef = useRef<Set<string>>(new Set());
+  const completedSyncEpochsRef = useRef<Map<string, number>>(new Map());
+  const [resolvedProjectKeys, setResolvedProjectKeys] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+
+  useEffect(() => {
+    if (!runtimeControllerEnabled) {
+      return;
+    }
+    if (controllerProjectMissing || projectAccessPending || projectAccessBlocked) {
+      return;
+    }
+    if (!isUuid(state.projectKey)) {
+      return;
+    }
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const handler: EventListener = (event) => {
+      const detail = (event as CustomEvent<{ projectId?: string }>).detail ?? null;
+      const projectIdFromEvent =
+        typeof detail?.projectId === "string" ? detail.projectId : null;
+      if (projectIdFromEvent && projectIdFromEvent !== state.projectKey) {
+        return;
+      }
+      bumpControllerConversationSyncEpoch();
+    };
+
+    window.addEventListener("instafy:controller-stream-reconnected", handler);
+    return () => {
+      window.removeEventListener("instafy:controller-stream-reconnected", handler);
+    };
+  }, [
+    bumpControllerConversationSyncEpoch,
+    controllerProjectMissing,
+    projectAccessBlocked,
+    projectAccessPending,
+    state.projectKey,
+  ]);
+
+  useEffect(() => {
+    if (!runtimeControllerEnabled) {
+      return;
+    }
+    if (controllerProjectMissing || projectAccessPending || projectAccessBlocked) {
+      return;
+    }
+    if (!isUuid(state.projectKey)) {
+      return;
+    }
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      bumpControllerConversationSyncEpoch();
+    }, CONTROLLER_CONVERSATION_BACKFILL_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [
+    bumpControllerConversationSyncEpoch,
+    controllerProjectMissing,
+    projectAccessBlocked,
+    projectAccessPending,
+    state.projectKey,
+  ]);
+
+  useEffect(() => {
+    if (!runtimeControllerEnabled) {
+      return;
+    }
+    if (controllerProjectMissing || projectAccessPending || projectAccessBlocked) {
+      return;
+    }
+    if (!isUuid(state.projectKey)) {
+      return;
+    }
+
+    let cancelled = false;
+    const projectId = state.projectKey;
+    const hydrationScope = `${projectId}:${currentUserId ?? "anonymous"}`;
+    if (
+      completedSyncEpochsRef.current.get(hydrationScope) ===
+      controllerConversationSyncEpoch
+    ) {
+      return;
+    }
+
+    void (async () => {
+      let remoteConversations: Awaited<ReturnType<ControllerConversationFetcher>> = null;
+      for (let attempt = 0; attempt < 4 && !cancelled; attempt += 1) {
+        remoteConversations = await fetchProjectConversationsFromController({
+          projectId,
+          limit: 50,
+        });
+        if (remoteConversations !== null) {
+          break;
+        }
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(500 * (attempt + 1), 2_000)),
+        );
+      }
+      if (cancelled || remoteConversations === null) {
+        return;
+      }
+
+      const latestState = latestStateRef.current;
+      if (latestState.projectKey !== projectId) {
+        return;
+      }
+
+      const isInitialSuccessfulHydration = !hydratedScopesRef.current.has(hydrationScope);
+      hydratedScopesRef.current.add(hydrationScope);
+      if (remoteConversations.length === 0) {
+        completedSyncEpochsRef.current.set(
+          hydrationScope,
+          controllerConversationSyncEpoch,
+        );
+        setResolvedProjectKeys((current) => {
+          if (current.has(projectId)) {
+            return current;
+          }
+          return new Set([...current, projectId]);
+        });
+        return;
+      }
+
+      const controllerToLocal = new Map<string, string>();
+      const conversationByLocalId = new Map<string, ConversationState>();
+      const localIds = new Set<string>();
+      latestState.conversations.forEach((conversation) => {
+        conversationByLocalId.set(conversation.localId, conversation);
+        localIds.add(conversation.localId);
+        if (conversation.controllerId) {
+          controllerToLocal.set(conversation.controllerId, conversation.localId);
+        }
+      });
+
+      const attachableByLocalId = new Map<string, ConversationState>();
+      latestState.conversations.forEach((conversation) => {
+        if (!isAttachableConversation(conversation)) {
+          return;
+        }
+        attachableByLocalId.set(conversation.localId, conversation);
+      });
+      const activeLocalConversation =
+        latestState.conversations.find(
+          (conversation) => conversation.localId === latestState.activeId,
+        ) ?? null;
+
+      let fallbackSequence = latestState.sequence;
+      remoteConversations.forEach((remote) => {
+        const controllerId = typeof remote?.id === "string" ? remote.id : "";
+        if (!isUuid(controllerId)) {
+          return;
+        }
+
+        const metadata = isPlainObject(remote.metadata) ? remote.metadata : {};
+        const hasRemoteMessages = controllerConversationHasRemoteMessages(remote);
+        const titleFromMetadata = extractConversationTitleFromMetadata(metadata);
+        const localIdFromMetadata = extractConversationLocalIdFromMetadata(metadata);
+        const parentConversationIdFromRemote =
+          typeof remote.parentConversationId === "string" && isUuid(remote.parentConversationId)
+            ? remote.parentConversationId
+            : null;
+        const threadKindFromRemote =
+          parentConversationIdFromRemote && typeof remote.threadKind === "string"
+            ? remote.threadKind.trim().toLowerCase() || null
+            : null;
+        const visibility = resolveConversationVisibility(remote.visibility, metadata);
+        const lifecycleStatus = extractConversationLifecycleFromMetadata(
+          metadata,
+          currentUserId,
+        );
+        const ownerAgentFromMetadata = extractConversationOwnerAgentFromMetadata(metadata);
+        const activeGoalFromMetadata = extractConversationGoalFromMetadata(metadata);
+        const originMessageIdFromMetadata =
+          extractConversationOriginMessageIdFromMetadata(metadata);
+        const delegatedByAgentIdFromMetadata =
+          extractConversationDelegatedByAgentIdFromMetadata(metadata);
+        const routingPreferencesFromMetadata = extractConversationRoutingPreferences(
+          metadata,
+          currentUserId,
+        );
+        const routingPreferences =
+          routingPreferencesFromMetadata ?? DEFAULT_CONVERSATION_ROUTING_PREFERENCES;
+        const createdByIsSelf = currentUserId !== null && remote.createdBy === currentUserId;
+
+        const syncExistingConversationFromRemote = (
+          conversation: ConversationState,
+        ) => {
+          if (conversation.hasRemoteMessages !== hasRemoteMessages) {
+            dispatch({
+              type: "SET_REMOTE_HISTORY",
+              id: conversation.localId,
+              hasMessages: hasRemoteMessages,
+            });
+          }
+          if (titleFromMetadata && conversation.title !== titleFromMetadata) {
+            dispatch({
+              type: "SET_TITLE",
+              id: conversation.localId,
+              title: titleFromMetadata,
+            });
+          }
+          if (conversation.visibility !== visibility) {
+            dispatch({
+              type: "SET_VISIBILITY",
+              id: conversation.localId,
+              visibility,
+            });
+          }
+          if (conversation.lifecycleStatus !== lifecycleStatus) {
+            dispatch({
+              type: "SET_LIFECYCLE",
+              id: conversation.localId,
+              status: lifecycleStatus,
+            });
+          }
+          if (
+            routingPreferencesFromMetadata &&
+            conversationsRoutingPreferencesChanged(conversation, routingPreferencesFromMetadata)
+          ) {
+            dispatch({
+              type: "SET_ROUTING_PREFERENCES",
+              id: conversation.localId,
+              assistantEnabled: routingPreferencesFromMetadata.assistantEnabled,
+              extraAgentHandles: routingPreferencesFromMetadata.extraAgentHandles,
+            });
+          }
+          if (
+            shouldApplyConversationGoalSnapshot(
+              conversation.activeGoal,
+              activeGoalFromMetadata,
+            )
+          ) {
+            dispatch({
+              type: "SET_GOAL",
+              id: conversation.localId,
+              goal: activeGoalFromMetadata,
+            });
+          }
+          const resolvedParentConversationId =
+            parentConversationIdFromRemote ?? conversation.parentConversationId ?? null;
+          const resolvedThreadKind =
+            threadKindFromRemote ?? conversation.threadKind ?? null;
+          if (
+            conversation.parentConversationId !== resolvedParentConversationId ||
+            conversation.threadKind !== resolvedThreadKind ||
+            conversation.ownerAgent?.id !== ownerAgentFromMetadata?.id ||
+            conversation.ownerAgent?.handle !== ownerAgentFromMetadata?.handle ||
+            conversation.originMessageId !== originMessageIdFromMetadata ||
+            conversation.delegatedByAgentId !== delegatedByAgentIdFromMetadata
+          ) {
+            dispatch({
+              type: "SET_THREAD_META",
+              id: conversation.localId,
+              parentConversationId: resolvedParentConversationId,
+              threadKind: resolvedThreadKind,
+              ownerAgent: ownerAgentFromMetadata,
+              originMessageId: originMessageIdFromMetadata,
+              delegatedByAgentId: delegatedByAgentIdFromMetadata,
+            });
+          }
+        };
+
+        const existingLocalId = controllerToLocal.get(controllerId);
+        if (existingLocalId) {
+          const existingConversation = conversationByLocalId.get(existingLocalId);
+          if (existingConversation) {
+            syncExistingConversationFromRemote(existingConversation);
+          }
+          return;
+        }
+
+        const desiredLocalId = localIdFromMetadata ?? controllerId;
+        const findAttachableMatch = (): ConversationState | null => {
+          const candidate = attachableByLocalId.get(desiredLocalId) ?? null;
+          if (candidate) {
+            return candidate;
+          }
+          if (localIdFromMetadata) {
+            return null;
+          }
+          if (
+            activeLocalConversation &&
+            isAttachableConversation(activeLocalConversation) &&
+            !activeLocalConversation.controllerId
+          ) {
+            if (!titleFromMetadata || activeLocalConversation.title === titleFromMetadata) {
+              return activeLocalConversation;
+            }
+          }
+          if (titleFromMetadata) {
+            for (const conversation of attachableByLocalId.values()) {
+              if (conversation.title === titleFromMetadata) {
+                return conversation;
+              }
+            }
+          }
+          if (attachableByLocalId.size === 1) {
+            return attachableByLocalId.values().next().value ?? null;
+          }
+          return null;
+        };
+
+        const existingAttachable = createdByIsSelf ? findAttachableMatch() : null;
+        if (existingAttachable && !existingAttachable.controllerId) {
+          dispatch({ type: "SET_CONTROLLER", id: existingAttachable.localId, controllerId });
+          syncExistingConversationFromRemote(existingAttachable);
+
+          if (!localIdFromMetadata) {
+            void updateControllerConversationMetadata({
+              conversationId: controllerId,
+              metadata: {
+                ...metadata,
+                title: titleFromMetadata ?? existingAttachable.title,
+                localId: existingAttachable.localId,
+              },
+            });
+          }
+          controllerToLocal.set(controllerId, existingAttachable.localId);
+          return;
+        }
+
+        let localId = desiredLocalId;
+        if (localIds.has(localId)) {
+          localId = controllerId;
+        }
+        localIds.add(localId);
+
+        const fallbackTitle = titleFromMetadata ?? `Conversation ${fallbackSequence}`;
+        if (!titleFromMetadata) {
+          fallbackSequence += 1;
+        }
+        const conversation: ConversationState = {
+          localId,
+          title: fallbackTitle,
+          visibility,
+          lifecycleStatus,
+          controllerId,
+          hasRemoteMessages,
+          parentConversationId: parentConversationIdFromRemote,
+          threadKind: threadKindFromRemote,
+          ownerAgent: ownerAgentFromMetadata,
+          activeGoal: activeGoalFromMetadata,
+          originMessageId: originMessageIdFromMetadata,
+          delegatedByAgentId: delegatedByAgentIdFromMetadata,
+          messages: [],
+          draft: "",
+          draftEditorState: null,
+          assistantEnabled: routingPreferences.assistantEnabled,
+          extraAgentHandles: [...routingPreferences.extraAgentHandles],
+          unreadCount: 0,
+          createdAt: parseTimestamp(remote.createdAt ?? null),
+          pendingRunIds: [],
+          awaitingLeaseRunIds: [],
+          pendingRunSubmittedAt: {},
+          runtimePreference: null,
+        };
+        dispatch({ type: "CREATE", conversation, select: false });
+        controllerToLocal.set(controllerId, conversation.localId);
+      });
+
+      const shouldAutoSelectControllerConversation = (() => {
+        if (!isInitialSuccessfulHydration) {
+          return false;
+        }
+        if (!activeLocalConversation || !isEmptyConversationPlaceholder(activeLocalConversation)) {
+          return false;
+        }
+        if (latestState.conversations.length !== 1) {
+          return false;
+        }
+        if (typeof window === "undefined") {
+          return true;
+        }
+        try {
+          const params = new URLSearchParams(window.location.search);
+          const controllerParam = params.get("conversationControllerId");
+          return !isUuid(controllerParam ?? "");
+        } catch {
+          return true;
+        }
+      })();
+
+      if (shouldAutoSelectControllerConversation) {
+        const latestRemote = [...remoteConversations]
+          .filter((remote) => isUuid(typeof remote?.id === "string" ? remote.id : ""))
+          .map((remote) => ({
+            controllerId: remote.id as string,
+            createdAt: parseTimestamp(remote.createdAt ?? null),
+          }))
+          .sort((a, b) => b.createdAt - a.createdAt)[0];
+        const candidateLocalId = latestRemote
+          ? controllerToLocal.get(latestRemote.controllerId) ?? null
+          : null;
+        if (
+          activeLocalConversation &&
+          candidateLocalId &&
+          candidateLocalId !== activeLocalConversation.localId
+        ) {
+          dispatch({ type: "SELECT", id: candidateLocalId });
+          dispatch({ type: "CLOSE", id: activeLocalConversation.localId });
+        }
+      }
+
+      completedSyncEpochsRef.current.set(
+        hydrationScope,
+        controllerConversationSyncEpoch,
+      );
+      setResolvedProjectKeys((current) => {
+        if (current.has(projectId)) {
+          return current;
+        }
+        return new Set([...current, projectId]);
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    controllerConversationSyncEpoch,
+    controllerProjectMissing,
+    currentUserId,
+    dispatch,
+    fetchProjectConversationsFromController,
+    latestStateRef,
+    projectAccessBlocked,
+    projectAccessPending,
+    state.projectKey,
+    updateControllerConversationMetadata,
+  ]);
+
+  return (
+    !runtimeControllerEnabled ||
+    !isUuid(state.projectKey) ||
+    controllerProjectMissing ||
+    projectAccessBlocked ||
+    resolvedProjectKeys.has(state.projectKey)
+  );
+}

@@ -1,0 +1,288 @@
+// @vitest-environment jsdom
+
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const PROJECT_ID = "11111111-1111-4111-8111-111111111111";
+
+const mocks = vi.hoisted(() => ({
+  createControllerProject: vi.fn(),
+  createProject: vi.fn(),
+  getSummaryResult: vi.fn(),
+  removeProject: vi.fn(),
+  setProjectName: vi.fn(),
+  setProjectOrg: vi.fn(),
+  switchProject: vi.fn(),
+}));
+
+vi.mock("../../lib/supabaseClient", () => ({
+  hasSupabaseConfig: true,
+}));
+
+vi.mock("../../sdk/instafy", () => ({
+  controllerClient: {
+    projects: {
+      create: mocks.createControllerProject,
+      getSummaryResult: mocks.getSummaryResult,
+    },
+  },
+}));
+
+vi.mock("../ProjectStateProvider", () => ({
+  useProjectState: () => ({
+    projects: {
+      [PROJECT_ID]: {
+        metadata: { projectName: "Shared space" },
+        org: { id: "org-1", name: "Team" },
+      },
+    },
+    activeProjectId: PROJECT_ID,
+    createProject: mocks.createProject,
+    switchProject: mocks.switchProject,
+    setProjectOrg: mocks.setProjectOrg,
+    setProjectName: mocks.setProjectName,
+    removeProject: mocks.removeProject,
+  }),
+}));
+
+vi.mock("../../providers/AuthProvider", () => ({
+  useAuth: () => ({ user: { id: "user-1" } }),
+}));
+
+vi.mock("react-router-dom", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-router-dom")>();
+  return {
+    ...actual,
+    useLocation: () => ({
+      pathname: "/studio",
+      search: `?projectId=${PROJECT_ID}`,
+      hash: "",
+      state: null,
+      key: "test",
+    }),
+  };
+});
+
+vi.mock("../projectRecency", () => ({ recordProjectOpened: vi.fn() }));
+vi.mock("../../workspace/projectClear", () => ({ clearProjectState: vi.fn() }));
+
+import {
+  PROJECT_ACCESS_REFRESH_EVENT,
+  ProjectAccessProvider,
+  useProjectAccess,
+} from "../ProjectAccessProvider";
+
+function AccessProbe() {
+  const access = useProjectAccess();
+  return (
+    <output
+      data-testid="access-probe"
+      data-role={access.effectiveProjectRole ?? "none"}
+      data-write={String(access.canWriteProject)}
+      data-share={String(access.canShareProject)}
+      data-resolved={String(access.projectCapabilitiesResolved)}
+      data-blocked={String(access.projectAccessBlocked)}
+    />
+  );
+}
+
+function summaryFor(role: "admin" | "viewer") {
+  const admin = role === "admin";
+  return {
+    summary: {
+      projectId: PROJECT_ID,
+      projectName: "Shared space",
+      orgId: "org-1",
+      orgName: "Team",
+      effectiveRole: role,
+      canWrite: admin,
+      canShare: admin,
+      canManage: admin,
+    },
+    notFound: false,
+    forbidden: false,
+    unauthorized: false,
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+describe("ProjectAccessProvider capability refresh", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    window.history.replaceState(null, "", `/studio?projectId=${PROJECT_ID}`);
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    Object.values(mocks).forEach((mock) => mock.mockReset());
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+    window.localStorage.clear();
+    window.sessionStorage.clear();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("demotes a live project after a targeted controller invalidation", async () => {
+    mocks.getSummaryResult
+      .mockResolvedValueOnce(summaryFor("admin"))
+      .mockResolvedValueOnce(summaryFor("viewer"));
+
+    await act(async () => {
+      root.render(
+        <ProjectAccessProvider>
+          <AccessProbe />
+        </ProjectAccessProvider>,
+      );
+    });
+    await vi.waitFor(() => {
+      expect(container.querySelector('[data-testid="access-probe"]')?.getAttribute("data-role")).toBe("admin");
+    });
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, {
+          detail: { projectId: PROJECT_ID },
+        }),
+      );
+    });
+    await vi.waitFor(() => {
+      const probe = container.querySelector('[data-testid="access-probe"]');
+      expect(probe?.getAttribute("data-role")).toBe("viewer");
+      expect(probe?.getAttribute("data-write")).toBe("false");
+      expect(probe?.getAttribute("data-share")).toBe("false");
+    });
+  });
+
+  it("promotes a live project after a targeted controller invalidation", async () => {
+    mocks.getSummaryResult
+      .mockResolvedValueOnce(summaryFor("viewer"))
+      .mockResolvedValueOnce(summaryFor("admin"));
+
+    await act(async () => {
+      root.render(
+        <ProjectAccessProvider>
+          <AccessProbe />
+        </ProjectAccessProvider>,
+      );
+    });
+    await vi.waitFor(() => {
+      expect(container.querySelector('[data-testid="access-probe"]')?.getAttribute("data-role")).toBe("viewer");
+    });
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, {
+          detail: { projectId: PROJECT_ID },
+        }),
+      );
+    });
+    await vi.waitFor(() => {
+      const probe = container.querySelector('[data-testid="access-probe"]');
+      expect(probe?.getAttribute("data-role")).toBe("admin");
+      expect(probe?.getAttribute("data-write")).toBe("true");
+      expect(probe?.getAttribute("data-share")).toBe("true");
+    });
+  });
+
+  it("fails closed immediately and refetches after an older refresh is in flight", async () => {
+    const staleRefresh = deferred<ReturnType<typeof summaryFor>>();
+    const authoritativeRefresh = deferred<ReturnType<typeof summaryFor>>();
+    mocks.getSummaryResult
+      .mockResolvedValueOnce(summaryFor("admin"))
+      .mockReturnValueOnce(staleRefresh.promise)
+      .mockReturnValueOnce(authoritativeRefresh.promise);
+
+    await act(async () => {
+      root.render(
+        <ProjectAccessProvider>
+          <AccessProbe />
+        </ProjectAccessProvider>,
+      );
+    });
+    await vi.waitFor(() => {
+      expect(container.querySelector('[data-testid="access-probe"]')?.getAttribute("data-role")).toBe("admin");
+    });
+
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await vi.waitFor(() => expect(mocks.getSummaryResult).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, {
+          detail: { projectId: PROJECT_ID },
+        }),
+      );
+    });
+    let probe = container.querySelector('[data-testid="access-probe"]');
+    expect(probe?.getAttribute("data-role")).toBe("none");
+    expect(probe?.getAttribute("data-write")).toBe("false");
+    expect(probe?.getAttribute("data-share")).toBe("false");
+    expect(probe?.getAttribute("data-resolved")).toBe("false");
+
+    await act(async () => {
+      staleRefresh.resolve(summaryFor("admin"));
+      await staleRefresh.promise;
+    });
+    await vi.waitFor(() => expect(mocks.getSummaryResult).toHaveBeenCalledTimes(3));
+    probe = container.querySelector('[data-testid="access-probe"]');
+    expect(probe?.getAttribute("data-role")).toBe("none");
+    expect(probe?.getAttribute("data-write")).toBe("false");
+
+    await act(async () => {
+      authoritativeRefresh.resolve(summaryFor("viewer"));
+      await authoritativeRefresh.promise;
+    });
+    await vi.waitFor(() => {
+      const refreshedProbe = container.querySelector('[data-testid="access-probe"]');
+      expect(refreshedProbe?.getAttribute("data-role")).toBe("viewer");
+      expect(refreshedProbe?.getAttribute("data-write")).toBe("false");
+    });
+  });
+
+  it("fails closed when an explicit refresh discovers revoked access", async () => {
+    mocks.getSummaryResult
+      .mockResolvedValueOnce(summaryFor("admin"))
+      .mockResolvedValueOnce({
+        summary: null,
+        notFound: false,
+        forbidden: true,
+        unauthorized: false,
+      });
+
+    await act(async () => {
+      root.render(
+        <ProjectAccessProvider>
+          <AccessProbe />
+        </ProjectAccessProvider>,
+      );
+    });
+    await vi.waitFor(() => {
+      expect(container.querySelector('[data-testid="access-probe"]')?.getAttribute("data-role")).toBe("admin");
+    });
+
+    await act(async () => {
+      window.dispatchEvent(new Event(PROJECT_ACCESS_REFRESH_EVENT));
+    });
+    await vi.waitFor(() => {
+      const probe = container.querySelector('[data-testid="access-probe"]');
+      expect(probe?.getAttribute("data-blocked")).toBe("true");
+      expect(probe?.getAttribute("data-resolved")).toBe("false");
+      expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID);
+    });
+  });
+});
