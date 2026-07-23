@@ -1,0 +1,147 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tunnel_broker
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: tunnel_broker
+    ports:
+      - "5545:5432"
+    networks:
+      - tunnelnet
+    volumes:
+      - tunnel-broker-pg:/var/lib/postgresql/data
+
+  broker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: tunnel-broker:local
+    depends_on:
+      - postgres
+    environment:
+      DATABASE_URL: postgres://tunnel_broker:password@postgres:5432/tunnel_broker
+      HTTP_BIND: 0.0.0.0:8080
+      TUNNEL_DOMAIN: ${TUNNEL_DOMAIN:-rt.test}
+      INGRESS_HOST: ${INGRESS_HOST:-ingress.rt.test}
+      INGRESS_PORT: ${INGRESS_PORT:-37000}
+      # Local Traefik has no certificate resolver by default, so advertise its
+      # plain-HTTP port. Production configures TLS and overrides this to 443.
+      PUBLIC_INGRESS_PORT: ${PUBLIC_INGRESS_PORT:-8083}
+      INGRESS_IPV4: ${INGRESS_IPV4:-127.0.0.1}
+      DEFAULT_TTL_SECONDS: 60
+      RATHOLE_SHARED_TOKEN: dev-tunnel-token
+      TOKEN_SIGNING_KEY: dev-secret-change-me
+      BROKER_API_TOKENS: dev-token
+      TOKEN_ISSUER: instafy-tunnel-broker
+      TUNNEL_TOKEN_TTL_SECONDS: 900
+      ACL_HOOK_URL: ${ACL_HOOK_URL-}
+      ACL_HOOK_TOKEN: ${ACL_HOOK_TOKEN-}
+      EVENT_HOOK_URL: ${EVENT_HOOK_URL-}
+      EVENT_HOOK_TOKEN: ${EVENT_HOOK_TOKEN-}
+    ports:
+      - "8082:8080"
+    command: ["tunnel-broker"]
+    networks:
+      - tunnelnet
+
+  # Optional extras for end-to-end smoke once DNS + ingress wiring lands.
+  pdns:
+    image: powerdns/pdns-auth-48
+    profiles: ["pdns"]
+    depends_on:
+      - postgres
+    environment:
+      PDNS_ALLOW_AXFR_IPS: "127.0.0.1"
+    volumes:
+      - ./config/pdns/pdns.conf:/etc/powerdns/pdns.conf:ro
+    command: ["--disable-syslog=yes", "--loglevel=4"]
+    ports:
+      - "1053:53/udp"
+      - "1053:53/tcp"
+      - "18081:8081/tcp"
+    networks:
+      - tunnelnet
+
+  rathole:
+    # The broker image contains all tunnel binaries. Reuse it rather than
+    # compiling the same Rust workspace independently for every process.
+    image: tunnel-broker:local
+    profiles: ["ingress"]
+    user: root
+    command: ["rathole", "/etc/rathole/server.toml"]
+    volumes:
+      - ./config/rathole:/etc/rathole
+    ports:
+      - "${INGRESS_PORT:-37000}:${INGRESS_PORT:-37000}"
+      - "18443:18443"
+    networks:
+      - tunnelnet
+
+  rathole-sidecar:
+    image: tunnel-broker:local
+    profiles: ["ingress"]
+    pid: "service:rathole"
+    depends_on:
+      - postgres
+      - rathole
+    environment:
+      DATABASE_URL: postgres://tunnel_broker:password@postgres:5432/tunnel_broker
+      TUNNEL_DOMAIN: ${TUNNEL_DOMAIN:-rt.test}
+      INGRESS_HOST: ${INGRESS_HOST:-ingress.rt.test}
+      INGRESS_PORT: ${INGRESS_PORT:-37000}
+      RATHOLE_SHARED_TOKEN: dev-tunnel-token
+      RATHOLE_CONFIG_OUTPUT: /etc/rathole/server.toml
+      RATHOLE_CONFIG_REFRESH_SECONDS: ${RATHOLE_CONFIG_REFRESH_SECONDS:-5}
+      # Requires pid namespace sharing so the sidecar can signal the rathole process.
+      RATHOLE_RELOAD_COMMAND: "kill -HUP 1"
+      TRAEFIK_CONFIG_OUTPUT: /etc/traefik/dynamic.yml
+    volumes:
+      - ./config/rathole:/etc/rathole
+      - ./config/traefik:/etc/traefik
+    networks:
+      - tunnelnet
+    user: root
+    command: ["ingress_sidecar"]
+
+  traefik:
+    image: traefik:v3.0
+    profiles: ["ingress"]
+    depends_on:
+      - rathole
+    command: ["--configFile=/etc/traefik/traefik.yml"]
+    ports:
+      - "8083:80"
+      - "8443:443"
+      - "8084:8080"
+    volumes:
+      - ./config/traefik:/etc/traefik
+    networks:
+      - tunnelnet
+
+  # Extra services for full ingress reachability smoke.
+  smoke-http:
+    image: traefik/whoami:v1.10
+    profiles: ["ingress-smoke"]
+    networks:
+      - tunnelnet
+
+  rathole-client:
+    image: tunnel-broker:local
+    profiles: ["ingress-smoke"]
+    user: root
+    depends_on:
+      - rathole
+      - smoke-http
+    volumes:
+      - ./config/rathole:/etc/rathole
+    networks:
+      - tunnelnet
+    command: ["rathole", "/etc/rathole/client.toml"]
+
+networks:
+  tunnelnet: {}
+
+volumes:
+  tunnel-broker-pg: {}

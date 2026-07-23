@@ -1,0 +1,85 @@
+name: Public Git Conflict Contract
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/git-conflict-canary.yml"
+      - "packages/runtime-agent/assets/instafy/.agents/skills/instafy-git-canonical-conflicts/SKILL.md"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/git-conflict-canary.yml"
+      - "packages/runtime-agent/assets/instafy/.agents/skills/instafy-git-canonical-conflicts/SKILL.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-git-conflict-contract-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deterministic-conflict:
+    name: Deterministic conflict fixture
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Verify conflict-resolution fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          skill_path="packages/runtime-agent/assets/instafy/.agents/skills/instafy-git-canonical-conflicts/SKILL.md"
+          test -s "$skill_path"
+          grep -Fq "git rebase" "$skill_path"
+          grep -Fq "git rebase --continue" "$skill_path"
+          grep -Fq "git push" "$skill_path"
+
+          fixture_root="$(mktemp -d)"
+          trap 'rm -rf "$fixture_root"' EXIT
+
+          git init --bare --initial-branch=main "$fixture_root/remote.git"
+          git clone "$fixture_root/remote.git" "$fixture_root/local"
+          git -C "$fixture_root/local" config user.name "Instafy fixture"
+          git -C "$fixture_root/local" config user.email "fixture@example.invalid"
+          printf '%s\n' "TODO: milk" > "$fixture_root/local/todo.txt"
+          git -C "$fixture_root/local" add todo.txt
+          git -C "$fixture_root/local" commit -m "fixture: base"
+          git -C "$fixture_root/local" push origin main
+
+          git clone "$fixture_root/remote.git" "$fixture_root/remote-writer"
+          git -C "$fixture_root/remote-writer" config user.name "Instafy fixture"
+          git -C "$fixture_root/remote-writer" config user.email "fixture@example.invalid"
+
+          printf '%s\n' "TODO: milk + eggs" > "$fixture_root/local/todo.txt"
+          git -C "$fixture_root/local" add todo.txt
+          git -C "$fixture_root/local" commit -m "fixture: local"
+
+          printf '%s\n' "TODO: milk + bread" > "$fixture_root/remote-writer/todo.txt"
+          git -C "$fixture_root/remote-writer" add todo.txt
+          git -C "$fixture_root/remote-writer" commit -m "fixture: remote"
+          git -C "$fixture_root/remote-writer" push origin main
+
+          git -C "$fixture_root/local" fetch origin main
+          if git -C "$fixture_root/local" rebase origin/main; then
+            echo "expected the deterministic fixture to conflict" >&2
+            exit 1
+          fi
+
+          test -f "$fixture_root/local/.git/rebase-merge/git-rebase-todo" ||
+            test -f "$fixture_root/local/.git/rebase-apply/applying"
+          grep -Fq "<<<<<<<" "$fixture_root/local/todo.txt"
+
+          printf '%s\n' "TODO: milk + bread + eggs" > "$fixture_root/local/todo.txt"
+          git -C "$fixture_root/local" add todo.txt
+          GIT_EDITOR=true git -C "$fixture_root/local" rebase --continue
+          git -C "$fixture_root/local" push origin HEAD:main
+
+          resolved="$(git --git-dir="$fixture_root/remote.git" show main:todo.txt)"
+          test "$resolved" = "TODO: milk + bread + eggs"

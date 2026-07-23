@@ -1,0 +1,290 @@
+import { expect, test, type Page } from "@playwright/test";
+
+import { resolveViteReactDependencies } from "./viteComponentDependencies.js";
+
+const FIXTURE_PATH = "/__browser-chrome-mobile-layout-fixture__";
+
+async function mountCompactBrowserChrome(page: Page): Promise<void> {
+  const deps = await resolveViteReactDependencies(page);
+  const main = `
+    import "/src/styles/tailwind.css";
+    import ReactNS from "${deps.react}";
+    import ReactDomClientNS from "${deps.reactDomClient}";
+    import { BrowserStatusPill } from "/src/screens/studio/components/BrowserChromeShell.tsx";
+    import { ChatBrowserSubtabs } from "/src/screens/studio/components/ChatBrowserSubtabs.tsx";
+    import { BrowserTransportSelector } from "/src/screens/studio/components/PersonalBrowserSurface.tsx";
+    import { RemoteBrowserMobileKeyboard } from "/src/screens/studio/components/RemoteBrowserMobileKeyboard.tsx";
+    import { SharedBrowserChrome } from "/src/screens/studio/components/SharedBrowserChrome.tsx";
+    import { SharedBrowserCollaborationControls } from "/src/screens/studio/components/SharedBrowserCollaborationControls.tsx";
+    const React = ReactNS.default ?? ReactNS;
+    const { createRoot } = ReactDomClientNS.default ?? ReactDomClientNS;
+    const h = React.createElement;
+    const participants = [
+      { id: "self", displayName: "A very long local participant name", color: "#0ea5e9", pageId: "page-1", cursor: null, canControl: true },
+      { id: "peer", displayName: "A teammate with an exceptionally long display name", color: "#8b5cf6", pageId: "page-1", cursor: null, canControl: true },
+      { id: "third", displayName: "Another teammate", color: "#10b981", pageId: "page-1", cursor: null, canControl: true },
+      { id: "fourth", displayName: "Fourth teammate", color: "#f97316", pageId: "page-1", cursor: null, canControl: true },
+    ];
+    const client = {
+      connectionStatus: "connected",
+      participantId: "self",
+      state: {
+        revision: 1,
+        participants,
+        controlOwner: { kind: "human", participantId: "peer" },
+        requests: [],
+      },
+      error: null,
+    };
+    const pages = [
+      { id: "page-1", url: "https://example.com/with/a/long/path", host: "example.com", label: "Example", title: "An exceptionally long active browser tab title", lastReferencedAt: 3, isActive: true },
+      { id: "page-2", url: "https://two.example/", host: "two.example", label: "Second", title: "A second long browser tab title", lastReferencedAt: 2, isActive: false },
+      { id: "page-3", url: "https://three.example/", host: "three.example", label: "Third", title: "A third long browser tab title", lastReferencedAt: 1, isActive: false },
+    ];
+
+    function Fixture() {
+      const [agentControls, setAgentControls] = React.useState(false);
+      React.useEffect(() => {
+        window.__setAgentControls = setAgentControls;
+        window.__remoteKeyboardMessages = [];
+        return () => { delete window.__setAgentControls; };
+      }, []);
+      const localControlOwner = agentControls
+        ? { kind: "agent", displayName: "Octo with a very long agent name" }
+        : { kind: "human" };
+      const transport = h(BrowserTransportSelector, {
+        checked: true,
+        compact: true,
+        mode: "shared",
+        onModeChange: () => {},
+        personalAvailable: true,
+      });
+      const collaboration = h(SharedBrowserCollaborationControls, {
+        client,
+        compact: true,
+        localControlOwner,
+        onGrantControl: () => {},
+        onReleaseControl: () => {},
+        onRequestControl: () => {},
+        onTakeControl: () => {},
+      });
+      return h("main", { style: { width: "100vw", overflow: "hidden" } },
+        h(ChatBrowserSubtabs, {
+          activeTab: "browser",
+          browserAttention: true,
+          browserPanelId: "browser-panel",
+          chatPanelId: "chat-panel",
+          onTabChange: () => {},
+        }),
+        h(SharedBrowserChrome, {
+          compact: true,
+          pages,
+          resolved: true,
+          pendingAction: null,
+          error: null,
+          onNavigate: () => {},
+          onBack: () => {},
+          onForward: () => {},
+          onReload: () => {},
+          onFocusPage: () => {},
+          onClearError: () => {},
+          toolbarLeading: transport,
+          toolbarStatus: h(BrowserStatusPill, {
+            compact: true,
+            detail: "Shared Browser is connected and ready.",
+            state: "ready",
+            testId: "browser-session-status",
+          }),
+          toolbarActions: collaboration,
+          interactionEnabled: false,
+        }),
+        h(RemoteBrowserMobileKeyboard, {
+          enabled: true,
+          onMessage: (message) => window.__remoteKeyboardMessages.push(message),
+        }),
+      );
+    }
+    createRoot(document.getElementById("root")).render(h(Fixture));
+    window.__mounted = true;`;
+
+  const html = `<!doctype html><html><head><meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <style>html, body, #root { margin: 0; min-width: 0; width: 100%; }</style>
+    <script type="module">
+      import RefreshRuntime from "/@react-refresh";
+      RefreshRuntime.injectIntoGlobalHook(window);
+      window.$RefreshReg$ = () => {};
+      window.$RefreshSig$ = () => (type) => type;
+      window.__vite_plugin_react_preamble_installed__ = true;
+    </script>
+    <script type="module" src="/@vite/client"></script>
+    <script type="module" src="${FIXTURE_PATH}/main.js"></script>
+    </head><body><div id="root"></div></body></html>`;
+
+  await page.route(`**${FIXTURE_PATH}`, (route) =>
+    route.fulfill({ contentType: "text/html", body: html }),
+  );
+  await page.route(`**${FIXTURE_PATH}/main.js`, (route) =>
+    route.fulfill({ contentType: "application/javascript", body: main }),
+  );
+
+  const errors: string[] = [];
+  const failedRequests: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  page.on("response", (response) => {
+    if (response.status() >= 400) {
+      failedRequests.push(`${response.request().method()} ${response.url()}: HTTP ${response.status()}`);
+    }
+  });
+  page.on("requestfailed", (request) => {
+    failedRequests.push(
+      `${request.method()} ${request.url()}: ${request.failure()?.errorText ?? "request failed"}`,
+    );
+  });
+  await page.goto(FIXTURE_PATH);
+  await page
+    .waitForFunction(() => (window as { __mounted?: boolean }).__mounted === true, {
+      timeout: 20_000,
+    })
+    .catch((error: unknown) => {
+      const detail = [...errors, ...failedRequests].join("; ") || "no browser error reported";
+      throw new Error(`Compact browser fixture did not mount: ${detail}`, { cause: error });
+    });
+  expect(errors, errors.join("; ")).toEqual([]);
+  expect(failedRequests, failedRequests.join("; ")).toEqual([]);
+}
+
+test("keeps compact browser identity, control, and tabs usable at 360px", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 360, height: 800 });
+  await mountCompactBrowserChrome(page);
+
+  const chrome = page.getByTestId("shared-browser-chrome");
+  const context = page.getByTestId("browser-chrome-context-row");
+  const participants = page.getByTestId("shared-browser-participants");
+  const controlState = page.getByTestId("shared-browser-collaboration-control-state");
+  const action = page.getByTestId("shared-browser-collaboration-control-action");
+  const address = page.getByTestId("shared-browser-address");
+  const pageSelect = page.getByTestId("shared-browser-page-select");
+
+  await expect(context).toBeVisible();
+  await expect(page.getByTestId("browser-session-status")).toBeVisible();
+  await expect(participants).toBeVisible();
+  await expect(participants).toHaveAttribute(
+    "aria-label",
+    /A teammate with an exceptionally long display name/,
+  );
+  await expect(participants).toContainText("+3");
+  await expect(controlState).toBeVisible();
+  await expect(controlState).toContainText("A teammate with an exceptionally long display name");
+  await expect(action).toBeVisible();
+  await expect(action).toHaveAccessibleName(
+    "Request control",
+  );
+  await expect(pageSelect).toBeVisible();
+  await expect(pageSelect.locator("option")).toHaveCount(3);
+  await expect(address).toBeVisible();
+  await expect(page.getByTestId("conversation-subtab-browser")).toHaveAccessibleName(
+    "Browser, approval needed",
+  );
+  await expect(page.getByTestId("shared-browser-approval-attention")).toBeVisible();
+
+  const geometry = await page.evaluate(() => {
+    const bounds = (testId: string) => {
+      const element = document.querySelector<HTMLElement>(`[data-testid="${testId}"]`);
+      if (!element) {
+        return null;
+      }
+      const rect = element.getBoundingClientRect();
+      return { height: rect.height, left: rect.left, right: rect.right, width: rect.width };
+    };
+    const chromeElement = document.querySelector<HTMLElement>(
+      '[data-testid="shared-browser-chrome"]',
+    );
+    return {
+      address: bounds("shared-browser-address"),
+      action: bounds("shared-browser-collaboration-control-action"),
+      browserTab: bounds("conversation-subtab-browser"),
+      chromeFits: chromeElement ? chromeElement.scrollWidth <= chromeElement.clientWidth : false,
+      documentWidth: document.documentElement.scrollWidth,
+      reload: bounds("shared-browser-reload"),
+      transportPersonal: bounds("browser-transport-personal"),
+      transportShared: bounds("browser-transport-shared"),
+    };
+  });
+
+  expect(geometry.documentWidth).toBeLessThanOrEqual(360);
+  expect(geometry.chromeFits).toBe(true);
+  expect(geometry.address?.width ?? 0).toBeGreaterThanOrEqual(96);
+  for (const target of [
+    geometry.action,
+    geometry.browserTab,
+    geometry.reload,
+    geometry.transportPersonal,
+    geometry.transportShared,
+  ]) {
+    expect(target).not.toBeNull();
+    expect(target!.height).toBeGreaterThanOrEqual(40);
+    expect(target!.left).toBeGreaterThanOrEqual(0);
+    expect(target!.right).toBeLessThanOrEqual(360);
+  }
+
+  await page.evaluate(() => {
+    const setAgentControls = (
+      window as Window & { __setAgentControls?: (active: boolean) => void }
+    ).__setAgentControls;
+    if (!setAgentControls) {
+      throw new Error("Compact browser fixture was not ready");
+    }
+    setAgentControls(true);
+  });
+  await expect(controlState).toContainText("Octo with a very long agent name controls");
+  await expect(controlState).toHaveAttribute(
+    "title",
+    "Octo with a very long agent name controls",
+  );
+  await expect(action).toHaveCount(0);
+  await expect(context).toBeVisible();
+  await expect(chrome).toBeVisible();
+
+  const screenshotPath = testInfo.outputPath("shared-browser-chrome-360x800.png");
+  await page.screenshot({ animations: "disabled", path: screenshotPath });
+  await testInfo.attach("Shared Browser compact chrome at 360×800", {
+    contentType: "image/png",
+    path: screenshotPath,
+  });
+});
+
+test("uses one real Chromium action per mobile keyboard control key", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mountCompactBrowserChrome(page);
+
+  const keyboard = page.getByTestId("shared-browser-mobile-keyboard");
+  await keyboard.evaluate((element) => {
+    element.style.setProperty("display", "flex", "important");
+  });
+  await page.getByTestId("shared-browser-mobile-keyboard-open").click();
+  const input = page.getByTestId("shared-browser-mobile-keyboard-input");
+  await expect(input).toBeFocused();
+  await expect(input).toHaveAttribute("autocapitalize", "none");
+  await expect(input).toHaveAttribute("autocorrect", "off");
+  await expect(input).toHaveAttribute("spellcheck", "false");
+
+  await input.press("Backspace");
+  await input.press("Enter");
+  await input.pressSequentially("a");
+
+  const messages = await page.evaluate(
+    () =>
+      (window as Window & { __remoteKeyboardMessages?: Record<string, unknown>[] })
+        .__remoteKeyboardMessages ?? [],
+  );
+  expect(messages.filter((message) => message.type === "key")).toEqual([
+    expect.objectContaining({ kind: "rawKeyDown", key: "Backspace" }),
+    expect.objectContaining({ kind: "keyUp", key: "Backspace" }),
+    expect.objectContaining({ kind: "rawKeyDown", key: "Enter" }),
+    expect.objectContaining({ kind: "keyUp", key: "Enter" }),
+  ]);
+  expect(messages.filter((message) => message.type === "text")).toEqual([
+    { type: "text", text: "a" },
+  ]);
+});

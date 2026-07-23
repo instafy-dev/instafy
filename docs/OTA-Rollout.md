@@ -1,0 +1,297 @@
+# OTA Rollout
+
+This document describes the recommended over-the-air update path for Instafy across iOS, Android, and desktop.
+
+The recommendation is intentionally biased toward long-term ownership of release metadata, telemetry, and rollout controls while still reusing the existing GitHub Actions build pipeline.
+
+Implementation details live in [OTA control plane](./OTA-Control-Plane.md).
+
+## Decision
+
+Use the Capawesome Live Update plugin in a self-hosted-bundle setup, but make Instafy the source of truth for:
+
+- bundle metadata
+- channel assignments
+- rollout percentages
+- update telemetry
+- rollback state
+- operational visibility
+
+This combines the earlier "stage 1" and "stage 2" into the initial implementation:
+
+- Stage 1: self-host update bundles and wire OTA into the app
+- Stage 2: own release metadata and telemetry in Instafy from day one
+
+We are explicitly not choosing Appflow because it is being sunset, and we do not want to build a new delivery path on top of a platform that is shutting down.
+
+## Why This Shape
+
+Instafy already has:
+
+- GitHub Actions for native builds and release automation
+- portable bundle-building and signing helpers
+- a product direction that requires custom telemetry and distribution logic
+
+Because of that, the main value we need from the OTA layer is the client-side update primitive, not a hosted control plane.
+
+We want to own:
+
+- which bundle is live for each channel
+- which devices see which update
+- how rollout and rollback decisions are made
+- how update adoption is measured
+- how OTA events tie into Instafy orgs, users, spaces, runtimes, and sessions
+
+## Constraints
+
+### iOS
+
+OTA updates must stay within Apple's review constraints. Treat OTA as web-layer/app-shell updates, not a way to bypass App Review for major native or product-scope changes.
+
+### Android
+
+Use OTA for web-layer changes. Keep native binary updates on the Play Store path.
+
+### Desktop
+
+Desktop binaries should continue to use the Electron updater / installer flow. The OTA bundle path described here is primarily for the Capacitor app shell.
+
+See [Desktop updater](./Desktop-Updater.md) for the separate desktop release track.
+
+## What We Are Building
+
+### 1. Client updater
+
+Use the Capawesome Live Update plugin in the Capacitor app.
+
+Responsibilities:
+
+- check for updates
+- download bundle ZIPs
+- verify signatures
+- install and apply updates
+- report lifecycle events back to Instafy
+
+### 2. Bundle hosting
+
+Host OTA bundles on immutable HTTPS object storage, optionally behind a CDN or custom domain.
+
+Each published bundle should be immutable and addressable by a stable release identifier.
+
+Example:
+
+```text
+https://artifacts.example.com/mobile/ios/stable/2026-03-18T120000Z-<git_sha>.zip
+https://artifacts.example.com/mobile/android/stable/2026-03-18T120000Z-<git_sha>.zip
+```
+
+### 3. Instafy OTA control plane
+
+Instafy backend should own release metadata instead of delegating that to a vendor dashboard.
+
+Responsibilities:
+
+- register a release
+- attach bundle URL, checksum, signature, platform, and native compatibility
+- map channels to releases
+- define rollout percentage and targeting rules
+- expose "latest allowed release for this device" to the app
+- record update events
+- support rollback by flipping the channel pointer
+
+### 4. Telemetry
+
+Telemetry is part of the first version, not a later add-on.
+
+Track at minimum:
+
+- update check requested
+- update available
+- download started
+- download completed
+- install succeeded
+- install failed
+- app reloaded into new bundle
+- rollback triggered
+- current native version
+- current bundle version
+- active usage time
+- session start / session end
+
+All OTA events should be attributable to:
+
+- platform
+- app version
+- bundle version
+- channel
+- git SHA
+- org / user / space when available
+
+## What We Are Not Building Yet
+
+- a full public-facing OTA admin product
+- experiment tooling
+- deep cohort analytics
+- desktop OTA through the same channel system
+- delta-update infrastructure beyond what the plugin already supports
+
+Those can come later once the basic release and telemetry loop is proven.
+
+## Release Data Model
+
+Instafy should define its own canonical OTA release model from day one.
+
+Suggested fields:
+
+```text
+release_id
+platform                # ios | android
+channel                 # internal | beta | stable
+native_version
+min_supported_native_version
+bundle_version
+git_sha
+artifact_url
+artifact_sha256
+signature
+rollout_percentage
+status                  # draft | live | paused | rolled_back | archived
+published_at
+published_by
+notes
+```
+
+Suggested device state fields:
+
+```text
+device_id
+platform
+native_version
+current_bundle_version
+current_git_sha
+channel
+last_seen_at
+last_update_status
+last_update_error
+```
+
+## GitHub Actions Flow
+
+We should continue to use GitHub Actions as the build and publish engine.
+
+Initial release flow:
+
+1. Build the web bundle from `packages/frontend`
+2. Create an OTA artifact ZIP
+3. Sign the artifact with `OTA_SIGNING_PRIVATE_KEY`
+4. Upload the artifact to Instafy-hosted storage
+5. Register the release in the Instafy OTA metadata store
+6. Move the desired channel pointer or rollout percentage
+
+This keeps CI stable and makes the OTA system replaceable without changing how builds are produced.
+
+Use `pnpm ota:signing:keygen` to generate the RSA keypair. Keep the private key only in the
+deployment's CI secret store and embed the corresponding public key in native builds.
+
+## Initial Channel Model
+
+Keep the first version simple:
+
+- `internal`
+- `beta`
+- `stable`
+
+Rules:
+
+- `internal` is for dev/test devices only
+- `beta` is for pre-release rollout
+- `stable` is public production
+
+Rollout can start as one simple percentage gate per channel.
+
+## Rollback Model
+
+Rollback should be metadata-only whenever possible.
+
+Preferred rollback action:
+
+- mark current release unhealthy
+- repoint the affected channel to the previous good release
+
+No artifact deletion should be required for rollback.
+
+## Operational visibility
+
+The control-plane API should make it possible to answer:
+
+- which release is live on each channel
+- how many devices are on each bundle
+- adoption curve over time
+- failure rate by release
+- rollback count by release
+- average active usage time by bundle version
+
+The presentation layer is deployment-specific and does not belong in the customer-facing Studio
+application.
+
+## Recommended Implementation Order
+
+### Step 1
+
+Add the Capawesome Live Update plugin to the Capacitor app and define the bundle format.
+
+### Step 2
+
+Create the Instafy OTA metadata schema and a small protected API for:
+
+- list releases
+- create release
+- set channel release
+- resolve latest release for a device
+- ingest update events
+
+### Step 3
+
+Wire GitHub Actions to:
+
+- build
+- sign
+- upload
+- register
+
+### Step 4
+
+Add lean client telemetry and minimal operational visibility.
+
+Keep the first telemetry slice operational only:
+
+- session started / ended
+- update check requested
+- update available / not available
+- download or install lifecycle events once the updater primitive is fully wired
+
+Do not start with high-volume usage analytics or heartbeat streams. Keep the first store small enough to fit comfortably in Postgres.
+
+### Step 5
+
+Validate release selection, signature enforcement, and rollback with disposable test devices.
+Live channel-promotion policy is deployment-specific.
+
+## Open Questions
+
+- Whether OTA artifacts should share a general artifact host or use a dedicated mobile-update host
+- Whether rollout logic should be per-app, per-org, or per-user/device cohort from the first version
+- Whether Electron should later reuse parts of the same Instafy release metadata model even if binary delivery stays separate
+
+## Summary
+
+The recommended path is:
+
+- Capawesome plugin for the client updater
+- GitHub Actions for builds
+- provider-neutral immutable hosting for bundle artifacts
+- Instafy backend as the OTA control plane
+- Instafy telemetry as the source of truth for adoption and usage
+
+That keeps artifact storage replaceable, fits the current repository shape, and preserves ownership
+of release metadata and telemetry.

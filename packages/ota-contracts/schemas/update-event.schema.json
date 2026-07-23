@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://instafy.dev/schemas/ota/update-event.schema.json",
+  "title": "Instafy OTA Update Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "event_type",
+    "occurred_at",
+    "device_id",
+    "platform",
+    "channel",
+    "native_version"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "event_type": {
+      "type": "string",
+      "enum": [
+        "update_check_requested",
+        "update_available",
+        "update_not_available",
+        "download_started",
+        "download_completed",
+        "download_failed",
+        "install_started",
+        "install_completed",
+        "install_failed",
+        "app_reloaded",
+        "rollback_triggered",
+        "session_started",
+        "session_ended",
+        "usage_heartbeat"
+      ]
+    },
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "device_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "platform": {
+      "type": "string",
+      "enum": ["ios", "android"]
+    },
+    "channel": {
+      "type": "string",
+      "minLength": 1
+    },
+    "native_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "bundle_version": {
+      "type": ["string", "null"]
+    },
+    "git_sha": {
+      "type": ["string", "null"]
+    },
+    "space_id": {
+      "type": ["string", "null"]
+    },
+    "user_id": {
+      "type": ["string", "null"]
+    },
+    "session_id": {
+      "type": ["string", "null"]
+    },
+    "country_code": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Z]{2}$"
+    },
+    "properties": {
+      "type": "object"
+    }
+  }
+}

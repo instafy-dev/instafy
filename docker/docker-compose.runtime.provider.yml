@@ -1,0 +1,139 @@
+services:
+  proxy:
+    image: "${RUNTIME_PROXY_IMAGE:?Set RUNTIME_PROXY_IMAGE to an immutable OCI digest}"
+    env_file:
+      - ${PROXY_CREDENTIAL_LEASE_ENV_FILE:-/opt/instafy/runtime/proxy-credential-lease.env}
+    environment:
+      CODEX_PROXY_ADDR: ${CODEX_PROXY_ADDR:-0.0.0.0:8789}
+      CODEX_HOME: /root/.codex
+      CODEX_AUTH_PATH: /root/.codex/auth.json
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      PROXY_CONTROLLER_BASE_URL: ${PROXY_CONTROLLER_BASE_URL:-http://host.docker.internal:80}
+      CONTROLLER_INTERNAL_TOKEN: ${CONTROLLER_INTERNAL_TOKEN:-}
+      PROXY_SIGNING_SECRET: ${PROXY_SIGNING_SECRET:-}
+      PROXY_CREDIT_BURN_AMOUNT: ${PROXY_CREDIT_BURN_AMOUNT:-}
+    volumes:
+      - ${PROXY_CODEX_VOLUME:-/opt/instafy/proxy-codex}:/root/.codex:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8789/readyz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 2s
+
+  runtime:
+    # Hosted/provider launches must select a reviewed OCI manifest by digest.
+    # Local development builds docker/runtime/Dockerfile via docker-compose.runtime.yml.
+    image: "${RUNTIME_AGENT_IMAGE:?Set RUNTIME_AGENT_IMAGE to an immutable ghcr.io/instafy-dev/instafy-runtime-agent@sha256 digest}"
+    cpus: ${RUNTIME_CPU_LIMIT:-2}
+    mem_limit: ${RUNTIME_MEMORY_LIMIT:-4g}
+    cap_drop:
+      - SYS_PTRACE
+    environment:
+      RUNTIME_TYPE: ${RUNTIME_TYPE:-codex-embedded}
+      RUNTIME_ID: ${RUNTIME_ID:-}
+      RUNTIME_LEASE_ID: ${RUNTIME_LEASE_ID:-}
+      RUNTIME_LEASE_SECONDS: ${RUNTIME_LEASE_SECONDS:-300}
+      RUNTIME_HEARTBEAT_SECONDS: ${RUNTIME_HEARTBEAT_SECONDS:-120}
+      WORKSPACE_DIR: /workspace
+      CODEX_HOME: /workspace/.codex
+      # Point toolchain/package managers into the persisted cache mount so a
+      # cargo/npm/pip project survives idle stop without re-downloading its
+      # world (see the /workspace/.cache volume below).
+      CARGO_HOME: /workspace/.cache/cargo
+      RUSTUP_HOME: /workspace/.cache/rustup
+      GOPATH: /workspace/.cache/go
+      PIP_CACHE_DIR: /workspace/.cache/pip
+      UV_CACHE_DIR: /workspace/.cache/uv
+      npm_config_cache: /workspace/.cache/npm
+      INSTAFY_ENABLE_BROWSER_SESSION: ${INSTAFY_ENABLE_BROWSER_SESSION:-0}
+      INSTAFY_BROWSER_EGRESS_ISOLATION: ${INSTAFY_BROWSER_EGRESS_ISOLATION:-1}
+      INSTAFY_BROWSER_EGRESS_ALLOW_UNSAFE_DEV: ${INSTAFY_BROWSER_EGRESS_ALLOW_UNSAFE_DEV:-0}
+      INSTAFY_BROWSER_EGRESS_PROXY_BIND: ${INSTAFY_BROWSER_EGRESS_PROXY_BIND:-127.0.0.1:9226}
+      INSTAFY_BROWSER_EGRESS_ALLOWED_PORTS: ${INSTAFY_BROWSER_EGRESS_ALLOWED_PORTS:-80,443}
+      INSTAFY_BROWSER_EGRESS_MAX_CONNECTIONS: ${INSTAFY_BROWSER_EGRESS_MAX_CONNECTIONS:-128}
+      INSTAFY_BROWSER_VIEWPORT_ONLY: ${INSTAFY_BROWSER_VIEWPORT_ONLY:-0}
+      INSTAFY_BROWSER_PROFILE_PERSIST: ${INSTAFY_BROWSER_PROFILE_PERSIST:-0}
+      INSTAFY_BROWSER_PROFILE_SNAPSHOT_SECS: ${INSTAFY_BROWSER_PROFILE_SNAPSHOT_SECS:-30}
+      INSTAFY_BROWSER_RENDER_SCALE: ${INSTAFY_BROWSER_RENDER_SCALE:-1}
+      INSTAFY_BROWSER_MAX_FRAMEBUFFER_PIXELS: ${INSTAFY_BROWSER_MAX_FRAMEBUFFER_PIXELS:-8294400}
+      INSTAFY_BROWSER_CDP_SCREENCAST: ${INSTAFY_BROWSER_CDP_SCREENCAST:-0}
+      INSTAFY_BROWSER_WEBRTC_ENABLED: ${INSTAFY_BROWSER_WEBRTC_ENABLED:-0}
+      INSTAFY_BROWSER_PREFERRED_VIEWER: ${INSTAFY_BROWSER_PREFERRED_VIEWER:-}
+      INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON: ${INSTAFY_BROWSER_WEBRTC_ICE_SERVERS_JSON:-}
+      INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN: ${INSTAFY_BROWSER_WEBRTC_REQUIRE_TURN:-0}
+      INSTAFY_BROWSER_WEBRTC_FPS: ${INSTAFY_BROWSER_WEBRTC_FPS:-30}
+      INSTAFY_BROWSER_WEBRTC_BITRATE_KBPS: ${INSTAFY_BROWSER_WEBRTC_BITRATE_KBPS:-3500}
+      INSTAFY_BROWSER_DISPLAY: ${INSTAFY_BROWSER_DISPLAY:-}
+      INSTAFY_VNC_HOST: ${INSTAFY_VNC_HOST:-}
+      INSTAFY_VNC_PORT: ${INSTAFY_VNC_PORT:-}
+      INSTAFY_VNC_GEOMETRY: ${INSTAFY_VNC_GEOMETRY:-}
+      INSTAFY_VNC_DEPTH: ${INSTAFY_VNC_DEPTH:-}
+      INSTAFY_PLAYWRIGHT_MCP_MODE: ${INSTAFY_PLAYWRIGHT_MCP_MODE:-}
+      INSTAFY_PLAYWRIGHT_MCP_PORT: ${INSTAFY_PLAYWRIGHT_MCP_PORT:-}
+      INSTAFY_PLAYWRIGHT_MCP_PROFILE_DIR: ${INSTAFY_PLAYWRIGHT_MCP_PROFILE_DIR:-}
+      INSTAFY_PLAYWRIGHT_MCP_ALLOW_ISOLATED: ${INSTAFY_PLAYWRIGHT_MCP_ALLOW_ISOLATED:-}
+      CONTROLLER_BASE_URL: ${CONTROLLER_BASE_URL:-http://host.docker.internal:80}
+      SPACE_ID: ${SPACE_ID:-00000000-0000-0000-0000-000000000000}
+      PROJECT_ID: ${SPACE_ID:-00000000-0000-0000-0000-000000000000}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-http://proxy:8789/v1}
+      CODEX_PROXY_CHATGPT_ENDPOINT: ${CODEX_PROXY_CHATGPT_ENDPOINT:-http://proxy:8789/backend-api/codex/responses}
+      RUNTIME_VERSION: ${RUNTIME_VERSION:-runtime-agent}
+      RUNTIME_CAPABILITIES: ${RUNTIME_CAPABILITIES:-}
+      RUNTIME_METADATA: ${RUNTIME_METADATA:-}
+      PROXY_BASE_URL: ${PROXY_BASE_URL:-http://proxy:8789}
+      CODEX_CHATGPT_ENDPOINT: ${CODEX_CHATGPT_ENDPOINT:-http://proxy:8789/backend-api/codex/responses}
+      PROXY_TOKEN_TTL_SECONDS: ${PROXY_TOKEN_TTL_SECONDS:-1800}
+      CODEX_API_ENDPOINT: ${CODEX_API_ENDPOINT:-http://proxy:8789/api}
+      CODEX_API_KEY: ${CODEX_API_KEY:-proxy-dev-key}
+      CODEX_MODEL: ${CODEX_MODEL:-}
+      CODEX_MODEL_PROVIDER: ${CODEX_MODEL_PROVIDER:-}
+      CODEX_PROFILE: ${CODEX_PROFILE:-}
+      CODEX_SANDBOX_MODE: ${CODEX_SANDBOX_MODE:-danger-full-access}
+      CODEX_BASE_INSTRUCTIONS: ${CODEX_BASE_INSTRUCTIONS:-}
+      CODEX_INCLUDE_PLAN_TOOL: ${CODEX_INCLUDE_PLAN_TOOL:-true}
+      CODEX_INCLUDE_APPLY_PATCH_TOOL: ${CODEX_INCLUDE_APPLY_PATCH_TOOL:-true}
+      CODEX_INCLUDE_VIEW_IMAGE_TOOL: ${CODEX_INCLUDE_VIEW_IMAGE_TOOL:-true}
+      CODEX_SHOW_RAW_AGENT_REASONING: ${CODEX_SHOW_RAW_AGENT_REASONING:-}
+      CODEX_ENABLE_WEB_SEARCH: ${CODEX_ENABLE_WEB_SEARCH:-}
+      CODEX_DISABLED: ${CODEX_DISABLED:-0}
+      CODEX_AUTH_PATH: ${CODEX_AUTH_PATH:-/workspace/.codex/auth.json}
+      USE_PROXY_FOR_LLM: ${USE_PROXY_FOR_LLM:-1}
+      RUNTIME_STRICT_MODE: ${RUNTIME_STRICT_MODE:-0}
+      RUNTIME_DEV_ISOLATION: ${RUNTIME_DEV_ISOLATION:-0}
+      RUNTIME_ACCESS_TOKEN: ${RUNTIME_ACCESS_TOKEN:-}
+      # Never copy the proxy-only lease bearer into an agent container.
+      PROXY_CREDENTIAL_LEASE_TOKEN: ""
+      ORIGIN_ID: ${ORIGIN_ID:-}
+      ORIGIN_BIND_HOST: ${ORIGIN_BIND_HOST:-0.0.0.0}
+      ORIGIN_BIND_PORT: ${ORIGIN_BIND_PORT:-54332}
+      ORIGIN_ENDPOINT: ${ORIGIN_ENDPOINT:-http://host.docker.internal:54332}
+      ORIGIN_SKIP_AUTH: ${ORIGIN_SKIP_AUTH:-0}
+      ORIGIN_ENABLE_PRESENCE_HEARTBEAT: ${ORIGIN_ENABLE_PRESENCE_HEARTBEAT:-1}
+      ORIGIN_INTERNAL_TOKEN: ${ORIGIN_INTERNAL_TOKEN:-dev-internal-token}
+      ORIGIN_PROTOCOLS: ${ORIGIN_PROTOCOLS:-http}
+      ORIGIN_MODE: ${ORIGIN_MODE:-hosted}
+      ORIGIN_DEVICE_ID: ${ORIGIN_DEVICE_ID:-runtime-hosted}
+      ORIGIN_LEASE_ID: ${ORIGIN_LEASE_ID:-}
+      ORIGIN_METADATA: ${ORIGIN_METADATA:-}
+    volumes:
+      - ${RUNTIME_REPO_HOST:-/opt/instafy/workspaces}:/workspace/${SPACE_ID:-00000000-0000-0000-0000-000000000000}
+      - ${RUNTIME_CODEX_VOLUME:-/opt/instafy/codex}:/workspace/.codex
+      # Persistent per-project toolchain/package caches: survive idle stop and
+      # re-provision so cargo/npm/pip/toolchains don't re-download every wake.
+      - ${RUNTIME_CACHE_HOST:-/opt/instafy/workspace-caches/default}:/workspace/.cache
+    depends_on:
+      proxy:
+        condition: service_healthy
+    working_dir: /workspace
+    # Give the agent time to push its final workspace checkpoint (WIP flush in
+    # the origin server's shutdown path) before SIGKILL.
+    stop_grace_period: 45s
+    tty: true
+    stdin_open: true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${ORIGIN_HOST_PORT:-54332}:54332"

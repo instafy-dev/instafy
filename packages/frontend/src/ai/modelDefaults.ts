@@ -1,0 +1,6 @@
+export const DEFAULT_PROJECT_AI_MODEL = "gpt-5.5";
+export const DEFAULT_MANAGED_AI_MODEL_LABEL = "GPT-5.5";
+export const DEFAULT_OPENAI_MODEL_OPTION = {
+  id: DEFAULT_PROJECT_AI_MODEL,
+  label: DEFAULT_PROJECT_AI_MODEL,
+} as const;

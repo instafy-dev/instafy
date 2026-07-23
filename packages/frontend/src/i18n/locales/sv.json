@@ -1,0 +1,34 @@
+{
+  "i18n": {
+    "language": "Språk"
+  },
+  "marketing": {
+    "menu": {
+      "open": "Öppna meny",
+      "ariaLabel": "Meny"
+    },
+    "nav": {
+      "home": "Hem",
+      "install": "Installera",
+      "news": "Nyheter",
+      "openStudio": "Öppna Studio",
+      "getStarted": "Kom igång",
+      "subscribeUpdates": "Prenumerera på uppdateringar",
+      "signIn": "Logga in"
+    },
+    "footer": {
+      "terms": "Användarvillkor",
+      "privacy": "Integritetspolicy",
+      "crafted": "Skapad med omsorg."
+    }
+  },
+  "legal": {
+    "back": "Tillbaka",
+    "disclaimerEnglishControls": "Översättning för bekvämlighet. Vid konflikt gäller den engelska versionen.",
+    "lastUpdated": "Senast uppdaterad: {{date}}"
+  },
+  "status": {
+    "dismiss": "Stäng notis"
+  }
+}
+

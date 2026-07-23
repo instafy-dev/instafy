@@ -1,0 +1,24 @@
+{
+  "name": "@instafy/provider-client",
+  "private": true,
+  "version": "0.0.0",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "description": "Generic provider-host client helpers shared by Instafy surfaces such as frontend diagnostics and future CLI tooling.",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ],
+  "dependencies": {
+    "@instafy/provider-contract": "workspace:*"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "cacheRevision": 3,
+  "distributionScale": 0.85,
+  "colors": {
+    "ink": "#0f172a",
+    "paper": "#ffffff",
+    "interaction": "#007acc",
+    "interactionDark": "#3794ff",
+    "sand": "#d7b686",
+    "sandDark": "#e0c49a"
+  }
+}

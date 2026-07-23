@@ -1,0 +1,25 @@
+{
+  "name": "@instafy/sdk",
+  "private": true,
+  "version": "0.0.0",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "description": "Shared Instafy SDK helpers for built-in agents, capabilities, and controller-client composition.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./agents": "./src/agents.ts",
+    "./capabilities": "./src/capabilities.ts",
+    "./controller-client": "./src/controllerClient.ts",
+    "./feature-modules": {
+      "types": "./src/featureModules.d.ts",
+      "default": "./src/featureModules.js"
+    },
+    "./hardware-node": "./src/hardwareNode.ts",
+    "./hardware-provider": "./src/hardwareProvider.ts",
+    "./provider-project-binding": "./src/providerProjectBinding.ts"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ]
+}

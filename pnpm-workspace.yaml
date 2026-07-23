@@ -1,0 +1,15 @@
+packages:
+  - packages/*
+
+allowBuilds:
+  '@tailwindcss/oxide': true
+  electron: true
+  esbuild: true
+  protobufjs: true
+  supabase: true
+
+onlyBuiltDependencies:
+  - '@tailwindcss/oxide'
+  - electron
+  - esbuild
+  - supabase

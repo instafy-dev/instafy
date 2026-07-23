@@ -1,0 +1,34 @@
+{
+  "i18n": {
+    "language": "Langue"
+  },
+  "marketing": {
+    "menu": {
+      "open": "Ouvrir le menu",
+      "ariaLabel": "Menu"
+    },
+    "nav": {
+      "home": "Accueil",
+      "install": "Installer",
+      "news": "Actualités",
+      "openStudio": "Ouvrir Studio",
+      "getStarted": "Commencer",
+      "subscribeUpdates": "S’abonner aux mises à jour",
+      "signIn": "Se connecter"
+    },
+    "footer": {
+      "terms": "Conditions d’utilisation",
+      "privacy": "Politique de confidentialité",
+      "crafted": "Conçu avec soin."
+    }
+  },
+  "legal": {
+    "back": "Retour",
+    "disclaimerEnglishControls": "Traduction fournie pour votre confort. En cas de conflit, la version anglaise prévaut.",
+    "lastUpdated": "Dernière mise à jour : {{date}}"
+  },
+  "status": {
+    "dismiss": "Fermer la notification"
+  }
+}
+

@@ -1,0 +1,44 @@
+{
+  "name": "@instafy/cli",
+  "version": "0.1.12",
+  "license": "AGPL-3.0-only",
+  "description": "Run Instafy spaces locally, link folders to Studio, and share previews/webhooks via tunnels.",
+  "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "bin",
+    "dist/cli.js",
+    "LICENSE",
+    "README.md"
+  ],
+  "bin": {
+    "instafy": "bin/instafy.js"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsup --config tsup.config.ts",
+    "prepack": "npm run build",
+    "dev": "ts-node src/index.ts",
+    "test": "pnpm test:unit",
+    "test:unit": "pnpm build && vitest run",
+    "test:package": "pnpm build && node --test test/package-artifact.test.mjs",
+    "test:live": "pnpm build && TUNNEL_E2E_LIVE=1 vitest run test/tunnel-live.e2e.spec.ts"
+  },
+  "dependencies": {
+    "@clack/prompts": "^0.11.0",
+    "commander": "^12.1.0",
+    "kleur": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.8.1",
+    "ts-node": "^10.9.2",
+    "tsup": "^7.3.0",
+    "typescript": "^5.4.5",
+    "vitest": "^1.6.0"
+  }
+}

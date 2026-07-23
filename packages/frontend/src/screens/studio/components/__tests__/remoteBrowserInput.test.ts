@@ -1,0 +1,516 @@
+// @vitest-environment jsdom
+
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  attachRemoteBrowserInput,
+  dispatchRemoteBrowserVirtualInput,
+} from "../remoteBrowserInput";
+import { setRemoteBrowserSurfaceContentSize } from "../remoteBrowserSurfaceGeometry";
+
+function touchPointerEvent(
+  type: string,
+  options: MouseEventInit & { pointerId: number },
+): PointerEvent {
+  const event = new MouseEvent(type, options);
+  Object.defineProperties(event, {
+    pointerId: { configurable: true, value: options.pointerId },
+    pointerType: { configurable: true, value: "touch" },
+  });
+  return event as unknown as PointerEvent;
+}
+
+afterEach(() => {
+  document.body.innerHTML = "";
+});
+
+describe("attachRemoteBrowserInput", () => {
+  it("maps pointer and keyboard events into the bounded shared input API", () => {
+    const element = document.createElement("canvas");
+    element.tabIndex = 0;
+    element.getBoundingClientRect = () =>
+      ({ left: 10, top: 20, width: 400, height: 200 }) as DOMRect;
+    document.body.append(element);
+    const send = vi.fn();
+    const binding = attachRemoteBrowserInput(element, {
+      getViewport: () => ({
+        width: 1280,
+        height: 720,
+        dpr: 2,
+        deviceWidth: 2560,
+        deviceHeight: 1440,
+      }),
+      send,
+    });
+
+    element.dispatchEvent(
+      new MouseEvent("pointerdown", {
+        bubbles: true,
+        button: 0,
+        buttons: 1,
+        clientX: 210,
+        clientY: 120,
+        ctrlKey: true,
+        detail: 1,
+      }),
+    );
+    expect(send).toHaveBeenCalledWith({
+      type: "mouse",
+      kind: "mousePressed",
+      x: 640,
+      y: 360,
+      button: "left",
+      buttons: 1,
+      modifiers: 2,
+      clickCount: 1,
+    });
+
+    element.dispatchEvent(
+      new MouseEvent("pointercancel", {
+        bubbles: true,
+        button: 0,
+        buttons: 0,
+        clientX: 210,
+        clientY: 120,
+      }),
+    );
+    expect(send).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        type: "mouse",
+        kind: "mouseReleased",
+        button: "left",
+        buttons: 0,
+      }),
+    );
+
+    element.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        bubbles: true,
+        key: "a",
+        code: "KeyA",
+        shiftKey: true,
+      }),
+    );
+    expect(send).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        type: "key",
+        kind: "keyDown",
+        key: "a",
+        code: "KeyA",
+        text: "a",
+        modifiers: 8,
+      }),
+    );
+
+    binding.dispose();
+    const callCount = send.mock.calls.length;
+    element.dispatchEvent(new KeyboardEvent("keydown", { key: "b", code: "KeyB" }));
+    expect(send).toHaveBeenCalledTimes(callCount);
+  });
+
+  it("sends AltGr characters as printable text on international layouts", () => {
+    const element = document.createElement("canvas");
+    element.tabIndex = 0;
+    document.body.append(element);
+    const send = vi.fn();
+    const binding = attachRemoteBrowserInput(element, {
+      getViewport: () => ({
+        width: 1280,
+        height: 720,
+        dpr: 1,
+        deviceWidth: 1280,
+        deviceHeight: 720,
+      }),
+      send,
+    });
+    const event = new KeyboardEvent("keydown", {
+      bubbles: true,
+      key: "@",
+      code: "Digit2",
+      ctrlKey: true,
+      altKey: true,
+    });
+    Object.defineProperty(event, "getModifierState", {
+      value: (modifier: string) => modifier === "AltGraph",
+    });
+
+    element.dispatchEvent(event);
+
+    expect(send).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        type: "key",
+        kind: "keyDown",
+        key: "@",
+        code: "Digit2",
+        text: "@",
+      }),
+    );
+    binding.dispose();
+  });
+
+  it("keeps a mounted but inactive Shared surface from receiving input", () => {
+    const element = document.createElement("canvas");
+    element.tabIndex = 0;
+    document.body.append(element);
+    const send = vi.fn();
+    let active = false;
+    const binding = attachRemoteBrowserInput(element, {
+      enabled: () => active,
+      getViewport: () => ({
+        width: 640,
+        height: 360,
+        dpr: 1,
+        deviceWidth: 640,
+        deviceHeight: 360,
+      }),
+      send,
+    });
+
+    element.dispatchEvent(
+      new KeyboardEvent("keydown", { bubbles: true, key: "x", code: "KeyX" }),
+    );
+    element.dispatchEvent(
+      new MouseEvent("pointerdown", {
+        bubbles: true,
+        button: 0,
+        buttons: 1,
+        clientX: 10,
+        clientY: 10,
+      }),
+    );
+    expect(send).not.toHaveBeenCalled();
+
+    active = true;
+    element.dispatchEvent(
+      new KeyboardEvent("keydown", { bubbles: true, key: "x", code: "KeyX" }),
+    );
+    expect(send).toHaveBeenCalledOnce();
+    binding.dispose();
+  });
+
+  it("turns a touch tap into one remote click without pressing during gesture detection", () => {
+    const element = document.createElement("canvas");
+    element.tabIndex = 0;
+    element.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 400, height: 200 }) as DOMRect;
+    document.body.append(element);
+    const send = vi.fn();
+    const binding = attachRemoteBrowserInput(element, {
+      getViewport: () => ({
+        width: 800,
+        height: 400,
+        dpr: 1,
+        deviceWidth: 800,
+        deviceHeight: 400,
+      }),
+      send,
+    });
+
+    element.dispatchEvent(
+      touchPointerEvent("pointerdown", {
+        bubbles: true,
+        button: 0,
+        buttons: 1,
+        clientX: 100,
+        clientY: 50,
+        pointerId: 7,
+      }),
+    );
+    expect(send).not.toHaveBeenCalled();
+
+    element.dispatchEvent(
+      touchPointerEvent("pointerup", {
+        bubbles: true,
+        button: 0,
+        buttons: 0,
+        clientX: 100,
+        clientY: 50,
+        pointerId: 7,
+      }),
+    );
+
+    expect(send.mock.calls.map(([message]) => message)).toEqual([
+      expect.objectContaining({
+        type: "mouse",
+        kind: "mousePressed",
+        x: 200,
+        y: 100,
+        button: "left",
+        buttons: 1,
+      }),
+      expect.objectContaining({
+        type: "mouse",
+        kind: "mouseReleased",
+        x: 200,
+        y: 100,
+        button: "left",
+        buttons: 0,
+      }),
+    ]);
+    binding.dispose();
+  });
+
+  it("turns a touch drag into remote wheel scrolling without clicking", () => {
+    const element = document.createElement("canvas");
+    element.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 400, height: 200 }) as DOMRect;
+    document.body.append(element);
+    const send = vi.fn();
+    const binding = attachRemoteBrowserInput(element, {
+      getViewport: () => ({
+        width: 800,
+        height: 400,
+        dpr: 1,
+        deviceWidth: 800,
+        deviceHeight: 400,
+      }),
+      send,
+    });
+
+    element.dispatchEvent(
+      touchPointerEvent("pointerdown", {
+        bubbles: true,
+        button: 0,
+        buttons: 1,
+        clientX: 200,
+        clientY: 150,
+        pointerId: 9,
+      }),
+    );
+    element.dispatchEvent(
+      touchPointerEvent("pointermove", {
+        bubbles: true,
+        button: 0,
+        buttons: 1,
+        clientX: 200,
+        clientY: 100,
+        pointerId: 9,
+      }),
+    );
+    element.dispatchEvent(
+      touchPointerEvent("pointerup", {
+        bubbles: true,
+        button: 0,
+        buttons: 0,
+        clientX: 200,
+        clientY: 100,
+        pointerId: 9,
+      }),
+    );
+
+    expect(send).toHaveBeenCalledOnce();
+    expect(send).toHaveBeenCalledWith({
+      type: "wheel",
+      x: 400,
+      y: 200,
+      deltaX: 0,
+      deltaY: 50,
+      modifiers: 0,
+    });
+    expect(send).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "mouse" }),
+    );
+    binding.dispose();
+  });
+
+  it("does not turn a drag through an aspect-fit gutter back into a tap", () => {
+    const element = document.createElement("canvas");
+    element.getBoundingClientRect = () =>
+      ({ left: 0, top: 0, width: 400, height: 400 }) as DOMRect;
+    setRemoteBrowserSurfaceContentSize(element, 1280, 720);
+    document.body.append(element);
+    const send = vi.fn();
+    const binding = attachRemoteBrowserInput(element, {
+      getViewport: () => ({
+        width: 1280,
+        height: 720,
+        dpr: 1,
+        deviceWidth: 1280,
+        deviceHeight: 720,
+      }),
+      send,
+    });
+
+    element.dispatchEvent(
+      touchPointerEvent("pointerdown", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        buttons: 1,
+        clientX: 200,
+        clientY: 120,
+        pointerId: 12,
+      }),
+    );
+    const gutterMove = touchPointerEvent("pointermove", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      buttons: 1,
+      clientX: 200,
+      clientY: 40,
+      pointerId: 12,
+    });
+    element.dispatchEvent(gutterMove);
+    element.dispatchEvent(
+      touchPointerEvent("pointerup", {
+        bubbles: true,
+        cancelable: true,
+        button: 0,
+        buttons: 0,
+        clientX: 200,
+        clientY: 120,
+        pointerId: 12,
+      }),
+    );
+
+    expect(gutterMove.defaultPrevented).toBe(true);
+    expect(send).not.toHaveBeenCalled();
+    binding.dispose();
+  });
+
+  it("rejects mouse, wheel, and touch input in aspect-fit gutters", () => {
+    const element = document.createElement("canvas");
+    element.tabIndex = 0;
+    element.getBoundingClientRect = () =>
+      ({ left: 10, top: 20, width: 400, height: 400 }) as DOMRect;
+    setRemoteBrowserSurfaceContentSize(element, 1280, 720);
+    document.body.append(element);
+    const send = vi.fn();
+    const binding = attachRemoteBrowserInput(element, {
+      getViewport: () => ({
+        width: 1280,
+        height: 720,
+        dpr: 1,
+        deviceWidth: 1280,
+        deviceHeight: 720,
+      }),
+      send,
+    });
+
+    const gutterPointer = new MouseEvent("pointerdown", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      buttons: 1,
+      clientX: 210,
+      clientY: 60,
+    });
+    element.dispatchEvent(gutterPointer);
+    const gutterWheel = new WheelEvent("wheel", {
+      bubbles: true,
+      cancelable: true,
+      clientX: 210,
+      clientY: 60,
+      deltaY: 40,
+    });
+    element.dispatchEvent(gutterWheel);
+    const gutterTouch = touchPointerEvent("pointerdown", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      buttons: 1,
+      clientX: 210,
+      clientY: 60,
+      pointerId: 11,
+    });
+    element.dispatchEvent(gutterTouch);
+    const gutterTouchUp = touchPointerEvent("pointerup", {
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      buttons: 0,
+      clientX: 210,
+      clientY: 60,
+      pointerId: 11,
+    });
+    element.dispatchEvent(gutterTouchUp);
+
+    expect(send).not.toHaveBeenCalled();
+    expect(gutterPointer.defaultPrevented).toBe(false);
+    expect(gutterWheel.defaultPrevented).toBe(false);
+    expect(gutterTouch.defaultPrevented).toBe(false);
+    expect(gutterTouchUp.defaultPrevented).toBe(false);
+    expect(document.activeElement).not.toBe(element);
+
+    element.dispatchEvent(
+      new MouseEvent("pointerdown", {
+        bubbles: true,
+        button: 0,
+        buttons: 1,
+        clientX: 210,
+        clientY: 220,
+      }),
+    );
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "mouse",
+        kind: "mousePressed",
+        x: 640,
+        y: 360,
+      }),
+    );
+    binding.dispose();
+  });
+
+  it("routes software-keyboard text and control keys through the active input binding", () => {
+    const element = document.createElement("canvas");
+    document.body.append(element);
+    const send = vi.fn();
+    const binding = attachRemoteBrowserInput(element, {
+      getViewport: () => ({
+        width: 640,
+        height: 360,
+        dpr: 1,
+        deviceWidth: 640,
+        deviceHeight: 360,
+      }),
+      send,
+    });
+
+    dispatchRemoteBrowserVirtualInput(element, {
+      type: "text",
+      text: "Hej från mobilen",
+    });
+    dispatchRemoteBrowserVirtualInput(element, {
+      type: "key",
+      kind: "rawKeyDown",
+      key: "Backspace",
+      code: "Backspace",
+      text: "",
+      modifiers: 0,
+      autoRepeat: false,
+    });
+    dispatchRemoteBrowserVirtualInput(element, {
+      type: "key",
+      kind: "keyUp",
+      key: "Backspace",
+      code: "Backspace",
+      text: "",
+      modifiers: 0,
+      autoRepeat: false,
+    });
+    element.dispatchEvent(
+      new CustomEvent("instafy:remote-browser-virtual-input", {
+        detail: { type: "key", kind: "rawKeyDown" },
+      }),
+    );
+
+    expect(send.mock.calls.map(([message]) => message)).toEqual([
+      { type: "text", text: "Hej från mobilen" },
+      expect.objectContaining({
+        type: "key",
+        kind: "rawKeyDown",
+        key: "Backspace",
+      }),
+      expect.objectContaining({
+        type: "key",
+        kind: "keyUp",
+        key: "Backspace",
+      }),
+    ]);
+
+    binding.dispose();
+    dispatchRemoteBrowserVirtualInput(element, { type: "text", text: "ignored" });
+    expect(send).toHaveBeenCalledTimes(3);
+  });
+});

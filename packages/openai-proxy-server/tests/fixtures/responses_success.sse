@@ -1,0 +1,11 @@
+data: {"type":"response.created","response":{"id":"resp-proxy","status":"in_progress","model":"gpt-5.5"}}
+
+data: {"type":"response.output_item.added","item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":""}]}}
+
+data: {"type":"response.output_text.delta","delta":"{\"summary\":\"Created abc.md with the requested contents.\",\"files\":[{\"path\":\"abc.md\",\"workspacePath\":\"abc.md\",\"change\":{\"type\":\"created\"}}]}"}
+
+data: {"type":"response.output_item.done","item":{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"{\"summary\":\"Created abc.md with the requested contents.\",\"files\":[{\"path\":\"abc.md\",\"workspacePath\":\"abc.md\",\"change\":{\"type\":\"created\"}}]}"}]}}
+
+data: {"type":"response.completed","response":{"id":"resp-proxy","status":"completed","model":"gpt-5.5","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"{\"summary\":\"Created abc.md with the requested contents.\",\"files\":[{\"path\":\"abc.md\",\"workspacePath\":\"abc.md\",\"change\":{\"type\":\"created\"}}]}"}]}],"metadata":{"codex":{"final":{"summary":"Created abc.md with the requested contents.","files":[{"path":"abc.md","workspacePath":"abc.md","change":{"type":"created"}}]}}},"usage":{"input_tokens":42,"output_tokens":84,"total_tokens":126,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}}
+
+data: [DONE]

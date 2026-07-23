@@ -1,0 +1,50 @@
+{
+  "name": "@instafy/provider-contract",
+  "private": false,
+  "version": "0.1.2",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "description": "Neutral provider discovery and invocation contract shared between Instafy and external providers.",
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js"
+    },
+    "./provider-core": {
+      "types": "./provider-core.d.ts",
+      "import": "./provider-core.js"
+    },
+    "./provider-sandbox": {
+      "types": "./provider-sandbox.d.ts",
+      "import": "./provider-sandbox.js"
+    },
+    "./provider-ui-surface": {
+      "types": "./provider-ui-surface.d.ts",
+      "import": "./provider-ui-surface.js"
+    },
+    "./builtins": {
+      "types": "./builtins.d.ts",
+      "import": "./builtins.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "shared.js",
+    "provider-sandbox.js",
+    "provider-sandbox.d.ts",
+    "provider-ui-surface.js",
+    "provider-ui-surface.d.ts",
+    "provider-core.js",
+    "provider-core.d.ts",
+    "builtins.js",
+    "builtins.d.ts",
+    "LICENSE",
+    "README.md"
+  ]
+}

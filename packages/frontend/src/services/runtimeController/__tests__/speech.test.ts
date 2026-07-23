@@ -1,0 +1,82 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const resolveControllerAccessTokenMock = vi.hoisted(() => vi.fn());
+
+vi.mock("../core", () => ({
+  controllerBaseUrl: "http://controller.test",
+  normalizeUuidParam: (value: string | null | undefined) =>
+    typeof value === "string" && value.trim() ? value.trim() : null,
+  resolveControllerAccessToken: resolveControllerAccessTokenMock,
+  runtimeControllerEnabled: true,
+}));
+
+import {
+  buildControllerSpeechProxyBaseUrl,
+  CONTROLLER_SPEECH_PROXY_UPSTREAM_AUTH_HEADER,
+  resolveControllerSpeechProxyRequest,
+  shouldUseControllerSpeechProxy,
+} from "../speech";
+
+describe("controller speech proxy helpers", () => {
+  beforeEach(() => {
+    resolveControllerAccessTokenMock.mockReset();
+    resolveControllerAccessTokenMock.mockResolvedValue("controller-token");
+  });
+
+  it("only proxies local tunnel hostnames", () => {
+    expect(shouldUseControllerSpeechProxy("http://abc.rt.test:8443")).toBe(true);
+    expect(shouldUseControllerSpeechProxy("https://speech.example.com")).toBe(false);
+    expect(shouldUseControllerSpeechProxy("http://127.0.0.1:8796")).toBe(false);
+  });
+
+  it("builds a project-scoped controller speech proxy url", () => {
+    expect(
+      buildControllerSpeechProxyBaseUrl({
+        projectId: "project-123",
+        baseUrl: "http://abc.rt.test:8443/",
+      }),
+    ).toBe(
+      "http://controller.test/projects/project-123/speech/proxy/http%3A%2F%2Fabc.rt.test%3A8443",
+    );
+  });
+
+  it("preserves transcribe as a proxy path instead of encoding it into the base", () => {
+    expect(
+      buildControllerSpeechProxyBaseUrl({
+        projectId: "project-123",
+        baseUrl: "http://abc.rt.test:8443/transcribe",
+      }),
+    ).toBe(
+      "http://controller.test/projects/project-123/speech/proxy/http%3A%2F%2Fabc.rt.test%3A8443/transcribe",
+    );
+  });
+
+  it("preserves nested base paths before the proxied endpoint", () => {
+    expect(
+      buildControllerSpeechProxyBaseUrl({
+        projectId: "project-123",
+        baseUrl: "http://abc.rt.test:8443/provider/synthesize",
+      }),
+    ).toBe(
+      "http://controller.test/projects/project-123/speech/proxy/http%3A%2F%2Fabc.rt.test%3A8443%2Fprovider/synthesize",
+    );
+  });
+
+  it("includes controller auth and forwards upstream auth when present", async () => {
+    await expect(
+      resolveControllerSpeechProxyRequest({
+        projectId: "project-123",
+        baseUrl: "http://abc.rt.test:8443/transcribe",
+        upstreamAuthToken: "speech-token",
+      }),
+    ).resolves.toEqual({
+      baseUrl:
+        "http://controller.test/projects/project-123/speech/proxy/http%3A%2F%2Fabc.rt.test%3A8443/transcribe",
+      headers: {
+        authorization: "Bearer controller-token",
+        [CONTROLLER_SPEECH_PROXY_UPSTREAM_AUTH_HEADER]:
+          "Bearer speech-token",
+      },
+    });
+  });
+});

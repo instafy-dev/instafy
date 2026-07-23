@@ -1,0 +1,32 @@
+services:
+  # Override bind-mount configs with named volumes so running the stack doesn't dirty the repo.
+  rathole:
+    volumes:
+      - tunnel-broker-rathole-config:/etc/rathole
+      - ./config/rathole:/templates/rathole:ro
+    entrypoint: ["sh", "-lc"]
+    command:
+      - |
+        cp -n /templates/rathole/server.toml /etc/rathole/server.toml
+        exec rathole /etc/rathole/server.toml
+
+  rathole-sidecar:
+    volumes:
+      - tunnel-broker-rathole-config:/etc/rathole
+      - tunnel-broker-traefik-config:/etc/traefik
+
+  traefik:
+    volumes:
+      - tunnel-broker-traefik-config:/etc/traefik
+      - ./config/traefik/traefik.yml:/templates/traefik.yml:ro
+      - ./config/traefik/dynamic.yml:/templates/dynamic.yml:ro
+    entrypoint: ["sh", "-lc"]
+    command:
+      - |
+        cp -n /templates/traefik.yml /etc/traefik/traefik.yml
+        cp -n /templates/dynamic.yml /etc/traefik/dynamic.yml
+        exec traefik --configFile=/etc/traefik/traefik.yml
+
+volumes:
+  tunnel-broker-rathole-config: {}
+  tunnel-broker-traefik-config: {}

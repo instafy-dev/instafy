@@ -1,0 +1,16 @@
+{
+  "name": "@instafy/ota-contracts",
+  "private": true,
+  "version": "0.0.0",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "description": "Shared OTA schemas and contract documentation for Instafy control-plane releases, checks, and telemetry.",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "schemas",
+    "README.md"
+  ]
+}

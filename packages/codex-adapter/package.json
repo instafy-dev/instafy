@@ -1,0 +1,13 @@
+{
+  "name": "@instafy/codex-adapter",
+  "private": true,
+  "version": "0.1.0",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "description": "Instafy wrapper scripts for the upstream codex/ submodule.",
+  "scripts": {
+    "codex:status": "git -C ../.. submodule status codex && git -C ../../codex rev-parse HEAD",
+    "codex:update": "git -C ../.. submodule sync -- codex && git -C ../.. submodule update --init --recursive --remote codex",
+    "codex:verify:e2e": "pnpm -C ../frontend test:e2e"
+  }
+}

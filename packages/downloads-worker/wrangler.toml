@@ -1,0 +1,16 @@
+name = "instafy-downloads"
+main = "src/index.ts"
+compatibility_date = "2026-02-08"
+
+# Note: this worker is intended to be public and fronted by Cloudflare.
+# It serves release artifacts from R2 for both desktop installers and mobile OTA bundles.
+
+workers_dev = true
+
+routes = [
+  { pattern = "downloads.instafy.dev/*", zone_name = "instafy.dev" }
+]
+
+[[r2_buckets]]
+binding = "DOWNLOADS_BUCKET"
+bucket_name = "instafy-downloads"
