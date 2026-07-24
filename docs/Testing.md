@@ -28,9 +28,10 @@ Public Build keeps four stable job names:
 Pull requests are leak-gated by the separate
 `Public boundary (trusted base)` check. Its `pull_request_target` workflow owns
 the scanner, policy, and Gitleaks configuration from protected `main`, checks
-the GitHub-generated merge tree out separately as data, verifies its event
-commit and both parents, and never installs, imports, sources, caches, or
-executes candidate code. It has read-only repository permission and no
+the GitHub-generated merge tree out separately as data, verifies its observed
+OID and exact event base/head parents (plus the payload merge OID when GitHub
+supplies one), and never installs, imports, sources, caches, or executes
+candidate code. It has read-only repository permission and no
 repository or deployment secrets. Its candidate checkout is the one deliberate
 `allow-unsafe-pr-checkout` exception required by current `actions/checkout`;
 the trusted checkout does not opt out. Before public visibility, require this
