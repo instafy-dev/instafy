@@ -179,10 +179,7 @@ jobs:
           push_log="$RUNNER_TEMP/${IMAGE_KEY}-push.log"
           docker push "$RELEASE_TAG" | tee "$push_log"
           digest="$(
-            sed -nE \
-              's/^digest: (sha256:[0-9a-f]{64}) size: [0-9]+$/\1/p' \
-              "$push_log" |
-              tail -n 1
+            node scripts/lib/dockerPushDigest.mjs "$push_log"
           )"
           if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "::error::Docker push did not return a valid immutable digest."
