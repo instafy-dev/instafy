@@ -131,16 +131,27 @@ test("trusted boundary binds the server merge ref to both event parents", () => 
     verification,
     /\[\[ "\$actual_merge_sha" =~ \^\[0-9a-f\]\{40\}\$ \]\]/u,
   );
-  assert.match(verification, /show -s --format='%H %P' HEAD/u);
-  assert.match(verification, /test -z "\$\{extra_parent:-\}"/u);
   assert.match(
     verification,
-    /test "\$first_parent" = "\$EXPECTED_BASE_SHA"/u,
+    /rev-parse --verify "HEAD\^\{commit\}"/u,
   );
   assert.match(
     verification,
-    /test "\$second_parent" = "\$EXPECTED_HEAD_SHA"/u,
+    /cat-file commit "\$actual_merge_sha" \|[\s\S]*sed -n '\/\^\$\/q; s\/\^parent \/\/p'/u,
   );
+  assert.match(
+    verification,
+    /test "\$\{#parent_shas\[@\]\}" -eq 2/u,
+  );
+  assert.match(
+    verification,
+    /test "\$\{parent_shas\[0\]\}" = "\$EXPECTED_BASE_SHA"/u,
+  );
+  assert.match(
+    verification,
+    /test "\$\{parent_shas\[1\]\}" = "\$EXPECTED_HEAD_SHA"/u,
+  );
+  assert.doesNotMatch(verification, /show -s --format='%H %P'/u);
   assert.match(
     verification,
     /if \[\[ -n "\$EXPECTED_MERGE_SHA" \]\]; then[\s\S]*\[\[ "\$EXPECTED_MERGE_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\][\s\S]*test "\$actual_merge_sha" = "\$EXPECTED_MERGE_SHA"[\s\S]*fi/u,
