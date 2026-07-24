@@ -1,0 +1,5 @@
+title = "Instafy public boundary path-independent stream"
+
+[extend]
+path = "scripts/public-boundary-gitleaks.toml"
+disabledRules = ["instafy-private-product"]

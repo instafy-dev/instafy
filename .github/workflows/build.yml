@@ -16,7 +16,11 @@ permissions:
 
 jobs:
   secret-scan:
+    # Pull requests are leak-gated by the base-owned Trusted Public Boundary workflow.
     name: Secret scan
+    if: >-
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -42,19 +46,69 @@ jobs:
           sudo install -m 0755 "$RUNNER_TEMP/gitleaks" /usr/local/bin/gitleaks
           test "$(gitleaks version)" = "$GITLEAKS_VERSION"
 
+      - name: Test public boundary controls
+        run: |
+          node --test \
+            scripts/check-public-boundary.test.mjs \
+            scripts/check-public-boundary-workflow.test.mjs
+
       - name: Enforce public repository boundary
         run: node scripts/check-public-boundary.mjs
 
+      - name: Create isolated Gitleaks ignore input
+        run: |
+          set -euo pipefail
+          : > "$RUNNER_TEMP/gitleaks-public-ci.empty-ignore"
+
+      - name: Scan the complete current tree
+        run: |
+          set -euo pipefail
+          gitleaks dir \
+            --config "$GITHUB_WORKSPACE/scripts/public-boundary-gitleaks.toml" \
+            --gitleaks-ignore-path "$RUNNER_TEMP/gitleaks-public-ci.empty-ignore" \
+            --ignore-gitleaks-allow \
+            --log-level=error \
+            --max-archive-depth=1 \
+            --max-decode-depth=3 \
+            --max-target-megabytes=0 \
+            --no-banner \
+            --no-color \
+            --redact=100 \
+            --timeout=110 \
+            .
+
+      - name: Scan tracked bytes without path allowlists
+        run: |
+          set -euo pipefail
+          tracked_inventory="$RUNNER_TEMP/public-boundary-main-files.zlist"
+          git ls-files --cached -z > "$tracked_inventory"
+          test -s "$tracked_inventory"
+          while IFS= read -r -d '' relative_path; do
+            if [[ -f "$relative_path" && ! -L "$relative_path" ]]; then
+              cat -- "$relative_path"
+              printf '\n'
+            fi
+          done < "$tracked_inventory" |
+            gitleaks stdin \
+              --config "$GITHUB_WORKSPACE/scripts/public-boundary-gitleaks-stream.toml" \
+              --gitleaks-ignore-path "$RUNNER_TEMP/gitleaks-public-ci.empty-ignore" \
+              --ignore-gitleaks-allow \
+              --log-level=error \
+              --max-archive-depth=1 \
+              --max-decode-depth=3 \
+              --max-target-megabytes=0 \
+              --no-banner \
+              --no-color \
+              --redact=100 \
+              --timeout=110
+
       - name: Scan introduced commits
         env:
-          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PUSH_BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
           zero_sha="0000000000000000000000000000000000000000"
-          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-            log_range="${PULL_REQUEST_BASE_SHA}..HEAD"
-          elif [[ -n "${PUSH_BEFORE_SHA:-}" && "$PUSH_BEFORE_SHA" != "$zero_sha" ]]; then
+          if [[ -n "${PUSH_BEFORE_SHA:-}" && "$PUSH_BEFORE_SHA" != "$zero_sha" ]]; then
             log_range="${PUSH_BEFORE_SHA}..HEAD"
           elif parent_sha="$(git rev-parse HEAD^ 2>/dev/null)"; then
             log_range="${parent_sha}..HEAD"
@@ -62,22 +116,19 @@ jobs:
             echo "Reviewed parentless seed is covered by the public export gate."
             exit 0
           fi
-          gitleaks_config="$RUNNER_TEMP/gitleaks-public-ci.toml"
-          gitleaks_ignore="$RUNNER_TEMP/gitleaks-public-ci.empty-ignore"
-          printf '%s\n' \
-            'title = "Instafy public incremental scan"' \
-            '' \
-            '[extend]' \
-            'useDefault = true' \
-            > "$gitleaks_config"
-          : > "$gitleaks_ignore"
           gitleaks git \
-            --config "$gitleaks_config" \
-            --gitleaks-ignore-path "$gitleaks_ignore" \
+            --config "$GITHUB_WORKSPACE/scripts/public-boundary-gitleaks.toml" \
+            --gitleaks-ignore-path "$RUNNER_TEMP/gitleaks-public-ci.empty-ignore" \
             --ignore-gitleaks-allow \
+            --log-level=error \
+            --max-archive-depth=1 \
+            --max-decode-depth=3 \
+            --max-target-megabytes=0 \
             --no-banner \
+            --no-color \
             --redact=100 \
             --log-opts="$log_range" \
+            --timeout=110 \
             .
 
   javascript:
@@ -112,6 +163,7 @@ jobs:
       - name: Test public migration and self-host contracts
         run: |
           node --test \
+            scripts/check-public-boundary-workflow.test.mjs \
             scripts/check-public-release-workflows.test.mjs \
             scripts/check-supabase-migrations.test.mjs \
             scripts/test-supabase-migrations-empty-db.test.mjs \
