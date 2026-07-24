@@ -1,0 +1,79 @@
+title = "Instafy public boundary"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "jwt"
+
+  [[rules.allowlists]]
+  description = "Fixed Supabase local-development JWT fixtures"
+  regexTarget = "match"
+  regexes = [
+    '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9\.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0''',
+    '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImV4cCI6MTk4MzgxMjk5Nn0\.EGIM96RAZx35lJzdJsyH-qQwv8Hdp7fsn3W0YpN81IU''',
+  ]
+
+[[rules]]
+id = "generic-api-key"
+
+  [[rules.allowlists]]
+  description = "Cargo lock metadata for the crypto_secretbox dependency"
+  regexTarget = "match"
+  regexes = ['''^crypto_secretbox",\n "curve25519-dalek"$''']
+
+[[rules]]
+id = "private-key"
+
+  [[rules.allowlists]]
+  description = "Test-only PEM formatter fed by a generated in-memory key"
+  regexTarget = "match"
+  regexes = [
+    '''^-{5}BEGIN PRIVATE KEY-{5}\\n\{\}\\n-{5}END PRIVATE KEY-{5}\\n",\n\s+base64::engine::general_purpose::STANDARD\.encode\(private_key_der\)''',
+  ]
+
+  [[rules.allowlists]]
+  description = "Fixed test-only RSA key used by controller authentication tests"
+  regexTarget = "match"
+  regexes = [
+    '''^-{5}BEGIN PRIVATE KEY-{5}\\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDUcqlvgFjB5JCJ\\n''',
+  ]
+
+[[rules]]
+id = "instafy-absolute-personal-path"
+description = "Private absolute workstation path"
+regex = '''/U[s]ers/'''
+
+[[rules]]
+id = "instafy-private-network"
+description = "Private network range"
+regex = '''10[.]42[.]'''
+
+[[rules]]
+id = "instafy-private-host"
+description = "Private hosted control plane"
+regex = '''(?i)i[n]ternal[.]instafy[.]dev'''
+
+[[rules]]
+id = "instafy-github-token-prefix"
+description = "GitHub credential prefix"
+regex = '''(?:gh[p]_|gh[o]_|github_[p]at_)'''
+
+[[rules]]
+id = "instafy-private-package"
+description = "Private package name"
+regex = '''(?i)(?:operator-[c]onsole|org-[c]redits|infra-[p]ulumi|kno[s]h-contract)'''
+
+[[rules]]
+id = "instafy-browser-service-role"
+description = "Browser-exposed service-role identifier"
+regex = '''(?i)\bV[I]TE_[A-Z0-9_]*SERVICE_ROLE(?:_[A-Z0-9_]+)?\b'''
+
+[[rules]]
+id = "instafy-private-product"
+description = "Private product marker outside its public contract"
+regex = '''(?i)k[n]osh'''
+
+  [[rules.allowlists]]
+  description = "The public provider contract names the supported private product"
+  paths = ['''(?:^|/)packages/provider-contract(?:/|$)''']
