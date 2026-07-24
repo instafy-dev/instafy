@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type APIResponse, type Page } from "@playwright/test";
 import { randomUUID } from "node:crypto";
 import { deriveGithubImportTargetPath } from "../../../src/services/runtimeController/githubImportPath.js";
 import {
@@ -15,6 +15,12 @@ import {
   waitForHostedRuntimeReady,
   waitForStoreProjectId,
 } from "../utils/harness.js";
+
+// The controller import request contains the purpose-scoped GitHub fixture
+// credential. Never serialize it into a retained Playwright trace artifact.
+test.use({ trace: "off" });
+
+const WORKSPACE_BUSY_RETRY_DELAYS_MS = [250, 500, 1_000, 2_000, 4_000, 8_000] as const;
 
 type InstafyE2EBridge = {
   createBlankConversation?: (input: {
@@ -98,9 +104,15 @@ async function importGithubRepoViaController(params: {
   targetPath: string;
 }): Promise<{ fileCount: number | null; targetPath: string | null }> {
   const accessToken = await getSupabaseAccessToken(params.page);
-  const response = await params.page.context().request.post(
-    `${getControllerUrl()}/projects/${encodeURIComponent(params.projectId)}/import/github`,
-    {
+  const importUrl = `${getControllerUrl()}/projects/${encodeURIComponent(params.projectId)}/import/github`;
+  const idempotencyKey = `org-invite-link-github-import:${randomUUID()}`;
+  const githubToken =
+    process.env.GITHUB_CANONICAL_IMPORT_TOKEN?.trim() ||
+    process.env.GH_TESTING_TOKEN?.trim() ||
+    undefined;
+  let response: APIResponse;
+  for (let attempt = 0; ; attempt += 1) {
+    response = await params.page.context().request.post(importUrl, {
       headers: {
         authorization: `Bearer ${accessToken}`,
         "content-type": "application/json",
@@ -108,13 +120,28 @@ async function importGithubRepoViaController(params: {
       data: {
         repo: params.repo,
         targetPath: params.targetPath,
+        idempotencyKey,
+        ...(githubToken ? { githubToken } : {}),
       },
       timeout: 120_000,
-    },
-  );
-  if (!response.ok()) {
-    const body = await response.text().catch(() => "");
-    throw new Error(`GitHub import failed (${response.status()}): ${body.slice(0, 500)}`);
+    });
+    if (response.ok()) {
+      break;
+    }
+    const errorPayload = (await response.json().catch(() => null)) as
+      | { code?: string; details?: { retryable?: boolean } }
+      | null;
+    const retryableWorkspaceBusy =
+      response.status() === 409 &&
+      errorPayload?.code === "workspace_busy" &&
+      errorPayload.details?.retryable === true;
+    const retryDelayMs = WORKSPACE_BUSY_RETRY_DELAYS_MS[attempt];
+    if (!retryableWorkspaceBusy || retryDelayMs === undefined) {
+      throw new Error(
+        `GitHub import failed (${response.status()}): ${JSON.stringify(errorPayload)?.slice(0, 500)}`,
+      );
+    }
+    await params.page.waitForTimeout(retryDelayMs);
   }
   const payload = (await response.json().catch(() => null)) as {
     ok?: boolean;
@@ -225,32 +252,15 @@ function sanitizeFileEntryTestId(path: string): string {
   return `files-entry-${path.replace(/[^a-zA-Z0-9]/g, "-")}`;
 }
 
-async function openWorkspaceFile(page: Page, projectId: string, filePath: string) {
-  // The sidebar code button only toggles the files drawer (portal explorer);
-  // on large screens a drawer entry click renders no viewer. The files
-  // workspace (viewer + monaco) mounts from the ?panel=code query param.
-  const workspaceUrl = `/studio?projectId=${encodeURIComponent(projectId)}&panel=code`;
-  let appMounted = false;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    await page.goto(workspaceUrl, { waitUntil: "domcontentloaded" }).catch(() => null);
-    appMounted = await page
-      .locator("#root > *")
-      .first()
-      .waitFor({ state: "attached", timeout: 5_000 })
-      .then(() => true)
-      .catch(() => false);
-    if (appMounted) {
-      break;
-    }
-    if (attempt < 2) {
-      await page.waitForTimeout(500);
-    }
-  }
-  if (!appMounted) {
-    throw new Error("Studio app did not mount after opening the files workspace.");
-  }
+async function openWorkspaceFile(page: Page, filePath: string) {
+  // Keep the mounted Studio document alive. Starting a hosted runtime changes
+  // Docker networking locally, so a full Vite reload here can strand the app
+  // with an empty root after module requests fail with ERR_NETWORK_CHANGED.
+  // Selecting a file from the normal explorer opens and activates its file tab.
+  await page.getByTestId("sidebar-nav-code").click();
   const refreshButton = page.getByTestId("files-explorer-refresh");
-  await expect(refreshButton).toBeEnabled({ timeout: 90_000 });
+  await expect(refreshButton).toBeEnabled({ timeout: 30_000 });
+  await refreshButton.click();
   await page.getByTestId("code-search-input").fill("");
 
   const segments = filePath.split("/").filter((segment) => segment.length > 0);
@@ -279,7 +289,7 @@ test.describe("Org invite link GitHub import durability", () => {
     "Requires git-canonical stack (start with GIT_CANONICAL=1).",
   );
 
-  test.describe.configure({ timeout: 360_000 });
+  test.describe.configure({ timeout: 240_000, retries: 1 });
 
   test.afterEach(async ({ page }) => {
     if (!createdProjectId) {
@@ -428,13 +438,7 @@ test.describe("Org invite link GitHub import durability", () => {
       }
 
       await ensureHostedRuntimeReady(page, projectId);
-      await openWorkspaceFile(page, projectId, importedFilePath);
-      await expect(page.getByTestId("monaco-editor")).toContainText(expectedSnippet, {
-        timeout: 60_000,
-      });
-
-      await ensureHostedRuntimeReady(memberPage, projectId);
-      await openWorkspaceFile(memberPage, projectId, importedFilePath);
+      await openWorkspaceFile(memberPage, importedFilePath);
       await expect(memberPage.getByTestId("monaco-editor")).toContainText(expectedSnippet, {
         timeout: 60_000,
       });

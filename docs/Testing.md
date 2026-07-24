@@ -18,31 +18,27 @@ The default `pnpm test:e2e` loop is intentionally product-focused:
 - it does not load the opt-in benchmark specs under `tests/playwright/bench`
 - benchmark coverage stays available through `pnpm test:e2e:bench`, which sets `PLAYWRIGHT_RUN_BENCH=1`
 
-Required CI lanes stay scoped to:
-- lint/build/unit
-- `pnpm -C packages/frontend test:e2e:component`
-- `pnpm test:e2e:smoke:core`
-- `pnpm test:e2e:controller`
-- `pnpm test:e2e:projects`
-- `pnpm test:e2e:orgs`
+The protected public workflow has four required jobs:
 
-The required build executes that coverage as a short preflight followed by parallel
-runtime/Rust and E2E lanes. The preflight owns workflow contracts, deploy drift,
-lint, frontend builds, frontend units, and component tests. Once it
-passes, the runtime/Rust lane and all four full-stack E2E lanes start together;
-the E2E matrix must not wait for the runtime/Rust lane. This changes only the
-job graph, not the required coverage or whole-workflow success requirement.
-The runtime/Rust lane is the single Cargo and runtime-image cache writer;
-parallel E2E jobs restore those caches without racing to upload the same key.
-Required browser E2E slices skip the tunnel-broker ingress fixture because no
-tunnel specs are selected there; tunnel coverage remains required in the
-runtime/Rust lane's dedicated Rust, PDNS, and end-to-end ingress reachability
-smokes. The tunnel processes reuse one image built from their shared Rust
-workspace. That lane also skips the git-canonical Compose services because it
-tests those crates directly.
-An always-running aggregate retains the established `Lint, build, unit tests`
-required-check name and fails unless preflight, runtime/Rust, and the complete
-E2E matrix all report success; skipped or canceled dependencies cannot pass it.
+- Secret scan
+- JavaScript packages
+- Go packages
+- Rust packages
+
+The Secret scan job runs pinned Gitleaks over every introduced commit and a
+repository-wide boundary check over tracked paths and contents. The boundary
+check rejects live environment/auth files, private-only package/product
+markers, personal paths, private hosts/networks, browser-exposed service-role
+names, and token prefixes. Product-contract references are allowed only inside
+the provider-contract package.
+
+The JavaScript job performs a frozen install, validates and applies the public
+migration track to an empty database, checks the self-host contract, lints and
+builds the frontend, runs frontend units, proves the CLI package artifact, and
+builds/tests the Desktop app and its runtime helper. The Go and Rust jobs test
+the public service packages directly. Full-stack Playwright suites remain
+available to contributors and downstream distributions, but are not required
+public-branch checks because they depend on a larger local/deployment fixture.
 
 Environment-gated suites remain non-required:
 - payments

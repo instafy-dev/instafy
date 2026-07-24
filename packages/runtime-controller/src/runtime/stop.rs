@@ -245,6 +245,7 @@ async fn quarantine_runtime_for_provider_release(
         .execute(
             "update runtimes
              set status = 'requested',
+                 drain_expires_at = null,
                  endpoint_url = null,
                  task_ref = null,
                  last_seen_at = null,
@@ -1309,6 +1310,7 @@ pub(crate) async fn runtime_remove(
                 .execute(
                     "update runtimes
                      set status = 'removed', endpoint_url = null, task_ref = null,
+                         drain_expires_at = null,
                          last_seen_at = now(), updated_at = now()
                      where id = $1",
                     &[&runtime.id],
@@ -1356,6 +1358,7 @@ pub(crate) async fn runtime_remove(
         .execute(
             "update runtimes
              set status = 'removed',
+                 drain_expires_at = null,
                  endpoint_url = null,
                  task_ref = null,
                  last_seen_at = now(),
@@ -1778,6 +1781,7 @@ pub(crate) async fn perform_runtime_stop(
         .execute(
             "update runtimes
              set status = 'stopped',
+                 drain_expires_at = null,
                  endpoint_url = null,
                  task_ref = null,
                  last_seen_at = now(),
@@ -2502,7 +2506,7 @@ pub(crate) async fn runtime_mark_offline(
 
     let rows_updated = transaction
         .execute(
-            "update runtimes set status = 'offline', last_seen_at = now(), idle_ttl_seconds = 1 \
+            "update runtimes set status = 'offline', drain_expires_at = null, last_seen_at = now(), idle_ttl_seconds = 1 \
              where id = $1 and project_id = $2",
             &[&runtime_id, &project_id],
         )

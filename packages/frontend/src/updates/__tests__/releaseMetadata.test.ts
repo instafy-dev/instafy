@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildReleaseMetadataDetailRows,
   deriveNativeOtaPhaseAction,
+  resolveDesktopDownloadFeedback,
   resolveNativeOtaAvailableVersion,
   summarizeAppUpdateState,
   type AppReleaseMetadata,
@@ -46,6 +47,46 @@ function makeMetadata(
   };
 }
 
+describe("resolveDesktopDownloadFeedback", () => {
+  const baseStatus = {
+    isEnabled: true,
+    channel: "stable",
+    currentVersion: "1.2.3",
+    availableVersion: "1.2.4",
+    feedUrl: "https://downloads.instafy.dev/desktop-app/stable",
+  } as const;
+
+  it("reports a caught native download failure instead of a success toast", () => {
+    expect(
+      resolveDesktopDownloadFeedback(
+        { ...baseStatus, phase: "error", lastError: "network unavailable" },
+        makeMetadata({ phase: "update_available", primary_action: "download" }),
+      ),
+    ).toEqual({ intent: "error", message: "network unavailable" });
+  });
+
+  it("does not claim a background download has already completed", () => {
+    expect(
+      resolveDesktopDownloadFeedback(
+        { ...baseStatus, phase: "downloading" },
+        makeMetadata({ phase: "downloading", primary_action: null }),
+      ),
+    ).toEqual({
+      intent: "info",
+      message: "Desktop update is downloading in the background.",
+    });
+  });
+
+  it("reports success only after either source confirms downloaded", () => {
+    expect(
+      resolveDesktopDownloadFeedback(
+        { ...baseStatus, phase: "downloading" },
+        makeMetadata({ phase: "downloaded", primary_action: "install" }),
+      ).intent,
+    ).toBe("success");
+  });
+});
+
 describe("summarizeAppUpdateState", () => {
   it("surfaces an available update without showing the version by default", () => {
     const result = summarizeAppUpdateState(
@@ -89,6 +130,40 @@ describe("summarizeAppUpdateState", () => {
       title: "Up to date",
       detail: "Current",
       emphasis: "success",
+      show: true,
+    });
+  });
+
+  it("marks a downloaded update as restart-ready attention", () => {
+    const result = summarizeAppUpdateState(
+      makeMetadata({
+        phase: "downloaded",
+        primary_action: "install",
+        available_version: "1.2.4",
+      }),
+    );
+
+    expect(result).toEqual({
+      title: "Restart to update",
+      detail: "Ready",
+      emphasis: "attention",
+      show: true,
+    });
+  });
+
+  it("marks update failures as persistent danger attention", () => {
+    const result = summarizeAppUpdateState(
+      makeMetadata({
+        phase: "error",
+        primary_action: "check",
+        last_error: "Feed unavailable",
+      }),
+    );
+
+    expect(result).toEqual({
+      title: "Update check failed",
+      detail: "Retry",
+      emphasis: "danger",
       show: true,
     });
   });

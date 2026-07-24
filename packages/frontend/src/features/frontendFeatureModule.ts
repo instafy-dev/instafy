@@ -30,6 +30,16 @@ export interface TrustedFrontendRouteContribution {
   element: ReactNode;
 }
 
+/**
+ * A trusted, build-time-selected background bridge mounted inside the Studio
+ * provider graph. Product-specific integrations contribute these from their
+ * own feature module; the public application never imports them by name.
+ */
+export interface FrontendStudioRuntimeBridgeContribution {
+  id: string;
+  component: ComponentType;
+}
+
 export function createLazyFrontendRouteElement(
   load: () => Promise<{ default: ComponentType }>,
 ): ReactNode {
@@ -43,6 +53,7 @@ export interface FrontendFeatureContributions {
   capabilityProviders?: readonly CapabilityProviderDefinition[];
   executorProviders?: readonly CapabilityExecutorProviderDefinition<FrontendFeatureServices>[];
   routes?: readonly TrustedFrontendRouteContribution[];
+  studioRuntimeBridges?: readonly FrontendStudioRuntimeBridgeContribution[];
   nativeExtensionRegistrations?: readonly NativeExtensionRegistration[];
   nativeRuntimeFamilyRegistrations?: readonly NativeRuntimeFamilyRegistration[];
   nativeCapabilityRuntimeRegistrations?: readonly NativeCapabilityRuntimeRegistration[];
@@ -60,6 +71,7 @@ export interface FrontendFeatureComposition {
   capabilityProviders: readonly CapabilityProviderDefinition[];
   executorProviders: readonly CapabilityExecutorProviderDefinition<FrontendFeatureServices>[];
   routes: readonly TrustedFrontendRouteContribution[];
+  studioRuntimeBridges: readonly FrontendStudioRuntimeBridgeContribution[];
   nativeExtensionRegistrations: readonly NativeExtensionRegistration[];
   nativeRuntimeFamilyRegistrations: readonly NativeRuntimeFamilyRegistration[];
   nativeCapabilityRuntimeRegistrations: readonly NativeCapabilityRuntimeRegistration[];
@@ -112,6 +124,10 @@ export function createFrontendFeatureComposition(
     "executorProviders",
   );
   const routes = collectInstafyFeatureModuleContributions(validatedModules, "routes");
+  const studioRuntimeBridges = collectInstafyFeatureModuleContributions(
+    validatedModules,
+    "studioRuntimeBridges",
+  );
   const nativeExtensionRegistrations = collectInstafyFeatureModuleContributions(
     validatedModules,
     "nativeExtensionRegistrations",
@@ -150,6 +166,11 @@ export function createFrontendFeatureComposition(
   assertUniqueContributionIds("capability provider", capabilityProviders, (provider) => provider.id);
   assertUniqueContributionIds("executor provider", executorProviders, (provider) => provider.id);
   assertUniqueContributionIds("route", routes, (route) => route.id);
+  assertUniqueContributionIds(
+    "Studio runtime bridge",
+    studioRuntimeBridges,
+    (bridge) => bridge.id,
+  );
   assertUniqueContributionIds(
     "native extension",
     nativeExtensionRegistrations,
@@ -206,6 +227,7 @@ export function createFrontendFeatureComposition(
     capabilityProviders,
     executorProviders,
     routes,
+    studioRuntimeBridges,
     nativeExtensionRegistrations,
     nativeRuntimeFamilyRegistrations,
     nativeCapabilityRuntimeRegistrations,

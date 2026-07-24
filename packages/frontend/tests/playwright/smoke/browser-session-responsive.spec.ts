@@ -112,6 +112,8 @@ async function expectPhoneTransportRecovery(
 }
 
 test.describe("Shared Browser responsive continuity", () => {
+  test.describe.configure({ retries: 0 });
+
   test.skip(
     !ENABLED,
     "Set PLAYWRIGHT_SHARED_BROWSER_RESPONSIVE=1 for the live responsive browser proof.",

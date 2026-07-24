@@ -32,19 +32,18 @@ import {
   getProjectProviderSelectedDevice,
 } from "../capabilities/projectProviderAccess";
 import { dispatchNativeExtensionStateUpdated } from "./nativeExtensionStateChannel";
+import {
+  integrationIsAttached,
+  providerRequestTargetsCurrentDevice,
+} from "./providerRequestClaimSupport";
+import { APPLICATION_FRONTEND_FEATURES } from "../features/applicationFrontendFeatureComposition";
+import type { FrontendStudioRuntimeBridgeContribution } from "../features/frontendFeatureModule";
 import { useProject } from "../projects/useProject";
 import { controllerClient } from "../sdk/instafy";
 import type {
   ControllerProjectIntegration,
   ControllerProviderRequestRecord,
 } from "../services/runtimeController";
-
-const ATTACHED_PROJECT_INTEGRATION_STATUSES = new Set([
-  "attached",
-  "available",
-  "connected",
-  "enabled",
-]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -68,33 +67,6 @@ function normalizeCameraCaptureMetadata(
     return null;
   }
   return value as unknown as CameraCaptureResult["capture"];
-}
-
-function integrationIsAttached(integration: ControllerProjectIntegration | null | undefined) {
-  if (!integration) {
-    return false;
-  }
-  const status = integration.status.trim().toLowerCase();
-  const metadata = isRecord(integration.metadata) ? integration.metadata : {};
-  return (
-    ATTACHED_PROJECT_INTEGRATION_STATUSES.has(status) &&
-    metadata.attached !== false &&
-    metadata.enabled !== false
-  );
-}
-
-function providerRequestTargetsCurrentDevice(
-  request: ControllerProviderRequestRecord,
-  providerId: string,
-  deviceId: string,
-) {
-  if (request.providerId.trim().toLowerCase() !== providerId.trim().toLowerCase()) {
-    return false;
-  }
-  if (request.status === "claimed") {
-    return request.claimedByDeviceId?.trim().toLowerCase() === deviceId.trim().toLowerCase();
-  }
-  return request.status === "pending";
 }
 
 function buildCameraHeartbeatMetadata(status: CameraStatusSnapshot) {
@@ -584,7 +556,26 @@ export function NativeExtensionRequestProvider({ children }: { children: ReactNo
   return (
     <>
       <NativeExtensionRequestBridge />
+      <StudioRuntimeBridges
+        bridges={APPLICATION_FRONTEND_FEATURES.studioRuntimeBridges}
+      />
       {children}
+    </>
+  );
+}
+
+export function StudioRuntimeBridges({
+  bridges,
+}: {
+  bridges: readonly FrontendStudioRuntimeBridgeContribution[];
+}) {
+  return (
+    <>
+      {bridges.map(
+        ({ id, component: RuntimeBridge }) => (
+          <RuntimeBridge key={id} />
+        ),
+      )}
     </>
   );
 }

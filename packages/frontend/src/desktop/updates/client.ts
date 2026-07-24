@@ -12,6 +12,7 @@ export interface DesktopUpdaterBridgeStatus {
   lastCheckedAt?: string;
   lastDownloadedAt?: string;
   lastError?: string;
+  lastInstallRequestAccepted?: boolean;
 }
 
 function browserPlatform(): string | null {
@@ -61,6 +62,10 @@ function normalizeDesktopUpdaterStatus(status: InstafyDesktopUpdaterStatus): Des
     lastCheckedAt: status.lastCheckedAt?.trim() || undefined,
     lastDownloadedAt: status.lastDownloadedAt?.trim() || undefined,
     lastError: status.lastError?.trim() || undefined,
+    lastInstallRequestAccepted:
+      typeof status.lastInstallRequestAccepted === "boolean"
+        ? status.lastInstallRequestAccepted
+        : undefined,
   };
 }
 

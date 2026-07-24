@@ -21,6 +21,7 @@ export type CdpScreencastViewerProps = {
   inputWsUrl?: string | null;
   inputAvailable?: boolean;
   inputAuthorityKey?: string | null;
+  connectionGeneration: number;
   active: boolean;
   inputEnabled: boolean;
   onConnected: () => void;
@@ -108,6 +109,7 @@ export function CdpScreencastViewer({
   inputWsUrl = null,
   inputAvailable = false,
   inputAuthorityKey = null,
+  connectionGeneration,
   active,
   inputEnabled,
   onConnected,
@@ -143,109 +145,123 @@ export function CdpScreencastViewer({
     );
     let latestFrameId = 0;
     let paintedFrameId = 0;
-    const socket = new WebSocket(withInitialViewport(wsUrl, currentViewport));
+    let socket: WebSocket | null = null;
 
-    firstFrameTimer = window.setTimeout(() => {
-      firstFrameTimer = null;
-      if (!disposed && !connected) {
-        callbacksRef.current.onTransportError(
-          "Shared Browser renderer did not produce its first frame.",
-          true,
-        );
-        socket.close(1011, "first frame timeout");
-      }
-    }, CDP_FIRST_FRAME_TIMEOUT_MS);
-
-    const send = (message: Record<string, unknown>) => {
-      if (websocketOpen(socket)) {
-        socket.send(JSON.stringify(message));
-      }
-    };
-
-    socket.addEventListener("message", (event) => {
-      const message = parseCdpScreencastServerMessage(event.data);
-      if (!message || disposed) {
+    // React StrictMode intentionally mounts, disposes, and remounts effects in
+    // development. Defer the network side effect by one microtask so the
+    // disposed probe cannot overlap the replacement CDP screencast session.
+    // This also collapses same-commit URL/generation replacements without
+    // delaying ordinary renderer startup by a visible frame.
+    queueMicrotask(() => {
+      if (disposed) {
         return;
       }
-      if (message.type === "ready" || message.type === "viewport") {
-        if (message.type === "ready") {
-          readyReceived = true;
+
+      const nextSocket = new WebSocket(withInitialViewport(wsUrl, currentViewport));
+      socket = nextSocket;
+
+      firstFrameTimer = window.setTimeout(() => {
+        firstFrameTimer = null;
+        if (!disposed && !connected) {
+          callbacksRef.current.onTransportError(
+            "Shared Browser renderer did not produce its first frame.",
+            true,
+          );
+          nextSocket.close(1011, "first frame timeout");
         }
-        return;
-      }
-      if (message.type === "error") {
-        callbacksRef.current.onTransportError(message.message, message.fatal);
-        if (message.fatal) {
-          socket.close(1011, "renderer error");
-        }
-        return;
-      }
+      }, CDP_FIRST_FRAME_TIMEOUT_MS);
 
-      const frameId = message.frameId;
-      latestFrameId = Math.max(latestFrameId, frameId);
-      void decodeFrame(message)
-        .then((bitmap) => {
-          let painted = false;
-          try {
-            // Decodes may resolve out of order after the origin's frame ACK
-            // timeout, or after this effect has been replaced during a
-            // reconnect. Never let an older decode regress a newer canvas.
-            if (!disposed && frameId > paintedFrameId) {
-              paintFrame(canvas, bitmap);
-              paintedFrameId = frameId;
-              painted = true;
-            }
-          } finally {
-            bitmap.close();
+      const send = (message: Record<string, unknown>) => {
+        if (websocketOpen(nextSocket)) {
+          nextSocket.send(JSON.stringify(message));
+        }
+      };
+
+      nextSocket.addEventListener("message", (event) => {
+        const message = parseCdpScreencastServerMessage(event.data);
+        if (!message || disposed) {
+          return;
+        }
+        if (message.type === "ready" || message.type === "viewport") {
+          if (message.type === "ready") {
+            readyReceived = true;
           }
-          if (!disposed) {
-            // Release origin-side backpressure before reporting Ready. On a
-            // higher-latency controller/tunnel path, navigation can otherwise
-            // race ahead of this first acknowledgement.
-            send({ type: "ack", frameId: message.frameId });
-            if (painted && readyReceived && !connected) {
-              connected = true;
-              if (firstFrameTimer !== null) {
-                window.clearTimeout(firstFrameTimer);
-                firstFrameTimer = null;
+          return;
+        }
+        if (message.type === "error") {
+          callbacksRef.current.onTransportError(message.message, message.fatal);
+          if (message.fatal) {
+            nextSocket.close(1011, "renderer error");
+          }
+          return;
+        }
+
+        const frameId = message.frameId;
+        latestFrameId = Math.max(latestFrameId, frameId);
+        void decodeFrame(message)
+          .then((bitmap) => {
+            let painted = false;
+            try {
+              // Decodes may resolve out of order after the origin's frame ACK
+              // timeout, or after this effect has been replaced during a
+              // reconnect. Never let an older decode regress a newer canvas.
+              if (!disposed && frameId > paintedFrameId) {
+                paintFrame(canvas, bitmap);
+                paintedFrameId = frameId;
+                painted = true;
               }
-              callbacksRef.current.onConnected();
+            } finally {
+              bitmap.close();
             }
-          }
-        })
-        .catch((cause) => {
-          if (!disposed) {
-            if (frameId === latestFrameId) {
-              callbacksRef.current.onTransportError(
-                cause instanceof Error ? cause.message : "Unable to render browser frame.",
-                false,
-              );
+            if (!disposed) {
+              // Release origin-side backpressure before reporting Ready. On a
+              // higher-latency controller/tunnel path, navigation can otherwise
+              // race ahead of this first acknowledgement.
+              send({ type: "ack", frameId: message.frameId });
+              if (painted && readyReceived && !connected) {
+                connected = true;
+                if (firstFrameTimer !== null) {
+                  window.clearTimeout(firstFrameTimer);
+                  firstFrameTimer = null;
+                }
+                callbacksRef.current.onConnected();
+              }
             }
-            // A corrupt frame must still release the producer. The origin
-            // retains the latest replacement frame until this acknowledgement.
-            send({ type: "ack", frameId: message.frameId });
-          }
-        });
-    });
-    socket.addEventListener("error", () => {
-      if (!disposed) {
-        callbacksRef.current.onTransportError(
-          "Shared Browser renderer connection failed.",
-          true,
-        );
-      }
-    });
-    socket.addEventListener("close", (event) => {
-      if (!disposed) {
-        if (firstFrameTimer !== null) {
-          window.clearTimeout(firstFrameTimer);
-          firstFrameTimer = null;
+          })
+          .catch((cause) => {
+            if (!disposed) {
+              if (frameId === latestFrameId) {
+                callbacksRef.current.onTransportError(
+                  cause instanceof Error ? cause.message : "Unable to render browser frame.",
+                  false,
+                );
+              }
+              // A corrupt frame must still release the producer. The origin
+              // retains the latest replacement frame until this acknowledgement.
+              send({ type: "ack", frameId: message.frameId });
+            }
+          });
+      });
+      nextSocket.addEventListener("error", () => {
+        if (!disposed) {
+          callbacksRef.current.onTransportError(
+            "Shared Browser renderer connection failed.",
+            true,
+          );
         }
-        callbacksRef.current.onDisconnected({
-          connected,
-          reason: event.reason || `WebSocket closed (${event.code})`,
-        });
-      }
+      });
+      nextSocket.addEventListener("close", (event) => {
+        if (!disposed) {
+          if (firstFrameTimer !== null) {
+            window.clearTimeout(firstFrameTimer);
+            firstFrameTimer = null;
+          }
+          callbacksRef.current.onDisconnected({
+            connected,
+            reason: event.reason || `WebSocket closed (${event.code})`,
+          });
+        }
+      });
     });
 
     return () => {
@@ -253,9 +269,9 @@ export function CdpScreencastViewer({
       if (firstFrameTimer !== null) {
         window.clearTimeout(firstFrameTimer);
       }
-      socket.close(1000, "viewer disposed");
+      socket?.close(1000, "viewer disposed");
     };
-  }, [wsUrl]);
+  }, [connectionGeneration, wsUrl]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -389,7 +405,7 @@ export function CdpScreencastViewer({
       input.dispose();
       socket.close(1000, "input target changed");
     };
-  }, [inputAvailable, inputWsUrl]);
+  }, [connectionGeneration, inputAvailable, inputWsUrl]);
 
   useEffect(() => {
     const canvas = canvasRef.current;

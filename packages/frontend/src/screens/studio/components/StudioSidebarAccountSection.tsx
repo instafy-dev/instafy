@@ -1,6 +1,6 @@
-import { BellNotification, BellOff, HalfMoon, LogOut, Refresh, Settings, SunLight, User } from "iconoir-react";
+import { BellNotification, BellOff, Download, HalfMoon, LogOut, Refresh, Settings, SunLight, User } from "iconoir-react";
 import { DialogTrigger } from "react-aria-components";
-import type { MouseEvent, PointerEvent as ReactPointerEvent, RefObject } from "react";
+import { useId, type MouseEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import { Button, IconButton } from "../../../components/Button";
 import { MenuItemContent } from "../../../components/MenuItemContent";
 import { SegmentedControl } from "../../../components/SegmentedControl";
@@ -26,6 +26,7 @@ type StudioSidebarAccountSectionProps = {
   accountSubtitle: string | null;
   resolvedTheme: ResolvedTheme;
   onThemeModeChange: (value: ResolvedTheme) => void;
+  showInstallEntry: boolean;
   shouldRenderUpdateEntry: boolean;
   updatePresentation: AppUpdatePresentation | null;
   onUpdateEntryClick: () => void;
@@ -49,7 +50,35 @@ type StudioSidebarAccountSectionProps = {
 };
 
 function avatarShellClassName(sizeClass: string) {
-  return `flex ${sizeClass} items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-slate-50 text-sm font-medium text-slate-700 dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-[var(--color-studio-dark-raised-control)] dark:text-slate-200`;
+  return `relative flex ${sizeClass} items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-slate-50 text-sm font-medium text-slate-700 dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-[var(--color-studio-dark-raised-control)] dark:text-slate-200`;
+}
+
+function ProfileUpdateIndicator({
+  presentation,
+}: {
+  presentation: AppUpdatePresentation | null;
+}) {
+  const tone =
+    presentation?.emphasis === "danger"
+      ? "danger"
+      : presentation?.emphasis === "attention"
+        ? "attention"
+        : null;
+  if (!tone) {
+    return null;
+  }
+  return (
+    <span
+      className={[
+        "absolute right-0.5 top-0.5 z-10 inline-flex h-2.5 w-2.5 rounded-full ring-2 ring-white dark:ring-[var(--color-studio-dark-rail)]",
+        tone === "danger" ? "bg-rose-500" : "bg-amber-500",
+      ].join(" ")}
+      data-testid="profile-update-indicator"
+      data-tone={tone}
+      title={presentation?.title}
+      aria-hidden="true"
+    />
+  );
 }
 
 export function StudioSidebarAccountSection({
@@ -64,6 +93,7 @@ export function StudioSidebarAccountSection({
   accountSubtitle,
   resolvedTheme,
   onThemeModeChange,
+  showInstallEntry,
   shouldRenderUpdateEntry,
   updatePresentation,
   onUpdateEntryClick,
@@ -85,6 +115,13 @@ export function StudioSidebarAccountSection({
   onUpdatePrimaryAction,
   updateActionPending,
 }: StudioSidebarAccountSectionProps) {
+  const updateStatusDescriptionId = useId();
+  const accessibleUpdateStatus =
+    shouldRenderUpdateEntry &&
+    (updatePresentation?.emphasis === "attention" || updatePresentation?.emphasis === "danger")
+      ? `${updatePresentation.title}. ${updatePresentation.detail}.`
+      : null;
+
   return (
     <div
       ref={footerRef}
@@ -100,6 +137,14 @@ export function StudioSidebarAccountSection({
         showLabels ? "items-stretch px-2" : "items-center",
       ].join(" ")}
     >
+      <span
+        id={updateStatusDescriptionId}
+        className="sr-only"
+        role="status"
+        aria-live="polite"
+      >
+        {accessibleUpdateStatus}
+      </span>
       <DialogTrigger
         isOpen={profileMenuOpen}
         onOpenChange={(open) => onProfileMenuOpenChange(open)}
@@ -112,6 +157,7 @@ export function StudioSidebarAccountSection({
             className="w-full justify-start gap-3 text-left"
             data-testid="sidebar-profile-menu"
             aria-haspopup="dialog"
+            aria-describedby={accessibleUpdateStatus ? updateStatusDescriptionId : undefined}
           >
             <span className={avatarShellClassName("h-9 w-9")}>
               {avatarUrl ? (
@@ -119,6 +165,9 @@ export function StudioSidebarAccountSection({
               ) : (
                 initials
               )}
+              {shouldRenderUpdateEntry ? (
+                <ProfileUpdateIndicator presentation={updatePresentation} />
+              ) : null}
             </span>
             <span className="min-w-0 flex-1">
               <Text as="span" variant="bodyStrong" tone="primary" className="block truncate">
@@ -136,16 +185,20 @@ export function StudioSidebarAccountSection({
             variant="ghost"
             size={collapsedSidebarDensity === "dense" ? "xs" : "sm"}
             radius="lg"
-            className="overflow-hidden"
+            className="relative overflow-hidden"
             data-testid="sidebar-profile-menu"
             aria-haspopup="dialog"
             aria-label="Open profile menu"
+            aria-describedby={accessibleUpdateStatus ? updateStatusDescriptionId : undefined}
           >
             {avatarUrl ? (
               <img src={avatarUrl} alt="" className="h-full w-full object-cover" />
             ) : (
               initials
             )}
+            {shouldRenderUpdateEntry ? (
+              <ProfileUpdateIndicator presentation={updatePresentation} />
+            ) : null}
           </IconButton>
         )}
         <StudioDialogPopover placement="top start" offset={10} className="w-64 p-3 text-sm">
@@ -262,6 +315,19 @@ export function StudioSidebarAccountSection({
                 <StudioMenuItem id="profile:settings" data-testid="profile-settings-button">
                   <MenuItemContent start={<User aria-hidden="true" />}>
                     Profile settings
+                  </MenuItemContent>
+                </StudioMenuItem>
+              ) : null}
+              {showInstallEntry ? (
+                <StudioMenuItem
+                  id="profile:install"
+                  href="/install#desktop"
+                  target="_blank"
+                  rel="noreferrer"
+                  data-testid="profile-install-button"
+                >
+                  <MenuItemContent start={<Download aria-hidden="true" />}>
+                    Install Instafy
                   </MenuItemContent>
                 </StudioMenuItem>
               ) : null}

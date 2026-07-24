@@ -1,5 +1,8 @@
 const MIN_INLINE_DOCKED_BROWSER_VIEWPORT_HEIGHT = 620;
-const COMPACT_BROWSER_CHROME_MAX_WIDTH = 720;
+// The unified row includes transport, navigation, status, and collaboration.
+// Below this width, compact labels preserve a useful address field instead of
+// letting the flex item collapse to a token-sized sliver.
+const COMPACT_BROWSER_CHROME_MAX_WIDTH = 900;
 
 export function shouldUseCompactBrowserChrome({
   containerWidth,

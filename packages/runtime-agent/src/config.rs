@@ -61,6 +61,9 @@ pub struct Config {
     pub codex_bin: Option<PathBuf>,
     pub require_codex_bin: bool,
     pub runtime_access_token: Option<String>,
+    /// Electron owns the desktop process tree and dispositions the controller
+    /// runtime only after every descendant has exited.
+    pub parent_dispositions_runtime_on_shutdown: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -127,6 +130,8 @@ impl Config {
             .ok()
             .map(|raw| raw.trim().to_string())
             .filter(|value| !value.is_empty());
+        let parent_dispositions_runtime_on_shutdown =
+            parse_env_bool("INSTAFY_RUNTIME_PARENT_DISPOSITION").unwrap_or(false);
 
         if runtime_access_token.is_none() {
             return Err(anyhow!(
@@ -506,6 +511,7 @@ impl Config {
             codex_bin,
             require_codex_bin,
             runtime_access_token,
+            parent_dispositions_runtime_on_shutdown,
         })
     }
 

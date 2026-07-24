@@ -66,6 +66,16 @@ function inlineDownloadErrorMessage(metadata: AppReleaseMetadata | null): string
   return `Last download failed: ${lastError} Try again.`;
 }
 
+export function formatAvailableUpdateVersion(metadata: AppReleaseMetadata): string | null {
+  const availableVersion = metadata.updates.available_version;
+  if (!availableVersion) {
+    return null;
+  }
+  return metadata.runtime_surface === "desktop"
+    ? `Available desktop version: ${availableVersion}`
+    : `Available OTA: ${availableVersion}`;
+}
+
 export function UpdateStatusDialog({
   isOpen,
   onOpenChange,
@@ -78,6 +88,7 @@ export function UpdateStatusDialog({
   const summary = metadata ? summarizeAppUpdateState(metadata) : null;
   const detailRows = metadata ? buildReleaseMetadataDetailRows(metadata) : [];
   const downloadErrorMessage = inlineDownloadErrorMessage(metadata);
+  const availableVersion = metadata ? formatAvailableUpdateVersion(metadata) : null;
 
   return (
     <StudioDialogModal
@@ -108,13 +119,13 @@ export function UpdateStatusDialog({
                     : ""}
                 </Text>
               </div>
-              {metadata.updates.available_version ? (
+              {availableVersion ? (
                 <Text
                   variant="caption"
                   tone="secondary"
                   className="max-w-full break-all sm:max-w-[13rem] sm:text-right"
                 >
-                  Available OTA: {metadata.updates.available_version}
+                  {availableVersion}
                 </Text>
               ) : null}
             </div>

@@ -17,8 +17,9 @@ use uuid::Uuid;
 use crate::auth::authenticate_request;
 use crate::projects::load_project_record;
 use crate::{
-    bad_request, ensure_project_access, ensure_project_write_access, internal_error, not_found,
-    publish_controller_event, unauthorized, ApiError, AppState,
+    bad_request, ensure_project_access, ensure_project_scoped_write_access,
+    ensure_project_write_access, internal_error, not_found, publish_controller_event, unauthorized,
+    ApiError, AppState,
 };
 
 const PROVIDER_ID_MAX_LEN: usize = 128;
@@ -33,6 +34,11 @@ const REQUEST_STATUS_FAILED: &str = "failed";
 const REQUEST_STATUS_EXPIRED: &str = "expired";
 const REQUEST_KIND_TOOL_CALL: &str = "tool_call";
 const REQUEST_KIND_RESOURCE_READ: &str = "resource_read";
+/// Scope carried by the per-job controller token that authorizes workspace
+/// shells to dispatch provider tool calls / resource reads. The device-side
+/// routes (list/claim/complete) keep their user-session checks: the phone
+/// authenticates with a real session, not a job token.
+pub(crate) const PROVIDER_CALL_SCOPE: &str = "provider.call";
 const DEFAULT_WAIT_TIMEOUT_MS: u64 = 45_000;
 const MAX_WAIT_TIMEOUT_MS: u64 = 120_000;
 const MIN_WAIT_TIMEOUT_MS: u64 = 5_000;
@@ -216,7 +222,17 @@ async fn dispatch_provider_tool_call(
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
     let project = load_project_record(&transaction, &project_id).await?;
-    ensure_project_write_access(&transaction, &project, &context, None).await?;
+    // Workspace shells authenticate with the per-job scoped controller token;
+    // authorize it by project match + explicit provider.call scope while
+    // user-session and service-role callers keep the membership write check.
+    ensure_project_scoped_write_access(
+        &transaction,
+        &project,
+        &context,
+        None,
+        &[PROVIDER_CALL_SCOPE],
+    )
+    .await?;
     ensure_provider_is_attached(&transaction, &project_id, provider_id.as_str()).await?;
 
     let request_id = Uuid::new_v4();
@@ -287,7 +303,15 @@ async fn dispatch_provider_resource_read(
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
     let project = load_project_record(&transaction, &project_id).await?;
-    ensure_project_write_access(&transaction, &project, &context, None).await?;
+    // Same scoped-token authorization as dispatch_provider_tool_call.
+    ensure_project_scoped_write_access(
+        &transaction,
+        &project,
+        &context,
+        None,
+        &[PROVIDER_CALL_SCOPE],
+    )
+    .await?;
     ensure_provider_is_attached(&transaction, &project_id, provider_id.as_str()).await?;
 
     let request_id = Uuid::new_v4();

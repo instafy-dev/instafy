@@ -27,6 +27,10 @@ vi.mock("../OctoAgentChip", () => ({
   OctoAgentChip: () => <div data-testid="mock-octo-chip" />,
 }));
 
+vi.mock("../ConversationRoster", () => ({
+  ConversationRoster: () => <div data-testid="mock-conversation-roster" />,
+}));
+
 vi.mock("../VoiceConversationActionStrip", () => ({
   VoiceConversationActionStrip: () => <div data-testid="mock-voice-action-strip" />,
 }));
@@ -608,6 +612,31 @@ describe("ChatComposerSurface", () => {
     expect(goalChip?.textContent).toContain("Improve the README until it is ready");
     expect(goalChip?.textContent).toContain("Needs reassessment");
     expect(goalChip?.textContent).toContain("Recent automatic goal turns look repetitive");
+  });
+
+  it("renders the participants roster in the composer-adjacent slot when provided", async () => {
+    await act(async () => {
+      root.render(
+        <ChatComposerSurface
+          {...createProps({
+            rosterProps: {
+              humans: [{ userId: "user-self", label: "You", isSelf: true }],
+              agents: [{ handle: "octo", displayName: "Octo", avatarSeed: "octo" }],
+            },
+          })}
+        />,
+      );
+    });
+
+    expect(container.querySelector('[data-testid="mock-conversation-roster"]')).not.toBeNull();
+  });
+
+  it("omits the participants roster slot when no roster is provided", async () => {
+    await act(async () => {
+      root.render(<ChatComposerSurface {...createProps()} />);
+    });
+
+    expect(container.querySelector('[data-testid="mock-conversation-roster"]')).toBeNull();
   });
 
   it("submits from a native click fallback when press events are unavailable", async () => {

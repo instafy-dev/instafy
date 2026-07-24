@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { ComputerIcon, PlayIcon } from "../components/marketingIcons";
 import { Badge } from "../components/Badge";
 import { Heading } from "../components/Heading";
@@ -9,86 +9,11 @@ import { Text } from "../components/Text";
 import { AppStoreIcon } from "../components/IntegrationIcons";
 import { useAuth } from "../providers/AuthProvider";
 import { theme } from "../styles/theme";
+import { useDesktopReleaseLookup } from "../updates/useDesktopReleaseLookup";
 import { applyPageMeta } from "../utils/seo";
+import { DesktopDownloadActions } from "./install/DesktopDownloadActions";
 
 const HERO_DESCRIPTION = "Pick a surface and keep building in the same repo.";
-
-const FALLBACK_DESKTOP_APP_VERSION = "0.2.0";
-const DESKTOP_APP_STABLE_BASE_URL = "https://downloads.instafy.dev/desktop-app/stable";
-const DESKTOP_APP_LATEST_URL = `${DESKTOP_APP_STABLE_BASE_URL}/latest.json`;
-
-type DesktopAppDownloads = {
-  macDmg: string;
-  macArch: "arm64" | "x64";
-  windowsExe: string;
-  linuxAppImage?: string;
-};
-
-function parseDesktopArtifactUrl(value: unknown) {
-  if (typeof value !== "string") return null;
-  try {
-    const parsed = new URL(value);
-    if (
-      parsed.protocol !== "https:" ||
-      parsed.hostname !== "downloads.instafy.dev" ||
-      !parsed.pathname.startsWith("/desktop-app/stable/")
-    ) {
-      return null;
-    }
-    return parsed.toString();
-  } catch {
-    return null;
-  }
-}
-
-function parseDesktopAppLatestPayload(payload: unknown) {
-  if (!payload || typeof payload !== "object") return null;
-  const record = payload as Record<string, unknown>;
-  const version = record.version;
-  const tag = record.tag;
-  const channel = record.channel;
-  const feedUrl = record.feedUrl;
-  const publishedAt = record.publishedAt;
-  const sourceSha = record.sourceSha;
-  const artifacts = record.artifacts;
-  const architectures = record.architectures;
-  if (typeof version !== "string" || tag !== `desktop-app-v${version}`) return null;
-  if (
-    channel !== "stable" ||
-    feedUrl !== DESKTOP_APP_STABLE_BASE_URL ||
-    typeof publishedAt !== "string" ||
-    Number.isNaN(Date.parse(publishedAt)) ||
-    typeof sourceSha !== "string" ||
-    !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sourceSha)
-  ) {
-    return null;
-  }
-  if (!artifacts || typeof artifacts !== "object" || Array.isArray(artifacts)) return null;
-  if (!architectures || typeof architectures !== "object" || Array.isArray(architectures)) return null;
-  const artifactRecord = artifacts as Record<string, unknown>;
-  const architectureRecord = architectures as Record<string, unknown>;
-  const macArchitectures = architectureRecord.mac;
-  if (
-    !Array.isArray(macArchitectures) ||
-    macArchitectures.length !== 1 ||
-    !["arm64", "x64"].includes(macArchitectures[0])
-  ) {
-    return null;
-  }
-  const macArch = macArchitectures[0] as "arm64" | "x64";
-  const macDmg = parseDesktopArtifactUrl(artifactRecord.macDmg);
-  const windowsExe = parseDesktopArtifactUrl(artifactRecord.windowsExe);
-  const linuxAppImage = parseDesktopArtifactUrl(artifactRecord.linuxAppImage);
-  if (!macDmg || !macDmg.includes(`-mac-${macArch}.dmg`) || !windowsExe) return null;
-  return {
-    version,
-    tag,
-    channel,
-    feedUrl,
-    publishedAt,
-    artifacts: { macDmg, macArch, windowsExe, ...(linuxAppImage ? { linuxAppImage } : {}) },
-  };
-}
 
 const SECONDARY_BUTTON_CLASSNAME = [
   theme.button.secondary,
@@ -99,41 +24,15 @@ export function InstallPage() {
   const auth = useAuth();
   const user = auth.user;
 
-  const [desktopAppVersion, setDesktopAppVersion] = useState(FALLBACK_DESKTOP_APP_VERSION);
-  const [desktopAppArtifacts, setDesktopAppArtifacts] = useState<DesktopAppDownloads | null>(null);
+  const {
+    lookup: desktopReleaseLookup,
+    retry: retryDesktopRelease,
+  } = useDesktopReleaseLookup();
 
-  useEffect(() => {
-    const controller = new AbortController();
-
-    const timer = window.setTimeout(() => controller.abort(), 1500);
-    (async () => {
-      try {
-        const res = await fetch(DESKTOP_APP_LATEST_URL, { signal: controller.signal });
-        if (!res.ok) {
-          setDesktopAppArtifacts(null);
-          return;
-        }
-
-        const parsed = parseDesktopAppLatestPayload((await res.json()) as unknown);
-        if (!parsed) {
-          setDesktopAppArtifacts(null);
-          return;
-        }
-
-        setDesktopAppVersion(parsed.version);
-        setDesktopAppArtifacts(parsed.artifacts);
-      } catch {
-        // The signed stable feed is authoritative. Do not invent links to an
-        // installer version that has not passed the publication workflow.
-        setDesktopAppArtifacts(null);
-      }
-    })();
-
-    return () => {
-      window.clearTimeout(timer);
-      controller.abort();
-    };
-  }, []);
+  const desktopAppVersion =
+    desktopReleaseLookup.status === "available"
+      ? desktopReleaseLookup.manifest.version
+      : null;
 
   useEffect(() => {
     applyPageMeta({
@@ -153,8 +52,6 @@ export function InstallPage() {
     params.set("redirect", target);
     return `/login?${params.toString()}`;
   };
-
-  const desktopAppDownloads = desktopAppArtifacts;
 
   return (
     <div className="flex min-h-screen flex-col bg-gradient-to-b from-[#ffffff] via-white to-[#efefef] text-slate-900 dark:bg-none dark:bg-slate-950 dark:text-slate-100">
@@ -239,7 +136,10 @@ export function InstallPage() {
                   </div>
                 </div>
 
-                <div className="rounded-[28px] border border-slate-200 bg-white/90 p-6 shadow-card-lg dark:border-slate-800 dark:bg-slate-950/60 dark:shadow-modal">
+                <div
+                  id="desktop"
+                  className="scroll-mt-24 rounded-[28px] border border-slate-200 bg-white/90 p-6 shadow-card-lg dark:border-slate-800 dark:bg-slate-950/60 dark:shadow-modal"
+                >
                   <div className="flex items-start gap-4">
                     <span
                       aria-hidden="true"
@@ -252,7 +152,9 @@ export function InstallPage() {
                         <Heading level={2} variant="title">
                           Desktop app
                         </Heading>
-                        <Badge size="xs">v{desktopAppVersion}</Badge>
+                        {desktopAppVersion ? (
+                          <Badge size="xs">v{desktopAppVersion}</Badge>
+                        ) : null}
                       </div>
                       <Text variant="body" tone="muted" className="mt-1">
                         Install the native desktop Studio with Personal Browser and automatic updates.
@@ -260,42 +162,17 @@ export function InstallPage() {
                     </div>
                   </div>
 
-                  {desktopAppDownloads ? (
-                    <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
-                      <a
-                        className={SECONDARY_BUTTON_CLASSNAME}
-                        href={desktopAppDownloads.macDmg}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        {desktopAppDownloads.macArch === "arm64"
-                          ? "macOS Apple silicon (DMG)"
-                          : "macOS Intel (DMG)"}
-                      </a>
-                      <a
-                        className={SECONDARY_BUTTON_CLASSNAME}
-                        href={desktopAppDownloads.windowsExe}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        Windows (EXE)
-                      </a>
-                      {desktopAppDownloads.linuxAppImage ? (
-                        <a
-                          className={SECONDARY_BUTTON_CLASSNAME}
-                          href={desktopAppDownloads.linuxAppImage}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          Linux (AppImage)
-                        </a>
-                      ) : null}
-                    </div>
-                  ) : (
-                    <Text variant="caption" tone="muted" className="mt-5">
-                      Signed desktop installers are not published yet.
-                    </Text>
-                  )}
+                  <DesktopDownloadActions
+                    lookup={desktopReleaseLookup}
+                    onRetry={retryDesktopRelease}
+                  />
+                  <a
+                    href="instafy://studio"
+                    className="mt-4 inline-flex text-sm font-semibold text-primary-700 underline-offset-4 transition hover:text-primary-800 hover:underline dark:text-primary-300 dark:hover:text-primary-200"
+                    data-testid="open-desktop-app"
+                  >
+                    Already installed? Open Desktop
+                  </a>
                 </div>
               </div>
             </section>

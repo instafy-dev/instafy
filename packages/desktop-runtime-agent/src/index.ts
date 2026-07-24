@@ -35,6 +35,12 @@ export interface StartDesktopRuntimeOptions {
   env?: Record<string, string | undefined>;
   displayName?: string;
   /**
+   * Electron-only ownership contract. When true, the parent kills the complete
+   * process tree and dispositions the controller runtime after that proof.
+   * CLI callers must leave this false so the child handles Ctrl+C itself.
+   */
+  parentDispositionsRuntimeOnShutdown?: boolean;
+  /**
    * Short-lived capability for the Personal Browser hosted by the desktop
    * app. These values are deliberately not discovered from process.env or the
    * generic env bag: only the Electron host may opt a runtime into controlling
@@ -84,6 +90,50 @@ export const PERSONAL_BROWSER_CONTROL_ENV_KEYS = [
   "INSTAFY_PERSONAL_BROWSER_CONTROL_TOKEN",
   "INSTAFY_PERSONAL_BROWSER_PROJECT_ID",
 ] as const;
+export const DESKTOP_RUNTIME_PARENT_DISPOSITION_ENV =
+  "INSTAFY_RUNTIME_PARENT_DISPOSITION";
+// Must remain below the controller's expired-drain recovery proof window.
+// Electron-owned runtimes cannot inherit or override this safety cadence.
+export const DESKTOP_PARENT_DISPOSITION_HEARTBEAT_SECONDS = 60;
+
+export function desktopRuntimeUsesParentDisposition(
+  options: Pick<StartDesktopRuntimeOptions, "parentDispositionsRuntimeOnShutdown">,
+): boolean {
+  return options.parentDispositionsRuntimeOnShutdown === true;
+}
+
+export function createRetryableDesktopRuntimeStop(
+  operation: () => Promise<void>,
+): () => Promise<void> {
+  let inFlight: Promise<void> | null = null;
+  return () => {
+    if (inFlight) {
+      return inFlight;
+    }
+    const attempt = operation();
+    const retryable = attempt.catch((error) => {
+      if (inFlight === retryable) {
+        inFlight = null;
+      }
+      throw error;
+    });
+    inFlight = retryable;
+    return retryable;
+  };
+}
+
+export async function runDesktopRuntimeExitFinalizer<T>(
+  exited: Promise<T>,
+  finalizer: () => Promise<void>,
+): Promise<void> {
+  try {
+    await exited;
+  } catch {
+    // ChildProcess `error` rejects events.once(..., "exit"), but presence and
+    // other runtime-scoped resources still require the same finalization.
+  }
+  await finalizer();
+}
 
 function normalizeOptionalUuid(value: string | undefined, field: string): string | undefined {
   const trimmed = value?.trim();
@@ -160,10 +210,12 @@ export function applyProtectedDesktopRuntimeEnv(
     runtimeId?: string;
     runtimeBinaryPath?: string;
     personalBrowser?: DesktopPersonalBrowserControl;
+    parentDispositionsRuntimeOnShutdown?: boolean;
   },
 ): NodeJS.ProcessEnv {
   delete env.RUNTIME_ID;
   delete env.INSTAFY_RUNTIME_AGENT_BIN;
+  delete env[DESKTOP_RUNTIME_PARENT_DISPOSITION_ENV];
   for (const key of PERSONAL_BROWSER_CONTROL_ENV_KEYS) {
     delete env[key];
   }
@@ -175,6 +227,15 @@ export function applyProtectedDesktopRuntimeEnv(
   const runtimeBinaryPath = options.runtimeBinaryPath?.trim();
   if (runtimeBinaryPath) {
     env.INSTAFY_RUNTIME_AGENT_BIN = runtimeBinaryPath;
+  }
+  // Electron owns the complete process tree and is the only actor that can
+  // prove descendants are dead. The child must not requeue its lease on
+  // SIGINT before that proof exists.
+  if (desktopRuntimeUsesParentDisposition(options)) {
+    env[DESKTOP_RUNTIME_PARENT_DISPOSITION_ENV] = "1";
+    env.RUNTIME_HEARTBEAT_SECONDS = String(
+      DESKTOP_PARENT_DISPOSITION_HEARTBEAT_SECONDS,
+    );
   }
   Object.assign(
     env,
@@ -287,6 +348,71 @@ export type DesktopRuntimeChildStopTarget = {
   kill: (signal: NodeJS.Signals) => boolean;
 };
 
+type DesktopRuntimeChildStopOptions = {
+  sigintGraceMs?: number;
+  sigtermGraceMs?: number;
+  sigkillGraceMs?: number;
+  /** The real runtime owns a process group so Codex descendants cannot survive it. */
+  killProcessTree?: boolean;
+  platform?: NodeJS.Platform;
+  signalProcessGroup?: (pid: number, signal: NodeJS.Signals) => void;
+  isProcessGroupAlive?: (pid: number) => boolean;
+  terminateWindowsProcessTree?: (pid: number) => Promise<void>;
+};
+
+export function resolveWindowsTaskkillPath(
+  environment: NodeJS.ProcessEnv = process.env,
+): string {
+  const configuredRoot = environment.SystemRoot?.trim() || environment.windir?.trim();
+  const windowsRoot = configuredRoot && path.win32.isAbsolute(configuredRoot)
+    ? configuredRoot
+    : "C:\\Windows";
+  return path.win32.join(windowsRoot, "System32", "taskkill.exe");
+}
+
+async function terminateWindowsProcessTree(pid: number): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const taskkill = spawn(resolveWindowsTaskkillPath(), ["/PID", String(pid), "/T", "/F"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const finish = (error?: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeout) {
+        clearTimeout(timeout);
+        timeout = null;
+      }
+      if (error) {
+        reject(error);
+      } else {
+        resolve();
+      }
+    };
+    timeout = setTimeout(() => {
+      try {
+        taskkill.kill("SIGKILL");
+      } catch {
+        // The command may have exited while its timeout fired.
+      }
+      finish(new Error("taskkill timed out while terminating the desktop runtime tree"));
+    }, DESKTOP_RUNTIME_SIGKILL_GRACE_MS);
+    timeout.unref();
+    taskkill.once("error", (error) => finish(error));
+    taskkill.once("exit", (code) => {
+      if (code === 0) {
+        finish();
+      } else {
+        finish(new Error(`taskkill exited with code ${code ?? "unknown"}`));
+      }
+    });
+  });
+}
+
 async function promiseSettlesWithin(
   promise: Promise<unknown>,
   timeoutMs: number,
@@ -352,53 +478,135 @@ async function childExitsWithin(
   });
 }
 
+function unixProcessGroupIsAlive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return !(
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      (error as NodeJS.ErrnoException).code === "ESRCH"
+    );
+  }
+}
+
+async function processGroupExitsWithin(
+  pid: number,
+  exited: Promise<unknown>,
+  timeoutMs: number,
+  isProcessGroupAlive: (pid: number) => boolean,
+): Promise<boolean> {
+  if (!isProcessGroupAlive(pid)) {
+    return true;
+  }
+  return await new Promise<boolean>((resolve) => {
+    let finished = false;
+    const finish = (value: boolean) => {
+      if (finished) {
+        return;
+      }
+      finished = true;
+      clearInterval(poll);
+      clearTimeout(timeout);
+      resolve(value);
+    };
+    const poll = setInterval(() => {
+      if (!isProcessGroupAlive(pid)) {
+        finish(true);
+      }
+    }, Math.min(25, Math.max(1, timeoutMs)));
+    const timeout = setTimeout(() => finish(!isProcessGroupAlive(pid)), timeoutMs);
+    poll.unref();
+    timeout.unref();
+    // Root exit is only a hint. A descendant can keep the process group alive,
+    // so never resolve until the independent group probe says it is gone.
+    void exited.then(
+      () => {
+        if (!isProcessGroupAlive(pid)) {
+          finish(true);
+        }
+      },
+      () => undefined,
+    );
+  });
+}
+
 export async function stopDesktopRuntimeChildWithEscalation(
   child: DesktopRuntimeChildStopTarget,
   exited: Promise<unknown>,
-  options: {
-    sigintGraceMs?: number;
-    sigtermGraceMs?: number;
-    sigkillGraceMs?: number;
-  } = {},
+  options: DesktopRuntimeChildStopOptions = {},
 ): Promise<void> {
   const hasExited = () => child.exitCode !== null || child.signalCode !== null;
-  const signal = (value: NodeJS.Signals) => {
+  const platform = options.platform ?? process.platform;
+  const pid = child.pid;
+  const unixProcessTree = Boolean(
+    options.killProcessTree && platform !== "win32" && pid && pid > 0,
+  );
+  const isProcessGroupAlive = options.isProcessGroupAlive ?? unixProcessGroupIsAlive;
+  const targetHasExited = () =>
+    unixProcessTree && pid ? !isProcessGroupAlive(pid) : hasExited();
+  const targetExitsWithin = (timeoutMs: number) =>
+    unixProcessTree && pid
+      ? processGroupExitsWithin(pid, exited, timeoutMs, isProcessGroupAlive)
+      : childExitsWithin(child, exited, timeoutMs);
+
+  if (options.killProcessTree && platform === "win32" && pid && pid > 0) {
     if (hasExited()) {
+      // Electron-owned Windows runtimes install themselves into a fail-closed
+      // KILL_ON_JOB_CLOSE Job Object before they can spawn model processes.
+      // Root exit therefore proves that every descendant has been terminated.
+      return;
+    }
+    await (options.terminateWindowsProcessTree ?? terminateWindowsProcessTree)(pid);
+    if (!(await childExitsWithin(
+      child,
+      exited,
+      options.sigkillGraceMs ?? DESKTOP_RUNTIME_SIGKILL_GRACE_MS,
+    ))) {
+      throw new Error(`Desktop runtime ${pid} did not exit after terminating its process tree.`);
+    }
+    return;
+  }
+
+  const signal = (value: NodeJS.Signals) => {
+    if (targetHasExited()) {
       return;
     }
     try {
+      if (options.killProcessTree && pid && pid > 0) {
+        (options.signalProcessGroup ?? ((groupPid, groupSignal) => {
+          process.kill(-groupPid, groupSignal);
+        }))(pid, value);
+        return;
+      }
       child.kill(value);
     } catch {
-      // The exit event may be racing this signal. The bounded wait below
-      // decides whether another escalation is required.
+      // A just-exited process group can disappear before the child exit state
+      // updates. Fall back to the direct child signal; the bounded wait below
+      // remains authoritative.
+      try {
+        child.kill(value);
+      } catch {
+        // The exit event may be racing this signal.
+      }
     }
   };
 
-  if (hasExited()) {
+  if (targetHasExited()) {
     return;
   }
   signal("SIGINT");
-  if (await childExitsWithin(
-    child,
-    exited,
-    options.sigintGraceMs ?? DESKTOP_RUNTIME_SIGINT_GRACE_MS,
-  )) {
+  if (await targetExitsWithin(options.sigintGraceMs ?? DESKTOP_RUNTIME_SIGINT_GRACE_MS)) {
     return;
   }
   signal("SIGTERM");
-  if (await childExitsWithin(
-    child,
-    exited,
-    options.sigtermGraceMs ?? DESKTOP_RUNTIME_SIGTERM_GRACE_MS,
-  )) {
+  if (await targetExitsWithin(options.sigtermGraceMs ?? DESKTOP_RUNTIME_SIGTERM_GRACE_MS)) {
     return;
   }
   signal("SIGKILL");
-  if (!(await childExitsWithin(
-    child,
-    exited,
-    options.sigkillGraceMs ?? DESKTOP_RUNTIME_SIGKILL_GRACE_MS,
-  ))) {
+  if (!(await targetExitsWithin(options.sigkillGraceMs ?? DESKTOP_RUNTIME_SIGKILL_GRACE_MS))) {
     throw new Error(`Desktop runtime ${child.pid ?? "process"} did not exit after SIGKILL.`);
   }
 }
@@ -618,6 +826,8 @@ export async function startDesktopRuntime(
       runtimeId,
       runtimeBinaryPath: runtimeBinary,
       personalBrowser: options.personalBrowser,
+      parentDispositionsRuntimeOnShutdown:
+        desktopRuntimeUsesParentDisposition(options),
     },
   );
 
@@ -632,6 +842,12 @@ export async function startDesktopRuntime(
   const captureLogs = Boolean(logFilePath);
   const child = spawn(runtimeBinary, {
     env: childEnv,
+    // On Unix this creates a dedicated process group. Shutdown can therefore
+    // terminate both the Rust runtime and any local Codex descendants without
+    // risking orphaned work being requeued while it is still executing.
+    detached:
+      desktopRuntimeUsesParentDisposition(options) &&
+      process.platform !== "win32",
     stdio: captureLogs ? ["ignore", "pipe", "pipe"] : "inherit",
   });
 
@@ -723,25 +939,24 @@ export async function startDesktopRuntime(
       }
     })();
   }
-  void exited.then(() => {
+  void runDesktopRuntimeExitFinalizer(exited, async () => {
     stopPresenceRegistration = true;
-    return presence?.stop();
+    const presenceStop = presence?.stop().catch(() => {}) ?? Promise.resolve();
+    presence = null;
+    await promiseSettlesWithin(presenceStop, DESKTOP_RUNTIME_PRESENCE_STOP_GRACE_MS);
+  }).catch((error) => {
+    console.warn(`[instafy-desktop] runtime exit finalization failed: ${String(error)}`);
   });
 
-  let stopPromise: Promise<void> | null = null;
-  const stop = (): Promise<void> => {
-    if (stopPromise) {
-      return stopPromise;
-    }
-    stopPromise = (async () => {
+  const stop = createRetryableDesktopRuntimeStop(async () => {
       stopPresenceRegistration = true;
       const presenceStop = presence?.stop().catch(() => {}) ?? Promise.resolve();
       presence = null;
-      await stopDesktopRuntimeChildWithEscalation(child, exited);
+      await stopDesktopRuntimeChildWithEscalation(child, exited, {
+        killProcessTree: desktopRuntimeUsesParentDisposition(options),
+      });
       await promiseSettlesWithin(presenceStop, DESKTOP_RUNTIME_PRESENCE_STOP_GRACE_MS);
-    })();
-    return stopPromise;
-  };
+  });
 
   return {
     pid: child.pid ?? -1,

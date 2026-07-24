@@ -27,6 +27,11 @@ const STUCK_QUEUED_RUNTIME_HEARTBEAT_MAX_AGE_SECONDS: i64 = 60;
 const STUCK_REGISTERED_LOOP_WINDOW_SECONDS: i64 = 90;
 const STUCK_REGISTERED_EVENT_THRESHOLD: i64 = 8;
 const STUCK_QUEUED_RECOVERY_BATCH_SIZE: i64 = 20;
+// Desktop drain leases last 90 seconds and desktop runtimes heartbeat every
+// 60 seconds. Requiring a heartbeat in the final 70 seconds distinguishes a
+// live runtime whose Electron parent disappeared from one killed immediately
+// after its final drain renewal.
+pub(crate) const DRAIN_RECOVERY_HEARTBEAT_WINDOW_SECONDS: i64 = 70;
 const AUTO_STOP_STALE_RUNTIMES_QUERY: &str = "select id from runtimes
      where status not in ('stopped', 'offline', 'removed')
        and idle_ttl_seconds > 0
@@ -50,6 +55,7 @@ const RUNTIME_EVENT_CLEANUP_BATCH_SIZE: i64 = 5000;
 const RUNTIME_EVENT_CLEANUP_MAX_BATCHES_PER_RUN: u32 = 20;
 
 pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
+    resume_expired_runtime_drains(state).await?;
     let candidates = state.runtime_activity.idle_candidates().await;
 
     for (project_id, entry) in candidates {
@@ -78,6 +84,30 @@ pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
     auto_recover_stuck_queued_runtimes(state).await?;
     cleanup_terminal_runtime_records(state).await?;
 
+    Ok(())
+}
+
+pub(super) async fn resume_expired_runtime_drains(state: &AppState) -> AnyResult<()> {
+    let connection = state
+        .pool
+        .get()
+        .await
+        .context("failed to acquire connection for expired runtime drain recovery")?;
+    let resumed = connection
+        .execute(
+            "update runtimes
+             set status = 'ready', drain_expires_at = null, updated_at = now()
+             where status = 'draining'
+               and drain_expires_at <= now()
+               and last_seen_at > drain_expires_at
+                   - ($1::bigint * interval '1 second')",
+            &[&DRAIN_RECOVERY_HEARTBEAT_WINDOW_SECONDS],
+        )
+        .await
+        .context("failed to recover expired runtime drain leases")?;
+    if resumed > 0 {
+        info!(resumed, "recovered expired desktop runtime drain leases");
+    }
     Ok(())
 }
 

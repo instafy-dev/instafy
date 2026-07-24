@@ -1,5 +1,83 @@
 use std::io;
 
+const PARENT_DISPOSITION_ENV: &str = "INSTAFY_RUNTIME_PARENT_DISPOSITION";
+
+#[cfg(windows)]
+pub struct ParentOwnedProcessTreeGuard {
+    job: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(not(windows))]
+pub struct ParentOwnedProcessTreeGuard;
+
+#[cfg(windows)]
+impl Drop for ParentOwnedProcessTreeGuard {
+    fn drop(&mut self) {
+        // Closing the final non-inherited handle activates
+        // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE for every descendant.
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.job);
+        }
+    }
+}
+
+fn parent_disposition_requested(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|value| {
+        let value = value.to_string_lossy();
+        value == "1" || value.eq_ignore_ascii_case("true")
+    })
+}
+
+/// On Windows, bind an Electron-owned runtime and every process it spawns to
+/// one OS-enforced lifetime before Codex can start. Setup failures are fatal:
+/// continuing would let a root crash orphan a writer that Electron cannot
+/// identify safely after parent PID reuse.
+pub fn install_parent_owned_process_tree_guard() -> io::Result<Option<ParentOwnedProcessTreeGuard>>
+{
+    if !parent_disposition_requested(std::env::var_os(PARENT_DISPOSITION_ENV).as_deref()) {
+        return Ok(None);
+    }
+
+    #[cfg(windows)]
+    {
+        use std::ffi::c_void;
+        use std::mem::size_of;
+        use std::ptr;
+        use windows_sys::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject,
+        };
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        let job = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
+        if job.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let guard = ParentOwnedProcessTreeGuard { job };
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast::<c_void>(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if configured == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if unsafe { AssignProcessToJobObject(job, GetCurrentProcess()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        return Ok(Some(guard));
+    }
+
+    #[cfg(not(windows))]
+    Ok(None)
+}
+
 #[cfg(target_os = "linux")]
 const CAP_SYS_PTRACE_BIT: u32 = 19;
 

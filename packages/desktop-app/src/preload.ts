@@ -89,6 +89,7 @@ export type DesktopUpdaterStatus = {
   lastCheckedAt?: string;
   lastDownloadedAt?: string;
   lastError?: string;
+  lastInstallRequestAccepted?: boolean;
 };
 
 export type DesktopVoiceHostServiceStatus = {

@@ -139,6 +139,25 @@ export function readGroupParticipationDecision(
 
 export const SKILL_MODE_AMBIENT_PARTICIPATION_REASON = "skill_mode_ambient";
 
+export const AGENT_DECLINED_GROUP_PARTICIPATION_REASON = "agent_declined";
+
+/**
+ * Completed skill-mode ambient runs where the agent itself read the turn and
+ * stayed out (swallowed NO_RESPONSE) carry a controller-stamped
+ * `groupParticipation: { decision: "silent", reason: "agent_declined" }` on the
+ * run record. This is the signal that a viewer just witnessed Octo silently
+ * declining a group turn.
+ */
+export function readGroupParticipationAgentDeclined(
+  metadata: Record<string, unknown> | null | undefined,
+): boolean {
+  const participation = readRecord(metadata?.groupParticipation);
+  return (
+    participation?.decision === "silent" &&
+    participation.reason === AGENT_DECLINED_GROUP_PARTICIPATION_REASON
+  );
+}
+
 export type GroupParticipationAgentEvaluation = {
   reason: string | null;
   enforcedBy: string | null;

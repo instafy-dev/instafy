@@ -58,6 +58,30 @@ export function setEnvFileValue(filePath, key, value) {
   }
 }
 
+export function deleteEnvFileValue(filePath, key) {
+  try {
+    const content = fs.readFileSync(filePath, "utf-8");
+    const prefix = `${key}=`;
+    const lines = content.split(/\r?\n/);
+    const next = lines.filter((line) => !line.startsWith(prefix));
+    if (next.length === lines.length) {
+      return;
+    }
+    fs.writeFileSync(
+      filePath,
+      `${next.join("\n").replace(/\n+$/, "")}\n`,
+      "utf-8"
+    );
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return;
+    }
+    console.warn(
+      `[runtime-dev] Unable to delete ${key} from ${filePath}: ${error.message}`
+    );
+  }
+}
+
 export async function ensureServiceRuntimeUserId(supabaseEnv = {}) {
   const supabaseUrlRaw =
     process.env.SUPABASE_PROJECT_URL ||

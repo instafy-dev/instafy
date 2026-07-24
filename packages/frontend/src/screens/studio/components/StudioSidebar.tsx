@@ -61,10 +61,13 @@ import {
 const { list: listControllerOrganizations } = controllerClient.organizations;
 import { otaIsSupportedOnThisClient } from "../../../mobile/ota/shared";
 import {
-  collectAppReleaseMetadata,
+  resolveDesktopDownloadFeedback,
   summarizeAppUpdateState,
-  type AppReleaseMetadata,
 } from "../../../updates/releaseMetadata";
+import { canOfferDesktopAcquisition } from "../../../updates/desktopAcquisition";
+import { DESKTOP_APP_PUBLIC_LATEST_URL } from "../../../updates/desktopReleaseManifest";
+import { useAppUpdateMetadata } from "../../../updates/useAppUpdateMetadata";
+import { useDesktopReleaseLookup } from "../../../updates/useDesktopReleaseLookup";
 import { StudioSidebarAccountSection } from "./StudioSidebarAccountSection";
 import { StudioSidebarMobileDrillIn } from "./StudioSidebarMobileDrillIn";
 import { StudioSidebarMorePanels } from "./StudioSidebarMorePanels";
@@ -144,7 +147,6 @@ export function StudioSidebar({
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false);
   const [updateDialogShowDetails, setUpdateDialogShowDetails] = useState(false);
   const [updateActionPending, setUpdateActionPending] = useState(false);
-  const [updateMetadata, setUpdateMetadata] = useState<AppReleaseMetadata | null>(null);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [workspaceMobileViewOpen, setWorkspaceMobileViewOpen] = useState(false);
   const [workspaceOrgKey, setWorkspaceOrgKey] = useState("personal");
@@ -165,6 +167,13 @@ export function StudioSidebar({
   const { logs: appLogs, hasLogs: hasAppLogs, hasErrors: hasAppLogErrors, clearLogs: clearAppLogs } =
     useAppLogs();
   const isLargeScreen = useStudioDesktopLayout();
+  const desktopAcquisitionSurface = canOfferDesktopAcquisition();
+  const { lookup: desktopReleaseLookup } = useDesktopReleaseLookup({
+    enabled: desktopAcquisitionSurface,
+    manifestUrl: DESKTOP_APP_PUBLIC_LATEST_URL,
+  });
+  const showInstallEntry =
+    desktopAcquisitionSurface && desktopReleaseLookup.status === "available";
   const isExpanded = !collapsed;
   const showLabels = isExpanded;
   const collapsedSidebarDensity =
@@ -346,6 +355,10 @@ export function StudioSidebar({
     return parts[0].slice(0, 2).toUpperCase();
   })();
   const updateEntrySupported = desktopUpdaterBridgeAvailable() || otaIsSupportedOnThisClient();
+  const {
+    metadata: updateMetadata,
+    refresh: refreshUpdateMetadata,
+  } = useAppUpdateMetadata(updateEntrySupported);
   const updatePresentation = useMemo(
     () => (updateMetadata ? summarizeAppUpdateState(updateMetadata) : null),
     [updateMetadata],
@@ -429,16 +442,6 @@ export function StudioSidebar({
     setNotificationsEnabled(areMessageNotificationsEnabled());
   }, [profileMenuOpen]);
 
-  const refreshUpdateMetadata = useCallback(async () => {
-    if (!updateEntrySupported) {
-      setUpdateMetadata(null);
-      return null;
-    }
-    const next = await collectAppReleaseMetadata().catch(() => null);
-    setUpdateMetadata(next);
-    return next;
-  }, [updateEntrySupported]);
-
   useEffect(() => {
     if (!profileMenuOpen && !updateDialogOpen) {
       return;
@@ -510,10 +513,17 @@ export function StudioSidebar({
     try {
       if (current.runtime_surface === "desktop") {
         if (current.updates.primary_action === "download") {
-          await downloadDesktopUpdaterNow();
-          showStatus("Downloading desktop update.", "success", 2500);
+          const result = await downloadDesktopUpdaterNow();
+          const nextMeta = await refreshUpdateMetadata();
+          const feedback = resolveDesktopDownloadFeedback(result, nextMeta);
+          showStatus(feedback.message, feedback.intent, feedback.intent === "error" ? 3500 : 3000);
+          return;
         } else if (current.updates.primary_action === "install") {
-          await installDesktopUpdaterNow();
+          const result = await installDesktopUpdaterNow();
+          if (result?.lastInstallRequestAccepted === false) {
+            showStatus("Update kept for later.", "info", 2500);
+            return;
+          }
           showStatus("Restarting to install update.", "success", 2500);
         } else if (current.updates.primary_action === "check") {
           const next = await checkDesktopUpdaterNow();
@@ -1524,6 +1534,7 @@ export function StudioSidebar({
         accountSubtitle={accountSubtitle}
         resolvedTheme={resolvedTheme}
         onThemeModeChange={setThemeMode}
+        showInstallEntry={showInstallEntry}
         shouldRenderUpdateEntry={shouldRenderUpdateEntry}
         updatePresentation={updatePresentation}
         onUpdateEntryClick={handleUpdateEntryClick}

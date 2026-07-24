@@ -33,7 +33,9 @@ import { ComposerInviteModal } from "./ComposerInviteModal";
 import { ChatBrowserDock } from "./ChatBrowserDock";
 import { ChatInput, type ChatInputHandle } from "./chat-input/ChatInput";
 import { ChatSendQueueSurface } from "./ChatSendQueueSurface";
+import { ConversationRoster } from "./ConversationRoster";
 import { OctoAgentChip } from "./OctoAgentChip";
+import { OctoSilenceHint } from "./OctoSilenceHint";
 import { StatusPill, StatusPillButton, type StatusPillTone } from "./StatusPill";
 import { VoiceConversationActionStrip } from "./VoiceConversationActionStrip";
 import { ProviderTriggerNotice } from "../../../extensions/ProviderTriggerNotice";
@@ -101,6 +103,8 @@ type ChatComposerSurfaceProps = {
   inviteModalProps: ComponentProps<typeof ComposerInviteModal>;
   mutationDisabled?: boolean;
   accessNotice?: string | null;
+  rosterProps?: ComponentProps<typeof ConversationRoster> | null;
+  silenceHintProps?: ComponentProps<typeof OctoSilenceHint> | null;
 };
 
 function resolveGoalStatusPillTone(tone: ConversationGoalHealth["tone"]): StatusPillTone {
@@ -172,6 +176,8 @@ export function ChatComposerSurface({
   inviteModalProps,
   mutationDisabled = false,
   accessNotice = null,
+  rosterProps = null,
+  silenceHintProps = null,
 }: ChatComposerSurfaceProps) {
   const showVoiceSecondaryStatus = showVoicePrimaryAction && showVoiceStatus;
   const showVoiceActiveStrip = showVoicePrimaryAction && showVoiceSecondaryStatus;
@@ -483,6 +489,12 @@ export function ChatComposerSurface({
                 {accessNotice}
               </div>
             ) : null}
+            {rosterProps ? (
+              <div className="mx-1 flex justify-end sm:mx-2">
+                <ConversationRoster {...rosterProps} />
+              </div>
+            ) : null}
+            {silenceHintProps ? <OctoSilenceHint {...silenceHintProps} /> : null}
             <ChatSendQueueSurface {...queueSurfaceProps} mutationDisabled={mutationDisabled} />
             <Surface
               tone="default"

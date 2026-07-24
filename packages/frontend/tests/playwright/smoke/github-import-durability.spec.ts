@@ -16,6 +16,45 @@ import {
 
 const WORKSPACE_BUSY_RETRY_DELAYS_MS = [250, 500, 1_000, 2_000, 4_000, 8_000] as const;
 
+function resolveGithubImportToken(): string | undefined {
+  return (
+    process.env.GITHUB_CANONICAL_IMPORT_TOKEN?.trim() ||
+    process.env.GH_TESTING_TOKEN?.trim() ||
+    undefined
+  );
+}
+
+async function provisionProjectGithubToken(params: {
+  page: Page;
+  projectId: string;
+  accessToken: string;
+}): Promise<void> {
+  const githubToken = resolveGithubImportToken();
+  if (!githubToken) {
+    return;
+  }
+
+  const response = await params.page.context().request.post(
+    `${getControllerUrl()}/projects/${encodeURIComponent(params.projectId)}/secrets`,
+    {
+      headers: {
+        authorization: `Bearer ${params.accessToken}`,
+        "content-type": "application/json",
+        accept: "application/json",
+      },
+      data: {
+        name: "GITHUB_TOKEN",
+        value: githubToken,
+        description: "Ephemeral token for the canonical GitHub import E2E proof.",
+        agentHandles: [],
+      },
+    },
+  );
+  if (!response.ok()) {
+    throw new Error(`Failed to provision GitHub import token (${response.status()}).`);
+  }
+}
+
 // A newly opened Studio project bootstraps managed project-memory files in the
 // background. That short mutation owns the same workspace lease as an import,
 // whose explicit workspace_busy response is safe to retry with this stable key.
@@ -103,6 +142,7 @@ test.describe("GitHub import durability", () => {
         repo: "octocat/Hello-World",
         targetPath,
         idempotencyKey,
+        githubToken: resolveGithubImportToken(),
       },
     });
 
@@ -238,6 +278,17 @@ test.describe("GitHub import durability", () => {
     const targetPath = deriveGithubImportTargetPath(repo);
     const importStartedAt = Date.now();
     const prompt = `Continue working on my project https://github.com/${repo}`;
+
+    const session = await captureAuthenticatedSession(page);
+    const accessToken = session?.accessToken?.trim() ?? "";
+    if (!accessToken) {
+      throw new Error("Authenticated session missing access token for GitHub import.");
+    }
+    await provisionProjectGithubToken({
+      page,
+      projectId: activeProjectId,
+      accessToken,
+    });
 
     await page.getByTestId("chat-input").fill(prompt);
     await page.getByTestId("chat-send-button").click();

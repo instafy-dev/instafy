@@ -1,10 +1,62 @@
 import { describe, expect, it } from "vitest";
 import {
+  doesWorkspaceTabMatchPanelRoute,
   resolveLeftDrawerFromSearch,
   resolvePendingUrlSearchSync,
   resolveProjectScopedWorkspaceRouteValues,
   resolveWorkspaceUrlSyncBaseSearch,
 } from "../useStudioLayoutWorkspaceRouting";
+
+describe("doesWorkspaceTabMatchPanelRoute", () => {
+  it("requires the active tab to render the routed Files workspace", () => {
+    expect(
+      doesWorkspaceTabMatchPanelRoute({ panel: "code", tabKind: "panel", tabPanel: "code" }),
+    ).toBe(true);
+    expect(
+      doesWorkspaceTabMatchPanelRoute({ panel: "code", tabKind: "file", tabPanel: null }),
+    ).toBe(true);
+    expect(
+      doesWorkspaceTabMatchPanelRoute({
+        panel: "code",
+        tabKind: "conversation",
+        tabPanel: null,
+      }),
+    ).toBe(false);
+  });
+
+  it("accepts conversation-backed Chat tabs but not unrelated panels", () => {
+    expect(
+      doesWorkspaceTabMatchPanelRoute({
+        panel: "chat",
+        tabKind: "conversation",
+        tabPanel: null,
+      }),
+    ).toBe(true);
+    expect(
+      doesWorkspaceTabMatchPanelRoute({ panel: "chat", tabKind: "jobThread", tabPanel: null }),
+    ).toBe(true);
+    expect(
+      doesWorkspaceTabMatchPanelRoute({ panel: "chat", tabKind: "panel", tabPanel: "home" }),
+    ).toBe(false);
+  });
+
+  it("requires exact panel tabs for the remaining routed panels", () => {
+    expect(
+      doesWorkspaceTabMatchPanelRoute({
+        panel: "settings",
+        tabKind: "panel",
+        tabPanel: "settings",
+      }),
+    ).toBe(true);
+    expect(
+      doesWorkspaceTabMatchPanelRoute({
+        panel: "settings",
+        tabKind: "panel",
+        tabPanel: "projects",
+      }),
+    ).toBe(false);
+  });
+});
 
 describe("resolveLeftDrawerFromSearch", () => {
   it("restores only supported drawer values from browser history", () => {

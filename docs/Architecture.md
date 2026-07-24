@@ -8,6 +8,20 @@ Instafy Studio is a chat-first filesystem UI backed by the runtime controller. T
 - **Runtime agent**: applies prompts and file edits inside a workspace.
 - **AI proxy**: all model traffic must flow through the proxy (`PROXY_BASE_URL`).
 
+## Build-Time Feature Composition
+
+The public frontend is the complete default application. Optional product
+integrations are selected at build time through
+`INSTAFY_FRONTEND_FEATURE_MANIFEST`; the default manifest contains only the
+public-core feature module.
+
+Feature modules contribute typed assistants, capabilities, routes, native
+extensions, runtime families, and background Studio runtime bridges. The
+composition rejects duplicate identifiers. Integration-owned implementation
+and branded UI stay in the integration package, while the application depends
+only on the generic feature API. This is deliberately a trusted build-time
+plugin seam, not a runtime marketplace or arbitrary remote-code loader.
+
 ## Filesystem Model
 - Hosted workers materialize per-space workspaces under `WORKSPACE_ROOT/<project_id>`.
 - Desktop/local-canonical mode can point directly at the user's chosen folder instead of materializing a hosted checkout.

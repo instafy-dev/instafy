@@ -112,7 +112,7 @@ export function LandingPage() {
                         to="/install"
                         className="inline-flex items-center justify-center whitespace-nowrap px-2 py-2 text-sm font-semibold text-slate-600 underline-offset-4 transition hover:text-slate-900 hover:underline dark:text-slate-300 dark:hover:text-white"
                       >
-                        Install on your phone
+                        Install Instafy
                       </Link>
                     </div>
                   </div>

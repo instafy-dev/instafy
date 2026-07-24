@@ -341,15 +341,25 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
       const nextTabs: WorkspaceTabState[] = [...conversationTabs, ...nonConversationTabs];
       tabsRef.current = nextTabs;
       setTabs(nextTabs);
+      seenConversationIdsRef.current = new Set(conversations.map((entry) => entry.localId));
+      conversationAutoOpenStartRef.current = Date.now();
+      appliedProjectRef.current = workspaceProjectId;
+
+      const currentActiveId = activeTabIdRef.current;
+      const current = currentActiveId
+        ? nextTabs.find((tab) => tab.id === currentActiveId) ?? null
+        : null;
+      if (current) {
+        setActiveTabInternal(current, { syncPanel: false, syncConversation: false });
+        return;
+      }
+
       const target = nextTabs.find(
         (tab) => tab.kind === "conversation" && tab.conversationId === conversation.localId
       );
       if (target) {
         setActiveTabInternal(target, { syncPanel: false });
       }
-      seenConversationIdsRef.current = new Set(conversations.map((entry) => entry.localId));
-      conversationAutoOpenStartRef.current = Date.now();
-      appliedProjectRef.current = workspaceProjectId;
       return;
     }
 

@@ -1,5 +1,5 @@
 ## Pin the Rust image to keep CI build caches warm (avoid nightly churn).
-ARG RUST_TOOLCHAIN=1.94.0
+ARG RUST_TOOLCHAIN=1.95.0
 ARG RUST_IMAGE=rust:${RUST_TOOLCHAIN}-slim-bookworm
 ARG GO_VERSION=1.26.5
 ARG NODE_IMAGE=node:24-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d
@@ -32,7 +32,8 @@ WORKDIR /src
 COPY packages/browser-egress-proxy/go.mod ./
 COPY packages/browser-egress-proxy/ ./
 RUN go test ./...
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/browser-egress-proxy .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/browser-egress-proxy . \
+    && go version -m /out/browser-egress-proxy >/dev/null
 
 ########################
 # Shared Browser WebRTC sender
@@ -45,7 +46,8 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY packages/browser-webrtc-sender/ ./
 RUN --mount=type=cache,target=/go/pkg/mod go test ./...
 RUN --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/browser-webrtc-sender .
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/browser-webrtc-sender . \
+    && go version -m /out/browser-webrtc-sender >/dev/null
 
 ########################
 # Instafy CLI builder
@@ -205,6 +207,11 @@ COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/runtime-agent /us
 COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox /usr/local/bin/codex-linux-sandbox
 COPY --from=browser-egress-proxy-builder /out/browser-egress-proxy /usr/local/bin/browser-egress-proxy
 COPY --from=browser-webrtc-builder /out/browser-webrtc-sender /usr/local/bin/browser-webrtc-sender
+RUN set -eu; \
+    for binary in /usr/local/bin/browser-egress-proxy /usr/local/bin/browser-webrtc-sender; do \
+      magic="$(od -An -tx1 -N4 "${binary}" | tr -d ' \n')"; \
+      [ "${magic}" = "7f454c46" ] || { echo "Invalid ELF helper binary: ${binary}" >&2; exit 1; }; \
+    done
 COPY --from=cli-builder /out /opt/instafy-cli
 
 RUN install -m 0755 /usr/local/bin/codex-linux-sandbox /usr/local/bin/codex-linux-sandbox.real \
@@ -313,6 +320,11 @@ COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/runtime-agent /us
 COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox /usr/local/bin/codex-linux-sandbox
 COPY --from=browser-egress-proxy-builder /out/browser-egress-proxy /usr/local/bin/browser-egress-proxy
 COPY --from=browser-webrtc-builder /out/browser-webrtc-sender /usr/local/bin/browser-webrtc-sender
+RUN set -eu; \
+    for binary in /usr/local/bin/browser-egress-proxy /usr/local/bin/browser-webrtc-sender; do \
+      magic="$(od -An -tx1 -N4 "${binary}" | tr -d ' \n')"; \
+      [ "${magic}" = "7f454c46" ] || { echo "Invalid ELF helper binary: ${binary}" >&2; exit 1; }; \
+    done
 COPY --from=cli-builder /out /opt/instafy-cli
 
 RUN install -m 0755 /usr/local/bin/codex-linux-sandbox /usr/local/bin/codex-linux-sandbox.real \

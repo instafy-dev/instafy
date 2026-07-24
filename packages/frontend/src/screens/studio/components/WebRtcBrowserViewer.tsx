@@ -31,6 +31,7 @@ export type WebRtcBrowserViewerProps = {
   inputWsUrl: string | null;
   inputAvailable: boolean;
   accessToken: string;
+  connectionGeneration: number;
   iceServers: RTCIceServer[];
   relayOnly: boolean;
   renderScale: number;
@@ -217,6 +218,7 @@ export function WebRtcBrowserViewer({
   inputWsUrl,
   inputAvailable,
   accessToken,
+  connectionGeneration,
   iceServers,
   relayOnly,
   renderScale,
@@ -456,7 +458,14 @@ export function WebRtcBrowserViewer({
       video.pause();
       video.srcObject = null;
     };
-  }, [accessToken, iceServers, notifyConnectedIfReady, offerUrl, relayOnly]);
+  }, [
+    accessToken,
+    connectionGeneration,
+    iceServers,
+    notifyConnectedIfReady,
+    offerUrl,
+    relayOnly,
+  ]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -595,7 +604,13 @@ export function WebRtcBrowserViewer({
       video.removeEventListener("loadedmetadata", handleLoadedMetadata);
       video.removeEventListener("resize", handleLoadedMetadata);
     };
-  }, [inputAvailable, inputWsUrl, notifyConnectedIfReady, renderScale]);
+  }, [
+    connectionGeneration,
+    inputAvailable,
+    inputWsUrl,
+    notifyConnectedIfReady,
+    renderScale,
+  ]);
 
   useEffect(() => {
     if ((!inputAvailable || !inputEnabled) && document.activeElement === videoRef.current) {
