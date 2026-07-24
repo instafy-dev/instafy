@@ -35,7 +35,9 @@ export default defineConfig({
     personalBrowserPageBridge: "src/personalBrowserPageBridge.ts",
     personalBrowserInputShield: "src/personalBrowserInputShield.ts",
     personalBrowserControlServer: "src/personalBrowserControlServer.ts",
-    bundledRuntimeAgent: "src/bundledRuntimeAgent.ts"
+    bundledRuntimeAgent: "src/bundledRuntimeAgent.ts",
+    desktopRuntimeActivity: "src/desktopRuntimeActivity.ts",
+    desktopUpdaterDownload: "src/desktopUpdaterDownload.ts"
   },
   outDir: "dist",
   format: ["cjs"],

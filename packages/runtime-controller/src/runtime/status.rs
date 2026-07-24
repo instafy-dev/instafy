@@ -5,7 +5,7 @@ use anyhow::{Context, Result as AnyResult};
 use axum::extract::{Path, Query};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 use tokio_postgres::types::ToSql;
@@ -104,6 +104,19 @@ pub(crate) struct RuntimeStatusResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     preferred_runtime_id: Option<String>,
 }
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RuntimeDrainResponse {
+    ok: bool,
+    contract_version: u8,
+    runtime_id: String,
+    status: String,
+    active_job_count: i64,
+    drain_expires_at: Option<DateTime<Utc>>,
+}
+
+const RUNTIME_DRAIN_LEASE_SECONDS: i64 = 90;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -600,6 +613,135 @@ pub(crate) async fn load_runtime_status_response(
     project_id: &Uuid,
 ) -> Result<RuntimeStatusResponse, (StatusCode, Json<ApiError>)> {
     load_runtime_status_response_for_viewer(state, transaction, project_id, None, true).await
+}
+
+/// Fence a user-owned desktop runtime from taking another lease while allowing
+/// its already-leased job to heartbeat and complete. Electron calls this only
+/// after the user chooses to wait for a safe quit/update restart.
+#[instrument(skip(state, headers))]
+pub(super) async fn drain_runtime(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Path((project_id_raw, runtime_id_raw)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<RuntimeDrainResponse>, (StatusCode, Json<ApiError>)> {
+    set_runtime_drain_state(state, project_id_raw, runtime_id_raw, headers, true).await
+}
+
+#[instrument(skip(state, headers))]
+pub(super) async fn resume_runtime(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Path((project_id_raw, runtime_id_raw)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Json<RuntimeDrainResponse>, (StatusCode, Json<ApiError>)> {
+    set_runtime_drain_state(state, project_id_raw, runtime_id_raw, headers, false).await
+}
+
+async fn set_runtime_drain_state(
+    state: AppState,
+    project_id_raw: String,
+    runtime_id_raw: String,
+    headers: HeaderMap,
+    should_drain: bool,
+) -> Result<Json<RuntimeDrainResponse>, (StatusCode, Json<ApiError>)> {
+    let project_id = Uuid::from_str(project_id_raw.trim())
+        .map_err(|_| bad_request("project_id must be a valid UUID"))?;
+    let runtime_id = Uuid::from_str(runtime_id_raw.trim())
+        .map_err(|_| bad_request("runtime_id must be a valid UUID"))?;
+    let auth_context = authenticate_request(&state.config, &headers, None).await?;
+
+    let mut connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| database_unavailable("Runtime drain", error))?;
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|error| database_unavailable("Runtime drain", error))?;
+
+    let project = load_project_record(&transaction, &project_id).await?;
+    ensure_project_write_access(&transaction, &project, &auth_context, None).await?;
+
+    let row = transaction
+        .query_opt(
+            "select provider, capabilities, status
+             from runtimes
+             where id = $1 and project_id = $2
+             for update",
+            &[&runtime_id, &project_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load runtime for drain: {error}")))?;
+    let Some(row) = row else {
+        return Err(crate::not_found("runtime not found for project"));
+    };
+    let provider: String = row.get("provider");
+    let capabilities: JsonValue = row.get("capabilities");
+    let status: String = row.get("status");
+    if !super::access::runtime_is_private_self_hosted(&state, &provider, &capabilities) {
+        return Err(crate::forbidden(
+            "Only a private self-hosted runtime can be drained by its desktop owner",
+        ));
+    }
+    super::access::ensure_self_hosted_runtime_access(
+        &state,
+        &provider,
+        &capabilities,
+        auth_context.user_id,
+        auth_context.is_service_role,
+    )?;
+
+    if !matches!(status.as_str(), "ready" | "running" | "draining") {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ApiError::new(format!(
+                "runtime cannot change drain state from status {status}"
+            ))),
+        ));
+    }
+
+    let target_status = if should_drain { "draining" } else { "ready" };
+    let drain_expires_at =
+        should_drain.then(|| Utc::now() + ChronoDuration::seconds(RUNTIME_DRAIN_LEASE_SECONDS));
+    transaction
+        .execute(
+            "update runtimes
+             set status = $3,
+                 drain_expires_at = $4,
+                 updated_at = now()
+             where id = $1 and project_id = $2",
+            &[&runtime_id, &project_id, &target_status, &drain_expires_at],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to change runtime drain state: {error}"))
+        })?;
+
+    let active_job_count: i64 = transaction
+        .query_one(
+            "select count(*)::bigint
+             from agent_jobs
+             where leased_by_runtime_id = $1
+               and status = 'leased'",
+            &[&runtime_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to count draining jobs: {error}")))?
+        .get(0);
+
+    transaction
+        .commit()
+        .await
+        .map_err(|error| internal_error(format!("failed to finalize runtime drain: {error}")))?;
+
+    Ok(Json(RuntimeDrainResponse {
+        ok: true,
+        contract_version: 1,
+        runtime_id: runtime_id.to_string(),
+        status: target_status.to_string(),
+        active_job_count,
+        drain_expires_at,
+    }))
 }
 
 async fn load_runtime_status_response_for_viewer(

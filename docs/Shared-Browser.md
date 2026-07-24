@@ -8,7 +8,7 @@ Shared Browser is the isolated, web/mobile-compatible browser identity. Cookies,
 
 ## Runtime eligibility
 
-Shared Browser is an Instafy Cloud collaboration surface, not a way to expose a contributor's self-hosted runtime. Studio accepts only the exact canonical managed `instafy-cloud` route. The controller independently enforces the same rule before origin view/control grants, browser-only job creation, durable browser-profile GET/PUT, and privileged provider authentication. An ordinary or custom self-hosted runtime remains private to its immutable controller-attested owner even when its project is shared; a cloud-looking provider label or prefix cannot create managed-cloud authority. Personal Browser is never shareable.
+Shared Browser is an Instafy Cloud collaboration surface, not a way to expose a contributor's self-hosted runtime. Studio accepts only the exact canonical managed `instafy-cloud` route. The controller independently enforces the same rule before origin view/control grants, browser-only job creation, durable browser-profile GET/PUT, profile reset, and privileged provider authentication. An ordinary or custom self-hosted runtime remains private to its immutable controller-attested owner even when its project is shared; a cloud-looking provider label or prefix cannot create managed-cloud authority. Personal Browser is never shareable.
 
 The managed browser image is also a controller/provider decision. Studio asks
 for the harmless `runtimeFlavor: "webdev"`; it never sends an image reference
@@ -485,6 +485,36 @@ and control-plane destinations for Chromium navigation. The per-origin plus
 one-shot confirmation policy above is the sensitive-site action policy for
 otherwise public sites; a future denylist may reduce prompt volume but is not
 an authorization substitute.
+
+## Shared profile persistence and clearing
+
+Durable Shared Browser state reuses the Project Secrets security boundary
+rather than introducing another vault. The controller encrypts the pruned
+Chromium archive with the same AES-GCM key, stores one controller-only row per
+project/scope, and restores it only to an exact active managed-cloud lease with
+the dedicated `agent.browser_profile` scope. Cookies, Local Storage, Session
+Storage, IndexedDB, and required Chromium identity files are included; caches
+and browsing history are not. The row is overwritten rather than accumulated
+and is retained until a writer clears it or the project/organization is
+deleted. There is no separate inactivity TTL.
+
+Builders and higher roles get one **Clear shared browser data** action in the
+existing browser bar. After confirmation, `DELETE
+/projects/:project_id/browser-profile` stops every potentially live trusted
+managed runtime through the provider-fenced release path, takes the project
+launch fence, rechecks that no replacement runtime can hold the decrypted
+profile, and only then deletes the encrypted row. Provider ambiguity, failed
+release, or a concurrent replacement fails closed and retains the row for a
+safe retry. The action remains available after a project is removed from the
+persistence allowlist so policy rollback cannot strand stored login material.
+Viewers cannot invoke it. A successful clear ends the current shared session
+and Studio starts one fresh browser; the client suppresses automatic reconnect
+while deletion is in flight.
+
+This lifecycle deliberately adds neither a second secret system nor a new
+audit ledger. Existing browser access grants retain the actor, project, scope,
+lease, issuance, and expiry boundary. A future team activity stream may add a
+small `profile_cleared` event, but that is not required for safe persistence.
 
 ## Operational notes
 

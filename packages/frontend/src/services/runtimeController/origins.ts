@@ -275,6 +275,12 @@ export async function fetchOriginSummary(
     const endpoint =
       buildControllerOriginProxyEndpoint(originId) || endpointNormalized;
     const mode = typeof payload.mode === "string" ? payload.mode : "unknown";
+    const runtimeId =
+      typeof payload.runtime_id === "string"
+        ? payload.runtime_id
+        : typeof payload.runtimeId === "string"
+          ? payload.runtimeId
+          : null;
     const protocols = Array.isArray(payload.protocols)
       ? (payload.protocols as unknown[]).map((value) => String(value))
       : undefined;
@@ -350,6 +356,7 @@ export async function fetchOriginSummary(
 
     return {
       originId,
+      runtimeId,
       endpoint,
       mode,
       protocols,
@@ -721,6 +728,12 @@ export function mapOriginSummaryFromPayload(
         ? (data["originMode"] as string).trim()
         : "";
   const mode = modeRaw || "desktop";
+  const runtimeId =
+    typeof data["runtimeId"] === "string"
+      ? (data["runtimeId"] as string).trim() || null
+      : typeof data["runtime_id"] === "string"
+        ? (data["runtime_id"] as string).trim() || null
+        : null;
 
   const protocolsSourceValue = Array.isArray(data["protocols"])
     ? (data["protocols"] as unknown[])
@@ -807,6 +820,7 @@ export function mapOriginSummaryFromPayload(
 
   return {
     originId: originIdRaw,
+    runtimeId,
     endpoint: endpointForClient,
     mode,
     protocols,

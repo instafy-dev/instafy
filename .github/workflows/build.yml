@@ -42,6 +42,9 @@ jobs:
           sudo install -m 0755 "$RUNNER_TEMP/gitleaks" /usr/local/bin/gitleaks
           test "$(gitleaks version)" = "$GITLEAKS_VERSION"
 
+      - name: Enforce public repository boundary
+        run: node scripts/check-public-boundary.mjs
+
       - name: Scan introduced commits
         env:
           PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}

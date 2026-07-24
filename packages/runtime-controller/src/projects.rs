@@ -5029,127 +5029,145 @@ async fn bootstrap_project_memory_scaffold(
         }
     };
 
-    let write_token = mint_scoped_token(
-        &state.config,
-        ScopedTokenRequest {
-            audience: origin.id.to_string(),
-            subject: token_subject,
-            project_id: project_id.to_string(),
-            origin_id: Some(origin.id.to_string()),
-            runtime_id: None,
-            protocol: Some("http".to_string()),
-            scopes: vec!["fs.write".to_string()],
-            lease_id: Some(lease_id.to_string()),
-            run_id: None,
-            prefer_runtime: None,
-            ttl_seconds: Some(300),
-        },
-    )?;
+    // Axum drops a handler future when the client navigates away or otherwise
+    // cancels its request. Once this one-shot mutation owns a workspace lease,
+    // keep the apply + release sequence in a detached task so request
+    // cancellation cannot strand that lease until its 180-second expiry.
+    let task_state = state.clone();
+    let task_project_id = *project_id;
+    let task_origin_id = origin.id;
+    let apply_task = tokio::spawn(async move {
+        let apply_result: Result<BootstrapProjectMemoryOutcome, (StatusCode, Json<ApiError>)> =
+            async {
+                let write_token = mint_scoped_token(
+                    &task_state.config,
+                    ScopedTokenRequest {
+                        audience: task_origin_id.to_string(),
+                        subject: token_subject,
+                        project_id: task_project_id.to_string(),
+                        origin_id: Some(task_origin_id.to_string()),
+                        runtime_id: None,
+                        protocol: Some("http".to_string()),
+                        scopes: vec!["fs.write".to_string()],
+                        lease_id: Some(lease_id.to_string()),
+                        run_id: None,
+                        prefer_runtime: None,
+                        ttl_seconds: Some(300),
+                    },
+                )?;
 
-    let apply_result: Result<BootstrapProjectMemoryOutcome, (StatusCode, Json<ApiError>)> = async {
-        let (archive, manifest_files) =
-            build_project_memory_archive(&files_to_write).map_err(|error| {
-                internal_error(format!("failed to build bootstrap archive: {error}"))
-            })?;
-
-        let manifest = json!({
-            "projectId": project_id.to_string(),
-            "leaseId": lease_id.to_string(),
-            "generatedAt": Utc::now().to_rfc3339(),
-            "files": manifest_files,
-            "deletes": [],
-            // Ensure managed defaults never leave git-canonical workspaces dirty when we
-            // introduce new template files (for example new default skills).
-            "autoCommitAfterApply": true,
-            "commitMessage": "instafy: bootstrap project memory",
-        });
-
-        let manifest_json = serde_json::to_vec(&manifest).map_err(|error| {
-            internal_error(format!("failed to serialize bootstrap manifest: {error}"))
-        })?;
-
-        let apply_url = format!("{endpoint}/apply");
-        let form = Form::new()
-            .part(
-                "manifest",
-                Part::bytes(manifest_json)
-                    .file_name("manifest.json")
-                    .mime_str("application/json")
+                let (archive, manifest_files) = build_project_memory_archive(&files_to_write)
                     .map_err(|error| {
-                        internal_error(format!("failed to build manifest part: {error}"))
-                    })?,
-            )
-            .part(
-                "archive",
-                Part::bytes(archive)
-                    .file_name("workspace.zip")
-                    .mime_str("application/zip")
-                    .map_err(|error| {
-                        internal_error(format!("failed to build archive part: {error}"))
-                    })?,
-            );
+                        internal_error(format!("failed to build bootstrap archive: {error}"))
+                    })?;
 
-        let response = timeout(
-            StdDuration::from_secs(ORIGIN_APPLY_TIMEOUT_SECS),
-            state
-                .http_client
-                .post(apply_url)
-                .bearer_auth(write_token.token)
-                .multipart(form)
-                .send(),
+                let manifest = json!({
+                    "projectId": task_project_id.to_string(),
+                    "leaseId": lease_id.to_string(),
+                    "generatedAt": Utc::now().to_rfc3339(),
+                    "files": manifest_files,
+                    "deletes": [],
+                    // Ensure managed defaults never leave git-canonical workspaces dirty when we
+                    // introduce new template files (for example new default skills).
+                    "autoCommitAfterApply": true,
+                    "commitMessage": "instafy: bootstrap project memory",
+                });
+
+                let manifest_json = serde_json::to_vec(&manifest).map_err(|error| {
+                    internal_error(format!("failed to serialize bootstrap manifest: {error}"))
+                })?;
+
+                let apply_url = format!("{endpoint}/apply");
+                let form = Form::new()
+                    .part(
+                        "manifest",
+                        Part::bytes(manifest_json)
+                            .file_name("manifest.json")
+                            .mime_str("application/json")
+                            .map_err(|error| {
+                                internal_error(format!("failed to build manifest part: {error}"))
+                            })?,
+                    )
+                    .part(
+                        "archive",
+                        Part::bytes(archive)
+                            .file_name("workspace.zip")
+                            .mime_str("application/zip")
+                            .map_err(|error| {
+                                internal_error(format!("failed to build archive part: {error}"))
+                            })?,
+                    );
+
+                let response = timeout(
+                    StdDuration::from_secs(ORIGIN_APPLY_TIMEOUT_SECS),
+                    task_state
+                        .http_client
+                        .post(apply_url)
+                        .bearer_auth(write_token.token)
+                        .multipart(form)
+                        .send(),
+                )
+                .await
+                .map_err(|_| internal_error("origin apply request timed out"))?
+                .map_err(|error| internal_error(format!("origin apply request failed: {error}")))?;
+
+                let status = response.status();
+                if !status.is_success() {
+                    let body = response.text().await.unwrap_or_default();
+                    return Err(internal_error(format!(
+                        "origin apply failed ({}): {}",
+                        status.as_u16(),
+                        body
+                    )));
+                }
+
+                let payload = response
+                    .json::<serde_json::Value>()
+                    .await
+                    .map_err(|error| {
+                        internal_error(format!("origin apply response invalid: {error}"))
+                    })?;
+                let rev = payload
+                    .get("rev")
+                    .and_then(|value| value.as_str())
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
+
+                Ok(BootstrapProjectMemoryOutcome {
+                    seeded: true,
+                    file_count: files_to_write.len(),
+                    rev,
+                    reason: None,
+                })
+            }
+            .await;
+
+        if let Err(error) = release_lease(
+            &task_state.pool,
+            &lease_id,
+            &task_project_id,
+            actor_user_id.as_ref(),
+            None,
+            "released",
         )
         .await
-        .map_err(|_| internal_error("origin apply request timed out"))?
-        .map_err(|error| internal_error(format!("origin apply request failed: {error}")))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(internal_error(format!(
-                "origin apply failed ({}): {}",
-                status.as_u16(),
-                body
-            )));
+        {
+            tracing::warn!(
+                project_id = %task_project_id,
+                lease_id = %lease_id,
+                error = %error,
+                "failed to release project memory bootstrap lease"
+            );
         }
 
-        let payload = response
-            .json::<serde_json::Value>()
-            .await
-            .map_err(|error| internal_error(format!("origin apply response invalid: {error}")))?;
-        let rev = payload
-            .get("rev")
-            .and_then(|value| value.as_str())
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
+        apply_result
+    });
 
-        Ok(BootstrapProjectMemoryOutcome {
-            seeded: true,
-            file_count: files_to_write.len(),
-            rev,
-            reason: None,
-        })
-    }
-    .await;
-
-    if let Err(error) = release_lease(
-        &state.pool,
-        &lease_id,
-        &project_id,
-        actor_user_id.as_ref(),
-        None,
-        "released",
-    )
-    .await
-    {
-        tracing::warn!(
-            project_id = %project_id,
-            lease_id = %lease_id,
-            error = %error,
-            "failed to release project memory bootstrap lease"
-        );
-    }
-
-    apply_result
+    apply_task.await.map_err(|error| {
+        internal_error(format!(
+            "project memory bootstrap apply task failed: {error}"
+        ))
+    })?
 }
 
 async fn read_project_memory_managed_defaults_state(

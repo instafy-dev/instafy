@@ -19,6 +19,10 @@ import {
   resolveLocalSupabaseServiceRoleKey,
 } from "./lib/localSupabaseEnv.mjs";
 import { ensureSupabaseEmailTemplateMounts } from "./lib/supabaseEmailTemplateMounts.mjs";
+import {
+  buildSupabaseStartArgs,
+  parseSupabaseDatabaseOnly,
+} from "./lib/supabaseStartMode.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -92,20 +96,36 @@ function readSupabaseEnv() {
 
 function startSupabase() {
   syncSupabaseMigrationsDir();
-  console.log("[supabase-stack] Starting Supabase local stack...");
+  const databaseOnly = parseSupabaseDatabaseOnly(process.env.SUPABASE_DATABASE_ONLY);
+  const startArgs = buildSupabaseStartArgs(process.env.SUPABASE_DATABASE_ONLY);
+  console.log(
+    databaseOnly
+      ? "[supabase-stack] Starting database-only Supabase..."
+      : "[supabase-stack] Starting Supabase local stack...",
+  );
   try {
-    runSupabase(["start"]);
+    runSupabase(startArgs);
   } catch (error) {
     console.warn(`[supabase-stack] Supabase start failed: ${error.message}`);
-    console.warn("[supabase-stack] Retrying with --ignore-health-check...");
+    console.warn(
+      databaseOnly
+        ? "[supabase-stack] Retrying Supabase Postgres startup..."
+        : "[supabase-stack] Retrying with --ignore-health-check...",
+    );
     try {
       runSupabase(["stop"]);
     } catch (stopError) {
       console.warn(`[supabase-stack] Supabase stop after failed start: ${stopError.message}`);
     }
-    runSupabase(["start", "--ignore-health-check"]);
+    runSupabase(
+      buildSupabaseStartArgs(process.env.SUPABASE_DATABASE_ONLY, {
+        ignoreHealthCheck: !databaseOnly,
+      }),
+    );
   }
-  ensureSupabaseEmailTemplateMounts({ projectDir: supabaseProjectDir });
+  if (!databaseOnly) {
+    ensureSupabaseEmailTemplateMounts({ projectDir: supabaseProjectDir });
+  }
   ensureTmpDir();
   fs.writeFileSync(supabaseFlag, String(Date.now()));
   applySupabaseMigrations();
@@ -114,10 +134,13 @@ function startSupabase() {
 }
 
 function ensureSupabase() {
+  const databaseOnly = parseSupabaseDatabaseOnly(process.env.SUPABASE_DATABASE_ONLY);
   const existingEnv = readSupabaseEnv();
   if (existingEnv) {
     console.log("[supabase-stack] Supabase already running.");
-    ensureSupabaseEmailTemplateMounts({ projectDir: supabaseProjectDir });
+    if (!databaseOnly) {
+      ensureSupabaseEmailTemplateMounts({ projectDir: supabaseProjectDir });
+    }
     applySupabaseMigrations();
     return { env: existingEnv, started: false };
   }

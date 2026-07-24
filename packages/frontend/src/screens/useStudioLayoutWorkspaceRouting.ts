@@ -127,6 +127,28 @@ function isStudioPanel(value: string | null): value is StudioPanel {
   );
 }
 
+export function doesWorkspaceTabMatchPanelRoute({
+  panel,
+  tabKind,
+  tabPanel,
+}: {
+  panel: StudioPanel;
+  tabKind: string | null;
+  tabPanel: StudioPanel | null;
+}): boolean {
+  if (panel === "chat") {
+    return (
+      tabKind === "conversation" ||
+      tabKind === "jobThread" ||
+      (tabKind === "panel" && tabPanel === "chat")
+    );
+  }
+  if (panel === "code") {
+    return tabKind === "file" || (tabKind === "panel" && tabPanel === "code");
+  }
+  return tabKind === "panel" && tabPanel === panel;
+}
+
 function isLeftDrawerPanel(value: string | null): value is LeftDrawerPanel {
   return value === "history" || value === "files" || value === "sourceControl";
 }
@@ -333,17 +355,29 @@ export function useStudioLayoutWorkspaceRouting({
     if (suppressQueryEffectRef.current) {
       suppressQueryEffectRef.current = false;
     }
+    const params = new URLSearchParams(locationSearch);
+    const panelParam = params.get("panel");
+    const panelRouteNeedsReconciliation =
+      isStudioPanel(panelParam) &&
+      !doesWorkspaceTabMatchPanelRoute({
+        panel: panelParam,
+        tabKind: activeWorkspaceTabKind,
+        tabPanel: activeWorkspaceTabPanel,
+      });
     const sameSearchAsLastHydration = lastHydratedSearchRef.current === locationSearch;
     const hasPendingConversationHydration =
       pendingConversationIdRef.current !== null || pendingConversationControllerIdRef.current !== null;
-    if (sameSearchAsLastHydration && !hasPendingConversationHydration) {
+    if (
+      sameSearchAsLastHydration &&
+      !hasPendingConversationHydration &&
+      !panelRouteNeedsReconciliation
+    ) {
       return;
     }
     if (peekUrlNavigation() !== null) {
       return;
     }
     lastHydratedSearchRef.current = locationSearch;
-    const params = new URLSearchParams(locationSearch);
     let applied = false;
     let resolvedConversationLocalId = activeConversationId ?? null;
 
@@ -413,17 +447,14 @@ export function useStudioLayoutWorkspaceRouting({
       pendingConversationControllerIdRef.current = null;
     }
 
-    const panelParam = params.get("panel");
     const resolvedPanelParam = panelParam;
-    const isPanelTabMismatch = (() => {
-      if (!isStudioPanel(resolvedPanelParam)) {
-        return false;
-      }
-      if (resolvedPanelParam === "chat" || resolvedPanelParam === "code") {
-        return false;
-      }
-      return activeWorkspaceTabKind !== "panel" || activeWorkspaceTabPanel !== resolvedPanelParam;
-    })();
+    const isPanelTabMismatch =
+      isStudioPanel(resolvedPanelParam) &&
+      !doesWorkspaceTabMatchPanelRoute({
+        panel: resolvedPanelParam,
+        tabKind: activeWorkspaceTabKind,
+        tabPanel: activeWorkspaceTabPanel,
+      });
     if (
       isStudioPanel(resolvedPanelParam) &&
       (resolvedPanelParam !== activePanel || isPanelTabMismatch)
@@ -575,10 +606,16 @@ export function useStudioLayoutWorkspaceRouting({
 
     const params = new URLSearchParams(locationSearch);
     const panelParam = params.get("panel");
-    if (!isStudioPanel(panelParam) || panelParam === "chat" || panelParam === "code") {
+    if (!isStudioPanel(panelParam)) {
       return;
     }
-    if (activeWorkspaceTabKind === "panel" && activeWorkspaceTabPanel === panelParam) {
+    if (
+      doesWorkspaceTabMatchPanelRoute({
+        panel: panelParam,
+        tabKind: activeWorkspaceTabKind,
+        tabPanel: activeWorkspaceTabPanel,
+      })
+    ) {
       return;
     }
 

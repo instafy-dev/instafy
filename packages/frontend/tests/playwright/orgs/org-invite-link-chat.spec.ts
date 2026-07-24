@@ -115,7 +115,6 @@ test.describe("Org invite link chat", () => {
     await page.getByTestId("chat-send-button").click();
     await createConversationResponse;
 
-    await expect(page.getByTestId("assistant-typing-indicator")).toBeVisible({ timeout: 10_000 });
     await expect(page.getByTestId("assistant-setup-indicator")).toHaveCount(0, { timeout: 120_000 });
     await expect(page.getByTestId("assistant-typing-indicator")).toHaveCount(0, { timeout: 180_000 });
     await waitForAssistantReply(page, { projectId, expectedText: /\b2\b/ });
@@ -234,7 +233,6 @@ test.describe("Org invite link chat", () => {
       const followUpPrompt = "Now add 3 to the result. Reply with just the number no other text.";
       await memberPage.getByTestId("chat-input").fill(followUpPrompt);
       await memberPage.getByTestId("chat-send-button").click();
-      await expect(memberPage.getByTestId("assistant-typing-indicator")).toBeVisible({ timeout: 10_000 });
       await waitForAssistantReply(memberPage, { projectId, expectedText: /\b5\b/, recoveryTimeoutMs: 180_000 });
 
       await page.getByTestId("sidebar-nav-chat").click();

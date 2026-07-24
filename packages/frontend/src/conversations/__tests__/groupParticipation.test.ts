@@ -5,6 +5,7 @@ import {
   hasVisibleAssistantMessageForRun,
   isSkillModeAmbientDispatchMetadata,
   markPendingAgentEvaluationRun,
+  readGroupParticipationAgentDeclined,
   readGroupParticipationAgentEvaluation,
   resolveGroupParticipationReplyTargets,
   shouldResolveAmbientGroupParticipation,
@@ -393,5 +394,47 @@ describe("agent evaluation presence suppression", () => {
     expect(marks.size).toBe(200);
     expect(marks.has("run-0")).toBe(false);
     expect(marks.has("run-200")).toBe(true);
+  });
+});
+
+describe("readGroupParticipationAgentDeclined", () => {
+  it("detects the controller-stamped swallowed decline marker", () => {
+    expect(
+      readGroupParticipationAgentDeclined({
+        groupParticipation: {
+          decision: "silent",
+          reason: "agent_declined",
+          enforcedBy: "runtime-controller",
+        },
+      }),
+    ).toBe(true);
+  });
+
+  it("ignores other silent reasons, other decisions, and missing metadata", () => {
+    expect(
+      readGroupParticipationAgentDeclined({
+        groupParticipation: {
+          decision: "silent",
+          reason: "participation_resolver_unavailable",
+        },
+      }),
+    ).toBe(false);
+    expect(
+      readGroupParticipationAgentDeclined({
+        groupParticipation: {
+          decision: "agent_evaluation",
+          reason: "skill_mode_ambient",
+        },
+      }),
+    ).toBe(false);
+    expect(
+      readGroupParticipationAgentDeclined({
+        groupParticipation: { decision: "respond", reason: "agent_declined" },
+      }),
+    ).toBe(false);
+    expect(readGroupParticipationAgentDeclined({ groupParticipation: null })).toBe(false);
+    expect(readGroupParticipationAgentDeclined({})).toBe(false);
+    expect(readGroupParticipationAgentDeclined(null)).toBe(false);
+    expect(readGroupParticipationAgentDeclined(undefined)).toBe(false);
   });
 });

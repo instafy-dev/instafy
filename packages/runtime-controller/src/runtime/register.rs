@@ -806,7 +806,14 @@ pub(crate) async fn runtime_register(
         .query_one(
             r#"
             update runtimes
-            set status = 'ready',
+            set status = case
+                    when status = 'draining' and drain_expires_at > now() then 'draining'
+                    else 'ready'
+                end,
+                drain_expires_at = case
+                    when status = 'draining' and drain_expires_at > now() then drain_expires_at
+                    else null
+                end,
                 endpoint_url = $1,
                 task_ref = $2,
                 capabilities = coalesce($3::jsonb, '{}'::jsonb),

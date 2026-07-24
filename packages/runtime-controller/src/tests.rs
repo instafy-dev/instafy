@@ -364,6 +364,37 @@ fn decode_scoped_token_round_trip() {
 }
 
 #[tokio::test]
+async fn concurrent_browser_profile_table_initialization_is_deadlock_free() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping browser profile schema concurrency test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let initialize_all = async {
+        let mut initializers = tokio::task::JoinSet::new();
+        for _ in 0..10 {
+            let pool = pool.clone();
+            initializers.spawn(async move {
+                crate::browser_profile::ensure_browser_profiles_table(&pool).await
+            });
+        }
+        while let Some(result) = initializers.join_next().await {
+            result.map_err(|error| {
+                anyhow::anyhow!("browser profile initializer panicked: {error}")
+            })??;
+        }
+        Ok::<_, anyhow::Error>(())
+    };
+
+    timeout(std::time::Duration::from_secs(10), initialize_all)
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("parallel browser profile table initialization timed out")
+        })??;
+    Ok(())
+}
+
+#[tokio::test]
 async fn delete_project_purges_durable_browser_profile() -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {
         eprintln!("skipping browser profile deletion test: TEST_DATABASE_URL not set");
@@ -469,6 +500,326 @@ async fn delete_project_purges_durable_browser_profile() -> anyhow::Result<()> {
         .get(0);
     assert_eq!(profile_count, 0);
     drop(connection);
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn project_builder_can_reset_browser_profile_after_policy_revocation() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping browser profile reset authorization test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    crate::browser_profile::ensure_browser_profiles_table(&pool).await?;
+
+    let project_id = Uuid::new_v4();
+    let builder_user_id = Uuid::new_v4();
+    let viewer_user_id = Uuid::new_v4();
+    let private_runtime_id = Uuid::new_v4();
+    ensure_test_user(&pool, &builder_user_id).await?;
+    ensure_test_user(&pool, &viewer_user_id).await?;
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into projects (id, project_type, status)
+                 values ($1, 'customer', 'active')",
+                &[&project_id],
+            )
+            .await?;
+        for (user_id, role) in [(builder_user_id, "builder"), (viewer_user_id, "viewer")] {
+            connection
+                .execute(
+                    "insert into project_memberships (project_id, user_id, role)
+                     values ($1, $2, $3)",
+                    &[&project_id, &user_id, &role],
+                )
+                .await?;
+        }
+        connection
+            .execute(
+                "insert into project_browser_profiles
+                   (id, project_id, scope, version, nonce_b64, ciphertext_b64, bytes)
+                 values ($1, $2, 'project', 1, 'nonce', 'ciphertext', 10)",
+                &[&Uuid::new_v4(), &project_id],
+            )
+            .await?;
+        let private_capabilities = json!({
+            "_instafySelfHostedAccess": {
+                "mode": "private",
+                "ownerUserId": viewer_user_id.to_string(),
+            }
+        });
+        connection
+            .execute(
+                "insert into runtimes
+                   (id, project_id, provider, status, capabilities,
+                    idle_ttl_seconds, last_seen_at)
+                 values ($1, $2, 'instafy-cloud', 'ready', $3, 600, now())",
+                &[&private_runtime_id, &project_id, &private_capabilities],
+            )
+            .await?;
+    }
+
+    // Intentionally leave the persistence allowlist empty. Removing rollout
+    // access must not make already-stored shared login state impossible to
+    // clear.
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "browser-profile-reset-authorization",
+    );
+    let builder_token = crate::auth::issue_controller_token(&config, &builder_user_id)
+        .expect("mint builder token")
+        .token;
+    let viewer_token = crate::auth::issue_controller_token(&config, &viewer_user_id)
+        .expect("mint viewer token")
+        .token;
+    let app = crate::browser_profile::router().with_state(build_test_state(pool.clone(), config));
+
+    let viewer_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/projects/{project_id}/browser-profile"))
+                .header("authorization", format!("Bearer {viewer_token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(viewer_response.status(), StatusCode::FORBIDDEN);
+    let profile_count: i64 = pool
+        .get()
+        .await?
+        .query_one(
+            "select count(*) from project_browser_profiles where project_id = $1",
+            &[&project_id],
+        )
+        .await?
+        .get(0);
+    assert_eq!(profile_count, 1, "viewer denial must retain the profile");
+
+    let builder_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/projects/{project_id}/browser-profile"))
+                .header("authorization", format!("Bearer {builder_token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(builder_response.status(), StatusCode::OK);
+    let builder_body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(builder_response.into_body(), usize::MAX).await?)?;
+    assert_eq!(builder_body["ok"], true);
+    assert_eq!(builder_body["cleared"], true);
+    assert_eq!(builder_body["stoppedRuntimeIds"], json!([]));
+    let private_runtime_status: String = pool
+        .get()
+        .await?
+        .query_one(
+            "select status from runtimes where id = $1",
+            &[&private_runtime_id],
+        )
+        .await?
+        .get("status");
+    assert_eq!(
+        private_runtime_status, "ready",
+        "profile reset must not stop a protected private runtime even when its provider id is canonical"
+    );
+
+    let repeated_response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/projects/{project_id}/browser-profile"))
+                .header("authorization", format!("Bearer {builder_token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(repeated_response.status(), StatusCode::OK);
+    let repeated_body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(repeated_response.into_body(), usize::MAX).await?)?;
+    assert_eq!(repeated_body["cleared"], false);
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_test_user(&pool, &builder_user_id).await?;
+    cleanup_test_user(&pool, &viewer_user_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn browser_profile_reset_retains_profile_when_provider_release_cannot_be_proven(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping browser profile reset release test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    crate::browser_profile::ensure_browser_profiles_table(&pool).await?;
+
+    let project_id = Uuid::new_v4();
+    let runtime_id = Uuid::new_v4();
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into projects (id, project_type, status)
+                 values ($1, 'customer', 'active')",
+                &[&project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into project_browser_profiles
+                   (id, project_id, scope, version, nonce_b64, ciphertext_b64, bytes)
+                 values ($1, $2, 'project', 1, 'nonce', 'ciphertext', 10)",
+                &[&Uuid::new_v4(), &project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runtimes (
+                     id, project_id, provider, status, endpoint_url, task_ref,
+                     idle_ttl_seconds, last_seen_at, updated_at
+                 ) values (
+                     $1, $2, 'instafy-cloud', 'offline', 'http://runtime.invalid',
+                     'browser-profile-reset-runtime', 600, now(), now()
+                 )",
+                &[&runtime_id, &project_id],
+            )
+            .await?;
+    }
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "browser-profile-reset-provider-release",
+    );
+    let app = crate::browser_profile::router().with_state(build_test_state(pool.clone(), config));
+    let reset_request = || {
+        Request::builder()
+            .method("DELETE")
+            .uri(format!("/projects/{project_id}/browser-profile"))
+            .header("authorization", "Bearer service-role-token")
+            .body(Body::empty())
+    };
+
+    let failed_reset = app.clone().oneshot(reset_request()?).await?;
+    let failed_status = failed_reset.status();
+    let failed_body = to_bytes(failed_reset.into_body(), usize::MAX).await?;
+    assert_eq!(
+        failed_status,
+        StatusCode::CONFLICT,
+        "unexpected reset response: {}",
+        String::from_utf8_lossy(&failed_body)
+    );
+    let failed_json: serde_json::Value = serde_json::from_slice(&failed_body)?;
+    assert_eq!(
+        failed_json["message"],
+        "provider-managed runtime is missing its active lease generation"
+    );
+    {
+        let connection = pool.get().await?;
+        let profile_count: i64 = connection
+            .query_one(
+                "select count(*) from project_browser_profiles where project_id = $1",
+                &[&project_id],
+            )
+            .await?
+            .get(0);
+        assert_eq!(
+            profile_count, 1,
+            "ambiguous provider cleanup must retain the encrypted profile"
+        );
+        let runtime = connection
+            .query_one(
+                "select status, active_lease_id from runtimes where id = $1",
+                &[&runtime_id],
+            )
+            .await?;
+        assert_eq!(runtime.get::<_, String>("status"), "offline");
+        assert_eq!(runtime.get::<_, Option<Uuid>>("active_lease_id"), None);
+
+        // `removed` is also only a local lifecycle state. Without an ordered
+        // provider-release acknowledgement it must remain fail-closed just
+        // like an offline heartbeat.
+        connection
+            .execute(
+                "update runtimes set status = 'removed', updated_at = now() where id = $1",
+                &[&runtime_id],
+            )
+            .await?;
+    }
+
+    let removed_reset = app.clone().oneshot(reset_request()?).await?;
+    let removed_status = removed_reset.status();
+    let removed_body = to_bytes(removed_reset.into_body(), usize::MAX).await?;
+    assert_eq!(
+        removed_status,
+        StatusCode::CONFLICT,
+        "unexpected removed-runtime reset response: {}",
+        String::from_utf8_lossy(&removed_body)
+    );
+    let removed_json: serde_json::Value = serde_json::from_slice(&removed_body)?;
+    assert_eq!(
+        removed_json["message"],
+        "provider-managed runtime is missing its active lease generation"
+    );
+    {
+        let connection = pool.get().await?;
+        let profile_count: i64 = connection
+            .query_one(
+                "select count(*) from project_browser_profiles where project_id = $1",
+                &[&project_id],
+            )
+            .await?
+            .get(0);
+        assert_eq!(
+            profile_count, 1,
+            "removed runtime without provider proof must retain the encrypted profile"
+        );
+
+        // Model operator/provider recovery proving the runtime terminal. The
+        // idempotent retry may now clear the retained encrypted profile.
+        connection
+            .execute(
+                "update runtimes
+                 set status = 'stopped', endpoint_url = null, task_ref = null,
+                     last_seen_at = null, updated_at = now()
+                 where id = $1",
+                &[&runtime_id],
+            )
+            .await?;
+    }
+
+    let successful_reset = app.oneshot(reset_request()?).await?;
+    assert_eq!(successful_reset.status(), StatusCode::OK);
+    let successful_body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(successful_reset.into_body(), usize::MAX).await?)?;
+    assert_eq!(successful_body["cleared"], true);
+    assert_eq!(successful_body["stoppedRuntimeIds"], json!([]));
+
+    {
+        let connection = pool.get().await?;
+        let profile_count: i64 = connection
+            .query_one(
+                "select count(*) from project_browser_profiles where project_id = $1",
+                &[&project_id],
+            )
+            .await?
+            .get(0);
+        assert_eq!(profile_count, 0);
+        let runtime = connection
+            .query_one(
+                "select status, active_lease_id from runtimes where id = $1",
+                &[&runtime_id],
+            )
+            .await?;
+        assert_eq!(runtime.get::<_, String>("status"), "stopped");
+        assert_eq!(runtime.get::<_, Option<Uuid>>("active_lease_id"), None);
+    }
 
     cleanup_origin_project(&pool, &project_id).await?;
     Ok(())
@@ -11926,6 +12277,136 @@ async fn acquire_fresh_lease_serializes_concurrent_first_claims() -> anyhow::Res
 }
 
 #[tokio::test]
+async fn project_memory_bootstrap_releases_lease_after_request_cancellation() -> anyhow::Result<()>
+{
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping project memory cancellation test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let project_id = Uuid::new_v4();
+    let owner_user_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "INSERT INTO projects (id, owner_user_id, project_type, status)
+                 VALUES ($1, $2, 'customer', 'active')",
+                &[&project_id, &owner_user_id],
+            )
+            .await?;
+    }
+
+    let apply_started = Arc::new(tokio::sync::Notify::new());
+    let finish_apply = Arc::new(tokio::sync::Notify::new());
+    let origin_app = axum::Router::new()
+        .route(
+            "/apply",
+            axum::routing::post({
+                let apply_started = apply_started.clone();
+                let finish_apply = finish_apply.clone();
+                move |_body: axum::body::Bytes| {
+                    let apply_started = apply_started.clone();
+                    let finish_apply = finish_apply.clone();
+                    async move {
+                        apply_started.notify_one();
+                        finish_apply.notified().await;
+                        AxumJson(json!({
+                            "rev": "project-memory-rev",
+                            "fileCount": 24,
+                            "bytesWritten": 1024,
+                        }))
+                    }
+                }
+            }),
+        )
+        .fallback(|| async { StatusCode::NOT_FOUND });
+    let origin_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let origin_address = origin_listener.local_addr()?;
+    let origin_handle = tokio::spawn(async move {
+        axum::serve(origin_listener, origin_app)
+            .await
+            .expect("serve project memory cancellation origin");
+    });
+
+    let mut config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "project-memory-cancellation",
+    );
+    config.hosted_origin_endpoint = Some(format!("http://{origin_address}"));
+    let app = crate::projects::router().with_state(build_test_state(pool.clone(), config));
+    let bootstrap_task = tokio::spawn(async move {
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/projects/{project_id}/memory/bootstrap"))
+                .header("authorization", "Bearer service-role-token")
+                .body(Body::empty())
+                .expect("project memory bootstrap request"),
+        )
+        .await
+    });
+
+    timeout(std::time::Duration::from_secs(10), apply_started.notified())
+        .await
+        .map_err(|_| anyhow::anyhow!("project memory apply did not start"))?;
+
+    let lease_id: Uuid = {
+        let connection = pool.get().await?;
+        connection
+            .query_one(
+                "SELECT id
+                 FROM workspace_leases
+                 WHERE project_id = $1
+                   AND status = 'active'
+                   AND metadata ->> 'source' = 'project_memory_bootstrap'",
+                &[&project_id],
+            )
+            .await?
+            .get("id")
+    };
+
+    // Model a browser navigation dropping the controller request while the
+    // origin mutation is in flight. The inner apply/release task must outlive
+    // this outer request future.
+    bootstrap_task.abort();
+    let cancellation = bootstrap_task
+        .await
+        .expect_err("outer bootstrap request should be cancelled");
+    assert!(cancellation.is_cancelled());
+    finish_apply.notify_one();
+
+    timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let connection = pool.get().await?;
+            let row = connection
+                .query_one(
+                    "SELECT status, released_at
+                     FROM workspace_leases
+                     WHERE id = $1",
+                    &[&lease_id],
+                )
+                .await?;
+            let status: String = row.get("status");
+            let released_at: Option<chrono::DateTime<Utc>> = row.get("released_at");
+            if status == "released" && released_at.is_some() {
+                return Ok::<(), anyhow::Error>(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("detached project memory task did not release its lease"))??;
+
+    origin_handle.abort();
+    cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn record_commit_receipt_persists_payload() -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {
         eprintln!("skipping commit receipt test: TEST_DATABASE_URL not set");
@@ -12087,6 +12568,9 @@ async fn post_access_token_mints_signed_token_and_publishes_event() -> anyhow::R
     let project_id = Uuid::new_v4();
     let origin_id = Uuid::new_v4();
     let user_id = Uuid::new_v4();
+    let runtime_id = Uuid::new_v4();
+    let runtime_lease_id = Uuid::new_v4();
+    let origin_instance_id = Uuid::new_v4();
     let private_pem = test_origin_private_key();
     let public_pem = test_origin_public_key();
 
@@ -12103,9 +12587,44 @@ async fn post_access_token_mints_signed_token_and_publishes_event() -> anyhow::R
             .await?;
         connection
             .execute(
+                "INSERT INTO runtimes
+                   (id, project_id, provider, status, idle_ttl_seconds, last_seen_at)
+                 VALUES ($1, $2, 'instafy-cloud', 'ready', 600, now())",
+                &[&runtime_id, &project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "INSERT INTO runtime_leases
+                   (id, project_id, runtime_id, status, requested_at, launched_at)
+                 VALUES ($1, $2, $3, 'active', now(), now())",
+                &[&runtime_lease_id, &project_id, &runtime_id],
+            )
+            .await?;
+        connection
+            .execute(
                 "INSERT INTO workspace_origins (id, project_id, mode, endpoint, protocols)
                  VALUES ($1, $2, 'desktop', 'https://origin', ARRAY['webdav']::text[])",
                 &[&origin_id, &project_id],
+            )
+            .await?;
+        let protocols = vec!["webdav".to_string()];
+        connection
+            .execute(
+                "INSERT INTO origin_instances
+                   (id, project_id, runtime_id, lease_id, origin_id, required,
+                    mode, status, endpoint, protocols, metadata)
+                 VALUES
+                   ($1, $2, $3, $4, $5, true, 'hosted', 'online',
+                    'https://origin', $6::text[], '{}'::jsonb)",
+                &[
+                    &origin_instance_id,
+                    &project_id,
+                    &runtime_id,
+                    &runtime_lease_id,
+                    &origin_id,
+                    &protocols,
+                ],
             )
             .await?;
     }
@@ -12203,6 +12722,21 @@ async fn post_access_token_mints_signed_token_and_publishes_event() -> anyhow::R
     assert_eq!(decoded.claims.project_id, project_id.to_string());
     assert_eq!(decoded.claims.scopes, vec!["fs.write"]);
     assert_eq!(decoded.claims.lease_id, Some(lease_id.to_string()));
+    assert_eq!(decoded.claims.runtime_id, Some(runtime_id.to_string()));
+    let bound_runtime_id: Option<Uuid> = pool
+        .get()
+        .await?
+        .query_one(
+            "SELECT runtime_id FROM workspace_leases WHERE id = $1",
+            &[&lease_id],
+        )
+        .await?
+        .get("runtime_id");
+    assert_eq!(
+        bound_runtime_id,
+        Some(runtime_id),
+        "origin selection must bind a previously runtime-neutral workspace lease"
+    );
 
     let grants = {
         let connection = pool.get().await?;
@@ -13710,6 +14244,453 @@ async fn no_response_on_direct_turn_persists_as_a_normal_message() -> anyhow::Re
     cleanup_origin_project(&pool, &project_id).await?;
     cleanup_org(&pool, &org_id).await?;
     cleanup_test_user(&pool, &owner_user_id).await?;
+    Ok(())
+}
+
+async fn seed_custom_agent(
+    pool: &PgPool,
+    user_id: &Uuid,
+    credential_id: &Uuid,
+    agent_id: &Uuid,
+    handle: &str,
+    description: &str,
+) -> anyhow::Result<()> {
+    let connection = pool.get().await?;
+    connection
+        .execute(
+            "insert into user_credentials (
+                 id, user_id, kind, label, nonce_b64, ciphertext_b64,
+                 metadata, is_default
+             ) values (
+                 $1, $2, 'openai_api_key', 'Custom agent credential',
+                 'test-nonce', 'test-ciphertext', '{}'::jsonb, false
+             )",
+            &[credential_id, user_id],
+        )
+        .await?;
+    connection
+        .execute(
+            "insert into user_agents (
+                 id, user_id, credential_id, provider, handle, display_name,
+                 description, avatar_seed
+             ) values ($1, $2, $3, 'openai', $4, initcap($4), $5, $4)",
+            &[agent_id, user_id, credential_id, &handle, &description],
+        )
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn skill_mode_multi_ai_ambient_turn_evaluates_every_agent_and_swallows_custom_decline(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping multi-AI skill-mode test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let owner_user_id = Uuid::new_v4();
+    let other_user_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let conversation_id = Uuid::new_v4();
+    let credential_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
+    ensure_test_user(&pool, &other_user_id).await?;
+    seed_group_participation_project(
+        &pool,
+        &org_id,
+        &project_id,
+        &owner_user_id,
+        &other_user_id,
+        "Multi-AI skill mode test",
+    )
+    .await?;
+    seed_custom_agent(
+        &pool,
+        &owner_user_id,
+        &credential_id,
+        &agent_id,
+        "reviewer",
+        "Reviews frontend changes",
+    )
+    .await?;
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "skill-mode-multi-ai",
+    );
+    let state = build_test_state(pool.clone(), config.clone());
+
+    let request = dispatch::normalize_dispatch_request(DispatchPromptRequest {
+        project_id: Some(project_id.to_string()),
+        session_id: None,
+        prompt_text: Some("Should we keep the blue version?".to_string()),
+        intent: Some("feature".to_string()),
+        plan_seed: None,
+        metadata: Some(json!({
+            "clientMessageId": Uuid::new_v4().to_string(),
+            "agentSelection": { "active": ["octo", "reviewer"], "mentions": [] }
+        })),
+        conversation_metadata: Some(json!({ "visibility": "public" })),
+        parent_conversation_id: None,
+        thread_kind: None,
+        tool_limits: None,
+        repo: None,
+        ui: None,
+        priority: None,
+        runtime_type: None,
+        idle_ttl_seconds: None,
+        conversation_id: Some(conversation_id.to_string()),
+        runtime_id: None,
+        runtime_display_name: None,
+        prefer_runtime: None,
+    })
+    .map_err(|error| controller_error("normalize multi-AI ambient dispatch", error))?;
+    let response = dispatch::process_dispatch_prompt(
+        &state,
+        &RequestContext {
+            user_id: Some(owner_user_id),
+            is_service_role: false,
+            scoped_claims: None,
+        },
+        request,
+    )
+    .await
+    .map_err(|error| controller_error("process multi-AI ambient dispatch", error))?;
+    assert_eq!(
+        response.status, "queued",
+        "an ambient multi-AI turn must dispatch evaluations"
+    );
+
+    let connection = pool.get().await?;
+    let job_rows = connection
+        .query(
+            "select id, run_id, credential_id, payload from agent_jobs
+             where conversation_id = $1
+             order by created_at asc, id asc",
+            &[&conversation_id],
+        )
+        .await?;
+    assert_eq!(
+        job_rows.len(),
+        2,
+        "every ambient-active agent must receive an evaluation job"
+    );
+
+    let mut octo_job: Option<(Uuid, serde_json::Value)> = None;
+    let mut reviewer_job: Option<(Uuid, Uuid, Option<Uuid>, serde_json::Value)> = None;
+    for row in &job_rows {
+        let job_id: Uuid = row.get("id");
+        let run_id: Uuid = row.get("run_id");
+        let job_credential_id: Option<Uuid> = row.get("credential_id");
+        let payload: PgJson<serde_json::Value> = row.get("payload");
+        let payload = payload.0;
+        assert_eq!(
+            payload["metadata"]["groupParticipation"]["decision"],
+            json!("agent_evaluation"),
+            "every evaluation job must carry the server-stamped marker"
+        );
+        assert_eq!(
+            payload["metadata"]["groupParticipation"]["reason"],
+            json!("skill_mode_ambient")
+        );
+        let participants = payload["metadata"]["groupAiParticipants"]
+            .as_array()
+            .expect("evaluation jobs carry the AI participant roster")
+            .clone();
+        assert_eq!(
+            participants.len(),
+            2,
+            "the roster lists every AI participant"
+        );
+        match payload["metadata"]["agent"]["handle"].as_str() {
+            Some("octo") => octo_job = Some((job_id, payload)),
+            Some("reviewer") => reviewer_job = Some((job_id, run_id, job_credential_id, payload)),
+            other => panic!("unexpected agent handle on evaluation job: {other:?}"),
+        }
+    }
+
+    let (_octo_job_id, octo_payload) = octo_job.expect("octo evaluation job");
+    assert_eq!(
+        octo_payload["metadata"]["managedAiBillingDeferred"],
+        json!(true),
+        "the managed default agent defers its flat burn"
+    );
+    assert_eq!(octo_payload["metadata"]["managedAiUsed"], json!(false));
+    let octo_prompt = octo_payload["prompt_text"].as_str().expect("octo prompt");
+    assert!(
+        octo_prompt.contains("@octo") && octo_prompt.contains("@reviewer"),
+        "the delivered turn addresses octo and lists the reviewer peer: {octo_prompt}"
+    );
+    assert!(
+        octo_prompt.contains("Reviews frontend changes"),
+        "the peer listing includes the reviewer description: {octo_prompt}"
+    );
+
+    let (reviewer_job_id, reviewer_run_id, reviewer_credential, reviewer_payload) =
+        reviewer_job.expect("reviewer evaluation job");
+    assert_eq!(
+        reviewer_credential,
+        Some(credential_id),
+        "the custom agent evaluation runs on its own credential"
+    );
+    assert_eq!(
+        reviewer_payload["metadata"]["managedAiBillingDeferred"],
+        json!(false),
+        "a BYOC evaluation has no flat managed burn to defer"
+    );
+    assert_eq!(reviewer_payload["metadata"]["aiAccessMode"], json!("byoc"));
+    assert_eq!(reviewer_payload["metadata"]["managedAiUsed"], json!(false));
+    let reviewer_prompt = reviewer_payload["prompt_text"]
+        .as_str()
+        .expect("reviewer prompt");
+    assert!(
+        reviewer_prompt.contains("@reviewer") && reviewer_prompt.contains("@octo"),
+        "the delivered turn addresses the reviewer and lists octo: {reviewer_prompt}"
+    );
+
+    let ledger_count: i64 = connection
+        .query_one(
+            "select count(*)::bigint from org_credit_ledger where project_id = $1",
+            &[&project_id],
+        )
+        .await?
+        .get(0);
+    assert_eq!(ledger_count, 0, "undecided evaluations must not burn");
+
+    connection
+        .execute(
+            "update agent_jobs set status = 'leased' where id = $1",
+            &[&reviewer_job_id],
+        )
+        .await?;
+    drop(connection);
+
+    let token = mint_agent_message_token(&config, &project_id)?;
+    let status = post_agent_endpoint(
+        &state,
+        &token,
+        "/agent/message",
+        json!({ "job_id": reviewer_job_id, "content": "NO_RESPONSE" }),
+    )
+    .await?;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the custom agent decline must succeed normally"
+    );
+
+    let connection = pool.get().await?;
+    let assistant_count: i64 = connection
+        .query_one(
+            "select count(*)::bigint from conversation_messages
+             where conversation_id = $1
+               and role = 'assistant'
+               and coalesce(metadata ->> 'kind', '') <> 'runtime_alert'",
+            &[&conversation_id],
+        )
+        .await?
+        .get(0);
+    assert_eq!(
+        assistant_count, 0,
+        "the custom agent decline sentinel must be swallowed"
+    );
+    let reviewer_payload: PgJson<serde_json::Value> = connection
+        .query_one(
+            "select payload from agent_jobs where id = $1",
+            &[&reviewer_job_id],
+        )
+        .await?
+        .get("payload");
+    assert_eq!(
+        reviewer_payload.0["metadata"]["groupParticipation"]["decision"],
+        json!("silent")
+    );
+    assert_eq!(
+        reviewer_payload.0["metadata"]["groupParticipation"]["reason"],
+        json!("agent_declined")
+    );
+    let reviewer_run_metadata: PgJson<serde_json::Value> = connection
+        .query_one(
+            "select metadata from runs where id = $1",
+            &[&reviewer_run_id],
+        )
+        .await?
+        .get("metadata");
+    assert_eq!(
+        reviewer_run_metadata.0["groupParticipation"]["decision"],
+        json!("silent"),
+        "the custom agent decline must be recorded on its run"
+    );
+    let ledger_count: i64 = connection
+        .query_one(
+            "select count(*)::bigint from org_credit_ledger where project_id = $1",
+            &[&project_id],
+        )
+        .await?
+        .get(0);
+    assert_eq!(ledger_count, 0, "a declined BYOC evaluation burns nothing");
+    drop(connection);
+
+    let status = post_agent_endpoint(
+        &state,
+        &token,
+        "/agent/complete",
+        json!({ "job_id": reviewer_job_id, "outcome": "succeeded" }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK);
+
+    let connection = pool.get().await?;
+    let job_status: String = connection
+        .query_one(
+            "select status from agent_jobs where id = $1",
+            &[&reviewer_job_id],
+        )
+        .await?
+        .get("status");
+    assert_eq!(job_status, "completed");
+    let sentinel_rows: i64 = connection
+        .query_one(
+            "select count(*)::bigint from conversation_messages
+             where conversation_id = $1 and content = 'NO_RESPONSE'",
+            &[&conversation_id],
+        )
+        .await?
+        .get(0);
+    assert_eq!(sentinel_rows, 0, "the sentinel must never be persisted");
+    drop(connection);
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_org(&pool, &org_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
+    cleanup_test_user(&pool, &other_user_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_custom_agent_mention_stays_a_direct_dispatch() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping direct custom-agent mention test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let owner_user_id = Uuid::new_v4();
+    let other_user_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let conversation_id = Uuid::new_v4();
+    let credential_id = Uuid::new_v4();
+    let agent_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
+    ensure_test_user(&pool, &other_user_id).await?;
+    seed_group_participation_project(
+        &pool,
+        &org_id,
+        &project_id,
+        &owner_user_id,
+        &other_user_id,
+        "Direct custom mention test",
+    )
+    .await?;
+    seed_custom_agent(
+        &pool,
+        &owner_user_id,
+        &credential_id,
+        &agent_id,
+        "reviewer",
+        "Reviews frontend changes",
+    )
+    .await?;
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "skill-mode-direct-custom-mention",
+    );
+    let state = build_test_state(pool.clone(), config.clone());
+
+    let request = dispatch::normalize_dispatch_request(DispatchPromptRequest {
+        project_id: Some(project_id.to_string()),
+        session_id: None,
+        prompt_text: Some("@reviewer please check the header spacing".to_string()),
+        intent: Some("feature".to_string()),
+        plan_seed: None,
+        metadata: Some(json!({
+            "clientMessageId": Uuid::new_v4().to_string(),
+            "agentSelection": { "active": ["octo", "reviewer"], "mentions": ["reviewer"] }
+        })),
+        conversation_metadata: Some(json!({ "visibility": "public" })),
+        parent_conversation_id: None,
+        thread_kind: None,
+        tool_limits: None,
+        repo: None,
+        ui: None,
+        priority: None,
+        runtime_type: None,
+        idle_ttl_seconds: None,
+        conversation_id: Some(conversation_id.to_string()),
+        runtime_id: None,
+        runtime_display_name: None,
+        prefer_runtime: None,
+    })
+    .map_err(|error| controller_error("normalize direct custom mention", error))?;
+    let response = dispatch::process_dispatch_prompt(
+        &state,
+        &RequestContext {
+            user_id: Some(owner_user_id),
+            is_service_role: false,
+            scoped_claims: None,
+        },
+        request,
+    )
+    .await
+    .map_err(|error| controller_error("process direct custom mention", error))?;
+    assert_eq!(response.status, "queued");
+
+    let connection = pool.get().await?;
+    let job_rows = connection
+        .query(
+            "select payload from agent_jobs where conversation_id = $1",
+            &[&conversation_id],
+        )
+        .await?;
+    assert_eq!(
+        job_rows.len(),
+        1,
+        "an explicit mention dispatches only the mentioned agent"
+    );
+    let payload: PgJson<serde_json::Value> = job_rows[0].get("payload");
+    assert_eq!(payload.0["metadata"]["agent"]["handle"], json!("reviewer"));
+    assert!(
+        payload.0["metadata"].get("groupParticipation").is_none(),
+        "a direct dispatch must not carry the evaluation marker"
+    );
+    let prompt_text = payload.0["prompt_text"].as_str().expect("prompt text");
+    assert!(
+        !prompt_text.starts_with("[Ambient group turn"),
+        "a direct dispatch is delivered without the evaluation wrapper: {prompt_text}"
+    );
+    let message_metadata: PgJson<serde_json::Value> = connection
+        .query_one(
+            "select metadata from conversation_messages
+             where conversation_id = $1 and role = 'user'",
+            &[&conversation_id],
+        )
+        .await?
+        .get("metadata");
+    assert!(
+        message_metadata.0.get("groupParticipation").is_none(),
+        "a direct mention records without a participation marker"
+    );
+    drop(connection);
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_org(&pool, &org_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
+    cleanup_test_user(&pool, &other_user_id).await?;
     Ok(())
 }
 
@@ -16479,6 +17460,7 @@ async fn create_runtime_tables(client: &mut tokio_postgres::Client) -> anyhow::R
                 last_seen_at timestamptz,
                 display_name text,
                 active_lease_id uuid,
+                drain_expires_at timestamptz,
                 updated_at timestamptz NOT NULL DEFAULT now()
             );
             CREATE TEMP TABLE agent_jobs (
@@ -16644,6 +17626,28 @@ async fn runtime_idle_sweep_removes_stale_terminal_records() -> anyhow::Result<(
     let active_lease_id = Uuid::new_v4();
     let personal_browser_run_id = Uuid::new_v4();
     let personal_browser_job_id = Uuid::new_v4();
+    let provider_id = format!("terminal-cleanup-test-{}", Uuid::new_v4().simple());
+    let provider_release_attempts = Arc::new(AtomicUsize::new(0));
+    let provider_app = axum::Router::new().route(
+        "/runtime/release",
+        axum::routing::post({
+            let provider_release_attempts = provider_release_attempts.clone();
+            move || {
+                let provider_release_attempts = provider_release_attempts.clone();
+                async move {
+                    provider_release_attempts.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::NO_CONTENT
+                }
+            }
+        }),
+    );
+    let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let provider_address = provider_listener.local_addr()?;
+    let provider_handle = tokio::spawn(async move {
+        axum::serve(provider_listener, provider_app)
+            .await
+            .expect("serve terminal cleanup provider test");
+    });
 
     {
         let connection = pool.get().await?;
@@ -16660,13 +17664,14 @@ async fn runtime_idle_sweep_removes_stale_terminal_records() -> anyhow::Result<(
                    ($1, $2, 'self-hosted', 'offline', 'http://stale-offline', 'task-offline', 600, now() - interval '2 hours', now() - interval '30 minutes'),
                    ($3, $2, 'self-hosted', 'stopped', 'http://stale-stopped', 'task-stopped', 600, now() - interval '2 hours', now() - interval '35 minutes'),
                    ($4, $2, 'self-hosted', 'offline', 'http://recent-offline', 'task-recent', 600, now() - interval '2 minutes', now() - interval '2 minutes'),
-                   ($5, $2, 'instafy-cloud', 'offline', 'http://leased-offline', 'task-lease', 600, now() - interval '90 minutes', now() - interval '40 minutes')",
+                   ($5, $2, $6, 'offline', 'http://leased-offline', 'task-lease', 600, now() - interval '90 minutes', now() - interval '40 minutes')",
                 &[
                     &stale_offline_runtime,
                     &project_id,
                     &stale_stopped_runtime,
                     &recent_offline_runtime,
                     &stale_offline_with_active_lease,
+                    &provider_id,
                 ],
             )
             .await?;
@@ -16726,16 +17731,25 @@ async fn runtime_idle_sweep_removes_stale_terminal_records() -> anyhow::Result<(
             .await?;
     }
 
-    let state = build_test_state(
-        pool.clone(),
-        build_app_config(
-            test_origin_private_key(),
-            test_origin_public_key(),
-            "runtime-sweep-terminal-cleanup",
-        ),
+    let mut config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "runtime-sweep-terminal-cleanup",
     );
+    config.runtime_providers = vec![RuntimeProviderConfig {
+        id: provider_id,
+        display_name: "Terminal cleanup provider".to_string(),
+        kind: "test".to_string(),
+        owner_org_id: None,
+        allowed_org_ids: vec![],
+        endpoint: Some(format!("http://{provider_address}")),
+        auth_token: None,
+        metadata: None,
+    }];
+    let state = build_test_state(pool.clone(), config);
 
     runtime::sweep_idle_activity(&state).await?;
+    assert_eq!(provider_release_attempts.load(Ordering::SeqCst), 1);
 
     {
         let connection = pool.get().await?;
@@ -16839,6 +17853,7 @@ async fn runtime_idle_sweep_removes_stale_terminal_records() -> anyhow::Result<(
     }
 
     cleanup_origin_project(&pool, &project_id).await?;
+    provider_handle.abort();
     Ok(())
 }
 
@@ -20736,6 +21751,299 @@ fn controller_error(context: &str, error: (StatusCode, axum::Json<ApiError>)) ->
         status.as_u16(),
         body.message
     )
+}
+
+#[tokio::test]
+async fn provider_dispatch_authorizes_job_tokens_with_provider_call_scope() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping provider dispatch scope test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let owner_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_id).await?;
+
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let other_project_id = Uuid::new_v4();
+    let provider_id = "camera:phone_01";
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into organizations (id, slug, name) values ($1, $2, 'Provider dispatch')",
+                &[&org_id, &format!("provider-dispatch-{org_id}")],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into org_memberships (org_id, user_id, role) values ($1, $2, 'owner')",
+                &[&org_id, &owner_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into projects (id, org_id, owner_user_id, project_type, status)
+                 values ($1, $3, $4, 'customer', 'active'),
+                        ($2, $3, $4, 'customer', 'active')",
+                &[&project_id, &other_project_id, &org_id, &owner_id],
+            )
+            .await?;
+        connection
+            .batch_execute(
+                "create table if not exists project_integrations (
+                    id uuid primary key,
+                    project_id uuid not null,
+                    provider text not null,
+                    status text not null,
+                    connection_type text not null,
+                    credential_id uuid,
+                    metadata jsonb not null default '{}'::jsonb,
+                    required_scopes jsonb not null default '[]'::jsonb,
+                    capabilities jsonb not null default '[]'::jsonb,
+                    created_by uuid,
+                    created_at timestamptz not null default now(),
+                    updated_at timestamptz not null default now(),
+                    unique (project_id, provider)
+                );",
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into project_integrations (id, project_id, provider, status, connection_type)
+                 values ($1, $2, $3, 'attached', 'device')
+                 on conflict (project_id, provider)
+                 do update set status = 'attached'",
+                &[&Uuid::new_v4(), &project_id, &provider_id],
+            )
+            .await?;
+    }
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "provider-dispatch-scope",
+    );
+    let mint = |scopes: Vec<&str>, token_project: Uuid| -> anyhow::Result<String> {
+        Ok(mint_scoped_token(
+            &config,
+            ScopedTokenRequest {
+                audience: token_project.to_string(),
+                subject: owner_id.to_string(),
+                project_id: token_project.to_string(),
+                origin_id: None,
+                runtime_id: None,
+                protocol: None,
+                scopes: scopes.into_iter().map(str::to_string).collect(),
+                lease_id: None,
+                run_id: None,
+                prefer_runtime: None,
+                ttl_seconds: Some(300),
+            },
+        )
+        .map_err(|error| controller_error("mint scoped token", error))?
+        .token)
+    };
+    // The shape the runtime mints for jobs: prompt.execute + provider.call.
+    let job_token = mint(vec!["prompt.execute", "provider.call"], project_id)?;
+    // A job token that predates (or was stripped of) provider.call.
+    let scopeless_job_token = mint(vec!["prompt.execute", "fs.write"], project_id)?;
+    // provider.call for a different project must not cross project boundaries.
+    let cross_project_token = mint(vec!["prompt.execute", "provider.call"], other_project_id)?;
+    let user_token = crate::auth::issue_controller_token(&config, &owner_id)
+        .map_err(|error| controller_error("mint controller user token", error))?
+        .token;
+
+    let app = crate::provider_requests::router().with_state(build_test_state(pool.clone(), config));
+
+    let tool_call_body = json!({
+        "providerId": provider_id,
+        "name": "camera.snapshot",
+        "arguments": { "quality": "low" },
+        "timeoutMs": 5000,
+    });
+    let dispatch_tool_call = |token: String, body: serde_json::Value| {
+        let app = app.clone();
+        let uri = format!("/projects/{project_id}/provider-tools/call");
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body)?))?,
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("dispatch request failed: {error}"))
+        }
+    };
+
+    // A job token without provider.call keeps getting 403 even though the
+    // subject user owns the project: scoped tokens are capabilities, not
+    // memberships.
+    let denied_missing_scope =
+        dispatch_tool_call(scopeless_job_token, tool_call_body.clone()).await?;
+    assert_eq!(denied_missing_scope.status(), StatusCode::FORBIDDEN);
+
+    // provider.call scoped to another project is rejected by project match.
+    let denied_cross_project =
+        dispatch_tool_call(cross_project_token, tool_call_body.clone()).await?;
+    assert_eq!(denied_cross_project.status(), StatusCode::FORBIDDEN);
+
+    {
+        let connection = pool.get().await?;
+        let denied_rows: i64 = connection
+            .query_one(
+                "select count(*) from project_provider_requests where project_id = $1",
+                &[&project_id],
+            )
+            .await?
+            .get(0);
+        assert_eq!(
+            denied_rows, 0,
+            "denied dispatches must not enqueue provider requests"
+        );
+    }
+
+    // Background "device" that completes the next pending request over SQL so
+    // the dispatch long-poll resolves without standing up the device routes.
+    let spawn_completer = |response: serde_json::Value| {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            for _ in 0..200u32 {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                let Ok(connection) = pool.get().await else {
+                    continue;
+                };
+                let Ok(updated) = connection
+                    .query(
+                        "update project_provider_requests
+                            set status = 'completed',
+                                response = $2::jsonb,
+                                completed_at = now(),
+                                updated_at = now()
+                          where id = (
+                                select id from project_provider_requests
+                                 where project_id = $1 and status = 'pending'
+                                 limit 1
+                          )
+                      returning id",
+                        &[&project_id, &PgJson(&response)],
+                    )
+                    .await
+                else {
+                    continue;
+                };
+                if !updated.is_empty() {
+                    return;
+                }
+            }
+        })
+    };
+
+    // A job token carrying provider.call for the right project dispatches the
+    // tool call end to end.
+    let completer = spawn_completer(json!({ "ok": true, "result": "snapshot-42" }));
+    let allowed_job_token = dispatch_tool_call(job_token.clone(), tool_call_body.clone()).await?;
+    assert_eq!(allowed_job_token.status(), StatusCode::OK);
+    let allowed_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(allowed_job_token.into_body(), usize::MAX).await?)?;
+    assert_eq!(allowed_payload["ok"], json!(true));
+    assert_eq!(allowed_payload["result"], json!("snapshot-42"));
+    completer.await?;
+    {
+        let connection = pool.get().await?;
+        let row = connection
+            .query_one(
+                "select status, requested_by, tool_name from project_provider_requests
+                  where project_id = $1
+                  order by created_at desc
+                  limit 1",
+                &[&project_id],
+            )
+            .await?;
+        assert_eq!(row.get::<_, String>("status"), "completed");
+        assert_eq!(row.get::<_, Option<Uuid>>("requested_by"), Some(owner_id));
+        assert_eq!(
+            row.get::<_, Option<String>>("tool_name").as_deref(),
+            Some("camera.snapshot")
+        );
+    }
+
+    // The resource-read dispatch route accepts the same job token.
+    let completer = spawn_completer(json!({ "ok": true, "exists": true, "text": "hello" }));
+    let resource_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/projects/{project_id}/provider-resources/read"))
+                .header("authorization", format!("Bearer {job_token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&json!({
+                    "providerId": provider_id,
+                    "uri": "camera://front/latest",
+                    "timeoutMs": 5000,
+                }))?))?,
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("resource dispatch failed: {error}"))?;
+    assert_eq!(resource_response.status(), StatusCode::OK);
+    let resource_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(resource_response.into_body(), usize::MAX).await?)?;
+    assert_eq!(resource_payload["ok"], json!(true));
+    assert_eq!(resource_payload["text"], json!("hello"));
+    completer.await?;
+
+    // User-session dispatch still works, and an unanswered request drains
+    // through the pending -> expired path instead of hanging.
+    let unanswered = dispatch_tool_call(user_token, tool_call_body).await?;
+    assert_eq!(unanswered.status(), StatusCode::OK);
+    let unanswered_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(unanswered.into_body(), usize::MAX).await?)?;
+    assert_eq!(unanswered_payload["ok"], json!(false));
+    assert!(
+        unanswered_payload["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Timed out"),
+        "expected timeout error, got {unanswered_payload}"
+    );
+    {
+        let connection = pool.get().await?;
+        let row = connection
+            .query_one(
+                "select status from project_provider_requests
+                  where project_id = $1
+                  order by created_at desc
+                  limit 1",
+                &[&project_id],
+            )
+            .await?;
+        assert_eq!(row.get::<_, String>("status"), "expired");
+    }
+
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "delete from project_provider_requests where project_id = $1",
+                &[&project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "delete from project_integrations where project_id = $1",
+                &[&project_id],
+            )
+            .await?;
+    }
+    cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_origin_project(&pool, &other_project_id).await?;
+    cleanup_org(&pool, &org_id).await?;
+    cleanup_test_user(&pool, &owner_id).await?;
+    Ok(())
 }
 
 mod billing_processor_tests {

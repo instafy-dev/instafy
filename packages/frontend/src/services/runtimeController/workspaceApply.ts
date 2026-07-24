@@ -54,8 +54,8 @@ export async function applyWorkspaceChangesViaOrigin(
     return { ok: false, error: "no changes supplied" };
   }
 
-  const runtimePreference = params.preferRuntime ?? params.runtimeId ?? null;
-  const runtimeId = params.runtimeId ?? runtimePreference ?? null;
+  let runtimePreference = params.preferRuntime ?? params.runtimeId ?? null;
+  let runtimeId = params.runtimeId ?? runtimePreference ?? null;
   const retainLease = params.retainLease === true;
   let leaseId = params.leaseId ?? null;
   let leaseIdForRelease: string | null = null;
@@ -72,6 +72,14 @@ export async function applyWorkspaceChangesViaOrigin(
     }
     if (origin.presence?.status === "offline") {
       return { ok: false, error: "origin is offline" };
+    }
+    const requestedOriginId = params.originId?.trim() || null;
+    if (
+      !runtimePreference &&
+      (!requestedOriginId || requestedOriginId === origin.originId)
+    ) {
+      runtimePreference = origin.runtimeId ?? null;
+      runtimeId = params.runtimeId ?? runtimePreference;
     }
 
     if (!leaseId) {

@@ -1,6 +1,9 @@
 import { Capacitor } from "@capacitor/core";
 import type { DesktopUpdaterBridgeStatus } from "../desktop/updates/client";
-import { readDesktopUpdaterStatus } from "../desktop/updates/client";
+import {
+  desktopUpdaterBridgeAvailable,
+  readDesktopUpdaterStatus,
+} from "../desktop/updates/client";
 import { readStoredDesktopUpdaterSnapshot } from "../desktop/updates/state";
 import { formatInstafyBuildLabel, instafyBuildInfo } from "../config/buildInfo";
 import { buildNativeOtaIdentity } from "../mobile/ota/client";
@@ -51,6 +54,43 @@ export interface AppUpdatePresentation {
   show: boolean;
 }
 
+export interface DesktopDownloadFeedback {
+  intent: "success" | "info" | "error";
+  message: string;
+}
+
+export function resolveDesktopDownloadFeedback(
+  status: DesktopUpdaterBridgeStatus | null,
+  metadata: AppReleaseMetadata | null,
+): DesktopDownloadFeedback {
+  const refreshedPhase = metadata?.updates.phase;
+  if (status?.phase === "downloaded" || refreshedPhase === "downloaded") {
+    return {
+      intent: "success",
+      message: "Desktop update downloaded. Restart Instafy to install it.",
+    };
+  }
+  if (status?.phase === "error" || refreshedPhase === "error") {
+    return {
+      intent: "error",
+      message:
+        status?.lastError?.trim() ||
+        metadata?.updates.last_error?.trim() ||
+        "Desktop update download failed.",
+    };
+  }
+  if (status?.phase === "downloading" || refreshedPhase === "downloading") {
+    return {
+      intent: "info",
+      message: "Desktop update is downloading in the background.",
+    };
+  }
+  return {
+    intent: "error",
+    message: "Instafy could not start the desktop update download.",
+  };
+}
+
 function browserPlatform(): string {
   if (Capacitor.isNativePlatform()) {
     return Capacitor.getPlatform();
@@ -61,10 +101,14 @@ function browserPlatform(): string {
   return "web";
 }
 
-function desktopPrimaryAction(phase: DesktopUpdaterBridgeStatus["phase"] | null): AppUpdateAction {
+function desktopPrimaryAction(
+  phase: DesktopUpdaterBridgeStatus["phase"] | null,
+  availableVersion: string | null,
+): AppUpdateAction {
   if (phase === "update_available") return "download";
   if (phase === "downloaded") return "install";
-  if (phase === "idle" || phase === "up_to_date" || phase === "error") return "check";
+  if (phase === "error") return availableVersion ? "download" : "check";
+  if (phase === "idle" || phase === "up_to_date") return "check";
   return null;
 }
 
@@ -166,7 +210,13 @@ function buildDesktopMetadata(status: DesktopUpdaterBridgeStatus | null): AppRel
     updates: {
       supported: true,
       is_enabled: effective?.isEnabled ?? false,
-      primary_action: effective?.isEnabled === false ? null : desktopPrimaryAction(effective?.phase ?? "idle"),
+      primary_action:
+        effective?.isEnabled === false
+          ? null
+          : desktopPrimaryAction(
+              effective?.phase ?? "idle",
+              effective?.availableVersion ?? null,
+            ),
       channel: effective?.channel ?? null,
       phase: effective?.phase ?? null,
       current_bundle_version: null,
@@ -257,8 +307,11 @@ function buildWebMetadata(): AppReleaseMetadata {
 }
 
 export async function collectAppReleaseMetadata(): Promise<AppReleaseMetadata> {
-  const desktopStatus = await readDesktopUpdaterStatus().catch(() => null);
-  if (desktopStatus) {
+  const desktopBridgeAvailable = desktopUpdaterBridgeAvailable();
+  const desktopStatus = desktopBridgeAvailable
+    ? await readDesktopUpdaterStatus().catch(() => null)
+    : null;
+  if (desktopStatus || desktopBridgeAvailable) {
     return buildDesktopMetadata(desktopStatus);
   }
   if (otaIsSupportedOnThisClient()) {

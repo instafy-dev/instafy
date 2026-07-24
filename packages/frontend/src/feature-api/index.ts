@@ -8,6 +8,7 @@ export type {
   FrontendFeatureComposition,
   FrontendFeatureContributions,
   FrontendFeatureModule,
+  FrontendStudioRuntimeBridgeContribution,
   TrustedFrontendRouteContribution,
 } from "../features/frontendFeatureModule";
 export type { FrontendFeatureServices } from "../features/frontendFeatureServices";
@@ -56,6 +57,10 @@ export type {
 export {
   matchesExtensionProviderFamily,
 } from "../providers/extensionProviderId";
+export {
+  integrationIsAttached,
+  providerRequestTargetsCurrentDevice,
+} from "../extensions/providerRequestClaimSupport";
 
 export type {
   VisionClassifierRegistration,

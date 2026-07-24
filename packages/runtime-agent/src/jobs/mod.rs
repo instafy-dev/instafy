@@ -14943,6 +14943,7 @@ mod tests {
                 "verified-scoped-job-token",
                 &[
                     "prompt.execute".to_string(),
+                    "provider.call".to_string(),
                     "git.token.mint.job".to_string(),
                 ],
                 Some("2026-07-15T10:05:00Z"),
@@ -14960,9 +14961,12 @@ mod tests {
                 env::var("CONTROLLER_ACCESS_TOKEN").as_deref(),
                 Ok("verified-scoped-job-token")
             );
+            // Workspace shells inherit the controller-advertised scope list
+            // verbatim, including provider.call, which the controller's
+            // provider-tools/call dispatch routes require from job tokens.
             assert_eq!(
                 env::var("CONTROLLER_ACCESS_SCOPES").as_deref(),
-                Ok("prompt.execute git.token.mint.job")
+                Ok("prompt.execute provider.call git.token.mint.job")
             );
             assert_eq!(
                 env::var("CODEX_API_KEY").as_deref(),
@@ -15085,6 +15089,7 @@ mod tests {
             codex_bin: None,
             require_codex_bin: false,
             runtime_access_token: None,
+            parent_dispositions_runtime_on_shutdown: false,
         }))
     }
 

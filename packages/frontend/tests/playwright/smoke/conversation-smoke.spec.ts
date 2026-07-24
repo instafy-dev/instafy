@@ -62,15 +62,15 @@ async function waitForAssistantRunStart(params: {
   await expect
     .poll(
       async () => {
-        const [assistantCount, typingCount, setupCount] = await Promise.all([
+        const [assistantCount, typingVisible, setupVisible] = await Promise.all([
           params.assistantBubbles.count(),
-          params.typingIndicator.count(),
-          params.setupIndicator.count(),
+          params.typingIndicator.isVisible().catch(() => false),
+          params.setupIndicator.isVisible().catch(() => false),
         ]);
 
         if (assistantCount > params.baselineAssistantCount) return "assistant";
-        if (typingCount > 0) return "typing";
-        if (setupCount > 0) return "setup";
+        if (typingVisible) return "typing";
+        if (setupVisible) return "setup";
         return "none";
       },
       { timeout: timeoutMs },
@@ -184,7 +184,10 @@ test.describe("Controller conversation smoke", () => {
     const typingIndicator = page.getByTestId("assistant-typing-indicator");
     const numericReply = /\b\d+\b/;
 
-    const firstPrompt = "What is 1+1? Reply with just the number.";
+    // This is an assistant-dispatch smoke, not an ambient group-participation
+    // classifier proof. Address Octo explicitly so busy state is guaranteed
+    // while the exact agent turn starts.
+    const firstPrompt = "@octo What is 1+1? Reply with just the number.";
     await page.getByTestId("chat-input").fill(firstPrompt);
     const baselineAnswerCount = await assistantResponses.filter({ hasText: numericReply }).count();
     const baselineAssistantCount = await assistantResponses.count();
@@ -217,11 +220,18 @@ test.describe("Controller conversation smoke", () => {
     await expect(conversationTabs).toHaveCount(2);
     await expect(conversationTabs.last()).toContainText("Conversation 2");
 
-    const secondPrompt = "What is 1+2? Reply with just the number.";
+    const secondPrompt = "@octo What is 1+2? Reply with just the number.";
     await page.getByTestId("chat-input").fill(secondPrompt);
     const baselineAnswerCount2 = await assistantResponses.filter({ hasText: numericReply }).count();
+    const baselineAssistantCount2 = await assistantResponses.count();
     await page.getByTestId("chat-send-button").click();
-    await expect(typingIndicator).toBeVisible({ timeout: 30_000 });
+    await waitForAssistantRunStart({
+      assistantBubbles: assistantResponses,
+      baselineAssistantCount: baselineAssistantCount2,
+      setupIndicator,
+      typingIndicator,
+      timeoutMs: 30_000,
+    });
     sawAssistant = false;
     try {
       await assistantResponses.first().waitFor({ state: "visible", timeout: 90_000 });
@@ -271,44 +281,47 @@ test.describe("Controller conversation smoke", () => {
     await expect(reloadedTabs).toHaveCount(1);
   });
 
-  test("resolves quick prompts across two conversations", async ({ page }) => {
-    page.setDefaultTimeout(60_000);
+  test.describe("live quick prompt switching", () => {
     test.skip(
       (process.env.PLAYWRIGHT_LIVE_CONVERSATION_QUICK_PROMPTS ?? "").trim() !== "1",
       "Live assistant quick multi-conversation smoke is model-dependent; opt in with PLAYWRIGHT_LIVE_CONVERSATION_QUICK_PROMPTS=1.",
     );
-    if (!activeProjectId) {
-      throw new Error("Active project id missing for conversation smoke.");
-    }
 
-    await waitForHostedRuntimeReady(page);
-    const conversationTabs = conversationTabButtons(page);
-    const userBubbles = page.locator('[data-testid="chat-bubble-user"]');
-    await expect(conversationTabs).toHaveCount(1);
+    test("resolves quick prompts across two conversations", async ({ page }) => {
+      page.setDefaultTimeout(60_000);
+      if (!activeProjectId) {
+        throw new Error("Active project id missing for conversation smoke.");
+      }
 
-    const firstPrompt = `What is 1+1? Reply with just the number. ${Date.now()}`;
-    await page.getByTestId("chat-input").fill(firstPrompt);
-    await page.getByTestId("chat-send-button").click();
-    await expect(userBubbles.last()).toContainText("What is 1+1?", { timeout: 15_000 });
+      await waitForHostedRuntimeReady(page);
+      const conversationTabs = conversationTabButtons(page);
+      const userBubbles = page.locator('[data-testid="chat-bubble-user"]');
+      await expect(conversationTabs).toHaveCount(1);
 
-    await createPublicChatFromTopBar(page);
-    await expect(conversationTabs).toHaveCount(2);
-    await expect(conversationTabs.last()).toContainText("Conversation 2");
+      const firstPrompt = `What is 1+1? Reply with just the number. ${Date.now()}`;
+      await page.getByTestId("chat-input").fill(firstPrompt);
+      await page.getByTestId("chat-send-button").click();
+      await expect(userBubbles.last()).toContainText("What is 1+1?", { timeout: 15_000 });
 
-    const secondPrompt = `What is 1+2? Reply with just the number. ${Date.now()}`;
-    await page.getByTestId("chat-input").fill(secondPrompt);
-    await page.getByTestId("chat-send-button").click();
-    await expect(userBubbles.last()).toContainText("What is 1+2?", { timeout: 15_000 });
+      await createPublicChatFromTopBar(page);
+      await expect(conversationTabs).toHaveCount(2);
+      await expect(conversationTabs.last()).toContainText("Conversation 2");
 
-    await conversationTabs.first().click();
-    await expect(conversationTabs.first()).toHaveAttribute("aria-current", "page");
-    await expect(userBubbles.last()).toContainText("What is 1+1?", { timeout: 15_000 });
-    await waitForAssistantNumberReplyInActiveConversation(page, 2);
+      const secondPrompt = `What is 1+2? Reply with just the number. ${Date.now()}`;
+      await page.getByTestId("chat-input").fill(secondPrompt);
+      await page.getByTestId("chat-send-button").click();
+      await expect(userBubbles.last()).toContainText("What is 1+2?", { timeout: 15_000 });
 
-    await conversationTabs.last().click();
-    await expect(conversationTabs.last()).toHaveAttribute("aria-current", "page");
-    await expect(userBubbles.last()).toContainText("What is 1+2?", { timeout: 15_000 });
-    await waitForAssistantNumberReplyInActiveConversation(page, 3);
+      await conversationTabs.first().click();
+      await expect(conversationTabs.first()).toHaveAttribute("aria-current", "page");
+      await expect(userBubbles.last()).toContainText("What is 1+1?", { timeout: 15_000 });
+      await waitForAssistantNumberReplyInActiveConversation(page, 2);
+
+      await conversationTabs.last().click();
+      await expect(conversationTabs.last()).toHaveAttribute("aria-current", "page");
+      await expect(userBubbles.last()).toContainText("What is 1+2?", { timeout: 15_000 });
+      await waitForAssistantNumberReplyInActiveConversation(page, 3);
+    });
   });
 
   test("queues messages while assistant is busy and supports interrupt", async ({ page }) => {
@@ -317,25 +330,40 @@ test.describe("Controller conversation smoke", () => {
       throw new Error("Active project id missing for conversation smoke.");
     }
 
-    const setupIndicator = page.getByTestId("assistant-setup-indicator");
     const typingIndicator = page.getByTestId("assistant-typing-indicator");
-    const assistantResponses = assistantBubbles(page);
 
-    const longPrompt = "Generate a short poem and save it to `poem.txt` in the repo root.";
-    const baselineAssistantCount = await assistantResponses.count();
+    const longPrompt = "@octo Generate a short poem and save it to `poem.txt` in the repo root.";
+    const firstDispatchResponse = page.waitForResponse(
+      (response) => {
+        if (response.request().method() !== "POST" || !response.ok()) {
+          return false;
+        }
+        const pathname = new URL(response.url()).pathname;
+        return (
+          pathname === `/projects/${activeProjectId}/conversations` ||
+          /\/conversations\/[^/]+\/messages$/.test(pathname)
+        );
+      },
+      { timeout: 30_000 },
+    );
     await page.getByTestId("chat-input").fill(longPrompt);
     await page.getByTestId("chat-send-button").click();
+    const firstDispatch = await firstDispatchResponse;
+    const firstDispatchPayload = (await firstDispatch.json().catch(() => null)) as {
+      runId?: unknown;
+      runIds?: unknown;
+      status?: unknown;
+    } | null;
+    expect(
+      typeof firstDispatchPayload?.runId === "string" ||
+        (Array.isArray(firstDispatchPayload?.runIds) && firstDispatchPayload.runIds.length > 0),
+      "the first turn should return an exact run before the follow-up is sent",
+    ).toBe(true);
+    await expect(typingIndicator).toBeVisible({ timeout: 15_000 });
 
-    await waitForAssistantRunStart({
-      assistantBubbles: assistantResponses,
-      baselineAssistantCount,
-      setupIndicator,
-      typingIndicator,
-      timeoutMs: 30_000,
-    });
-
-    // While the assistant is busy, send another message; it should be queued.
-    await expect(typingIndicator).toBeVisible({ timeout: 60_000 });
+    // Explicitly addressed turns expose visible busy state, so their follow-up
+    // queue and interrupt controls are a stable UI contract. Ambient agent
+    // evaluations intentionally remain silent until the agent speaks.
     const queuedPrompt = "What is 1+3? Reply with just the number.";
     await page.getByTestId("chat-input").fill(queuedPrompt);
     await page.getByTestId("chat-send-button").click();

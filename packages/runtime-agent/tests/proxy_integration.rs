@@ -1890,10 +1890,6 @@ project_doc_max_bytes = 0
         "CODEX_AUTH_PATH",
         runtime_auth_path.as_os_str().to_string_lossy(),
     );
-    let _guard_tool_choice = EnvGuard::set("CODEX_RESPONSES_TOOL_CHOICE", "required");
-    let _guard_tool_allowlist =
-        EnvGuard::set("CODEX_RESPONSES_TOOL_PREFIX_ALLOWLIST", "mcp__probe__");
-
     let project_workspace = workspace_root.join(project_id.to_string());
     fs::create_dir_all(&project_workspace).with_context(|| {
         format!(
@@ -1958,6 +1954,8 @@ struct PersonalBrowserMcpProbeState {
     completed_calls: AtomicUsize,
 }
 
+const PERSONAL_BROWSER_MCP_PROBE_URL: &str = "https://example.test/personal";
+
 async fn handle_personal_browser_mcp_probe(
     State(state): State<Arc<PersonalBrowserMcpProbeState>>,
     headers: HeaderMap,
@@ -2019,7 +2017,7 @@ async fn handle_personal_browser_mcp_probe(
             state.completed_calls.fetch_add(1, Ordering::SeqCst);
             let snapshot = json!({
                 "status": { "state": "ready" },
-                "url": "https://example.test/personal",
+                "url": PERSONAL_BROWSER_MCP_PROBE_URL,
                 "title": "Personal Browser MCP probe",
                 "visibleText": "Personal Browser dedicated tool reached",
                 "elements": [],
@@ -2050,8 +2048,28 @@ async fn handle_personal_browser_mcp_probe(
     }
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn codex_proxy_direct_personal_browser_mcp_probe() -> Result<()> {
+#[test]
+fn codex_proxy_direct_personal_browser_mcp_probe() -> Result<()> {
+    const RUNTIME_AGENT_STACK_SIZE: usize = 16 * 1024 * 1024;
+    let handle = std::thread::Builder::new()
+        .name("personal-browser-mcp-direct-probe".to_string())
+        .stack_size(RUNTIME_AGENT_STACK_SIZE)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(RUNTIME_AGENT_STACK_SIZE)
+                .build()
+                .expect("failed to build production-shaped runtime for Personal Browser probe");
+            runtime.block_on(codex_proxy_direct_personal_browser_mcp_probe_inner())
+        })
+        .context("failed to spawn Personal Browser probe thread")?;
+
+    handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("Personal Browser probe thread panicked"))?
+}
+
+async fn codex_proxy_direct_personal_browser_mcp_probe_inner() -> Result<()> {
     let _env_guard = env_guard().await;
     if std::env::var("RUN_PERSONAL_BROWSER_MCP_DIRECT_PROBE_TEST")
         .ok()
@@ -2158,11 +2176,6 @@ async fn codex_proxy_direct_personal_browser_mcp_probe() -> Result<()> {
             .join("auth.json")
             .to_string_lossy(),
     );
-    let _guard_tool_choice = EnvGuard::set("CODEX_RESPONSES_TOOL_CHOICE", "required");
-    let _guard_tool_allowlist = EnvGuard::set(
-        "CODEX_RESPONSES_TOOL_PREFIX_ALLOWLIST",
-        "mcp__instafy_personal_browser__",
-    );
     let _guard_personal_url = EnvGuard::set(
         "INSTAFY_PERSONAL_BROWSER_CONTROL_URL",
         format!("http://{mcp_addr}"),
@@ -2185,12 +2198,13 @@ async fn codex_proxy_direct_personal_browser_mcp_probe() -> Result<()> {
     let output = tokio::time::timeout(
         Duration::from_secs(180),
         codex_client.execute_with_options(
-            "Use the Personal Browser snapshot tool and reply with the exact observed URL.",
+            "Use the Personal Browser snapshot tool, read the URL from its result, and set the final JSON summary field to exactly that observed URL with no other text.",
             None,
             CodexRunOptions {
                 disable_shell_tool: true,
                 expect_browser_session: true,
                 personal_browser: true,
+                require_first_tool_call: true,
                 ..Default::default()
             },
         ),
@@ -2198,14 +2212,28 @@ async fn codex_proxy_direct_personal_browser_mcp_probe() -> Result<()> {
     .await
     .context("Personal Browser MCP direct probe timed out")??;
 
+    let completed_calls = mcp_state.completed_calls.load(Ordering::SeqCst);
+    let reported_url = output
+        .final_json
+        .get("summary")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if completed_calls == 0 || reported_url != PERSONAL_BROWSER_MCP_PROBE_URL {
+        dump_codex_events_tail("personal-browser-mcp-direct", &output.events);
+    }
     assert!(
-        mcp_state.completed_calls.load(Ordering::SeqCst) > 0,
+        completed_calls > 0,
         "model did not execute the dedicated Personal Browser MCP tool; summary={}",
         output
             .final_json
             .get("summary")
             .and_then(Value::as_str)
             .unwrap_or("<missing>")
+    );
+    assert_eq!(
+        reported_url, PERSONAL_BROWSER_MCP_PROBE_URL,
+        "Personal Browser direct probe did not report the exact URL observed through the dedicated MCP snapshot tool"
     );
     assert_eq!(
         count_command_executions_in_events(&output.events),

@@ -45,7 +45,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use tokio::sync::Notify;
 use tracing::{info, warn};
 use zip::write::{FileOptions, ZipWriter};
 use zip::{CompressionMethod, ZipArchive};
@@ -242,7 +241,7 @@ pub async fn maybe_snapshot(client: &ControllerClient, registration: &Registrati
 pub async fn run_periodic_snapshots(
     client: Arc<ControllerClient>,
     registration: Registration,
-    shutdown: Arc<Notify>,
+    shutdown: crate::agent::ShutdownSignal,
 ) {
     if !persistence_enabled() {
         return;
@@ -255,7 +254,7 @@ pub async fn run_periodic_snapshots(
     let mut prev_hash: Option<u64> = None;
     loop {
         tokio::select! {
-            _ = shutdown.notified() => return,
+            _ = shutdown.cancelled() => return,
             _ = tokio::time::sleep(interval) => {}
         }
         // Only snapshot when a browser is actually up (skip during the restore/

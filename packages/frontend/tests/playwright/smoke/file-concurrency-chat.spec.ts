@@ -17,6 +17,22 @@ async function dismissAnyToast(page: Page) {
   }
 }
 
+async function readAuthenticatedUserId(page: Page): Promise<string | null> {
+  return await page.evaluate(async () => {
+    const client = (window as typeof window & {
+      __INSTAFY_SUPABASE__?: {
+        auth?: {
+          getUser?: () => Promise<{
+            data?: { user?: { id?: string | null } | null };
+          }>;
+        };
+      };
+    }).__INSTAFY_SUPABASE__;
+    const result = await client?.auth?.getUser?.();
+    return result?.data?.user?.id ?? null;
+  });
+}
+
 test.describe("File concurrency", () => {
   test.afterEach(async ({ page }) => {
     await resetRuntimeUserState(page, { source: "file-concurrency-chat:cleanup" }).catch(() => {});
@@ -89,9 +105,20 @@ test.describe("File concurrency", () => {
 
     // Use a separate browser context so localStorage mutations in the peer can't
     // trigger cross-tab project switching in the primary page.
+    const primaryUserId = await readAuthenticatedUserId(page);
+    expect(primaryUserId).not.toBeNull();
     const peerContext = await browser.newContext({ storageState: await page.context().storageState() });
     try {
       const peerPage = await peerContext.newPage();
+      // Copied Supabase localStorage is origin-scoped and unavailable on
+      // about:blank. Initialize the app before the harness resolves the user
+      // that will own the peer's workspace lease.
+      await peerPage.goto(`/studio?projectId=${encodeURIComponent(projectId)}`, {
+        waitUntil: "domcontentloaded",
+      });
+      await expect
+        .poll(async () => await readAuthenticatedUserId(peerPage), { timeout: 30_000 })
+        .toBe(primaryUserId);
       await writeWorkspaceFile(peerPage, filePath, peerText, { projectId });
     } finally {
       await peerContext.close().catch(() => {});

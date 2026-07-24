@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   DEFAULT_SERVICE_RUNTIME_EMAIL,
+  deleteEnvFileValue,
   ensureServiceRuntimeUserId,
   setEnvFileValue,
 } from "./runtimeEnvHelpers.mjs";
@@ -35,6 +36,20 @@ test("setEnvFileValue writes or updates a private file", (t) => {
     .filter((line) => line.startsWith("FOO="));
   assert.equal(matches.length, 1);
   assert.equal(matches[0], "FOO=baz");
+});
+
+test("deleteEnvFileValue removes a stale key without changing neighboring values", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "runtime-env-test-"));
+  const envPath = path.join(dir, "env");
+  fs.writeFileSync(
+    envPath,
+    "KEEP=before\nORIGIN_GIT_REMOTE_URL=http://git-edge/repo.git\nKEEP_AFTER=after\n",
+    "utf-8"
+  );
+
+  deleteEnvFileValue(envPath, "ORIGIN_GIT_REMOTE_URL");
+
+  assert.equal(fs.readFileSync(envPath, "utf-8"), "KEEP=before\nKEEP_AFTER=after\n");
 });
 
 test("ensureServiceRuntimeUserId returns existing user without creating", async (t) => {

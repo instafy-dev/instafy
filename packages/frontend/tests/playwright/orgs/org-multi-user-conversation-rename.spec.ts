@@ -43,7 +43,7 @@ test.describe("Org multi-user conversation rename", () => {
   test("renaming a conversation syncs across sessions", async ({ page, browser }) => {
     page.setDefaultTimeout(60_000);
 
-    const projectId = await prepareStudio(page);
+    const projectId = await prepareStudio(page, { waitForHostedRuntime: false });
     if (!projectId) {
       throw new Error("Project id missing for multi-user conversation rename test.");
     }
