@@ -105,6 +105,27 @@ test("every repository Dockerfile pins external base images by digest", () => {
   }
 });
 
+test("provider service pins the complete Docker CLI toolchain", () => {
+  const relativePath = "docker/provider-service/Dockerfile";
+  const source = read(relativePath);
+
+  assert.match(
+    source,
+    /^FROM alpine:3\.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40$/mu,
+  );
+  assert.equal(argumentDefaults(source).get("DOCKER_CLI_VERSION"), "29.5.2-r0");
+  assert.equal(argumentDefaults(source).get("DOCKER_BUILDX_VERSION"), "0.30.1-r6");
+  assert.equal(argumentDefaults(source).get("DOCKER_COMPOSE_VERSION"), "2.40.3-r6");
+  assertOrdered(
+    source,
+    relativePath,
+    '"docker-cli=${DOCKER_CLI_VERSION}"',
+    '"docker-cli-buildx=${DOCKER_BUILDX_VERSION}"',
+    '"docker-cli-compose=${DOCKER_COMPOSE_VERSION}"',
+  );
+  assert.doesNotMatch(source, /^FROM docker:/mu);
+});
+
 test("runtime downloads verify architecture-bound checksums before extraction", () => {
   const relativePath = "docker/runtime/Dockerfile";
   const source = read(relativePath);
@@ -212,9 +233,23 @@ test("cargo-chef installation is version-locked", () => {
 
 test("runtime publication scans amd64 and arm64 before registry login", () => {
   const source = read(".github/workflows/publish-runtime-agent.yml");
+  const cleanup = source.indexOf(
+    "- name: Reclaim hosted-runner disk for audited images",
+  );
   const login = source.indexOf("- name: Login to GHCR");
   const push = source.indexOf(
     "- name: Push only the two scanned images and assemble the release manifest",
+  );
+  const firstBuild = source.indexOf("- name: Build amd64 audit image");
+  assert.ok(cleanup > 0 && cleanup < firstBuild);
+  assertOrdered(
+    source.slice(cleanup, firstBuild),
+    "runtime publication disk cleanup",
+    "sudo rm -rf --",
+    "/opt/ghc",
+    "/usr/local/lib/android",
+    "/usr/share/dotnet",
+    "available_kib < 20 * 1024 * 1024",
   );
   assert.ok(login > 0 && push > login, "runtime publication login/push order is malformed");
   const beforeLogin = source.slice(0, login);
