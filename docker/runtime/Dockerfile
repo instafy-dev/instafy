@@ -1,8 +1,10 @@
 ## Pin the Rust image to keep CI build caches warm (avoid nightly churn).
 ARG RUST_TOOLCHAIN=1.95.0
-ARG RUST_IMAGE=rust:${RUST_TOOLCHAIN}-slim-bookworm
+ARG RUST_IMAGE=rust:${RUST_TOOLCHAIN}-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082
 ARG GO_VERSION=1.26.5
+ARG GO_IMAGE=golang:${GO_VERSION}-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651
 ARG NODE_IMAGE=node:24-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d
+ARG CLI_NODE_IMAGE=node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3
 ARG PLAYWRIGHT_VERSION=1.61.1
 ARG NPM_VERSION=12.0.1
 ARG PNPM_VERSION=11.17.0
@@ -10,12 +12,16 @@ ARG PNPM_VERSION=11.17.0
 # depends on older `time` versions that fail to compile on newer Rust toolchains,
 # so we install a prebuilt release binary instead of `cargo install`.
 ARG RATHOLE_VERSION=0.5.0
+ARG RATHOLE_SHA256_AMD64=3e7d0d0f365120cd3cd351d147d1a12ee960c8068b464d4dd533a3821873b80e
+ARG RATHOLE_SHA256_ARM64=fa4a6fc63d86f8f1faa7c103a845e4715ce79a048455c0eec897b27237576564
+ARG UBOLITE_SHA256_AMD64=d5811c79278f27001ae0be090e824577c505cc2b4151997e252462df9f11ba36
+ARG UBOLITE_SHA256_ARM64=d5811c79278f27001ae0be090e824577c505cc2b4151997e252462df9f11ba36
 # Default to dev profile for faster, debug-friendly test builds.
 ARG BUILD_PROFILE=dev
 # Cargo's dev profile outputs to target/debug.
 ARG BUILD_ARTIFACT_DIR=debug
 # Runtime base should have glibc >= the builder image; Debian trixie is newer than bookworm.
-ARG RUNTIME_BASE=debian:trixie-slim
+ARG RUNTIME_BASE=debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
 ARG WEBDEV_BASE=mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
 
 ########################
@@ -26,7 +32,7 @@ FROM ${NODE_IMAGE} AS node-runtime
 ########################
 # Shared Browser egress proxy
 ########################
-FROM golang:${GO_VERSION}-bookworm AS browser-egress-proxy-builder
+FROM ${GO_IMAGE} AS browser-egress-proxy-builder
 
 WORKDIR /src
 COPY packages/browser-egress-proxy/go.mod ./
@@ -38,7 +44,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/browser-egress-pro
 ########################
 # Shared Browser WebRTC sender
 ########################
-FROM golang:${GO_VERSION}-bookworm AS browser-webrtc-builder
+FROM ${GO_IMAGE} AS browser-webrtc-builder
 
 WORKDIR /src
 COPY packages/browser-webrtc-sender/go.mod packages/browser-webrtc-sender/go.sum ./
@@ -52,7 +58,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 ########################
 # Instafy CLI builder
 ########################
-FROM node:22-bookworm-slim AS cli-builder
+FROM ${CLI_NODE_IMAGE} AS cli-builder
 
 WORKDIR /src
 COPY package.json package.json
@@ -83,12 +89,13 @@ RUN pnpm deploy --legacy --filter @instafy/cli --prod /out
 # Dependencies planner
 ########################
 FROM ${RUST_IMAGE} AS chef
+ARG CARGO_CHEF_VERSION=0.1.77
 # codex-linux-sandbox's vendored bubblewrap build.rs probes libcap via pkg-config.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       pkg-config libssl-dev libcap-dev protobuf-compiler ca-certificates \
       clang lld \
     && rm -rf /var/lib/apt/lists/*
-RUN cargo install cargo-chef --locked
+RUN cargo install cargo-chef --version "${CARGO_CHEF_VERSION}" --locked
 WORKDIR /src
 COPY packages/runtime-agent/Cargo.toml packages/runtime-agent/Cargo.lock packages/runtime-agent/
 RUN mkdir -p packages/runtime-agent/src \
@@ -171,6 +178,8 @@ COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandb
 FROM ${RUNTIME_BASE} AS runtime
 
 ARG RATHOLE_VERSION=0.5.0
+ARG RATHOLE_SHA256_AMD64
+ARG RATHOLE_SHA256_ARM64
 ARG TARGETARCH
 ARG PLAYWRIGHT_VERSION
 ARG NPM_VERSION
@@ -239,12 +248,13 @@ RUN set -eu; \
       esac; \
     fi; \
     case "$arch" in \
-      amd64) asset="rathole-x86_64-unknown-linux-gnu.zip" ;; \
-      arm64) asset="rathole-aarch64-unknown-linux-musl.zip" ;; \
+      amd64) asset="rathole-x86_64-unknown-linux-gnu.zip"; checksum="${RATHOLE_SHA256_AMD64}" ;; \
+      arm64) asset="rathole-aarch64-unknown-linux-musl.zip"; checksum="${RATHOLE_SHA256_ARM64}" ;; \
       *) echo "Unsupported arch=$arch (expected amd64|arm64)"; exit 1 ;; \
     esac; \
     url="https://github.com/rathole-org/rathole/releases/download/v${RATHOLE_VERSION}/${asset}"; \
-    curl -fsSL -o /tmp/rathole.zip "$url"; \
+    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error -o /tmp/rathole.zip "$url"; \
+    printf '%s  %s\n' "${checksum}" /tmp/rathole.zip | sha256sum --check --status; \
     unzip -q /tmp/rathole.zip -d /tmp/rathole; \
     install -m 0755 /tmp/rathole/rathole /usr/local/bin/rathole; \
     rm -rf /tmp/rathole /tmp/rathole.zip; \
@@ -270,6 +280,8 @@ ENTRYPOINT ["/usr/local/bin/runtime-entrypoint"]
 FROM ${WEBDEV_BASE} AS runtime-webdev
 
 ARG RATHOLE_VERSION=0.5.0
+ARG RATHOLE_SHA256_AMD64
+ARG RATHOLE_SHA256_ARM64
 ARG TARGETARCH
 ARG PLAYWRIGHT_VERSION
 ARG NPM_VERSION
@@ -277,6 +289,8 @@ ARG PNPM_VERSION
 # uBlock Origin Lite (Manifest V3) provides ad blocking on modern Chromium builds.
 # uBlock Origin itself is Manifest V2 which may be blocked/disabled in newer releases.
 ARG UBOLITE_VERSION=2026.301.2014
+ARG UBOLITE_SHA256_AMD64
+ARG UBOLITE_SHA256_ARM64
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
@@ -309,8 +323,25 @@ RUN npm install -g "npm@${NPM_VERSION}" && \
 # This is architecture-independent and avoids having to bundle Brave (which is not
 # consistently available on all target arches).
 RUN set -eu; \
+    arch="${TARGETARCH:-}"; \
+    if [ -z "$arch" ]; then \
+      uname_arch="$(uname -m || true)"; \
+      case "$uname_arch" in \
+        x86_64) arch="amd64" ;; \
+        aarch64|arm64) arch="arm64" ;; \
+        *) arch="$uname_arch" ;; \
+      esac; \
+    fi; \
+    case "$arch" in \
+      amd64) checksum="${UBOLITE_SHA256_AMD64}" ;; \
+      arm64) checksum="${UBOLITE_SHA256_ARM64}" ;; \
+      *) echo "Unsupported arch=$arch (expected amd64|arm64)"; exit 1 ;; \
+    esac; \
     mkdir -p /opt/instafy/extensions/ublock; \
-    curl -fsSL -o /tmp/ublock.zip "https://github.com/uBlockOrigin/uBOL-home/releases/download/${UBOLITE_VERSION}/uBOLite_${UBOLITE_VERSION}.chromium.zip"; \
+    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+      -o /tmp/ublock.zip \
+      "https://github.com/uBlockOrigin/uBOL-home/releases/download/${UBOLITE_VERSION}/uBOLite_${UBOLITE_VERSION}.chromium.zip"; \
+    printf '%s  %s\n' "${checksum}" /tmp/ublock.zip | sha256sum --check --status; \
     unzip -q /tmp/ublock.zip -d /opt/instafy/extensions/ublock; \
     rm -f /tmp/ublock.zip
 
@@ -352,12 +383,13 @@ RUN set -eu; \
       esac; \
     fi; \
     case "$arch" in \
-      amd64) asset="rathole-x86_64-unknown-linux-gnu.zip" ;; \
-      arm64) asset="rathole-aarch64-unknown-linux-musl.zip" ;; \
+      amd64) asset="rathole-x86_64-unknown-linux-gnu.zip"; checksum="${RATHOLE_SHA256_AMD64}" ;; \
+      arm64) asset="rathole-aarch64-unknown-linux-musl.zip"; checksum="${RATHOLE_SHA256_ARM64}" ;; \
       *) echo "Unsupported arch=$arch (expected amd64|arm64)"; exit 1 ;; \
     esac; \
     url="https://github.com/rathole-org/rathole/releases/download/v${RATHOLE_VERSION}/${asset}"; \
-    curl -fsSL -o /tmp/rathole.zip "$url"; \
+    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error -o /tmp/rathole.zip "$url"; \
+    printf '%s  %s\n' "${checksum}" /tmp/rathole.zip | sha256sum --check --status; \
     unzip -q /tmp/rathole.zip -d /tmp/rathole; \
     install -m 0755 /tmp/rathole/rathole /usr/local/bin/rathole; \
     rm -rf /tmp/rathole /tmp/rathole.zip; \
