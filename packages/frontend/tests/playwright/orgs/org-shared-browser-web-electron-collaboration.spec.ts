@@ -43,7 +43,9 @@ import {
 import {
   expectParticipantPointerAtNormalizedPoint,
   expectResponsiveSharedBrowserLayout,
+  expectSharedBrowserContentGeometryConverged,
   hoverSharedSurfaceAtNormalizedPoint,
+  sharedBrowserContentBox,
 } from "../utils/sharedBrowserResponsiveHarness.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -70,19 +72,45 @@ const SECOND_TARGET = { x: 158, y: 256 };
 const PHONE_VIEWPORT = { width: 390, height: 844 };
 const PHONE_LANDSCAPE_VIEWPORT = { width: 844, height: 390 };
 
+async function sharedBrowserContentClip(page: Page) {
+  const contentBox = await sharedBrowserContentBox(page);
+  const viewport = await page.evaluate(() => ({
+    height: window.innerHeight,
+    width: window.innerWidth,
+  }));
+  const x = Math.max(0, contentBox.x);
+  const y = Math.max(0, contentBox.y);
+  return {
+    x,
+    y,
+    width: Math.max(0, Math.min(contentBox.x + contentBox.width, viewport.width) - x),
+    height: Math.max(0, Math.min(contentBox.y + contentBox.height, viewport.height) - y),
+  };
+}
+
 async function expectExampleDomainComposited(
   page: Page,
   label: string,
 ) {
-  // Capture the containing stage. A canvas-only locator screenshot can read
-  // the canvas backing store even while Electron presents a black compositor
-  // layer for that canvas, which is exactly the user-visible failure this
-  // cross-client proof must catch.
+  // Capture the actual aspect-contained page rectangle from Chromium's
+  // compositor. A canvas-only locator screenshot can read the backing store
+  // while Electron presents a black compositor layer, but sampling the entire
+  // portrait stage would also count its intentional object-fit gutters as
+  // failed pixels.
   const surface = page.getByTestId("browser-session-stage");
   let consecutivePaintedSamples = 0;
   await expect
     .poll(async () => {
-      const paint = await remoteSurfaceScreenshotPaint(surface);
+      const clip = await sharedBrowserContentClip(page);
+      if (clip.width < 2 || clip.height < 2) {
+        consecutivePaintedSamples = 0;
+        return consecutivePaintedSamples;
+      }
+      const screenshot = await page.screenshot({
+        animations: "disabled",
+        clip,
+      });
+      const paint = await remoteSurfaceScreenshotPaint(surface, screenshot);
       const painted =
         paint.brightPixelRatio > 0.65 && paint.darkPixelRatio < 0.15;
       consecutivePaintedSamples = painted ? consecutivePaintedSamples + 1 : 0;
@@ -192,8 +220,10 @@ async function captureBrowserSurface(
 ) {
   const modal = page.getByTestId("browser-session-modal");
   const screenshotPath = testInfo.outputPath(name);
-  const screenshot = await modal.screenshot({ path: screenshotPath });
-  const paint = await remoteSurfaceScreenshotPaint(modal, screenshot);
+  await modal.screenshot({ path: screenshotPath });
+  const clip = await sharedBrowserContentClip(page);
+  const contentScreenshot = await page.screenshot({ animations: "disabled", clip });
+  const paint = await remoteSurfaceScreenshotPaint(modal, contentScreenshot);
   await testInfo.attach(name, { path: screenshotPath, contentType: "image/png" });
   return { paint, screenshotPath };
 }
@@ -610,8 +640,20 @@ test.describe("Org Shared Browser web/Electron collaboration", () => {
           );
         })
         .toBe(true);
+      const landscapeViewport = (await latestOpenInputSocket(electronPage))?.resizes.at(-1);
+      if (!landscapeViewport) {
+        throw new Error("Electron Shared Browser did not publish its landscape input viewport.");
+      }
+      const landscapeInputTarget = {
+        x: Math.max(1, Math.floor(landscapeViewport.width * 0.25)),
+        y: Math.max(1, Math.floor(landscapeViewport.height * 0.25)),
+      };
 
       const ownerCursorAfterResize = { x: 0.57, y: 0.31 };
+      await Promise.all([
+        expectSharedBrowserContentGeometryConverged(webPage),
+        expectSharedBrowserContentGeometryConverged(electronPage),
+      ]);
       await hoverSharedSurfaceAtNormalizedPoint(webPage, ownerCursorAfterResize);
       await expectParticipantPointerAtNormalizedPoint(
         electronPage,
@@ -680,7 +722,7 @@ test.describe("Org Shared Browser web/Electron collaboration", () => {
         "true",
       );
       await expectExistingInputRejected(webPage, FIRST_TARGET);
-      await expectExistingInputAccepted(electronPage, SECOND_TARGET);
+      await expectExistingInputAccepted(electronPage, landscapeInputTarget);
       await expect
         .poll(() => remoteSurfaceHasRenderedFrame(sharedSurface(electronPage)), {
           message: "Electron should retain a rendered Shared Browser frame after reconnect",

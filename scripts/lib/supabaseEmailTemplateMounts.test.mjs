@@ -115,5 +115,15 @@ test("both local Supabase startup paths validate existing and newly started stac
       /ensureSupabaseEmailTemplateMounts\(\{ projectDir: supabaseProjectDir \}\)/g,
     );
     assert.equal(calls?.length, 2, `${relativePath} should validate both startup branches`);
+    if (relativePath === "scripts/supabase-stack.mjs") {
+      const guardedCalls = source.match(
+        /if \(!databaseOnly\) \{\s+ensureSupabaseEmailTemplateMounts\(\{ projectDir: supabaseProjectDir \}\);\s+\}/g,
+      );
+      assert.equal(
+        guardedCalls?.length,
+        2,
+        "database-only startup must not require the excluded Kong service",
+      );
+    }
   }
 });

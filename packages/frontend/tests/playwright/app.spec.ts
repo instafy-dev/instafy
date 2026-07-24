@@ -148,6 +148,9 @@ test.afterEach(async ({ page }) => {
       await expect(page.getByTestId("integration-chip-github")).toBeVisible();
       await expect(page.getByTestId("integration-chip-gemini")).toHaveText("Gemini");
       await expect(page.getByTestId("integration-chip-kimi")).toContainText("Soon");
+      const installLink = page.getByRole("link", { name: "Install Instafy", exact: true });
+      await expect(installLink).toHaveAttribute("href", "/install");
+      await expect(page.getByText("Install on your phone", { exact: true })).toHaveCount(0);
     });
 
     test("landing prompt input does not emit console errors", async ({ page }) => {
@@ -254,6 +257,49 @@ test.afterEach(async ({ page }) => {
     await page.getByTestId("sidebar-project-button").click();
     await expect(page.getByTestId("sidebar-project-switcher-menu")).toBeVisible();
     await expect(page.getByTestId("sidebar-project-new")).toBeVisible();
+  });
+
+  loadsStudioTest("offers a verified Desktop release from wide web Studio", async ({ page }) => {
+    test.setTimeout(60_000);
+    const version = "0.2.0";
+    const stableBaseUrl = "https://downloads.instafy.dev/desktop-app/stable";
+    await page.route("https://downloads.instafy.dev/desktop-app/latest.json", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        headers: {
+          "access-control-expose-headers": "X-Instafy-Desktop-Release",
+          "x-instafy-desktop-release": "desktop-app-v0.2.0",
+        },
+        body: JSON.stringify({
+          version,
+          tag: `desktop-app-v${version}`,
+          channel: "stable",
+          feedUrl: stableBaseUrl,
+          publishedAt: "2026-07-22T10:00:00.000Z",
+          sourceSha: "a".repeat(40),
+          architectures: { mac: ["arm64"] },
+          artifacts: {
+            macDmg: `${stableBaseUrl}/instafy-studio-${version}-mac-arm64.dmg`,
+            macZip: `${stableBaseUrl}/instafy-studio-${version}-mac-arm64.zip`,
+            windowsExe: `${stableBaseUrl}/instafy-studio-${version}-win.exe`,
+          },
+        }),
+      });
+    });
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto("/studio");
+
+    const topbarInstall = page.getByTestId("topbar-get-desktop");
+    await expect(topbarInstall).toBeVisible({ timeout: 15_000 });
+    await expect(topbarInstall).toHaveText("Get Desktop");
+    await expect(topbarInstall).toHaveAttribute("href", "/install#desktop");
+    await expect(topbarInstall).toHaveAttribute("target", "_blank");
+
+    await page.getByTestId("sidebar-profile-menu").click();
+    const accountInstall = page.getByTestId("profile-install-button");
+    await expect(accountInstall).toBeVisible();
+    await expect(accountInstall).toHaveAttribute("href", "/install#desktop");
   });
 
   loadsStudioTest("fresh preparation remounts initialized project access", async ({ page }) => {

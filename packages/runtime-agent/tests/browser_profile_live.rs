@@ -44,6 +44,7 @@ fn config_for(base: &str) -> Config {
         codex_bin: None,
         require_codex_bin: false,
         runtime_access_token: None,
+        parent_dispositions_runtime_on_shutdown: false,
     }
 }
 

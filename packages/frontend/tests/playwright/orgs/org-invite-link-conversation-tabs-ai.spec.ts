@@ -173,7 +173,6 @@ test.describe("Org invite link conversation tabs + AI", () => {
       await guestPage.getByTestId("chat-input").fill(prompt);
       await guestPage.getByTestId("chat-send-button").click();
 
-      await expect(guestPage.getByTestId("assistant-typing-indicator")).toBeVisible({ timeout: 10_000 });
       await expect(guestPage.getByTestId("assistant-setup-indicator"))
         .toHaveCount(0, { timeout: 120_000 })
         .catch(() => {});

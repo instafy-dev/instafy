@@ -613,6 +613,47 @@ fn inject_agent_target_metadata(metadata: &mut JsonValue, target: &AgentTarget) 
     map.insert("agent".to_string(), JsonValue::Object(agent_map));
 }
 
+/// Roster of every AI participant receiving an ambient evaluation dispatch
+/// for this turn (handle plus display name/description when available), in
+/// dispatch order. Stamped on each evaluation job payload so the delivered
+/// turn can list the agent's AI peers.
+fn build_ambient_ai_participants(agent_runs: &[(Uuid, AgentTarget)]) -> JsonValue {
+    let participants = agent_runs
+        .iter()
+        .map(|(_, target)| {
+            let mut entry = JsonMap::new();
+            entry.insert(
+                "handle".to_string(),
+                JsonValue::String(target.handle.clone()),
+            );
+            if let Some(display_name) = target
+                .display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                entry.insert(
+                    "displayName".to_string(),
+                    JsonValue::String(display_name.to_string()),
+                );
+            }
+            if let Some(description) = target
+                .description
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                entry.insert(
+                    "description".to_string(),
+                    JsonValue::String(description.to_string()),
+                );
+            }
+            JsonValue::Object(entry)
+        })
+        .collect::<Vec<_>>();
+    JsonValue::Array(participants)
+}
+
 fn managed_ai_gate_message(managed_ai: &credentials::ManagedAiAccessResponse) -> String {
     if !managed_ai.enabled {
         return "Connect your own AI to continue. Managed Instafy AI is unavailable right now."
@@ -1595,6 +1636,14 @@ pub(crate) async fn process_dispatch_prompt(
     let mut dispatches: Vec<(Uuid, Option<Uuid>, Option<JsonValue>, Option<JsonValue>)> =
         Vec::new();
 
+    // Evaluation dispatches carry the full AI-participant roster so each
+    // agent's delivered turn can name the peers that are also evaluating it
+    // (the wrapper excludes the agent itself). Job-payload-only: the persisted
+    // human message keeps only the server-authored participation marker.
+    let ambient_ai_participants = skill_mode_ambient_evaluation
+        .then(|| build_ambient_ai_participants(&agent_runs))
+        .filter(|value| value.as_array().is_some_and(|list| !list.is_empty()));
+
     for (run_id, target) in agent_runs.iter() {
         let mut agent_request = request.clone();
         apply_agent_prompt_segment(&mut agent_request, &prompt_segments, target);
@@ -1603,6 +1652,29 @@ pub(crate) async fn process_dispatch_prompt(
             &mut agent_request.metadata,
             write_scope_plan.get(&target.handle),
         );
+        if skill_mode_ambient_evaluation {
+            let map = ensure_object(&mut agent_request.metadata);
+            if let Some(participants) = ambient_ai_participants.as_ref() {
+                map.insert("groupAiParticipants".to_string(), participants.clone());
+            }
+            // A BYOC evaluation job has no flat managed-AI burn to defer: its
+            // upstream usage bills to the user's own credential. The deferral
+            // markers were stamped on the shared dispatch metadata for the
+            // managed participants, so override them per credentialed job or
+            // a custom agent's first visible message would burn a managed
+            // prompt it never used.
+            if target.credential_id.is_some() {
+                map.insert(
+                    "aiAccessMode".to_string(),
+                    JsonValue::String("byoc".to_string()),
+                );
+                map.insert("managedAiUsed".to_string(), JsonValue::Bool(false));
+                map.insert(
+                    "managedAiBillingDeferred".to_string(),
+                    JsonValue::Bool(false),
+                );
+            }
+        }
         if let Some(scope) = write_scope_plan.get(&target.handle) {
             if scope.is_coordination_required() {
                 warn!(
@@ -2645,6 +2717,7 @@ fn should_enforce_ambient_group_participation(input: AmbientDispatchGateInput<'_
         || input.has_repo_request
         || input.has_preview_request
         || input.verified_custom_agent_mention
+        || input.prompt_text.trim_start().starts_with('/')
         || prompt_contains_explicit_octo_mention(input.prompt_text)
         || metadata_marks_special_dispatch(input.metadata)
     {
@@ -2656,8 +2729,15 @@ fn should_enforce_ambient_group_participation(input: AmbientDispatchGateInput<'_
         return !explicit_mentions.iter().any(|handle| handle == "octo");
     }
 
-    let handles = extract_agent_selection_handles(input.metadata);
-    handles.len() == 1 && handles.first().is_some_and(|handle| handle == "octo")
+    // Ambient turns arbitrate through the dispatched agents themselves,
+    // regardless of which AI participants are active: every ambient-active
+    // agent (default and/or custom) receives an evaluation dispatch and
+    // decides participation via the skill-mode decline protocol. Explicit
+    // mentions of the default agent or of a verified custom agent already
+    // bailed above as direct dispatches, and `extract_agent_selection_handles`
+    // falls back to the default agent when the selection is empty, so every
+    // remaining selection qualifies.
+    true
 }
 
 fn extract_explicit_agent_mention_handles(metadata: &JsonValue) -> Vec<String> {
@@ -4363,7 +4443,7 @@ mod tests {
     }
 
     #[test]
-    fn ambient_group_enforcement_only_accepts_plain_default_octo_turns() {
+    fn ambient_group_enforcement_accepts_plain_turns_for_any_agent_selection() {
         assert!(ambient_gate_for(
             "Should the button be blue?",
             "feature",
@@ -4395,12 +4475,22 @@ mod tests {
             &json!({ "agentSelection": { "active": ["octo"], "mentions": ["reviewer"] } }),
             true,
         ));
-        assert!(!ambient_gate_for(
+        assert!(ambient_gate_for(
             "Please review this",
             "feature",
             &json!({ "agentSelection": { "active": ["reviewer"], "mentions": [] } })
         ));
+        assert!(ambient_gate_for(
+            "Please review this",
+            "feature",
+            &json!({ "agentSelection": { "active": ["octo", "reviewer"], "mentions": [] } })
+        ));
         assert!(!ambient_gate_for("ls -la", "terminal_command", &json!({})));
+        assert!(!ambient_gate_for(
+            "  /skills list",
+            "feature",
+            &json!({ "agentSelection": { "active": ["octo"], "mentions": [] } })
+        ));
         assert!(!ambient_gate_for(
             "Open the page",
             "feature",

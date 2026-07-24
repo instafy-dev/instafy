@@ -55,6 +55,7 @@ import {
 } from "../../../theme/darkSurfaces";
 import { useWorkspaceControls } from "../workspaceControls";
 import { useStudioNavigationPosture } from "../useStudioNavigationPosture";
+import { DesktopInstallTopBarAction } from "./DesktopInstallTopBarAction";
 
 const {
   listMembers: listControllerOrgMembers,
@@ -621,6 +622,7 @@ export function StudioTopBar() {
           actions={
             hasDesktopTabs ? (
               <div className="flex items-center">
+                <DesktopInstallTopBarAction enabled={isLargeScreen} />
                 <DialogTrigger
                   isOpen={tabMenuOpen}
                   onOpenChange={(open) => setTabMenuOpen((current) => (open && current ? false : open))}
@@ -638,7 +640,9 @@ export function StudioTopBar() {
                   {tabsMenu}
                 </DialogTrigger>
               </div>
-            ) : null
+            ) : (
+              <DesktopInstallTopBarAction enabled={isLargeScreen} />
+            )
           }
         />
       ) : isLargeScreen ? (
@@ -747,6 +751,7 @@ export function StudioTopBar() {
                 {newChatMenu}
               </DialogTrigger>
             ) : null}
+            <DesktopInstallTopBarAction enabled={isLargeScreen} variant="compact" />
           </div>
         </div>
       ) : (

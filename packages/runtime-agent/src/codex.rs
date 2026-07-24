@@ -13,7 +13,8 @@ use codex_core::config::{
 };
 use codex_core::test_support::EmptyUserInstructionsProvider;
 use codex_core::{
-    CodexThread, NewThread, ThreadManager, init_state_db, resolve_installation_id,
+    CodexAppsToolsCache, CodexThread, NewThread, ThreadManager, build_models_manager,
+    init_state_db, local_agent_graph_store_from_state_db, resolve_installation_id,
     thread_store_from_config,
 };
 use codex_exec_server::{EnvironmentManager, LOCAL_ENVIRONMENT_ID, LOCAL_FS};
@@ -37,7 +38,7 @@ use codex_protocol::protocol::{
 };
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use codex_utils_path_uri::PathUri;
+use codex_utils_path_uri::{LegacyAppPathString, PathUri};
 use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
 use tokio::task::JoinHandle;
@@ -1204,13 +1205,15 @@ impl CodexClient {
         let thread_manager = Arc::new(ThreadManager::new(
             &config,
             auth_manager.clone(),
+            build_models_manager(&config, auth_manager.clone()),
+            CodexAppsToolsCache::default(),
             SessionSource::Exec,
             environment_manager,
             empty_extension_registry(),
             Arc::new(EmptyUserInstructionsProvider),
             None,
             thread_store,
-            state_db,
+            local_agent_graph_store_from_state_db(state_db.as_ref()),
             installation_id,
             None,
             None,
@@ -1464,7 +1467,6 @@ impl CodexClient {
                         default_cwd.clone(),
                         bounded_browser_mode,
                     )),
-                    workspace_roots: None,
                     profile_workspace_roots: None,
                     approval_policy: Some(approval_policy),
                     approvals_reviewer: None,
@@ -1477,7 +1479,6 @@ impl CodexClient {
                     summary,
                     service_tier: None,
                     collaboration_mode: None,
-                    multi_agent_mode: None,
                     personality: default_personality,
                 },
             })
@@ -1512,6 +1513,9 @@ impl CodexClient {
 
             match &event.msg {
                 EventMsg::TurnComplete(turn) => {
+                    if let Some(error) = &turn.error {
+                        error_message.get_or_insert(error.message.clone());
+                    }
                     let msg = &turn.last_agent_message;
                     if let Some(text) = msg.clone() {
                         if is_unstructured_turn_complete_candidate(
@@ -1717,8 +1721,15 @@ async fn confirm_shared_browser_shutdown(conversation: &CodexThread) -> Result<(
                 .next_event()
                 .await
                 .context("Shared Browser Codex ended before shutdown confirmation")?;
-            if matches!(event.msg, EventMsg::ShutdownComplete) {
-                break;
+            match event.msg {
+                EventMsg::ShutdownComplete => break,
+                EventMsg::Error(error) => {
+                    return Err(anyhow!(
+                        "Shared Browser Codex shutdown could not be confirmed: {}",
+                        error.message
+                    ));
+                }
+                _ => {}
             }
         }
         conversation.wait_until_terminated().await;
@@ -2426,7 +2437,7 @@ fn install_browser_mcp_servers(
                 args: vec![SHARED_BROWSER_MCP_COMMAND.to_string()],
                 env: Some(environment),
                 env_vars: Vec::new(),
-                cwd: Some(trusted_cwd),
+                cwd: Some(LegacyAppPathString::from_path(&trusted_cwd)),
             }),
         );
     }
@@ -2450,6 +2461,7 @@ fn install_browser_mcp_servers(
 fn browser_mcp_server_config(transport: McpServerTransportConfig) -> McpServerConfig {
     McpServerConfig {
         transport,
+        auth: Default::default(),
         environment_id: DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
         enabled: true,
         required: true,
@@ -2618,14 +2630,27 @@ fn disable_bounded_browser_features(features: &mut ManagedFeatures) -> Result<()
         features
             .disable(feature)
             .with_context(|| format!("failed to disable {feature:?} for bounded browser turn"))?;
+        if features.enabled(feature) {
+            return Err(anyhow!(
+                "bounded browser turn cannot start while {feature:?} is pinned enabled"
+            ));
+        }
     }
     Ok(())
 }
 
-fn bounded_browser_disabled_features() -> [Feature; 17] {
+fn bounded_browser_disabled_features() -> impl Iterator<Item = Feature> {
     [
+        Feature::ShellTool,
+        Feature::UnifiedExec,
+        Feature::ShellZshFork,
+        Feature::UnifiedExecZshFork,
+        Feature::ExecPermissionApprovals,
+        Feature::ApplyPatchStreamingEvents,
         Feature::CodeModeOnly,
         Feature::CodeMode,
+        Feature::CodeModeBufferedExec,
+        Feature::CodeModeHost,
         Feature::SpawnCsv,
         Feature::MultiAgentV2,
         Feature::Collab,
@@ -2633,15 +2658,32 @@ fn bounded_browser_disabled_features() -> [Feature; 17] {
         Feature::StandaloneWebSearch,
         Feature::WebSearchCached,
         Feature::WebSearchRequest,
-        Feature::ImageGenExt,
         Feature::ImageGeneration,
         Feature::ToolSuggest,
+        Feature::Apps,
         Feature::Plugins,
         Feature::RequestPermissionsTool,
-        Feature::SleepTool,
         Feature::MemoryTool,
+        Feature::ExternalAgentMemoryImport,
         Feature::Chronicle,
+        Feature::CodexHooks,
+        Feature::SkillMcpDependencyInstall,
+        Feature::ExecutorCapabilityDiscovery,
+        Feature::EnableMcpApps,
+        Feature::BrowserUse,
+        Feature::BrowserUseFullCdpAccess,
+        Feature::BrowserUseExternal,
+        Feature::ComputerUse,
+        Feature::RemotePlugin,
+        Feature::PluginSharing,
+        Feature::DefaultModeRequestUserInput,
+        Feature::Goals,
+        Feature::Artifact,
+        Feature::WorkspaceDependencies,
+        Feature::ToolCallMcpElicitation,
+        Feature::AuthElicitation,
     ]
+    .into_iter()
 }
 
 fn turn_environment_selections(
@@ -2654,6 +2696,7 @@ fn turn_environment_selections(
         vec![TurnEnvironmentSelection {
             environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
             cwd: PathUri::from_abs_path(&default_cwd),
+            workspace_roots: vec![PathUri::from_abs_path(&default_cwd)],
         }]
     };
     TurnEnvironmentSelections::new(default_cwd, environments)
@@ -4857,6 +4900,8 @@ required = true
                 connector_id: None,
                 mcp_app_resource_uri: None,
                 link_id: None,
+                app_name: None,
+                action_name: None,
                 plugin_id: None,
                 duration: Duration::from_millis(1),
                 result: Ok(CallToolResult {
@@ -4996,6 +5041,8 @@ required = true
             msg: EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn_1".to_string(),
                 last_agent_message: None,
+                error: None,
+                started_at: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -5045,6 +5092,8 @@ required = true
             msg: EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn_1".to_string(),
                 last_agent_message: None,
+                error: None,
+                started_at: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -5129,13 +5178,15 @@ required = true
             id: "evt_raw_response_item".to_string(),
             msg: EventMsg::RawResponseItem(RawResponseItemEvent {
                 item: ResponseItem::Message {
-                    id: Some("msg_1".to_string()),
+                    id: Some(codex_protocol::ResponseItemId::from_server(
+                        "msg_1".to_string(),
+                    )),
                     role: "assistant".to_string(),
                     content: vec![ContentItem::OutputText {
                         text: "{\"summary\":\"ok-from-raw\",\"files\":[]}".to_string(),
                     }],
                     phase: Some(MessagePhase::FinalAnswer),
-                    metadata: None,
+                    internal_chat_message_metadata_passthrough: None,
                 },
             }),
         });
@@ -5153,6 +5204,8 @@ required = true
             msg: EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn_1".to_string(),
                 last_agent_message: None,
+                error: None,
+                started_at: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,
@@ -5164,13 +5217,15 @@ required = true
     #[test]
     fn assistant_response_item_text_ignores_raw_commentary_items() {
         let item = ResponseItem::Message {
-            id: Some("msg_1".to_string()),
+            id: Some(codex_protocol::ResponseItemId::from_server(
+                "msg_1".to_string(),
+            )),
             role: "assistant".to_string(),
             content: vec![ContentItem::OutputText {
                 text: "working".to_string(),
             }],
             phase: Some(MessagePhase::Commentary),
-            metadata: None,
+            internal_chat_message_metadata_passthrough: None,
         };
 
         assert_eq!(assistant_response_item_text(&item), None);
@@ -5206,6 +5261,7 @@ required = true
         let token_usage = TokenUsage {
             input_tokens: 1000,
             cached_input_tokens: 200,
+            cache_write_input_tokens: 0,
             output_tokens: 250,
             reasoning_output_tokens: 50,
             total_tokens: 1250,
@@ -5227,6 +5283,8 @@ required = true
             msg: EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn_1".to_string(),
                 last_agent_message: None,
+                error: None,
+                started_at: None,
                 completed_at: None,
                 duration_ms: None,
                 time_to_first_token_ms: None,

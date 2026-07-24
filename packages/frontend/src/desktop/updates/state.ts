@@ -3,6 +3,9 @@ import type { DesktopUpdatePhase } from "@instafy/ota-contracts";
 const DEVICE_ID_STORAGE_KEY = "instafy.desktop-updates.deviceId";
 const SNAPSHOT_STORAGE_KEY = "instafy.desktop-updates.lastSnapshot";
 
+export const DESKTOP_UPDATER_STATUS_CHANGED_EVENT =
+  "instafy:desktop-updater-status-changed";
+
 export interface StoredDesktopUpdaterSnapshot {
   channel: string;
   currentVersion: string;
@@ -94,4 +97,17 @@ export function writeStoredDesktopUpdaterSnapshot(snapshot: StoredDesktopUpdater
     return;
   }
   writeStorageValue(SNAPSHOT_STORAGE_KEY, JSON.stringify(snapshot));
+}
+
+export function publishDesktopUpdaterSnapshot(snapshot: StoredDesktopUpdaterSnapshot) {
+  writeStoredDesktopUpdaterSnapshot(snapshot);
+  if (!hasWindow()) {
+    return;
+  }
+  window.dispatchEvent(
+    new CustomEvent<StoredDesktopUpdaterSnapshot>(
+      DESKTOP_UPDATER_STATUS_CHANGED_EVENT,
+      { detail: snapshot },
+    ),
+  );
 }

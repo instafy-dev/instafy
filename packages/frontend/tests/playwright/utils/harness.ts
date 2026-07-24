@@ -2794,6 +2794,7 @@ type ControllerOrgProjectOptions = {
   orgSlug?: string;
   ownerUserId?: string;
   projectType?: string;
+  reuseAccessibleOrg?: boolean;
 };
 
 export async function createControllerOrgAndProject(
@@ -2809,43 +2810,91 @@ export async function createControllerOrgAndProject(
   const orgName = options?.orgName?.trim() || `Playwright Workspace ${Date.now()}`;
   const orgSlug = options?.orgSlug?.trim();
   const ownerUserId = options?.ownerUserId?.trim() || undefined;
+  let orgId: string | null = null;
+  let resolvedOrgName = orgName;
+  let resolvedOrgSlug: string | null = orgSlug ?? null;
 
-  const orgResponse = await request.post(`${controllerUrl}/orgs`, {
-    headers: {
-      authorization: `Bearer ${accessToken}`,
-      "content-type": "application/json",
-    },
-    data: {
-      orgName,
-      orgSlug,
-      ownerUserId,
-    },
-  });
-  if (!orgResponse.ok()) {
-    const body = await orgResponse.text().catch(() => "");
-    throw new Error(
-      `Controller org create failed (${orgResponse.status()} ${orgResponse.statusText()}): ${body}`
-    );
+  if (options?.reuseAccessibleOrg) {
+    const orgsResponse = await request.get(`${controllerUrl}/orgs`, {
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+      },
+    });
+    if (orgsResponse.ok()) {
+      const orgsPayload = (await orgsResponse.json().catch(() => null)) as {
+        orgs?: Array<{
+          id?: unknown;
+          slug?: unknown;
+          name?: unknown;
+          role?: unknown;
+        }>;
+      } | null;
+      const writableOrgs = (orgsPayload?.orgs ?? []).filter((candidate) =>
+        Boolean(normalizeProjectId(candidate.id)),
+      );
+      const reusableOrg = ["owner", "admin", "builder"]
+        .map((preferredRole) =>
+          writableOrgs.find((candidate) => {
+            const role =
+              typeof candidate.role === "string"
+                ? candidate.role.trim().toLowerCase()
+                : "";
+            return role === preferredRole;
+          }),
+        )
+        .find(Boolean);
+      orgId = normalizeProjectId(reusableOrg?.id);
+      if (orgId) {
+        resolvedOrgName =
+          typeof reusableOrg?.name === "string" && reusableOrg.name.trim().length > 0
+            ? reusableOrg.name
+            : orgName;
+        resolvedOrgSlug =
+          typeof reusableOrg?.slug === "string" && reusableOrg.slug.trim().length > 0
+            ? reusableOrg.slug
+            : null;
+      }
+    }
   }
-  const orgPayload = (await orgResponse.json()) as {
-    orgId?: unknown;
-    orgSlug?: unknown;
-    orgName?: unknown;
-  };
-  const orgId = normalizeProjectId(orgPayload.orgId);
+
   if (!orgId) {
-    throw new Error(
-      `Controller org create did not return a valid orgId. body=${JSON.stringify(orgPayload)}`
-    );
+    const orgResponse = await request.post(`${controllerUrl}/orgs`, {
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json",
+      },
+      data: {
+        orgName,
+        orgSlug,
+        ownerUserId,
+      },
+    });
+    if (!orgResponse.ok()) {
+      const body = await orgResponse.text().catch(() => "");
+      throw new Error(
+        `Controller org create failed (${orgResponse.status()} ${orgResponse.statusText()}): ${body}`
+      );
+    }
+    const orgPayload = (await orgResponse.json()) as {
+      orgId?: unknown;
+      orgSlug?: unknown;
+      orgName?: unknown;
+    };
+    orgId = normalizeProjectId(orgPayload.orgId);
+    if (!orgId) {
+      throw new Error(
+        `Controller org create did not return a valid orgId. body=${JSON.stringify(orgPayload)}`
+      );
+    }
+    resolvedOrgName =
+      typeof orgPayload.orgName === "string" && orgPayload.orgName.trim().length > 0
+        ? orgPayload.orgName
+        : orgName;
+    resolvedOrgSlug =
+      typeof orgPayload.orgSlug === "string" && orgPayload.orgSlug.trim().length > 0
+        ? orgPayload.orgSlug
+        : orgSlug ?? null;
   }
-  const resolvedOrgName =
-    typeof orgPayload.orgName === "string" && orgPayload.orgName.trim().length > 0
-      ? orgPayload.orgName
-      : orgName;
-  const resolvedOrgSlug =
-    typeof orgPayload.orgSlug === "string" && orgPayload.orgSlug.trim().length > 0
-      ? orgPayload.orgSlug
-      : orgSlug ?? null;
 
   const projectResponse = await request.post(
     `${controllerUrl}/orgs/${encodeURIComponent(orgId)}/projects`,
@@ -2965,6 +3014,7 @@ async function ensureControllerProjectExists(
     accessToken: authToken,
     ownerUserId: ownerUserId ?? undefined,
     projectType: "customer",
+    reuseAccessibleOrg: true,
   });
   const createdProjectId = created.projectId;
   return createdProjectId;

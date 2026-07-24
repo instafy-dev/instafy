@@ -301,20 +301,20 @@ async function sendInputThroughExistingSocket(
   page: Page,
   point: { x: number; y: number },
 ) {
-  await page.evaluate(({ x, y }) => {
+  return page.evaluate(({ x, y }) => {
     const entries = (window as SharedBrowserSocketProbeWindow)
       .__INSTAFY_SHARED_BROWSER_SOCKET_PROBE__?.inputEntries ?? [];
-    const entry = [...entries]
-      .reverse()
-      .find(
-        (candidate) =>
-          candidate.ready &&
-          !candidate.closed &&
-          candidate.socket.readyState === WebSocket.OPEN,
-      );
-    if (!entry) {
+    const entryIndex = entries.findLastIndex(
+      (candidate) =>
+        candidate.ready &&
+        !candidate.closed &&
+        candidate.socket.readyState === WebSocket.OPEN,
+    );
+    if (entryIndex < 0) {
       throw new Error("No open Shared Browser input socket is available.");
     }
+    const entry = entries[entryIndex];
+    const errorCountBefore = entry.errors.length;
     const common = {
       type: "mouse",
       x,
@@ -337,11 +337,8 @@ async function sendInputThroughExistingSocket(
         buttons: 0,
       }),
     );
+    return { entryIndex, errorCountBefore };
   }, point);
-}
-
-function inputProbeErrorCount(entries: InputSocketProbeSnapshot[]) {
-  return entries.reduce((total, entry) => total + entry.errors.length, 0);
 }
 
 function inputProbeHasOpenSocket(entries: InputSocketProbeSnapshot[]) {
@@ -354,15 +351,24 @@ export async function expectExistingInputAccepted(
 ) {
   const before = await inputSocketProbeSnapshot(page);
   expect(inputProbeHasOpenSocket(before)).toBe(true);
-  const errorCountBefore = inputProbeErrorCount(before);
-  await sendInputThroughExistingSocket(page, point);
+  const sent = await sendInputThroughExistingSocket(page, point);
   // Accepted CDP input is intentionally one-way. Give the origin enough time
   // to return a non-fatal authorization error if ownership changed between
   // socket setup and this exact message.
   await page.waitForTimeout(250);
   const after = await inputSocketProbeSnapshot(page);
   expect(inputProbeHasOpenSocket(after)).toBe(true);
-  expect(inputProbeErrorCount(after)).toBe(errorCountBefore);
+  const selectedEntry = after[sent.entryIndex];
+  expect(selectedEntry).toBeDefined();
+  expect({
+    errorCount: selectedEntry.errors.length - sent.errorCountBefore,
+    errors: selectedEntry.errors.slice(sent.errorCountBefore),
+    open: selectedEntry.open && !selectedEntry.closed,
+  }).toEqual({
+    errorCount: 0,
+    errors: [],
+    open: true,
+  });
 }
 
 export async function expectExistingInputRejected(
@@ -371,20 +377,22 @@ export async function expectExistingInputRejected(
 ) {
   const before = await inputSocketProbeSnapshot(page);
   expect(inputProbeHasOpenSocket(before)).toBe(true);
-  const errorCountBefore = inputProbeErrorCount(before);
-  await sendInputThroughExistingSocket(page, point);
+  const sent = await sendInputThroughExistingSocket(page, point);
   await expect
     .poll(async () => {
       const after = await inputSocketProbeSnapshot(page);
+      const selectedEntry = after[sent.entryIndex];
       return {
-        errorCount: inputProbeErrorCount(after),
-        hasOpenSocket: inputProbeHasOpenSocket(after),
-        errors: after.flatMap((entry) => entry.errors).join("\n"),
+        errorCount:
+          (selectedEntry?.errors.length ?? sent.errorCountBefore) -
+          sent.errorCountBefore,
+        errors: selectedEntry?.errors.slice(sent.errorCountBefore).join("\n") ?? "",
+        open: Boolean(selectedEntry?.open && !selectedEntry.closed),
       };
     })
     .toEqual({
-      errorCount: errorCountBefore + CLICK_INPUT_MESSAGE_COUNT,
-      hasOpenSocket: true,
+      errorCount: CLICK_INPUT_MESSAGE_COUNT,
       errors: expect.stringMatching(/controlled by another participant/i),
+      open: true,
     });
 }

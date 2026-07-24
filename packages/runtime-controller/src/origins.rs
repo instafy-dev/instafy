@@ -489,7 +489,7 @@ fn runtime_capability_state_is_live(
     lease_status: Option<&str>,
     lease_released_at: Option<DateTime<Utc>>,
 ) -> bool {
-    let live = matches!(status, "ready" | "running");
+    let live = matches!(status, "ready" | "running" | "draining");
     let active_generation = active_lease_id.is_none()
         || (lease_status == Some("active") && lease_released_at.is_none());
     live && active_generation
@@ -833,7 +833,7 @@ async fn authorize_active_job_capability(
                and j.leased_by_runtime_id = $3
                and j.status = 'leased'
                and j.lease_expires_at > now()
-               and r.status in ('ready', 'running')
+               and r.status in ('ready', 'running', 'draining')
              order by j.leased_at desc nulls last
              limit 1",
             &[project_id, &run_id, &runtime_id],
@@ -2013,7 +2013,7 @@ async fn load_origin_runtime_binding(
                and oi.origin_id = $2
                and oi.runtime_id is not null
                and oi.status = 'online'
-               and r.status in ('ready', 'running')
+               and r.status in ('ready', 'running', 'draining')
                and ($3::uuid is null or oi.runtime_id = $3)
              order by oi.updated_at desc
              limit 1",
@@ -3053,6 +3053,42 @@ pub(crate) async fn load_active_lease_by_id(
         )
         .await
         .context("failed to query workspace lease by id")?;
+
+    Ok(row.map(|record| lease_from_row(&record)))
+}
+
+/// Narrows a user-held workspace lease to the runtime selected by the
+/// controller for an origin write. Origin selection happens after lease
+/// acquisition, so a client without a runtime hint can legitimately acquire
+/// an unbound lease first. This update is monotonic (NULL -> exact runtime),
+/// race-safe, and refuses an already-different binding.
+async fn bind_workspace_lease_runtime(
+    pool: &PgPool,
+    lease_id: &Uuid,
+    project_id: &Uuid,
+    user_id: &Uuid,
+    runtime_id: &Uuid,
+) -> Result<Option<WorkspaceLeaseRecord>> {
+    let connection = pool
+        .get()
+        .await
+        .context("failed to acquire connection for workspace lease runtime binding")?;
+    let row = connection
+        .query_opt(
+            "update workspace_leases
+             set runtime_id = coalesce(runtime_id, $4),
+                 updated_at = now()
+             where id = $1
+               and project_id = $2
+               and user_id = $3
+               and status = 'active'
+               and expires_at > now()
+               and (runtime_id is null or runtime_id = $4)
+             returning *",
+            &[lease_id, project_id, user_id, runtime_id],
+        )
+        .await
+        .context("failed to bind workspace lease to origin runtime")?;
 
     Ok(row.map(|record| lease_from_row(&record)))
 }
@@ -4409,6 +4445,7 @@ pub(crate) struct OriginRegisterResponse {
 struct ProjectOriginResponse {
     project_id: Uuid,
     origin_id: Uuid,
+    runtime_id: Option<Uuid>,
     mode: String,
     endpoint: String,
     protocols: Vec<String>,
@@ -4564,10 +4601,21 @@ async fn get_project_origin(
         &resolved.origin.id,
         &resolved.origin.endpoint,
     );
+    // A user-driven write acquires its workspace lease before minting the
+    // origin token. Return the controller-verified runtime binding so the
+    // client can bind that lease to the same runtime that will receive the
+    // write. Unbound hosted gateways intentionally return null.
+    let runtime_id = load_origin_runtime_binding(&state.pool, &resolved.origin, None)
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to resolve project origin runtime: {error}"))
+        })?
+        .map(|binding| binding.runtime_id);
 
     Ok(Json(ProjectOriginResponse {
         project_id,
         origin_id: resolved.origin.id,
+        runtime_id,
         mode: resolved.origin.mode.as_str().to_string(),
         endpoint,
         protocols: resolved.origin.protocols,
@@ -4784,6 +4832,12 @@ mod tests {
         assert!(runtime_capability_state_is_live("ready", None, None, None));
         assert!(runtime_capability_state_is_live(
             "running",
+            Some(lease_id),
+            Some("active"),
+            None,
+        ));
+        assert!(runtime_capability_state_is_live(
+            "draining",
             Some(lease_id),
             Some("active"),
             None,
@@ -7114,6 +7168,29 @@ pub(crate) async fn post_access_token(
         context.is_service_role,
     )
     .await?;
+
+    if lease_required {
+        if let (Some(lease), Some(binding)) =
+            (lease_record.as_ref(), origin_runtime_binding.as_ref())
+        {
+            let bound = bind_workspace_lease_runtime(
+                &state.pool,
+                &lease.id,
+                &project_id,
+                &subject_user,
+                &binding.runtime_id,
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!("failed to bind origin workspace lease: {error}"))
+            })?;
+            if bound.is_none() {
+                return Err(unauthorized(
+                    "workspace lease cannot be bound to the selected origin runtime",
+                ));
+            }
+        }
+    }
     if browser_access_requested
         && origin_runtime_binding.as_ref().is_none_or(|binding| {
             !crate::provider_identifiers::is_trusted_instafy_cloud_provider_id(&binding.provider)

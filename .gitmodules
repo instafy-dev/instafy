@@ -1,4 +1,4 @@
 [submodule "codex"]
 	path = codex
 	url = https://github.com/instafy-dev/codex
-	branch = main
+	branch = instafy/integration

@@ -2,7 +2,7 @@
 
 This document defines how Octo participates when a conversation contains more than one human. Octo is presented as a peer participant, but it should contribute selectively so a shared chat still feels like a human conversation.
 
-There is one participation behavior: **the dispatched agent decides**. Every ambient multi-human turn dispatches to the default agent, which runs the pinned participation skill (`.agents/skills/instafy-group-participation/SKILL.md`) as its first act and either answers or declines silently. The controller keeps only a small deterministic gate for the contracts that must never depend on model judgment: explicit addressing, single-human conversations, and the mechanical arithmetic answer-race machinery.
+There is one participation behavior: **the dispatched agent decides**. Every ambient multi-human turn dispatches to every ambient-active agent — the default agent and/or any active custom agents — as an evaluation: each agent runs the pinned participation skill (`.agents/skills/instafy-group-participation/SKILL.md`) as its first act and either answers or declines silently. The controller keeps only a small deterministic gate for the contracts that must never depend on model judgment: explicit addressing, single-human conversations, and the mechanical arithmetic answer-race machinery.
 
 ## Mental model
 
@@ -16,14 +16,16 @@ There is one participation behavior: **the dispatched agent decides**. Every amb
 
 ## The agent-evaluated contract
 
-There is no pre-dispatch participation judgment for ambient turns. The controller dispatches every ambient multi-human turn to the default agent, stamping server-authored marker metadata `groupParticipation = {decision: "agent_evaluation", reason: "skill_mode_ambient", enforcedBy: "runtime-controller"}` so downstream consumers (billing, UI, sentinel handling) can recognize the run. The dispatched agent reads the pinned participation skill before any tool use or drafting and either:
+There is no pre-dispatch participation judgment for ambient turns. The controller dispatches every ambient multi-human turn to every ambient-active agent (default and/or custom), stamping server-authored marker metadata `groupParticipation = {decision: "agent_evaluation", reason: "skill_mode_ambient", enforcedBy: "runtime-controller"}` on each evaluation job so downstream consumers (billing, UI, sentinel handling) can recognize the run. Each dispatched agent reads the pinned participation skill before any tool use or drafting and either:
 
 - answers (or claims/corrects) normally — from the first visible output onward the run bills and presents exactly like any other Octo turn; or
 - declines by emitting exactly `NO_RESPONSE` as its entire reply. The controller swallows the sentinel: the message is never persisted, never rendered on any client, and the job records as a normal success. No credit is burned, no prompt is counted, and no Octo activity was ever shown.
 
 The sentinel is only honored as the agent's first and only conversational output — both the streamed-message path and the completion-summary path swallow it. Once the agent has produced visible output it is committed to a real answer, and a direct address (`@octo`, reply to Octo, **Ask Octo**) is never eligible for the sentinel. Deciding is required to be cheap: the skill forbids opening files or running tools just to decide whether to speak.
 
-**Billing is free-until-spoken.** For ambient evaluations, managed-AI prompt counting and credit burn are deferred until the first visible assistant message lands, so a declined turn debits nothing. Direct addresses and single-human conversations bill exactly as before.
+**Multiple AI participants behave as selective peers.** When more than one agent is active in the conversation, every ambient turn dispatches one evaluation job per agent, each with the same server-stamped marker. Each agent's delivered turn addresses it by its own identity and lists the other AI participants (handle plus description when available), so an agent whose turn is clearly better suited to a listed peer declines and lets that peer take it — a multi-AI room does not answer in chorus. An explicit mention of one agent (`@octo` or a verified `@custom-agent`) stays a direct dispatch to that agent only, with no evaluation marker, and a custom agent's `NO_RESPONSE` decline is swallowed and recorded exactly like the default agent's.
+
+**Billing is free-until-spoken.** For ambient evaluations, managed-AI prompt counting and credit burn are deferred until the first visible assistant message lands, so a declined turn debits nothing. The deferral applies to managed-AI evaluation jobs; a custom agent evaluating on its own connected credential (BYOC) has no flat platform burn to defer — its upstream usage is inherently the user's own. Direct addresses and single-human conversations bill exactly as before.
 
 **Presence is silent-until-speaking.** No thinking/typing indicator and no agent-owned activity row appears for a run that may end in a swallowed `NO_RESPONSE` — for any viewer, including the sender. Full lifecycle presentation begins when the turn was direct or once the run starts streaming visible content.
 

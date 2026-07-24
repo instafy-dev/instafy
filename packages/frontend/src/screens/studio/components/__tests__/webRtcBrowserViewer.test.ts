@@ -225,6 +225,7 @@ describe("WebRTC Shared Browser protocol", () => {
 });
 
 describe("WebRTC Shared Browser grant rotation", () => {
+  const stableIceServers: RTCIceServer[] = [];
   let container: HTMLDivElement;
   let root: Root;
   let fetchMock: ReturnType<typeof vi.fn>;
@@ -267,7 +268,8 @@ describe("WebRTC Shared Browser grant rotation", () => {
         inputWsUrl: null,
         inputAvailable: false,
         accessToken,
-        iceServers: [],
+        connectionGeneration: 0,
+        iceServers: stableIceServers,
         relayOnly: false,
         renderScale: 1,
         active: true,
@@ -303,6 +305,44 @@ describe("WebRTC Shared Browser grant rotation", () => {
         }),
       }),
     );
+  });
+
+  it("reopens identical peer and input endpoints when the connection generation changes", async () => {
+    const sharedConnection = {
+      inputAvailable: true,
+      inputWsUrl: "wss://runtime.test/browser/input?token=same-grant",
+    } as const;
+    await act(async () =>
+      renderViewer("same-browser-grant", {
+        ...sharedConnection,
+        connectionGeneration: 0,
+      }),
+    );
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    expect(FakeInputWebSocket.instances).toHaveLength(1);
+    const firstPeer = FakePeerConnection.instances[0];
+    const firstInput = FakeInputWebSocket.instances[0];
+
+    await act(async () =>
+      renderViewer("same-browser-grant", {
+        ...sharedConnection,
+        connectionGeneration: 0,
+      }),
+    );
+    expect(FakePeerConnection.instances).toHaveLength(1);
+    expect(FakeInputWebSocket.instances).toHaveLength(1);
+
+    await act(async () =>
+      renderViewer("same-browser-grant", {
+        ...sharedConnection,
+        connectionGeneration: 1,
+      }),
+    );
+    expect(FakePeerConnection.instances).toHaveLength(2);
+    expect(FakeInputWebSocket.instances).toHaveLength(2);
+    expect(firstPeer?.closed).toBe(true);
+    expect(firstInput?.readyState).toBe(3);
+    expect(FakeInputWebSocket.instances[1]?.url).toBe(firstInput?.url);
   });
 
   it("keeps the last decoded frame visible until the rotated peer renders", async () => {

@@ -1988,7 +1988,7 @@ fn ensure_runtime_tunnel_generation_is_live(
         ));
     }
 
-    if !matches!(state.status, "ready" | "running") {
+    if !matches!(state.status, "ready" | "running" | "draining") {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ApiError::new("runtime is not active")),
@@ -2784,6 +2784,17 @@ mod tests {
 
         ensure_runtime_tunnel_generation_is_live(&project_id, &runtime_id, Some(lease_id), current)
             .expect("current live runtime generation should be accepted");
+
+        ensure_runtime_tunnel_generation_is_live(
+            &project_id,
+            &runtime_id,
+            Some(lease_id),
+            RuntimeTunnelGenerationState {
+                status: "draining",
+                ..current
+            },
+        )
+        .expect("draining runtime generation should finish its active job");
 
         let stale_error = ensure_runtime_tunnel_generation_is_live(
             &project_id,

@@ -16,6 +16,7 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
     import { RemoteBrowserMobileKeyboard } from "/src/screens/studio/components/RemoteBrowserMobileKeyboard.tsx";
     import { SharedBrowserChrome } from "/src/screens/studio/components/SharedBrowserChrome.tsx";
     import { SharedBrowserCollaborationControls } from "/src/screens/studio/components/SharedBrowserCollaborationControls.tsx";
+    import { shouldUseCompactBrowserChrome } from "/src/screens/studio/components/browserSessionLayout.ts";
     const React = ReactNS.default ?? ReactNS;
     const { createRoot } = ReactDomClientNS.default ?? ReactDomClientNS;
     const h = React.createElement;
@@ -44,6 +45,10 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
 
     function Fixture() {
       const [agentControls, setAgentControls] = React.useState(false);
+      const compact = shouldUseCompactBrowserChrome({
+        containerWidth: window.innerWidth,
+        compactViewport: window.innerWidth < 640,
+      });
       React.useEffect(() => {
         window.__setAgentControls = setAgentControls;
         window.__remoteKeyboardMessages = [];
@@ -54,14 +59,14 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
         : { kind: "human" };
       const transport = h(BrowserTransportSelector, {
         checked: true,
-        compact: true,
+        compact,
         mode: "shared",
         onModeChange: () => {},
         personalAvailable: true,
       });
       const collaboration = h(SharedBrowserCollaborationControls, {
         client,
-        compact: true,
+        compact,
         localControlOwner,
         onGrantControl: () => {},
         onReleaseControl: () => {},
@@ -77,7 +82,7 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
           onTabChange: () => {},
         }),
         h(SharedBrowserChrome, {
-          compact: true,
+          compact,
           pages,
           resolved: true,
           pendingAction: null,
@@ -90,7 +95,7 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
           onClearError: () => {},
           toolbarLeading: transport,
           toolbarStatus: h(BrowserStatusPill, {
-            compact: true,
+            compact,
             detail: "Shared Browser is connected and ready.",
             state: "ready",
             testId: "browser-session-status",
@@ -252,6 +257,37 @@ test("keeps compact browser identity, control, and tabs usable at 360px", async 
     contentType: "image/png",
     path: screenshotPath,
   });
+});
+
+test("keeps the unified browser address usable at tablet portrait width", async ({ page }) => {
+  await page.setViewportSize({ width: 768, height: 1024 });
+  await mountCompactBrowserChrome(page);
+
+  const chrome = page.getByTestId("shared-browser-chrome");
+  const address = page.getByTestId("shared-browser-address");
+  const transport = page.getByTestId("browser-transport-selector");
+
+  await expect(transport).toHaveAttribute("data-compact", "true");
+  await expect(chrome).toBeVisible();
+  await expect(address).toBeVisible();
+
+  const geometry = await page.evaluate(() => {
+    const chromeElement = document.querySelector<HTMLElement>(
+      '[data-testid="shared-browser-chrome"]',
+    );
+    const addressElement = document.querySelector<HTMLElement>(
+      '[data-testid="shared-browser-address"]',
+    );
+    return {
+      addressWidth: addressElement?.getBoundingClientRect().width ?? 0,
+      chromeFits: chromeElement ? chromeElement.scrollWidth <= chromeElement.clientWidth : false,
+      documentWidth: document.documentElement.scrollWidth,
+    };
+  });
+
+  expect(geometry.documentWidth).toBeLessThanOrEqual(768);
+  expect(geometry.chromeFits).toBe(true);
+  expect(geometry.addressWidth).toBeGreaterThanOrEqual(96);
 });
 
 test("uses one real Chromium action per mobile keyboard control key", async ({ page }) => {

@@ -20,10 +20,25 @@ describe("browserSessionLayout", () => {
     ).toBe(true);
     expect(
       shouldUseCompactBrowserChrome({
-        containerWidth: 721,
+        containerWidth: 901,
         compactViewport: true,
       }),
     ).toBe(false);
+  });
+
+  it("keeps unified browser controls compact at tablet and phone-landscape widths", () => {
+    expect(
+      shouldUseCompactBrowserChrome({
+        containerWidth: 768,
+        compactViewport: false,
+      }),
+    ).toBe(true);
+    expect(
+      shouldUseCompactBrowserChrome({
+        containerWidth: 844,
+        compactViewport: false,
+      }),
+    ).toBe(true);
   });
 
   it("uses viewport posture only until browser panel width is measured", () => {

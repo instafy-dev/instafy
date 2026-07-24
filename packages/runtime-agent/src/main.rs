@@ -20,6 +20,12 @@ use tracing_subscriber::EnvFilter;
 const APPLY_PATCH_COMMANDS: [&str; 2] = ["apply_patch", "applypatch"];
 
 fn main() -> anyhow::Result<()> {
+    // Electron-owned Windows runtimes join a KILL_ON_JOB_CLOSE Job Object
+    // before any model-controlled process can spawn. If the Rust root exits,
+    // Windows then terminates the full descendant tree as one lifetime unit.
+    let _parent_owned_process_tree =
+        process_hardening::install_parent_owned_process_tree_guard()
+            .context("failed to install parent-owned runtime process-tree guard")?;
     // Keep runtime service credentials out of model-controlled processes even
     // when both run as the same Unix user. This must precede every dispatch
     // path because `/proc/<pid>/environ` exposes the process's initial
@@ -225,7 +231,7 @@ async fn run_runtime_agent() -> Result<()> {
     wait_for_shutdown().await;
     info!("shutdown signal received; stopping agent");
 
-    shutdown.notify_waiters();
+    shutdown.cancel();
 
     if let Err(join_error) = agent_task.await {
         if !join_error.is_cancelled() {

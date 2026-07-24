@@ -29,7 +29,7 @@ const VARIANT_CONFIG = {
   },
   "smoke-core": {
     args: [
-      "tests/playwright/smoke/browser-session-smoke.spec.ts",
+      "tests/playwright/api",
       "tests/playwright/smoke/conversation-smoke.spec.ts",
       "tests/playwright/smoke/file-explorer-ui.spec.ts",
       "tests/playwright/smoke/project-picker.spec.ts",
@@ -37,23 +37,36 @@ const VARIANT_CONFIG = {
       "tests/playwright/smoke/runtime-ai-model-select.spec.ts",
       "--max-failures=1",
     ],
-    env: {},
+    // Core smoke deliberately includes the non-Git Files CRUD contract.
+    env: { GIT_CANONICAL: "0" },
   },
   controller: {
     args: [
       "tests/playwright/api",
-      "tests/playwright/smoke/conversation-smoke.spec.ts",
       "--max-failures=1",
     ],
-    env: {},
+    // Controller/API coverage uses its HTTP/runtime fixtures without Git
+    // edge, shard, or origin-gateway services.
+    env: { GIT_CANONICAL: "0" },
   },
   projects: {
-    args: ["tests/playwright/projects", "--max-failures=1"],
-    env: {},
+    args: [
+      "tests/playwright/projects",
+      // This proof is primarily about canonical Git durability. Keep it in its
+      // existing org-oriented source file, but execute it in the projects lane
+      // that already pays the cost of the Git service stack.
+      "tests/playwright/orgs/org-invite-link-github-import-canonical.spec.ts",
+      "--max-failures=1",
+    ],
+    env: { GIT_CANONICAL: "1" },
   },
   orgs: {
     args: ["tests/playwright/orgs", "--max-failures=1"],
-    env: {},
+    // All required org collaboration contracts except the canonical-import
+    // proof operate through the controller/Supabase/runtime surfaces. The
+    // import proof now runs in `projects`, so avoid booting three unused Git
+    // service containers on this critical lane.
+    env: { GIT_CANONICAL: "0" },
   },
   payments: {
     args: [

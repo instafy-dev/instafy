@@ -4,10 +4,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 
+import { modulePathToImportUrl } from "./module-import-url.mjs";
+
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const releaseRoot = path.join(packageRoot, "release");
 const { resolveVerifiedBundledRuntimeAgent } = await import(
-  path.join(packageRoot, "dist", "bundledRuntimeAgent.js")
+  modulePathToImportUrl(path.join(packageRoot, "dist", "bundledRuntimeAgent.js")),
 );
 
 const EXPECTED_PERSONAL_BROWSER_CAPABILITY_CONTRACT = {

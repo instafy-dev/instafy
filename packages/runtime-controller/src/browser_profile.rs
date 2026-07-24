@@ -12,7 +12,7 @@
 //! needs per-user key management (spec step 3) and is rejected until then.
 
 use axum::body::{Body, Bytes};
-use axum::extract::{DefaultBodyLimit, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Json, Response};
 use axum::routing::get;
@@ -23,9 +23,13 @@ use uuid::Uuid;
 use crate::agent::{
     ensure_agent_token_matches_runtime_lease, extract_agent_token, verify_agent_token_with_scopes,
 };
+use crate::auth::authenticate_request;
 use crate::config::PgPool;
 use crate::secrets::{decrypt_secret_payload, encrypt_secret_payload};
-use crate::{bad_request, forbidden, internal_error, not_found, unauthorized, ApiError, AppState};
+use crate::{
+    bad_request, ensure_project_write_access, forbidden, internal_error, load_project_record,
+    not_found, unauthorized, ApiError, AppState,
+};
 
 const BROWSER_PROFILE_SCOPE_PROJECT: &str = "project";
 const AGENT_BROWSER_PROFILE_SCOPE: &str = "agent.browser_profile";
@@ -35,14 +39,19 @@ const AGENT_BROWSER_PROFILE_SCOPE: &str = "agent.browser_profile";
 const BROWSER_PROFILE_MAX_BYTES: usize = 16 * 1024 * 1024;
 
 pub(crate) fn router() -> Router<AppState> {
-    Router::new().route(
-        "/agent/browser-profile",
-        get(get_browser_profile)
-            .put(put_browser_profile)
-            // Profiles are up to a few MB, above axum's 2MB default extractor
-            // cap; align the limit with the handler's own size check.
-            .layer(DefaultBodyLimit::max(BROWSER_PROFILE_MAX_BYTES)),
-    )
+    Router::new()
+        .route(
+            "/agent/browser-profile",
+            get(get_browser_profile)
+                .put(put_browser_profile)
+                // Profiles are up to a few MB, above axum's 2MB default extractor
+                // cap; align the limit with the handler's own size check.
+                .layer(DefaultBodyLimit::max(BROWSER_PROFILE_MAX_BYTES)),
+        )
+        .route(
+            "/projects/:project_id/browser-profile",
+            axum::routing::delete(reset_browser_profile),
+        )
 }
 
 fn conflict(message: impl Into<String>) -> (StatusCode, Json<ApiError>) {
@@ -135,6 +144,227 @@ struct BrowserProfileManifest {
     updated_at: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserProfileResetResponse {
+    ok: bool,
+    cleared: bool,
+    stopped_runtime_ids: Vec<Uuid>,
+}
+
+#[derive(Debug)]
+struct BrowserProfileRuntime {
+    id: Uuid,
+    provider: String,
+    capabilities: serde_json::Value,
+    status: String,
+    active_lease_id: Option<Uuid>,
+}
+
+fn runtime_may_hold_browser_profile_with_classification(
+    runtime: &BrowserProfileRuntime,
+    is_private_self_hosted: bool,
+) -> bool {
+    crate::provider_identifiers::is_trusted_instafy_cloud_provider_id(&runtime.provider)
+        && !is_private_self_hosted
+        // Heartbeat loss (`offline`) and lifecycle cleanup (`removed`) do not
+        // prove that the provider allocation released its decrypted profile.
+        // Feed those ambiguous rows through the strict stop path so reset
+        // retains the encrypted profile unless cleanup can be proven. Only a
+        // generation-free `stopped` row is safe to ignore here.
+        && (runtime.status != "stopped" || runtime.active_lease_id.is_some())
+}
+
+fn runtime_may_hold_browser_profile(state: &AppState, runtime: &BrowserProfileRuntime) -> bool {
+    runtime_may_hold_browser_profile_with_classification(
+        runtime,
+        crate::runtime::runtime_is_private_self_hosted(
+            state,
+            &runtime.provider,
+            &runtime.capabilities,
+        ),
+    )
+}
+
+fn map_browser_profile_runtime(row: &tokio_postgres::Row) -> BrowserProfileRuntime {
+    BrowserProfileRuntime {
+        id: row.get("id"),
+        provider: row.get("provider"),
+        capabilities: row.get("capabilities"),
+        status: row.get("status"),
+        active_lease_id: row.get("active_lease_id"),
+    }
+}
+
+async fn load_browser_profile_runtime_candidates(
+    state: &AppState,
+    project_id: &Uuid,
+) -> Result<Vec<Uuid>, (StatusCode, Json<ApiError>)> {
+    let connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+    let rows = connection
+        .query(
+            "select id, provider, capabilities, status, active_lease_id
+             from runtimes
+             where project_id = $1
+             order by id",
+            &[project_id],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to load runtimes before browser profile reset: {error}"
+            ))
+        })?;
+
+    Ok(rows
+        .iter()
+        .map(map_browser_profile_runtime)
+        .filter(|runtime| runtime_may_hold_browser_profile(state, runtime))
+        .map(|runtime| runtime.id)
+        .collect())
+}
+
+/// Clear project-shared browser identity without leaving a live Chromium able
+/// to restore or re-upload the old state. This deliberately remains available
+/// after the persistence allowlist is revoked: policy revocation must never
+/// strand encrypted login material that a project member can no longer clear.
+async fn reset_browser_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(project_id_raw): Path<String>,
+) -> Result<Json<BrowserProfileResetResponse>, (StatusCode, Json<ApiError>)> {
+    let context = authenticate_request(&state.config, &headers, None).await?;
+    if context.user_id.is_none() && !context.is_service_role {
+        return Err(unauthorized("user session required"));
+    }
+    let project_id = Uuid::parse_str(project_id_raw.trim())
+        .map_err(|_| bad_request("projectId must be a valid UUID"))?;
+
+    // Authorize before doing externally visible provider cleanup. The same
+    // builder-or-higher boundary is used for revoking a Project Secret.
+    {
+        let mut connection = state
+            .pool
+            .get()
+            .await
+            .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+        let transaction = connection
+            .transaction()
+            .await
+            .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+        let project = load_project_record(&transaction, &project_id).await?;
+        ensure_project_write_access(&transaction, &project, &context, None).await?;
+        transaction.commit().await.map_err(|error| {
+            internal_error(format!(
+                "failed to finalize browser profile reset authorization: {error}"
+            ))
+        })?;
+    }
+
+    // Stop every trusted managed runtime that might still have the decrypted
+    // profile in memory. Provider-managed generations are fenced and this call
+    // returns only after the allocator acknowledges release; ambiguity is an
+    // error, so the encrypted row remains available for a safe retry.
+    let runtime_ids = load_browser_profile_runtime_candidates(&state, &project_id).await?;
+    let mut stopped_runtime_ids = Vec::with_capacity(runtime_ids.len());
+    for runtime_id in runtime_ids {
+        crate::runtime::stop_runtime_for_project(
+            &state,
+            &project_id,
+            &runtime_id,
+            Some("browser_profile_reset".to_string()),
+            "browser_profile_reset",
+        )
+        .await?;
+        stopped_runtime_ids.push(runtime_id);
+    }
+
+    let mut connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+
+    // Take only the project launch fence here, without also holding runtime
+    // row locks. Launches that already passed their FOR SHARE boundary finish
+    // before this lock is granted and become visible to the recheck below.
+    // Launches behind this lock cannot contact/restore into Chromium until
+    // after the old profile has been deleted and this transaction commits.
+    let locked_project = transaction
+        .query_opt(
+            "select status from projects where id = $1 for update",
+            &[&project_id],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to lock project during browser profile reset: {error}"
+            ))
+        })?
+        .ok_or_else(|| not_found("project not found"))?;
+    let project_status: Option<String> = locked_project.get("status");
+    if project_status
+        .as_deref()
+        .is_some_and(|status| status.eq_ignore_ascii_case("deleted"))
+    {
+        return Err(not_found("project not found"));
+    }
+
+    let project = load_project_record(&transaction, &project_id).await?;
+    ensure_project_write_access(&transaction, &project, &context, None).await?;
+
+    let current_runtimes = transaction
+        .query(
+            "select id, provider, capabilities, status, active_lease_id
+             from runtimes
+             where project_id = $1
+             order by id",
+            &[&project_id],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to recheck runtimes during browser profile reset: {error}"
+            ))
+        })?;
+    if current_runtimes
+        .iter()
+        .map(map_browser_profile_runtime)
+        .any(|runtime| runtime_may_hold_browser_profile(&state, &runtime))
+    {
+        return Err(conflict(
+            "a managed Shared Browser runtime became active during reset; retry",
+        ));
+    }
+
+    let deleted = transaction
+        .execute(
+            "delete from project_browser_profiles
+             where project_id = $1 and scope = $2",
+            &[&project_id, &BROWSER_PROFILE_SCOPE_PROJECT],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to clear browser profile: {error}")))?
+        > 0;
+    transaction.commit().await.map_err(|error| {
+        internal_error(format!("failed to commit browser profile reset: {error}"))
+    })?;
+
+    Ok(Json(BrowserProfileResetResponse {
+        ok: true,
+        cleared: deleted,
+        stopped_runtime_ids,
+    }))
+}
+
 fn resolve_scope(query: &BrowserProfileQuery) -> Result<String, (StatusCode, Json<ApiError>)> {
     let scope = query
         .scope
@@ -152,8 +382,21 @@ fn resolve_scope(query: &BrowserProfileQuery) -> Result<String, (StatusCode, Jso
 }
 
 pub(crate) async fn ensure_browser_profiles_table(pool: &PgPool) -> anyhow::Result<()> {
-    let connection = pool.get().await?;
-    connection
+    let mut connection = pool.get().await?;
+    let transaction = connection.transaction().await?;
+    // Multiple controller replicas (and parallel database-backed tests) may
+    // initialize this compatibility table at the same time. Serialize the
+    // multi-statement DDL as one transaction: CREATE INDEX / ALTER TABLE /
+    // REVOKE otherwise acquire different relation locks and can deadlock even
+    // though every individual statement is idempotent. A transaction-scoped
+    // advisory lock is released automatically on commit or rollback.
+    transaction
+        .query_one(
+            "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&"runtime-controller:project-browser-profiles-schema-v1"],
+        )
+        .await?;
+    transaction
         .batch_execute(
             "
             create table if not exists project_browser_profiles (
@@ -177,6 +420,7 @@ pub(crate) async fn ensure_browser_profiles_table(pool: &PgPool) -> anyhow::Resu
             ",
         )
         .await?;
+    transaction.commit().await?;
     Ok(())
 }
 
@@ -394,7 +638,8 @@ async fn get_browser_profile(
 mod tests {
     use super::{
         ensure_browser_profile_persistence_enabled, is_supported_scope,
-        next_browser_profile_version,
+        next_browser_profile_version, runtime_may_hold_browser_profile_with_classification,
+        BrowserProfileRuntime,
     };
     use axum::http::StatusCode;
     use uuid::Uuid;
@@ -445,5 +690,52 @@ mod tests {
         let (status, _) = ensure_browser_profile_persistence_enabled(&config, &project_id)
             .expect_err("revocation must take effect independently of token lifetime");
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn reset_stops_only_potentially_live_trusted_managed_runtimes() {
+        let runtime = |provider: &str, status: &str, active_lease_id| BrowserProfileRuntime {
+            id: Uuid::new_v4(),
+            provider: provider.to_string(),
+            capabilities: serde_json::json!({}),
+            status: status.to_string(),
+            active_lease_id,
+        };
+
+        assert!(runtime_may_hold_browser_profile_with_classification(
+            &runtime("instafy-cloud", "ready", Some(Uuid::new_v4()),),
+            false
+        ));
+        assert!(runtime_may_hold_browser_profile_with_classification(
+            &runtime("instafy_cloud", "requested", None,),
+            false
+        ));
+        assert!(runtime_may_hold_browser_profile_with_classification(
+            &runtime("instafy-cloud", "offline", Some(Uuid::new_v4()),),
+            false
+        ));
+
+        for ambiguous_status in ["offline", "removed"] {
+            assert!(runtime_may_hold_browser_profile_with_classification(
+                &runtime("instafy-cloud", ambiguous_status, None,),
+                false
+            ));
+        }
+        assert!(!runtime_may_hold_browser_profile_with_classification(
+            &runtime("instafy-cloud", "stopped", None,),
+            false
+        ));
+        assert!(!runtime_may_hold_browser_profile_with_classification(
+            &runtime("instafy-cloud-custom", "ready", Some(Uuid::new_v4()),),
+            false
+        ));
+        assert!(!runtime_may_hold_browser_profile_with_classification(
+            &runtime("self-hosted", "ready", Some(Uuid::new_v4()),),
+            true
+        ));
+        assert!(!runtime_may_hold_browser_profile_with_classification(
+            &runtime("instafy-cloud", "ready", Some(Uuid::new_v4()),),
+            true
+        ));
     }
 }

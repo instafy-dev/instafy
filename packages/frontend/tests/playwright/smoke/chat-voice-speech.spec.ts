@@ -19,7 +19,7 @@ import {
   warmSpeechTranscription,
 } from "../utils/speechHarness";
 
-const PROMPT_TEXT = "Stop all motion.";
+const PROMPT_TEXT = "@octo Stop all motion.";
 
 function logStep(message: string) {
   console.log(`[chat-voice-speech-smoke] ${message}`);
@@ -79,7 +79,7 @@ async function resolveActiveProjectId(page: import("@playwright/test").Page) {
 
 test.describe("Chat voice speech smoke", () => {
     test("routes chat voice through hosted speech capture in hold mode", async ({}, testInfo) => {
-    test.slow();
+    test.setTimeout(240_000);
 
     const repoRoot = path.resolve(testInfo.config.rootDir, "..", "..");
     let managedServices;

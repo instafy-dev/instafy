@@ -4,6 +4,8 @@
 interface ImportMetaEnv {
   readonly VITE_USE_WEBCONTAINERS?: string;
   readonly VITE_CONTROLLER_URL?: string;
+  readonly VITE_DOWNLOADS_BASE_URL?: string;
+  readonly VITE_DESKTOP_DOWNLOADS_PREFIX?: string;
   readonly VITE_INSTAFY_SHARED_BROWSER_CDP_SCREENCAST?: string;
   readonly VITE_INSTAFY_SHARED_BROWSER_WEBRTC?: string;
   readonly VITE_OTA_CHANNEL?: string;
@@ -183,6 +185,7 @@ type InstafyDesktopUpdaterStatus = {
   lastCheckedAt?: string;
   lastDownloadedAt?: string;
   lastError?: string;
+  lastInstallRequestAccepted?: boolean;
 };
 
 type InstafyDesktopVoiceHostServiceStatus = {

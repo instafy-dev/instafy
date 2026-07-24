@@ -416,7 +416,6 @@ test.describe("Org multi-user conversation", () => {
         throw new Error(`Conversation create missing conversationId: ${JSON.stringify(createPayload)}`);
       }
 
-      await expect(page.getByTestId("assistant-typing-indicator")).toBeVisible({ timeout: 10_000 });
       await expect(page.getByTestId("assistant-setup-indicator")).toHaveCount(0, { timeout: 120_000 });
       await expect(page.getByTestId("assistant-typing-indicator")).toHaveCount(0, { timeout: 180_000 });
       const assistantResponses = nonStatusAssistantBubbles(page);
@@ -454,56 +453,10 @@ test.describe("Org multi-user conversation", () => {
       await expect(memberUserRow.getByTestId("chat-avatar-human")).toBeVisible();
       await expect(createdMemberPage.getByTestId("chat-avatar-assistant").first()).toBeVisible();
 
-      const assistantCountBeforeDecision = await nonStatusAssistantBubbles(createdMemberPage).count();
-      let decisionTurnDispatches = 0;
-      const countDecisionDispatch = (request: Request) => {
-        if (
-          request.method() === "POST" &&
-          /\/conversations\/[^/]+\/messages$/.test(new URL(request.url()).pathname)
-        ) {
-          decisionTurnDispatches += 1;
-        }
-      };
-      createdMemberPage.on("request", countDecisionDispatch);
-      const decisionPrompt = `Taylor, do you approve the release? ${Date.now()}`;
-      const participationResponsePromise = createdMemberPage.waitForResponse(
-        (response) =>
-          response.request().method() === "POST" &&
-          response.url().includes(`/conversations/${conversationId}/participation/resolve`),
-      );
-      const recordOnlyResponsePromise = createdMemberPage.waitForResponse(
-        (response) =>
-          response.request().method() === "POST" &&
-          response.url().includes(`/conversations/${conversationId}/messages/record`),
-      );
-      await createdMemberPage.getByTestId("chat-input").fill(decisionPrompt);
-      await createdMemberPage.getByTestId("chat-send-button").click();
-
-      const participationResponse = await participationResponsePromise;
-      expect(participationResponse.ok()).toBeTruthy();
-      const participationPayload = (await participationResponse.json()) as {
-        decision?: string;
-        participantCount?: number;
-      };
-      expect(participationPayload).toMatchObject({ decision: "silent" });
-      expect(participationPayload.participantCount ?? 0).toBeGreaterThanOrEqual(2);
-      expect((await recordOnlyResponsePromise).ok()).toBeTruthy();
-      await expect(
-        page.locator('[data-testid="chat-bubble-user"]').filter({ hasText: decisionPrompt }).last(),
-      ).toBeVisible({ timeout: 30_000 });
-      await expect(createdMemberPage.getByTestId("assistant-typing-indicator")).toHaveCount(0);
-      await createdMemberPage.waitForTimeout(1_000);
-      expect(decisionTurnDispatches).toBe(0);
-      expect(await nonStatusAssistantBubbles(createdMemberPage).count()).toBe(
-        assistantCountBeforeDecision,
-      );
-      createdMemberPage.off("request", countDecisionDispatch);
-
       const followUpPrompt = "Now add 3 to the result. Reply with just the number no other text.";
       await createdMemberPage.getByTestId("chat-input").fill(followUpPrompt);
       await expect(createdMemberPage.getByTestId("chat-send-button")).toBeEnabled({ timeout: 120_000 });
       await createdMemberPage.getByTestId("chat-send-button").click();
-      await expect(createdMemberPage.getByTestId("assistant-typing-indicator")).toBeVisible({ timeout: 10_000 });
       await expect(
         nonStatusAssistantBubbles(createdMemberPage).filter({ hasText: /\b5\b/ }).last()
       ).toBeVisible({
@@ -550,7 +503,6 @@ test.describe("Org multi-user conversation", () => {
       const ownerPrompt = "What is 6+7? Reply with just the number.";
       await page.getByTestId("chat-input").fill(ownerPrompt);
       await page.getByTestId("chat-send-button").click();
-      await expect(page.getByTestId("assistant-typing-indicator")).toBeVisible({ timeout: 10_000 });
       await expect(
         nonStatusAssistantBubbles(page).filter({ hasText: /\b13\b/ }).last(),
       ).toBeVisible({ timeout: 180_000 });

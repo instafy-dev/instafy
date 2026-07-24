@@ -1048,8 +1048,10 @@ fn strip_reserved_controller_notice_claims(value: &mut JsonValue) -> bool {
             .get_mut(key)
             .is_some_and(strip_reserved_controller_notice_claims);
     }
-    let reserved_group_participation =
-        map.remove("groupParticipation").is_some() | map.remove("group_participation").is_some();
+    let reserved_group_participation = map.remove("groupParticipation").is_some()
+        | map.remove("group_participation").is_some()
+        | map.remove("groupAiParticipants").is_some()
+        | map.remove("group_ai_participants").is_some();
     let reserved = source_is_controller
         || reserved_kind
         || reserved_message_type
@@ -1075,6 +1077,11 @@ pub(crate) fn strip_client_group_participation_claims(value: &mut JsonValue) {
     };
     map.remove("groupParticipation");
     map.remove("group_participation");
+    // The AI-participant roster delivered with ambient evaluations is
+    // controller-authored: dispatch re-stamps it per evaluation job, and a
+    // client-supplied copy must not ride a direct dispatch into job payloads.
+    map.remove("groupAiParticipants");
+    map.remove("group_ai_participants");
     for key in ["details", "prompt_metadata", "promptMetadata"] {
         if let Some(nested) = map.get_mut(key) {
             strip_client_group_participation_claims(nested);

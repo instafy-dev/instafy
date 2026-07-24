@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CdpScreencastViewer } from "../CdpScreencastViewer";
@@ -85,6 +85,10 @@ function emitFrame(socket: FakeWebSocket, frameId: number) {
   );
 }
 
+function socketsMatching(path: string): FakeWebSocket[] {
+  return FakeWebSocket.instances.filter((socket) => socket.url.includes(path));
+}
+
 describe("CdpScreencastViewer", () => {
   let host: HTMLDivElement;
   let root: Root;
@@ -140,6 +144,7 @@ describe("CdpScreencastViewer", () => {
       root.render(
         <CdpScreencastViewer
           wsUrl="wss://runtime.test/browser/screencast?token=secret"
+          connectionGeneration={0}
           active
           inputEnabled
           onConnected={onConnected}
@@ -199,11 +204,34 @@ describe("CdpScreencastViewer", () => {
     expect(canvas?.dataset.remoteContentHeight).toBe("720");
   });
 
+  it("does not open a disposable StrictMode renderer connection", async () => {
+    await act(async () => {
+      root.render(
+        <StrictMode>
+          <CdpScreencastViewer
+            wsUrl="wss://runtime.test/browser/screencast"
+            connectionGeneration={0}
+            active
+            inputEnabled={false}
+            onConnected={vi.fn()}
+            onDisconnected={vi.fn()}
+            onTransportError={vi.fn()}
+          />
+        </StrictMode>,
+      );
+      await Promise.resolve();
+    });
+
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(FakeWebSocket.instances[0]?.readyState).toBe(FakeWebSocket.OPEN);
+  });
+
   it("uses decoded pixels instead of spectator-local viewport metadata", async () => {
     await act(async () => {
       root.render(
         <CdpScreencastViewer
           wsUrl="wss://runtime.test/browser/screencast"
+          connectionGeneration={0}
           active
           inputEnabled={false}
           onConnected={vi.fn()}
@@ -254,6 +282,7 @@ describe("CdpScreencastViewer", () => {
       root.render(
         <CdpScreencastViewer
           wsUrl="wss://runtime.test/browser/screencast"
+          connectionGeneration={0}
           active
           inputEnabled
           onConnected={vi.fn()}
@@ -306,6 +335,7 @@ describe("CdpScreencastViewer", () => {
     const renderViewer = (wsUrl: string) => (
       <CdpScreencastViewer
         wsUrl={wsUrl}
+        connectionGeneration={0}
         active
         inputEnabled
         onConnected={vi.fn()}
@@ -336,6 +366,39 @@ describe("CdpScreencastViewer", () => {
     expect(newBitmap.close).toHaveBeenCalledOnce();
   });
 
+  it("reopens identical renderer and input URLs when the connection generation changes", async () => {
+    const renderViewer = (connectionGeneration: number) => (
+      <CdpScreencastViewer
+        wsUrl="wss://runtime.test/browser/screencast?token=same-grant"
+        inputWsUrl="wss://runtime.test/browser/input?token=same-grant"
+        inputAvailable
+        connectionGeneration={connectionGeneration}
+        active
+        inputEnabled
+        onConnected={vi.fn()}
+        onDisconnected={vi.fn()}
+        onTransportError={vi.fn()}
+      />
+    );
+
+    await act(async () => root.render(renderViewer(0)));
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    const [firstRenderer] = socketsMatching("/browser/screencast");
+    const [firstInput] = socketsMatching("/browser/input");
+
+    await act(async () => root.render(renderViewer(0)));
+    expect(FakeWebSocket.instances).toHaveLength(2);
+
+    await act(async () => root.render(renderViewer(1)));
+    expect(FakeWebSocket.instances).toHaveLength(4);
+    const [, secondRenderer] = socketsMatching("/browser/screencast");
+    const [, secondInput] = socketsMatching("/browser/input");
+    expect(firstRenderer?.readyState).toBe(3);
+    expect(firstInput?.readyState).toBe(3);
+    expect(secondRenderer?.url).toBe(firstRenderer?.url);
+    expect(secondInput?.url).toBe(firstInput?.url);
+  });
+
   it("fails closed when the socket never produces a ready message or frame", async () => {
     vi.useFakeTimers();
     const onTransportError = vi.fn();
@@ -343,6 +406,7 @@ describe("CdpScreencastViewer", () => {
       root.render(
         <CdpScreencastViewer
           wsUrl="wss://runtime.test/browser/screencast"
+          connectionGeneration={0}
           active
           inputEnabled
           onConnected={vi.fn()}
@@ -369,6 +433,7 @@ describe("CdpScreencastViewer", () => {
       root.render(
         <CdpScreencastViewer
           wsUrl="wss://runtime.test/browser/screencast"
+          connectionGeneration={0}
           inputWsUrl="wss://runtime.test/browser/input"
           inputAvailable
           inputAuthorityKey="human:owner"
@@ -380,7 +445,7 @@ describe("CdpScreencastViewer", () => {
         />,
       );
     });
-    const inputSocket = FakeWebSocket.instances[1];
+    const [inputSocket] = socketsMatching("/browser/input");
     inputSocket.emit(
       "message",
       Object.assign(new Event("message"), {
@@ -429,6 +494,7 @@ describe("CdpScreencastViewer", () => {
     const renderViewer = (inputEnabled: boolean) => (
       <CdpScreencastViewer
         wsUrl="wss://runtime.test/browser/screencast"
+        connectionGeneration={0}
         inputWsUrl="wss://runtime.test/browser/input"
         inputAvailable
         active
@@ -439,7 +505,7 @@ describe("CdpScreencastViewer", () => {
       />
     );
     await act(async () => root.render(renderViewer(true)));
-    const inputSocket = FakeWebSocket.instances[1];
+    const [inputSocket] = socketsMatching("/browser/input");
     await act(async () => {
       inputSocket.emit("open");
       inputSocket.emit(
@@ -494,6 +560,7 @@ describe("CdpScreencastViewer", () => {
       root.render(
         <CdpScreencastViewer
           wsUrl="wss://runtime.test/browser/screencast"
+          connectionGeneration={0}
           inputWsUrl="wss://runtime.test/browser/input"
           inputAvailable
           inputAuthorityKey="human:owner"
@@ -505,7 +572,7 @@ describe("CdpScreencastViewer", () => {
         />,
       );
     });
-    const inputSocket = FakeWebSocket.instances[1];
+    const [inputSocket] = socketsMatching("/browser/input");
     await act(async () => {
       inputSocket.emit("open");
       inputSocket.emit(
@@ -540,6 +607,7 @@ describe("CdpScreencastViewer", () => {
     const renderViewer = (inputEnabled: boolean, inputAuthorityKey: string | null) => (
       <CdpScreencastViewer
         wsUrl="wss://runtime.test/browser/screencast"
+        connectionGeneration={0}
         inputWsUrl="wss://runtime.test/browser/input"
         inputAvailable
         inputAuthorityKey={inputAuthorityKey}
@@ -551,7 +619,7 @@ describe("CdpScreencastViewer", () => {
       />
     );
     await act(async () => root.render(renderViewer(false, "human:owner")));
-    const inputSocket = FakeWebSocket.instances[1];
+    const [inputSocket] = socketsMatching("/browser/input");
     await act(async () => {
       inputSocket.emit(
         "message",
