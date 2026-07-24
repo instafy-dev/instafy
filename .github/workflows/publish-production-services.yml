@@ -1,0 +1,319 @@
+name: Publish production service images
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Full commit SHA; must equal current protected main
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-production-services-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  authorize:
+    name: Authorize exact release source
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.release.outputs.commit_sha }}
+    steps:
+      - name: Bind release to current protected main
+        id: release
+        shell: bash
+        env:
+          REQUESTED_COMMIT: ${{ inputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REPOSITORY" != "instafy-dev/instafy" ]]; then
+            echo "::error::Production images may be published only from instafy-dev/instafy."
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::Production images may be published only from protected main."
+            exit 1
+          fi
+          if [[ ! "$REQUESTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::commit_sha must be a full lowercase commit SHA."
+            exit 1
+          fi
+          if [[ "$REQUESTED_COMMIT" != "$GITHUB_SHA" ]]; then
+            echo "::error::commit_sha must equal current protected main."
+            exit 1
+          fi
+          echo "commit_sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Publish ${{ matrix.key }}
+    needs: authorize
+    runs-on: ubuntu-latest
+    environment: ghcr-release
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - key: controller
+            repository: instafy-runtime-controller
+            context: .
+            dockerfile: packages/runtime-controller/Dockerfile
+          - key: proxy
+            repository: instafy-openai-proxy-server
+            context: .
+            dockerfile: docker/proxy/Dockerfile
+          - key: providerService
+            repository: instafy-runtime-provider-service
+            context: .
+            dockerfile: docker/provider-service/Dockerfile
+          - key: tunnelBroker
+            repository: instafy-tunnel-broker
+            context: packages/tunnel-broker
+            dockerfile: packages/tunnel-broker/Dockerfile
+          - key: gitEdge
+            repository: instafy-git-edge
+            context: .
+            dockerfile: docker/git-edge/Dockerfile
+          - key: gitShard
+            repository: instafy-git-shard
+            context: .
+            dockerfile: docker/git-shard/Dockerfile
+          - key: originGateway
+            repository: instafy-origin-gateway
+            context: .
+            dockerfile: docker/origin-gateway/Dockerfile
+
+    steps:
+      - name: Checkout exact protected-main commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ needs.authorize.outputs.commit_sha }}
+          submodules: recursive
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: v0.35.0
+
+      - name: Install pinned Trivy
+        env:
+          TRIVY_VERSION: "0.72.0"
+          TRIVY_LINUX_X64_SHA256: "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/trivy.tar.gz"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+            --output "$archive"
+          printf '%s  %s\n' "$TRIVY_LINUX_X64_SHA256" "$archive" |
+            sha256sum --check --status
+          tar -xzf "$archive" -C "$RUNNER_TEMP" trivy
+          sudo install -m 0755 "$RUNNER_TEMP/trivy" /usr/local/bin/trivy
+          test "$(trivy --version | awk 'NR == 1 { print $2 }')" = "$TRIVY_VERSION"
+
+      - name: Build amd64 release candidate
+        shell: bash
+        env:
+          CONTEXT: ${{ matrix.context }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          IMAGE_REPOSITORY: ${{ matrix.repository }}
+          RELEASE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}
+          CACHE_KEY: ${{ matrix.key }}
+        run: |
+          set -euo pipefail
+          release_tag="ghcr.io/instafy-dev/${IMAGE_REPOSITORY}:${RELEASE_COMMIT}"
+          docker buildx build \
+            --platform linux/amd64 \
+            --file "$DOCKERFILE" \
+            --tag "$release_tag" \
+            --label "org.opencontainers.image.source=https://github.com/instafy-dev/instafy" \
+            --label "org.opencontainers.image.revision=${RELEASE_COMMIT}" \
+            --cache-from "type=gha,scope=production-${CACHE_KEY}" \
+            --cache-to "type=gha,scope=production-${CACHE_KEY},mode=max" \
+            --load \
+            "$CONTEXT"
+          echo "RELEASE_TAG=$release_tag" >> "$GITHUB_ENV"
+
+      - name: Scan amd64 release candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          empty_config="$RUNNER_TEMP/trivy.empty.yaml"
+          empty_ignore="$RUNNER_TEMP/trivy.empty-ignore"
+          printf '{}\n' > "$empty_config"
+          : > "$empty_ignore"
+          trivy image \
+            --config "$empty_config" \
+            --scanners vuln,secret \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --ignorefile "$empty_ignore" \
+            --exit-code 1 \
+            --skip-version-check \
+            --no-progress \
+            "$RELEASE_TAG"
+
+      - name: Login to GHCR after the gate passes
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push the scanned image and record its digest
+        id: image
+        shell: bash
+        env:
+          IMAGE_KEY: ${{ matrix.key }}
+          RELEASE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          push_log="$RUNNER_TEMP/${IMAGE_KEY}-push.log"
+          docker push "$RELEASE_TAG" | tee "$push_log"
+          digest="$(
+            sed -nE \
+              's/^digest: (sha256:[0-9a-f]{64}) size: [0-9]+$/\1/p' \
+              "$push_log" |
+              tail -n 1
+          )"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Docker push did not return a valid immutable digest."
+            exit 1
+          fi
+          repository="${RELEASE_TAG%%:*}"
+          immutable_ref="${repository}@${digest}"
+          docker buildx imagetools inspect "$immutable_ref" >/dev/null
+          jq -n \
+            --arg key "$IMAGE_KEY" \
+            --arg coreCommit "$RELEASE_COMMIT" \
+            --arg tag "$RELEASE_TAG" \
+            --arg ref "$immutable_ref" \
+            '{
+              schemaVersion: 1,
+              key: $key,
+              coreCommit: $coreCommit,
+              platform: "linux/amd64",
+              releaseTag: $tag,
+              ref: $ref
+            }' > "${IMAGE_KEY}.json"
+
+      - name: Upload immutable image record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: production-image-${{ matrix.key }}
+          path: ${{ matrix.key }}.json
+          if-no-files-found: error
+          retention-days: 30
+
+  manifest:
+    name: Seal production service manifest
+    needs:
+      - authorize
+      - publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download every gated image record
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          pattern: production-image-*
+          path: image-records
+          merge-multiple: true
+
+      - name: Validate and seal the manifest
+        shell: bash
+        env:
+          RELEASE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          expected_keys='["controller","gitEdge","gitShard","originGateway","providerService","proxy","tunnelBroker"]'
+          expected_repositories='{
+            "controller":"instafy-runtime-controller",
+            "gitEdge":"instafy-git-edge",
+            "gitShard":"instafy-git-shard",
+            "originGateway":"instafy-origin-gateway",
+            "providerService":"instafy-runtime-provider-service",
+            "proxy":"instafy-openai-proxy-server",
+            "tunnelBroker":"instafy-tunnel-broker"
+          }'
+          actual_keys="$(
+            jq -s -c 'map(.key) | sort' image-records/*.json
+          )"
+          if [ "$actual_keys" != "$expected_keys" ]; then
+            echo "::error::The image set is incomplete or contains an unexpected key."
+            exit 1
+          fi
+          if ! jq -se \
+            --arg commit "$RELEASE_COMMIT" \
+            --argjson repositories "$expected_repositories" '
+            all(.[];
+              .schemaVersion == 1 and
+              .coreCommit == $commit and
+              .platform == "linux/amd64" and
+              ($repositories[.key] != null) and
+              .releaseTag == (
+                "ghcr.io/instafy-dev/" +
+                $repositories[.key] +
+                ":" +
+                $commit
+              ) and
+              (
+                .ref |
+                startswith(
+                  "ghcr.io/instafy-dev/" +
+                  $repositories[.key] +
+                  "@sha256:"
+                )
+              ) and
+              (.ref | test("@sha256:[0-9a-f]{64}$"))
+            )
+          ' image-records/*.json >/dev/null; then
+            echo "::error::At least one image record is malformed, swapped, or belongs to another commit."
+            exit 1
+          fi
+
+          jq -s \
+            --arg commit "$RELEASE_COMMIT" \
+            '{
+              schemaVersion: 1,
+              repository: "instafy-dev/instafy",
+              coreCommit: $commit,
+              platform: "linux/amd64",
+              images: (
+                map({key: .key, value: .ref}) |
+                sort_by(.key) |
+                from_entries
+              )
+            }' image-records/*.json > production-service-release-manifest.json
+          sha256sum production-service-release-manifest.json |
+            tee production-service-release-manifest.sha256
+          {
+            echo "### Production service release"
+            echo
+            echo "- Public core: \`$RELEASE_COMMIT\`"
+            echo "- Platform: \`linux/amd64\`"
+            echo "- All seven images passed Trivy vulnerability and secret scans."
+            echo
+            echo '```json'
+            cat production-service-release-manifest.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload sealed release manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: production-service-release-manifest
+          path: |
+            production-service-release-manifest.json
+            production-service-release-manifest.sha256
+          if-no-files-found: error
+          retention-days: 30

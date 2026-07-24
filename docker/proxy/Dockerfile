@@ -1,9 +1,9 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 
 ## Pin Rust to keep CI build caches warm (avoid nightly churn).
 ARG RUST_TOOLCHAIN=1.95.0
-ARG RUST_IMAGE=rust:${RUST_TOOLCHAIN}-slim-bookworm
-ARG RUNTIME_BASE=debian:bookworm-slim
+ARG RUST_IMAGE=rust:${RUST_TOOLCHAIN}-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082
+ARG RUNTIME_BASE=debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
 ## Cargo profile to build (release for production images, dev for CI speed).
 ARG BUILD_PROFILE=release
@@ -13,11 +13,12 @@ ARG BUILD_ARTIFACT_DIR=release
 # Dependency planner
 ########################
 FROM ${RUST_IMAGE} AS chef
+ARG CARGO_CHEF_VERSION=0.1.77
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential pkg-config libssl-dev protobuf-compiler ca-certificates \
       clang lld \
     && rm -rf /var/lib/apt/lists/*
-RUN cargo install cargo-chef --locked
+RUN cargo install cargo-chef --version "${CARGO_CHEF_VERSION}" --locked
 WORKDIR /src
 COPY packages/openai-proxy-server/ packages/openai-proxy-server/
 COPY packages/runtime-contracts/ packages/runtime-contracts/
