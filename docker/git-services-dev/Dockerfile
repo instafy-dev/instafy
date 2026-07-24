@@ -3,10 +3,10 @@
 # its own minimal runtime surface. It uses the BuildKit frontend bundled with
 # Docker so local test startup does not need a Docker Hub metadata lookup.
 ARG RUST_TOOLCHAIN=1.91.1
-ARG RUST_IMAGE=rust:${RUST_TOOLCHAIN}-slim-bookworm
+ARG RUST_IMAGE=rust:${RUST_TOOLCHAIN}-slim-bookworm@sha256:8514999d4786ef12efe89239e86b3d0a021b94b9d35108c8efe6c79ca7dc1a65
 ARG BUILD_PROFILE=release
 ARG BUILD_ARTIFACT_DIR=release
-ARG RUNTIME_BASE=debian:trixie-slim
+ARG RUNTIME_BASE=debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
 
 FROM ${RUST_IMAGE} AS builder
 ARG BUILD_PROFILE
