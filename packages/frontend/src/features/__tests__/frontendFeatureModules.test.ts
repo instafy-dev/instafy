@@ -8,6 +8,10 @@ import {
 import { createFrontendFeatureServices } from "../frontendFeatureServices";
 import { PUBLIC_CORE_FRONTEND_FEATURE_MODULE } from "../publicCoreFrontendFeatureModule";
 
+function FixtureRuntimeBridge() {
+  return null;
+}
+
 describe("frontend feature-module composition", () => {
   it("keeps public core registrations when no private feature module is supplied", () => {
     const composition = createFrontendFeatureComposition([
@@ -30,6 +34,7 @@ describe("frontend feature-module composition", () => {
       ),
     ).toEqual(["camera"]);
     expect(composition.routes).toEqual([]);
+    expect(composition.studioRuntimeBridges).toEqual([]);
   });
 
   it("adds a neutral fake module without changing public core definitions", () => {
@@ -58,6 +63,12 @@ describe("frontend feature-module composition", () => {
           element: null,
         },
       ],
+      studioRuntimeBridges: [
+        {
+          id: "fixture.weather.runtime",
+          component: FixtureRuntimeBridge,
+        },
+      ],
     };
 
     const application = createFrontendApplicationComposition([
@@ -76,6 +87,12 @@ describe("frontend feature-module composition", () => {
       "fixture_weather",
     ]);
     expect(composition.routes.map((route) => route.path)).toEqual(["fixture-weather"]);
+    expect(composition.studioRuntimeBridges).toEqual([
+      {
+        id: "fixture.weather.runtime",
+        component: FixtureRuntimeBridge,
+      },
+    ]);
     expect(
       application.registrations.capabilityProviderRegistry.get("fixture_weather"),
     ).toMatchObject({
@@ -128,6 +145,27 @@ describe("frontend feature-module composition", () => {
     };
     expect(() => createFrontendFeatureComposition([first, second])).toThrow(
       'Duplicate frontend feature route path "fixture".',
+    );
+  });
+
+  it("fails closed on duplicate Studio runtime bridges", () => {
+    const first: FrontendFeatureModule = {
+      apiVersion: INSTAFY_FEATURE_MODULE_API_VERSION,
+      id: "fixture.bridge-one",
+      studioRuntimeBridges: [
+        { id: "fixture.shared-runtime", component: FixtureRuntimeBridge },
+      ],
+    };
+    const second: FrontendFeatureModule = {
+      apiVersion: INSTAFY_FEATURE_MODULE_API_VERSION,
+      id: "fixture.bridge-two",
+      studioRuntimeBridges: [
+        { id: "fixture.shared-runtime", component: FixtureRuntimeBridge },
+      ],
+    };
+
+    expect(() => createFrontendFeatureComposition([first, second])).toThrow(
+      'Duplicate frontend feature Studio runtime bridge contribution id "fixture.shared-runtime".',
     );
   });
 

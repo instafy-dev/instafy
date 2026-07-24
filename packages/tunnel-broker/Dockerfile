@@ -16,7 +16,11 @@ RUN mkdir -p crates/tunnel-broker/src \
 
 # Now copy the full source and rebuild.
 COPY . .
-RUN cargo build -p tunnel-broker --release
+# The CI smoke image is also the production image, so keep the broker's unit
+# suite in the same cached release build instead of compiling it again on the
+# host with a second Cargo target directory.
+RUN cargo test -p tunnel-broker --release --tests \
+  && cargo build -p tunnel-broker --release
 
 FROM debian:bookworm-slim AS rathole
 RUN apt-get update \

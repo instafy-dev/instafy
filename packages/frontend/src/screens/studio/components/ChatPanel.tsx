@@ -115,6 +115,7 @@ import {
   type StickyAssistantSpeaker,
 } from "./chatSpeakerMarker";
 import { ChatColumn } from "./ChatColumn";
+import { useOctoSilenceHint } from "./useOctoSilenceHint";
 import { ChatTypingRows } from "./ChatTypingRows";
 import {
   AssistantMessageEntry,
@@ -213,6 +214,11 @@ import {
   resolveConversationHumanPeerContext,
   resolveGettingStartedConversationContext,
 } from "./gettingStartedConversationContext";
+import {
+  resolveConversationRosterHumans,
+  shouldShowConversationRoster,
+  type ConversationRosterAgent,
+} from "./conversationRosterMembers";
 import { useChatComposerLayoutState } from "./useChatComposerLayoutState";
 import { useChatAutoScrollSync, useChatScrollController } from "./useChatScrollOrchestration";
 import {
@@ -1363,6 +1369,18 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       projectMembersError,
     ],
   );
+  // Skill-mode group silence affordances: the quiet "listening" chip and the
+  // one-time decline hint only apply when other humans can see the
+  // conversation and the default assistant is enabled for the sender.
+  const groupListeningActive =
+    assistantEnabled &&
+    conversationHumanPeerContext.resolved &&
+    conversationHumanPeerContext.hasHumanPeer;
+  const octoSilenceHint = useOctoSilenceHint({
+    runs,
+    conversationControllerId: activeConversationEntry?.controllerId ?? null,
+    eligible: groupListeningActive && !jobThread,
+  });
   const gettingStartedConversationContext = useMemo(
     () =>
       resolveGettingStartedConversationContext({
@@ -2249,6 +2267,52 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       conversationParticipants,
     });
   }, [conversationParticipants, mentionableUsers]);
+
+  const conversationRosterHumans = useMemo(
+    () =>
+      resolveConversationRosterHumans({
+        conversationVisibility: activeConversationEntry?.visibility ?? null,
+        currentUserId,
+        humanLabelByUserId,
+        humanPeerContext: conversationHumanPeerContext,
+        orgMembers,
+        participants: conversationParticipants,
+        projectMembers,
+      }),
+    [
+      activeConversationEntry?.visibility,
+      conversationHumanPeerContext,
+      conversationParticipants,
+      currentUserId,
+      humanLabelByUserId,
+      orgMembers,
+      projectMembers,
+    ],
+  );
+  // AI participants active in this conversation (default assistant when
+  // enabled plus any added agents), each carrying its own avatar seed so the
+  // roster faces match the transcript.
+  const conversationRosterAgents = useMemo<ConversationRosterAgent[]>(() => {
+    const seen = new Set<string>();
+    const rosterAgents: ConversationRosterAgent[] = [];
+    for (const rawHandle of agentHandles) {
+      const handle = rawHandle.trim().toLowerCase();
+      if (!handle || seen.has(handle)) {
+        continue;
+      }
+      seen.add(handle);
+      const profile = agentByHandle.get(handle) ?? null;
+      const avatarSeed =
+        typeof profile?.avatarSeed === "string" && profile.avatarSeed.trim().length > 0
+          ? profile.avatarSeed.trim()
+          : handle;
+      const displayName =
+        getBuiltInAssistantDisplayName(handle) ??
+        (profile?.displayName?.trim() ? profile.displayName.trim() : `@${handle}`);
+      rosterAgents.push({ handle, displayName, avatarSeed });
+    }
+    return rosterAgents;
+  }, [agentByHandle, agentHandles]);
 
   const peerTypingLabel = useMemo(() => {
     const peerIds = Object.keys(peerTypingActivity);
@@ -4413,6 +4477,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                       browserTransport === "shared" && browserSubtab === "browser"
                     }
                     canControlBrowser={canWriteProject}
+                    canClearBrowserData={canWriteProject}
                     controlOwner={sharedBrowserControlOwner}
                     sharedBrowserChrome={sharedBrowserChrome}
                     sharedBrowserViewerKind={sharedBrowserViewerKind}
@@ -4426,6 +4491,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                       sharedBrowserCapabilities?.webrtc ?? null
                     }
                     onRuntimeIdResolved={handleBrowserRuntimeIdResolved}
+                    onStatus={showStatus}
                   />
                 </div>
               ) : null}
@@ -4659,6 +4725,20 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
       <ChatComposerSurface
         mutationDisabled={projectWriteDisabled}
+        rosterProps={
+          shouldShowConversationRoster({
+            agents: conversationRosterAgents,
+            humans: conversationRosterHumans,
+          })
+            ? {
+                agents: conversationRosterAgents,
+                humans: conversationRosterHumans,
+              }
+            : null
+        }
+        silenceHintProps={
+          octoSilenceHint.visible ? { onDismiss: octoSilenceHint.dismiss } : null
+        }
         accessNotice={
           projectReadOnly
             ? "Read-only access — you can review this space, but you can’t send messages or change files."

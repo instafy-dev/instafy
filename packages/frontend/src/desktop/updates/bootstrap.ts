@@ -1,6 +1,11 @@
 import type { DesktopUpdateEventType, DesktopUpdatePhase } from "@instafy/ota-contracts";
 import { desktopUpdaterBridgeAvailable, postDesktopUpdateEvent, readDesktopUpdaterStatus, type DesktopUpdaterBridgeStatus } from "./client";
-import { getOrCreateDesktopUpdateDeviceId, readStoredDesktopUpdaterSnapshot, writeStoredDesktopUpdaterSnapshot, type StoredDesktopUpdaterSnapshot } from "./state";
+import {
+  getOrCreateDesktopUpdateDeviceId,
+  publishDesktopUpdaterSnapshot,
+  readStoredDesktopUpdaterSnapshot,
+  type StoredDesktopUpdaterSnapshot,
+} from "./state";
 
 const POLL_INTERVAL_MS = 30_000;
 
@@ -156,8 +161,8 @@ async function syncDesktopUpdaterState() {
     }
     const previous = readStoredDesktopUpdaterSnapshot();
     const current = normalizeSnapshot(status);
+    publishDesktopUpdaterSnapshot(current);
     await emitTransitionEvents({ deviceId, previous, current, status });
-    writeStoredDesktopUpdaterSnapshot(current);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn("[desktop-updates] sync failed:", message);

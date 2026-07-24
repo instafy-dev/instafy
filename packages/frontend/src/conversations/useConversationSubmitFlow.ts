@@ -33,10 +33,12 @@ import {
   type ConversationGroupParticipationPreflightResult,
 } from "./groupParticipation";
 import {
-  buildBuiltInAssistantPromptContextMetadata,
+  buildLocalCapabilityAssistantPromptContextMetadata,
   type BuiltInAssistantHandle,
+  type BuiltInAssistantPromptContextMetadata,
   getDefaultAssistantHandle,
   resolveBuiltInAssistantHandle,
+  resolveLocalCapabilityAssistantHandle,
 } from "../assistants/localBuiltInAssistantCatalog";
 import {
   getWebdevRuntimeEnv,
@@ -88,6 +90,25 @@ type WebdevRuntimeNeed = "screenshot" | "node";
 function isDedicatedAgentThreadHandle(handle: string): boolean {
   const resolved = resolveBuiltInAssistantHandle(handle);
   return resolved === null || resolved === getDefaultAssistantHandle();
+}
+
+/**
+ * Build the assistant capability context that rides along with a cloud prompt.
+ *
+ * Resolves target handles against the full local-capability assistant
+ * registry, so capability-only feature modules contribute their catalogs
+ * without requiring the public application to know their identities.
+ */
+export function buildAssistantCapabilityContextForTargets(
+  targetHandles: readonly string[],
+): BuiltInAssistantPromptContextMetadata | null {
+  const resolvedHandles = targetHandles
+    .map((handle) => resolveLocalCapabilityAssistantHandle(handle))
+    .filter((handle): handle is BuiltInAssistantHandle => handle !== null);
+  return buildLocalCapabilityAssistantPromptContextMetadata(
+    resolvedHandles,
+    LOCAL_CAPABILITY_DEFINITIONS,
+  );
 }
 
 function detectWebdevRuntimeNeed(): WebdevRuntimeNeed | null {
@@ -660,12 +681,8 @@ export function useConversationSubmitFlow({
         );
       }
 
-      const builtInAssistantTargetHandles = effectiveAgentSelection.targetHandles
-        .map((handle) => resolveBuiltInAssistantHandle(handle))
-        .filter((handle): handle is BuiltInAssistantHandle => handle !== null);
-      const assistantCapabilityContext = buildBuiltInAssistantPromptContextMetadata(
-        builtInAssistantTargetHandles,
-        LOCAL_CAPABILITY_DEFINITIONS,
+      const assistantCapabilityContext = buildAssistantCapabilityContextForTargets(
+        effectiveAgentSelection.targetHandles,
       );
       if (assistantCapabilityContext) {
         promptMetadata = {

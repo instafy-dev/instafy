@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::future::pending;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
@@ -29,8 +30,49 @@ static JOB_PROCESS_ENV_LOCK: Lazy<AsyncMutex<()>> = Lazy::new(|| AsyncMutex::new
 
 pub struct RuntimeAgent {
     config: Config,
-    shutdown: Arc<Notify>,
+    shutdown: ShutdownSignal,
     secret_env_keys: Arc<Mutex<HashSet<String>>>,
+}
+
+/// A sticky, broadcast shutdown signal.
+///
+/// `Notify::notify_waiters` alone is edge-triggered: a signal received while the
+/// lease loop is executing a job can be lost before the loop waits again. This
+/// wrapper records cancellation so every current and future waiter observes it.
+#[derive(Clone, Debug, Default)]
+pub struct ShutdownSignal {
+    cancelled: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+impl ShutdownSignal {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
+    pub async fn cancelled(&self) {
+        loop {
+            if self.is_cancelled() {
+                return;
+            }
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 
 struct HeartbeatTask {
@@ -176,12 +218,12 @@ impl RuntimeAgent {
     pub fn new(config: Config) -> Self {
         Self {
             config,
-            shutdown: Arc::new(Notify::new()),
+            shutdown: ShutdownSignal::new(),
             secret_env_keys: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
-    pub fn shutdown_handle(&self) -> Arc<Notify> {
+    pub fn shutdown_handle(&self) -> ShutdownSignal {
         self.shutdown.clone()
     }
 
@@ -216,7 +258,7 @@ impl RuntimeAgent {
         config: Arc<Config>,
         client: Arc<ControllerClient>,
         executor: Arc<AgentExecutor>,
-        shutdown: Arc<Notify>,
+        shutdown: ShutdownSignal,
         secret_env_keys: Arc<Mutex<HashSet<String>>>,
     ) -> Result<()> {
         loop {
@@ -251,7 +293,7 @@ impl RuntimeAgent {
         config: Arc<Config>,
         client: Arc<ControllerClient>,
         executor: Arc<AgentExecutor>,
-        shutdown: Arc<Notify>,
+        shutdown: ShutdownSignal,
         secret_env_keys: Arc<Mutex<HashSet<String>>>,
     ) -> Result<bool> {
         let registration = client
@@ -384,11 +426,17 @@ impl RuntimeAgent {
             // before we tear the runtime down, so the next runtime restores it.
             crate::browser_profile::maybe_snapshot(client.as_ref(), &registration).await;
 
-            if let Err(error) = client
-                .stop_runtime(&registration, Some("agent_shutdown"))
-                .await
-            {
-                warn!(?error, "failed to stop runtime during shutdown");
+            if should_self_disposition_runtime_on_shutdown(
+                config.parent_dispositions_runtime_on_shutdown,
+            ) {
+                if let Err(error) = client
+                    .stop_runtime(&registration, Some("agent_shutdown"))
+                    .await
+                {
+                    warn!(?error, "failed to stop runtime during shutdown");
+                }
+            } else {
+                info!("runtime disposition deferred to parent after desktop process-tree shutdown");
             }
         } else {
             info!("tunnel refresh requested; keeping runtime registered");
@@ -401,7 +449,7 @@ impl RuntimeAgent {
         client: Arc<ControllerClient>,
         executor: Arc<AgentExecutor>,
         registration: &Registration,
-        shutdown: Arc<Notify>,
+        shutdown: ShutdownSignal,
         refresh: Option<Arc<Notify>>,
         secret_env_keys: Arc<Mutex<HashSet<String>>>,
     ) -> Result<bool> {
@@ -410,7 +458,7 @@ impl RuntimeAgent {
 
         loop {
             let jobs = tokio::select! {
-                _ = shutdown.notified() => {
+                _ = shutdown.cancelled() => {
                     info!("shutdown requested; exiting lease loop");
                     return Ok(true);
                 }
@@ -966,6 +1014,10 @@ impl RuntimeAgent {
     }
 }
 
+fn should_self_disposition_runtime_on_shutdown(parent_dispositions_runtime: bool) -> bool {
+    !parent_dispositions_runtime
+}
+
 #[derive(Debug, Clone, Copy)]
 enum ExecutionMode {
     Apply,
@@ -1190,7 +1242,7 @@ enum LoopSignal {
 }
 
 impl RuntimeAgent {
-    async fn sleep_or_shutdown(duration: Duration, shutdown: Arc<Notify>) -> bool {
+    async fn sleep_or_shutdown(duration: Duration, shutdown: ShutdownSignal) -> bool {
         matches!(
             Self::sleep_or_signal(duration, shutdown, None).await,
             LoopSignal::Shutdown
@@ -1199,11 +1251,11 @@ impl RuntimeAgent {
 
     async fn sleep_or_signal(
         duration: Duration,
-        shutdown: Arc<Notify>,
+        shutdown: ShutdownSignal,
         refresh: Option<Arc<Notify>>,
     ) -> LoopSignal {
         tokio::select! {
-            _ = shutdown.notified() => LoopSignal::Shutdown,
+            _ = shutdown.cancelled() => LoopSignal::Shutdown,
             _ = Self::wait_for_refresh(refresh) => LoopSignal::Refresh,
             _ = sleep(duration) => LoopSignal::Completed,
         }
@@ -1387,6 +1439,45 @@ fn push_unique_case_insensitive(values: &mut Vec<String>, candidate: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn shutdown_signal_remains_observable_after_work_finishes() {
+        let shutdown = ShutdownSignal::new();
+        shutdown.cancel();
+
+        tokio::time::timeout(Duration::from_secs(1), shutdown.cancelled())
+            .await
+            .expect("sticky shutdown must not wait for a second notification");
+    }
+
+    #[tokio::test]
+    async fn shutdown_signal_wakes_every_current_waiter() {
+        let shutdown = ShutdownSignal::new();
+        let first = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move { shutdown.cancelled().await }
+        });
+        let second = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move { shutdown.cancelled().await }
+        });
+
+        tokio::task::yield_now().await;
+        shutdown.cancel();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            first.await.expect("first waiter should exit");
+            second.await.expect("second waiter should exit");
+        })
+        .await
+        .expect("all shutdown waiters should wake");
+    }
+
+    #[test]
+    fn desktop_parent_is_the_only_shutdown_disposition_actor() {
+        assert!(!should_self_disposition_runtime_on_shutdown(true));
+        assert!(should_self_disposition_runtime_on_shutdown(false));
+    }
 
     #[test]
     fn runtime_token_without_tunnel_assignment_does_not_restart_origin() {

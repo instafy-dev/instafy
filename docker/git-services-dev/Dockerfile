@@ -1,8 +1,7 @@
-# syntax=docker/dockerfile:1.7
-
 # This image is intentionally local/E2E-only. Production keeps the separate
 # git-edge, git-shard, and origin-gateway images so each deployed service has
-# its own minimal runtime surface.
+# its own minimal runtime surface. It uses the BuildKit frontend bundled with
+# Docker so local test startup does not need a Docker Hub metadata lookup.
 ARG RUST_TOOLCHAIN=1.91.1
 ARG RUST_IMAGE=rust:${RUST_TOOLCHAIN}-slim-bookworm
 ARG BUILD_PROFILE=release
@@ -34,6 +33,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     && install -Dm755 /src/target/${BUILD_ARTIFACT_DIR}/origin-http-server /src/build-artifacts/${BUILD_ARTIFACT_DIR}/origin-http-server
 
 FROM ${RUNTIME_BASE} AS runtime
+ARG INSTAFY_GIT_SERVICES_SOURCE_SHA=unknown
+LABEL dev.instafy.git-services.source-sha=${INSTAFY_GIT_SERVICES_SOURCE_SHA}
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates git \
     && mkdir -p /var/lib/instafy-git \

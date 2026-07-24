@@ -17,6 +17,7 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
   DEFAULT_SERVICE_RUNTIME_EMAIL,
+  deleteEnvFileValue,
   DEFAULT_SUPABASE_PROJECT_URL,
   ensureServiceRuntimeUserId,
   setEnvFileValue,
@@ -30,6 +31,8 @@ import {
   writePrivateEnvFileSync,
 } from "./lib/privateEnvPaths.mjs";
 import { ensureSupabaseEmailTemplateMounts } from "./lib/supabaseEmailTemplateMounts.mjs";
+import { computeGitServicesImageFingerprint } from "./lib/gitServicesImageFingerprint.mjs";
+import { resolveRustBinaryLaunch } from "./lib/prebuiltRustBinary.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -100,12 +103,20 @@ const controllerBaseUrl = `http://127.0.0.1:${controllerPort}`;
 const redisPort = Number(process.env.REDIS_PORT || 6379);
 const redisUrlDefault = `redis://127.0.0.1:${redisPort}`;
 
+function hasConfiguredPrebuiltBinary(envKey, env = process.env) {
+  return typeof env?.[envKey] === "string" && env[envKey].trim().length > 0;
+}
+
 // Provider service (external allocator) bits
 const providerManifest = path.join(repoRoot, "packages", "runtime-provider-service", "Cargo.toml");
 const providerPidFile = path.join(repoRoot, "tmp", ".provider.pid");
 const providerLogPath = path.join(logsDir, "provider.log");
 const providerPort = Number(process.env.PROVIDER_PORT || 9090);
-const providerBaseUrl = process.env.DEV_PROVIDER_ENDPOINT || `http://127.0.0.1:${providerPort}`;
+const providerBaseUrl = hasConfiguredPrebuiltBinary(
+  "INSTAFY_RUNTIME_PROVIDER_SERVICE_BIN"
+)
+  ? `http://127.0.0.1:${providerPort}`
+  : process.env.DEV_PROVIDER_ENDPOINT || `http://127.0.0.1:${providerPort}`;
 
 // Proxy bits
 const proxyManifest = path.join(
@@ -860,9 +871,10 @@ function normalizeComposeEnvSpaceIdentifiers() {
       migratedLegacyProjectId = true;
     }
 
-    if (spaceId && (process.env.GIT_CANONICAL || "").trim() === "1") {
+    const gitCanonicalEnabled = (process.env.GIT_CANONICAL || "").trim() === "1";
+    const remoteIdx = lines.findIndex((line) => line.startsWith("ORIGIN_GIT_REMOTE_URL="));
+    if (spaceId && gitCanonicalEnabled) {
       const desiredRemoteLine = `ORIGIN_GIT_REMOTE_URL=http://git-edge:8080/${spaceId}.git`;
-      const remoteIdx = lines.findIndex((line) => line.startsWith("ORIGIN_GIT_REMOTE_URL="));
       if (remoteIdx === -1) {
         lines.push(desiredRemoteLine);
         modified = true;
@@ -870,6 +882,9 @@ function normalizeComposeEnvSpaceIdentifiers() {
         lines[remoteIdx] = desiredRemoteLine;
         modified = true;
       }
+    } else if (!gitCanonicalEnabled && remoteIdx !== -1) {
+      lines.splice(remoteIdx, 1);
+      modified = true;
     }
 
     if (!modified) {
@@ -1457,6 +1472,9 @@ function ensureComposeOriginEntries() {
           envMap.ORIGIN_GIT_AUTHOR_EMAIL ?? "origin@instafy.dev",
         );
       }
+    } else {
+      deleteEnvFileValue(composeEnvPath, "ORIGIN_GIT_REMOTE_URL");
+      delete process.env.ORIGIN_GIT_REMOTE_URL;
     }
   } catch (error) {
     console.warn(
@@ -1650,9 +1668,44 @@ function clearProxyPid() {
   } catch {}
 }
 
-async function stopProxyInternal() {
+function isProxyProcess(pid, expectedCommand = "") {
+  if (!Number.isFinite(pid) || pid <= 0) {
+    return false;
+  }
+  const result = tryCapture("ps", ["-p", String(pid), "-o", "command="]);
+  if (result.code !== 0) {
+    return false;
+  }
+  const command = (result.stdout ?? "").trim();
+  if (!command) {
+    return false;
+  }
+  const expected = String(expectedCommand ?? "").trim();
+  if (expected) {
+    return command === expected || command.startsWith(`${expected} `);
+  }
+  const proxyPackageRoot = path.dirname(proxyManifest);
+  const executable = command.split(/\s+/, 1)[0] ?? "";
+  return (
+    command.includes(proxyManifest) ||
+    command.includes("openai-proxy-server") ||
+    (executable.startsWith(`${proxyPackageRoot}${path.sep}target${path.sep}`) &&
+      path.basename(executable) === "proxy") ||
+    path.basename(executable) === "openai-proxy"
+  );
+}
+
+async function stopProxyInternal(options = {}) {
+  const { expectedCommand = "" } = options;
   const pid = readProxyPid();
   if (!pid) return false;
+  if (!isProxyProcess(pid, expectedCommand)) {
+    console.warn(
+      `[runtime-dev] Ignoring stale proxy pid file for pid ${pid}; the process identity did not match the Instafy proxy.`
+    );
+    clearProxyPid();
+    return false;
+  }
   console.log(`[runtime-dev] Stopping proxy (pid=${pid})...`);
   try {
     process.kill(pid, "SIGINT");
@@ -1928,18 +1981,45 @@ async function startGitComposeIfEnabled() {
   console.log(
     "[runtime-dev] Launching git-canonical services via docker compose (git-edge + git-shard-0 + origin-gateway)..."
   );
-  // Only git-shard-0 owns the shared dev-image build definition. Build it
-  // first so the other two services never race Compose's image resolution on
-  // a cold machine, then start all three from that exact local image.
-  run("docker", [
-    "compose",
-    "-p",
-    composeProject,
-    "-f",
-    composeFile,
-    "build",
-    "git-shard-0"
-  ]);
+  // Only git-shard-0 owns the shared dev-image build definition. Reuse is
+  // allowed only when the image label matches the exact build inputs; a bare
+  // local tag can otherwise select stale binaries on a persistent runner.
+  const forceGitBuild = process.env.STACK_FORCE_GIT_BUILD === "1";
+  const sourceFingerprint = computeGitServicesImageFingerprint(repoRoot);
+  const gitServicesImage = inspectImage("git-services:local");
+  const fingerprintMatches =
+    gitServicesImage?.sourceFingerprint === sourceFingerprint;
+  if (!gitServicesImage || forceGitBuild || !fingerprintMatches) {
+    const buildReason = forceGitBuild
+      ? "forced build"
+      : gitServicesImage
+        ? "source fingerprint changed"
+        : "image missing";
+    console.log(
+      `[runtime-dev] Building git-services:local (${buildReason})...`
+    );
+    run("docker", [
+      "compose",
+      "-p",
+      composeProject,
+      "-f",
+      composeFile,
+      "build",
+      "--build-arg",
+      `INSTAFY_GIT_SERVICES_SOURCE_SHA=${sourceFingerprint}`,
+      "git-shard-0"
+    ]);
+    const builtImage = inspectImage("git-services:local");
+    if (builtImage?.sourceFingerprint !== sourceFingerprint) {
+      throw new Error(
+        "git-services:local build did not preserve the expected source fingerprint label"
+      );
+    }
+  } else {
+    console.log(
+      `[runtime-dev] Reusing git-services:local (${gitServicesImage.id || "image present"}; source fingerprint matched).`
+    );
+  }
   const composeArgs = [
     "compose",
     "-p",
@@ -1949,12 +2029,7 @@ async function startGitComposeIfEnabled() {
     "up",
     "-d",
   ];
-  if (process.env.STACK_FORCE_GIT_BUILD === "1") {
-    console.log("[runtime-dev] Rebuilding git-canonical service images (forced build)...");
-    composeArgs.push("--build");
-  } else {
-    composeArgs.push("--no-build");
-  }
+  composeArgs.push("--no-build");
   composeArgs.push(
     "git-shard-0",
     "git-edge",
@@ -2000,6 +2075,16 @@ async function startProxyIfNeeded(runtimeRepoHost, proxyConfig) {
     return { running: false, started: false, skipped: true };
   }
 
+  const prebuiltLaunch = hasConfiguredPrebuiltBinary("INSTAFY_OPENAI_PROXY_BIN")
+    ? resolveRustBinaryLaunch({
+        env: process.env,
+        envKey: "INSTAFY_OPENAI_PROXY_BIN",
+        repoRoot,
+        cargoArgs: ["run", "--manifest-path", proxyManifest, "--bin", "proxy"],
+        label: "Codex proxy",
+      })
+    : null;
+
   const byocMode = proxyByocModeEnabled();
   if (byocMode) {
     ensureProxyCodexHomeForMode();
@@ -2012,6 +2097,26 @@ async function startProxyIfNeeded(runtimeRepoHost, proxyConfig) {
   const bindAddr =
     process.env.CODEX_PROXY_ADDR ||
     (byocMode || isDockerHostAlias ? `0.0.0.0:${port}` : `${host}:${port}`);
+
+  if (prebuiltLaunch) {
+    console.log(
+      `[runtime-dev] Preparing a clean launch for prebuilt Codex proxy: ${prebuiltLaunch.command}`
+    );
+    await stopProxyIfWeStarted({ expectedCommand: prebuiltLaunch.command }).catch((error) => {
+      console.warn(
+        `[runtime-dev] Failed while stopping an existing proxy before prebuilt launch: ${
+          error?.message || error
+        }`
+      );
+    });
+    const closed = await waitForPortClose(port, { host: checkHost });
+    if (!closed) {
+      throw new Error(
+        `Refusing to launch prebuilt Codex proxy while ${baseUrl} is still occupied. ` +
+          "Stop the existing proxy or service and retry."
+      );
+    }
+  }
 
   const alreadyUp = await waitForPort(port, {
     attempts: 1,
@@ -2140,6 +2245,7 @@ async function startProxyIfNeeded(runtimeRepoHost, proxyConfig) {
   }
 
   const useComposeProxy =
+    !prebuiltLaunch &&
     !byocMode &&
     ["1", "true", "yes", "on"].includes(
       (process.env.RUNTIME_PROXY_IN_COMPOSE || "1").trim().toLowerCase()
@@ -2175,7 +2281,6 @@ async function startProxyIfNeeded(runtimeRepoHost, proxyConfig) {
 
   ensureTmpDir();
   console.log(`[runtime-dev] Launching Codex proxy (logs → ${proxyLogPath})...`);
-  console.log("[runtime-dev] Building Codex proxy (first run may take a minute while Cargo compiles)...");
 
   let fd = null;
   try {
@@ -2240,6 +2345,23 @@ async function startProxyIfNeeded(runtimeRepoHost, proxyConfig) {
   delete env.OPENAI_BASE_URL;
   delete env.CODEX_API_ENDPOINT;
 
+  const launch =
+    prebuiltLaunch ??
+    resolveRustBinaryLaunch({
+      env,
+      envKey: "INSTAFY_OPENAI_PROXY_BIN",
+      repoRoot,
+      cargoArgs: ["run", "--manifest-path", proxyManifest, "--bin", "proxy"],
+      label: "Codex proxy",
+    });
+  if (launch.source === "prebuilt") {
+    console.log(`[runtime-dev] Using prebuilt Codex proxy: ${launch.command}`);
+  } else {
+    console.log(
+      "[runtime-dev] Building Codex proxy (first run may take a minute while Cargo compiles)..."
+    );
+  }
+
   console.log(`[runtime-dev] Starting proxy with CODEX_PROXY_ADDR=${env.CODEX_PROXY_ADDR}`);
   try {
     const bytes = Buffer.from(env.CODEX_PROXY_ADDR, "utf-8");
@@ -2249,8 +2371,8 @@ async function startProxyIfNeeded(runtimeRepoHost, proxyConfig) {
   } catch {}
 
   const child = spawn(
-    "cargo",
-    ["run", "--manifest-path", proxyManifest, "--bin", "proxy"],
+    launch.command,
+    launch.args,
     {
       cwd: repoRoot,
       env,
@@ -2311,23 +2433,38 @@ async function startProxyIfNeeded(runtimeRepoHost, proxyConfig) {
     );
   }
 
+  if (prebuiltLaunch) {
+    const listeningPids = listListeningPidsByPort(port);
+    if (!listeningPids.includes(child.pid) || !killPid(child.pid, 0)) {
+      await stopProxyInternal().catch(() => {});
+      throw new Error(
+        `Prebuilt Codex proxy pid ${child.pid} did not own listening port ${port}; ` +
+          `observed listener pids: ${listeningPids.join(", ") || "none"}.`
+      );
+    }
+  }
+
   child.unref();
   console.log(`[runtime-dev] Proxy is listening on ${bindAddr}.`);
   return { running: true, started: true, pid: child.pid };
 }
 
-async function stopProxyIfWeStarted() {
+async function stopProxyIfWeStarted(options = {}) {
   let stopped = false;
   if (fileExists(proxyPidFile)) {
-    stopped = await stopProxyInternal();
+    stopped = await stopProxyInternal(options);
   }
   const composeStopped = await stopProxyCompose({ remove: true });
   return stopped || composeStopped;
 }
 
 async function ensureProviderStartedIfConfigured() {
-  // If the caller explicitly set DEV_PROVIDER_ENDPOINT, assume they manage the provider lifecycle.
-  if (process.env.DEV_PROVIDER_ENDPOINT) {
+  const prebuiltConfigured = hasConfiguredPrebuiltBinary(
+    "INSTAFY_RUNTIME_PROVIDER_SERVICE_BIN"
+  );
+  // An explicit prebuilt binary is an instruction to launch that exact artifact,
+  // even when a caller also left an external provider endpoint configured.
+  if (process.env.DEV_PROVIDER_ENDPOINT && !prebuiltConfigured) {
     return { running: true, started: false, pid: readProviderPid() };
   }
   return startProviderService();
@@ -2424,6 +2561,50 @@ function findProviderPidByPort() {
   return 0;
 }
 
+async function clearProviderPortForPrebuiltLaunch() {
+  const candidatePids = new Set();
+  const managedPid = readProviderPid();
+  if (managedPid && isProviderProcess(managedPid)) {
+    candidatePids.add(managedPid);
+  } else if (managedPid) {
+    console.warn(
+      `[runtime-dev] Ignoring stale provider pid file for pid ${managedPid}; the process identity did not match runtime-provider-service.`
+    );
+  }
+  const listeningPid = findProviderPidByPort();
+  if (listeningPid) {
+    candidatePids.add(listeningPid);
+  }
+  clearProviderPid();
+
+  for (const signal of ["SIGINT", "SIGTERM", "SIGKILL"]) {
+    for (const pid of candidatePids) {
+      if (killPid(pid, 0)) {
+        killPid(pid, signal);
+      }
+    }
+    if (candidatePids.size > 0) {
+      await wait(signal === "SIGKILL" ? 150 : 400);
+    }
+    const listening = await waitForPort(providerPort, {
+      attempts: 1,
+      delayMs: 1,
+      host: "127.0.0.1",
+    });
+    if (!listening) {
+      break;
+    }
+  }
+
+  const closed = await waitForPortClose(providerPort);
+  if (!closed) {
+    throw new Error(
+      `Refusing to launch prebuilt runtime provider service while port ${providerPort} is still occupied. ` +
+        "Stop the existing provider or service and retry."
+    );
+  }
+}
+
 function providerEnv(baseEnv = {}) {
   const env = { ...process.env, ...baseEnv };
   env.RUST_LOG = env.RUST_LOG || "info,runtime_provider=info";
@@ -2480,7 +2661,30 @@ async function waitForProvider(port) {
 }
 
 async function startProviderService() {
-  if (fileExists(providerPidFile)) {
+  const prebuiltLaunch = hasConfiguredPrebuiltBinary(
+    "INSTAFY_RUNTIME_PROVIDER_SERVICE_BIN"
+  )
+    ? resolveRustBinaryLaunch({
+        env: process.env,
+        envKey: "INSTAFY_RUNTIME_PROVIDER_SERVICE_BIN",
+        repoRoot,
+        cargoArgs: [
+          "run",
+          "--manifest-path",
+          providerManifest,
+          "--bin",
+          "runtime-provider-service",
+        ],
+        label: "runtime provider service",
+      })
+    : null;
+
+  if (prebuiltLaunch) {
+    console.log(
+      `[runtime-dev] Preparing a clean launch for prebuilt provider service: ${prebuiltLaunch.command}`
+    );
+    await clearProviderPortForPrebuiltLaunch();
+  } else if (fileExists(providerPidFile)) {
     const pid = readProviderPid();
     if (pid && killPid(pid, 0)) {
       const ready = await waitForProvider(providerPort);
@@ -2492,7 +2696,7 @@ async function startProviderService() {
     clearProviderPid();
   }
 
-  const existingPid = findProviderPidByPort();
+  const existingPid = prebuiltLaunch ? 0 : findProviderPidByPort();
   if (existingPid) {
     writeProviderPid(existingPid);
     console.log(`[runtime-dev] Provider already running (pid=${existingPid}).`);
@@ -2501,12 +2705,31 @@ async function startProviderService() {
 
   const stdio = ["ignore", providerLogFd(), providerLogFd()];
   console.log(`[runtime-dev] Starting provider service on ${providerBaseUrl}...`);
+  const env = providerEnv();
+  const launch =
+    prebuiltLaunch ??
+    resolveRustBinaryLaunch({
+      env,
+      envKey: "INSTAFY_RUNTIME_PROVIDER_SERVICE_BIN",
+      repoRoot,
+      cargoArgs: [
+        "run",
+        "--manifest-path",
+        providerManifest,
+        "--bin",
+        "runtime-provider-service",
+      ],
+      label: "runtime provider service",
+    });
+  if (launch.source === "prebuilt") {
+    console.log(`[runtime-dev] Using prebuilt provider service: ${launch.command}`);
+  }
   const child = spawn(
-    "cargo",
-    ["run", "--manifest-path", providerManifest, "--bin", "runtime-provider-service"],
+    launch.command,
+    launch.args,
     {
       cwd: repoRoot,
-      env: providerEnv(),
+      env,
       detached: true,
       stdio,
     }
@@ -2560,6 +2783,18 @@ function parsePidOutput(raw) {
     .split(/\r?\n/)
     .map((line) => Number.parseInt(line.trim(), 10))
     .filter((pid) => Number.isFinite(pid) && pid > 0);
+}
+function listListeningPidsByPort(port) {
+  const result = tryCapture("lsof", [
+    "-nP",
+    `-iTCP:${port}`,
+    "-sTCP:LISTEN",
+    "-t",
+  ]);
+  if (result.code !== 0) {
+    return [];
+  }
+  return parsePidOutput(result.stdout ?? "");
 }
 function isControllerProcess(pid) {
   if (!Number.isFinite(pid) || pid <= 0) {
@@ -2636,6 +2871,30 @@ async function terminateControllerProcesses(pids) {
   }
   return signalled && closed;
 }
+async function clearControllerPortForPrebuiltLaunch() {
+  const candidatePids = new Set();
+  const managedPid = readPid();
+  if (managedPid && isControllerProcess(managedPid)) {
+    candidatePids.add(managedPid);
+  }
+  for (const pid of listListeningPidsByPort(controllerPort)) {
+    if (isControllerProcess(pid)) {
+      candidatePids.add(pid);
+    }
+  }
+  clearPid();
+
+  if (candidatePids.size > 0) {
+    await terminateControllerProcesses(Array.from(candidatePids));
+  }
+  const closed = await waitForPortClose(controllerPort);
+  if (!closed) {
+    throw new Error(
+      `Refusing to launch prebuilt runtime controller while port ${controllerPort} is still occupied. ` +
+        "Stop the existing controller or service and retry."
+    );
+  }
+}
 async function stopControllerInternal() {
   const pid = readPid();
   if (!pid) return false;
@@ -2666,6 +2925,25 @@ async function startControllerIfNeeded(
   if (process.env.RUNTIME_SKIP_CONTROLLER === "1") {
     console.log("[runtime-dev] Skipping controller start (RUNTIME_SKIP_CONTROLLER=1).");
     return { running: false, started: false, skipped: true };
+  }
+
+  const prebuiltLaunch = hasConfiguredPrebuiltBinary(
+    "INSTAFY_RUNTIME_CONTROLLER_BIN"
+  )
+    ? resolveRustBinaryLaunch({
+        env: process.env,
+        envKey: "INSTAFY_RUNTIME_CONTROLLER_BIN",
+        repoRoot,
+        cargoArgs: ["run", "--manifest-path", controllerManifest],
+        label: "runtime controller",
+      })
+    : null;
+
+  if (prebuiltLaunch) {
+    console.log(
+      `[runtime-dev] Preparing a clean launch for prebuilt runtime controller: ${prebuiltLaunch.command}`
+    );
+    await clearControllerPortForPrebuiltLaunch();
   }
 
   // Reuse if already running
@@ -2883,11 +3161,23 @@ async function startControllerIfNeeded(
   }
 
   console.log(`[runtime-dev] Starting controller with manifest ${controllerManifest}`);
+  const launch =
+    prebuiltLaunch ??
+    resolveRustBinaryLaunch({
+      env,
+      envKey: "INSTAFY_RUNTIME_CONTROLLER_BIN",
+      repoRoot,
+      cargoArgs: ["run", "--manifest-path", controllerManifest],
+      label: "runtime controller",
+    });
+  if (launch.source === "prebuilt") {
+    console.log(`[runtime-dev] Using prebuilt runtime controller: ${launch.command}`);
+  }
   let child;
   try {
     child = spawn(
-      "cargo",
-      ["run", "--manifest-path", controllerManifest],
+      launch.command,
+      launch.args,
       {
         cwd: repoRoot,
         env,
@@ -2969,6 +3259,17 @@ async function startControllerIfNeeded(
         `Controller exited (${details}) immediately after starting. ` +
           `Check logs at: ${controllerLogPath}`
       );
+    }
+
+    if (prebuiltLaunch) {
+      const listeningPids = listListeningPidsByPort(controllerPort);
+      if (!listeningPids.includes(child.pid) || !killPid(child.pid, 0)) {
+        await stopControllerInternal().catch(() => {});
+        throw new Error(
+          `Prebuilt runtime controller pid ${child.pid} did not own listening port ${controllerPort}; ` +
+            `observed listener pids: ${listeningPids.join(", ") || "none"}.`
+        );
+      }
     }
 
     console.log(`[runtime-dev] Controller is listening on ${controllerPort}.`);
@@ -3175,7 +3476,10 @@ async function buildRuntimeContext(options = {}) {
 
   // Bring up a local provider service when none is specified so the controller can talk
   // to an external_http provider that wraps the docker allocator.
-  if (!process.env.DEV_PROVIDER_ENDPOINT) {
+  if (
+    !process.env.DEV_PROVIDER_ENDPOINT ||
+    hasConfiguredPrebuiltBinary("INSTAFY_RUNTIME_PROVIDER_SERVICE_BIN")
+  ) {
     await ensureProviderStartedIfConfigured();
     process.env.DEV_PROVIDER_ENDPOINT = providerBaseUrl;
     process.env.DEV_PROVIDER_AUTH_TOKEN =
@@ -3257,16 +3561,21 @@ function inspectImage(tag) {
     "inspect",
     tag,
     "--format",
-    "{{.Id}}\t{{.Created}}"
+    '{{.Id}}\t{{.Created}}\t{{index .Config.Labels "dev.instafy.git-services.source-sha"}}'
   ]);
   if (inspected.code !== 0) return null;
   const line = inspected.stdout.trim();
   if (!line) return null;
-  const [id = "", created = ""] = line.split(/\t+/, 2);
+  const [id = "", created = "", sourceFingerprintRaw = ""] = line.split(/\t+/, 3);
+  const sourceFingerprint = sourceFingerprintRaw.trim();
   return {
     tag,
     id: id.trim(),
-    created: created.trim()
+    created: created.trim(),
+    sourceFingerprint:
+      sourceFingerprint && sourceFingerprint !== "<no value>"
+        ? sourceFingerprint
+        : null
   };
 }
 
@@ -3910,6 +4219,9 @@ function printUsage() {
   console.log(`  controller:start|stop|status`);
   console.log(`\nEnv toggles:`);
   console.log(`  RUNTIME_SKIP_CONTROLLER=1   Skip starting controller`);
+  console.log(`  INSTAFY_RUNTIME_CONTROLLER_BIN=<path>       Use a verified prebuilt controller`);
+  console.log(`  INSTAFY_RUNTIME_PROVIDER_SERVICE_BIN=<path> Use a verified prebuilt provider`);
+  console.log(`  INSTAFY_OPENAI_PROXY_BIN=<path>             Use a verified prebuilt proxy`);
   console.log(`  RUNTIME_KEEP_SUPABASE=1     Do not stop Supabase on 'down'`);
   console.log(`  RUNTIME_PRUNE_ON_UP=0       Do not prune stale per-project runtimes on 'up'`);
   console.log(`  KEEP_E2E_ENV=1              Do not clean up after 'test'`);

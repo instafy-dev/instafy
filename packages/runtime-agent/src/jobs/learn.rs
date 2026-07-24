@@ -1467,8 +1467,10 @@ mod tests {
         assert!(refreshed.contains("context_kind: policy"));
         assert!(refreshed.contains("context_parent: instafy-persistent-contexts"));
         assert!(refreshed.contains("always_include: true"));
-        assert!(refreshed.contains("decision`: `respond`, `claim`, `correct`, or `silent`"));
-        assert!(refreshed.contains("Do not add a waiting timer"));
+        assert!(refreshed.contains(
+            "`groupParticipation` decisions (`respond`, `claim`, `correct`, or `silent`"
+        ));
+        assert!(refreshed.contains("Do not add an artificial waiting period"));
         assert!(refreshed.contains("do not call tools"));
     }
 

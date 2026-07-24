@@ -12,6 +12,7 @@ export interface ControllerOriginPresence {
 
 export interface ControllerOriginSummary {
   originId: string;
+  runtimeId?: string | null;
   endpoint: string;
   mode: string;
   protocols?: string[];

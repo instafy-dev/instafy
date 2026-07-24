@@ -28,10 +28,12 @@ import {
 } from "../../../runtime/utils/webdevRuntime";
 import { runtimeDebugLog } from "../../../runtime/utils/runtimeDebug";
 import { generateUUID } from "../../../utils/uuid";
+import type { StatusIntent } from "../../../status/useStatus";
 import { useBrowserSessionActions } from "./useBrowserSessionActions";
 import { BrowserCursorOverlay } from "./BrowserCursorOverlay";
 import { ActionTicker } from "./ActionTicker";
 import { SharedBrowserCollaborationControls } from "./SharedBrowserCollaborationControls";
+import { SharedBrowserDataClearAction } from "./SharedBrowserDataClearAction";
 import { SharedBrowserParticipantPointers } from "./SharedBrowserParticipantPointers";
 import { collaborationSelfOwnsControl } from "./sharedBrowserCollaboration";
 import { useSharedBrowserCollaboration } from "./useSharedBrowserCollaboration";
@@ -398,9 +400,11 @@ export function BrowserSessionModal({
   toolbarLeading,
   transportActive = true,
   canControlBrowser = false,
+  canClearBrowserData = false,
   controlOwner = HUMAN_SHARED_BROWSER_CONTROL_OWNER,
   onBackToChat,
   onApprovalPendingChange,
+  onStatus,
   sharedBrowserChrome = null,
   sharedBrowserViewerKind = "rfb",
   sharedBrowserCapabilitiesResolved = true,
@@ -422,9 +426,15 @@ export function BrowserSessionModal({
   toolbarLeading?: ReactNode;
   transportActive?: boolean;
   canControlBrowser?: boolean;
+  canClearBrowserData?: boolean;
   controlOwner?: SharedBrowserControlOwner;
   onBackToChat?: (() => void) | null;
   onApprovalPendingChange?: ((pending: boolean) => void) | null;
+  onStatus?: (
+    message: string,
+    intent?: StatusIntent,
+    durationMs?: number,
+  ) => void;
   sharedBrowserChrome?: SharedBrowserChromeProps | null;
   sharedBrowserViewerKind?: SupportedSharedBrowserViewerKind | null;
   sharedBrowserCapabilitiesResolved?: boolean;
@@ -439,6 +449,9 @@ export function BrowserSessionModal({
   const rfbRef = useRef<BrowserSessionRfbLike | null>(null);
   const generatedBrowserSessionId = useMemo(() => generateUUID(), []);
   const browserSessionId = suppliedBrowserSessionId?.trim() || generatedBrowserSessionId;
+  const browserDataClearInFlightRef = useRef(false);
+  const browserConnectionGenerationRef = useRef(0);
+  const [browserDataClearInFlight, setBrowserDataClearInFlight] = useState(false);
   const [collaborationWsUrl, setCollaborationWsUrl] = useState<string | null>(null);
   const [collaborationConnectionKey, setCollaborationConnectionKey] =
     useState<string | null>(null);
@@ -448,7 +461,11 @@ export function BrowserSessionModal({
     sharedBrowserChrome?.pages[0]?.id ??
     null;
   const collaboration = useSharedBrowserCollaboration({
-    active: isOpen && transportActive && Boolean(sharedBrowserPageId),
+    active:
+      isOpen &&
+      transportActive &&
+      !browserDataClearInFlight &&
+      Boolean(sharedBrowserPageId),
     pageId: sharedBrowserPageId,
     sessionId: browserSessionId,
     wsUrl: collaborationWsUrl,
@@ -516,7 +533,7 @@ export function BrowserSessionModal({
     // The signed origin marker/request remains authoritative even if the user
     // switches conversations or hides the Shared transport. The endpoint is
     // initiator-scoped, so a writable mounted surface can safely keep polling.
-    active: isOpen && canControlBrowser,
+    active: isOpen && canControlBrowser && !browserDataClearInFlight,
     projectId: browserOriginConnection?.projectId ?? projectId,
     browserSessionId,
     runtimeId: browserOriginConnection?.runtimeId ?? null,
@@ -667,7 +684,11 @@ export function BrowserSessionModal({
   // renders (connected and not collapsed) so a hidden/collapsed session doesn't
   // keep polling. Uses the same runtime the VNC stream resolved to.
   const { actions: browserActions, latestClick: browserLatestClick } = useBrowserSessionActions({
-    enabled: isOpen && displayStatus === "connected" && !shouldCollapseDocked,
+    enabled:
+      isOpen &&
+      !browserDataClearInFlight &&
+      displayStatus === "connected" &&
+      !shouldCollapseDocked,
     browserSessionId,
     projectId,
     preferRuntimeId: forcedRuntimeId ?? preferRuntimeId,
@@ -796,6 +817,13 @@ export function BrowserSessionModal({
   }, [connectedScopeKey, forcedRuntimeId, preferRuntimeId, projectId]);
   const scheduleReconnectAttempt = useCallback(
     (reason: "disconnect" | "connect_failure", debugWsUrl: string): boolean => {
+      if (browserDataClearInFlightRef.current) {
+        runtimeDebugLog("browser-session:reset-suppressed-reconnect", {
+          reason,
+          projectId,
+        });
+        return true;
+      }
       if (autoRetryCountRef.current < MAX_AUTO_CONNECT_RETRIES) {
         freezeCurrentBrowserFrame();
         autoRetryCountRef.current += 1;
@@ -839,10 +867,22 @@ export function BrowserSessionModal({
       }
       return false;
     },
-    [activeSharedBrowserViewerKind, forcedRuntimeId, freezeCurrentBrowserFrame],
+    [
+      activeSharedBrowserViewerKind,
+      forcedRuntimeId,
+      freezeCurrentBrowserFrame,
+      projectId,
+    ],
   );
   const fallBackFromViewer = useCallback(
     (reason: string): boolean => {
+      if (browserDataClearInFlightRef.current) {
+        runtimeDebugLog("browser-session:reset-suppressed-fallback", {
+          reason,
+          projectId,
+        });
+        return true;
+      }
       if (!activeSharedBrowserViewerKind) {
         return false;
       }
@@ -880,7 +920,57 @@ export function BrowserSessionModal({
       forcedRuntimeId,
       freezeCurrentBrowserFrame,
       permittedSharedBrowserViewerKinds,
+      projectId,
     ],
+  );
+  const handleBrowserDataClearStart = useCallback(() => {
+    browserDataClearInFlightRef.current = true;
+    browserConnectionGenerationRef.current += 1;
+    setBrowserDataClearInFlight(true);
+    // A reconnect may preserve the last frame, but an explicit privacy reset
+    // must not keep showing the authenticated page whose data is being erased.
+    setFrozenFrameUrl(null);
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    autoRetryCountRef.current = 0;
+    setHasConnectedOnce(false);
+    if (connectedScopeKey) {
+      connectedBrowserSessionScopes.delete(connectedScopeKey);
+    }
+    setStatus("connecting");
+    setError(null);
+    setRuntimeLimitDetails(null);
+    setWsUrl(null);
+    setBrowserInputWsUrl(null);
+    setCollaborationWsUrl(null);
+    setCollaborationConnectionKey(null);
+    setBrowserOriginConnection(null);
+    browserOriginConnectionRef.current = null;
+    setWebRtcConnection(null);
+    webRtcConnectionRef.current = null;
+    webRtcProjectIdRef.current = null;
+    runtimeDebugLog("browser-session:reset-start", { projectId });
+  }, [connectedScopeKey, projectId]);
+  const handleBrowserDataClearSettled = useCallback(
+    (succeeded: boolean) => {
+      browserDataClearInFlightRef.current = false;
+      setBrowserDataClearInFlight(false);
+      if (succeeded) {
+        // Use a new ensure identity so a just-completed reset cannot reuse an
+        // in-flight/coalesced ensure for the runtime that the controller stopped.
+        setForcedRuntimeId(generateUUID());
+      }
+      runtimeDebugLog("browser-session:reset-settled", {
+        projectId,
+        succeeded,
+      });
+      // The reset endpoint may have stopped the viewer even when it returns an
+      // error. Retry exactly once after either outcome to restore a useful tab.
+      retryConnection();
+    },
+    [projectId, retryConnection],
   );
   const closeBrowserSession = useCallback(() => {
     if (connectedScopeKey) {
@@ -970,12 +1060,21 @@ export function BrowserSessionModal({
       return;
     }
 
+    if (browserDataClearInFlight) {
+      return;
+    }
+
     if (!projectId) {
       setStatus("error");
       setError("Space is missing.");
       return;
     }
     let cancelled = false;
+    const connectionGeneration = browserConnectionGenerationRef.current;
+    const connectionCancelled = () =>
+      cancelled ||
+      browserDataClearInFlightRef.current ||
+      connectionGeneration !== browserConnectionGenerationRef.current;
     const startupAbortController = new AbortController();
     const existingConnection = browserOriginConnectionRef.current;
     const preservingConnection =
@@ -1007,7 +1106,7 @@ export function BrowserSessionModal({
         signal: startupAbortController.signal,
         quietOnAbort: true,
       }).catch(() => null);
-      if (cancelled) {
+      if (connectionCancelled()) {
         return;
       }
       const statusEntries = Array.isArray(statusSnapshot?.runtimes) ? statusSnapshot.runtimes : [];
@@ -1124,7 +1223,7 @@ export function BrowserSessionModal({
                 signal: startupAbortController.signal,
                 quietOnAbort: true,
               }).catch(() => null);
-              if (cancelled) {
+              if (connectionCancelled()) {
                 return;
               }
               recyclableRuntime = resolveAutoRecyclableBrowserRuntimeIdentity({
@@ -1163,7 +1262,7 @@ export function BrowserSessionModal({
               });
               throw initialError;
             }
-            if (cancelled) {
+            if (connectionCancelled()) {
               return;
             }
 
@@ -1184,7 +1283,7 @@ export function BrowserSessionModal({
             ensuredRuntimeId = recyclableRuntimeId;
             ensured = await ensureBrowserRuntime(ensuredRuntimeId, false);
           }
-          if (cancelled) {
+          if (connectionCancelled()) {
             return;
           }
           runtimeId = ensured?.runtimeId ?? null;
@@ -1197,7 +1296,7 @@ export function BrowserSessionModal({
             requestedRfbRenderScale,
           });
         } catch (err) {
-          if (cancelled) {
+          if (connectionCancelled()) {
             return;
           }
           const message = err instanceof Error ? err.message : String(err);
@@ -1230,7 +1329,7 @@ export function BrowserSessionModal({
           originEndpoint,
         });
       }
-      if (cancelled) {
+      if (connectionCancelled()) {
         return;
       }
       if (!originId) {
@@ -1263,7 +1362,7 @@ export function BrowserSessionModal({
         preferRuntime: runtimeId,
         browserSessionId,
       });
-      if (cancelled) {
+      if (connectionCancelled()) {
         return;
       }
       if (!token) {
@@ -1304,6 +1403,7 @@ export function BrowserSessionModal({
     };
   }, [
     browserSessionId,
+    browserDataClearInFlight,
     canControlBrowser,
     connectAttempt,
     forcedRuntimeId,
@@ -1316,7 +1416,12 @@ export function BrowserSessionModal({
 
   useEffect(() => {
     const connection = browserOriginConnection;
-    if (!isOpen || !connection || !activeSharedBrowserViewerKind) {
+    if (
+      !isOpen ||
+      browserDataClearInFlight ||
+      !connection ||
+      !activeSharedBrowserViewerKind
+    ) {
       setWsUrl(null);
       setBrowserInputWsUrl(null);
       setWebRtcConnection(null);
@@ -1400,6 +1505,7 @@ export function BrowserSessionModal({
   }, [
     activeSharedBrowserViewerKind,
     browserOriginConnection,
+    browserDataClearInFlight,
     canControlBrowser,
     isOpen,
     sharedBrowserConnectionPageId,
@@ -1407,7 +1513,7 @@ export function BrowserSessionModal({
 
   useEffect(() => {
     const connection = browserOriginConnection;
-    if (!isOpen || !connection?.expiresAtMs) {
+    if (!isOpen || browserDataClearInFlight || !connection?.expiresAtMs) {
       return;
     }
 
@@ -1471,10 +1577,20 @@ export function BrowserSessionModal({
         window.clearTimeout(timerId);
       }
     };
-  }, [browserOriginConnection, browserSessionId, canControlBrowser, isOpen]);
+  }, [
+    browserDataClearInFlight,
+    browserOriginConnection,
+    browserSessionId,
+    canControlBrowser,
+    isOpen,
+  ]);
 
   useEffect(() => {
-    if (!isOpen || activeSharedBrowserViewerKind !== null) {
+    if (
+      !isOpen ||
+      browserDataClearInFlight ||
+      activeSharedBrowserViewerKind !== null
+    ) {
       return;
     }
     if (!sharedBrowserCapabilitiesResolved) {
@@ -1495,6 +1611,7 @@ export function BrowserSessionModal({
     );
   }, [
     activeSharedBrowserViewerKind,
+    browserDataClearInFlight,
     canControlBrowser,
     collaboration.client.state,
     isOpen,
@@ -1611,7 +1728,7 @@ export function BrowserSessionModal({
   ]);
 
   useEffect(() => {
-    if (!isOpen) {
+    if (!isOpen || browserDataClearInFlight) {
       return;
     }
 
@@ -1679,7 +1796,7 @@ export function BrowserSessionModal({
 
         let connected = false;
         const handleConnect = () => {
-          if (cancelled) {
+          if (cancelled || browserDataClearInFlightRef.current) {
             return;
           }
           connected = true;
@@ -1738,6 +1855,9 @@ export function BrowserSessionModal({
         rfb.addEventListener?.("connect", handleConnect);
         rfb.addEventListener?.("disconnect", handleDisconnect);
       } catch (err) {
+        if (browserDataClearInFlightRef.current) {
+          return;
+        }
         const message = err instanceof Error ? err.message : String(err);
         runtimeDebugLog("browser-session:rfb-init-error", {
           ...browserSessionWsDebugFields(wsUrl),
@@ -1765,6 +1885,7 @@ export function BrowserSessionModal({
     };
   }, [
     connectedScopeKey,
+    browserDataClearInFlight,
     containerNode,
     forcedRuntimeId,
     fullscreen,
@@ -1775,6 +1896,7 @@ export function BrowserSessionModal({
     rfbRenderScale,
     scheduleReconnectAttempt,
     activeSharedBrowserViewerKind,
+    connectAttempt,
     viewportMode,
     wsUrl,
   ]);
@@ -1933,6 +2055,9 @@ export function BrowserSessionModal({
   }, [isOpen, sharedBrowserViewportOnly, viewportMode]);
 
   const handleCdpScreencastConnected = useCallback(() => {
+    if (browserDataClearInFlightRef.current) {
+      return;
+    }
     autoRetryCountRef.current = 0;
     if (reconnectTimerRef.current !== null) {
       window.clearTimeout(reconnectTimerRef.current);
@@ -2004,6 +2129,9 @@ export function BrowserSessionModal({
   );
 
   const handleWebRtcConnected = useCallback(() => {
+    if (browserDataClearInFlightRef.current) {
+      return;
+    }
     autoRetryCountRef.current = 0;
     if (reconnectTimerRef.current !== null) {
       window.clearTimeout(reconnectTimerRef.current);
@@ -2284,6 +2412,13 @@ export function BrowserSessionModal({
             )}
           </div>
           <div className="flex flex-none items-center gap-1">
+            <SharedBrowserDataClearAction
+              canClear={canClearBrowserData}
+              onClearSettled={handleBrowserDataClearSettled}
+              onClearStart={handleBrowserDataClearStart}
+              projectId={projectId}
+              showStatus={onStatus}
+            />
             {!forceViewportFullscreenDocked ? (
               <IconButton
                 variant="ghost"
@@ -2335,6 +2470,13 @@ export function BrowserSessionModal({
                 onTakeControl={() => {
                   collaboration.takeControl();
                 }}
+              />
+              <SharedBrowserDataClearAction
+                canClear={canClearBrowserData}
+                onClearSettled={handleBrowserDataClearSettled}
+                onClearStart={handleBrowserDataClearStart}
+                projectId={projectId}
+                showStatus={onStatus}
               />
               {!forceViewportFullscreenDocked && !sharedBrowserChrome.compact ? (
                 <IconButton
@@ -2442,6 +2584,7 @@ export function BrowserSessionModal({
                 inputWsUrl={webRtcConnection.inputWsUrl}
                 inputAvailable={canControlBrowser}
                 accessToken={webRtcConnection.accessToken}
+                connectionGeneration={connectAttempt}
                 iceServers={webRtcIceServers}
                 relayOnly={webRtcRelayOnly}
                 renderScale={rfbRenderScale}
@@ -2470,6 +2613,7 @@ export function BrowserSessionModal({
                 inputWsUrl={browserInputWsUrl}
                 inputAvailable={canControlBrowser}
                 inputAuthorityKey={inputAuthorityKey}
+                connectionGeneration={connectAttempt}
                 active={transportActive}
                 inputEnabled={humanInputEnabled}
                 onConnected={handleCdpScreencastConnected}

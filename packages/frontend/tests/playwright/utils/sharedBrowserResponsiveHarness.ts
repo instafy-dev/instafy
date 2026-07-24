@@ -116,6 +116,46 @@ export async function hoverSharedSurfaceAtNormalizedPoint(
   });
 }
 
+export async function expectSharedBrowserContentGeometryConverged(page: Page) {
+  const surface = visibleBrowserSurface(page);
+  let consecutiveSamples = 0;
+  await expect
+    .poll(
+      async () => {
+        const converged = await surface.evaluate((element) => {
+          if (!(element instanceof HTMLCanvasElement || element instanceof HTMLVideoElement)) {
+            return false;
+          }
+          const contentWidth = Number(element.getAttribute("data-remote-content-width"));
+          const contentHeight = Number(element.getAttribute("data-remote-content-height"));
+          const intrinsicWidth =
+            element instanceof HTMLCanvasElement ? element.width : element.videoWidth;
+          const intrinsicHeight =
+            element instanceof HTMLCanvasElement ? element.height : element.videoHeight;
+          if (
+            ![contentWidth, contentHeight, intrinsicWidth, intrinsicHeight].every(
+              (value) => Number.isFinite(value) && value > 0,
+            )
+          ) {
+            return false;
+          }
+          const contentAspect = contentWidth / contentHeight;
+          const intrinsicAspect = intrinsicWidth / intrinsicHeight;
+          return Math.abs(contentAspect - intrinsicAspect) / intrinsicAspect <= 0.002;
+        });
+        consecutiveSamples = converged ? consecutiveSamples + 1 : 0;
+        return consecutiveSamples;
+      },
+      {
+        intervals: [100],
+        message:
+          "Shared Browser decoded pixels and explicit content geometry should converge after resize",
+        timeout: 15_000,
+      },
+    )
+    .toBeGreaterThanOrEqual(2);
+}
+
 export async function expectResponsiveSharedBrowserLayout(
   page: Page,
   options: {
@@ -254,6 +294,7 @@ export async function expectParticipantPointerAtNormalizedPoint(
   tolerance = 12,
 ) {
   const root = page.getByTestId("shared-browser-participant-pointers");
+  const surface = visibleBrowserSurface(page);
   const pointer = page
     .getByTestId("shared-browser-participant-pointer")
     .filter({ hasText: participantLabel });
@@ -261,12 +302,20 @@ export async function expectParticipantPointerAtNormalizedPoint(
 
   await expect
     .poll(async () => {
-      const [rootBox, contentBox, position] = await Promise.all([
+      const [rootBox, contentBox, position, surfaceGeometry] = await Promise.all([
         root.boundingBox(),
         sharedBrowserContentBox(page),
         pointer.evaluate((element) => ({
           left: Number.parseFloat((element as HTMLElement).style.left),
           top: Number.parseFloat((element as HTMLElement).style.top),
+        })),
+        surface.evaluate((element) => ({
+          contentHeight: Number(element.getAttribute("data-remote-content-height")),
+          contentWidth: Number(element.getAttribute("data-remote-content-width")),
+          intrinsicHeight:
+            element instanceof HTMLCanvasElement ? element.height : element.videoHeight,
+          intrinsicWidth:
+            element instanceof HTMLCanvasElement ? element.width : element.videoWidth,
         })),
       ]);
       if (
@@ -279,11 +328,19 @@ export async function expectParticipantPointerAtNormalizedPoint(
       const expectedLeft = contentBox.x - rootBox.x + normalizedPoint.x * contentBox.width;
       const expectedTop = contentBox.y - rootBox.y + normalizedPoint.y * contentBox.height;
       return {
+        actualLeft: Math.round(position.left),
+        actualTop: Math.round(position.top),
+        contentHeight: Math.round(surfaceGeometry.contentHeight),
+        contentWidth: Math.round(surfaceGeometry.contentWidth),
+        expectedLeft: Math.round(expectedLeft),
+        expectedTop: Math.round(expectedTop),
+        intrinsicHeight: Math.round(surfaceGeometry.intrinsicHeight),
+        intrinsicWidth: Math.round(surfaceGeometry.intrinsicWidth),
         leftWithinTolerance: Math.abs(position.left - expectedLeft) <= tolerance,
         topWithinTolerance: Math.abs(position.top - expectedTop) <= tolerance,
       };
-    })
-    .toEqual({
+    }, { timeout: 15_000 })
+    .toMatchObject({
       leftWithinTolerance: true,
       topWithinTolerance: true,
     });

@@ -9,20 +9,159 @@ use tokio_tungstenite::tungstenite::Message as TungMessage;
 use tracing::{debug, info, warn};
 
 use crate::browser_collaboration::PixelStreamAdmission;
+use crate::error::OriginError;
 
 use super::protocol::{
     parse_screencast_frame, ClientMessage, ScreencastFrame, Viewport, FRAME_DATA_MAX_BYTES,
 };
-use super::transport::{cdp_command, send_cdp_command_and_wait, send_client_json, ResolvedTarget};
+use super::transport::{
+    cdp_command, send_cdp_command_and_wait, send_client_json, CdpSocket, ResolvedTarget,
+};
 
 const FRAME_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const FRAME_ACK_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+const SCREENCAST_START_TIMEOUT: Duration = Duration::from_secs(2);
 const SCREENCAST_MAX_DIMENSION: u32 = 4096;
 const SCREENCAST_JPEG_QUALITY: u8 = 85;
 const BOOTSTRAP_FRAME_ID: u64 = 1;
 
 fn viewer_expiry_delay(expires_at: SystemTime, now: SystemTime) -> Duration {
     expires_at.duration_since(now).unwrap_or(Duration::ZERO)
+}
+
+#[derive(Debug)]
+struct ScreencastStartup {
+    command_id: u64,
+    latest_frame: Option<ScreencastFrame>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScreencastStartupEvent {
+    Ignore,
+    AcknowledgeFrame(i64),
+    Started,
+}
+
+impl ScreencastStartup {
+    fn new(command_id: u64) -> Self {
+        Self {
+            command_id,
+            latest_frame: None,
+        }
+    }
+
+    fn observe(&mut self, payload: &JsonValue) -> Result<ScreencastStartupEvent, OriginError> {
+        if payload.get("id").and_then(JsonValue::as_u64) == Some(self.command_id) {
+            if let Some(error) = payload.get("error") {
+                let message = error
+                    .get("message")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or("command rejected");
+                return Err(OriginError::unavailable(format!(
+                    "browser CDP rejected Page.startScreencast: {}",
+                    message.chars().take(256).collect::<String>()
+                )));
+            }
+            return Ok(ScreencastStartupEvent::Started);
+        }
+
+        match parse_screencast_frame(payload) {
+            Ok(Some(frame)) => {
+                let session_id = frame.session_id;
+                self.latest_frame = Some(frame);
+                Ok(ScreencastStartupEvent::AcknowledgeFrame(session_id))
+            }
+            Ok(None) => Ok(ScreencastStartupEvent::Ignore),
+            Err(_) => Ok(payload
+                .get("params")
+                .and_then(|params| params.get("sessionId"))
+                .and_then(JsonValue::as_i64)
+                .filter(|session_id| *session_id >= 0)
+                .map(ScreencastStartupEvent::AcknowledgeFrame)
+                .unwrap_or(ScreencastStartupEvent::Ignore)),
+        }
+    }
+}
+
+/// Do not expose `ready` until Chromium has accepted Page.startScreencast.
+/// A rapid mount/dispose/remount can otherwise receive only the point-in-time
+/// about:blank bootstrap, while a navigation issued immediately after Ready is
+/// missed before the replacement event stream is active. Chromium may emit a
+/// frame before the command response; acknowledge it and retain only its newest
+/// bounded pixels so startup cannot deadlock on an unacknowledged frame.
+async fn start_screencast_and_wait(
+    cdp: &mut CdpSocket,
+    start_command_id: u64,
+    next_command_id: &mut u64,
+) -> Result<Option<ScreencastFrame>, OriginError> {
+    cdp.send(cdp_command(
+        start_command_id,
+        "Page.startScreencast",
+        json!({
+            "format": "jpeg",
+            "quality": SCREENCAST_JPEG_QUALITY,
+            "maxWidth": SCREENCAST_MAX_DIMENSION,
+            "maxHeight": SCREENCAST_MAX_DIMENSION,
+            "everyNthFrame": 1,
+        }),
+    ))
+    .await
+    .map_err(|error| {
+        OriginError::unavailable(format!("failed to start browser CDP screencast: {error}"))
+    })?;
+
+    let mut startup = ScreencastStartup::new(start_command_id);
+    tokio::time::timeout(SCREENCAST_START_TIMEOUT, async {
+        while let Some(message) = cdp.next().await {
+            let message = message.map_err(|error| {
+                OriginError::unavailable(format!("browser CDP response failed: {error}"))
+            })?;
+            let payload = match message {
+                TungMessage::Text(text) => serde_json::from_str::<JsonValue>(&text).ok(),
+                TungMessage::Binary(bytes) => serde_json::from_slice::<JsonValue>(&bytes).ok(),
+                TungMessage::Ping(payload) => {
+                    cdp.send(TungMessage::Pong(payload))
+                        .await
+                        .map_err(|error| {
+                            OriginError::unavailable(format!("browser CDP pong failed: {error}"))
+                        })?;
+                    None
+                }
+                TungMessage::Close(_) => {
+                    return Err(OriginError::unavailable(
+                        "browser CDP closed during screencast startup",
+                    ));
+                }
+                _ => None,
+            };
+            let Some(payload) = payload else {
+                continue;
+            };
+            match startup.observe(&payload)? {
+                ScreencastStartupEvent::Ignore => {}
+                ScreencastStartupEvent::AcknowledgeFrame(session_id) => {
+                    cdp.send(cdp_command(
+                        *next_command_id,
+                        "Page.screencastFrameAck",
+                        json!({ "sessionId": session_id }),
+                    ))
+                    .await
+                    .map_err(|error| {
+                        OriginError::unavailable(format!(
+                            "failed to acknowledge browser CDP startup frame: {error}"
+                        ))
+                    })?;
+                    *next_command_id = next_command_id.saturating_add(1);
+                }
+                ScreencastStartupEvent::Started => return Ok(startup.latest_frame),
+            }
+        }
+        Err(OriginError::unavailable(
+            "browser CDP closed during screencast startup",
+        ))
+    })
+    .await
+    .map_err(|_| OriginError::unavailable("browser CDP screencast startup timed out"))?
 }
 
 #[derive(Debug)]
@@ -321,35 +460,26 @@ pub(super) async fn bridge_screencast(
     };
     next_command_id += 1;
     let start_command_id = next_command_id;
-    if let Err(error) = cdp
-        .send(cdp_command(
-            start_command_id,
-            "Page.startScreencast",
-            json!({
-                "format": "jpeg",
-                "quality": SCREENCAST_JPEG_QUALITY,
-                "maxWidth": SCREENCAST_MAX_DIMENSION,
-                "maxHeight": SCREENCAST_MAX_DIMENSION,
-                "everyNthFrame": 1,
-            }),
-        ))
-        .await
-    {
-        let _ = socket
-            .send(WsMessage::Text(
-                json!({
-                    "type": "error",
-                    "message": "Unable to start the browser renderer.",
-                    "fatal": true,
-                })
-                .to_string(),
-            ))
-            .await;
-        warn!(?error, page_id = %target.id, "failed to start CDP screencast");
-        let _ = socket.close().await;
-        return;
-    }
     next_command_id += 1;
+    let startup_frame =
+        match start_screencast_and_wait(&mut cdp, start_command_id, &mut next_command_id).await {
+            Ok(frame) => frame,
+            Err(error) => {
+                let _ = socket
+                    .send(WsMessage::Text(
+                        json!({
+                            "type": "error",
+                            "message": "Unable to start the browser renderer.",
+                            "fatal": true,
+                        })
+                        .to_string(),
+                    ))
+                    .await;
+                warn!(?error, page_id = %target.id, "failed to start CDP screencast");
+                let _ = socket.close().await;
+                return;
+            }
+        };
 
     // The token may have expired during target connection/Page setup. Do not
     // emit `ready` (or any pixels) in that case.
@@ -385,7 +515,21 @@ pub(super) async fn bridge_screencast(
         return;
     }
 
-    if let Some(data) = bootstrap_frame {
+    if let Some(frame) = startup_frame {
+        if !send_client_json(
+            &mut client_sender,
+            json!({
+                "type": "frame",
+                "frameId": BOOTSTRAP_FRAME_ID,
+                "data": frame.data,
+                "metadata": frame.metadata,
+            }),
+        )
+        .await
+        {
+            return;
+        }
+    } else if let Some(data) = bootstrap_frame {
         if !send_client_json(
             &mut client_sender,
             json!({
@@ -521,18 +665,6 @@ pub(super) async fn bridge_screencast(
                     continue;
                 };
 
-                if payload.get("id").and_then(JsonValue::as_u64) == Some(start_command_id) {
-                    if payload.get("error").is_some() {
-                        let _ = send_client_json(&mut client_sender, json!({
-                            "type": "error",
-                            "message": "The browser rejected screencast startup.",
-                            "fatal": true,
-                        })).await;
-                        break;
-                    }
-                    continue;
-                }
-
                 match parse_screencast_frame(&payload) {
                     Ok(Some(frame)) => match frame_backpressure.accept(frame, Instant::now()) {
                         IncomingFrameAction::Deliver(frame) => {
@@ -626,6 +758,91 @@ mod tests {
             data: label.to_string(),
             metadata: json!({}),
         }
+    }
+
+    fn frame_payload(session_id: i64, label: &str) -> JsonValue {
+        json!({
+            "method": "Page.screencastFrame",
+            "params": {
+                "sessionId": session_id,
+                "data": label,
+                "metadata": { "pageScaleFactor": 1 }
+            }
+        })
+    }
+
+    #[test]
+    fn screencast_startup_retains_the_latest_frame_until_chromium_accepts_start() {
+        let mut startup = ScreencastStartup::new(17);
+
+        assert_eq!(
+            startup
+                .observe(&json!({ "id": 16, "result": {} }))
+                .expect("unrelated command response"),
+            ScreencastStartupEvent::Ignore
+        );
+        assert_eq!(
+            startup
+                .observe(&frame_payload(41, "initial"))
+                .expect("initial startup frame"),
+            ScreencastStartupEvent::AcknowledgeFrame(41)
+        );
+        assert_eq!(
+            startup
+                .observe(&frame_payload(42, "navigation"))
+                .expect("newer startup frame"),
+            ScreencastStartupEvent::AcknowledgeFrame(42)
+        );
+        assert_eq!(
+            startup
+                .observe(&json!({ "id": 17, "result": {} }))
+                .expect("start command response"),
+            ScreencastStartupEvent::Started
+        );
+        assert_eq!(
+            startup
+                .latest_frame
+                .as_ref()
+                .map(|frame| (frame.session_id, frame.data.as_str())),
+            Some((42, "navigation"))
+        );
+    }
+
+    #[test]
+    fn screencast_startup_fails_closed_when_chromium_rejects_start() {
+        let mut startup = ScreencastStartup::new(17);
+        let error = startup
+            .observe(&json!({
+                "id": 17,
+                "error": { "message": "screencast unavailable" }
+            }))
+            .expect_err("start rejection must be terminal");
+
+        assert!(error
+            .to_string()
+            .contains("Page.startScreencast: screencast unavailable"));
+    }
+
+    #[test]
+    fn screencast_startup_acknowledges_a_rejected_frame_without_replacing_good_pixels() {
+        let mut startup = ScreencastStartup::new(17);
+        startup
+            .observe(&frame_payload(41, "initial"))
+            .expect("valid startup frame");
+
+        assert_eq!(
+            startup
+                .observe(&frame_payload(42, ""))
+                .expect("rejected startup frame"),
+            ScreencastStartupEvent::AcknowledgeFrame(42)
+        );
+        assert_eq!(
+            startup
+                .latest_frame
+                .as_ref()
+                .map(|frame| (frame.session_id, frame.data.as_str())),
+            Some((41, "initial"))
+        );
     }
 
     #[test]

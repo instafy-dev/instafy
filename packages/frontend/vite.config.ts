@@ -142,6 +142,9 @@ const frontendFeatureApiControllerPath = fileURLToPath(
 const frontendFeatureApiRuntimePath = fileURLToPath(
   new URL("./src/feature-api/runtime.ts", import.meta.url),
 );
+const frontendFeatureApiRuntimeBridgePath = fileURLToPath(
+  new URL("./src/feature-api/runtimeBridge.ts", import.meta.url),
+);
 const frontendFeatureApiUiPath = fileURLToPath(
   new URL("./src/feature-api/ui.ts", import.meta.url),
 );
@@ -180,6 +183,10 @@ export default defineConfig(({ mode }) => {
       {
         find: /^@instafy\/frontend\/feature-api\/runtime$/,
         replacement: frontendFeatureApiRuntimePath,
+      },
+      {
+        find: /^@instafy\/frontend\/feature-api\/runtime-bridge$/,
+        replacement: frontendFeatureApiRuntimeBridgePath,
       },
       {
         find: /^@instafy\/frontend\/feature-api\/ui$/,

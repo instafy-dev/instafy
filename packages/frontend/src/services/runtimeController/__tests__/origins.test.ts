@@ -1,6 +1,25 @@
 import { describe, expect, it } from "vitest";
 
-import { mapOriginSummaryToLocalWorkspacePresence } from "../origins";
+import {
+  mapOriginSummaryFromPayload,
+  mapOriginSummaryToLocalWorkspacePresence,
+} from "../origins";
+
+describe("mapOriginSummaryFromPayload", () => {
+  it("preserves the controller-verified runtime binding", () => {
+    const summary = mapOriginSummaryFromPayload({
+      originId: "origin-123",
+      runtimeId: "runtime-456",
+      endpoint: "http://runtime.invalid",
+      mode: "hosted",
+    });
+
+    expect(summary).toMatchObject({
+      originId: "origin-123",
+      runtimeId: "runtime-456",
+    });
+  });
+});
 
 describe("mapOriginSummaryToLocalWorkspacePresence", () => {
   it("falls back to originId when summary and metadata device ids are blank", () => {

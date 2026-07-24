@@ -5,11 +5,13 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { modulePathToImportUrl } from "./module-import-url.mjs";
+
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const releaseRoot = path.join(packageRoot, "release");
 const requireSignedArtifacts = process.env.INSTAFY_REQUIRE_SIGNED_DESKTOP_ARTIFACTS === "1";
 const { resolveVerifiedBundledRuntimeAgent } = await import(
-  path.join(packageRoot, "dist", "bundledRuntimeAgent.js")
+  modulePathToImportUrl(path.join(packageRoot, "dist", "bundledRuntimeAgent.js")),
 );
 
 function walk(directory, predicate, depth = 0) {

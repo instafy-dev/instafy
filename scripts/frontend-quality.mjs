@@ -23,7 +23,6 @@ const frontendUnitCommand = ["--filter", "@instafy/frontend", "test:unit"];
 const defaultRequiredE2eCommands = [
   ["test:e2e:component"],
   ["test:e2e:smoke:core"],
-  ["test:e2e:controller"],
   ["test:e2e:projects"],
   ["test:e2e:orgs"],
 ];

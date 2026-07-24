@@ -1177,7 +1177,7 @@ async fn ensure_runtime_can_lease(
 }
 
 fn runtime_status_can_heartbeat(status: &str) -> bool {
-    matches!(status, "ready" | "running")
+    matches!(status, "ready" | "running" | "draining")
 }
 
 fn ensure_agent_token_runtime_is_active(status: &str) -> Result<(), (StatusCode, Json<ApiError>)> {
@@ -1445,6 +1445,11 @@ fn attach_controller_tokens(
 
 fn job_controller_token_scopes(job: &AgentJob) -> Vec<String> {
     let mut scopes = vec!["prompt.execute".to_string()];
+    // Workspace scripts dispatch phone-hosted provider tools/resources through
+    // the controller's provider-tools/call and provider-resources/read routes,
+    // which authorize scoped tokens by project match + this explicit scope.
+    // It grants no workspace write authority, so read-only jobs carry it too.
+    scopes.push(crate::provider_requests::PROVIDER_CALL_SCOPE.to_string());
     // Writable runtime jobs use this short-lived, project/runtime/run-bound
     // token to acquire a workspace lease and delegate an origin fs.write token
     // after Codex produces file changes. Every normalized read-only signal is
@@ -3905,6 +3910,83 @@ fn merge_run_completion_metadata(
     JsonValue::Object(root)
 }
 
+/// Per-agent participation preamble for ambient skill-mode evaluations. It
+/// must be self-contained: custom agents can run on runtimes without the
+/// bundled instafy-group-participation skill file, so the delivered turn
+/// itself addresses the agent by its own identity, states the full decline
+/// protocol, and lists the other AI participants (from the roster dispatch
+/// stamped as `groupAiParticipants`) that are also evaluating this turn.
+fn build_ambient_evaluation_preamble(metadata: &JsonValue) -> String {
+    let agent = metadata.get("agent").and_then(JsonValue::as_object);
+    let self_handle = agent
+        .and_then(|map| map.get("handle"))
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let self_display_name = agent
+        .and_then(|map| map.get("displayName"))
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let addressed = match (self_display_name, self_handle) {
+        (Some(name), Some(handle)) => format!("you ({name}, @{handle})"),
+        (Some(name), None) => format!("you ({name})"),
+        (None, Some(handle)) => format!("you (@{handle})"),
+        (None, None) => "you".to_string(),
+    };
+
+    let mut preamble = format!(
+        "[Ambient group turn — nobody addressed {addressed} directly. Decide participation first per the instafy-group-participation skill. If this turn is not yours to answer, reply with exactly NO_RESPONSE and nothing else; statements about not answering (\"X should answer this\", \"I'll stay out\") are visible answers, not declines."
+    );
+
+    let other_participants = metadata
+        .get("groupAiParticipants")
+        .and_then(JsonValue::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(JsonValue::as_object)
+                .filter_map(|entry| {
+                    let handle = entry
+                        .get("handle")
+                        .and_then(JsonValue::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())?;
+                    if self_handle.is_some_and(|own| own.eq_ignore_ascii_case(handle)) {
+                        return None;
+                    }
+                    let display_name = entry
+                        .get("displayName")
+                        .and_then(JsonValue::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty());
+                    let description = entry
+                        .get("description")
+                        .and_then(JsonValue::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty());
+                    Some(match (display_name, description) {
+                        (Some(name), Some(description)) => {
+                            format!("@{handle} ({name} — {description})")
+                        }
+                        (Some(name), None) => format!("@{handle} ({name})"),
+                        (None, Some(description)) => format!("@{handle} ({description})"),
+                        (None, None) => format!("@{handle}"),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !other_participants.is_empty() {
+        preamble.push_str(&format!(
+            " Other AI participants are also evaluating this turn: {}. If this turn is better suited to another listed agent, reply NO_RESPONSE and let them take it; an explicit mention of another agent is never yours.",
+            other_participants.join(", ")
+        ));
+    }
+    preamble.push(']');
+    preamble
+}
+
 fn build_agent_job_payload(
     project: &ProjectRecord,
     context: &RequestContext,
@@ -3965,16 +4047,16 @@ fn build_agent_job_payload(
     // this directly" instead of declining). The persisted conversation message
     // keeps the human's original words — this wrapper exists only in the
     // runtime-facing payload.
-    let delivered_prompt_text = if crate::group_participation::metadata_marks_agent_evaluation(
-        &request.metadata,
-    ) {
-        format!(
-            "[Ambient group turn — nobody addressed you directly. Decide participation first per the instafy-group-participation skill. If this turn is not yours to answer, reply with exactly NO_RESPONSE and nothing else; statements about not answering (\"X should answer this\", \"I'll stay out\") are visible answers, not declines.]\n\n{}",
-            request.prompt_text
-        )
-    } else {
-        request.prompt_text.clone()
-    };
+    let delivered_prompt_text =
+        if crate::group_participation::metadata_marks_agent_evaluation(&request.metadata) {
+            format!(
+                "{}\n\n{}",
+                build_ambient_evaluation_preamble(&request.metadata),
+                request.prompt_text
+            )
+        } else {
+            request.prompt_text.clone()
+        };
     map.insert(
         "prompt_text".to_string(),
         JsonValue::String(delivered_prompt_text),
@@ -4513,12 +4595,19 @@ mod tests {
             &json!({ "agent": true }),
             false
         ));
+        assert!(!runtime_record_can_lease(
+            "self-hosted",
+            "draining",
+            &personal,
+            true
+        ));
     }
 
     #[test]
     fn heartbeat_only_continues_on_live_runtime_statuses() {
         assert!(runtime_status_can_heartbeat("ready"));
         assert!(runtime_status_can_heartbeat("running"));
+        assert!(runtime_status_can_heartbeat("draining"));
         for status in [
             "requested",
             "launching",
@@ -4541,6 +4630,8 @@ mod tests {
             .expect("ready runtime must retain agent capabilities");
         ensure_agent_token_runtime_is_active("running")
             .expect("running runtime must retain agent capabilities");
+        ensure_agent_token_runtime_is_active("draining")
+            .expect("draining runtime must finish its active job");
 
         for status in [
             "requested",
@@ -5104,7 +5195,11 @@ mod tests {
 
         assert_eq!(
             job_controller_token_scopes(&job),
-            vec!["prompt.execute".to_string(), "fs.write".to_string()]
+            vec![
+                "prompt.execute".to_string(),
+                crate::provider_requests::PROVIDER_CALL_SCOPE.to_string(),
+                "fs.write".to_string()
+            ]
         );
 
         job.payload = json!({
@@ -5117,7 +5212,10 @@ mod tests {
         });
         assert_eq!(
             job_controller_token_scopes(&job),
-            vec!["prompt.execute".to_string()]
+            vec![
+                "prompt.execute".to_string(),
+                crate::provider_requests::PROVIDER_CALL_SCOPE.to_string()
+            ]
         );
 
         job.payload = json!({
@@ -5126,7 +5224,10 @@ mod tests {
         });
         assert_eq!(
             job_controller_token_scopes(&job),
-            vec!["prompt.execute".to_string()]
+            vec![
+                "prompt.execute".to_string(),
+                crate::provider_requests::PROVIDER_CALL_SCOPE.to_string()
+            ]
         );
 
         job.payload = json!({
@@ -5136,7 +5237,10 @@ mod tests {
         });
         assert_eq!(
             job_controller_token_scopes(&job),
-            vec!["prompt.execute".to_string()]
+            vec![
+                "prompt.execute".to_string(),
+                crate::provider_requests::PROVIDER_CALL_SCOPE.to_string()
+            ]
         );
 
         job.payload = json!({
@@ -5146,7 +5250,10 @@ mod tests {
         });
         assert_eq!(
             job_controller_token_scopes(&job),
-            vec!["prompt.execute".to_string()]
+            vec![
+                "prompt.execute".to_string(),
+                crate::provider_requests::PROVIDER_CALL_SCOPE.to_string()
+            ]
         );
 
         job.payload = json!({
@@ -5159,7 +5266,11 @@ mod tests {
         });
         assert_eq!(
             job_controller_token_scopes(&job),
-            vec!["prompt.execute".to_string(), "fs.write".to_string()]
+            vec![
+                "prompt.execute".to_string(),
+                crate::provider_requests::PROVIDER_CALL_SCOPE.to_string(),
+                "fs.write".to_string()
+            ]
         );
 
         job.payload = json!({
@@ -5168,7 +5279,11 @@ mod tests {
         });
         assert_eq!(
             job_controller_token_scopes(&job),
-            vec!["prompt.execute".to_string(), "fs.write".to_string()]
+            vec![
+                "prompt.execute".to_string(),
+                crate::provider_requests::PROVIDER_CALL_SCOPE.to_string(),
+                "fs.write".to_string()
+            ]
         );
     }
 

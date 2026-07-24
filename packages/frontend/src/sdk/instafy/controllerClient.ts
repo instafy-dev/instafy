@@ -126,6 +126,7 @@ import {
   getControllerBugReport,
   listControllerBugReports,
   submitControllerBugReport,
+  clearSharedBrowserData,
 } from "../../services/runtimeController";
 import {
   browserSessionStatusIndicatesUnavailable,
@@ -324,6 +325,9 @@ export const controllerClient = createControllerClient({
     statusIndicatesUnavailable: browserSessionStatusIndicatesUnavailable,
     isCapabilitiesIncompatibleError: isBrowserSessionCapabilitiesIncompatibleError,
     isUnavailableError: isBrowserSessionUnavailableError,
+  }),
+  browserProfiles: Object.freeze({
+    clearForProject: clearSharedBrowserData,
   }),
   completions: Object.freeze({
     requestProjectEditorInline: requestProjectEditorInlineCompletion,

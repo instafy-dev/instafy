@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,8 +10,15 @@ import {
   applyProtectedDesktopRuntimeEnv,
   buildPersonalBrowserRuntimeEnv,
   buildRuntimeTokenRequestBody,
+  createRetryableDesktopRuntimeStop,
+  DESKTOP_PARENT_DISPOSITION_HEARTBEAT_SECONDS,
+  DESKTOP_RUNTIME_PARENT_DISPOSITION_ENV,
+  desktopRuntimeUsesParentDisposition,
+  type DesktopRuntimeChildStopTarget,
   hasProjectWorkspaceContent,
   resolveAuthoritativeRuntimeId,
+  resolveWindowsTaskkillPath,
+  runDesktopRuntimeExitFinalizer,
   shouldEnableProjectOrigin,
   stopDesktopRuntimeChildWithEscalation,
   waitForProjectWorkspaceContent,
@@ -200,6 +209,178 @@ describe("desktop runtime identity and Personal Browser capabilities", () => {
     expect(signals).toEqual(["SIGINT", "SIGTERM", "SIGKILL"]);
   });
 
+  it("deduplicates an active stop proof but retries after a rejected proof", async () => {
+    let attempts = 0;
+    let rejectFirst!: (error: Error) => void;
+    const stop = createRetryableDesktopRuntimeStop(async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        await new Promise<void>((_resolve, reject) => {
+          rejectFirst = reject;
+        });
+      }
+    });
+
+    const first = stop();
+    expect(stop()).toBe(first);
+    expect(attempts).toBe(1);
+    rejectFirst(new Error("tree probe raced process exit"));
+    await expect(first).rejects.toThrow(/tree probe raced/i);
+
+    await expect(stop()).resolves.toBeUndefined();
+    expect(attempts).toBe(2);
+  });
+
+  it("finalizes runtime-scoped resources when the child exit promise rejects", async () => {
+    const finalizer = vi.fn(async () => undefined);
+    await expect(
+      runDesktopRuntimeExitFinalizer(
+        Promise.reject(new Error("child process error")),
+        finalizer,
+      ),
+    ).resolves.toBeUndefined();
+    expect(finalizer).toHaveBeenCalledOnce();
+  });
+
+  it("signals the detached Unix process group when stopping the real runtime tree", async () => {
+    vi.useFakeTimers();
+    const groupSignals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    let groupAlive = true;
+    const child: DesktopRuntimeChildStopTarget = {
+      pid: 4444,
+      exitCode: null,
+      signalCode: null,
+      kill: vi.fn(() => true),
+    };
+    const stopping = stopDesktopRuntimeChildWithEscalation(
+      child,
+      new Promise<void>(() => undefined),
+      {
+        killProcessTree: true,
+        platform: "linux",
+        sigintGraceMs: 10,
+        isProcessGroupAlive: () => groupAlive,
+        signalProcessGroup(pid, signal) {
+          groupSignals.push({ pid, signal });
+          child.signalCode = signal;
+          groupAlive = false;
+        },
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(1);
+    await stopping;
+    expect(groupSignals).toEqual([{ pid: 4444, signal: "SIGINT" }]);
+    expect(child.kill).not.toHaveBeenCalled();
+  });
+
+  it("uses taskkill tree termination on Windows", async () => {
+    const terminatedPids: number[] = [];
+    const child: DesktopRuntimeChildStopTarget = {
+      pid: 4545,
+      exitCode: null,
+      signalCode: null,
+      kill: vi.fn(() => true),
+    };
+
+    await stopDesktopRuntimeChildWithEscalation(
+      child,
+      new Promise<void>(() => undefined),
+      {
+        killProcessTree: true,
+        platform: "win32",
+        terminateWindowsProcessTree: async (pid) => {
+          terminatedPids.push(pid);
+          child.signalCode = "SIGKILL";
+        },
+      },
+    );
+
+    expect(terminatedPids).toEqual([4545]);
+    expect(child.kill).not.toHaveBeenCalled();
+  });
+
+  it("accepts Windows root exit as Job Object process-tree proof", async () => {
+    const terminateWindowsProcessTree = vi.fn(async () => undefined);
+    const child: DesktopRuntimeChildStopTarget = {
+      pid: 4646,
+      exitCode: 1,
+      signalCode: null,
+      kill: vi.fn(() => true),
+    };
+
+    await expect(stopDesktopRuntimeChildWithEscalation(child, Promise.resolve(), {
+      killProcessTree: true,
+      platform: "win32",
+      terminateWindowsProcessTree,
+    })).resolves.toBeUndefined();
+    expect(terminateWindowsProcessTree).not.toHaveBeenCalled();
+  });
+
+  it("resolves taskkill from the trusted Windows system directory", () => {
+    expect(resolveWindowsTaskkillPath({ SystemRoot: "C:\\Windows" })).toBe(
+      "C:\\Windows\\System32\\taskkill.exe",
+    );
+    expect(resolveWindowsTaskkillPath({ SystemRoot: "relative" })).toBe(
+      "C:\\Windows\\System32\\taskkill.exe",
+    );
+  });
+
+  it.runIf(process.platform !== "win32")(
+    "escalates until a real detached runtime's stubborn descendant is gone",
+    async () => {
+      const parent = spawn(
+        process.execPath,
+        [
+          "-e",
+          [
+            'const { spawn } = require("node:child_process");',
+            'const child = spawn(process.execPath, ["-e", "process.on(\\"SIGINT\\", () => {}); process.on(\\"SIGTERM\\", () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore" });',
+            "process.stdout.write(String(child.pid) + '\\n');",
+            'process.on("SIGINT", () => process.exit(0));',
+            "setInterval(() => {}, 1000);",
+          ].join(" "),
+        ],
+        { detached: true, stdio: ["ignore", "pipe", "ignore"] },
+      );
+      const chunks: Buffer[] = [];
+      parent.stdout?.on("data", (chunk: Buffer) => chunks.push(chunk));
+      await once(parent.stdout!, "data");
+      const descendantPid = Number(Buffer.concat(chunks).toString("utf8").trim());
+      expect(Number.isSafeInteger(descendantPid) && descendantPid > 0).toBe(true);
+      const exited = once(parent, "exit");
+
+      try {
+        await stopDesktopRuntimeChildWithEscalation(parent, exited, {
+          killProcessTree: true,
+          sigintGraceMs: 100,
+          sigtermGraceMs: 100,
+          sigkillGraceMs: 2_000,
+        });
+        const deadline = Date.now() + 2_000;
+        let descendantAlive = true;
+        while (descendantAlive && Date.now() < deadline) {
+          try {
+            process.kill(descendantPid, 0);
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          } catch {
+            descendantAlive = false;
+          }
+        }
+        expect(descendantAlive).toBe(false);
+      } finally {
+        if (parent.pid) {
+          try {
+            process.kill(-parent.pid, "SIGKILL");
+          } catch {
+            // The process group should already be gone.
+          }
+        }
+      }
+    },
+    10_000,
+  );
+
   it("builds the project-scoped loopback browser capability without exposing it by default", () => {
     expect(buildPersonalBrowserRuntimeEnv({ projectId: PROJECT_ID })).toEqual({});
     expect(
@@ -247,6 +428,7 @@ describe("desktop runtime identity and Personal Browser capabilities", () => {
       INSTAFY_PERSONAL_BROWSER_CONTROL_URL: "http://127.0.0.1:9999",
       INSTAFY_PERSONAL_BROWSER_CONTROL_TOKEN: "inherited-secret",
       INSTAFY_PERSONAL_BROWSER_PROJECT_ID: PROJECT_ID,
+      INSTAFY_RUNTIME_PARENT_DISPOSITION: "0",
       SAFE_VALUE: "kept",
     };
 
@@ -255,16 +437,27 @@ describe("desktop runtime identity and Personal Browser capabilities", () => {
     });
   });
 
+  it("keeps CLI runtimes self-dispositioned unless Electron opts into parent ownership", () => {
+    expect(desktopRuntimeUsesParentDisposition({})).toBe(false);
+    expect(
+      desktopRuntimeUsesParentDisposition({
+        parentDispositionsRuntimeOnShutdown: true,
+      }),
+    ).toBe(true);
+  });
+
   it("sets runtime identity and browser capability only from explicit options", () => {
     const env: NodeJS.ProcessEnv = {
       RUNTIME_ID: "44444444-4444-4444-8444-444444444444",
       INSTAFY_PERSONAL_BROWSER_CONTROL_TOKEN: "generic-env-secret",
+      RUNTIME_HEARTBEAT_SECONDS: "999",
     };
 
     applyProtectedDesktopRuntimeEnv(env, {
       projectId: PROJECT_ID,
       runtimeId: RUNTIME_ID,
       runtimeBinaryPath: "/Applications/Instafy.app/runtime-agent",
+      parentDispositionsRuntimeOnShutdown: true,
       personalBrowser: {
         controlUrl: "http://[::1]:43127",
         token: "desktop-grant",
@@ -277,6 +470,10 @@ describe("desktop runtime identity and Personal Browser capabilities", () => {
       INSTAFY_PERSONAL_BROWSER_CONTROL_URL: "http://[::1]:43127",
       INSTAFY_PERSONAL_BROWSER_CONTROL_TOKEN: "desktop-grant",
       INSTAFY_PERSONAL_BROWSER_PROJECT_ID: PROJECT_ID,
+      [DESKTOP_RUNTIME_PARENT_DISPOSITION_ENV]: "1",
+      RUNTIME_HEARTBEAT_SECONDS: String(
+        DESKTOP_PARENT_DISPOSITION_HEARTBEAT_SECONDS,
+      ),
     });
   });
 });

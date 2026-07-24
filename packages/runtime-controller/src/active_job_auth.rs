@@ -239,7 +239,7 @@ pub(crate) async fn authorize_active_job_if_scoped(
                and j.leased_by_runtime_id = $3
                and j.status = 'leased'
                and j.lease_expires_at > now()
-               and r.status in ('ready', 'running')
+               and r.status in ('ready', 'running', 'draining')
              order by j.leased_at desc nulls last
              limit 1",
             &[&project_id, &run_id, &runtime_id],

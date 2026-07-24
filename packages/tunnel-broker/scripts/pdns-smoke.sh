@@ -7,8 +7,12 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-BROKER_URL="http://localhost:8082"
+TUNNEL_DOMAIN="${TUNNEL_DOMAIN:-rt.test}"
+BROKER_URL="${BROKER_URL:-http://localhost:8082}"
 AUTH_HEADER="Authorization: Bearer dev-token"
+PDNS_READY_WAIT_ATTEMPTS="${PDNS_READY_WAIT_ATTEMPTS:-60}"
+PDNS_RECORD_WAIT_ATTEMPTS="${PDNS_RECORD_WAIT_ATTEMPTS:-60}"
+DIG_OPTS=(+tcp +tries=1 +time=1)
 
 echo "Waiting for broker health..."
 HEALTH_OK=false
@@ -22,6 +26,25 @@ done
 
 if [[ "$HEALTH_OK" != "true" ]]; then
   echo "Broker did not become healthy at $BROKER_URL" >&2
+  exit 1
+fi
+
+echo "Waiting for PowerDNS to serve the $TUNNEL_DOMAIN zone..."
+PDNS_READY=false
+PDNS_LAST_OUTPUT=""
+for ((i = 0; i < PDNS_READY_WAIT_ATTEMPTS; i++)); do
+  PDNS_LAST_OUTPUT=$(dig +short "${DIG_OPTS[@]}" "@127.0.0.1" -p 1053 \
+    "$TUNNEL_DOMAIN" SOA 2>&1 | head -n 5 | tr -d '\r' || true)
+  if [[ -n "$PDNS_LAST_OUTPUT" && "$PDNS_LAST_OUTPUT" != *"communications error"* ]]; then
+    PDNS_READY=true
+    break
+  fi
+  sleep 0.5
+done
+
+if [[ "$PDNS_READY" != "true" ]]; then
+  echo "PowerDNS did not serve the $TUNNEL_DOMAIN SOA (last output: ${PDNS_LAST_OUTPUT:-<empty>})" >&2
+  docker compose --profile pdns logs --no-color --tail 100 broker pdns postgres >&2 || true
   exit 1
 fi
 
@@ -41,9 +64,8 @@ fi
 echo "Resolving via PowerDNS on 127.0.0.1:1053 for $HOSTNAME..."
 RESOLVED=""
 LAST_OUTPUT=""
-DIG_OPTS="+tcp +tries=1 +time=1"
-for i in {1..20}; do
-  LAST_OUTPUT=$(dig +short $DIG_OPTS "@127.0.0.1" -p 1053 "$HOSTNAME" A 2>&1 | head -n 5 | tr -d '\r' || true)
+for ((i = 0; i < PDNS_RECORD_WAIT_ATTEMPTS; i++)); do
+  LAST_OUTPUT=$(dig +short "${DIG_OPTS[@]}" "@127.0.0.1" -p 1053 "$HOSTNAME" A 2>&1 | head -n 5 | tr -d '\r' || true)
   if [[ "$LAST_OUTPUT" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
     RESOLVED="$LAST_OUTPUT"
     break
@@ -53,6 +75,7 @@ done
 
 if [[ -z "$RESOLVED" ]]; then
   echo "DNS did not resolve $HOSTNAME via PowerDNS (last output: ${LAST_OUTPUT:-<empty>})" >&2
+  docker compose --profile pdns logs --no-color --tail 100 broker pdns postgres >&2 || true
   exit 1
 fi
 

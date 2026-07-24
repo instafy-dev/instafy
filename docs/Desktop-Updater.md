@@ -22,7 +22,7 @@ Mobile OTA and desktop binary updates solve different problems:
 
 Trying to force both through one system would create the wrong operational model and weaken the safety story.
 
-## Current gap
+## Current implementation
 
 The desktop packaging is now aligned with updater-friendly targets in [packages/desktop-app/package.json](../packages/desktop-app/package.json):
 
@@ -30,16 +30,26 @@ The desktop packaging is now aligned with updater-friendly targets in [packages/
 - Windows: `nsis`
 - Linux: `AppImage`
 
-The desktop main process now initializes `electron-updater` against the stable downloads feed in [updater.ts](../packages/desktop-app/src/updater.ts).
+The desktop main process initializes `electron-updater` against the stable downloads feed in
+[updater.ts](../packages/desktop-app/src/updater.ts). The web installer page reads the stable
+`latest.json` alias; neither surface invents a download when the stable manifest is absent.
+
+The web Studio exposes a **Get Desktop** action in the wide workspace tab bar and an
+**Install Instafy** account-menu fallback. Both are hidden in Electron and Capacitor shells
+and fail closed until a strict stable manifest is available. Acquisition links open
+`/install#desktop` in a new tab so an active Studio task is not replaced.
 
 ## Feed shape
 
-GitHub Actions now publish desktop artifacts to two locations:
+A deployment release pipeline publishes desktop artifacts to two locations:
 
 - versioned artifacts under `desktop-app/<tag>/...`
 - the current updater feed under `desktop-app/<channel>/...`
 
 That keeps direct downloads stable while giving `electron-updater` a fixed per-channel feed URL.
+For stable releases, `desktop-app/latest.json` aliases
+`desktop-app/stable/latest.json`, while updater YAML and immutable tag-scoped artifacts remain
+available for in-progress downloads.
 
 ## Release channels
 
@@ -50,6 +60,9 @@ Desktop has two operational destinations:
 
 A stable pointer can only be written by a fresh `desktop-app-v*` tag build; the
 promotion workflow cannot copy an unsigned internal artifact into stable.
+Stable-to-internal diagnostic promotion first reads that private pointer and
+then copies only its selected immutable tag; it never trusts the mutable stable
+compatibility objects as release authority.
 
 Stable macOS filenames carry their build architecture explicitly (`mac-arm64`
 or `mac-x64`), and `latest.json` makes the installer page label it accurately.
@@ -65,12 +78,17 @@ policy belong to the deployment operator.
 
 ### Build and publish
 
-GitHub Actions should:
+A deployment release pipeline should:
 
 1. build desktop binaries
 2. sign them
-3. publish channel-specific metadata and artifacts
-4. attach release notes and git sha
+3. verify the final packaged installers and the local Electron SHA-512 metadata
+4. upload immutable tag-scoped payloads, blockmaps, updater YAML, and strict `latest.json`
+5. maintain non-authoritative channel compatibility copies for operations tooling
+6. verify the complete immutable candidate through `https://downloads.instafy.dev`
+7. select stable with one monotonic `stable-release.json` pointer write
+8. verify both live aliases and feeds through `https://downloads.instafy.dev`
+9. create the GitHub release only after the public verification passes
 
 The stable tag must equal `desktop-app-v<package-version>`, and its commit must
 be reachable from the current `origin/main`. The packaged runtime manifest and
@@ -78,6 +96,50 @@ public `latest.json` both record the full source commit.
 Release verification recalculates updater SHA-512 entries and extracts or
 mounts the final installer/archive to verify the bundled runtime from shipped
 bytes, not only from electron-builder's unpacked directory.
+
+The post-publication gate is
+[`scripts/verify-desktop-publication.mjs`](../scripts/verify-desktop-publication.mjs).
+It uses cache-busting HTTPS requests and fails the publication job unless all
+of the following are true:
+
+- the channel, version, tag, full source SHA, feed URL, architecture, and
+  artifact names in `latest.json` match the workflow build
+- for stable, `desktop-app/latest.json` exactly matches
+  `desktop-app/stable/latest.json`
+- stable manifest and platform-YAML responses report the expected immutable tag
+  in `X-Instafy-Desktop-Release`
+- every channel and immutable tag-scoped platform YAML is byte-identical,
+  reports the expected version, and contains complete SHA-512/size entries
+- both channel and immutable installer/archive bytes match those YAML
+  checksums and sizes
+- every channel blockmap is byte-for-byte equal to its immutable tag-scoped
+  copy by computed SHA-512 and size
+- an immutable artifact answers a `bytes=0-0` request with a valid `206`,
+  `Content-Range`, one-byte body, and `Accept-Ranges: bytes`
+
+The checks retry boundedly for edge propagation. A failed gate blocks the
+GitHub release. Do not replace immutable tag objects to repair a failure; fix
+the worker or publication configuration and rerun the same tag only when the
+already-published bytes are identical.
+
+Before tagging, run a non-publishing readiness build that exercises the same
+macOS signing/notarization, Windows signing, final signed-artifact verification,
+and packaged Personal Browser canary as the release build. Deployment-specific
+workflow wiring and credentials stay outside the public core. Do not run a
+packaged drain-aware canary until migration `20260000000064` and its matching
+controller behavior have been verified in that deployment.
+
+An operator can run the same gate independently when diagnosing a release:
+
+```bash
+DOWNLOADS_BASE_URL=https://downloads.instafy.dev \
+DESKTOP_DOWNLOADS_PREFIX=desktop-app \
+DESKTOP_PUBLICATION_CHANNEL=stable \
+DESKTOP_PUBLICATION_VERSION=0.2.0 \
+DESKTOP_PUBLICATION_TAG=desktop-app-v0.2.0 \
+DESKTOP_PUBLICATION_SOURCE_SHA=<full-tag-commit-sha> \
+node scripts/verify-desktop-publication.mjs
+```
 
 ### App client
 
@@ -87,6 +149,52 @@ The Electron app should:
 2. prompt before downloading the next binary update
 3. install on quit / restart
 4. expose lean updater status in the desktop shell for future telemetry/diagnostics
+
+#### Job-aware quit and update invariant
+
+Installing an update, restarting, and an ordinary application quit all use the
+same coordinated shutdown path. Before presenting the final choice, Electron
+asks the controller to place the exact active private runtime in `draining`.
+Only that runtime's immutable attested owner can create or renew the fence. The
+controller then refuses new job leases for that runtime while existing jobs may
+continue heartbeat, completion, origin, and tunnel operations.
+
+The drain is a renewable 90-second lease stored in
+`runtimes.drain_expires_at`, not a permanent status. While waiting, Electron
+renews it and reads the authoritative count of leased jobs. The user can:
+
+- wait for current work to finish and then quit/restart;
+- explicitly quit/restart anyway, which may interrupt the run; or
+- cancel, keep the app open, and require a confirmed `resume` response.
+
+A second quit/restart request while waiting offers Keep waiting, Quit/Restart
+anyway, and Cancel quit. If activity cannot be authenticated or verified, the
+default is to keep the app open; an explicit destructive choice is required.
+If a cancel cannot confirm `resume`, the app remains open and explains that the
+renewable fence will expire automatically. JWT refresh and every controller
+request are bounded so a long-running job cannot silently bypass or hang this
+decision.
+
+On the actual shutdown path, Electron must first prove the complete local
+runtime process tree is stopped and only then tell the controller to dispose the
+runtime and requeue interrupted work. The parent-managed runtime agent must not
+independently reverse that order. If tree termination cannot be proved, quit
+fails closed and the controller fence is not released.
+
+Migration `20260000000064_runtime_drain_leases.sql` and the controller code for
+contract version `1` are one deployment cutover unit. Verify both are live
+before running or publishing a packaged Desktop build that calls
+`drain`/`resume`. Never publish the Desktop caller first, and do not overlap old
+and new controller generations for this incompatible boundary.
+
+The generic Electron provider sets `useMultipleRangeRequest: false`. Its
+differential downloader therefore issues sequential single byte-range requests,
+which the downloads worker serves directly from R2. The worker supports bounded,
+open-ended, and suffix single ranges; returns `416` plus
+`Content-Range: bytes */<size>` for an unsatisfiable single range; and ignores
+unknown, malformed, or multipart range forms by returning the full `200`
+representation. Do not enable multipart range requests without implementing
+and testing `multipart/byteranges` responses at the edge.
 
 ### Telemetry
 

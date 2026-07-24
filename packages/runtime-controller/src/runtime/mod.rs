@@ -85,6 +85,14 @@ pub(crate) fn router() -> Router<AppState> {
             get(status::runtime_status),
         )
         .route(
+            "/projects/:project_id/runtime/:runtime_id/drain",
+            post(status::drain_runtime),
+        )
+        .route(
+            "/projects/:project_id/runtime/:runtime_id/resume",
+            post(status::resume_runtime),
+        )
+        .route(
             "/projects/:project_id/runtime/preference",
             get(status::runtime_preference).post(status::set_runtime_preference),
         )

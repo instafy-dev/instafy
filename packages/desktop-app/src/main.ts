@@ -37,6 +37,8 @@ import {
 } from "./bluetoothSelection";
 import {
   desktopUpdaterStatus,
+  isDesktopUpdaterReadyToInstall,
+  performDesktopUpdaterInstallAfterQuitApproved,
   startDesktopUpdater,
   triggerDesktopUpdaterCheck,
   triggerDesktopUpdaterDownload,
@@ -45,6 +47,19 @@ import {
 import {
   CURRENT_DESKTOP_EXTENSION_REGISTRY,
 } from "./currentDesktopFeatureComposition";
+import {
+  DesktopRuntimeHttpError,
+  assertDesktopRuntimeResumed,
+  buildDesktopRuntimeDrainUrl,
+  buildDesktopRuntimeResumeUrl,
+  buildDesktopRuntimeStopUrl,
+  canResumeDesktopRuntimeAfterFailedQuit,
+  createDesktopQuitWaitControl,
+  readDesktopRuntimeActiveJobCount,
+  runDesktopRuntimeExitCleanup,
+  withRefreshedDesktopRuntimeAccess,
+  withDesktopRuntimeTimeout,
+} from "./desktopRuntimeActivity";
 import { createDesktopVoiceHostSupervisor } from "./speechHostSupervisor";
 import { createDesktopSpeechTunnelSupervisor } from "./speechTunnelSupervisor";
 import {
@@ -625,6 +640,16 @@ function createMainWindow(initialUrl?: string) {
     personalBrowserHost?.detachWindow(mainWindow);
   });
 
+  mainWindow.on("close", (event) => {
+    if (process.platform === "darwin" || desktopQuitApproved) {
+      return;
+    }
+    event.preventDefault();
+    void requestCoordinatedDesktopQuit({
+      installUpdate: isDesktopUpdaterReadyToInstall(),
+    });
+  });
+
   mainWindow.webContents.on("will-navigate", (event, navigationUrl) => {
     const allowedOrigin = new URL(startUrl).origin;
     const targetOrigin = new URL(navigationUrl).origin;
@@ -670,6 +695,542 @@ let desktopVoiceHostSupervisor: ReturnType<typeof createDesktopVoiceHostSupervis
 let desktopSpeechTunnelSupervisor: ReturnType<typeof createDesktopSpeechTunnelSupervisor> | null = null;
 let personalBrowserHost: PersonalBrowserHost | null = null;
 let personalBrowserProfileUserId: string | null = null;
+let desktopQuitApproved = false;
+let desktopQuitCoordination: Promise<boolean> | null = null;
+let pendingDesktopUpdateInstall = false;
+const desktopRuntimeDispositionPromises = new WeakMap<DesktopRuntimeHandle, Promise<void>>();
+type DesktopQuitWaitControl = ReturnType<typeof createDesktopQuitWaitControl>;
+let desktopQuitWaitState: {
+  control: DesktopQuitWaitControl;
+  installUpdate: boolean;
+} | null = null;
+let desktopQuitWaitPrompt: Promise<void> | null = null;
+
+const DESKTOP_RUNTIME_DRAIN_POLL_MS = 1_000;
+const DESKTOP_RUNTIME_STATUS_TIMEOUT_MS = 10_000;
+const DESKTOP_RENDERER_SESSION_TIMEOUT_MS = 5_000;
+
+function waitForDesktopQuitPoll(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, DESKTOP_RUNTIME_DRAIN_POLL_MS));
+}
+
+async function refreshDesktopRuntimeControllerAccess(
+  runtime: DesktopRuntimeRecord,
+): Promise<void> {
+  const window = BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed());
+  if (!window) {
+    return;
+  }
+  try {
+    const value = await withDesktopRuntimeTimeout(
+      window.webContents.mainFrame.executeJavaScript(
+        READ_VISIBLE_SUPABASE_SESSION_SCRIPT,
+      ),
+      DESKTOP_RENDERER_SESSION_TIMEOUT_MS,
+      "Visible session refresh",
+    );
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return;
+    }
+    const accessToken = (value as { accessToken?: unknown }).accessToken;
+    if (typeof accessToken === "string" && accessToken.trim()) {
+      runtime.restartOptions.controllerAccessToken = accessToken.trim();
+    }
+  } catch (error) {
+    desktopLog("warn", "[instafy-desktop] failed to refresh controller access before quit", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function fetchDesktopRuntimeJson(
+  runtime: DesktopRuntimeRecord,
+  url: string,
+  method: "GET" | "POST",
+  body?: unknown,
+): Promise<unknown> {
+  return await withRefreshedDesktopRuntimeAccess({
+    getAccessToken: () => runtime.restartOptions.controllerAccessToken,
+    refreshAccessToken: () => refreshDesktopRuntimeControllerAccess(runtime),
+    request: async (accessToken) => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), DESKTOP_RUNTIME_STATUS_TIMEOUT_MS);
+      timeout.unref();
+      try {
+        const headers: Record<string, string> = {
+          accept: "application/json",
+          authorization: `Bearer ${accessToken}`,
+        };
+        if (body !== undefined) {
+          headers["content-type"] = "application/json";
+        }
+        const response = await net.fetch(url, {
+          method,
+          headers,
+          body: body === undefined ? undefined : JSON.stringify(body),
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new DesktopRuntimeHttpError(response.status);
+        }
+        return await response.json();
+      } finally {
+        clearTimeout(timeout);
+      }
+    },
+  });
+}
+
+async function fenceDesktopRuntimeForDrain(runtime: DesktopRuntimeRecord): Promise<number> {
+  if (!runtime.runtimeId) {
+    throw new Error("Desktop runtime identity is unavailable.");
+  }
+  const payload = await fetchDesktopRuntimeJson(
+    runtime,
+    buildDesktopRuntimeDrainUrl(runtime.controllerUrl, runtime.projectId, runtime.runtimeId),
+    "POST",
+  );
+  return readDesktopRuntimeActiveJobCount(payload, runtime.runtimeId);
+}
+
+async function resumeDesktopRuntimeAfterDrain(runtime: DesktopRuntimeRecord): Promise<void> {
+  if (!runtime.runtimeId) {
+    return;
+  }
+  const payload = await fetchDesktopRuntimeJson(
+    runtime,
+    buildDesktopRuntimeResumeUrl(runtime.controllerUrl, runtime.projectId, runtime.runtimeId),
+    "POST",
+  );
+  assertDesktopRuntimeResumed(payload, runtime.runtimeId);
+}
+
+async function dispositionDesktopRuntime(
+  runtime: DesktopRuntimeRecord,
+  reason: string,
+): Promise<void> {
+  if (!runtime.runtimeId) {
+    return;
+  }
+  await fetchDesktopRuntimeJson(
+    runtime,
+    buildDesktopRuntimeStopUrl(runtime.controllerUrl),
+    "POST",
+    {
+      runtime_id: runtime.runtimeId,
+      reason,
+      skip_if_active_jobs: false,
+      require_provider_release: false,
+      expected_project_id: runtime.projectId,
+    },
+  );
+}
+
+async function stopAndDispositionDesktopRuntime(
+  runtime: DesktopRuntimeRecord,
+  reason: string,
+): Promise<void> {
+  const existing = desktopRuntimeDispositionPromises.get(runtime.handle);
+  if (existing) {
+    return await existing;
+  }
+  const operation = (async () => {
+    // Tree proof must precede controller disposition; otherwise an interrupted
+    // job can be requeued while a surviving local Codex process still writes.
+    await stopDesktopRuntime(runtime.handle);
+    await dispositionDesktopRuntime(runtime, reason).catch((error) => {
+      // The process-tree proof is the safety boundary. If the controller is
+      // temporarily unreachable, lease expiry still recovers the stopped job;
+      // do not strand a quit after local execution is conclusively gone.
+      desktopLog("warn", "[instafy-desktop] controller runtime disposition failed", {
+        reason,
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+  })();
+  desktopRuntimeDispositionPromises.set(runtime.handle, operation);
+  try {
+    await operation;
+  } finally {
+    if (desktopRuntimeDispositionPromises.get(runtime.handle) === operation) {
+      desktopRuntimeDispositionPromises.delete(runtime.handle);
+    }
+  }
+}
+
+async function waitForDesktopRuntimeJobsToFinish(
+  runtime: DesktopRuntimeRecord,
+  control: DesktopQuitWaitControl,
+): Promise<"finished" | "force" | "cancel"> {
+  let consecutiveFailures = 0;
+  for (;;) {
+    try {
+      const activeJobCount = await fenceDesktopRuntimeForDrain(runtime);
+      if (activeJobCount === 0) {
+        return "finished";
+      }
+      consecutiveFailures = 0;
+      if (
+        runtime.handle.process.exitCode !== null ||
+        runtime.handle.process.signalCode !== null
+      ) {
+        throw new Error("The local runtime exited before its active job finished.");
+      }
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "The local runtime exited before its active job finished."
+      ) {
+        throw error;
+      }
+      consecutiveFailures += 1;
+      desktopLog("warn", "[instafy-desktop] runtime drain status check failed", {
+        consecutiveFailures,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      if (consecutiveFailures >= 5) {
+        throw new Error("Instafy could not verify that the active job finished.");
+      }
+    }
+    const waitAction = await Promise.race([
+      waitForDesktopQuitPoll(),
+      runtime.handle.exited.then(() => undefined, () => undefined),
+      control.promise,
+    ]);
+    if (waitAction === "force" || waitAction === "cancel") {
+      return waitAction;
+    }
+  }
+}
+
+async function showDesktopQuitMessageBox(
+  options: Electron.MessageBoxOptions,
+): Promise<Electron.MessageBoxReturnValue> {
+  const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows().at(0);
+  return window ? dialog.showMessageBox(window, options) : dialog.showMessageBox(options);
+}
+
+async function confirmDesktopRuntimeQuit(
+  activeJobCount: number | null,
+  installUpdate: boolean,
+): Promise<"drain" | "force" | "cancel"> {
+  const action = installUpdate ? "restart and install the update" : "quit Instafy Studio";
+  const actionLabel = installUpdate ? "Restart" : "Quit";
+  if (activeJobCount === null) {
+    const result = await showDesktopQuitMessageBox({
+      type: "warning",
+      buttons: ["Keep app open", `${actionLabel} anyway`],
+      defaultId: 0,
+      cancelId: 0,
+      title: "Could not verify local agent activity",
+      message: `Instafy could not confirm whether a local agent job is still running.`,
+      detail: `Keep the app open to protect in-progress work, or explicitly ${action}.`,
+      noLink: true,
+    });
+    return result.response === 1 ? "force" : "cancel";
+  }
+  if (activeJobCount === 0) {
+    return "drain";
+  }
+
+  const jobLabel = activeJobCount === 1 ? "A local agent job is" : `${activeJobCount} local agent jobs are`;
+  const result = await showDesktopQuitMessageBox({
+    type: "warning",
+    buttons: [`Wait, then ${actionLabel.toLowerCase()}`, `${actionLabel} anyway`, "Keep working"],
+    defaultId: 0,
+    cancelId: 2,
+    title: "Local agent work is still running",
+    message: `${jobLabel} still running on this computer.`,
+    detail: `Wait lets the current work finish safely and prevents another job from starting. ${actionLabel} anyway may interrupt the run.`,
+    noLink: true,
+  });
+  if (result.response === 0) {
+    return "drain";
+  }
+  return result.response === 1 ? "force" : "cancel";
+}
+
+async function promptForPendingDesktopQuit(
+  state: NonNullable<typeof desktopQuitWaitState>,
+): Promise<void> {
+  if (state.control.isSettled()) {
+    return;
+  }
+  const installUpdate = pendingDesktopUpdateInstall || state.installUpdate;
+  const actionLabel = installUpdate ? "Restart anyway" : "Quit anyway";
+  try {
+    const result = await showDesktopQuitMessageBox({
+      type: "warning",
+      buttons: ["Keep waiting", actionLabel, "Cancel quit"],
+      defaultId: 0,
+      cancelId: 2,
+      title: "Still waiting for local agent work",
+      message: "Instafy is still waiting for the current local job to finish.",
+      detail: `${actionLabel} interrupts the run. Cancel quit keeps the app and runtime available.`,
+      noLink: true,
+    });
+    if (result.response === 1) {
+      state.control.choose("force");
+    } else if (result.response === 2) {
+      state.control.choose("cancel");
+    }
+  } catch (error) {
+    desktopLog("warn", "[instafy-desktop] pending quit prompt failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function resumeDesktopRuntimeAfterCanceledQuit(
+  runtime: DesktopRuntimeRecord | null,
+  runtimeDrainAttempted: boolean,
+): Promise<boolean> {
+  if (!runtime || !runtimeDrainAttempted) {
+    return true;
+  }
+  if (
+    runtime.handle.process.exitCode !== null ||
+    runtime.handle.process.signalCode !== null
+  ) {
+    desktopLog("warn", "[instafy-desktop] canceled quit kept an exited runtime fenced", {
+      runtimeId: runtime.runtimeId,
+    });
+    await showDesktopQuitMessageBox({
+      type: "warning",
+      buttons: ["Keep app open"],
+      defaultId: 0,
+      cancelId: 0,
+      title: "Local runtime stopped",
+      message: "The local runtime exited while quit was being canceled.",
+      detail: "Instafy kept its controller fence in place while the complete process tree is verified and cleaned up.",
+      noLink: true,
+    }).catch(() => undefined);
+    return false;
+  }
+  try {
+    await resumeDesktopRuntimeAfterDrain(runtime);
+    return true;
+  } catch (resumeError) {
+    desktopLog("warn", "[instafy-desktop] failed to resume runtime after canceled quit", {
+      message: resumeError instanceof Error ? resumeError.message : String(resumeError),
+    });
+    await showDesktopQuitMessageBox({
+      type: "warning",
+      buttons: ["Keep app open"],
+      defaultId: 0,
+      cancelId: 0,
+      title: "Runtime resume is still pending",
+      message: "Instafy could not confirm that the local runtime resumed.",
+      detail: "The app will stay open. The renewable safety fence expires automatically if the controller cannot be reached.",
+      noLink: true,
+    }).catch(() => undefined);
+    return false;
+  }
+}
+
+async function stopDesktopServicesForQuit(
+  runtime: DesktopRuntimeRecord | null,
+  mode: "drain" | "force",
+  installUpdate: boolean,
+): Promise<void> {
+  stopSmokeParentWatchdog();
+  pausedPersonalBrowserRuntime = null;
+  if (runtime) {
+    try {
+      // The controller may only requeue an interrupted job after the complete
+      // local process tree is gone. Reversing this order can run the same job
+      // twice while a surviving Codex child is still writing to the workspace.
+      await stopAndDispositionDesktopRuntime(
+        runtime,
+        installUpdate ? "desktop_update_restart" : "desktop_app_quit",
+      );
+    } catch (error) {
+      desktopLog("warn", "[instafy-desktop] runtime process did not stop cleanly during quit", {
+        mode,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+    if (desktopRuntime?.handle === runtime.handle) {
+      desktopRuntime = null;
+    }
+    revokePersonalBrowserRuntimeBinding(runtime);
+    if (!runtime.personalBrowser && runtime.runtimeId) {
+      personalBrowserHost?.setRuntimeId(runtime.projectId, null);
+    }
+  }
+
+  const browserHost = personalBrowserHost;
+  personalBrowserHost = null;
+  const supervisor = desktopVoiceHostSupervisor;
+  desktopVoiceHostSupervisor = null;
+  const speechTunnelSupervisor = desktopSpeechTunnelSupervisor;
+  desktopSpeechTunnelSupervisor = null;
+  await Promise.allSettled([
+    browserHost?.stop(),
+    supervisor?.stop(),
+    speechTunnelSupervisor?.stop(),
+    CURRENT_DESKTOP_EXTENSION_REGISTRY.shutdownAll(),
+  ]);
+}
+
+async function coordinateDesktopQuit(installUpdate: boolean): Promise<boolean> {
+  return serializeDesktopRuntimeMutation(async () => {
+    const runtime = desktopRuntime;
+    let activeJobCount: number | null = 0;
+    let runtimeDrainAttempted = false;
+    let localStopAttempted = false;
+    if (runtime) {
+      await refreshDesktopRuntimeControllerAccess(runtime);
+      try {
+        runtimeDrainAttempted = true;
+        activeJobCount = await fenceDesktopRuntimeForDrain(runtime);
+      } catch (error) {
+        activeJobCount = null;
+        desktopLog("warn", "[instafy-desktop] active job check failed before quit", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    let mode = await confirmDesktopRuntimeQuit(activeJobCount, installUpdate);
+    if (mode === "cancel") {
+      await resumeDesktopRuntimeAfterCanceledQuit(runtime, runtimeDrainAttempted);
+      return false;
+    }
+    if (mode === "drain" && (activeJobCount ?? 0) > 0 && Notification.isSupported()) {
+      new Notification({
+        title: "Finishing local agent work",
+        body: installUpdate
+          ? "Instafy Studio will restart and install the update when the current job finishes."
+          : "Instafy Studio will quit when the current job finishes.",
+      }).show();
+    }
+
+    try {
+      if (mode === "drain" && runtime && (activeJobCount ?? 0) > 0) {
+        const control = createDesktopQuitWaitControl();
+        desktopQuitWaitState = { control, installUpdate };
+        let waitOutcome: "finished" | "force" | "cancel";
+        try {
+          waitOutcome = await waitForDesktopRuntimeJobsToFinish(runtime, control);
+        } finally {
+          if (desktopQuitWaitState?.control === control) {
+            desktopQuitWaitState = null;
+          }
+        }
+        if (waitOutcome === "cancel") {
+          await resumeDesktopRuntimeAfterCanceledQuit(runtime, runtimeDrainAttempted);
+          return false;
+        }
+        if (waitOutcome === "force") {
+          mode = "force";
+        }
+      }
+      localStopAttempted = true;
+      await stopDesktopServicesForQuit(runtime, mode, installUpdate);
+    } catch (error) {
+      desktopLog("warn", "[instafy-desktop] coordinated shutdown failed", {
+        mode,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      if (mode === "force") {
+        throw error;
+      }
+      const runtimeRootAlive =
+        !runtime ||
+        (runtime.handle.process.exitCode === null &&
+          runtime.handle.process.signalCode === null);
+      const mayResume = canResumeDesktopRuntimeAfterFailedQuit({
+        localStopAttempted,
+        runtimeRootAlive,
+      });
+      const result = await showDesktopQuitMessageBox({
+        type: "warning",
+        buttons: ["Keep app open", installUpdate ? "Restart anyway" : "Quit anyway"],
+        defaultId: 0,
+        cancelId: 0,
+        title: "Could not finish the safe shutdown",
+        message: "Instafy could not verify a clean stop for the local runtime.",
+        detail: mayResume
+          ? "Keep the app open to resume local work, or explicitly continue anyway."
+          : "Keep the app open and the runtime will remain fenced until its complete process tree is proven stopped, or explicitly retry the shutdown.",
+        noLink: true,
+      });
+      if (result.response !== 1) {
+        if (mayResume) {
+          await resumeDesktopRuntimeAfterCanceledQuit(runtime, runtimeDrainAttempted);
+        }
+        return false;
+      }
+      localStopAttempted = true;
+      await stopDesktopServicesForQuit(runtime, "force", installUpdate);
+    }
+
+    desktopQuitApproved = true;
+    if (pendingDesktopUpdateInstall) {
+      try {
+        if (performDesktopUpdaterInstallAfterQuitApproved()) {
+          return true;
+        }
+      } catch (error) {
+        desktopLog("error", "[instafy-desktop] updater installer handoff failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    app.quit();
+    return true;
+  });
+}
+
+function requestCoordinatedDesktopQuit(options: { installUpdate: boolean }): Promise<boolean> {
+  pendingDesktopUpdateInstall ||= options.installUpdate;
+  if (desktopQuitCoordination && desktopQuitWaitState && !desktopQuitWaitPrompt) {
+    const state = desktopQuitWaitState;
+    desktopQuitWaitPrompt = promptForPendingDesktopQuit(state).finally(() => {
+      desktopQuitWaitPrompt = null;
+    });
+    void desktopQuitWaitPrompt;
+  }
+  if (!desktopQuitCoordination) {
+    desktopQuitCoordination = coordinateDesktopQuit(pendingDesktopUpdateInstall)
+      .catch(async (error) => {
+        desktopLog("error", "[instafy-desktop] quit coordination failed closed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+        await showDesktopQuitMessageBox({
+          type: "error",
+          buttons: ["Keep app open"],
+          defaultId: 0,
+          cancelId: 0,
+          title: "Instafy stayed open",
+          message: "Instafy could not safely stop its local runtime.",
+          detail: "Your app was kept open so in-progress work is not silently interrupted.",
+          noLink: true,
+        }).catch(() => undefined);
+        return false;
+      })
+      .then((approved) => {
+        if (!approved) {
+          const existingWindow = BrowserWindow.getAllWindows().at(0);
+          if (existingWindow) {
+            focusMainWindow(existingWindow);
+          } else if (app.isReady()) {
+            createMainWindow();
+          }
+        }
+        return approved;
+      })
+      .finally(() => {
+        if (!desktopQuitApproved) {
+          pendingDesktopUpdateInstall = false;
+        }
+        desktopQuitCoordination = null;
+      });
+  }
+  return desktopQuitCoordination;
+}
 
 async function serializeDesktopRuntimeMutation<T>(operation: () => Promise<T>): Promise<T> {
   const previous = desktopRuntimeMutationTail;
@@ -740,15 +1301,48 @@ function registerDesktopRuntime(
   if (record.runtimeId) {
     personalBrowserHost?.setRuntimeId(record.projectId, record.runtimeId);
   }
-  void handle.exited.finally(() => {
-    if (desktopRuntime?.handle === handle) {
-      desktopRuntime = null;
-      revokePersonalBrowserRuntimeBinding(record);
-      if (!record.personalBrowser && record.runtimeId) {
-        personalBrowserHost?.setRuntimeId(record.projectId, null);
-      }
-    }
-  });
+  void runDesktopRuntimeExitCleanup(handle.exited, (exitError) =>
+    serializeDesktopRuntimeMutation(async () => {
+        if (desktopRuntime?.handle !== handle) {
+          return;
+        }
+        if (exitError) {
+          desktopLog("warn", "[instafy-desktop] runtime exit observation rejected", {
+            message: exitError instanceof Error ? exitError.message : String(exitError),
+            runtimeId: record.runtimeId,
+          });
+        }
+        try {
+          // Root exit is not process-tree exit. Sweep a stubborn descendant
+          // before clearing the only record that retains the process-group ID.
+          await stopAndDispositionDesktopRuntime(record, "desktop_runtime_process_exit");
+        } catch (error) {
+          desktopLog("error", "[instafy-desktop] failed to prove exited runtime tree is gone", {
+            message: error instanceof Error ? error.message : String(error),
+            runtimeId: record.runtimeId,
+          });
+          if (Notification.isSupported()) {
+            new Notification({
+              title: "Local runtime needs attention",
+              body: "Instafy kept the runtime fenced because its process tree could not be verified.",
+            }).show();
+          }
+          return;
+        }
+        if (desktopRuntime?.handle === handle) {
+          desktopRuntime = null;
+        }
+        revokePersonalBrowserRuntimeBinding(record);
+        if (!record.personalBrowser && record.runtimeId) {
+          personalBrowserHost?.setRuntimeId(record.projectId, null);
+        }
+      }),
+  )
+    .catch((error) => {
+      desktopLog("error", "[instafy-desktop] exited runtime cleanup failed", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
   return record;
 }
 
@@ -761,9 +1355,11 @@ async function suspendPersonalBrowserRuntime(projectId: string) {
     projectId,
     restartOptions: runtime.restartOptions,
   };
-  desktopRuntime = null;
   personalBrowserHost?.setRuntimeId(projectId, null);
-  await stopDesktopRuntime(runtime.handle).catch(() => undefined);
+  await stopAndDispositionDesktopRuntime(runtime, "personal_browser_suspended");
+  if (desktopRuntime?.handle === runtime.handle) {
+    desktopRuntime = null;
+  }
 }
 
 async function resumePersonalBrowserRuntime(projectId: string) {
@@ -801,9 +1397,11 @@ async function discardPersonalBrowserRuntime(projectId: string) {
   if (!runtime?.personalBrowser || runtime.projectId !== projectId) {
     return;
   }
-  desktopRuntime = null;
   personalBrowserHost?.setRuntimeId(projectId, null);
-  await stopDesktopRuntime(runtime.handle).catch(() => undefined);
+  await stopAndDispositionDesktopRuntime(runtime, "personal_browser_discarded");
+  if (desktopRuntime?.handle === runtime.handle) {
+    desktopRuntime = null;
+  }
 }
 
 function forgetPausedPersonalBrowserRuntime(projectId: string) {
@@ -1073,7 +1671,11 @@ app.whenReady().then(() => {
   const initialWindowUrl = pendingDesktopDeepLinkTargetUrl ?? getStartUrl();
   pendingDesktopDeepLinkTargetUrl = null;
   createMainWindow(initialWindowUrl);
-  startDesktopUpdater();
+  startDesktopUpdater({
+    requestInstall: async () => {
+      return await requestCoordinatedDesktopQuit({ installUpdate: true });
+    },
+  });
 
   ipcMain.handle("instafy:personalBrowserStatus", async (event) => {
     assertAllowedCaller(event);
@@ -1807,8 +2409,13 @@ app.whenReady().then(() => {
             activeRuntime?.personalBrowser &&
             activeRuntime.projectId === requestedProjectId
           ) {
-            desktopRuntime = null;
-            await activeRuntime.handle.stop().catch(() => undefined);
+            await stopAndDispositionDesktopRuntime(
+              activeRuntime,
+              "personal_browser_connection_failed",
+            );
+            if (desktopRuntime?.handle === activeRuntime.handle) {
+              desktopRuntime = null;
+            }
           }
           throw error;
         }
@@ -1830,12 +2437,14 @@ app.whenReady().then(() => {
         // One desktop runtime at a time: switching projects replaces the
         // running runtime instead of silently handing back the wrong one.
         const previous = desktopRuntime;
-        desktopRuntime = null;
+        await stopAndDispositionDesktopRuntime(previous, "desktop_runtime_replaced");
+        if (desktopRuntime?.handle === previous.handle) {
+          desktopRuntime = null;
+        }
         revokePersonalBrowserRuntimeBinding(previous);
         if (!previous.personalBrowser && previous.runtimeId) {
           personalBrowserHost?.setRuntimeId(previous.projectId, null);
         }
-        await previous.handle.stop().catch(() => {});
       }
 
       const projectId = requestedProjectId;
@@ -1927,6 +2536,7 @@ app.whenReady().then(() => {
           workspaceDir,
           workspaceProjectDir,
           displayName,
+          parentDispositionsRuntimeOnShutdown: true,
           env: effectiveProxy ? { PROXY_BASE_URL: effectiveProxy } : undefined,
           logging: { logFilePath, teeToStdout: false },
         };
@@ -1952,7 +2562,18 @@ app.whenReady().then(() => {
               currentCredentials?.projectId === personalBrowserCredentials.projectId,
           );
           if (!bindingStillCurrent) {
-            await stopDesktopRuntime(handle).catch(() => undefined);
+            await stopAndDispositionDesktopRuntime(
+              {
+                handle,
+                projectId,
+                controllerUrl,
+                logFilePath,
+                runtimeId,
+                personalBrowser: personalBrowserCredentials ?? undefined,
+                restartOptions,
+              },
+              "desktop_runtime_start_aborted",
+            );
             throw new Error(
               "Personal Browser control changed before its desktop runtime finished starting.",
             );
@@ -2013,38 +2634,24 @@ app.whenReady().then(() => {
       if (!runtime) {
         return;
       }
-      desktopRuntime = null;
+      await stopAndDispositionDesktopRuntime(runtime, "desktop_runtime_stopped_by_user");
+      if (desktopRuntime?.handle === runtime.handle) {
+        desktopRuntime = null;
+      }
       revokePersonalBrowserRuntimeBinding(runtime);
       if (!runtime.personalBrowser && runtime.runtimeId) {
         personalBrowserHost?.setRuntimeId(runtime.projectId, null);
       }
-      await stopDesktopRuntime(runtime.handle).catch(() => undefined);
     });
   });
 });
 
-app.on("before-quit", () => {
-  stopSmokeParentWatchdog();
-  const runtime = desktopRuntime;
-  desktopRuntime = null;
-  pausedPersonalBrowserRuntime = null;
-  if (runtime) {
-    void stopDesktopRuntime(runtime.handle).catch(() => undefined);
+app.on("before-quit", (event) => {
+  if (desktopQuitApproved) {
+    return;
   }
-  const browserHost = personalBrowserHost;
-  personalBrowserHost = null;
-  if (browserHost) {
-    void browserHost.stop().catch(() => undefined);
-  }
-  const supervisor = desktopVoiceHostSupervisor;
-  desktopVoiceHostSupervisor = null;
-  if (supervisor) {
-    void supervisor.stop().catch(() => undefined);
-  }
-  const speechTunnelSupervisor = desktopSpeechTunnelSupervisor;
-  desktopSpeechTunnelSupervisor = null;
-  if (speechTunnelSupervisor) {
-    void speechTunnelSupervisor.stop().catch(() => undefined);
-  }
-  void CURRENT_DESKTOP_EXTENSION_REGISTRY.shutdownAll().catch(() => undefined);
+  event.preventDefault();
+  void requestCoordinatedDesktopQuit({
+    installUpdate: isDesktopUpdaterReadyToInstall(),
+  });
 });

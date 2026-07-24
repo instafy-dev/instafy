@@ -9,7 +9,11 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { validatePublicMigrationTrack } from "./check-supabase-migrations.mjs";
+import {
+  LEGACY_PUBLIC_MIGRATION_COUNT,
+  LANE_BOUNDARY,
+  validatePublicMigrationTrack,
+} from "./check-supabase-migrations.mjs";
 
 function fixture() {
   return mkdtempSync(path.join(os.tmpdir(), "instafy-public-migrations-"));
@@ -20,7 +24,10 @@ function migration(directory, name) {
 }
 
 test("the checked-in pre-split migration history matches its immutable baseline", () => {
-  assert.equal(validatePublicMigrationTrack().length, 64);
+  const legacyMigrations = validatePublicMigrationTrack().filter(
+    ({ version }) => version <= LANE_BOUNDARY,
+  );
+  assert.equal(legacyMigrations.length, LEGACY_PUBLIC_MIGRATION_COUNT);
 });
 
 test("legacy history and the post-split even lane validate", (t) => {

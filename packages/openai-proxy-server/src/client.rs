@@ -1160,11 +1160,29 @@ fn read_chatgpt_stream_text(text: &str) -> Result<Value> {
     Ok(completed)
 }
 
+#[derive(Debug)]
+struct StreamedOutputItem {
+    output_index: Option<usize>,
+    item: Value,
+}
+
+impl StreamedOutputItem {
+    fn from_event(event: &Value, item: Value) -> Self {
+        Self {
+            output_index: event
+                .get("output_index")
+                .and_then(Value::as_u64)
+                .and_then(|index| usize::try_from(index).ok()),
+            item,
+        }
+    }
+}
+
 fn process_chatgpt_stream_event(
     event_kind: Option<&str>,
     data_lines: &[String],
     completed: &mut Option<Value>,
-    completed_output_items: &mut Vec<Value>,
+    completed_output_items: &mut Vec<StreamedOutputItem>,
     assistant_text_delta: &mut String,
 ) -> Result<bool> {
     if data_lines.is_empty() {
@@ -1210,19 +1228,19 @@ fn process_chatgpt_stream_event(
             if let Some(item) = event.get("item")
                 && response_item_has_assistant_output_text(item)
             {
-                completed_output_items.push(item.clone());
+                completed_output_items.push(StreamedOutputItem::from_event(&event, item.clone()));
             }
         }
         "response.output_item.done" => {
             if let Some(item) = event.get("item")
                 && response_item_should_be_preserved(item)
             {
-                completed_output_items.push(item.clone());
+                completed_output_items.push(StreamedOutputItem::from_event(&event, item.clone()));
             }
         }
         "message" => {
             if let Some(item) = chatgpt_message_event_to_response_item(&event) {
-                completed_output_items.push(item);
+                completed_output_items.push(StreamedOutputItem::from_event(&event, item));
             }
         }
         "response.completed" => {
@@ -1240,36 +1258,93 @@ fn process_chatgpt_stream_event(
 
 fn backfill_chatgpt_completed_output(
     completed: &mut Value,
-    completed_output_items: Vec<Value>,
+    completed_output_items: Vec<StreamedOutputItem>,
     assistant_text_delta: &str,
 ) {
-    if response_has_preserved_output_items(completed) {
-        return;
-    }
-
-    let output = if !completed_output_items.is_empty() {
-        completed_output_items
-    } else if !assistant_text_delta.trim().is_empty() {
-        vec![assistant_text_response_item(assistant_text_delta)]
-    } else {
+    let Value::Object(map) = completed else {
         return;
     };
 
-    if let Value::Object(map) = completed {
+    let mut output = map
+        .get("output")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut streamed_output_items = Vec::<StreamedOutputItem>::new();
+    for mut streamed in completed_output_items {
+        if let Some(existing) = streamed_output_items
+            .iter_mut()
+            .find(|existing| response_items_match(&existing.item, &streamed.item))
+        {
+            if streamed.output_index.is_none() {
+                streamed.output_index = existing.output_index;
+            }
+            *existing = streamed;
+        } else {
+            streamed_output_items.push(streamed);
+        }
+    }
+    streamed_output_items.sort_by_key(|streamed| streamed.output_index.unwrap_or(usize::MAX));
+
+    for streamed in streamed_output_items {
+        if let Some(existing_index) = output
+            .iter()
+            .position(|existing| response_items_match(existing, &streamed.item))
+        {
+            if let Some(output_index) = streamed.output_index {
+                let existing = output.remove(existing_index);
+                output.insert(output_index.min(output.len()), existing);
+            }
+            continue;
+        }
+
+        let output_index = streamed
+            .output_index
+            .unwrap_or(output.len())
+            .min(output.len());
+        output.insert(output_index, streamed.item);
+    }
+
+    if !output.iter().any(response_item_has_assistant_output_text)
+        && !assistant_text_delta.trim().is_empty()
+    {
+        output.push(assistant_text_response_item(assistant_text_delta));
+    }
+
+    if !output.is_empty() {
         map.insert("output".to_string(), Value::Array(output));
     }
 }
 
-fn response_has_preserved_output_items(response: &Value) -> bool {
-    response
-        .get("output")
-        .and_then(Value::as_array)
-        .is_some_and(|items| items.iter().any(response_item_should_be_preserved))
+fn response_items_match(left: &Value, right: &Value) -> bool {
+    if left.get("type") != right.get("type") {
+        return false;
+    }
+
+    if let (Some(left_id), Some(right_id)) = (
+        left.get("id").and_then(Value::as_str),
+        right.get("id").and_then(Value::as_str),
+    ) {
+        return left_id == right_id;
+    }
+
+    if let (Some(left_call_id), Some(right_call_id)) = (
+        left.get("call_id").and_then(Value::as_str),
+        right.get("call_id").and_then(Value::as_str),
+    ) {
+        return left_call_id == right_call_id;
+    }
+
+    left == right
 }
 
 fn response_item_should_be_preserved(item: &Value) -> bool {
     match item.get("type").and_then(Value::as_str) {
-        Some("function_call") | Some("custom_tool_call") | Some("local_shell_call") => true,
+        Some("function_call")
+        | Some("custom_tool_call")
+        | Some("local_shell_call")
+        | Some("tool_search_call") => true,
         _ => response_item_has_assistant_output_text(item),
     }
 }
@@ -1388,10 +1463,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        UpstreamWireApi, backfill_chatgpt_completed_output, build_chatgpt_payload,
-        build_gemini_code_assist_payload, build_openai_payload, detect_upstream_wire_api,
-        gemini_code_assist_request_url, gemini_code_assist_to_responses, parse_completion,
-        read_chatgpt_stream_text,
+        StreamedOutputItem, UpstreamWireApi, backfill_chatgpt_completed_output,
+        build_chatgpt_payload, build_gemini_code_assist_payload, build_openai_payload,
+        detect_upstream_wire_api, gemini_code_assist_request_url, gemini_code_assist_to_responses,
+        parse_completion, read_chatgpt_stream_text,
     };
 
     #[test]
@@ -1466,7 +1541,6 @@ mod tests {
             "type": "function",
             "name": "exec_command"
         });
-
         let payload = build_chatgpt_payload(
             "gpt-5.5",
             "Use tools.",
@@ -1488,6 +1562,7 @@ mod tests {
         assert_eq!(payload["tool_choice"], tool_choice);
         assert_eq!(payload["parallel_tool_calls"], json!(true));
         assert_eq!(payload["text"], json!({"format": {"type": "text"}}));
+        assert!(payload.get("client_metadata").is_none());
     }
 
     #[test]
@@ -1510,7 +1585,6 @@ mod tests {
             "type": "function",
             "name": "exec_command"
         });
-
         let payload = build_openai_payload(
             "gpt-5.5",
             "Use tools.",
@@ -1532,6 +1606,7 @@ mod tests {
         assert_eq!(payload["tool_choice"], tool_choice);
         assert_eq!(payload["parallel_tool_calls"], json!(false));
         assert_eq!(payload["text"], json!({"format": {"type": "text"}}));
+        assert!(payload.get("client_metadata").is_none());
     }
 
     #[test]
@@ -1587,7 +1662,14 @@ mod tests {
             "content": [{"type": "output_text", "text": "done item"}]
         });
 
-        backfill_chatgpt_completed_output(&mut completed, vec![done_item], "delta fallback");
+        backfill_chatgpt_completed_output(
+            &mut completed,
+            vec![StreamedOutputItem {
+                output_index: None,
+                item: done_item,
+            }],
+            "delta fallback",
+        );
 
         let completion = parse_completion(completed).expect("completion should parse");
         assert_eq!(completion.text.as_deref(), Some("done item"));
@@ -1663,6 +1745,64 @@ data: [DONE]
         assert_eq!(output[0]["type"], json!("function_call"));
         assert_eq!(output[0]["name"], json!("exec_command"));
         assert_eq!(output[0]["arguments"], json!("{\"cmd\":\"pwd\"}"));
+    }
+
+    #[test]
+    fn chatgpt_stream_merges_omitted_tool_search_call_with_completed_message() {
+        let stream = r#"event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"tsc_1","type":"tool_search_call","call_id":"search-1","execution":"client","status":"completed","arguments":{"query":"Personal Browser snapshot","limit":5}},"output_index":0}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp-search","model":"gpt-5.5","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"I found the browser tool."}]}]}}
+
+data: [DONE]
+
+"#;
+
+        let raw = read_chatgpt_stream_text(stream).expect("stream should parse");
+        let output = raw["output"].as_array().expect("output should be present");
+
+        assert_eq!(output.len(), 2);
+        assert_eq!(output[0]["type"], json!("tool_search_call"));
+        assert_eq!(output[0]["call_id"], json!("search-1"));
+        assert_eq!(output[0]["execution"], json!("client"));
+        assert_eq!(
+            output[0]["arguments"]["query"],
+            json!("Personal Browser snapshot")
+        );
+        assert_eq!(output[1]["id"], json!("msg_1"));
+        let completion = parse_completion(raw).expect("completion should parse");
+        assert_eq!(
+            completion.text.as_deref(),
+            Some("I found the browser tool.")
+        );
+    }
+
+    #[test]
+    fn chatgpt_stream_deduplicates_tool_search_call_in_completed_output() {
+        let stream = r#"event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"id":"tsc_1","type":"tool_search_call","call_id":"search-1","execution":"client","status":"completed","arguments":{"query":"Personal Browser snapshot","limit":5}},"output_index":0}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp-search","model":"gpt-5.5","status":"completed","output":[{"id":"tsc_1","type":"tool_search_call","call_id":"search-1","execution":"client","status":"completed","arguments":{"query":"Personal Browser snapshot","limit":5}},{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"Already complete."}]}]}}
+
+data: [DONE]
+
+"#;
+
+        let raw = read_chatgpt_stream_text(stream).expect("stream should parse");
+        let output = raw["output"].as_array().expect("output should be present");
+
+        assert_eq!(output.len(), 2);
+        assert_eq!(
+            output
+                .iter()
+                .filter(|item| item["type"] == json!("tool_search_call"))
+                .count(),
+            1
+        );
+        assert_eq!(output[0]["id"], json!("tsc_1"));
+        assert_eq!(output[1]["id"], json!("msg_1"));
     }
 
     #[test]

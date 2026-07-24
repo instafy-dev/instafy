@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ## Pin Rust to keep CI build caches warm (avoid nightly churn).
-ARG RUST_TOOLCHAIN=1.91.1
+ARG RUST_TOOLCHAIN=1.95.0
 ARG RUST_IMAGE=rust:${RUST_TOOLCHAIN}-slim-bookworm
 ARG RUNTIME_BASE=debian:bookworm-slim
 

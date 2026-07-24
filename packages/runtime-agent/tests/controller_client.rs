@@ -337,6 +337,7 @@ fn test_config(addr: SocketAddr, project_id: Uuid, workspace_root: &Path) -> Con
         origin: None,
         codex_bin: None,
         require_codex_bin: false,
+        parent_dispositions_runtime_on_shutdown: false,
     }
 }
 

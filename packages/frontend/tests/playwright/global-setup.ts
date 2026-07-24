@@ -883,21 +883,10 @@ function normalizeRuntimeComposeEnv(): void {
       }
     }
 
-    if (spaceId) {
-      const desiredProjectLine = `PROJECT_ID=${spaceId}`;
-      const projectIdx = lines.findIndex((line) => line.startsWith("PROJECT_ID="));
-      if (projectIdx === -1) {
-        lines.push(desiredProjectLine);
-        modified = true;
-      } else if (lines[projectIdx] !== desiredProjectLine) {
-        lines[projectIdx] = desiredProjectLine;
-        modified = true;
-      }
-    }
-
-    if (spaceId && (process.env.GIT_CANONICAL ?? "1").trim() === "1") {
+    const gitCanonicalEnabled = (process.env.GIT_CANONICAL ?? "1").trim() === "1";
+    const remoteIdx = lines.findIndex((line) => line.startsWith("ORIGIN_GIT_REMOTE_URL="));
+    if (spaceId && gitCanonicalEnabled) {
       const desiredRemoteLine = `ORIGIN_GIT_REMOTE_URL=http://git-edge:8080/${spaceId}.git`;
-      const remoteIdx = lines.findIndex((line) => line.startsWith("ORIGIN_GIT_REMOTE_URL="));
       if (remoteIdx === -1) {
         lines.push(desiredRemoteLine);
         modified = true;
@@ -905,6 +894,9 @@ function normalizeRuntimeComposeEnv(): void {
         lines[remoteIdx] = desiredRemoteLine;
         modified = true;
       }
+    } else if (!gitCanonicalEnabled && remoteIdx !== -1) {
+      lines.splice(remoteIdx, 1);
+      modified = true;
     }
 
     if (!modified) {

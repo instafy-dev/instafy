@@ -21,6 +21,7 @@ export * from "./notifications";
 export * from "./automations";
 export * from "./skills";
 export * from "./bugReports";
+export * from "./browserProfiles";
 
 export type {
   ControllerOriginSummary,

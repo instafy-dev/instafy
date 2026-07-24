@@ -194,11 +194,150 @@ function assistantBubbles(page: Page) {
   return page.locator('[data-testid="chat-bubble-assistant"]');
 }
 
+const TERMINAL_RUN_STATUSES = new Set(["success", "failed", "canceled", "merged"]);
+
+async function waitForControllerRunTerminal(options: {
+  page: Page;
+  controllerUrl: string;
+  serviceRoleKey: string;
+  conversationId: string;
+  runId: string;
+  timeoutMs?: number;
+}): Promise<{
+  id: string;
+  status: string;
+  metadata: Record<string, unknown> | null;
+}> {
+  const { page, controllerUrl, serviceRoleKey, conversationId, runId } = options;
+  const timeoutMs = options.timeoutMs ?? 120_000;
+  let terminalRun:
+    | {
+        id: string;
+        status: string;
+        metadata: Record<string, unknown> | null;
+      }
+    | null = null;
+
+  await expect
+    .poll(
+      async () => {
+        const response = await page.context().request.get(
+          `${controllerUrl}/conversations/${encodeURIComponent(conversationId)}/runs?limit=200`,
+          {
+            headers: { authorization: `Bearer ${serviceRoleKey}` },
+          },
+        );
+        if (!response.ok()) {
+          const detail = (await response.text().catch(() => "")).trim().slice(0, 200);
+          return `http:${response.status()}${detail ? `:${detail}` : ""}`;
+        }
+
+        const payload = (await response.json().catch(() => null)) as
+          | Array<{ id?: unknown; status?: unknown; metadata?: unknown }>
+          | null;
+        const run = Array.isArray(payload)
+          ? payload.find((candidate) => candidate.id === runId)
+          : null;
+        if (!run) {
+          return "missing";
+        }
+        const status = typeof run.status === "string" ? run.status.trim().toLowerCase() : "";
+        if (TERMINAL_RUN_STATUSES.has(status)) {
+          terminalRun = {
+            id: runId,
+            status,
+            metadata:
+              run.metadata && typeof run.metadata === "object" && !Array.isArray(run.metadata)
+                ? (run.metadata as Record<string, unknown>)
+                : null,
+          };
+        }
+        return TERMINAL_RUN_STATUSES.has(status) ? status : status || "status-missing";
+      },
+      {
+        timeout: timeoutMs,
+        intervals: [100, 250, 500, 1_000],
+        message: `Run ${runId} should reach a controller terminal state`,
+      },
+    )
+    .toMatch(/^(success|failed|canceled|merged)$/);
+
+  const settledRun = terminalRun as {
+    id: string;
+    status: string;
+    metadata: Record<string, unknown> | null;
+  } | null;
+  if (!settledRun) {
+    throw new Error(`Run ${runId} reached a terminal status without a readable snapshot`);
+  }
+  return settledRun;
+}
+
+function extractRunIds(payload: { runId?: unknown; runIds?: unknown } | null): string[] {
+  const runIds = Array.isArray(payload?.runIds)
+    ? payload.runIds.filter(
+        (candidate): candidate is string =>
+          typeof candidate === "string" && candidate.trim().length > 0,
+      )
+    : [];
+  if (runIds.length > 0) {
+    return runIds;
+  }
+  return typeof payload?.runId === "string" && payload.runId.trim().length > 0
+    ? [payload.runId]
+    : [];
+}
+
+async function startTypingAppearanceProbe(page: Page) {
+  await page.evaluate(() => {
+    const probeWindow = window as typeof window & {
+      __instafyTypingAppearanceProbe?: {
+        seen: boolean;
+        observer: MutationObserver | null;
+      };
+    };
+    probeWindow.__instafyTypingAppearanceProbe?.observer?.disconnect();
+    const probe = {
+      seen: document.querySelector('[data-testid="assistant-typing-indicator"]') !== null,
+      observer: null as MutationObserver | null,
+    };
+    probe.observer = new MutationObserver(() => {
+      if (document.querySelector('[data-testid="assistant-typing-indicator"]')) {
+        probe.seen = true;
+      }
+    });
+    probe.observer.observe(document.documentElement, {
+      attributes: true,
+      childList: true,
+      subtree: true,
+      attributeFilter: ["data-testid"],
+    });
+    probeWindow.__instafyTypingAppearanceProbe = probe;
+  });
+}
+
+async function stopTypingAppearanceProbe(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const probeWindow = window as typeof window & {
+      __instafyTypingAppearanceProbe?: {
+        seen: boolean;
+        observer: MutationObserver | null;
+      };
+    };
+    const probe = probeWindow.__instafyTypingAppearanceProbe;
+    probe?.observer?.disconnect();
+    delete probeWindow.__instafyTypingAppearanceProbe;
+    return probe?.seen ?? false;
+  });
+}
+
 type SilentProbeOutcome = {
   decision: string;
   reason: string;
   recordUsed: boolean;
   dispatchUsed: boolean;
+  dispatchStatus: string;
+  runIds: string[];
 };
 
 /**
@@ -234,12 +373,34 @@ async function sendExpectingSilence(
       { timeout: 20_000 },
     )
     .catch(() => null);
+  const writeResponsePromise = page
+    .waitForResponse(
+      (response) => {
+        if (response.request().method() !== "POST") {
+          return false;
+        }
+        const pathname = new URL(response.url()).pathname;
+        return (
+          pathname === `/conversations/${conversationId}/messages` ||
+          pathname === `/conversations/${conversationId}/messages/record`
+        );
+      },
+      { timeout: 30_000 },
+    )
+    .catch(() => null);
 
   await page.getByTestId("chat-input").fill(content);
   await expect(page.getByTestId("chat-send-button")).toBeEnabled({ timeout: 30_000 });
   await page.getByTestId("chat-send-button").click();
 
-  const participationResponse = await participationPromise;
+  const firstResponse = await Promise.race([
+    participationPromise.then((response) => ({ kind: "participation" as const, response })),
+    writeResponsePromise.then((response) => ({ kind: "write" as const, response })),
+  ]);
+  const participationResponse =
+    firstResponse.kind === "participation" ? firstResponse.response : null;
+  const writeResponse =
+    firstResponse.kind === "write" ? firstResponse.response : await writeResponsePromise;
   let decision = "(no resolve call)";
   let reason = "(no resolve call)";
   if (participationResponse) {
@@ -250,9 +411,26 @@ async function sendExpectingSilence(
     decision = payload?.decision ?? "(unparseable)";
     reason = payload?.reason ?? "(unparseable)";
   }
-  await page.waitForTimeout(1_500);
+  const writePayload = writeResponse
+    ? ((await writeResponse.json().catch(() => null)) as {
+        runId?: unknown;
+        runIds?: unknown;
+        status?: unknown;
+      } | null)
+    : null;
+  const dispatchStatus =
+    typeof writePayload?.status === "string"
+      ? writePayload.status.trim().toLowerCase()
+      : "";
   page.off("request", onRequest);
-  return { decision, reason, recordUsed, dispatchUsed };
+  return {
+    decision,
+    reason,
+    recordUsed,
+    dispatchUsed,
+    dispatchStatus,
+    runIds: extractRunIds(writePayload),
+  };
 }
 
 test.describe("Group participation live drive", () => {
@@ -398,6 +576,9 @@ test.describe("Group participation live drive", () => {
 
       // ---- Scenario 2: three-turn human-to-human silent streak.
       const ownerAssistantCountBefore = await assistantBubbles(page).count();
+      await expect(page.getByTestId("assistant-typing-indicator")).toHaveCount(0);
+      await expect(memberPage.getByTestId("assistant-typing-indicator")).toHaveCount(0);
+      await Promise.all([startTypingAppearanceProbe(page), startTypingAppearanceProbe(memberPage)]);
 
       const turn1 = await sendExpectingSilence(
         memberPage,
@@ -412,7 +593,7 @@ test.describe("Group participation live drive", () => {
       const turn3 = await sendExpectingSilence(
         memberPage,
         conversationId,
-        `sounds good, ship it then ${Date.now()}`,
+        `Marcus, thanks for confirming the release plan. ${Date.now()}`,
       );
       console.log("[drive] silent streak outcomes:", { turn1, turn2, turn3 });
       for (const [label, outcome] of [
@@ -424,30 +605,49 @@ test.describe("Group participation live drive", () => {
         // (swallowed NO_RESPONSE) — silence, never record-only.
         expect(outcome.dispatchUsed, `${label} dispatches an evaluation`).toBe(true);
         expect(outcome.recordUsed, `${label} must not use record-only`).toBe(false);
+        expect(outcome.dispatchStatus, `${label} dispatch is queued`).toBe("queued");
+        expect(outcome.runIds, `${label} returns its exact evaluation run`).not.toHaveLength(0);
       }
-      // No typing indicator may appear for ambient turns, and the declines
-      // must settle with zero new assistant bubbles. Give the agent time to
-      // evaluate+decline all three turns on the warm runtime.
-      await expect(page.getByTestId("assistant-typing-indicator")).toHaveCount(0);
-      await expect(memberPage.getByTestId("assistant-typing-indicator")).toHaveCount(0);
-      // Sample for 75s while the agent evaluates and declines all three
-      // turns: typing must never show, bubbles must never grow.
-      for (let sample = 0; sample < 15; sample += 1) {
-        await memberPage.waitForTimeout(5_000);
+      const silentRunIds = [...new Set([...turn1.runIds, ...turn2.runIds, ...turn3.runIds])];
+      const silentRuns = await Promise.all(
+        silentRunIds.map((runId) =>
+          waitForControllerRunTerminal({
+            page,
+            controllerUrl,
+            serviceRoleKey,
+            conversationId,
+            runId,
+            timeoutMs: 180_000,
+          }),
+        ),
+      );
+      for (const run of silentRuns) {
+        expect(run.status, `${run.id} completes as a swallowed decline`).toBe("success");
         expect(
-          await memberPage.getByTestId("assistant-typing-indicator").count(),
-          "typing must stay hidden during evaluations",
-        ).toBe(0);
-        expect(
-          await assistantBubbles(page).count(),
-          "no assistant bubble may appear for declined turns",
-        ).toBe(ownerAssistantCountBefore);
+          run.metadata?.groupParticipation,
+          `${run.id} has the controller decline marker`,
+        ).toMatchObject({
+          decision: "silent",
+          reason: "agent_declined",
+          enforcedBy: "runtime-controller",
+        });
       }
+      const [ownerTypingAppeared, memberTypingAppeared] = await Promise.all([
+        stopTypingAppearanceProbe(page),
+        stopTypingAppearanceProbe(memberPage),
+      ]);
+      expect(ownerTypingAppeared, "owner must never see typing for silent evaluations").toBe(false);
+      expect(memberTypingAppeared, "member must never see typing for silent evaluations").toBe(
+        false,
+      );
       expect(await assistantBubbles(page).count()).toBe(ownerAssistantCountBefore);
       expect(await assistantBubbles(memberPage).count()).toBe(ownerAssistantCountBefore);
       // Cross-visibility: owner sees the members' human turns.
       await expect(
-        page.locator('[data-testid="chat-bubble-user"]').filter({ hasText: /ship it then/ }).last(),
+        page
+          .locator('[data-testid="chat-bubble-user"]')
+          .filter({ hasText: /thanks for confirming the release plan/ })
+          .last(),
       ).toBeVisible({ timeout: 30_000 });
       console.log(
         "[drive] scenario 2 OK: 3-turn silent streak (agent-declined), no typing, cross-visible",
@@ -467,11 +667,24 @@ test.describe("Group participation live drive", () => {
       console.log("[drive] resolver-outage outcome:", outage);
       expect(outage.dispatchUsed, "outage turn defers to dispatch").toBe(true);
       expect(outage.recordUsed, "outage turn must not use record-only").toBe(false);
+      expect(outage.dispatchStatus, "outage dispatch is queued").toBe("queued");
+      expect(outage.runIds, "outage dispatch returns its exact run").not.toHaveLength(0);
       // The controller classifies server-side; settle whichever way it went
       // (respond -> run finishes; silent -> nothing) before the next scenario.
-      await memberPage.waitForTimeout(3_000);
+      await Promise.all(
+        outage.runIds.map((runId) =>
+          waitForControllerRunTerminal({
+            page: memberPage,
+            controllerUrl,
+            serviceRoleKey,
+            conversationId,
+            runId,
+            timeoutMs: 180_000,
+          }),
+        ),
+      );
       await expect(memberPage.getByTestId("assistant-typing-indicator")).toHaveCount(0, {
-        timeout: 180_000,
+        timeout: 10_000,
       });
       const outageAssistantText = (await assistantBubbles(memberPage).count())
         ? await assistantBubbles(memberPage).last().innerText()
@@ -529,6 +742,13 @@ test.describe("Group participation live drive", () => {
 
       // ---- Scenario 6: human-answer coverage race against in-flight Octo job.
       const raceBubblesBefore = await assistantBubbles(page).count();
+      const raceDispatch = page.waitForResponse(
+        (response) =>
+          response.request().method() === "POST" &&
+          response.ok() &&
+          new URL(response.url()).pathname === `/conversations/${conversationId}/messages`,
+        { timeout: 30_000 },
+      );
       await page.getByTestId("chat-input").fill("What is 123*45? Reply with just the number.");
       await expect(page.getByTestId("chat-send-button")).toBeEnabled({ timeout: 30_000 });
       await page.getByTestId("chat-send-button").click();
@@ -556,12 +776,26 @@ test.describe("Group participation live drive", () => {
         > | null;
       }
       console.log("[drive] race resolve payload:", JSON.stringify(raceResolution));
+      const raceDispatchPayload = (await (await raceDispatch).json().catch(() => null)) as {
+        runId?: unknown;
+        runIds?: unknown;
+      } | null;
+      const raceRunId = extractRunIds(raceDispatchPayload)[0] ?? "";
+      expect(raceRunId, "Scenario 6 owner dispatch should return the exact race run id").not.toBe(
+        "",
+      );
       // Observe the settle: either Octo was cancelled (no new bubble) or Octo
       // finished first (bubble with 5535 and coverage reused). Both are valid;
       // a bare duplicate/confused answer is not.
-      await page.waitForTimeout(20_000);
+      await waitForControllerRunTerminal({
+        page,
+        controllerUrl,
+        serviceRoleKey,
+        conversationId,
+        runId: raceRunId,
+      });
       await expect(page.getByTestId("assistant-typing-indicator")).toHaveCount(0, {
-        timeout: 120_000,
+        timeout: 10_000,
       });
       const raceBubblesAfter = await assistantBubbles(page).count();
       const lastAssistantText =

@@ -1,6 +1,7 @@
 import { BrowserWindow, app, dialog } from "electron";
 import { autoUpdater } from "electron-updater";
 import { desktopLog } from "./logging";
+import { settleDesktopUpdaterDownload } from "./desktopUpdaterDownload";
 
 export type DesktopUpdaterPhase =
   | "idle"
@@ -21,6 +22,20 @@ export type DesktopUpdaterStatus = {
   lastCheckedAt?: string;
   lastDownloadedAt?: string;
   lastError?: string;
+  lastInstallRequestAccepted?: boolean;
+};
+
+export type DesktopUpdaterInstallRequest = {
+  source: "native_prompt" | "renderer";
+  availableVersion?: string;
+};
+
+export type DesktopUpdaterInstallRequestHandler = (
+  request: DesktopUpdaterInstallRequest,
+) => Promise<boolean> | boolean;
+
+export type StartDesktopUpdaterOptions = {
+  requestInstall?: DesktopUpdaterInstallRequestHandler;
 };
 
 const DEFAULT_DESKTOP_UPDATE_FEED_BASE_URL = "https://downloads.instafy.dev/desktop-app";
@@ -28,8 +43,10 @@ const DEFAULT_DESKTOP_UPDATE_CHANNEL = "stable";
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 let promptInFlight = false;
+let pendingDownloadedPromptVersion: string | null = null;
 let suppressAvailablePrompt = false;
-let suppressDownloadedPrompt = false;
+let installRequestHandler: DesktopUpdaterInstallRequestHandler | null = null;
+let installRequestInFlight: Promise<boolean> | null = null;
 
 function resolveDesktopUpdateChannel(): string {
   const explicit = process.env.INSTAFY_DESKTOP_UPDATE_CHANNEL?.trim();
@@ -68,8 +85,11 @@ async function runDesktopUpdateCheck(options: { suppressPrompts?: boolean } = {}
   if (options.suppressPrompts) {
     suppressAvailablePrompt = true;
   }
+  const updateWasDownloaded = desktopUpdaterStatus.phase === "downloaded";
   try {
-    desktopUpdaterStatus.phase = "checking";
+    if (!updateWasDownloaded) {
+      desktopUpdaterStatus.phase = "checking";
+    }
     desktopUpdaterStatus.lastCheckedAt = new Date().toISOString();
     desktopUpdaterStatus.lastError = undefined;
     await autoUpdater.checkForUpdates();
@@ -78,7 +98,9 @@ async function runDesktopUpdateCheck(options: { suppressPrompts?: boolean } = {}
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    desktopUpdaterStatus.phase = "error";
+    if (!updateWasDownloaded) {
+      desktopUpdaterStatus.phase = "error";
+    }
     desktopUpdaterStatus.lastError = message;
     desktopLog("warn", "[instafy-desktop] updater check failed", {
       feedUrl: desktopUpdaterStatus.feedUrl,
@@ -102,19 +124,80 @@ async function downloadDesktopUpdateNow() {
     desktopUpdaterStatus.lastError = "Desktop updates are only available in packaged builds.";
     return desktopUpdaterStatus;
   }
-  suppressDownloadedPrompt = true;
-  desktopUpdaterStatus.phase = "downloading";
-  desktopUpdaterStatus.lastError = undefined;
-  await autoUpdater.downloadUpdate();
+  await settleDesktopUpdaterDownload(
+    desktopUpdaterStatus,
+    () => autoUpdater.downloadUpdate(),
+    (message) => {
+      desktopLog("warn", "[instafy-desktop] updater download failed", {
+        feedUrl: desktopUpdaterStatus.feedUrl,
+        message,
+      });
+    },
+  );
   return desktopUpdaterStatus;
 }
 
-function installDownloadedDesktopUpdateNow() {
+async function requestDownloadedDesktopUpdateInstall(
+  source: DesktopUpdaterInstallRequest["source"],
+) {
   if (!app.isPackaged || desktopUpdaterStatus.phase !== "downloaded") {
+    desktopUpdaterStatus.lastInstallRequestAccepted = false;
     return desktopUpdaterStatus;
   }
-  setImmediate(() => autoUpdater.quitAndInstall());
+
+  if (!installRequestHandler) {
+    desktopUpdaterStatus.lastError = "Desktop update restart coordination is unavailable.";
+    desktopUpdaterStatus.lastInstallRequestAccepted = false;
+    desktopLog("warn", "[instafy-desktop] updater install request ignored", {
+      reason: "install-request-handler-unavailable",
+      source,
+    });
+    return desktopUpdaterStatus;
+  }
+
+  if (!installRequestInFlight) {
+    const handler = installRequestHandler;
+    const request: DesktopUpdaterInstallRequest = {
+      source,
+      availableVersion: desktopUpdaterStatus.availableVersion,
+    };
+    installRequestInFlight = Promise.resolve()
+      .then(() => handler(request))
+      .finally(() => {
+        installRequestInFlight = null;
+      });
+  }
+
+  const activeInstallRequest = installRequestInFlight;
+  try {
+    desktopUpdaterStatus.lastInstallRequestAccepted = await activeInstallRequest;
+    desktopUpdaterStatus.lastError = undefined;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    desktopUpdaterStatus.lastError = message;
+    desktopUpdaterStatus.lastInstallRequestAccepted = false;
+    desktopLog("warn", "[instafy-desktop] updater install coordination failed", {
+      message,
+      source,
+    });
+  }
   return desktopUpdaterStatus;
+}
+
+export function isDesktopUpdaterReadyToInstall(): boolean {
+  return app.isPackaged && desktopUpdaterStatus.phase === "downloaded";
+}
+
+/**
+ * Performs the native installer handoff after the main process has approved an
+ * update restart. Callers must complete runtime/job shutdown coordination first.
+ */
+export function performDesktopUpdaterInstallAfterQuitApproved(): boolean {
+  if (!isDesktopUpdaterReadyToInstall()) {
+    return false;
+  }
+  autoUpdater.quitAndInstall();
+  return true;
 }
 
 export function triggerDesktopUpdaterCheck() {
@@ -126,36 +209,83 @@ export function triggerDesktopUpdaterDownload() {
 }
 
 export function triggerDesktopUpdaterInstall() {
-  return installDownloadedDesktopUpdateNow();
+  return requestDownloadedDesktopUpdateInstall("renderer");
 }
 
-export function startDesktopUpdater() {
+async function showDownloadedDesktopUpdatePrompt(version: string) {
+  if (promptInFlight) {
+    pendingDownloadedPromptVersion = version;
+    return;
+  }
+
+  promptInFlight = true;
+  try {
+    const window = getFocusedWindow() ?? undefined;
+    const result = await dialog.showMessageBox(window, {
+      type: "info",
+      buttons: ["Restart and install", "Later"],
+      defaultId: 0,
+      cancelId: 1,
+      title: "Update ready",
+      message: `Instafy Studio ${version} has been downloaded.`,
+      detail: "Restart now to apply the update, or keep working and install it later.",
+    });
+    if (result.response === 0) {
+      await requestDownloadedDesktopUpdateInstall("native_prompt");
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    desktopLog("warn", "[instafy-desktop] updater restart prompt failed", { message });
+  } finally {
+    promptInFlight = false;
+    const pendingVersion = pendingDownloadedPromptVersion;
+    pendingDownloadedPromptVersion = null;
+    if (pendingVersion) {
+      void showDownloadedDesktopUpdatePrompt(pendingVersion);
+    }
+  }
+}
+
+export function startDesktopUpdater(options: StartDesktopUpdaterOptions = {}) {
   desktopUpdaterStatus.isEnabled = app.isPackaged;
+  installRequestHandler = options.requestInstall ?? null;
   if (!app.isPackaged) {
     return;
   }
 
   suppressAvailablePrompt = false;
-  suppressDownloadedPrompt = false;
+  pendingDownloadedPromptVersion = null;
   desktopUpdaterStatus.channel = resolveDesktopUpdateChannel();
   desktopUpdaterStatus.currentVersion = app.getVersion();
   desktopUpdaterStatus.feedUrl = resolveDesktopUpdateFeedUrl(desktopUpdaterStatus.channel);
   const feedUrl = desktopUpdaterStatus.feedUrl;
   autoUpdater.autoDownload = false;
-  autoUpdater.autoInstallOnAppQuit = true;
+  // Runtime jobs must be drained or explicitly abandoned before the app exits.
+  // Never let electron-updater bypass the main-process quit coordinator.
+  autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.setFeedURL({
     provider: "generic",
     url: feedUrl,
+    // The downloads worker deliberately supports one RFC byte range per
+    // request. Sequential ranges keep differential updates compatible with
+    // R2 without requiring multipart/byteranges response assembly at the edge.
+    useMultipleRangeRequest: false,
   });
 
   autoUpdater.on("error", (error) => {
     const message = error instanceof Error ? error.message : String(error);
-    desktopUpdaterStatus.phase = "error";
+    if (desktopUpdaterStatus.phase !== "downloaded") {
+      desktopUpdaterStatus.phase = "error";
+    }
     desktopUpdaterStatus.lastError = message;
     desktopLog("warn", "[instafy-desktop] updater error", { feedUrl, message });
   });
 
   autoUpdater.on("update-available", async (info) => {
+    if (desktopUpdaterStatus.phase === "downloaded") {
+      suppressAvailablePrompt = false;
+      return;
+    }
     desktopUpdaterStatus.phase = "update_available";
     desktopUpdaterStatus.availableVersion = info.version;
     if (suppressAvailablePrompt) {
@@ -166,6 +296,7 @@ export function startDesktopUpdater() {
       return;
     }
     promptInFlight = true;
+    let shouldDownload = false;
     try {
       const window = getFocusedWindow() ?? undefined;
       const result = await dialog.showMessageBox(window, {
@@ -175,45 +306,42 @@ export function startDesktopUpdater() {
         cancelId: 1,
         title: "Update available",
         message: `Instafy Studio ${info.version} is available.`,
-        detail: "Download the update now and install it when you restart the app.",
+        detail: "Download it now, then choose when to restart and install it.",
       });
-      if (result.response === 0) {
-        await downloadDesktopUpdateNow();
-      }
+      shouldDownload = result.response === 0;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       desktopLog("warn", "[instafy-desktop] updater prompt failed", { message });
     } finally {
       promptInFlight = false;
+      const pendingVersion = pendingDownloadedPromptVersion;
+      pendingDownloadedPromptVersion = null;
+      if (pendingVersion) {
+        void showDownloadedDesktopUpdatePrompt(pendingVersion);
+      }
     }
+    if (shouldDownload) {
+      // EventEmitter does not observe rejected async-listener promises. The
+      // download helper records failures into updater state and always settles.
+      void downloadDesktopUpdateNow();
+    }
+  });
+
+  autoUpdater.on("update-not-available", () => {
+    if (desktopUpdaterStatus.phase === "downloaded") {
+      suppressAvailablePrompt = false;
+      return;
+    }
+    desktopUpdaterStatus.phase = "up_to_date";
+    desktopUpdaterStatus.availableVersion = undefined;
+    suppressAvailablePrompt = false;
   });
 
   autoUpdater.on("update-downloaded", async (info) => {
     desktopUpdaterStatus.phase = "downloaded";
     desktopUpdaterStatus.availableVersion = info.version;
     desktopUpdaterStatus.lastDownloadedAt = new Date().toISOString();
-    if (suppressDownloadedPrompt) {
-      suppressDownloadedPrompt = false;
-      return;
-    }
-    try {
-      const window = getFocusedWindow() ?? undefined;
-      const result = await dialog.showMessageBox(window, {
-        type: "info",
-        buttons: ["Restart and install", "Later"],
-        defaultId: 0,
-        cancelId: 1,
-        title: "Update ready",
-        message: `Instafy Studio ${info.version} has been downloaded.`,
-        detail: "Restart now to apply the update, or keep working and install it later.",
-      });
-      if (result.response === 0) {
-        installDownloadedDesktopUpdateNow();
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      desktopLog("warn", "[instafy-desktop] updater restart prompt failed", { message });
-    }
+    await showDownloadedDesktopUpdatePrompt(info.version);
   });
 
   void runDesktopUpdateCheck();
