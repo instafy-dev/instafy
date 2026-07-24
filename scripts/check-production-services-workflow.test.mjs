@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
+import { extractDockerPushDigest } from "./lib/dockerPushDigest.mjs";
+
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const workflowPath = path.join(
   repositoryRoot,
@@ -13,6 +15,18 @@ const workflowPath = path.join(
 
 function readWorkflow() {
   return fs.readFileSync(workflowPath, "utf8");
+}
+
+function readRuntimeWorkflow() {
+  return fs.readFileSync(
+    path.join(
+      repositoryRoot,
+      ".github",
+      "workflows",
+      "publish-runtime-agent.yml",
+    ),
+    "utf8",
+  );
 }
 
 function assertOrdered(source, ...needles) {
@@ -54,6 +68,40 @@ test("every service is scanned before registry login and publication", () => {
   assert.match(source, /--severity HIGH,CRITICAL/u);
   assert.match(source, /--exit-code 1/u);
   assert.match(source, /production-service-release-manifest\.sha256/u);
+});
+
+test("both image workflows parse the tagged digest line emitted by docker push", () => {
+  const realisticPushOutput = [
+    "The push refers to repository [ghcr.io/instafy-dev/instafy-runtime-agent]",
+    "5f70bf18a086: Layer already exists",
+    "f1d2d2f924e9: Pushed",
+    `0123456789abcdef0123456789abcdef01234567-linux-amd64: digest: sha256:${"a".repeat(64)} size: 2417`,
+    "",
+  ].join("\n");
+
+  assert.equal(
+    extractDockerPushDigest(realisticPushOutput),
+    `sha256:${"a".repeat(64)}`,
+  );
+  assert.throws(
+    () =>
+      extractDockerPushDigest(
+        `${realisticPushOutput}${realisticPushOutput}`,
+      ),
+    /exactly one Docker push digest line/u,
+  );
+  assert.throws(
+    () => extractDockerPushDigest("latest: digest: sha256:not-a-digest size: 1\n"),
+    /exactly one Docker push digest line/u,
+  );
+
+  for (const source of [readWorkflow(), readRuntimeWorkflow()]) {
+    assert.match(
+      source,
+      /node scripts\/lib\/dockerPushDigest\.mjs "\$(?:push_log|log)"/u,
+    );
+    assert.doesNotMatch(source, /s\/\^digest:/u);
+  }
 });
 
 test("the sealed manifest requires the complete hosted image set", () => {
