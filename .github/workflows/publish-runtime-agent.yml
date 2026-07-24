@@ -251,10 +251,7 @@ jobs:
             local digest
             docker push "$tag" | tee "$log" >&2
             digest="$(
-              sed -nE \
-                's/^digest: (sha256:[0-9a-f]{64}) size: [0-9]+$/\1/p' \
-                "$log" |
-                tail -n 1
+              node scripts/lib/dockerPushDigest.mjs "$log"
             )"
             if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
               echo "::error::Docker push did not return a valid digest for ${tag}." >&2
