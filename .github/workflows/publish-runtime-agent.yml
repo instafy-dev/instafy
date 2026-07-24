@@ -3,11 +3,10 @@ name: Publish runtime-agent images
 on:
   workflow_dispatch:
     inputs:
-      image_namespace:
-        description: "GHCR namespace/org (default: instafy-dev)"
-        required: false
+      commit_sha:
+        description: "Full commit SHA; must equal current protected main"
+        required: true
         type: string
-        default: instafy-dev
       update_channel_tags:
         description: "Also move the mutable latest/webdev convenience tags"
         required: false
@@ -16,16 +15,48 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: publish-runtime-agent-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
+  authorize:
+    name: Authorize exact release source
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ steps.release.outputs.commit_sha }}
+
+    steps:
+      - name: Bind release to current protected main
+        id: release
+        shell: bash
+        env:
+          REQUESTED_COMMIT: ${{ inputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::Runtime publication may run only from protected main."
+            exit 1
+          fi
+          if [[ ! "$REQUESTED_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::commit_sha must be a full lowercase commit SHA."
+            exit 1
+          fi
+          if [[ "$REQUESTED_COMMIT" != "$GITHUB_SHA" ]]; then
+            echo "::error::commit_sha must equal current protected main."
+            exit 1
+          fi
+          echo "commit_sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
   publish-runtime-agent:
     name: Publish ${{ matrix.flavor }} runtime
+    needs: authorize
     runs-on: ubuntu-latest
+    environment: ghcr-release
+    permissions:
+      contents: read
+      packages: write
     strategy:
       fail-fast: true
       max-parallel: 1
@@ -41,23 +72,26 @@ jobs:
             channel_tag: webdev
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
+      - name: Checkout exact protected-main commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ needs.authorize.outputs.commit_sha }}
           submodules: recursive
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Resolve image references
         id: refs
         shell: bash
         env:
-          IMAGE_NAMESPACE: ${{ inputs.image_namespace || 'instafy-dev' }}
+          IMAGE_NAMESPACE: instafy-dev
+          RELEASE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}
           TAG_PREFIX: ${{ matrix.tag_prefix }}
           CHANNEL_TAG: ${{ matrix.channel_tag }}
           UPDATE_CHANNEL_TAGS: ${{ inputs.update_channel_tags }}
@@ -65,12 +99,12 @@ jobs:
           set -euo pipefail
 
           if [[ ! "$IMAGE_NAMESPACE" =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
-            echo "::error::image_namespace must be a lowercase GHCR namespace."
+            echo "::error::The fixed image namespace must be a lowercase GHCR namespace."
             exit 1
           fi
 
           image="ghcr.io/${IMAGE_NAMESPACE}/instafy-runtime-agent"
-          release_tag="${image}:${TAG_PREFIX}${GITHUB_SHA}"
+          release_tag="${image}:${TAG_PREFIX}${RELEASE_COMMIT}"
           tags="$release_tag"
           if [ "$UPDATE_CHANNEL_TAGS" = "true" ]; then
             tags="${tags}"$'\n'"${image}:${CHANNEL_TAG}"
@@ -103,13 +137,13 @@ jobs:
       # inputs and Go module graph. Scan the native build before any registry
       # login or push so a finding cannot leave a partially published release.
       - name: Build native audit image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: docker/runtime/Dockerfile
           target: ${{ matrix.target }}
           platforms: linux/amd64
-          tags: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.sha }}
+          tags: instafy-runtime-audit:${{ matrix.flavor }}-${{ needs.authorize.outputs.commit_sha }}
           build-args: |
             BUILD_PROFILE=release
             BUILD_ARTIFACT_DIR=release
@@ -121,7 +155,7 @@ jobs:
 
       - name: Scan native audit image
         env:
-          AUDIT_IMAGE: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.sha }}
+          AUDIT_IMAGE: instafy-runtime-audit:${{ matrix.flavor }}-${{ needs.authorize.outputs.commit_sha }}
         run: |
           set -euo pipefail
           empty_config="$RUNNER_TEMP/trivy.empty.yaml"
@@ -140,7 +174,7 @@ jobs:
             "$AUDIT_IMAGE"
 
       - name: Login to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -148,7 +182,7 @@ jobs:
 
       - name: Build and push multi-arch image
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: docker/runtime/Dockerfile
@@ -157,8 +191,8 @@ jobs:
           tags: ${{ steps.refs.outputs.tags }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ github.sha }}
+            org.opencontainers.image.revision=${{ needs.authorize.outputs.commit_sha }}
+            org.opencontainers.image.version=${{ needs.authorize.outputs.commit_sha }}
           build-args: |
             BUILD_PROFILE=release
             BUILD_ARTIFACT_DIR=release
