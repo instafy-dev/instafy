@@ -87,7 +87,12 @@ test("npm publication is bound to exact protected main and a release environment
 test("runtime images publish only exact protected main from a fixed namespace", () => {
   const source = readWorkflow("publish-runtime-agent.yml");
   const authorize = jobSection(source, "authorize", "publish-runtime-agent");
-  const publish = jobSection(source, "publish-runtime-agent");
+  const publish = jobSection(
+    source,
+    "publish-runtime-agent",
+    "publish-release-manifest",
+  );
+  const manifest = jobSection(source, "publish-release-manifest");
 
   assert.match(source, /\n      commit_sha:\n/u);
   assert.match(source, /commit_sha:[\s\S]*required: true/u);
@@ -96,6 +101,7 @@ test("runtime images publish only exact protected main from a fixed namespace", 
     source.indexOf("\npermissions:\n"),
   );
   assert.doesNotMatch(dispatchInputs, /\n      image_namespace:\n/u);
+  assert.match(authorize, /GITHUB_REPOSITORY" != "instafy-dev\/instafy"/u);
   assert.match(authorize, /GITHUB_REF" != "refs\/heads\/main"/u);
   assert.match(authorize, /\^\[0-9a-f\]\{40\}\$/u);
   assert.match(authorize, /REQUESTED_COMMIT" != "\$GITHUB_SHA"/u);
@@ -106,14 +112,37 @@ test("runtime images publish only exact protected main from a fixed namespace", 
   assert.match(publish, /persist-credentials: false/u);
   assert.match(
     publish,
+    /image: tonistiigi\/binfmt:qemu-v10\.0\.4@sha256:[0-9a-f]{64}/u,
+  );
+  assert.match(publish, /version: v0\.35\.0/u);
+  assert.match(
+    publish,
     /ref: \$\{\{ needs\.authorize\.outputs\.commit_sha \}\}/u,
   );
   assert.doesNotMatch(publish, /\$\{\{ github\.sha \}\}/u);
   assertOrdered(
     publish,
-    "- name: Build native audit image",
-    "- name: Scan native audit image",
+    "- name: Build amd64 audit image",
+    "- name: Scan amd64 audit image",
+    "- name: Build arm64 audit image",
+    "- name: Scan arm64 audit image",
     "- name: Login to GHCR",
-    "- name: Build and push multi-arch image",
+    "- name: Push only the two scanned images and assemble the release manifest",
+  );
+  assert.match(publish, /name: runtime-agent-release-ref-\$\{\{ matrix\.flavor \}\}/u);
+  assert.match(manifest, /needs:[\s\S]*- publish-runtime-agent/u);
+  assert.match(manifest, /name: runtime-agent-release-manifest/u);
+  assert.match(manifest, /coreCommit: EXPECTED_CORE_COMMIT/u);
+  assert.match(
+    manifest,
+    /ghcr\\\.io\\\/instafy-dev\\\/instafy-runtime-agent@sha256:/u,
+  );
+  assert.doesNotMatch(manifest, /packages: write/u);
+  assert.doesNotMatch(manifest, /\bsecrets\./u);
+  assertOrdered(
+    manifest,
+    "- name: Download immutable flavor references",
+    "- name: Aggregate exact release manifest",
+    "- name: Upload runtime-agent release manifest",
   );
 });
