@@ -14961,9 +14961,10 @@ mod tests {
                 env::var("CONTROLLER_ACCESS_TOKEN").as_deref(),
                 Ok("verified-scoped-job-token")
             );
-            // Workspace shells inherit the controller-advertised scope list
-            // verbatim, including provider.call, which the controller's
-            // provider-tools/call dispatch routes require from job tokens.
+            // Workspace shells preserve whatever bounded scope list the
+            // controller explicitly issued. This propagation test includes
+            // provider.call, although ordinary jobs currently receive no such
+            // authority.
             assert_eq!(
                 env::var("CONTROLLER_ACCESS_SCOPES").as_deref(),
                 Ok("prompt.execute provider.call git.token.mint.job")
