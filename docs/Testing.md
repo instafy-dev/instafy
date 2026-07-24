@@ -18,19 +18,54 @@ The default `pnpm test:e2e` loop is intentionally product-focused:
 - it does not load the opt-in benchmark specs under `tests/playwright/bench`
 - benchmark coverage stays available through `pnpm test:e2e:bench`, which sets `PLAYWRIGHT_RUN_BENCH=1`
 
-The protected public workflow has four required jobs:
+Public Build keeps four stable job names:
 
 - Secret scan
 - JavaScript packages
 - Go packages
 - Rust packages
 
-The Secret scan job runs pinned Gitleaks over every introduced commit and a
-repository-wide boundary check over tracked paths and contents. The boundary
-check rejects live environment/auth files, private-only package/product
-markers, personal paths, private hosts/networks, browser-exposed service-role
-names, and token prefixes. Product-contract references are allowed only inside
-the provider-contract package.
+Pull requests are leak-gated by the separate
+`Public boundary (trusted base)` check. Its `pull_request_target` workflow owns
+the scanner, policy, and Gitleaks configuration from protected `main`, checks
+the GitHub-generated merge tree out separately as data, verifies its event
+commit and both parents, and never installs, imports, sources, caches, or
+executes candidate code. It has read-only repository permission and no
+repository or deployment secrets. Its candidate checkout is the one deliberate
+`allow-unsafe-pr-checkout` exception required by current `actions/checkout`;
+the trusted checkout does not opt out. Before public visibility, require this
+check in addition to the four Public Build names.
+
+The trusted gate rejects unreviewed environment templates, live
+environment/auth files, private-only package/product markers, personal paths,
+private hosts/networks, browser-exposed service-role names, token prefixes,
+symlinks, Git LFS indirection, unexpected Git index modes, unknown or repinned
+submodules, invalid UTF-8, and every unknown binary/archive. The policy
+allowlists exactly 16 inert environment templates, the reviewed Codex gitlink
+object, and 45 binary path/SHA-256 pairs. Marker matching covers paths, ordinary
+UTF-8, common UTF-16/UTF-32 layouts, and bounded recursive URL, Base64, and hex
+decoding for the private product marker.
+
+Pinned Gitleaks 8.30.1 scans the candidate with path-aware rules and scans a
+second path-independent stream of tracked bytes so inherited global filename
+allowlists cannot hide secrets in files such as lockfiles or SVGs. It traverses
+one archive level and three decoding levels, uses an empty ignore file,
+disables inline allowances, has no target-size skip, redacts findings, and
+fails on timeout. Protected `main` repeats the current-tree and introduced
+history scans as defense in depth.
+
+`.github/CODEOWNERS` assigns every workflow/action and boundary control,
+including itself, `.gitattributes`, `.gitmodules`, and `codex`, to the security
+maintainer. Branch protection must require code-owner review for those paths
+without imposing review on ordinary product changes. Do not use a push-path
+ruleset as the permanent trust anchor: GitHub disables all push rulesets when
+an internal repository becomes public.
+
+The trusted policy intentionally makes a binary addition/removal, approved
+environment-path addition, or Codex repin fail its own PR. Those rare changes
+require a security maintainer to inspect the bytes or object, update the policy,
+and use the explicit protected-branch break-glass path. Normal source
+contributions do not require that manual security review.
 
 The JavaScript job performs a frozen install, validates and applies the public
 migration track to an empty database, checks the self-host contract, lints and

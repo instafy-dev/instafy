@@ -1,0 +1,11 @@
+# Public-boundary controls require an independent security-maintainer review.
+/.github/ @instafy-bot
+/scripts/check-public-boundary.mjs @instafy-bot
+/scripts/check-public-boundary.test.mjs @instafy-bot
+/scripts/check-public-boundary-workflow.test.mjs @instafy-bot
+/scripts/public-boundary-gitleaks.toml @instafy-bot
+/scripts/public-boundary-gitleaks-stream.toml @instafy-bot
+/scripts/public-boundary-policy.json @instafy-bot
+/.gitattributes @instafy-bot
+/.gitmodules @instafy-bot
+/codex @instafy-bot
