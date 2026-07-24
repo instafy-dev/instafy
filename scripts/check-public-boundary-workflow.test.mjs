@@ -107,7 +107,7 @@ test("trusted boundary checkouts are separate, pinned, and non-persistent", () =
   assert.doesNotMatch(source, /pull_request\.head\.repo|github\.head_ref/iu);
 });
 
-test("trusted boundary binds the merge and both parents to the event", () => {
+test("trusted boundary binds the server merge ref to both event parents", () => {
   const source = readWorkflow("public-boundary.yml");
   const verification = stepSection(
     source,
@@ -127,16 +127,12 @@ test("trusted boundary binds the merge and both parents to the event", () => {
     verification,
     /EXPECTED_MERGE_SHA: \$\{\{ github\.event\.pull_request\.merge_commit_sha \}\}/u,
   );
-  assert.equal(
-    [...verification.matchAll(/\^\[0-9a-f\]\{40\}\$/gu)].length,
-    3,
+  assert.match(
+    verification,
+    /\[\[ "\$actual_merge_sha" =~ \^\[0-9a-f\]\{40\}\$ \]\]/u,
   );
   assert.match(verification, /show -s --format='%H %P' HEAD/u);
   assert.match(verification, /test -z "\$\{extra_parent:-\}"/u);
-  assert.match(
-    verification,
-    /test "\$actual_merge_sha" = "\$EXPECTED_MERGE_SHA"/u,
-  );
   assert.match(
     verification,
     /test "\$first_parent" = "\$EXPECTED_BASE_SHA"/u,
@@ -144,6 +140,10 @@ test("trusted boundary binds the merge and both parents to the event", () => {
   assert.match(
     verification,
     /test "\$second_parent" = "\$EXPECTED_HEAD_SHA"/u,
+  );
+  assert.match(
+    verification,
+    /if \[\[ -n "\$EXPECTED_MERGE_SHA" \]\]; then[\s\S]*\[\[ "\$EXPECTED_MERGE_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\][\s\S]*test "\$actual_merge_sha" = "\$EXPECTED_MERGE_SHA"[\s\S]*fi/u,
   );
 });
 
