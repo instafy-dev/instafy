@@ -66,6 +66,7 @@ test("npm publication is bound to exact protected main and a release environment
   assert.doesNotMatch(validate, /\bsecrets\./u);
   assert.match(publish, /environment: npm-release/u);
   assert.match(publish, /persist-credentials: false/u);
+  assert.match(publish, /npm publish --ignore-scripts/u);
   assert.match(
     publish,
     /ref: \$\{\{ needs\.authorize\.outputs\.commit_sha \}\}/u,

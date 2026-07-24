@@ -151,4 +151,4 @@ jobs:
             fi
           fi
 
-          npm publish --tag "${DIST_TAG}" --access public
+          npm publish --ignore-scripts --tag "${DIST_TAG}" --access public
