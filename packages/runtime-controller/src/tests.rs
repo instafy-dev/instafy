@@ -21844,7 +21844,8 @@ async fn provider_dispatch_authorizes_job_tokens_with_provider_call_scope() -> a
         .map_err(|error| controller_error("mint scoped token", error))?
         .token)
     };
-    // The shape the runtime mints for jobs: prompt.execute + provider.call.
+    // An explicitly scoped token reserved for a future bounded provider grant.
+    // Ordinary job-token minting deliberately withholds provider.call.
     let job_token = mint(vec!["prompt.execute", "provider.call"], project_id)?;
     // A job token that predates (or was stripped of) provider.call.
     let scopeless_job_token = mint(vec!["prompt.execute", "fs.write"], project_id)?;

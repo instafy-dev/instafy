@@ -222,8 +222,8 @@ async fn dispatch_provider_tool_call(
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
     let project = load_project_record(&transaction, &project_id).await?;
-    // Workspace shells authenticate with the per-job scoped controller token;
-    // authorize it by project match + explicit provider.call scope while
+    // If a future bounded grant explicitly carries provider.call, still bind
+    // it to this project. Ordinary model jobs currently receive no such scope;
     // user-session and service-role callers keep the membership write check.
     ensure_project_scoped_write_access(
         &transaction,

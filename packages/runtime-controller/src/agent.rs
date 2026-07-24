@@ -1445,11 +1445,11 @@ fn attach_controller_tokens(
 
 fn job_controller_token_scopes(job: &AgentJob) -> Vec<String> {
     let mut scopes = vec!["prompt.execute".to_string()];
-    // Workspace scripts dispatch phone-hosted provider tools/resources through
-    // the controller's provider-tools/call and provider-resources/read routes,
-    // which authorize scoped tokens by project match + this explicit scope.
-    // It grants no workspace write authority, so read-only jobs carry it too.
-    scopes.push(crate::provider_requests::PROVIDER_CALL_SCOPE.to_string());
+    // Fail closed on model-controlled provider execution. A project-level
+    // `provider.call` scope is too broad until a grant also binds the exact
+    // approved tool/resource ids, target device, run, runtime generation and
+    // live lease. Human sessions may keep using the provider request routes;
+    // ordinary model jobs receive no provider authority.
     // Writable runtime jobs use this short-lived, project/runtime/run-bound
     // token to acquire a workspace lease and delegate an origin fs.write token
     // after Codex produces file changes. Every normalized read-only signal is
@@ -5151,7 +5151,7 @@ mod tests {
     }
 
     #[test]
-    fn job_controller_token_scopes_preserve_write_authority_without_upgrading_read_only_jobs() {
+    fn job_controller_token_scopes_withhold_provider_calls_and_write_for_read_only_jobs() {
         let mut job = AgentJob {
             id: Uuid::new_v4(),
             project_id: Uuid::new_v4(),
@@ -5195,11 +5195,7 @@ mod tests {
 
         assert_eq!(
             job_controller_token_scopes(&job),
-            vec![
-                "prompt.execute".to_string(),
-                crate::provider_requests::PROVIDER_CALL_SCOPE.to_string(),
-                "fs.write".to_string()
-            ]
+            vec!["prompt.execute".to_string(), "fs.write".to_string()]
         );
 
         job.payload = json!({
@@ -5212,10 +5208,7 @@ mod tests {
         });
         assert_eq!(
             job_controller_token_scopes(&job),
-            vec![
-                "prompt.execute".to_string(),
-                crate::provider_requests::PROVIDER_CALL_SCOPE.to_string()
-            ]
+            vec!["prompt.execute".to_string()]
         );
 
         job.payload = json!({
@@ -5224,10 +5217,7 @@ mod tests {
         });
         assert_eq!(
             job_controller_token_scopes(&job),
-            vec![
-                "prompt.execute".to_string(),
-                crate::provider_requests::PROVIDER_CALL_SCOPE.to_string()
-            ]
+            vec!["prompt.execute".to_string()]
         );
 
         job.payload = json!({
@@ -5237,10 +5227,7 @@ mod tests {
         });
         assert_eq!(
             job_controller_token_scopes(&job),
-            vec![
-                "prompt.execute".to_string(),
-                crate::provider_requests::PROVIDER_CALL_SCOPE.to_string()
-            ]
+            vec!["prompt.execute".to_string()]
         );
 
         job.payload = json!({
@@ -5250,10 +5237,7 @@ mod tests {
         });
         assert_eq!(
             job_controller_token_scopes(&job),
-            vec![
-                "prompt.execute".to_string(),
-                crate::provider_requests::PROVIDER_CALL_SCOPE.to_string()
-            ]
+            vec!["prompt.execute".to_string()]
         );
 
         job.payload = json!({
@@ -5266,11 +5250,7 @@ mod tests {
         });
         assert_eq!(
             job_controller_token_scopes(&job),
-            vec![
-                "prompt.execute".to_string(),
-                crate::provider_requests::PROVIDER_CALL_SCOPE.to_string(),
-                "fs.write".to_string()
-            ]
+            vec!["prompt.execute".to_string(), "fs.write".to_string()]
         );
 
         job.payload = json!({
@@ -5279,11 +5259,7 @@ mod tests {
         });
         assert_eq!(
             job_controller_token_scopes(&job),
-            vec![
-                "prompt.execute".to_string(),
-                crate::provider_requests::PROVIDER_CALL_SCOPE.to_string(),
-                "fs.write".to_string()
-            ]
+            vec!["prompt.execute".to_string(), "fs.write".to_string()]
         );
     }
 
