@@ -1,0 +1,252 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import test from "node:test";
+
+const repositoryRoot = path.resolve(import.meta.dirname, "..");
+const productionDockerfiles = [
+  "packages/runtime-controller/Dockerfile",
+  "packages/tunnel-broker/Dockerfile",
+  "docker/runtime/Dockerfile",
+  "docker/proxy/Dockerfile",
+  "docker/provider-service/Dockerfile",
+  "docker/git-edge/Dockerfile",
+  "docker/git-shard/Dockerfile",
+  "docker/origin-gateway/Dockerfile",
+  "docker/speech-host/Dockerfile",
+];
+
+// This combined image is used by local development rather than publication,
+// but pin it too so the repository has no special unpinned Dockerfile escape.
+const localDockerfiles = ["docker/git-services-dev/Dockerfile"];
+const pinnedImage = /^[^@\s]+:[^@\s]+@sha256:[0-9a-f]{64}$/u;
+const checksum = /^[0-9a-f]{64}$/u;
+
+function read(relativePath) {
+  return fs.readFileSync(path.join(repositoryRoot, relativePath), "utf8");
+}
+
+function argumentDefaults(source) {
+  const defaults = new Map();
+  for (const match of source.matchAll(/^ARG ([A-Za-z_][A-Za-z0-9_]*)=(\S+)$/gmu)) {
+    defaults.set(match[1], match[2]);
+  }
+  return defaults;
+}
+
+function resolveBuildArguments(reference, defaults, relativePath) {
+  let resolved = reference;
+  for (let pass = 0; pass < 20 && resolved.includes("${"); pass += 1) {
+    resolved = resolved.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/gu, (_, name) => {
+      assert.ok(
+        defaults.has(name),
+        `${relativePath} FROM uses ${name} without a committed default`,
+      );
+      return defaults.get(name);
+    });
+  }
+  assert.doesNotMatch(
+    resolved,
+    /\$\{/u,
+    `${relativePath} FROM contains unresolved build arguments`,
+  );
+  return resolved;
+}
+
+function dockerfileFromReferences(source) {
+  return [...source.matchAll(/^FROM(?: --platform=\S+)? (\S+)/gmu)].map(
+    (match) => match[1],
+  );
+}
+
+function assertPinnedChecksumArgument(source, name, expected, relativePath) {
+  const actual = argumentDefaults(source).get(name);
+  assert.match(
+    actual ?? "",
+    checksum,
+    `${relativePath} must give ${name} a full SHA-256 default`,
+  );
+  assert.equal(actual, expected, `${relativePath} has an unexpected ${name}`);
+}
+
+function assertOrdered(source, label, ...needles) {
+  let cursor = -1;
+  for (const needle of needles) {
+    const next = source.indexOf(needle, cursor + 1);
+    assert.ok(next > cursor, `${label} is missing ordered input: ${needle}`);
+    cursor = next;
+  }
+}
+
+test("every repository Dockerfile pins external base images by digest", () => {
+  for (const relativePath of [...productionDockerfiles, ...localDockerfiles]) {
+    const source = read(relativePath);
+    const syntax = source.match(/^# syntax=(\S+)$/mu);
+    if (syntax) {
+      assert.match(
+        syntax[1],
+        pinnedImage,
+        `${relativePath} must pin its Dockerfile frontend by digest`,
+      );
+    }
+    const defaults = argumentDefaults(source);
+    const references = dockerfileFromReferences(source);
+    assert.ok(references.length > 0, `${relativePath} must contain a FROM instruction`);
+
+    for (const reference of references) {
+      const resolved = resolveBuildArguments(reference, defaults, relativePath);
+      if (resolved === "scratch") continue;
+      assert.match(
+        resolved,
+        pinnedImage,
+        `${relativePath} must pin ${resolved} as tag@sha256:<64 hex>`,
+      );
+    }
+  }
+});
+
+test("runtime downloads verify architecture-bound checksums before extraction", () => {
+  const relativePath = "docker/runtime/Dockerfile";
+  const source = read(relativePath);
+  const ratholeAmd64 =
+    "3e7d0d0f365120cd3cd351d147d1a12ee960c8068b464d4dd533a3821873b80e";
+  const ratholeArm64 =
+    "fa4a6fc63d86f8f1faa7c103a845e4715ce79a048455c0eec897b27237576564";
+  const uBlock =
+    "d5811c79278f27001ae0be090e824577c505cc2b4151997e252462df9f11ba36";
+
+  assertPinnedChecksumArgument(
+    source,
+    "RATHOLE_SHA256_AMD64",
+    ratholeAmd64,
+    relativePath,
+  );
+  assertPinnedChecksumArgument(
+    source,
+    "RATHOLE_SHA256_ARM64",
+    ratholeArm64,
+    relativePath,
+  );
+  assertPinnedChecksumArgument(
+    source,
+    "UBOLITE_SHA256_AMD64",
+    uBlock,
+    relativePath,
+  );
+  assertPinnedChecksumArgument(
+    source,
+    "UBOLITE_SHA256_ARM64",
+    uBlock,
+    relativePath,
+  );
+  assert.equal(
+    [...source.matchAll(/sha256sum --check --status/gu)].length,
+    3,
+    "runtime and webdev downloads must each verify their archive",
+  );
+  assert.equal(
+    [...source.matchAll(/curl --proto '=https' --tlsv1\.2/gu)].length,
+    3,
+    "runtime release downloads must enforce HTTPS and TLS 1.2+",
+  );
+
+  const firstRathole = source.indexOf(
+    "curl --proto '=https' --tlsv1.2",
+    source.indexOf("FROM ${RUNTIME_BASE} AS runtime"),
+  );
+  const webdev = source.indexOf("FROM ${WEBDEV_BASE} AS runtime-webdev");
+  const uBlockDownload = source.indexOf("curl --proto '=https' --tlsv1.2", webdev);
+  const secondRathole = source.indexOf(
+    "curl --proto '=https' --tlsv1.2",
+    uBlockDownload + 1,
+  );
+  for (const [label, start, archive, extraction] of [
+    ["runtime Rathole", firstRathole, "/tmp/rathole.zip", "unzip -q /tmp/rathole.zip"],
+    ["webdev uBlock", uBlockDownload, "/tmp/ublock.zip", "unzip -q /tmp/ublock.zip"],
+    ["webdev Rathole", secondRathole, "/tmp/rathole.zip", "unzip -q /tmp/rathole.zip"],
+  ]) {
+    const verify = source.indexOf("sha256sum --check --status", start);
+    const use = source.indexOf(extraction, start);
+    assert.ok(start >= 0, `${label} download is missing`);
+    assert.ok(source.indexOf(archive, start) < verify, `${label} archive is not downloaded`);
+    assert.ok(verify > start && verify < use, `${label} must verify before extraction`);
+  }
+});
+
+test("tunnel broker verifies the selected Rathole asset", () => {
+  const relativePath = "packages/tunnel-broker/Dockerfile";
+  const source = read(relativePath);
+  assertPinnedChecksumArgument(
+    source,
+    "RATHOLE_SHA256_AMD64",
+    "3e7d0d0f365120cd3cd351d147d1a12ee960c8068b464d4dd533a3821873b80e",
+    relativePath,
+  );
+  assertPinnedChecksumArgument(
+    source,
+    "RATHOLE_SHA256_ARM64",
+    "fa4a6fc63d86f8f1faa7c103a845e4715ce79a048455c0eec897b27237576564",
+    relativePath,
+  );
+  assertOrdered(
+    source,
+    relativePath,
+    "curl --proto '=https' --tlsv1.2",
+    "sha256sum --check --status",
+    "unzip -j /tmp/rathole.zip",
+  );
+});
+
+test("cargo-chef installation is version-locked", () => {
+  for (const relativePath of ["docker/runtime/Dockerfile", "docker/proxy/Dockerfile"]) {
+    const source = read(relativePath);
+    assert.match(source, /^ARG CARGO_CHEF_VERSION=0\.1\.77$/mu);
+    const installs = [
+      ...source.matchAll(
+        /^RUN cargo install cargo-chef --version "\$\{CARGO_CHEF_VERSION\}" --locked$/gmu,
+      ),
+    ];
+    assert.equal(installs.length, 1, `${relativePath} must pin its cargo-chef install`);
+  }
+});
+
+test("runtime publication scans amd64 and arm64 before registry login", () => {
+  const source = read(".github/workflows/publish-runtime-agent.yml");
+  const login = source.indexOf("- name: Login to GHCR");
+  const push = source.indexOf(
+    "- name: Push only the two scanned images and assemble the release manifest",
+  );
+  assert.ok(login > 0 && push > login, "runtime publication login/push order is malformed");
+  const beforeLogin = source.slice(0, login);
+
+  assertOrdered(
+    beforeLogin,
+    "runtime publication",
+    "- name: Build amd64 audit image",
+    "platforms: linux/amd64",
+    "load: true",
+    "- name: Scan amd64 audit image",
+    "- name: Build arm64 audit image",
+    "platforms: linux/arm64",
+    "load: true",
+    "- name: Scan arm64 audit image",
+  );
+  assert.equal(
+    [...beforeLogin.matchAll(/"\$AUDIT_IMAGE"/gu)].length,
+    2,
+    "each architecture must be scanned from its exact local image",
+  );
+  const afterLogin = source.slice(login);
+  assert.doesNotMatch(
+    afterLogin,
+    /docker\/build-push-action/u,
+    "publication must not rebuild after the scan gate",
+  );
+  assert.match(afterLogin, /docker push "\$tag"/u);
+  assert.match(afterLogin, /push_image "\$amd64_tag"/u);
+  assert.match(afterLogin, /push_image "\$arm64_tag"/u);
+  assert.match(afterLogin, /docker buildx imagetools create/u);
+  assert.match(afterLogin, /--metadata-file "\$metadata"/u);
+  assert.match(afterLogin, /\.\["containerimage\.digest"\]/u);
+  assert.match(afterLogin, /\["linux\/amd64","linux\/arm64"\]/u);
+});

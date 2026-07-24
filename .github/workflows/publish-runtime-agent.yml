@@ -35,6 +35,10 @@ jobs:
           REQUESTED_COMMIT: ${{ inputs.commit_sha }}
         run: |
           set -euo pipefail
+          if [[ "$GITHUB_REPOSITORY" != "instafy-dev/instafy" ]]; then
+            echo "::error::Runtime images may be published only from instafy-dev/instafy."
+            exit 1
+          fi
           if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
             echo "::error::Runtime publication may run only from protected main."
             exit 1
@@ -82,9 +86,14 @@ jobs:
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          image: tonistiigi/binfmt:qemu-v10.0.4@sha256:8f58e6214f4cc9dc83ce8f5acad1ece508eb6b20e696a8c1e9f274481982c541
+          platforms: arm64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        with:
+          version: v0.35.0
 
       - name: Resolve image references
         id: refs
@@ -94,7 +103,6 @@ jobs:
           RELEASE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}
           TAG_PREFIX: ${{ matrix.tag_prefix }}
           CHANNEL_TAG: ${{ matrix.channel_tag }}
-          UPDATE_CHANNEL_TAGS: ${{ inputs.update_channel_tags }}
         run: |
           set -euo pipefail
 
@@ -105,18 +113,10 @@ jobs:
 
           image="ghcr.io/${IMAGE_NAMESPACE}/instafy-runtime-agent"
           release_tag="${image}:${TAG_PREFIX}${RELEASE_COMMIT}"
-          tags="$release_tag"
-          if [ "$UPDATE_CHANNEL_TAGS" = "true" ]; then
-            tags="${tags}"$'\n'"${image}:${CHANNEL_TAG}"
-          fi
 
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
-          {
-            echo "tags<<EOF"
-            echo "$tags"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          echo "channel_tag=${image}:${CHANNEL_TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Install pinned Trivy
         env:
@@ -133,29 +133,76 @@ jobs:
           sudo install -m 0755 "$RUNNER_TEMP/trivy" /usr/local/bin/trivy
           test "$(trivy --version | awk 'NR == 1 { print $2 }')" = "$TRIVY_VERSION"
 
-      # Both release architectures use the same pinned base manifest, apt/npm
-      # inputs and Go module graph. Scan the native build before any registry
-      # login or push so a finding cannot leave a partially published release.
-      - name: Build native audit image
+      # Build and scan each architecture before any registry login. These
+      # exact local images are pushed after the gate; there is no post-scan
+      # rebuild that could change bytes.
+      - name: Build amd64 audit image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: docker/runtime/Dockerfile
           target: ${{ matrix.target }}
           platforms: linux/amd64
-          tags: instafy-runtime-audit:${{ matrix.flavor }}-${{ needs.authorize.outputs.commit_sha }}
           build-args: |
             BUILD_PROFILE=release
             BUILD_ARTIFACT_DIR=release
-          cache-from: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/instafy-dev/instafy
+            org.opencontainers.image.revision=${{ needs.authorize.outputs.commit_sha }}
+            org.opencontainers.image.version=${{ needs.authorize.outputs.commit_sha }}
+          cache-from: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-amd64
+          cache-to: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-amd64,mode=max
+          tags: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}-amd64
           load: true
           push: false
           provenance: false
           sbom: false
 
-      - name: Scan native audit image
+      - name: Scan amd64 audit image
         env:
-          AUDIT_IMAGE: instafy-runtime-audit:${{ matrix.flavor }}-${{ needs.authorize.outputs.commit_sha }}
+          AUDIT_IMAGE: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}-amd64
+        run: |
+          set -euo pipefail
+          empty_config="$RUNNER_TEMP/trivy.empty.yaml"
+          empty_ignore="$RUNNER_TEMP/trivy.empty-ignore"
+          printf '{}\n' > "$empty_config"
+          : > "$empty_ignore"
+          trivy image \
+            --config "$empty_config" \
+            --scanners vuln,secret \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --ignorefile "$empty_ignore" \
+            --exit-code 1 \
+            --skip-version-check \
+            --no-progress \
+            "$AUDIT_IMAGE"
+
+      - name: Build arm64 audit image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/runtime/Dockerfile
+          target: ${{ matrix.target }}
+          platforms: linux/arm64
+          build-args: |
+            BUILD_PROFILE=release
+            BUILD_ARTIFACT_DIR=release
+          labels: |
+            org.opencontainers.image.source=https://github.com/instafy-dev/instafy
+            org.opencontainers.image.revision=${{ needs.authorize.outputs.commit_sha }}
+            org.opencontainers.image.version=${{ needs.authorize.outputs.commit_sha }}
+          cache-from: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-arm64
+          cache-to: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-arm64,mode=max
+          tags: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}-arm64
+          load: true
+          push: false
+          provenance: false
+          sbom: false
+
+      - name: Scan arm64 audit image
+        env:
+          AUDIT_IMAGE: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}-arm64
         run: |
           set -euo pipefail
           empty_config="$RUNNER_TEMP/trivy.empty.yaml"
@@ -180,35 +227,87 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push multi-arch image
-        id: build
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: docker/runtime/Dockerfile
-          target: ${{ matrix.target }}
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.refs.outputs.tags }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ needs.authorize.outputs.commit_sha }}
-            org.opencontainers.image.version=${{ needs.authorize.outputs.commit_sha }}
-          build-args: |
-            BUILD_PROFILE=release
-            BUILD_ARTIFACT_DIR=release
-          cache-from: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}
-          cache-to: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }},mode=max
-          push: true
-          provenance: mode=max
-          sbom: true
+      - name: Push only the two scanned images and assemble the release manifest
+        id: push
+        shell: bash
+        env:
+          AMD64_AUDIT_IMAGE: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}-amd64
+          ARM64_AUDIT_IMAGE: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}-arm64
+          CHANNEL_TAG: ${{ steps.refs.outputs.channel_tag }}
+          IMAGE: ${{ steps.refs.outputs.image }}
+          RELEASE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}
+          RELEASE_TAG: ${{ steps.refs.outputs.release_tag }}
+          TAG_PREFIX: ${{ matrix.tag_prefix }}
+          UPDATE_CHANNEL_TAGS: ${{ inputs.update_channel_tags }}
+        run: |
+          set -euo pipefail
+          amd64_tag="${IMAGE}:${TAG_PREFIX}${RELEASE_COMMIT}-linux-amd64"
+          arm64_tag="${IMAGE}:${TAG_PREFIX}${RELEASE_COMMIT}-linux-arm64"
+          docker tag "$AMD64_AUDIT_IMAGE" "$amd64_tag"
+          docker tag "$ARM64_AUDIT_IMAGE" "$arm64_tag"
+          push_image() {
+            local tag="$1"
+            local log="$2"
+            local digest
+            docker push "$tag" | tee "$log" >&2
+            digest="$(
+              node scripts/lib/dockerPushDigest.mjs "$log"
+            )"
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::Docker push did not return a valid digest for ${tag}." >&2
+              return 1
+            fi
+            printf '%s\n' "$digest"
+          }
+
+          amd64_digest="$(
+            push_image "$amd64_tag" "$RUNNER_TEMP/runtime-amd64-push.log"
+          )"
+          arm64_digest="$(
+            push_image "$arm64_tag" "$RUNNER_TEMP/runtime-arm64-push.log"
+          )"
+          metadata="$RUNNER_TEMP/runtime-manifest-metadata.json"
+          docker buildx imagetools create \
+            --metadata-file "$metadata" \
+            --tag "$RELEASE_TAG" \
+            "${IMAGE}@${amd64_digest}" \
+            "${IMAGE}@${arm64_digest}"
+          digest="$(jq -er '.["containerimage.digest"]' "$metadata")"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Manifest assembly did not return a valid immutable digest."
+            exit 1
+          fi
+          immutable_image="${IMAGE}@${digest}"
+
+          platforms="$(
+            docker buildx imagetools inspect "$immutable_image" --raw |
+              jq -c '
+                [.manifests[].platform |
+                  select(.os != "unknown" and .architecture != "unknown") |
+                  "\(.os)/\(.architecture)"
+                ] | sort
+              '
+          )"
+          if [[ "$platforms" != '["linux/amd64","linux/arm64"]' ]]; then
+            echo "::error::Assembled runtime manifest has unexpected platforms: ${platforms}."
+            exit 1
+          fi
+          if [[ "$UPDATE_CHANNEL_TAGS" == "true" ]]; then
+            docker buildx imagetools create \
+              --tag "$CHANNEL_TAG" \
+              "$immutable_image"
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Verify and report immutable image
         shell: bash
         env:
           IMAGE: ${{ steps.refs.outputs.image }}
           RELEASE_TAG: ${{ steps.refs.outputs.release_tag }}
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.push.outputs.digest }}
           FLAVOR: ${{ matrix.flavor }}
+          RELEASE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}
+          RELEASE_REF_DIR: ${{ runner.temp }}/runtime-agent-release-ref
         run: |
           set -euo pipefail
 
@@ -216,9 +315,40 @@ jobs:
             echo "::error::Build did not return a valid OCI manifest digest."
             exit 1
           fi
+          if [[ ! "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Release commit is not a full lowercase commit SHA."
+            exit 1
+          fi
+          if [[ "$FLAVOR" != "base" && "$FLAVOR" != "webdev" ]]; then
+            echo "::error::Unexpected runtime flavor."
+            exit 1
+          fi
 
           immutable_image="${IMAGE}@${DIGEST}"
           docker buildx imagetools inspect "$immutable_image" >/dev/null
+          mkdir -p "$RELEASE_REF_DIR"
+          IMMUTABLE_IMAGE="$immutable_image" node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import path from "node:path";
+
+          const { FLAVOR, IMMUTABLE_IMAGE, RELEASE_COMMIT, RELEASE_REF_DIR } = process.env;
+          const imagePattern =
+            /^ghcr\.io\/instafy-dev\/instafy-runtime-agent@sha256:[0-9a-f]{64}$/;
+          if (!["base", "webdev"].includes(FLAVOR) || !imagePattern.test(IMMUTABLE_IMAGE)) {
+            throw new Error("Refusing to record an invalid immutable runtime reference.");
+          }
+          const record = {
+            schemaVersion: 1,
+            coreCommit: RELEASE_COMMIT,
+            flavor: FLAVOR,
+            immutableRef: IMMUTABLE_IMAGE,
+          };
+          fs.writeFileSync(
+            path.join(RELEASE_REF_DIR, `${FLAVOR}.json`),
+            `${JSON.stringify(record, null, 2)}\n`,
+            { flag: "wx", mode: 0o600 },
+          );
+          NODE
           {
             echo "### ${FLAVOR} runtime-agent"
             echo
@@ -226,3 +356,91 @@ jobs:
             echo "- Immutable image: \`${immutable_image}\`"
             echo "- Platforms: \`linux/amd64\`, \`linux/arm64\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload immutable flavor reference
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runtime-agent-release-ref-${{ matrix.flavor }}
+          path: ${{ runner.temp }}/runtime-agent-release-ref/${{ matrix.flavor }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-release-manifest:
+    name: Publish immutable runtime release manifest
+    needs:
+      - authorize
+      - publish-runtime-agent
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+      - name: Download immutable flavor references
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: runtime-agent-release-ref-*
+          path: ${{ runner.temp }}/runtime-agent-release-refs
+          merge-multiple: true
+
+      - name: Aggregate exact release manifest
+        env:
+          EXPECTED_CORE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}
+          RELEASE_REF_DIR: ${{ runner.temp }}/runtime-agent-release-refs
+          RELEASE_MANIFEST_DIR: ${{ runner.temp }}/runtime-agent-release-manifest
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import path from "node:path";
+
+          const {
+            EXPECTED_CORE_COMMIT,
+            RELEASE_MANIFEST_DIR,
+            RELEASE_REF_DIR,
+          } = process.env;
+          if (!/^[0-9a-f]{40}$/.test(EXPECTED_CORE_COMMIT)) {
+            throw new Error("Expected core commit is invalid.");
+          }
+          const imagePattern =
+            /^ghcr\.io\/instafy-dev\/instafy-runtime-agent@sha256:[0-9a-f]{64}$/;
+          const images = {};
+          for (const flavor of ["base", "webdev"]) {
+            const filename = path.join(RELEASE_REF_DIR, `${flavor}.json`);
+            const record = JSON.parse(fs.readFileSync(filename, "utf8"));
+            const keys = Object.keys(record).sort();
+            if (
+              keys.join("\0") !==
+                ["coreCommit", "flavor", "immutableRef", "schemaVersion"].join("\0") ||
+              record.schemaVersion !== 1 ||
+              record.coreCommit !== EXPECTED_CORE_COMMIT ||
+              record.flavor !== flavor ||
+              !imagePattern.test(record.immutableRef)
+            ) {
+              throw new Error(`Invalid ${flavor} runtime release record.`);
+            }
+            images[flavor] = record.immutableRef;
+          }
+          if (images.base === images.webdev) {
+            throw new Error("Base and webdev runtime images must have distinct manifests.");
+          }
+          const manifest = {
+            schemaVersion: 1,
+            coreCommit: EXPECTED_CORE_COMMIT,
+            images,
+          };
+          fs.mkdirSync(RELEASE_MANIFEST_DIR, { recursive: true, mode: 0o700 });
+          fs.writeFileSync(
+            path.join(RELEASE_MANIFEST_DIR, "runtime-agent-release-manifest.json"),
+            `${JSON.stringify(manifest, null, 2)}\n`,
+            { flag: "wx", mode: 0o600 },
+          );
+          NODE
+
+      - name: Upload runtime-agent release manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runtime-agent-release-manifest
+          path: ${{ runner.temp }}/runtime-agent-release-manifest/runtime-agent-release-manifest.json
+          if-no-files-found: error
+          retention-days: 90
