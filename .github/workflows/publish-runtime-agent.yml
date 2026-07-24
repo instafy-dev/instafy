@@ -84,6 +84,24 @@ jobs:
           ref: ${{ needs.authorize.outputs.commit_sha }}
           submodules: recursive
 
+      - name: Reclaim hosted-runner disk for audited images
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Standard private-repository runners expose only 14 GiB of free
+          # storage. These fixed preinstalled SDK paths are unrelated to this
+          # Docker-only job and otherwise crowd out the two audited images.
+          sudo rm -rf -- \
+            /opt/ghc \
+            /usr/local/lib/android \
+            /usr/share/dotnet
+          available_kib="$(df -Pk / | awk 'NR == 2 { print $4 }')"
+          if [[ ! "$available_kib" =~ ^[0-9]+$ ]] ||
+            (( available_kib < 20 * 1024 * 1024 )); then
+            echo "::error::Runtime image publication requires at least 20 GiB of free disk."
+            exit 1
+          fi
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
         with:

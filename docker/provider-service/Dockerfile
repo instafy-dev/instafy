@@ -14,7 +14,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     cargo build --release --manifest-path packages/runtime-provider-service/Cargo.toml --locked
 
-FROM docker:27-cli@sha256:851f91d241214e7c6db86513b270d58776379aacc5eb9c4a87e5b47115e3065c
+FROM alpine:3.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40
+ARG DOCKER_CLI_VERSION=29.5.2-r0
+ARG DOCKER_BUILDX_VERSION=0.30.1-r6
+ARG DOCKER_COMPOSE_VERSION=2.40.3-r6
+RUN apk add --no-cache \
+    "docker-cli=${DOCKER_CLI_VERSION}" \
+    "docker-cli-buildx=${DOCKER_BUILDX_VERSION}" \
+    "docker-cli-compose=${DOCKER_COMPOSE_VERSION}"
 LABEL org.opencontainers.image.source="https://github.com/instafy-dev/instafy"
 COPY --from=builder /src/packages/runtime-provider-service/target/release/runtime-provider-service /usr/local/bin/runtime-provider-service
 EXPOSE 9090
