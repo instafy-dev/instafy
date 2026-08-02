@@ -184,17 +184,26 @@ test("runtime downloads verify architecture-bound checksums before extraction", 
     "a03b06e66d862d0278b1ff45b66427f245f99c665800dc9bd790c0c13d2247fe",
     relativePath,
   );
+  // Patch EVERY npm installation in the image, not one hardcoded prefix: the
+  // webdev (Playwright) base ships a second npm at /usr/lib/node_modules that
+  // the /usr/local-only patch missed (run 30750744597, webdev cells only).
   assert.equal(
     [...source.matchAll(
-      /node_modules\/npm\/node_modules\/brace-expansion --strip-components=1/gu,
+      /for be_dir in \$\(find \/usr -type d -path '\*\/node_modules\/npm\/node_modules\/brace-expansion'/gu,
     )].length,
     2,
-    "both runtime flavors must replace npm's vendored brace-expansion",
+    "both runtime flavors must patch every npm root's brace-expansion",
   );
+  assert.doesNotMatch(
+    source,
+    /tar -xzf \/tmp\/brace-expansion\.tgz -C \/usr\/local/u,
+    "the patch must not target a single hardcoded npm prefix",
+  );
+  // Each flavor fails the build if any vendored copy is left unpatched.
   assert.equal(
-    [...source.matchAll(/unexpected vendored brace-expansion/gu)].length,
+    [...source.matchAll(/unpatched brace-expansion copies/gu)].length,
     2,
-    "both runtime flavors must assert the replaced module version",
+    "both runtime flavors must fail closed on a remaining vulnerable copy",
   );
 
   // Anchor each download on its own URL/target rather than "first curl in the

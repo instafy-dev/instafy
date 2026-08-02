@@ -219,11 +219,13 @@ RUN npm install -g "npm@${NPM_VERSION}" && \
       "https://registry.npmjs.org/brace-expansion/-/brace-expansion-${BRACE_EXPANSION_VERSION}.tgz" \
       --output /tmp/brace-expansion.tgz && \
     printf '%s  %s\n' "${BRACE_EXPANSION_SHA256}" /tmp/brace-expansion.tgz | sha256sum --check --status && \
-    rm -rf /usr/local/lib/node_modules/npm/node_modules/brace-expansion && \
-    mkdir -p /usr/local/lib/node_modules/npm/node_modules/brace-expansion && \
-    tar -xzf /tmp/brace-expansion.tgz -C /usr/local/lib/node_modules/npm/node_modules/brace-expansion --strip-components=1 && \
+    for be_dir in $(find /usr -type d -path '*/node_modules/npm/node_modules/brace-expansion' 2>/dev/null); do \
+      rm -rf "$be_dir" && mkdir -p "$be_dir" && \
+      tar -xzf /tmp/brace-expansion.tgz -C "$be_dir" --strip-components=1; \
+    done && \
     rm /tmp/brace-expansion.tgz && \
-    node -e "const v = require('/usr/local/lib/node_modules/npm/node_modules/brace-expansion/package.json').version; if (v !== '${BRACE_EXPANSION_VERSION}') { throw new Error('unexpected vendored brace-expansion ' + v); }" && \
+    unpatched="$(find /usr -type f -path '*/node_modules/npm/node_modules/brace-expansion/package.json' -exec grep -L "\"version\": \"${BRACE_EXPANSION_VERSION}\"" {} + 2>/dev/null || true)" && \
+    if [ -n "$unpatched" ]; then echo "unpatched brace-expansion copies: $unpatched" >&2; exit 1; fi && \
     rm -rf /root/.npm
 
 ARG BUILD_PROFILE=dev
@@ -339,11 +341,13 @@ RUN npm install -g "npm@${NPM_VERSION}" && \
       "https://registry.npmjs.org/brace-expansion/-/brace-expansion-${BRACE_EXPANSION_VERSION}.tgz" \
       --output /tmp/brace-expansion.tgz && \
     printf '%s  %s\n' "${BRACE_EXPANSION_SHA256}" /tmp/brace-expansion.tgz | sha256sum --check --status && \
-    rm -rf /usr/local/lib/node_modules/npm/node_modules/brace-expansion && \
-    mkdir -p /usr/local/lib/node_modules/npm/node_modules/brace-expansion && \
-    tar -xzf /tmp/brace-expansion.tgz -C /usr/local/lib/node_modules/npm/node_modules/brace-expansion --strip-components=1 && \
+    for be_dir in $(find /usr -type d -path '*/node_modules/npm/node_modules/brace-expansion' 2>/dev/null); do \
+      rm -rf "$be_dir" && mkdir -p "$be_dir" && \
+      tar -xzf /tmp/brace-expansion.tgz -C "$be_dir" --strip-components=1; \
+    done && \
     rm /tmp/brace-expansion.tgz && \
-    node -e "const v = require('/usr/local/lib/node_modules/npm/node_modules/brace-expansion/package.json').version; if (v !== '${BRACE_EXPANSION_VERSION}') { throw new Error('unexpected vendored brace-expansion ' + v); }" && \
+    unpatched="$(find /usr -type f -path '*/node_modules/npm/node_modules/brace-expansion/package.json' -exec grep -L "\"version\": \"${BRACE_EXPANSION_VERSION}\"" {} + 2>/dev/null || true)" && \
+    if [ -n "$unpatched" ]; then echo "unpatched brace-expansion copies: $unpatched" >&2; exit 1; fi && \
     rm -rf /root/.npm
 
 # Keep the headed browser usable for humans by shipping an ad blocker extension.
