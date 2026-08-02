@@ -77,12 +77,22 @@ jobs:
           test "${#parent_shas[@]}" -eq 2
           test "${parent_shas[0]}" = "$EXPECTED_BASE_SHA"
           test "${parent_shas[1]}" = "$EXPECTED_HEAD_SHA"
-          # pull_request_target may deliver a null merge_commit_sha. The exact
-          # event parents still bind the server-owned merge ref without trusting
-          # candidate bytes. When GitHub supplies the merge OID, bind that too.
+          # The parents binding above is the security property: the candidate
+          # is a server-minted merge of exactly the event's base and head, so
+          # base-owned tooling scans exactly this PR's content. Do NOT also
+          # require actual_merge_sha == the event's merge_commit_sha: GitHub
+          # re-mints refs/pull/N/merge lazily (same parents, fresh committer
+          # timestamp => new OID) between event delivery and checkout, so that
+          # equality fails on timing alone (observed 4/4 on PR #11). When the
+          # payload OID happens to match, note it; a mismatch with correct
+          # parents is the documented benign re-mint.
           if [[ -n "$EXPECTED_MERGE_SHA" ]]; then
             [[ "$EXPECTED_MERGE_SHA" =~ ^[0-9a-f]{40}$ ]]
-            test "$actual_merge_sha" = "$EXPECTED_MERGE_SHA"
+            if [[ "$actual_merge_sha" != "$EXPECTED_MERGE_SHA" ]]; then
+              echo "::notice::Merge ref re-minted after event delivery" \
+                "(payload ${EXPECTED_MERGE_SHA}, checked out ${actual_merge_sha});" \
+                "parents verified against the exact event base and head."
+            fi
           fi
 
       - name: Install pinned Gitleaks
