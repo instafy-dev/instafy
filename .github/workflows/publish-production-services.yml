@@ -274,28 +274,22 @@ jobs:
             echo "::error::The image set is incomplete or contains an unexpected key."
             exit 1
           fi
+          # Bind the expected repository BEFORE any pipe: inside `.ref | ...`,
+          # `.` is the ref string, so `$repositories[.key]` there indexes with
+          # the string's (nonexistent) .key and aborts the whole check.
           if ! jq -se \
             --arg commit "$RELEASE_COMMIT" \
             --argjson repositories "$expected_repositories" '
             all(.[];
+              ($repositories[.key]) as $repo |
               .schemaVersion == 1 and
               .coreCommit == $commit and
               .platform == "linux/amd64" and
-              ($repositories[.key] != null) and
+              ($repo != null) and
               .releaseTag == (
-                "ghcr.io/instafy-dev/" +
-                $repositories[.key] +
-                ":" +
-                $commit
+                "ghcr.io/instafy-dev/" + $repo + ":" + $commit
               ) and
-              (
-                .ref |
-                startswith(
-                  "ghcr.io/instafy-dev/" +
-                  $repositories[.key] +
-                  "@sha256:"
-                )
-              ) and
+              (.ref | startswith("ghcr.io/instafy-dev/" + $repo + "@sha256:")) and
               (.ref | test("@sha256:[0-9a-f]{64}$"))
             )
           ' image-records/*.json >/dev/null; then

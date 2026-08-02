@@ -198,4 +198,14 @@ test("the sealed manifest requires the complete hosted image set", () => {
   assert.match(source, /\.releaseTag ==/u);
   assert.match(source, /startswith/u);
   assert.match(source, /malformed, swapped/u);
+  // The repository lookup must be bound to a variable BEFORE any pipe: inside
+  // `.ref | startswith(...)`, `.` is the ref string, so an inline
+  // `$repositories[.key]` there indexes a string and aborts the seal step
+  // (first observed live in run 30747167299 after all seven images published).
+  assert.match(source, /\(\$repositories\[\.key\]\) as \$repo \|/u);
+  assert.doesNotMatch(
+    source,
+    /startswith\([\s\S]{0,80}\$repositories\[\.key\]/u,
+    "repository lookup must not be re-evaluated inside the ref pipe",
+  );
 });
