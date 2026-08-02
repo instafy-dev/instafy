@@ -52,6 +52,64 @@ test("production services are exact-main, fixed-namespace, amd64 releases", () =
   assert.match(source, /--platform linux\/amd64/u);
 });
 
+test("one protected approval covers the whole exact-SHA service release", () => {
+  const source = readWorkflow();
+
+  // The protected environment gate exists exactly once, on a dedicated
+  // non-matrix approval job, so one approval covers every matrix row instead
+  // of expiring between scheduled batches.
+  assert.equal(
+    [...source.matchAll(/environment: ghcr-release/gu)].length,
+    1,
+    "the ghcr-release environment must gate exactly one job",
+  );
+  assertOrdered(
+    source,
+    "  release-approval:",
+    "needs: authorize",
+    "environment: ghcr-release",
+    "permissions: {}",
+    "- name: Record the approved release commit",
+    "  publish:",
+  );
+  const publishStart = source.indexOf("  publish:\n");
+  const publishSection = source.slice(
+    publishStart,
+    source.indexOf("  manifest:\n", publishStart),
+  );
+  assert.doesNotMatch(
+    publishSection,
+    /environment:/u,
+    "matrix publishing jobs must not each re-enter the protected environment",
+  );
+  assert.match(publishSection, /- release-approval/u);
+  assert.match(publishSection, /- authorize/u);
+  assert.match(publishSection, /packages: write/u);
+  assert.match(publishSection, /persist-credentials: false/u);
+
+  const authorizeSection = source.slice(
+    source.indexOf("  authorize:\n"),
+    source.indexOf("  release-approval:\n"),
+  );
+  assert.doesNotMatch(authorizeSection, /packages: write/u);
+  assert.doesNotMatch(authorizeSection, /environment:/u);
+
+  // Trivy pinning must be enforced in the services workflow too.
+  assert.match(
+    source,
+    /TRIVY_LINUX_X64_SHA256: "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"/u,
+  );
+  assert.match(source, /TRIVY_VERSION: "0\.72\.0"/u);
+  assertOrdered(
+    source,
+    "- name: Install pinned Trivy",
+    "curl --proto '=https' --tlsv1.2",
+    "sha256sum --check --status",
+    "tar -xzf",
+    'test "$(trivy --version',
+  );
+});
+
 test("every service is scanned before registry login and publication", () => {
   const source = readWorkflow();
   assertOrdered(
