@@ -53,27 +53,78 @@ jobs:
           fi
           echo "commit_sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
 
-  publish-runtime-agent:
-    name: Publish ${{ matrix.flavor }} runtime
+  release-approval:
+    name: Approve the exact release once
     needs: authorize
     runs-on: ubuntu-latest
     environment: ghcr-release
+    permissions: {}
+    steps:
+      - name: Record the approved release commit
+        shell: bash
+        env:
+          RELEASE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Refusing to approve a release without an exact commit."
+            exit 1
+          fi
+          {
+            echo "### ghcr-release approval"
+            echo
+            echo "- Approved runtime-agent release for public core \`${RELEASE_COMMIT}\`."
+            echo "- This single approval covers every flavor/architecture cell below."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build-scan-push:
+    name: Publish ${{ matrix.flavor }} ${{ matrix.architecture }} runtime
+    needs:
+      - authorize
+      - release-approval
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
     strategy:
-      fail-fast: true
-      max-parallel: 1
+      # fail-fast off: a failing cell must not cancel siblings mid-push and
+      # strand arch tags; the assemble job's exact-fileset validation is the
+      # single aggregation gate (matches the production-services choice).
+      fail-fast: false
       matrix:
         include:
           - flavor: base
             target: runtime
             tag_prefix: ""
-            channel_tag: latest
+            architecture: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+            trivy_asset: Linux-64bit
+            trivy_sha256: "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"
+          - flavor: base
+            target: runtime
+            tag_prefix: ""
+            architecture: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            trivy_asset: Linux-ARM64
+            trivy_sha256: "2ca2c023109c2db6b2b77366b6717291452d4531167377d95c79547f0c8e3467"
           - flavor: webdev
             target: runtime-webdev
-            tag_prefix: webdev-
-            channel_tag: webdev
+            tag_prefix: "webdev-"
+            architecture: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+            trivy_asset: Linux-64bit
+            trivy_sha256: "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"
+          - flavor: webdev
+            target: runtime-webdev
+            tag_prefix: "webdev-"
+            architecture: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            trivy_asset: Linux-ARM64
+            trivy_sha256: "2ca2c023109c2db6b2b77366b6717291452d4531167377d95c79547f0c8e3467"
 
     steps:
       - name: Checkout exact protected-main commit
@@ -84,29 +135,25 @@ jobs:
           ref: ${{ needs.authorize.outputs.commit_sha }}
           submodules: recursive
 
-      - name: Reclaim hosted-runner disk for audited images
+      - name: Reclaim hosted-runner disk for the audited image
         shell: bash
         run: |
           set -euo pipefail
-          # Standard private-repository runners expose only 14 GiB of free
-          # storage. These fixed preinstalled SDK paths are unrelated to this
-          # Docker-only job and otherwise crowd out the two audited images.
+          # Standard hosted runners expose limited free storage. These fixed
+          # preinstalled SDK paths are unrelated to this Docker-only job and
+          # otherwise crowd out the audited image; on runner images where a
+          # path does not exist the removal is a harmless no-op.
           sudo rm -rf -- \
             /opt/ghc \
             /usr/local/lib/android \
             /usr/share/dotnet
           available_kib="$(df -Pk / | awk 'NR == 2 { print $4 }')"
+          echo "Free disk after reclaim: ${available_kib} KiB"
           if [[ ! "$available_kib" =~ ^[0-9]+$ ]] ||
             (( available_kib < 20 * 1024 * 1024 )); then
-            echo "::error::Runtime image publication requires at least 20 GiB of free disk."
+            echo "::error::Runtime image publication requires at least 20 GiB of free disk (have ${available_kib} KiB)."
             exit 1
           fi
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
-        with:
-          image: tonistiigi/binfmt:qemu-v10.0.4@sha256:8f58e6214f4cc9dc83ce8f5acad1ece508eb6b20e696a8c1e9f274481982c541
-          platforms: arm64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -120,7 +167,7 @@ jobs:
           IMAGE_NAMESPACE: instafy-dev
           RELEASE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}
           TAG_PREFIX: ${{ matrix.tag_prefix }}
-          CHANNEL_TAG: ${{ matrix.channel_tag }}
+          ARCHITECTURE: ${{ matrix.architecture }}
         run: |
           set -euo pipefail
 
@@ -128,39 +175,43 @@ jobs:
             echo "::error::The fixed image namespace must be a lowercase GHCR namespace."
             exit 1
           fi
+          if [[ "$ARCHITECTURE" != "amd64" && "$ARCHITECTURE" != "arm64" ]]; then
+            echo "::error::Unexpected build architecture."
+            exit 1
+          fi
 
           image="ghcr.io/${IMAGE_NAMESPACE}/instafy-runtime-agent"
-          release_tag="${image}:${TAG_PREFIX}${RELEASE_COMMIT}"
+          arch_tag="${image}:${TAG_PREFIX}${RELEASE_COMMIT}-linux-${ARCHITECTURE}"
 
           echo "image=$image" >> "$GITHUB_OUTPUT"
-          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
-          echo "channel_tag=${image}:${CHANNEL_TAG}" >> "$GITHUB_OUTPUT"
+          echo "arch_tag=$arch_tag" >> "$GITHUB_OUTPUT"
 
       - name: Install pinned Trivy
         env:
           TRIVY_VERSION: "0.72.0"
-          TRIVY_LINUX_X64_SHA256: "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"
+          TRIVY_ASSET: ${{ matrix.trivy_asset }}
+          TRIVY_SHA256: ${{ matrix.trivy_sha256 }}
         run: |
           set -euo pipefail
           archive="$RUNNER_TEMP/trivy.tar.gz"
           curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
-            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_${TRIVY_ASSET}.tar.gz" \
             --output "$archive"
-          printf '%s  %s\n' "$TRIVY_LINUX_X64_SHA256" "$archive" | sha256sum --check --status
+          printf '%s  %s\n' "$TRIVY_SHA256" "$archive" | sha256sum --check --status
           tar -xzf "$archive" -C "$RUNNER_TEMP" trivy
           sudo install -m 0755 "$RUNNER_TEMP/trivy" /usr/local/bin/trivy
           test "$(trivy --version | awk 'NR == 1 { print $2 }')" = "$TRIVY_VERSION"
 
-      # Build and scan each architecture before any registry login. These
-      # exact local images are pushed after the gate; there is no post-scan
+      # Build and scan on the native architecture before any registry login.
+      # This exact local image is pushed after the gate; there is no post-scan
       # rebuild that could change bytes.
-      - name: Build amd64 audit image
+      - name: Build audit image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: docker/runtime/Dockerfile
           target: ${{ matrix.target }}
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           build-args: |
             BUILD_PROFILE=release
             BUILD_ARTIFACT_DIR=release
@@ -168,59 +219,17 @@ jobs:
             org.opencontainers.image.source=https://github.com/instafy-dev/instafy
             org.opencontainers.image.revision=${{ needs.authorize.outputs.commit_sha }}
             org.opencontainers.image.version=${{ needs.authorize.outputs.commit_sha }}
-          cache-from: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-amd64
-          cache-to: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-amd64,mode=max
-          tags: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}-amd64
+          cache-from: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }}
+          cache-to: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-${{ matrix.architecture }},mode=max
+          tags: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}
           load: true
           push: false
           provenance: false
           sbom: false
 
-      - name: Scan amd64 audit image
+      - name: Scan audit image
         env:
-          AUDIT_IMAGE: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}-amd64
-        run: |
-          set -euo pipefail
-          empty_config="$RUNNER_TEMP/trivy.empty.yaml"
-          empty_ignore="$RUNNER_TEMP/trivy.empty-ignore"
-          printf '{}\n' > "$empty_config"
-          : > "$empty_ignore"
-          trivy image \
-            --config "$empty_config" \
-            --scanners vuln,secret \
-            --severity HIGH,CRITICAL \
-            --ignore-unfixed \
-            --ignorefile "$empty_ignore" \
-            --exit-code 1 \
-            --skip-version-check \
-            --no-progress \
-            "$AUDIT_IMAGE"
-
-      - name: Build arm64 audit image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: docker/runtime/Dockerfile
-          target: ${{ matrix.target }}
-          platforms: linux/arm64
-          build-args: |
-            BUILD_PROFILE=release
-            BUILD_ARTIFACT_DIR=release
-          labels: |
-            org.opencontainers.image.source=https://github.com/instafy-dev/instafy
-            org.opencontainers.image.revision=${{ needs.authorize.outputs.commit_sha }}
-            org.opencontainers.image.version=${{ needs.authorize.outputs.commit_sha }}
-          cache-from: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-arm64
-          cache-to: type=gha,scope=publish-runtime-agent-${{ matrix.flavor }}-arm64,mode=max
-          tags: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}-arm64
-          load: true
-          push: false
-          provenance: false
-          sbom: false
-
-      - name: Scan arm64 audit image
-        env:
-          AUDIT_IMAGE: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}-arm64
+          AUDIT_IMAGE: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}
         run: |
           set -euo pipefail
           empty_config="$RUNNER_TEMP/trivy.empty.yaml"
@@ -245,166 +254,265 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Push only the two scanned images and assemble the release manifest
-        id: push
+      - name: Push scanned image and record its digest
         shell: bash
         env:
-          AMD64_AUDIT_IMAGE: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}-amd64
-          ARM64_AUDIT_IMAGE: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}-arm64
-          CHANNEL_TAG: ${{ steps.refs.outputs.channel_tag }}
+          AUDIT_IMAGE: instafy-runtime-audit:${{ matrix.flavor }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.architecture }}
+          ARCH_TAG: ${{ steps.refs.outputs.arch_tag }}
           IMAGE: ${{ steps.refs.outputs.image }}
           RELEASE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}
-          RELEASE_TAG: ${{ steps.refs.outputs.release_tag }}
-          TAG_PREFIX: ${{ matrix.tag_prefix }}
-          UPDATE_CHANNEL_TAGS: ${{ inputs.update_channel_tags }}
-        run: |
-          set -euo pipefail
-          amd64_tag="${IMAGE}:${TAG_PREFIX}${RELEASE_COMMIT}-linux-amd64"
-          arm64_tag="${IMAGE}:${TAG_PREFIX}${RELEASE_COMMIT}-linux-arm64"
-          docker tag "$AMD64_AUDIT_IMAGE" "$amd64_tag"
-          docker tag "$ARM64_AUDIT_IMAGE" "$arm64_tag"
-          push_image() {
-            local tag="$1"
-            local log="$2"
-            local digest
-            docker push "$tag" | tee "$log" >&2
-            digest="$(
-              node scripts/lib/dockerPushDigest.mjs "$log"
-            )"
-            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-              echo "::error::Docker push did not return a valid digest for ${tag}." >&2
-              return 1
-            fi
-            printf '%s\n' "$digest"
-          }
-
-          amd64_digest="$(
-            push_image "$amd64_tag" "$RUNNER_TEMP/runtime-amd64-push.log"
-          )"
-          arm64_digest="$(
-            push_image "$arm64_tag" "$RUNNER_TEMP/runtime-arm64-push.log"
-          )"
-          metadata="$RUNNER_TEMP/runtime-manifest-metadata.json"
-          docker buildx imagetools create \
-            --metadata-file "$metadata" \
-            --tag "$RELEASE_TAG" \
-            "${IMAGE}@${amd64_digest}" \
-            "${IMAGE}@${arm64_digest}"
-          digest="$(jq -er '.["containerimage.digest"]' "$metadata")"
-          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::Manifest assembly did not return a valid immutable digest."
-            exit 1
-          fi
-          immutable_image="${IMAGE}@${digest}"
-
-          platforms="$(
-            docker buildx imagetools inspect "$immutable_image" --raw |
-              jq -c '
-                [.manifests[].platform |
-                  select(.os != "unknown" and .architecture != "unknown") |
-                  "\(.os)/\(.architecture)"
-                ] | sort
-              '
-          )"
-          if [[ "$platforms" != '["linux/amd64","linux/arm64"]' ]]; then
-            echo "::error::Assembled runtime manifest has unexpected platforms: ${platforms}."
-            exit 1
-          fi
-          if [[ "$UPDATE_CHANNEL_TAGS" == "true" ]]; then
-            docker buildx imagetools create \
-              --tag "$CHANNEL_TAG" \
-              "$immutable_image"
-          fi
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
-
-      - name: Verify and report immutable image
-        shell: bash
-        env:
-          IMAGE: ${{ steps.refs.outputs.image }}
-          RELEASE_TAG: ${{ steps.refs.outputs.release_tag }}
-          DIGEST: ${{ steps.push.outputs.digest }}
           FLAVOR: ${{ matrix.flavor }}
-          RELEASE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}
-          RELEASE_REF_DIR: ${{ runner.temp }}/runtime-agent-release-ref
+          ARCHITECTURE: ${{ matrix.architecture }}
+          PLATFORM: ${{ matrix.platform }}
+          RELEASE_REF_DIR: ${{ runner.temp }}/runtime-agent-arch-ref
         run: |
           set -euo pipefail
-
-          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::Build did not return a valid OCI manifest digest."
+          docker tag "$AUDIT_IMAGE" "$ARCH_TAG"
+          push_log="$RUNNER_TEMP/runtime-${FLAVOR}-${ARCHITECTURE}-push.log"
+          docker push "$ARCH_TAG" | tee "$push_log"
+          digest="$(
+            node scripts/lib/dockerPushDigest.mjs "$push_log"
+          )"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Docker push did not return a valid immutable digest."
             exit 1
           fi
-          if [[ ! "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::Release commit is not a full lowercase commit SHA."
-            exit 1
-          fi
-          if [[ "$FLAVOR" != "base" && "$FLAVOR" != "webdev" ]]; then
-            echo "::error::Unexpected runtime flavor."
-            exit 1
-          fi
-
-          immutable_image="${IMAGE}@${DIGEST}"
-          docker buildx imagetools inspect "$immutable_image" >/dev/null
+          immutable_ref="${IMAGE}@${digest}"
+          docker buildx imagetools inspect "$immutable_ref" >/dev/null
           mkdir -p "$RELEASE_REF_DIR"
-          IMMUTABLE_IMAGE="$immutable_image" node --input-type=module <<'NODE'
+          IMMUTABLE_REF="$immutable_ref" node --input-type=module <<'NODE'
           import fs from "node:fs";
           import path from "node:path";
 
-          const { FLAVOR, IMMUTABLE_IMAGE, RELEASE_COMMIT, RELEASE_REF_DIR } = process.env;
-          const imagePattern =
+          const {
+            ARCHITECTURE,
+            ARCH_TAG,
+            FLAVOR,
+            IMMUTABLE_REF,
+            PLATFORM,
+            RELEASE_COMMIT,
+            RELEASE_REF_DIR,
+          } = process.env;
+          const refPattern =
             /^ghcr\.io\/instafy-dev\/instafy-runtime-agent@sha256:[0-9a-f]{64}$/;
-          if (!["base", "webdev"].includes(FLAVOR) || !imagePattern.test(IMMUTABLE_IMAGE)) {
-            throw new Error("Refusing to record an invalid immutable runtime reference.");
+          const tagPattern =
+            /^ghcr\.io\/instafy-dev\/instafy-runtime-agent:(webdev-)?[0-9a-f]{40}-linux-(amd64|arm64)$/;
+          if (
+            !["base", "webdev"].includes(FLAVOR) ||
+            !["amd64", "arm64"].includes(ARCHITECTURE) ||
+            PLATFORM !== `linux/${ARCHITECTURE}` ||
+            !/^[0-9a-f]{40}$/.test(RELEASE_COMMIT) ||
+            !refPattern.test(IMMUTABLE_REF) ||
+            !tagPattern.test(ARCH_TAG)
+          ) {
+            throw new Error("Refusing to record an invalid architecture release record.");
           }
           const record = {
             schemaVersion: 1,
             coreCommit: RELEASE_COMMIT,
             flavor: FLAVOR,
-            immutableRef: IMMUTABLE_IMAGE,
+            architecture: ARCHITECTURE,
+            platform: PLATFORM,
+            archTag: ARCH_TAG,
+            immutableRef: IMMUTABLE_REF,
           };
           fs.writeFileSync(
-            path.join(RELEASE_REF_DIR, `${FLAVOR}.json`),
+            path.join(RELEASE_REF_DIR, `${FLAVOR}-${ARCHITECTURE}.json`),
             `${JSON.stringify(record, null, 2)}\n`,
             { flag: "wx", mode: 0o600 },
           );
           NODE
           {
-            echo "### ${FLAVOR} runtime-agent"
+            echo "### ${FLAVOR} ${ARCHITECTURE} runtime-agent"
             echo
-            echo "- Release tag: \`${RELEASE_TAG}\`"
-            echo "- Immutable image: \`${immutable_image}\`"
-            echo "- Platforms: \`linux/amd64\`, \`linux/arm64\`"
+            echo "- Architecture tag: \`${ARCH_TAG}\`"
+            echo "- Immutable image: \`${immutable_ref}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload immutable flavor reference
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      - name: Upload immutable architecture record
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: runtime-agent-release-ref-${{ matrix.flavor }}
-          path: ${{ runner.temp }}/runtime-agent-release-ref/${{ matrix.flavor }}.json
+          name: runtime-agent-arch-ref-${{ matrix.flavor }}-${{ matrix.architecture }}
+          path: ${{ runner.temp }}/runtime-agent-arch-ref/${{ matrix.flavor }}-${{ matrix.architecture }}.json
           if-no-files-found: error
           retention-days: 7
 
-  publish-release-manifest:
-    name: Publish immutable runtime release manifest
+  assemble-release-manifest:
+    name: Assemble and seal the runtime release manifest
     needs:
       - authorize
-      - publish-runtime-agent
+      - build-scan-push
     runs-on: ubuntu-latest
     permissions:
-      actions: read
       contents: read
+      packages: write
 
     steps:
-      - name: Download immutable flavor references
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
-          pattern: runtime-agent-release-ref-*
-          path: ${{ runner.temp }}/runtime-agent-release-refs
+          version: v0.35.0
+
+      - name: Download immutable architecture records
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          pattern: runtime-agent-arch-ref-*
+          path: ${{ runner.temp }}/runtime-agent-arch-refs
           merge-multiple: true
+
+      - name: Validate exactly two architectures per flavor
+        env:
+          EXPECTED_CORE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}
+          RELEASE_REF_DIR: ${{ runner.temp }}/runtime-agent-arch-refs
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import path from "node:path";
+
+          const { EXPECTED_CORE_COMMIT, RELEASE_REF_DIR } = process.env;
+          if (!/^[0-9a-f]{40}$/.test(EXPECTED_CORE_COMMIT)) {
+            throw new Error("Expected core commit is invalid.");
+          }
+          const refPattern =
+            /^ghcr\.io\/instafy-dev\/instafy-runtime-agent@sha256:[0-9a-f]{64}$/;
+          const flavors = ["base", "webdev"];
+          const architectures = ["amd64", "arm64"];
+          const expected = flavors.flatMap((flavor) =>
+            architectures.map((architecture) => `${flavor}-${architecture}.json`),
+          );
+          const actual = fs.readdirSync(RELEASE_REF_DIR).sort();
+          if (actual.join("\0") !== [...expected].sort().join("\0")) {
+            throw new Error(
+              `Expected exactly two architectures per flavor, found: ${actual.join(", ")}`,
+            );
+          }
+          for (const flavor of flavors) {
+            const refs = {};
+            for (const architecture of architectures) {
+              const filename = path.join(
+                RELEASE_REF_DIR,
+                `${flavor}-${architecture}.json`,
+              );
+              const record = JSON.parse(fs.readFileSync(filename, "utf8"));
+              const keys = Object.keys(record).sort();
+              const expectedKeys = [
+                "archTag",
+                "architecture",
+                "coreCommit",
+                "flavor",
+                "immutableRef",
+                "platform",
+                "schemaVersion",
+              ];
+              const tagPrefix = flavor === "webdev" ? "webdev-" : "";
+              const expectedTag =
+                "ghcr.io/instafy-dev/instafy-runtime-agent:" +
+                `${tagPrefix}${EXPECTED_CORE_COMMIT}-linux-${architecture}`;
+              if (
+                keys.join("\0") !== expectedKeys.join("\0") ||
+                record.schemaVersion !== 1 ||
+                record.coreCommit !== EXPECTED_CORE_COMMIT ||
+                record.flavor !== flavor ||
+                record.architecture !== architecture ||
+                record.platform !== `linux/${architecture}` ||
+                record.archTag !== expectedTag ||
+                !refPattern.test(record.immutableRef)
+              ) {
+                throw new Error(`Invalid ${flavor}/${architecture} release record.`);
+              }
+              refs[architecture] = record.immutableRef;
+            }
+            if (refs.amd64 === refs.arm64) {
+              throw new Error(
+                `${flavor}: amd64 and arm64 images must have distinct digests.`,
+              );
+            }
+          }
+          NODE
+
+      - name: Login to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Assemble commit-SHA multiarch manifests from immutable digests
+        id: assemble
+        shell: bash
+        env:
+          EXPECTED_CORE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}
+          RELEASE_REF_DIR: ${{ runner.temp }}/runtime-agent-arch-refs
+          RELEASE_MANIFEST_DIR: ${{ runner.temp }}/runtime-agent-release-manifest
+          UPDATE_CHANNEL_TAGS: ${{ inputs.update_channel_tags }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/instafy-dev/instafy-runtime-agent"
+          mkdir -p "$RELEASE_MANIFEST_DIR"
+          for flavor in base webdev; do
+            if [[ "$flavor" == "webdev" ]]; then
+              tag_prefix="webdev-"
+              channel_tag="${image}:webdev"
+            else
+              tag_prefix=""
+              channel_tag="${image}:latest"
+            fi
+            amd64_ref="$(jq -er '.immutableRef' "$RELEASE_REF_DIR/${flavor}-amd64.json")"
+            arm64_ref="$(jq -er '.immutableRef' "$RELEASE_REF_DIR/${flavor}-arm64.json")"
+            release_tag="${image}:${tag_prefix}${EXPECTED_CORE_COMMIT}"
+            metadata="$RUNNER_TEMP/${flavor}-manifest-metadata.json"
+            docker buildx imagetools create \
+              --metadata-file "$metadata" \
+              --tag "$release_tag" \
+              "$amd64_ref" \
+              "$arm64_ref"
+            digest="$(jq -er '.["containerimage.descriptor"].digest' "$metadata")"
+            if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::Manifest assembly did not return a valid immutable digest."
+              exit 1
+            fi
+            immutable_image="${image}@${digest}"
+            platforms="$(
+              docker buildx imagetools inspect "$immutable_image" --raw |
+                jq -c '
+                  [.manifests[].platform |
+                    select(.os != "unknown" and .architecture != "unknown") |
+                    "\(.os)/\(.architecture)"
+                  ] | sort
+                '
+            )"
+            if [[ "$platforms" != '["linux/amd64","linux/arm64"]' ]]; then
+              echo "::error::Assembled ${flavor} manifest has unexpected platforms: ${platforms}."
+              exit 1
+            fi
+            if [[ "$UPDATE_CHANNEL_TAGS" == "true" ]]; then
+              docker buildx imagetools create \
+                --tag "$channel_tag" \
+                "$immutable_image"
+            fi
+            jq -n \
+              --arg coreCommit "$EXPECTED_CORE_COMMIT" \
+              --arg flavor "$flavor" \
+              --arg immutableRef "$immutable_image" \
+              '{
+                schemaVersion: 1,
+                coreCommit: $coreCommit,
+                flavor: $flavor,
+                immutableRef: $immutableRef
+              }' > "$RELEASE_MANIFEST_DIR/${flavor}.json"
+            {
+              echo "### ${flavor} runtime-agent"
+              echo
+              echo "- Release tag: \`${release_tag}\`"
+              echo "- Immutable image: \`${immutable_image}\`"
+              echo "- Platforms: \`linux/amd64\`, \`linux/arm64\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
 
       - name: Aggregate exact release manifest
         env:
           EXPECTED_CORE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}
-          RELEASE_REF_DIR: ${{ runner.temp }}/runtime-agent-release-refs
           RELEASE_MANIFEST_DIR: ${{ runner.temp }}/runtime-agent-release-manifest
         run: |
           set -euo pipefail
@@ -412,11 +520,7 @@ jobs:
           import fs from "node:fs";
           import path from "node:path";
 
-          const {
-            EXPECTED_CORE_COMMIT,
-            RELEASE_MANIFEST_DIR,
-            RELEASE_REF_DIR,
-          } = process.env;
+          const { EXPECTED_CORE_COMMIT, RELEASE_MANIFEST_DIR } = process.env;
           if (!/^[0-9a-f]{40}$/.test(EXPECTED_CORE_COMMIT)) {
             throw new Error("Expected core commit is invalid.");
           }
@@ -424,7 +528,7 @@ jobs:
             /^ghcr\.io\/instafy-dev\/instafy-runtime-agent@sha256:[0-9a-f]{64}$/;
           const images = {};
           for (const flavor of ["base", "webdev"]) {
-            const filename = path.join(RELEASE_REF_DIR, `${flavor}.json`);
+            const filename = path.join(RELEASE_MANIFEST_DIR, `${flavor}.json`);
             const record = JSON.parse(fs.readFileSync(filename, "utf8"));
             const keys = Object.keys(record).sort();
             if (
@@ -447,7 +551,6 @@ jobs:
             coreCommit: EXPECTED_CORE_COMMIT,
             images,
           };
-          fs.mkdirSync(RELEASE_MANIFEST_DIR, { recursive: true, mode: 0o700 });
           fs.writeFileSync(
             path.join(RELEASE_MANIFEST_DIR, "runtime-agent-release-manifest.json"),
             `${JSON.stringify(manifest, null, 2)}\n`,
@@ -455,8 +558,24 @@ jobs:
           );
           NODE
 
+      - name: Upload immutable flavor references
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runtime-agent-release-ref-base
+          path: ${{ runner.temp }}/runtime-agent-release-manifest/base.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload immutable webdev flavor reference
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: runtime-agent-release-ref-webdev
+          path: ${{ runner.temp }}/runtime-agent-release-manifest/webdev.json
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Upload runtime-agent release manifest
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: runtime-agent-release-manifest
           path: ${{ runner.temp }}/runtime-agent-release-manifest/runtime-agent-release-manifest.json

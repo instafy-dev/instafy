@@ -86,13 +86,14 @@ test("npm publication is bound to exact protected main and a release environment
 
 test("runtime images publish only exact protected main from a fixed namespace", () => {
   const source = readWorkflow("publish-runtime-agent.yml");
-  const authorize = jobSection(source, "authorize", "publish-runtime-agent");
+  const authorize = jobSection(source, "authorize", "release-approval");
+  const approval = jobSection(source, "release-approval", "build-scan-push");
   const publish = jobSection(
     source,
-    "publish-runtime-agent",
-    "publish-release-manifest",
+    "build-scan-push",
+    "assemble-release-manifest",
   );
-  const manifest = jobSection(source, "publish-release-manifest");
+  const manifest = jobSection(source, "assemble-release-manifest");
 
   assert.match(source, /\n      commit_sha:\n/u);
   assert.match(source, /commit_sha:[\s\S]*required: true/u);
@@ -106,14 +107,39 @@ test("runtime images publish only exact protected main from a fixed namespace", 
   assert.match(authorize, /\^\[0-9a-f\]\{40\}\$/u);
   assert.match(authorize, /REQUESTED_COMMIT" != "\$GITHUB_SHA"/u);
   assert.doesNotMatch(authorize, /packages: write/u);
-  assert.match(publish, /environment: ghcr-release/u);
+
+  // Exactly one protected-environment approval gates the whole release.
+  assert.equal(
+    [...source.matchAll(/environment: ghcr-release/gu)].length,
+    1,
+    "the ghcr-release environment must gate exactly one job",
+  );
+  assert.match(approval, /needs: authorize/u);
+  assert.match(approval, /environment: ghcr-release/u);
+  assert.match(approval, /permissions: \{\}/u);
+  assert.doesNotMatch(approval, /packages: write/u);
+
+  // Every flavor×architecture cell builds natively — no QEMU emulation.
+  assert.doesNotMatch(source, /setup-qemu/u);
+  assert.doesNotMatch(source, /binfmt/u);
+  assert.match(publish, /- release-approval/u);
+  assert.match(publish, /runs-on: \$\{\{ matrix\.runner \}\}/u);
+  assert.match(publish, /runner: ubuntu-24\.04\n/u);
+  assert.match(publish, /runner: ubuntu-24\.04-arm\n/u);
+  assert.match(publish, /trivy_asset: Linux-64bit/u);
+  assert.match(publish, /trivy_asset: Linux-ARM64/u);
+  assert.match(
+    publish,
+    /trivy_sha256: "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"/u,
+  );
+  assert.match(
+    publish,
+    /trivy_sha256: "2ca2c023109c2db6b2b77366b6717291452d4531167377d95c79547f0c8e3467"/u,
+  );
+  assert.doesNotMatch(publish, /environment:/u);
   assert.match(publish, /packages: write/u);
   assert.match(publish, /IMAGE_NAMESPACE: instafy-dev/u);
   assert.match(publish, /persist-credentials: false/u);
-  assert.match(
-    publish,
-    /image: tonistiigi\/binfmt:qemu-v10\.0\.4@sha256:[0-9a-f]{64}/u,
-  );
   assert.match(publish, /version: v0\.35\.0/u);
   assert.match(
     publish,
@@ -122,27 +148,42 @@ test("runtime images publish only exact protected main from a fixed namespace", 
   assert.doesNotMatch(publish, /\$\{\{ github\.sha \}\}/u);
   assertOrdered(
     publish,
-    "- name: Build amd64 audit image",
-    "- name: Scan amd64 audit image",
-    "- name: Build arm64 audit image",
-    "- name: Scan arm64 audit image",
+    "- name: Build audit image",
+    "- name: Scan audit image",
     "- name: Login to GHCR",
-    "- name: Push only the two scanned images and assemble the release manifest",
+    "- name: Push scanned image and record its digest",
   );
-  assert.match(publish, /name: runtime-agent-release-ref-\$\{\{ matrix\.flavor \}\}/u);
-  assert.match(manifest, /needs:[\s\S]*- publish-runtime-agent/u);
+  assert.match(
+    publish,
+    /name: runtime-agent-arch-ref-\$\{\{ matrix\.flavor \}\}-\$\{\{ matrix\.architecture \}\}/u,
+  );
+
+  // The downstream job assembles multiarch manifests from immutable digests,
+  // so it is a publishing job: registry write via the workflow token only.
+  assert.match(manifest, /needs:[\s\S]*- build-scan-push/u);
+  assert.match(manifest, /packages: write/u);
+  assert.doesNotMatch(manifest, /environment:/u);
+  assert.match(manifest, /- name: Validate exactly two architectures per flavor/u);
   assert.match(manifest, /name: runtime-agent-release-manifest/u);
   assert.match(manifest, /coreCommit: EXPECTED_CORE_COMMIT/u);
   assert.match(
     manifest,
     /ghcr\\\.io\\\/instafy-dev\\\/instafy-runtime-agent@sha256:/u,
   );
-  assert.doesNotMatch(manifest, /packages: write/u);
-  assert.doesNotMatch(manifest, /\bsecrets\./u);
+  assert.match(manifest, /\["linux\/amd64","linux\/arm64"\]/u);
   assertOrdered(
     manifest,
-    "- name: Download immutable flavor references",
+    "- name: Download immutable architecture records",
+    "- name: Validate exactly two architectures per flavor",
+    "- name: Login to GHCR",
+    "- name: Assemble commit-SHA multiarch manifests from immutable digests",
     "- name: Aggregate exact release manifest",
     "- name: Upload runtime-agent release manifest",
+  );
+  // Channel tags move only on explicit request.
+  assertOrdered(
+    manifest,
+    'if [[ "$UPDATE_CHANNEL_TAGS" == "true" ]]',
+    '--tag "$channel_tag"',
   );
 });

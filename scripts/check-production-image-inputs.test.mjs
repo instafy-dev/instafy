@@ -231,16 +231,16 @@ test("cargo-chef installation is version-locked", () => {
   }
 });
 
-test("runtime publication scans amd64 and arm64 before registry login", () => {
+test("runtime publication scans each native architecture before registry login", () => {
   const source = read(".github/workflows/publish-runtime-agent.yml");
   const cleanup = source.indexOf(
-    "- name: Reclaim hosted-runner disk for audited images",
+    "- name: Reclaim hosted-runner disk for the audited image",
   );
   const login = source.indexOf("- name: Login to GHCR");
   const push = source.indexOf(
-    "- name: Push only the two scanned images and assemble the release manifest",
+    "- name: Push scanned image and record its digest",
   );
-  const firstBuild = source.indexOf("- name: Build amd64 audit image");
+  const firstBuild = source.indexOf("- name: Build audit image");
   assert.ok(cleanup > 0 && cleanup < firstBuild);
   assertOrdered(
     source.slice(cleanup, firstBuild),
@@ -254,22 +254,44 @@ test("runtime publication scans amd64 and arm64 before registry login", () => {
   assert.ok(login > 0 && push > login, "runtime publication login/push order is malformed");
   const beforeLogin = source.slice(0, login);
 
+  // Each flavor×architecture cell builds NATIVELY on an architecture-matched
+  // hosted runner — no QEMU emulation anywhere in the workflow.
+  assert.doesNotMatch(source, /setup-qemu/u);
+  assert.doesNotMatch(source, /binfmt/u);
+  assert.match(beforeLogin, /runner: ubuntu-24\.04\n/u);
+  assert.match(beforeLogin, /runner: ubuntu-24\.04-arm\n/u);
+  assert.match(beforeLogin, /platform: linux\/amd64/u);
+  assert.match(beforeLogin, /platform: linux\/arm64/u);
   assertOrdered(
     beforeLogin,
     "runtime publication",
-    "- name: Build amd64 audit image",
-    "platforms: linux/amd64",
+    "- name: Build audit image",
+    "platforms: ${{ matrix.platform }}",
     "load: true",
-    "- name: Scan amd64 audit image",
-    "- name: Build arm64 audit image",
-    "platforms: linux/arm64",
-    "load: true",
-    "- name: Scan arm64 audit image",
+    "- name: Scan audit image",
   );
   assert.equal(
     [...beforeLogin.matchAll(/"\$AUDIT_IMAGE"/gu)].length,
-    2,
-    "each architecture must be scanned from its exact local image",
+    1,
+    "each cell must scan its exact local image before login",
+  );
+  // The scan must be blocking and complete: vuln+secret, HIGH/CRITICAL,
+  // non-zero exit — asserted against the pre-login section so weakening the
+  // runtime gate (not just the services gate) fails the suite.
+  assert.match(beforeLogin, /--scanners vuln,secret/u);
+  assert.match(beforeLogin, /--severity HIGH,CRITICAL/u);
+  assert.match(beforeLogin, /--exit-code 1/u);
+  // Trivy pinning must be enforced, not just declared as matrix data:
+  // download -> checksum verification -> extraction -> version equality.
+  assert.match(beforeLogin, /TRIVY_VERSION: "0\.72\.0"/u);
+  assertOrdered(
+    beforeLogin,
+    "runtime Trivy install",
+    "- name: Install pinned Trivy",
+    "curl --proto '=https' --tlsv1.2",
+    "sha256sum --check --status",
+    "tar -xzf",
+    'test "$(trivy --version',
   );
   const afterLogin = source.slice(login);
   assert.doesNotMatch(
@@ -277,11 +299,14 @@ test("runtime publication scans amd64 and arm64 before registry login", () => {
     /docker\/build-push-action/u,
     "publication must not rebuild after the scan gate",
   );
-  assert.match(afterLogin, /docker push "\$tag"/u);
-  assert.match(afterLogin, /push_image "\$amd64_tag"/u);
-  assert.match(afterLogin, /push_image "\$arm64_tag"/u);
+  assert.doesNotMatch(
+    source,
+    /docker save/u,
+    "image bytes must never be exported as workflow artifacts",
+  );
+  assert.match(afterLogin, /docker push "\$ARCH_TAG"/u);
   assert.match(afterLogin, /docker buildx imagetools create/u);
   assert.match(afterLogin, /--metadata-file "\$metadata"/u);
-  assert.match(afterLogin, /\.\["containerimage\.digest"\]/u);
+  assert.match(afterLogin, /\.\["containerimage\.descriptor"\]\.digest/u);
   assert.match(afterLogin, /\["linux\/amd64","linux\/arm64"\]/u);
 });
