@@ -162,25 +162,51 @@ test("runtime downloads verify architecture-bound checksums before extraction", 
   );
   assert.equal(
     [...source.matchAll(/sha256sum --check --status/gu)].length,
-    3,
+    5,
     "runtime and webdev downloads must each verify their archive",
   );
   assert.equal(
     [...source.matchAll(/curl --proto '=https' --tlsv1\.2/gu)].length,
-    3,
+    5,
     "runtime release downloads must enforce HTTPS and TLS 1.2+",
   );
 
+  // The CVE-2026-14257 patch of npm's vendored brace-expansion must stay
+  // pinned by exact version and tarball checksum, and both runtime flavors
+  // must verify the replaced module's version after extraction.
+  assert.equal(
+    argumentDefaults(source).get("BRACE_EXPANSION_VERSION"),
+    "5.0.8",
+  );
+  assertPinnedChecksumArgument(
+    source,
+    "BRACE_EXPANSION_SHA256",
+    "a03b06e66d862d0278b1ff45b66427f245f99c665800dc9bd790c0c13d2247fe",
+    relativePath,
+  );
+  assert.equal(
+    [...source.matchAll(
+      /node_modules\/npm\/node_modules\/brace-expansion --strip-components=1/gu,
+    )].length,
+    2,
+    "both runtime flavors must replace npm's vendored brace-expansion",
+  );
+  assert.equal(
+    [...source.matchAll(/unexpected vendored brace-expansion/gu)].length,
+    2,
+    "both runtime flavors must assert the replaced module version",
+  );
+
+  // Anchor each download on its own URL/target rather than "first curl in the
+  // stage": the stages also contain the brace-expansion patch download.
+  const ratholeCurl = 'curl --proto \'=https\' --tlsv1.2 --fail --location --silent --show-error -o /tmp/rathole.zip';
   const firstRathole = source.indexOf(
-    "curl --proto '=https' --tlsv1.2",
+    ratholeCurl,
     source.indexOf("FROM ${RUNTIME_BASE} AS runtime"),
   );
   const webdev = source.indexOf("FROM ${WEBDEV_BASE} AS runtime-webdev");
-  const uBlockDownload = source.indexOf("curl --proto '=https' --tlsv1.2", webdev);
-  const secondRathole = source.indexOf(
-    "curl --proto '=https' --tlsv1.2",
-    uBlockDownload + 1,
-  );
+  const uBlockDownload = source.indexOf("ublock.zip", webdev);
+  const secondRathole = source.indexOf(ratholeCurl, uBlockDownload + 1);
   for (const [label, start, archive, extraction] of [
     ["runtime Rathole", firstRathole, "/tmp/rathole.zip", "unzip -q /tmp/rathole.zip"],
     ["webdev uBlock", uBlockDownload, "/tmp/ublock.zip", "unzip -q /tmp/ublock.zip"],
