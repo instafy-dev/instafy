@@ -152,9 +152,17 @@ test("trusted boundary binds the server merge ref to both event parents", () => 
     /test "\$\{parent_shas\[1\]\}" = "\$EXPECTED_HEAD_SHA"/u,
   );
   assert.doesNotMatch(verification, /show -s --format='%H %P'/u);
+  // The parents binding is the load-bearing check. A strict equality against
+  // the payload's merge OID must NOT come back: GitHub re-mints the merge ref
+  // lazily (same parents, new timestamp => new OID), so that equality fails on
+  // timing alone and turns the required gate into a coin flip.
+  assert.doesNotMatch(
+    verification,
+    /test "\$actual_merge_sha" = "\$EXPECTED_MERGE_SHA"/u,
+  );
   assert.match(
     verification,
-    /if \[\[ -n "\$EXPECTED_MERGE_SHA" \]\]; then[\s\S]*\[\[ "\$EXPECTED_MERGE_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\][\s\S]*test "\$actual_merge_sha" = "\$EXPECTED_MERGE_SHA"[\s\S]*fi/u,
+    /if \[\[ -n "\$EXPECTED_MERGE_SHA" \]\]; then[\s\S]*\[\[ "\$EXPECTED_MERGE_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\][\s\S]*fi/u,
   );
 });
 
