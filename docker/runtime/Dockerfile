@@ -8,6 +8,11 @@ ARG CLI_NODE_IMAGE=node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134
 ARG PLAYWRIGHT_VERSION=1.61.1
 ARG NPM_VERSION=12.0.1
 ARG PNPM_VERSION=11.17.0
+# npm (through 12.0.2) vendors brace-expansion 5.0.7, which is vulnerable to
+# CVE-2026-14257 (HIGH, ReDoS). Until an npm release vendors >= 5.0.8, replace
+# the vendored copy with the exact fixed tarball, checksum-verified.
+ARG BRACE_EXPANSION_VERSION=5.0.8
+ARG BRACE_EXPANSION_SHA256=a03b06e66d862d0278b1ff45b66427f245f99c665800dc9bd790c0c13d2247fe
 # Rathole is used for self-hosted tunnel ingress. The crates.io release currently
 # depends on older `time` versions that fail to compile on newer Rust toolchains,
 # so we install a prebuilt release binary instead of `cargo install`.
@@ -184,6 +189,8 @@ ARG TARGETARCH
 ARG PLAYWRIGHT_VERSION
 ARG NPM_VERSION
 ARG PNPM_VERSION
+ARG BRACE_EXPANSION_VERSION
+ARG BRACE_EXPANSION_SHA256
 
 COPY --from=node-runtime /usr/local/ /usr/local/
 RUN apt-get update && \
@@ -208,6 +215,15 @@ RUN npm install -g "npm@${NPM_VERSION}" && \
     npm install -g "pnpm@${PNPM_VERSION}" && \
     ln -sf /usr/local/bin/pnpm /usr/local/bin/pnpx && \
     if [ ! -e /usr/local/bin/npx ] && [ -x /usr/bin/npx ]; then ln -s /usr/bin/npx /usr/local/bin/npx; fi && \
+    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+      "https://registry.npmjs.org/brace-expansion/-/brace-expansion-${BRACE_EXPANSION_VERSION}.tgz" \
+      --output /tmp/brace-expansion.tgz && \
+    printf '%s  %s\n' "${BRACE_EXPANSION_SHA256}" /tmp/brace-expansion.tgz | sha256sum --check --status && \
+    rm -rf /usr/local/lib/node_modules/npm/node_modules/brace-expansion && \
+    mkdir -p /usr/local/lib/node_modules/npm/node_modules/brace-expansion && \
+    tar -xzf /tmp/brace-expansion.tgz -C /usr/local/lib/node_modules/npm/node_modules/brace-expansion --strip-components=1 && \
+    rm /tmp/brace-expansion.tgz && \
+    node -e "const v = require('/usr/local/lib/node_modules/npm/node_modules/brace-expansion/package.json').version; if (v !== '${BRACE_EXPANSION_VERSION}') { throw new Error('unexpected vendored brace-expansion ' + v); }" && \
     rm -rf /root/.npm
 
 ARG BUILD_PROFILE=dev
@@ -286,6 +302,8 @@ ARG TARGETARCH
 ARG PLAYWRIGHT_VERSION
 ARG NPM_VERSION
 ARG PNPM_VERSION
+ARG BRACE_EXPANSION_VERSION
+ARG BRACE_EXPANSION_SHA256
 # uBlock Origin Lite (Manifest V3) provides ad blocking on modern Chromium builds.
 # uBlock Origin itself is Manifest V2 which may be blocked/disabled in newer releases.
 ARG UBOLITE_VERSION=2026.301.2014
@@ -317,6 +335,15 @@ RUN npm install -g "npm@${NPM_VERSION}" && \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g "playwright@${PLAYWRIGHT_VERSION}" "@playwright/test@${PLAYWRIGHT_VERSION}" && \
     npm install -g "pnpm@${PNPM_VERSION}" && \
     if [ ! -e /usr/local/bin/npx ] && [ -x /usr/bin/npx ]; then ln -s /usr/bin/npx /usr/local/bin/npx; fi && \
+    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+      "https://registry.npmjs.org/brace-expansion/-/brace-expansion-${BRACE_EXPANSION_VERSION}.tgz" \
+      --output /tmp/brace-expansion.tgz && \
+    printf '%s  %s\n' "${BRACE_EXPANSION_SHA256}" /tmp/brace-expansion.tgz | sha256sum --check --status && \
+    rm -rf /usr/local/lib/node_modules/npm/node_modules/brace-expansion && \
+    mkdir -p /usr/local/lib/node_modules/npm/node_modules/brace-expansion && \
+    tar -xzf /tmp/brace-expansion.tgz -C /usr/local/lib/node_modules/npm/node_modules/brace-expansion --strip-components=1 && \
+    rm /tmp/brace-expansion.tgz && \
+    node -e "const v = require('/usr/local/lib/node_modules/npm/node_modules/brace-expansion/package.json').version; if (v !== '${BRACE_EXPANSION_VERSION}') { throw new Error('unexpected vendored brace-expansion ' + v); }" && \
     rm -rf /root/.npm
 
 # Keep the headed browser usable for humans by shipping an ad blocker extension.
