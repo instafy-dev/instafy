@@ -87,7 +87,10 @@ jobs:
       contents: read
       packages: write
     strategy:
-      fail-fast: true
+      # fail-fast off: a failing cell must not cancel siblings mid-push and
+      # strand arch tags; the assemble job's exact-fileset validation is the
+      # single aggregation gate (matches the production-services choice).
+      fail-fast: false
       matrix:
         include:
           - flavor: base
@@ -145,9 +148,10 @@ jobs:
             /usr/local/lib/android \
             /usr/share/dotnet
           available_kib="$(df -Pk / | awk 'NR == 2 { print $4 }')"
+          echo "Free disk after reclaim: ${available_kib} KiB"
           if [[ ! "$available_kib" =~ ^[0-9]+$ ]] ||
             (( available_kib < 20 * 1024 * 1024 )); then
-            echo "::error::Runtime image publication requires at least 20 GiB of free disk."
+            echo "::error::Runtime image publication requires at least 20 GiB of free disk (have ${available_kib} KiB)."
             exit 1
           fi
 
@@ -463,7 +467,7 @@ jobs:
               --tag "$release_tag" \
               "$amd64_ref" \
               "$arm64_ref"
-            digest="$(jq -er '.["containerimage.digest"]' "$metadata")"
+            digest="$(jq -er '.["containerimage.descriptor"].digest' "$metadata")"
             if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
               echo "::error::Manifest assembly did not return a valid immutable digest."
               exit 1

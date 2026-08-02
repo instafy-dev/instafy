@@ -275,15 +275,38 @@ test("runtime publication scans each native architecture before registry login",
     1,
     "each cell must scan its exact local image before login",
   );
+  // The scan must be blocking and complete: vuln+secret, HIGH/CRITICAL,
+  // non-zero exit — asserted against the pre-login section so weakening the
+  // runtime gate (not just the services gate) fails the suite.
+  assert.match(beforeLogin, /--scanners vuln,secret/u);
+  assert.match(beforeLogin, /--severity HIGH,CRITICAL/u);
+  assert.match(beforeLogin, /--exit-code 1/u);
+  // Trivy pinning must be enforced, not just declared as matrix data:
+  // download -> checksum verification -> extraction -> version equality.
+  assert.match(beforeLogin, /TRIVY_VERSION: "0\.72\.0"/u);
+  assertOrdered(
+    beforeLogin,
+    "runtime Trivy install",
+    "- name: Install pinned Trivy",
+    "curl --proto '=https' --tlsv1.2",
+    "sha256sum --check --status",
+    "tar -xzf",
+    'test "$(trivy --version',
+  );
   const afterLogin = source.slice(login);
   assert.doesNotMatch(
     afterLogin,
     /docker\/build-push-action/u,
     "publication must not rebuild after the scan gate",
   );
+  assert.doesNotMatch(
+    source,
+    /docker save/u,
+    "image bytes must never be exported as workflow artifacts",
+  );
   assert.match(afterLogin, /docker push "\$ARCH_TAG"/u);
   assert.match(afterLogin, /docker buildx imagetools create/u);
   assert.match(afterLogin, /--metadata-file "\$metadata"/u);
-  assert.match(afterLogin, /\.\["containerimage\.digest"\]/u);
+  assert.match(afterLogin, /\.\["containerimage\.descriptor"\]\.digest/u);
   assert.match(afterLogin, /\["linux\/amd64","linux\/arm64"\]/u);
 });
