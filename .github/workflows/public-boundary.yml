@@ -60,6 +60,10 @@ jobs:
           EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           EXPECTED_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          # Read-only: resolves whether the merge candidate's base parent is
+          # contained in the base branch. Never used to fetch candidate code.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [[ "$EXPECTED_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
@@ -75,8 +79,38 @@ jobs:
               sed -n '/^$/q; s/^parent //p'
           )
           test "${#parent_shas[@]}" -eq 2
-          test "${parent_shas[0]}" = "$EXPECTED_BASE_SHA"
+          # The head parent is bound exactly: this is what proves the candidate
+          # contains this pull request's code and nothing else.
           test "${parent_shas[1]}" = "$EXPECTED_HEAD_SHA"
+          # The base parent is bound to real base-branch history rather than to
+          # the event payload's base.sha. GitHub freezes that field, so once the
+          # base branch advances every later merge candidate is minted against
+          # the newer tip and an exact comparison can never succeed again — the
+          # pull request becomes permanently unmergeable and has to be recreated.
+          # Requiring the base parent to be contained in the base branch keeps
+          # the property that matters (the merge is against genuine repository
+          # history, not a base an author supplied) while letting the branch move.
+          if [ "${parent_shas[0]}" = "$EXPECTED_BASE_SHA" ]; then
+            base_relation=identical
+          else
+            base_relation="$(
+              gh api \
+                "repos/${GITHUB_REPOSITORY}/compare/${parent_shas[0]}...${BASE_REF}" \
+                --jq '.status'
+            )"
+          fi
+          case "$base_relation" in
+            identical|ahead)
+              # identical: the base parent is the current branch tip.
+              # ahead: the branch has moved on, so the parent is an ancestor.
+              # Anything else — behind or diverged — means the base parent is
+              # not contained in the branch and must be rejected.
+              ;;
+            *)
+              echo "::error::Merge candidate base parent ${parent_shas[0]} is not part of ${BASE_REF} history (${base_relation})."
+              exit 1
+              ;;
+          esac
           # The parents binding above is the security property: the candidate
           # is a server-minted merge of exactly the event's base and head, so
           # base-owned tooling scans exactly this PR's content. Do NOT also
