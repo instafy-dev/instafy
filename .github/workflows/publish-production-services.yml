@@ -47,11 +47,36 @@ jobs:
           fi
           echo "commit_sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
 
-  publish:
-    name: Publish ${{ matrix.key }}
+  release-approval:
+    name: Approve the exact release once
     needs: authorize
     runs-on: ubuntu-latest
     environment: ghcr-release
+    permissions: {}
+    steps:
+      - name: Record the approved release commit
+        shell: bash
+        env:
+          RELEASE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Refusing to approve a release without an exact commit."
+            exit 1
+          fi
+          {
+            echo "### ghcr-release approval"
+            echo
+            echo "- Approved production service release for public core \`${RELEASE_COMMIT}\`."
+            echo "- This single approval covers every image in the matrix below."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    name: Publish ${{ matrix.key }}
+    needs:
+      - authorize
+      - release-approval
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write

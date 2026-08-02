@@ -52,6 +52,41 @@ test("production services are exact-main, fixed-namespace, amd64 releases", () =
   assert.match(source, /--platform linux\/amd64/u);
 });
 
+test("one protected approval covers the whole exact-SHA service release", () => {
+  const source = readWorkflow();
+
+  // The protected environment gate exists exactly once, on a dedicated
+  // non-matrix approval job, so one approval covers every matrix row instead
+  // of expiring between scheduled batches.
+  assert.equal(
+    [...source.matchAll(/environment: ghcr-release/gu)].length,
+    1,
+    "the ghcr-release environment must gate exactly one job",
+  );
+  assertOrdered(
+    source,
+    "  release-approval:",
+    "needs: authorize",
+    "environment: ghcr-release",
+    "permissions: {}",
+    "- name: Record the approved release commit",
+    "  publish:",
+  );
+  const publishStart = source.indexOf("  publish:\n");
+  const publishSection = source.slice(
+    publishStart,
+    source.indexOf("  manifest:\n", publishStart),
+  );
+  assert.doesNotMatch(
+    publishSection,
+    /environment:/u,
+    "matrix publishing jobs must not each re-enter the protected environment",
+  );
+  assert.match(publishSection, /- release-approval/u);
+  assert.match(publishSection, /- authorize/u);
+  assert.match(publishSection, /packages: write/u);
+});
+
 test("every service is scanned before registry login and publication", () => {
   const source = readWorkflow();
   assertOrdered(
