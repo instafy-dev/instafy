@@ -85,6 +85,29 @@ test("one protected approval covers the whole exact-SHA service release", () => 
   assert.match(publishSection, /- release-approval/u);
   assert.match(publishSection, /- authorize/u);
   assert.match(publishSection, /packages: write/u);
+  assert.match(publishSection, /persist-credentials: false/u);
+
+  const authorizeSection = source.slice(
+    source.indexOf("  authorize:\n"),
+    source.indexOf("  release-approval:\n"),
+  );
+  assert.doesNotMatch(authorizeSection, /packages: write/u);
+  assert.doesNotMatch(authorizeSection, /environment:/u);
+
+  // Trivy pinning must be enforced in the services workflow too.
+  assert.match(
+    source,
+    /TRIVY_LINUX_X64_SHA256: "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"/u,
+  );
+  assert.match(source, /TRIVY_VERSION: "0\.72\.0"/u);
+  assertOrdered(
+    source,
+    "- name: Install pinned Trivy",
+    "curl --proto '=https' --tlsv1.2",
+    "sha256sum --check --status",
+    "tar -xzf",
+    'test "$(trivy --version',
+  );
 });
 
 test("every service is scanned before registry login and publication", () => {
