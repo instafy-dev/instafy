@@ -63,6 +63,47 @@ generated or packed artifact from a clean temporary directory.
 Environment-gated browser, mobile, Desktop, Docker and hardware suites should stay explicit.
 Do not silently turn a missing external dependency into a passing test.
 
+## Driving the app as a signed-in user
+
+Everything past `/login` needs a session, so verification usually stops at the login wall and the
+Studio goes untested. Mint a throwaway user instead — no human, no mailbox, no real account:
+
+```bash
+pnpm exec supabase --workdir supabase start        # if the local stack is not already up
+node scripts/mint-test-user.mjs --json
+```
+
+That prints the user plus `storageKey` and `localStorageValue`, which are exactly what the
+frontend's Supabase client reads. Put them in the browser and reload, and the next page load is
+authenticated:
+
+```js
+localStorage.setItem(storageKey, localStorageValue);
+```
+
+Delete what you created when you are done — `--cleanup-all-test-users` removes every user this
+tool has ever minted on the target:
+
+```bash
+node scripts/mint-test-user.mjs --cleanup <userId>
+node scripts/mint-test-user.mjs --cleanup-all-test-users
+```
+
+Two things worth knowing before you reach for it:
+
+**The storage key is derived, not fixed.** supabase-js builds it from the URL's first hostname
+label, so a local stack is `sb-127-auth-token` — not the project ref. Read it from the tool's
+output rather than hardcoding it.
+
+**It defaults to the local stack and defends that choice.** A production `service_role` key really
+does live in `INSTAFY_ENV_DIR/.env.supabase` on developer machines, and the shared resolvers
+consult `process.env` before the local CLI, so a shell that has sourced it otherwise yields a
+self-consistent production pair. The tool therefore ignores `process.env` for local targets and
+checks the admin key's own issuer claim rather than trusting a localhost URL. Writing to a real
+project needs two independent opt-ins — `--target remote` **and**
+`INSTAFY_MINT_TEST_USER_ALLOW_REMOTE=<project-ref>` naming that exact project. Do not add a way
+around this.
+
 ## Code conventions
 
 - Frontend code uses React, TypeScript, Vite and the existing component primitives. Preserve
