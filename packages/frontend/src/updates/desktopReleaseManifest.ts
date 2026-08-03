@@ -33,7 +33,8 @@ function isStrictSemver(value: string): boolean {
 export type DesktopAppDownloads = {
   macDmg: string;
   macArch: "arm64" | "x64";
-  windowsExe: string;
+  /** Absent until Windows code signing exists; the install page shows it as coming soon. */
+  windowsExe?: string;
 };
 
 export type DesktopReleaseManifest = {
@@ -113,10 +114,16 @@ export function parseDesktopAppLatestPayload(
   }
 
   const artifactRecord = artifacts as Record<string, unknown>;
-  const stableArtifactKinds = ["macDmg", "macZip", "windowsExe"];
+  // macOS is present in every release; Windows only when that platform was
+  // built and signed. Treating windowsExe as required made a macOS-only
+  // release parse as no release at all, so the install page would report that
+  // nothing is published while signed macOS installers sat in the feed.
+  const requiredArtifactKinds = ["macDmg", "macZip"];
+  const optionalArtifactKinds = ["windowsExe"];
+  const knownArtifactKinds = [...requiredArtifactKinds, ...optionalArtifactKinds];
   if (
-    Object.keys(artifactRecord).length !== stableArtifactKinds.length ||
-    Object.keys(artifactRecord).some((kind) => !stableArtifactKinds.includes(kind))
+    requiredArtifactKinds.some((kind) => !(kind in artifactRecord)) ||
+    Object.keys(artifactRecord).some((kind) => !knownArtifactKinds.includes(kind))
   ) {
     return null;
   }
@@ -139,11 +146,20 @@ export function parseDesktopAppLatestPayload(
     artifactRecord.macZip,
     `instafy-studio-${version}-mac-${macArch}.zip`,
   );
-  const windowsExe = parseDesktopArtifactUrl(
-    artifactRecord.windowsExe,
-    `instafy-studio-${version}-win.exe`,
-  );
-  if (!macDmg || !macZip || !windowsExe) return null;
+  if (!macDmg || !macZip) return null;
+
+  // Optional, but not unchecked: when a Windows artifact is declared it must
+  // still be a well-formed URL naming this exact version, or the manifest is
+  // rejected outright rather than silently losing the platform.
+  let windowsExe: string | undefined;
+  if ("windowsExe" in artifactRecord) {
+    const parsed = parseDesktopArtifactUrl(
+      artifactRecord.windowsExe,
+      `instafy-studio-${version}-win.exe`,
+    );
+    if (!parsed) return null;
+    windowsExe = parsed;
+  }
 
   return {
     version,
@@ -154,7 +170,7 @@ export function parseDesktopAppLatestPayload(
     artifacts: {
       macDmg,
       macArch,
-      windowsExe,
+      ...(windowsExe ? { windowsExe } : {}),
     },
   };
 }

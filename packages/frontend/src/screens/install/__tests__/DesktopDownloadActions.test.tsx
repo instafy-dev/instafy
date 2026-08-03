@@ -91,4 +91,32 @@ describe("DesktopDownloadActions", () => {
       `${DESKTOP_APP_STABLE_BASE_URL}/instafy-studio-1.2.3-mac-arm64.dmg`,
     );
   });
+
+  it("offers macOS and marks the platforms we do not ship yet as coming soon", () => {
+    // Windows needs a code-signing certificate no CA issues in exportable
+    // form any more, and the mac build is Apple silicon only. Both absences
+    // must read as deliberate rather than as a missing or dead button: a
+    // windowsExe-less manifest previously rendered <a href={undefined}>.
+    const lookup = availableLookup();
+    delete (lookup as { manifest: { artifacts: { windowsExe?: string } } })
+      .manifest.artifacts.windowsExe;
+
+    act(() => {
+      root.render(<DesktopDownloadActions lookup={lookup} onRetry={() => {}} />);
+    });
+
+    const macLink = container.querySelector<HTMLAnchorElement>(
+      'a[href$="instafy-studio-1.2.3-mac-arm64.dmg"]',
+    );
+    expect(macLink?.textContent).toContain("Apple silicon");
+    expect(container.querySelector('a[href="undefined"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="desktop-download-windows-coming-soon"]')
+        ?.textContent,
+    ).toContain("Coming soon");
+    expect(
+      container.querySelector('[data-testid="desktop-download-mac-intel-coming-soon"]')
+        ?.textContent,
+    ).toContain("Coming soon");
+  });
 });

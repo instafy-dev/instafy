@@ -103,3 +103,45 @@ test("rejects channel-incompatible artifacts and mismatched stable tags", () => 
   );
   assert.throws(() => stableManifest("1.2.3-01"), /Invalid SemVer/);
 });
+
+test("a macOS-only release omits the Windows artifact instead of failing", () => {
+  // Windows builds need a code-signing certificate no CA has issued in an
+  // exportable form since June 2023, so a release may legitimately contain
+  // macOS alone. Requiring windowsExeName here made such a release
+  // unpublishable rather than simply Windows-less.
+  const version = "1.2.3";
+  const manifest = createDesktopReleaseManifest({
+    version,
+    tag: `desktop-app-v${version}`,
+    channel: "stable",
+    sourceSha: "a".repeat(40),
+    publishedAt: "2026-07-22T12:34:56.987Z",
+    feedUrl: "https://downloads.instafy.dev/desktop-app/stable/",
+    macDmgName: `instafy-studio-${version}-mac-arm64.dmg`,
+    macZipName: `instafy-studio-${version}-mac-arm64.zip`,
+  });
+  assert.equal(manifest.artifacts.windowsExe, undefined);
+  assert.ok(manifest.artifacts.macDmg.endsWith(`instafy-studio-${version}-mac-arm64.dmg`));
+  assert.ok(manifest.artifacts.macZip.endsWith(`instafy-studio-${version}-mac-arm64.zip`));
+  assert.deepEqual(manifest.architectures, { mac: ["arm64"] });
+});
+
+test("an included Windows artifact is still validated strictly", () => {
+  // Optional must not mean unchecked: a present-but-wrong Windows name is a
+  // mismatched release, and still has to fail.
+  assert.throws(
+    () =>
+      createDesktopReleaseManifest({
+        version: "1.2.3",
+        tag: "desktop-app-v1.2.3",
+        channel: "stable",
+        sourceSha: "a".repeat(40),
+        publishedAt: "2026-07-22T12:34:56.987Z",
+        feedUrl: "https://downloads.instafy.dev/desktop-app/stable/",
+        macDmgName: "instafy-studio-1.2.3-mac-arm64.dmg",
+        macZipName: "instafy-studio-1.2.3-mac-arm64.zip",
+        windowsExeName: "instafy-studio-9.9.9-win.exe",
+      }),
+    /Windows artifact must name the release version/u,
+  );
+});
