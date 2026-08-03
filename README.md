@@ -75,6 +75,11 @@ Use the stronger camera lanes only when the change specifically needs them:
   - `pnpm test:e2e:smoke`
   - `pnpm test:e2e:headed`
   - See [Testing](docs/Testing.md)
+- Anything behind the login wall — mint a throwaway user instead of signing in by hand:
+  - `node scripts/mint-test-user.mjs --json` prints a session plus the exact `localStorage` key and
+    value the frontend reads, so a browser lands authenticated
+  - `node scripts/mint-test-user.mjs --cleanup-all-test-users` removes what it created
+  - Local stack only unless given two explicit opt-ins; see [Agent Handbook](AGENTS.md)
 - Android app / native mobile flows:
   - `pnpm test:android:build`
   - `pnpm test:camera:tri-client:smoke:recommended`
@@ -91,88 +96,40 @@ Use the stronger camera lanes only when the change specifically needs them:
 
 If a change crosses browser, Android, and iPhone, use the matching surface-specific path instead of guessing from one environment.
 
-## Speech Bootstrap
+## Speech and voice
 
-Provider-owned conversation surfaces use the same host-routed speech service as Studio instead of
-hardcoding a backend.
-On desktop, the local provider host surfaces a first-party `speech` provider that can:
+Provider-owned conversation surfaces route speech through the same host speech service Studio uses,
+rather than each surface owning its own STT/TTS stack. On desktop the local provider host exposes a
+first-party `speech` provider that reports dependency status, bootstraps host dependencies, and
+routes mounted-runtime speech through a local service, a tunnelled remote service, or a
+browser/native fallback.
 
-- report host dependency status at `instafy://speech/dependencies`
-- bootstrap local host dependencies through `instafy.speech.bootstrap_host_dependencies`
-- route mounted-runtime STT/TTS through either:
-  - a self-hosted local speech service
-  - a tunneled/remote speech service
-  - or browser/native fallback when no provider is reachable
+```bash
+pnpm speech:bootstrap:check   # what is installed and runnable here
+pnpm dev:speech-service       # the explicit CLI/operator path
+```
 
-Useful commands:
+Backend setup, strict round-trip checking against real HTTP backends, and troubleshooting live in
+the [Voice Operator Guide](docs/Voice-Operator.md).
 
-- `pnpm speech:bootstrap:check`
-- `pnpm speech:bootstrap:install`
-- `pnpm dev:speech-service`
-- `pnpm speech:fixtures:check`
+## Supabase
 
-Per-space voice routing lives in `Project settings -> AI overrides`, where a provider-owned surface
-can use `Auto`, `Speech provider`, or `This device` without owning a second routing stack. The same
-panel exposes provider and device reply voices when those backends publish a voice list.
+For local work, `pnpm supabase:up` from the Quick start is all you need: it starts the stack,
+applies `supabase/migrations/`, and prints the URL and anon key.
 
-The current local self-host path uses `insanely-fast-whisper` plus `ffmpeg` for transcription and macOS `say` for default TTS.
-If your speech backend exposes a dedicated voices endpoint, set `INSTAFY_SPEECH_VOICES_URL` so the host can discover real voice options without inferring `/voices` from the synthesis URL.
-`pnpm speech:fixtures:check` writes deterministic debug audio files into `packages/frontend/test-results/speech-fixtures` and round-trips them through the speech provider so STT/TTS regressions can be checked without a human in the loop.
-If you want strict round-trip checking with real HTTP speech backends instead of the macOS fallback, the local path is:
+To apply the same migrations to your own isolated, non-production hosted project:
 
-1. Start an OpenAI-compatible local speech TTS proxy:
-   - `pnpm dev:speech-tts-proxy`
-2. Export the printed backend URLs:
-   - `export LOCAL_SPEECH_TTS_BACKEND_URL=http://127.0.0.1:8799/v1/audio/speech`
-   - `export LOCAL_SPEECH_TRANSCRIPTION_BACKEND_URL=http://127.0.0.1:8799/v1/audio/transcriptions`
-   - if `LOCAL_SPEECH_TTS_BACKEND_URL` already points at an OpenAI-style `/v1/audio/speech` endpoint, the local doctor/service can now derive the matching transcription endpoint automatically
-3. Re-run the doctor:
-   - `pnpm speech:bootstrap:check`
-4. Then run the fixture loop:
-   - `pnpm speech:fixtures:check`
+```bash
+npx supabase link --project-ref <ref>
+pnpm dev:supabase:release
+pnpm test:e2e            # proves the chat + filesystem loop against it
+```
 
-Or run the full path in one command:
+If that project needs hosted secrets, set them from an env file you keep outside the repository
+(`npx supabase secrets set --env-file <your-file>`); none is committed here.
 
-- `pnpm speech:strict-roundtrip:check`
-
-The doctor now probes `LOCAL_SPEECH_TTS_BACKEND_URL` directly. If the configured backend cannot actually synthesize speech, it reports:
-
-- `synthesis.engine = "proxy"`
-- `synthesis.installState = "backend_probe_failed"`
-- `synthesis.strictRoundtripSupported = false`
-
-If you just want to check whether the current credential/backend path can synthesize at all before running the full doctor + fixture loop:
-
-- `pnpm speech:tts:probe`
-
-That probe now verifies both `/v1/audio/speech` and `/v1/audio/transcriptions` in one cheap pass.
-
-The speech proxy helpers now automatically prefer `OPENAI_API_KEY` from the current environment, then
-`.env.openai` at the repo root, before falling back to `tmp/proxy-codex/auth.json`
-or `~/.codex/auth.json`.
-
-The local proxy now supports both:
-
-- `/v1/audio/speech`
-- `/v1/audio/transcriptions`
-
-On this machine, `pnpm speech:strict-roundtrip:check` now passes when both backend URLs point at that proxy. The remaining local-only issue is the fallback `insanely-fast-whisper` lane, which still misreads the same synthetic fixture audio that the remote OpenAI transcription path reads correctly.
-
-The intended long-term shape is:
-
-- Instafy host owns mic capture, playback, install/bootstrap, and tunnel routing
-- speech providers own STT/TTS engines
-- provider-owned surfaces consume the host speech service instead of directly owning Whisper/TTS setup
-
-## Local Supabase TL;DR
-1. Ensure the workspace is linked to an isolated, non-production Supabase project: `npx supabase link --project-ref <ref>`.
-2. Sync hosted secrets: `npx supabase secrets set --env-file supabase/.secrets.deploy`
-3. Apply migrations stored in `supabase/migrations/`: `pnpm dev:supabase:release`
-4. Run `pnpm test:e2e` to validate the chat + filesystem loop end-to-end.
-5. Capture follow-ups in the shared task tracker (see `docs/README.md`).
-
-Hosted production migrations are intentionally outside the public local-development path. Keep
-them pinned, reviewed, and separate from `pnpm dev:supabase:release`.
+Hosted production migrations are intentionally outside this path. Keep them pinned, reviewed, and
+separate from `pnpm dev:supabase:release`.
 
 ## Distribution boundary
 
@@ -190,7 +147,7 @@ promotion, and production migration procedures are maintained separately.
 - Broader GitHub workflow automation is still out of scope for this release. Issue/PR/release automation should not be treated as shipped repo sync.
 
 ### AI Providers
-- Managed AI turns are served by OpenAI (the controller pins `CODEX_MODEL_PROVIDER=openai`; the model comes from `MANAGED_AI_MODEL_ID`, default `gpt-5.5`). The old `AI_PROVIDER=deepseek` edge-function setting is retired and no longer consumed by the runtime path.
+- Managed AI turns are served by OpenAI (the controller pins `CODEX_MODEL_PROVIDER=openai`; the model comes from `MANAGED_AI_MODEL_ID`, default `gpt-5.5`).
 - BYOC lets users bring their own provider instead: an OpenAI API key or ChatGPT device-code login, DeepSeek, z.ai, or Gemini.
 - All controller-driven automation **must route through the Instafy AI proxy**. Set `PROXY_BASE_URL` and `PROXY_SIGNING_SECRET` in your environment, and ensure any CLI agents (including the Codex runner inside dev containers) call the proxy endpoint instead of OpenAI directly so credit debits and BYO keys are enforced.
 
