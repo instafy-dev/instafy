@@ -8,6 +8,21 @@ const SECONDARY_BUTTON_CLASSNAME = [
   "dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200 dark:hover:border-slate-600 dark:hover:text-slate-50",
 ].join(" ");
 
+// A platform we do not ship yet, shown so the page reads as a deliberate
+// choice rather than a missing button. Not a link: there is nothing to
+// download, and a disabled-looking anchor invites clicking anyway.
+function ComingSoon({ label, testId }: { label: string; testId: string }) {
+  return (
+    <span
+      className="inline-flex items-center gap-2 rounded-full border border-dashed border-slate-300 px-4 py-2 text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400"
+      data-testid={testId}
+    >
+      {label}
+      <span className="text-xs uppercase tracking-wide">Coming soon</span>
+    </span>
+  );
+}
+
 export function DesktopDownloadActions({
   lookup,
   onRetry,
@@ -33,14 +48,24 @@ export function DesktopDownloadActions({
             ? "macOS Apple silicon (DMG)"
             : "macOS Intel (DMG)"}
         </a>
-        <a
-          className={SECONDARY_BUTTON_CLASSNAME}
-          href={downloads.windowsExe}
-          target="_blank"
-          rel="noreferrer"
-        >
-          Windows (EXE)
-        </a>
+        {downloads.windowsExe ? (
+          <a
+            className={SECONDARY_BUTTON_CLASSNAME}
+            href={downloads.windowsExe}
+            target="_blank"
+            rel="noreferrer"
+          >
+            Windows (EXE)
+          </a>
+        ) : (
+          <ComingSoon label="Windows" testId="desktop-download-windows-coming-soon" />
+        )}
+        {downloads.macArch === "arm64" ? (
+          <ComingSoon
+            label="macOS Intel"
+            testId="desktop-download-mac-intel-coming-soon"
+          />
+        ) : null}
       </div>
     );
   }
