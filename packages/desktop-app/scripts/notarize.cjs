@@ -91,10 +91,56 @@ exports.default = async function notarizeApp(context) {
   const { notarize } = require("@electron/notarize");
 
   console.log(`[desktop-app] Notarizing ${appPath}`);
-  await notarize({
-    appPath,
-    appleId,
-    appleIdPassword,
-    teamId,
-  });
+  await notarizeWithRetry({ appPath, appleId, appleIdPassword, teamId, notarize });
 };
+
+// Notarization is a long upload followed by minutes of polling Apple, at the
+// very end of a build that already cost the better part of an hour. A dropped
+// connection there is not a signing problem and should not throw the whole
+// build away: run 30822804681 failed on
+// NSURLErrorDomain -1009 ("The Internet connection appears to be offline")
+// while polling a submission Apple had already accepted.
+//
+// Only transport-shaped failures are retried. A rejected submission, bad
+// credentials or an invalid bundle must still fail immediately — retrying those
+// would burn an hour to arrive at the same answer.
+const TRANSIENT_NOTARIZATION_PATTERNS = [
+  /connection appears to be offline/i,
+  /NSURLErrorDomain/i,
+  /network (is )?(unreachable|down)/i,
+  /timed? ?out/i,
+  /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i,
+  /502|503|504|Bad Gateway|Service Unavailable|Gateway Time-?out/i,
+];
+
+function isTransientNotarizationFailure(error) {
+  const text = `${error?.message ?? ""} ${error?.stack ?? ""}`;
+  return TRANSIENT_NOTARIZATION_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+async function notarizeWithRetry({ appPath, appleId, appleIdPassword, teamId, notarize }) {
+  const attempts = Number(process.env.NOTARIZE_ATTEMPTS || 3);
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      await notarize({ appPath, appleId, appleIdPassword, teamId });
+      return;
+    } catch (error) {
+      const transient = isTransientNotarizationFailure(error);
+      if (!transient || attempt === attempts) {
+        if (!transient) {
+          console.error("[desktop-app] Notarization failed for a non-transport reason; not retrying.");
+        }
+        throw error;
+      }
+      const backoffMs = 30_000 * attempt;
+      console.warn(
+        `[desktop-app] Notarization attempt ${attempt}/${attempts} hit a transport failure ` +
+          `(${(error?.message ?? "").split("\n")[0].slice(0, 160)}); retrying in ${backoffMs / 1000}s.`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, backoffMs));
+    }
+  }
+}
+
+module.exports.isTransientNotarizationFailure = isTransientNotarizationFailure;
+module.exports.notarizeWithRetry = notarizeWithRetry;
