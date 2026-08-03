@@ -66,6 +66,43 @@ pnpm test:chat:voice:speech
 pnpm test:desktop:voice:host
 ```
 
+## Self-hosted speech backends
+
+The default local path transcribes with `insanely-fast-whisper` plus `ffmpeg` and synthesises with
+macOS `say`. Check and install those host dependencies with:
+
+```bash
+pnpm speech:bootstrap:check
+pnpm speech:bootstrap:install
+```
+
+`pnpm speech:fixtures:check` writes deterministic audio into
+`packages/frontend/test-results/speech-fixtures` and round-trips it through the speech provider, so
+STT/TTS regressions are catchable without a human listening.
+
+To check strictly against real HTTP backends rather than the macOS fallback:
+
+```bash
+pnpm dev:speech-tts-proxy
+export LOCAL_SPEECH_TTS_BACKEND_URL=http://127.0.0.1:8799/v1/audio/speech
+export LOCAL_SPEECH_TRANSCRIPTION_BACKEND_URL=http://127.0.0.1:8799/v1/audio/transcriptions
+pnpm speech:strict-roundtrip:check
+```
+
+The proxy serves both `/v1/audio/speech` and `/v1/audio/transcriptions`, and the doctor derives the
+transcription endpoint when only the synthesis URL is set. It resolves credentials from
+`OPENAI_API_KEY`, then `.env.openai` at the repo root, then `tmp/proxy-codex/auth.json`, then
+`~/.codex/auth.json`.
+
+`pnpm speech:tts:probe` is the cheap check of whether the configured backend can synthesise at all,
+and verifies both endpoints in one pass. When a backend cannot synthesise, the doctor reports
+`synthesis.engine = "proxy"`, `synthesis.installState = "backend_probe_failed"` and
+`synthesis.strictRoundtripSupported = false`.
+
+If your backend exposes a dedicated voices endpoint, set `INSTAFY_SPEECH_VOICES_URL` so the host
+discovers real voices instead of inferring `/voices` from the synthesis URL. Per-space routing lives
+in `Project settings -> AI overrides` (`Auto`, `Speech provider`, or `This device`).
+
 ## Troubleshooting
 
 - If microphone permission still says blocked after approving macOS access, click `Request again` in the same chat surface so the browser permission can update too.
