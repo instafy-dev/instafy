@@ -125,21 +125,28 @@ export function createDesktopReleaseManifest(input) {
   const normalizedFeedUrl = feedUrl.href.replace(/\/$/, "");
   const macDmgName = validateArtifactName(input.macDmgName, "macDmgName");
   const macZipName = validateArtifactName(input.macZipName, "macZipName");
-  const windowsExeName = validateArtifactName(input.windowsExeName, "windowsExeName");
   const macDmg = new RegExp(`^instafy-studio-${version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-mac-(arm64|x64)\\.dmg$`).exec(macDmgName);
   const macArch = macDmg?.[1];
   if (!macArch || macZipName !== `instafy-studio-${version}-mac-${macArch}.zip`) {
     fail("macOS artifacts must name the release version and one consistent architecture.");
   }
-  if (windowsExeName !== `instafy-studio-${version}-win.exe`) {
-    fail("The Windows artifact must name the release version.");
-  }
   const artifactUrl = (name) => `${normalizedFeedUrl}/${encodeURIComponent(name)}`;
   const artifacts = {
     macDmg: artifactUrl(macDmgName),
     macZip: artifactUrl(macZipName),
-    windowsExe: artifactUrl(windowsExeName),
   };
+  // Optional, like linuxAppImage below: a release describes the platforms it
+  // actually contains. Windows builds require a code-signing certificate no
+  // certificate authority has issued in an exportable form since June 2023, so
+  // a release may legitimately ship macOS only. Still strictly validated when
+  // present.
+  if (input.windowsExeName) {
+    const windowsExeName = validateArtifactName(input.windowsExeName, "windowsExeName");
+    if (windowsExeName !== `instafy-studio-${version}-win.exe`) {
+      fail("The Windows artifact must name the release version.");
+    }
+    artifacts.windowsExe = artifactUrl(windowsExeName);
+  }
   if (input.linuxAppImageName) {
     const linuxName = validateArtifactName(input.linuxAppImageName, "linuxAppImageName");
     if (channel === "stable") fail("Stable metadata must not include an unsigned Linux artifact.");
@@ -234,7 +241,6 @@ function main() {
     "RELEASE_FEED_URL",
     "MAC_DMG_NAME",
     "MAC_ZIP_NAME",
-    "WINDOWS_EXE_NAME",
   ];
   for (const name of required) {
     if (!process.env[name]) fail(`Missing release metadata environment value: ${name}.`);

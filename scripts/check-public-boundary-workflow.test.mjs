@@ -143,13 +143,29 @@ test("trusted boundary binds the server merge ref to both event parents", () => 
     verification,
     /test "\$\{#parent_shas\[@\]\}" -eq 2/u,
   );
+  // The head parent stays an exact binding: it is what proves the candidate
+  // holds this pull request's code.
   assert.match(
+    verification,
+    /test "\$\{parent_shas\[1\]\}" = "\$EXPECTED_HEAD_SHA"/u,
+  );
+  // The base parent must be bound to base-branch history, not to the frozen
+  // payload base.sha — that equality made a pull request permanently
+  // unmergeable once the base branch advanced. Containment must be resolved
+  // against the branch, and only identical/ahead may pass.
+  assert.doesNotMatch(
     verification,
     /test "\$\{parent_shas\[0\]\}" = "\$EXPECTED_BASE_SHA"/u,
   );
   assert.match(
     verification,
-    /test "\$\{parent_shas\[1\]\}" = "\$EXPECTED_HEAD_SHA"/u,
+    /compare\/\$\{parent_shas\[0\]\}\.\.\.\$\{BASE_REF\}/u,
+  );
+  assert.match(verification, /identical\|ahead\)/u);
+  assert.doesNotMatch(verification, /identical\|ahead\|behind\)/u);
+  assert.match(
+    verification,
+    /is not part of \$\{BASE_REF\} history/u,
   );
   assert.doesNotMatch(verification, /show -s --format='%H %P'/u);
   // The parents binding is the load-bearing check. A strict equality against

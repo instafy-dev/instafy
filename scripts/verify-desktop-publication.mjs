@@ -311,11 +311,16 @@ function requireLatestJson(payload, expected, feedUrl) {
     throw new Error("latest.json artifacts must be an object.");
   }
 
+  // macOS is the only platform every release must contain. Windows is present
+  // only when that leg was built and signed, so requiring it here made a
+  // macOS-only release unverifiable — and therefore unpublishable. Anything
+  // that IS present is still checked exactly as strictly below.
   const requiredKinds =
     expected.channel === "stable"
-      ? ["macDmg", "macZip", "windowsExe"]
-      : ["macDmg", "macZip", "windowsExe", "linuxAppImage"];
-  const allowedKinds = new Set(requiredKinds);
+      ? ["macDmg", "macZip"]
+      : ["macDmg", "macZip", "linuxAppImage"];
+  const optionalKinds = ["windowsExe"];
+  const allowedKinds = new Set([...requiredKinds, ...optionalKinds]);
   for (const kind of requiredKinds) {
     if (typeof payload.artifacts[kind] !== "string") throw new Error(`latest.json is missing ${kind}.`);
   }
@@ -335,7 +340,10 @@ function requireLatestJson(payload, expected, feedUrl) {
   if (!dmg || !zip || dmg[1] !== zip[1]) {
     throw new Error("latest.json macOS artifacts must contain the expected version and one matching architecture.");
   }
-  if (artifacts.windowsExe.name !== `instafy-studio-${expected.version}-win.exe`) {
+  if (
+    artifacts.windowsExe &&
+    artifacts.windowsExe.name !== `instafy-studio-${expected.version}-win.exe`
+  ) {
     throw new Error("latest.json Windows artifact does not contain the expected version.");
   }
   if (expected.channel === "internal" && artifacts.linuxAppImage.name !== `instafy-studio-${expected.version}-linux.AppImage`) {
@@ -390,6 +398,12 @@ function parseExpectedUpdaterMetadata({
   }
   const expectedKinds = expectedArtifactKindsForPlatform(platform);
   for (const kind of expectedKinds) {
+    // An updater manifest for a platform whose artifact latest.json never
+    // declared is a contradiction, not a missing checksum: say so, rather than
+    // dereferencing undefined.
+    if (!artifacts[kind]) {
+      throw new Error(`${scope} ${metadataName} covers ${platform}, but latest.json declares no ${kind}.`);
+    }
     if (!names.has(artifacts[kind].name)) {
       throw new Error(`${scope} ${metadataName} does not checksum latest.json artifact ${artifacts[kind].name}.`);
     }
@@ -584,7 +598,8 @@ export async function verifyDesktopPublicRelease(options) {
     }
   }
 
-  const blockmapNames = [`${artifacts.macZip.name}.blockmap`, `${artifacts.windowsExe.name}.blockmap`];
+  const blockmapNames = [`${artifacts.macZip.name}.blockmap`];
+  if (artifacts.windowsExe) blockmapNames.push(`${artifacts.windowsExe.name}.blockmap`);
   if (expected.channel === "internal") blockmapNames.push(`${artifacts.linuxAppImage.name}.blockmap`);
   for (const name of blockmapNames) {
     const immutableIntegrity = await hashPublicObject(
