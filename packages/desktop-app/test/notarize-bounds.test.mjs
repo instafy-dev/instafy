@@ -82,3 +82,27 @@ test("a rejected submission still fails immediately", async () => {
   );
   assert.equal(calls, 1, "a real rejection must not be retried");
 });
+
+test("the deadline fires even when nothing else keeps the loop alive", async () => {
+  // The regression this guards: an unref'd timer does not hold the event loop
+  // open, so the deadline only fires if some other pending work happens to keep
+  // the process running. That masks itself on any busy machine -- it passed
+  // locally and failed only in CI -- so assert it in a child process where the
+  // timer is the sole pending handle. If it is unref'd, the child exits 0
+  // having silently skipped the timeout instead of rejecting.
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const script = `
+    const { withTimeout } = require(${JSON.stringify(path.join(packageRoot, "scripts", "notarize.cjs"))});
+    withTimeout(new Promise(() => {}), 50, "probe").then(
+      () => { console.log("RESOLVED"); },
+      (error) => { console.log(/timed out/.test(error.message) ? "TIMED_OUT" : "OTHER"); },
+    );
+  `;
+  const { stdout } = await promisify(execFile)(process.execPath, ["-e", script], { timeout: 10_000 });
+  assert.equal(
+    stdout.trim(),
+    "TIMED_OUT",
+    "the deadline must fire with no other pending work; an unref'd timer prints nothing",
+  );
+});

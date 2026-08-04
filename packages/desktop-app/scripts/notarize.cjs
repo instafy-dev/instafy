@@ -125,9 +125,12 @@ async function withTimeout(promise, ms, label) {
     return await Promise.race([
       promise,
       new Promise((_resolve, reject) => {
+        // Deliberately not unref'd. An unref'd timer does not hold the event
+        // loop open, so whether the deadline fires depends on what else happens
+        // to be pending — which is precisely the case a deadline exists to
+        // catch. The finally below clears it the moment the race settles, so it
+        // only keeps the process alive while notarization is genuinely running.
         timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
-        // Do not hold the process open just to enforce a deadline.
-        timer.unref?.();
       }),
     ]);
   } finally {
@@ -187,5 +190,6 @@ async function notarizeWithRetry({ appPath, appleId, appleIdPassword, teamId, no
   }
 }
 
+module.exports.withTimeout = withTimeout;
 module.exports.isTransientNotarizationFailure = isTransientNotarizationFailure;
 module.exports.notarizeWithRetry = notarizeWithRetry;
