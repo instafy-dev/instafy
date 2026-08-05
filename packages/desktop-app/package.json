@@ -51,7 +51,9 @@
     "afterSign": "scripts/notarize.cjs",
     "files": [
       "dist/**",
-      "package.json"
+      "package.json",
+      "!**/node_modules/**/*.test.ts",
+      "!**/node_modules/**/tests/**"
     ],
     "extraResources": [
       {
