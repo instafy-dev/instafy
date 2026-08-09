@@ -509,8 +509,16 @@ export async function verifyDesktopPublicRelease(options) {
     }, expected.tag);
   }
 
-  const metadataNames =
-    expected.channel === "stable" ? ["latest-mac.yml", "latest.yml"] : ["latest-mac.yml", "latest.yml", "latest-linux.yml"];
+  // Derived from the artifacts that exist, for the same reason macDmg/macZip
+  // are the only required kinds above: macOS is the one platform every release
+  // contains, and each other platform's updater manifest exists exactly when
+  // its artifact does. Requiring latest.yml unconditionally made a macOS-only
+  // stable release fail its own publication verification, polling for a
+  // Windows manifest no build had produced (run 31324077906: 18 attempts,
+  // all HTTP 404, after the artifacts had uploaded cleanly).
+  const metadataNames = ["latest-mac.yml"];
+  if (artifacts.windowsExe) metadataNames.push("latest.yml");
+  if (artifacts.linuxAppImage) metadataNames.push("latest-linux.yml");
   const channelEntriesByName = new Map();
   const immutableEntriesByName = new Map();
   for (const metadataName of metadataNames) {
