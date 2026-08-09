@@ -11,6 +11,7 @@ import { Text } from "../components/Text";
 import { TextLink } from "../components/TextLink";
 import { ToggleIconButton } from "../components/ToggleIconButton";
 import { hasSupabaseConfig } from "../lib/supabaseClient";
+import { showBackToLanding as computeShowBackToLanding } from "../lib/desktopShell";
 import { useAuth } from "../providers/AuthProvider";
 import { OAUTH_REDIRECT_TARGET_KEY, useNativeGithubAuth } from "./login/useNativeGithubAuth";
 import {
@@ -128,7 +129,7 @@ export function LoginPage() {
   }, [location.search]);
   const isExtensionEmbed = embedMode.startsWith("extension");
   const isNativeApp = Capacitor.isNativePlatform();
-  const showBackToLanding = !isNativeApp && !isExtensionEmbed;
+  const showBackToLanding = computeShowBackToLanding({ isNativeApp, isExtensionEmbed });
   const recoveryMode = useMemo(
     () => parseRecoveryMode(location.hash ?? "", location.search ?? ""),
     [location.hash, location.search],
