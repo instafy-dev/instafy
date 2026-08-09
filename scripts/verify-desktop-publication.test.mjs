@@ -464,3 +464,37 @@ test("rejects incomplete updater checksum metadata", () => {
     /canonical base64-encoded SHA-512 digest/,
   );
 });
+
+test("a macOS-only stable release verifies without any Windows manifest", async () => {
+  // The exact shape of the first real stable release (run 31324077906):
+  // Windows disabled, arm64 macOS only. The candidate phase failed there by
+  // polling desktop-app-v0.2.0/latest.yml — a Windows updater manifest no
+  // build had produced — for 18 attempts of HTTP 404. A release must only be
+  // asked to prove the platforms it actually contains.
+  const { files, resources } = stableFixture();
+  for (const key of [...resources.keys()]) {
+    if (key.endsWith("/latest.yml") || key.includes("-win.exe")) resources.delete(key);
+  }
+  for (const key of ["/desktop-app/stable/latest.json", "/desktop-app/latest.json", `/desktop-app/${TAG}/latest.json`]) {
+    const latest = JSON.parse(resources.get(key));
+    delete latest.artifacts.windowsExe;
+    resources.set(key, JSON.stringify(latest));
+  }
+  delete files["instafy-studio-1.2.3-win.exe"];
+  delete files["instafy-studio-1.2.3-win.exe.blockmap"];
+
+  const result = await verifyDesktopPublicRelease({
+    downloadsBaseUrl: BASE_URL,
+    desktopPrefix: "desktop-app",
+    channel: "stable",
+    expectedVersion: VERSION,
+    expectedTag: TAG,
+    expectedSourceSha: SOURCE_SHA,
+    fetchImpl: mockFetch(resources, []),
+    metadataAttempts: 1,
+    artifactAttempts: 1,
+    retryDelayMs: 0,
+    logger: quietLogger,
+  });
+  assert.deepEqual(result, { feedUrl: FEED_URL, artifactsVerified: 2, blockmapsVerified: 1 });
+});
