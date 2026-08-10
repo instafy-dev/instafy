@@ -26,8 +26,13 @@ export function AppVersionLabel(props: { className?: string }) {
       .catch(() => null)
       .then((status) => {
         if (cancelled) return;
+        // isEnabled is false for an unpackaged shell, where app.getVersion()
+        // returns ELECTRON's version rather than the app's -- it rendered
+        // "Instafy 43.1.1" in a dev run, which is exactly the wrong answer to
+        // "which build am I on" in the situation where you most need it.
+        // Packaged builds read the real version from Info.plist.
         setLabel(
-          status?.currentVersion
+          status?.isEnabled && status.currentVersion
             ? `Instafy ${status.currentVersion}`
             : formatInstafyBuildLabel(instafyBuildInfo),
         );
