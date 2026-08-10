@@ -1,8 +1,9 @@
 import {
   controllerBaseUrl,
   readControllerError,
-  resolveControllerAccessToken,
+  resolveControllerRequestContext,
   runtimeControllerEnabled,
+  type ControllerRequestContext,
 } from "./core";
 
 export type ControllerSearchParamValue = string | number | boolean | null | undefined;
@@ -11,6 +12,7 @@ export interface ControllerJsonRequestOptions {
   path: string;
   method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
   accessToken?: string | null;
+  requestContext?: ControllerRequestContext;
   searchParams?: Record<string, ControllerSearchParamValue>;
   body?: unknown;
   headers?: HeadersInit;
@@ -34,11 +36,12 @@ export type ControllerJsonRequestResult<T> =
   | ControllerJsonRequestFailure;
 
 function buildControllerUrl(
+  baseUrl: string,
   path: string,
   searchParams?: Record<string, ControllerSearchParamValue>,
 ) {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  const url = new URL(`${controllerBaseUrl}${normalizedPath}`);
+  const url = new URL(`${baseUrl}${normalizedPath}`);
 
   if (!searchParams) {
     return url;
@@ -61,16 +64,25 @@ function buildControllerUrl(
 export async function controllerJsonRequest<T>(
   options: ControllerJsonRequestOptions,
 ): Promise<ControllerJsonRequestResult<T>> {
-  if (!runtimeControllerEnabled || !controllerBaseUrl) {
+  if (!options.requestContext && (!runtimeControllerEnabled || !controllerBaseUrl)) {
     return { success: false, error: "Runtime controller is not configured." };
   }
 
-  const accessToken = await resolveControllerAccessToken(options.accessToken ?? null);
+  const requestContext =
+    options.requestContext ?? await resolveControllerRequestContext(options.accessToken ?? null);
+  if (!requestContext.baseUrl) {
+    return { success: false, error: "Runtime controller is not configured." };
+  }
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return { success: false, error: "Missing controller session token." };
   }
 
-  const url = buildControllerUrl(options.path, options.searchParams);
+  const url = buildControllerUrl(
+    requestContext.baseUrl,
+    options.path,
+    options.searchParams,
+  );
   const headers = new Headers(options.headers);
   headers.set("authorization", `Bearer ${accessToken}`);
   if (!headers.has("accept")) {
@@ -95,7 +107,11 @@ export async function controllerJsonRequest<T>(
     if (!response.ok) {
       return {
         success: false,
-        error: await readControllerError(response, options.fallbackError),
+        error: await readControllerError(
+          response,
+          options.fallbackError,
+          requestContext,
+        ),
       };
     }
 

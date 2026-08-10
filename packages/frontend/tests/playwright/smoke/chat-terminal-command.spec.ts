@@ -293,8 +293,9 @@ async function fetchHostedRuntimeIdleTtlSeconds(page: Page, projectId: string): 
         return null;
       }
       const url = new URL(`${controllerUrl}/projects/${encodeURIComponent(projectId)}/runtime/status`);
-      url.searchParams.set("accessToken", accessToken);
-      const response = await fetch(url.toString());
+      const response = await fetch(url.toString(), {
+        headers: { authorization: `Bearer ${accessToken}` },
+      });
       if (!response.ok) {
         return null;
       }

@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const resolveControllerAccessTokenMock = vi.hoisted(() => vi.fn());
+const resolveControllerRequestContextMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../core", () => ({
   controllerBaseUrl: "http://controller.test",
   normalizeUuidParam: (value: string | null | undefined) =>
     typeof value === "string" && value.trim() ? value.trim() : null,
-  resolveControllerAccessToken: resolveControllerAccessTokenMock,
+  resolveControllerRequestContext: resolveControllerRequestContextMock,
   runtimeControllerEnabled: true,
 }));
 
@@ -19,8 +19,13 @@ import {
 
 describe("controller speech proxy helpers", () => {
   beforeEach(() => {
-    resolveControllerAccessTokenMock.mockReset();
-    resolveControllerAccessTokenMock.mockResolvedValue("controller-token");
+    resolveControllerRequestContextMock.mockReset();
+    resolveControllerRequestContextMock.mockResolvedValue({
+      baseUrl: "http://controller.test",
+      accessToken: "controller-token",
+      credentialSource: "ambient",
+      generation: 1,
+    });
   });
 
   it("only proxies local tunnel hostnames", () => {
@@ -76,6 +81,28 @@ describe("controller speech proxy helpers", () => {
         authorization: "Bearer controller-token",
         [CONTROLLER_SPEECH_PROXY_UPSTREAM_AUTH_HEADER]:
           "Bearer speech-token",
+      },
+    });
+  });
+
+  it("builds the authenticated proxy URL from the same request context as the token", async () => {
+    resolveControllerRequestContextMock.mockResolvedValue({
+      baseUrl: "https://bound-controller.test/api",
+      accessToken: "bound-token",
+      credentialSource: "fixed",
+      generation: 2,
+    });
+
+    await expect(
+      resolveControllerSpeechProxyRequest({
+        projectId: "project-123",
+        baseUrl: "http://abc.rt.test:8443/transcribe",
+      }),
+    ).resolves.toEqual({
+      baseUrl:
+        "https://bound-controller.test/api/projects/project-123/speech/proxy/http%3A%2F%2Fabc.rt.test%3A8443/transcribe",
+      headers: {
+        authorization: "Bearer bound-token",
       },
     });
   });

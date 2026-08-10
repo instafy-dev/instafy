@@ -130,7 +130,7 @@ async fn list_agent_contexts(
     AxumPath(project_id_raw): AxumPath<String>,
     Query(query): Query<AgentContextQuery>,
 ) -> Result<Json<Vec<AgentContextCard>>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let project_id = parse_uuid(&project_id_raw, "projectId")?;
     let limit = normalize_limit(query.limit);
     let scope_kind = query
@@ -273,7 +273,7 @@ async fn upsert_agent_context(
     AxumPath(project_id_raw): AxumPath<String>,
     Json(body): Json<UpsertAgentContextBody>,
 ) -> Result<Json<AgentContextCard>, (StatusCode, Json<ApiError>)> {
-    let request_context = authenticate_request(&state.config, &headers, None).await?;
+    let request_context = authenticate_request(&state.config, &headers).await?;
     let project_id = parse_uuid(&project_id_raw, "projectId")?;
     let scope_kind = normalize_scope_kind(&body.scope_kind)?;
     let scope_id = normalize_scope_id(&body.scope_id)?;

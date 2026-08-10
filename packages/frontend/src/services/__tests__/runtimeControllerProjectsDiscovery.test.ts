@@ -6,7 +6,12 @@ vi.mock("../runtimeController/core", () => ({
   controllerBaseUrl: "http://controller.test",
   normalizeUuidParam: (value: string | null | undefined) => value ?? null,
   readControllerError: vi.fn(),
-  resolveControllerAccessToken: resolveControllerAccessTokenMock,
+  resolveControllerRequestContext: async (desired: string | null) => ({
+    baseUrl: "http://controller.test",
+    accessToken: await resolveControllerAccessTokenMock(desired),
+    credentialSource: "ambient",
+    generation: 1,
+  }),
   runtimeControllerEnabled: true,
 }));
 

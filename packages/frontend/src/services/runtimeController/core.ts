@@ -16,19 +16,39 @@ function normalizeControllerBaseUrl(raw: string): string {
   }
   try {
     const parsed = new URL(trimmed);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return "";
+    }
+    if (
+      parsed.username ||
+      parsed.password ||
+      parsed.search ||
+      parsed.hash ||
+      trimmed.includes("?") ||
+      trimmed.includes("#")
+    ) {
+      return "";
+    }
     if (typeof window !== "undefined" && parsed.protocol === "http:" && parsed.hostname === "127.0.0.1") {
       // Some long-lived browser profiles intermittently fail against 127.0.0.1 while localhost works.
       // Normalize local controller loopback URLs to localhost for browser fetch/EventSource stability.
       parsed.hostname = "localhost";
     }
+    parsed.pathname = parsed.pathname.replace(/\/+$/, "") || "/";
     return parsed.toString().replace(/\/$/, "");
   } catch {
-    return trimmed.replace(/\/$/, "");
+    return "";
   }
 }
 
+const CONTROLLER_BINDING_STORAGE_KEY = "instafy.controllerBinding";
+const CONTROLLER_BINDING_STORAGE_VERSION = 1;
+// Legacy split keys are read only for a one-time, unambiguous custom-pair
+// migration. New writes use the atomic binding record above.
 const CONTROLLER_BASE_URL_STORAGE_KEY = "instafy.controllerBaseUrl";
-export let controllerBaseUrl = normalizeControllerBaseUrl(controllerUrlResolvedRaw);
+const CONTROLLER_TOKEN_STORAGE_KEY = "instafy.controllerAccessToken";
+const canonicalControllerBaseUrl = normalizeControllerBaseUrl(controllerUrlResolvedRaw);
+export let controllerBaseUrl = canonicalControllerBaseUrl;
 
 export let runtimeControllerEnabled = controllerBaseUrl.length > 0;
 
@@ -53,14 +73,24 @@ export function coerceControllerRuntimeIdleTtlSeconds(
   return Math.max(CONTROLLER_RUNTIME_IDLE_TTL_SECONDS_MIN, floored);
 }
 
-const CONTROLLER_TOKEN_STORAGE_KEY = "instafy.controllerAccessToken";
-
 export const CONTROLLER_AUTH_ERROR_EVENT = "instafy:controller-auth-error";
+export const CONTROLLER_RELOAD_REQUIRED_EVENT = "instafy:controller-reload-required";
 
 export interface ControllerAuthErrorDetail {
   status: number;
   message: string;
   url?: string | null;
+}
+
+export interface ControllerRequestContext {
+  readonly baseUrl: string;
+  readonly accessToken: string | null;
+  readonly credentialSource: "ambient" | "fixed" | null;
+  readonly generation: number;
+}
+
+export interface ControllerReloadRequiredDetail {
+  reason: "override-switch" | "rejected-override";
 }
 
 export interface ControllerApiErrorPayload {
@@ -92,6 +122,10 @@ const UUID_PATTERN =
 
 let injectedControllerToken: string | null | undefined;
 let injectedControllerBaseUrl: string | null | undefined;
+let controllerBindingInitialized = false;
+let controllerReloadPending = false;
+let controllerReloadReason: ControllerReloadRequiredDetail["reason"] | null = null;
+let controllerBindingGeneration = 0;
 let lastControllerAuthErrorAt = 0;
 let overrideDroppedForAuthErrorAt = 0;
 
@@ -116,54 +150,81 @@ function normalizeInjectedControllerBaseUrl(url: string | null | undefined): str
   if (lowered === "null" || lowered === "undefined") {
     return null;
   }
-  return normalizeControllerBaseUrl(normalized);
+  return normalizeControllerBaseUrl(normalized) || null;
 }
 
-function readControllerAccessTokenFromLocationSearch(): string | null {
-  if (typeof window === "undefined") {
-    return null;
-  }
-  return readControllerAccessTokenFromSearch(window.location.search);
+interface ControllerOverrideSource {
+  token: string | null;
+  baseUrl: string | null;
+  hasToken: boolean;
+  hasBaseUrl: boolean;
 }
 
-function readControllerBaseUrlFromLocationSearch(): string | null {
-  if (typeof window === "undefined") {
-    return null;
+interface PersistedControllerBindingV1 {
+  version: 1;
+  token: string | null;
+  baseUrl: string | null;
+}
+
+function readControllerOverridesFromSearch(search: string): ControllerOverrideSource {
+  try {
+    const params = new URLSearchParams(search);
+    return {
+      token: normalizeInjectedToken(params.get("controllerAccessToken")),
+      baseUrl: normalizeInjectedControllerBaseUrl(params.get("controllerUrl")),
+      hasToken: params.has("controllerAccessToken"),
+      hasBaseUrl: params.has("controllerUrl"),
+    };
+  } catch {
+    return { token: null, baseUrl: null, hasToken: false, hasBaseUrl: false };
   }
-  return readControllerBaseUrlFromSearch(window.location.search);
 }
 
 export function readControllerAccessTokenFromSearch(search: string): string | null {
-  try {
-    const params = new URLSearchParams(search);
-    return normalizeInjectedToken(params.get("controllerAccessToken"));
-  } catch (_error) {
-    return null;
-  }
+  return readControllerOverridesFromSearch(search).token;
 }
 
 export function readControllerBaseUrlFromSearch(search: string): string | null {
-  try {
-    const params = new URLSearchParams(search);
-    return normalizeInjectedControllerBaseUrl(params.get("controllerUrl"));
-  } catch {
-    return null;
+  return readControllerOverridesFromSearch(search).baseUrl;
+}
+
+export function syncControllerOverridesFromSearch(search: string): boolean {
+  initializeInjectedControllerOverrides();
+  const source = readControllerOverridesFromSearch(search);
+  if (!source.hasToken && !source.hasBaseUrl) {
+    return controllerReloadPending;
   }
+
+  const desired = resolveControllerOverrideSource(source);
+  const desiredBaseUrl = desired.baseUrl ?? canonicalControllerBaseUrl;
+  const bindingUnchanged =
+    desiredBaseUrl === controllerBaseUrl &&
+    desired.token === currentInjectedToken();
+
+  if (!bindingUnchanged) {
+    // Store the next document's complete pair without mutating this
+    // document's active binding. The reload boundary prevents prebuilt URLs
+    // and in-flight token resolutions from crossing controller origins.
+    persistInjectedControllerOverrides(desired.token, desired.baseUrl, false);
+  }
+  if (typeof window !== "undefined" && search === window.location.search) {
+    purgeControllerOverrideParamsFromLocation();
+  }
+  if (!bindingUnchanged) {
+    // Scrub credentials from the current history entry before dispatching;
+    // listeners are allowed to reload synchronously.
+    requestControllerDocumentReload("override-switch");
+  }
+  return controllerReloadPending;
 }
 
 export function syncControllerAccessTokenFromSearch(search: string): string | null {
-  const searchToken = readControllerAccessTokenFromSearch(search);
-  if (searchToken && searchToken !== currentInjectedToken()) {
-    setInjectedControllerToken(searchToken);
-  }
+  syncControllerOverridesFromSearch(search);
   return currentInjectedToken();
 }
 
 export function syncControllerBaseUrlFromSearch(search: string): string | null {
-  const searchControllerBaseUrl = readControllerBaseUrlFromSearch(search);
-  if (searchControllerBaseUrl && searchControllerBaseUrl !== currentInjectedControllerBaseUrl()) {
-    setInjectedControllerBaseUrl(searchControllerBaseUrl);
-  }
+  syncControllerOverridesFromSearch(search);
   return currentInjectedControllerBaseUrl();
 }
 
@@ -175,9 +236,140 @@ function currentInjectedControllerBaseUrl(): string | null {
   return normalizeInjectedControllerBaseUrl(injectedControllerBaseUrl ?? null);
 }
 
+function isLoopbackBrowserLocation(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  const hostname = window.location.hostname.toLowerCase();
+  return (
+    hostname === "" ||
+    hostname === "localhost" ||
+    hostname === "::1" ||
+    hostname === "[::1]" ||
+    /^127(?:\.\d{1,3}){3}$/.test(hostname)
+  );
+}
+
+function isHostedProductionControllerEnvironment(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    import.meta.env.PROD &&
+    !Capacitor.isNativePlatform() &&
+    !isLoopbackBrowserLocation()
+  );
+}
+
+function isCustomControllerBaseUrl(baseUrl: string | null): boolean {
+  return Boolean(baseUrl && baseUrl !== canonicalControllerBaseUrl);
+}
+
+function isActiveCustomControllerBaseUrl(): boolean {
+  return isCustomControllerBaseUrl(controllerBaseUrl);
+}
+
+function emptyControllerOverrideSource(): ControllerOverrideSource {
+  return { token: null, baseUrl: null, hasToken: false, hasBaseUrl: false };
+}
+
+function failClosedControllerOverrideSource(): ControllerOverrideSource {
+  // Mark the absent base as explicitly supplied so the normal source
+  // validation rejects the complete binding, including any token.
+  return { token: null, baseUrl: null, hasToken: true, hasBaseUrl: true };
+}
+
+function readStoredControllerOverrideSource(storage: Storage): ControllerOverrideSource {
+  let persistedBinding: string | null;
+  try {
+    persistedBinding = storage.getItem(CONTROLLER_BINDING_STORAGE_KEY);
+  } catch (_error) {
+    return failClosedControllerOverrideSource();
+  }
+
+  if (persistedBinding !== null) {
+    try {
+      const parsed = JSON.parse(persistedBinding) as Partial<PersistedControllerBindingV1> | null;
+      if (
+        !parsed ||
+        typeof parsed !== "object" ||
+        parsed.version !== CONTROLLER_BINDING_STORAGE_VERSION ||
+        !(typeof parsed.token === "string" || parsed.token === null) ||
+        !(typeof parsed.baseUrl === "string" || parsed.baseUrl === null)
+      ) {
+        return failClosedControllerOverrideSource();
+      }
+      return {
+        token: normalizeInjectedToken(parsed.token),
+        baseUrl: normalizeInjectedControllerBaseUrl(parsed.baseUrl),
+        hasToken: parsed.token !== null,
+        hasBaseUrl: parsed.baseUrl !== null,
+      };
+    } catch (_error) {
+      return failClosedControllerOverrideSource();
+    }
+  }
+
+  let legacyTokenRaw: string | null;
+  let legacyBaseUrlRaw: string | null;
+  try {
+    legacyTokenRaw = storage.getItem(CONTROLLER_TOKEN_STORAGE_KEY);
+    legacyBaseUrlRaw = storage.getItem(CONTROLLER_BASE_URL_STORAGE_KEY);
+  } catch (_error) {
+    return failClosedControllerOverrideSource();
+  }
+  if (legacyTokenRaw === null && legacyBaseUrlRaw === null) {
+    return emptyControllerOverrideSource();
+  }
+
+  const legacyToken = normalizeInjectedToken(legacyTokenRaw);
+  const legacyBaseUrl = normalizeInjectedControllerBaseUrl(legacyBaseUrlRaw);
+  // A split-key token without a custom base may be the residue of an
+  // interrupted custom-pair write. Never reinterpret it as canonical.
+  if (!legacyToken || !isCustomControllerBaseUrl(legacyBaseUrl)) {
+    return failClosedControllerOverrideSource();
+  }
+  return {
+    token: legacyToken,
+    baseUrl: legacyBaseUrl,
+    hasToken: true,
+    hasBaseUrl: true,
+  };
+}
+
+function resolveControllerOverrideSource(source: ControllerOverrideSource): {
+  token: string | null;
+  baseUrl: string | null;
+} {
+  // An explicitly supplied but invalid base URL invalidates its token too.
+  // Otherwise an attacker-controlled custom credential could silently be
+  // redirected to the canonical controller.
+  if (source.hasBaseUrl && !source.baseUrl) {
+    return { token: null, baseUrl: null };
+  }
+
+  const customBaseUrl = isCustomControllerBaseUrl(source.baseUrl)
+    ? source.baseUrl
+    : null;
+  if (
+    customBaseUrl &&
+    (!source.token || isHostedProductionControllerEnvironment())
+  ) {
+    return { token: null, baseUrl: null };
+  }
+  return {
+    token: source.token,
+    baseUrl: customBaseUrl,
+  };
+}
+
 function syncResolvedControllerBaseUrl() {
+  const injectedBaseUrl = currentInjectedControllerBaseUrl();
+  const customOverrideAllowed =
+    !isCustomControllerBaseUrl(injectedBaseUrl) ||
+    (!isHostedProductionControllerEnvironment() && Boolean(currentInjectedToken()));
   controllerBaseUrl =
-    currentInjectedControllerBaseUrl() ?? normalizeControllerBaseUrl(controllerUrlResolvedRaw);
+    customOverrideAllowed && injectedBaseUrl
+      ? injectedBaseUrl
+      : canonicalControllerBaseUrl;
   runtimeControllerEnabled = controllerBaseUrl.length > 0;
 }
 
@@ -226,118 +418,216 @@ function isLikelyExpiredJwt(token: string): boolean {
   return expiresAtMs - Date.now() < 30_000;
 }
 
-function setInjectedControllerToken(token: string | null | undefined) {
-  injectedControllerToken = normalizeInjectedToken(token);
-  if (typeof window !== "undefined") {
-    window.__INSTAFY_CONTROLLER_TOKEN__ = injectedControllerToken ?? null;
-    try {
-      if (window.sessionStorage) {
-        if (injectedControllerToken) {
-          window.sessionStorage.setItem(
-            CONTROLLER_TOKEN_STORAGE_KEY,
-            injectedControllerToken,
-          );
-        } else {
-          window.sessionStorage.removeItem(CONTROLLER_TOKEN_STORAGE_KEY);
-        }
-      }
-    } catch (_error) {
-      // ignore storage failures (e.g., private browsing)
+function setInjectedControllerOverrides(
+  token: string | null | undefined,
+  baseUrl: string | null | undefined,
+) {
+  const previousToken = currentInjectedToken();
+  const previousBaseUrl = currentInjectedControllerBaseUrl();
+  let normalizedToken = normalizeInjectedToken(token);
+  let normalizedBaseUrl = normalizeInjectedControllerBaseUrl(baseUrl);
+  if (normalizedBaseUrl === canonicalControllerBaseUrl) {
+    normalizedBaseUrl = null;
+  }
+  if (isCustomControllerBaseUrl(normalizedBaseUrl)) {
+    if (isHostedProductionControllerEnvironment()) {
+      // The token and custom base form one credential pair. Do not redirect
+      // the custom credential to the canonical controller when hosted web
+      // policy rejects its base URL.
+      normalizedToken = null;
+      normalizedBaseUrl = null;
+    } else if (!normalizedToken) {
+      normalizedBaseUrl = null;
     }
   }
+
+  injectedControllerToken = normalizedToken;
+  injectedControllerBaseUrl = normalizedBaseUrl;
+  if (
+    controllerBindingInitialized &&
+    (normalizedToken !== previousToken || normalizedBaseUrl !== previousBaseUrl)
+  ) {
+    controllerBindingGeneration += 1;
+  }
+  if (!controllerBindingInitialized) {
+    syncResolvedControllerBaseUrl();
+  }
+  persistInjectedControllerOverrides(normalizedToken, normalizedBaseUrl, true);
+}
+
+function persistInjectedControllerOverrides(
+  token: string | null,
+  baseUrl: string | null,
+  updateGlobals: boolean,
+) {
+  if (typeof window !== "undefined") {
+    if (updateGlobals) {
+      window.__INSTAFY_CONTROLLER_TOKEN__ = token;
+      window.__INSTAFY_CONTROLLER_BASE_URL__ = baseUrl;
+    }
+    let storage: Storage;
+    try {
+      storage = window.sessionStorage;
+      const binding: PersistedControllerBindingV1 = {
+        version: CONTROLLER_BINDING_STORAGE_VERSION,
+        token,
+        baseUrl,
+      };
+      // One setItem is the commit point. A failed/interrupted replacement
+      // leaves the previous complete binding intact rather than exposing a
+      // token-only or base-only intermediate state.
+      storage.setItem(CONTROLLER_BINDING_STORAGE_KEY, JSON.stringify(binding));
+    } catch (_error) {
+      // ignore storage failures (e.g., private browsing)
+      return;
+    }
+
+    // The atomic record is authoritative once committed. Retire old split
+    // keys afterward, independently, so interrupted cleanup cannot revive
+    // them on the next reload (including after an explicit null/null clear).
+    for (const legacyKey of [
+      CONTROLLER_TOKEN_STORAGE_KEY,
+      CONTROLLER_BASE_URL_STORAGE_KEY,
+    ]) {
+      try {
+        storage.removeItem(legacyKey);
+      } catch (_error) {
+        // ignore best-effort legacy cleanup failures
+      }
+    }
+  }
+}
+
+function setInjectedControllerToken(token: string | null | undefined) {
+  setInjectedControllerOverrides(token, currentInjectedControllerBaseUrl());
 }
 
 function setInjectedControllerBaseUrl(url: string | null | undefined) {
-  injectedControllerBaseUrl = normalizeInjectedControllerBaseUrl(url);
-  syncResolvedControllerBaseUrl();
-  if (typeof window !== "undefined") {
-    window.__INSTAFY_CONTROLLER_BASE_URL__ = injectedControllerBaseUrl ?? null;
-    try {
-      if (window.sessionStorage) {
-        if (injectedControllerBaseUrl) {
-          window.sessionStorage.setItem(
-            CONTROLLER_BASE_URL_STORAGE_KEY,
-            injectedControllerBaseUrl,
-          );
-        } else {
-          window.sessionStorage.removeItem(CONTROLLER_BASE_URL_STORAGE_KEY);
-        }
-      }
-    } catch (_error) {
-      // ignore storage failures (e.g., private browsing)
-    }
-  }
+  setInjectedControllerOverrides(currentInjectedToken(), url);
 }
 
-function initializeInjectedControllerToken() {
+function purgeControllerOverrideParamsFromLocation() {
   if (typeof window === "undefined") {
     return;
   }
-  if (typeof injectedControllerToken !== "undefined") {
-    return;
-  }
-  if (typeof window.__INSTAFY_CONTROLLER_TOKEN__ === "string") {
-    setInjectedControllerToken(window.__INSTAFY_CONTROLLER_TOKEN__);
-  }
-  const locationToken = readControllerAccessTokenFromLocationSearch();
-  if (locationToken) {
-    setInjectedControllerToken(locationToken);
-    return;
-  }
   try {
-    const stored = window.sessionStorage?.getItem(CONTROLLER_TOKEN_STORAGE_KEY);
-    if (stored && stored.trim().length > 0) {
-      setInjectedControllerToken(stored);
-    }
-  } catch (_error) {
-    // ignore storage read failures
-  }
-}
-
-function initializeInjectedControllerBaseUrl() {
-  if (typeof window === "undefined") {
-    return;
-  }
-  if (typeof injectedControllerBaseUrl !== "undefined") {
-    return;
-  }
-  if (typeof window.__INSTAFY_CONTROLLER_BASE_URL__ === "string") {
-    setInjectedControllerBaseUrl(window.__INSTAFY_CONTROLLER_BASE_URL__);
-  }
-  const locationControllerBaseUrl = readControllerBaseUrlFromLocationSearch();
-  if (locationControllerBaseUrl) {
-    setInjectedControllerBaseUrl(locationControllerBaseUrl);
-    return;
-  }
-  try {
-    const stored = window.sessionStorage?.getItem(CONTROLLER_BASE_URL_STORAGE_KEY);
-    if (stored && stored.trim().length > 0) {
-      setInjectedControllerBaseUrl(stored);
+    const url = new URL(window.location.href);
+    const hasControllerBaseUrl = url.searchParams.has("controllerUrl");
+    const hasControllerToken = url.searchParams.has("controllerAccessToken");
+    if (!hasControllerBaseUrl && !hasControllerToken) {
       return;
     }
+    url.searchParams.delete("controllerUrl");
+    url.searchParams.delete("controllerAccessToken");
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${url.pathname}${url.search}${url.hash}`,
+    );
+  } catch (_error) {
+    // ignore unavailable history/location implementations
+  }
+}
+
+function requestControllerDocumentReload(
+  reason: ControllerReloadRequiredDetail["reason"],
+) {
+  if (controllerReloadPending) {
+    return;
+  }
+  controllerReloadPending = true;
+  controllerReloadReason = reason;
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent(CONTROLLER_RELOAD_REQUIRED_EVENT, {
+        detail: { reason } satisfies ControllerReloadRequiredDetail,
+      }),
+    );
+  }
+}
+
+export function isControllerDocumentReloadPending(): boolean {
+  return controllerReloadPending;
+}
+
+export function subscribeToControllerReloadRequired(
+  listener: (detail: ControllerReloadRequiredDetail) => void,
+): () => void {
+  if (typeof window === "undefined") {
+    return () => {};
+  }
+  const handleReloadRequired = (event: Event) => {
+    listener(
+      (event as CustomEvent<ControllerReloadRequiredDetail>).detail,
+    );
+  };
+  window.addEventListener(
+    CONTROLLER_RELOAD_REQUIRED_EVENT,
+    handleReloadRequired,
+  );
+  // The event may have fired before a React parent effect mounted. Replay
+  // the durable pending state so the document cannot remain half-switched.
+  if (controllerReloadPending && controllerReloadReason) {
+    listener({ reason: controllerReloadReason });
+  }
+  return () => {
+    window.removeEventListener(
+      CONTROLLER_RELOAD_REQUIRED_EVENT,
+      handleReloadRequired,
+    );
+  };
+}
+
+function clearInjectedCustomControllerPair() {
+  setInjectedControllerOverrides(null, null);
+  purgeControllerOverrideParamsFromLocation();
+  requestControllerDocumentReload("rejected-override");
+}
+
+function initializeInjectedControllerOverrides() {
+  if (
+    typeof injectedControllerToken !== "undefined" &&
+    typeof injectedControllerBaseUrl !== "undefined"
+  ) {
+    return;
+  }
+  if (typeof window === "undefined") {
+    injectedControllerToken = null;
+    injectedControllerBaseUrl = null;
+    syncResolvedControllerBaseUrl();
+    controllerBindingInitialized = true;
+    return;
+  }
+
+  const searchSource = readControllerOverridesFromSearch(window.location.search);
+  const globalSource: ControllerOverrideSource = {
+    token: normalizeInjectedToken(window.__INSTAFY_CONTROLLER_TOKEN__),
+    baseUrl: normalizeInjectedControllerBaseUrl(window.__INSTAFY_CONTROLLER_BASE_URL__),
+    hasToken: typeof window.__INSTAFY_CONTROLLER_TOKEN__ === "string",
+    hasBaseUrl: typeof window.__INSTAFY_CONTROLLER_BASE_URL__ === "string",
+  };
+  let storedSource = emptyControllerOverrideSource();
+  try {
+    storedSource = readStoredControllerOverrideSource(window.sessionStorage);
   } catch (_error) {
     // ignore storage read failures
   }
-  syncResolvedControllerBaseUrl();
+
+  // Select one source as a unit. A query/global base must never borrow a
+  // token from session storage or another previously initialized source.
+  const source = searchSource.hasToken || searchSource.hasBaseUrl
+    ? searchSource
+    : globalSource.hasToken || globalSource.hasBaseUrl
+      ? globalSource
+      : storedSource;
+  const resolvedSource = resolveControllerOverrideSource(source);
+  setInjectedControllerOverrides(resolvedSource.token, resolvedSource.baseUrl);
+  controllerBindingInitialized = true;
+  purgeControllerOverrideParamsFromLocation();
 }
 
 if (typeof window !== "undefined") {
-  initializeInjectedControllerToken();
-  initializeInjectedControllerBaseUrl();
-  window.addEventListener("message", (event: MessageEvent) => {
-    const data = event.data;
-    if (!data || typeof data !== "object") {
-      return;
-    }
-    if (data.type === "instafy:setControllerAccessToken") {
-      const tokenValue = typeof data.token === "string" ? data.token : null;
-      setInjectedControllerToken(tokenValue);
-    }
-    if (data.type === "instafy:setControllerBaseUrl") {
-      const urlValue = typeof data.url === "string" ? data.url : null;
-      setInjectedControllerBaseUrl(urlValue);
-    }
-  });
+  initializeInjectedControllerOverrides();
 }
 
 declare global {
@@ -348,15 +638,74 @@ declare global {
 }
 
 export function clearControllerAccessTokenOverride() {
+  if (isActiveCustomControllerBaseUrl()) {
+    clearInjectedCustomControllerPair();
+    return;
+  }
+  const hadInjectedToken = Boolean(currentInjectedToken());
   setInjectedControllerToken(null);
+  purgeControllerOverrideParamsFromLocation();
+  if (hadInjectedToken) {
+    requestControllerDocumentReload("rejected-override");
+  }
 }
 
 export function clearControllerBaseUrlOverride() {
+  if (isActiveCustomControllerBaseUrl()) {
+    clearInjectedCustomControllerPair();
+    return;
+  }
   setInjectedControllerBaseUrl(null);
+  purgeControllerOverrideParamsFromLocation();
 }
 
-export function emitControllerAuthError(detail: ControllerAuthErrorDetail) {
+function createControllerRequestContext(
+  accessToken: string | null,
+  credentialSource: ControllerRequestContext["credentialSource"],
+): ControllerRequestContext {
+  return Object.freeze({
+    baseUrl: controllerBaseUrl,
+    accessToken,
+    credentialSource: accessToken ? credentialSource : null,
+    generation: controllerBindingGeneration,
+  });
+}
+
+function controllerRequestContextIsCurrent(
+  context: ControllerRequestContext,
+): boolean {
+  if (
+    controllerReloadPending ||
+    context.baseUrl !== controllerBaseUrl ||
+    context.generation !== controllerBindingGeneration ||
+    !context.accessToken
+  ) {
+    return false;
+  }
+
+  const injectedToken = currentInjectedToken();
+  if (injectedToken) {
+    return (
+      context.credentialSource === "fixed" &&
+      context.accessToken === injectedToken
+    );
+  }
+
+  return context.credentialSource === "ambient";
+}
+
+export function emitControllerAuthError(
+  detail: ControllerAuthErrorDetail,
+  requestContext?: ControllerRequestContext,
+) {
   if (typeof window === "undefined") {
+    return;
+  }
+  if (
+    detail.status === 401 &&
+    requestContext &&
+    (!requestContext.accessToken || !controllerRequestContextIsCurrent(requestContext))
+  ) {
     return;
   }
   // An injected override token (invite link / device handoff) outlives the
@@ -368,8 +717,16 @@ export function emitControllerAuthError(detail: ControllerAuthErrorDetail) {
   // 401s get the same treatment for a short grace window. A 401 outside that
   // window with no override present escalates to the sign-out flow below.
   if (detail.status === 401) {
+    if (controllerReloadPending) {
+      return;
+    }
+    if (isActiveCustomControllerBaseUrl()) {
+      clearInjectedCustomControllerPair();
+      overrideDroppedForAuthErrorAt = Date.now();
+      return;
+    }
     if (currentInjectedToken()) {
-      setInjectedControllerToken(null);
+      clearControllerAccessTokenOverride();
       overrideDroppedForAuthErrorAt = Date.now();
       return;
     }
@@ -391,6 +748,45 @@ export function emitControllerAuthError(detail: ControllerAuthErrorDetail) {
       } satisfies ControllerAuthErrorDetail,
     }),
   );
+}
+
+export async function emitControllerAuthErrorForRequest(
+  detail: ControllerAuthErrorDetail,
+  requestContext: ControllerRequestContext,
+): Promise<boolean> {
+  if (!controllerRequestContextIsCurrent(requestContext)) {
+    return false;
+  }
+
+  const injectedToken = currentInjectedToken();
+  if (injectedToken) {
+    if (injectedToken !== requestContext.accessToken) {
+      return false;
+    }
+    emitControllerAuthError(detail, requestContext);
+    return true;
+  }
+
+  // Supabase may refresh the browser session while a controller request is
+  // in flight. Re-read it before allowing a 401 to sign out the current user;
+  // a response for token A must not invalidate a newer token B.
+  try {
+    const result = await supabase.auth.getSession();
+    const currentSessionToken = normalizeInjectedToken(
+      result.data.session?.access_token ?? null,
+    );
+    if (
+      currentSessionToken !== requestContext.accessToken ||
+      !controllerRequestContextIsCurrent(requestContext)
+    ) {
+      return false;
+    }
+  } catch (_error) {
+    // Without a current-session comparison, mutating auth state is unsafe.
+    return false;
+  }
+  emitControllerAuthError(detail, requestContext);
+  return true;
 }
 
 export function normalizeOriginEndpointForClient(endpoint: string): string {
@@ -460,25 +856,27 @@ export function safeJson(
 export async function readControllerError(
   response: Response,
   fallback: string,
+  requestContext?: ControllerRequestContext,
 ): Promise<string> {
-  const payload = await readControllerApiError(response, fallback);
+  const payload = await readControllerApiError(response, fallback, requestContext);
   return payload.message;
 }
 
 export async function readControllerApiError(
   response: Response,
   fallback: string,
+  requestContext?: ControllerRequestContext,
 ): Promise<ControllerApiErrorPayload> {
   const base = `${fallback} (${response.status})`;
   try {
     const text = await response.text();
     if (!text) {
-      if (response.status === 401) {
-        emitControllerAuthError({
+      if (response.status === 401 && requestContext) {
+        await emitControllerAuthErrorForRequest({
           status: response.status,
           message: base,
           url: response.url,
-        });
+        }, requestContext);
       }
       return {
         status: response.status,
@@ -492,12 +890,12 @@ export async function readControllerApiError(
       const data = JSON.parse(text) as Record<string, unknown>;
       if (typeof data.message === "string" && data.message.trim().length > 0) {
         const message = data.message.trim();
-        if (response.status === 401) {
-          emitControllerAuthError({
+        if (response.status === 401 && requestContext) {
+          await emitControllerAuthErrorForRequest({
             status: response.status,
             message,
             url: response.url,
-          });
+          }, requestContext);
         }
         return {
           status: response.status,
@@ -513,12 +911,12 @@ export async function readControllerApiError(
       // ignore JSON parse failure, fall back to raw text
     }
     const message = `${base}: ${text}`;
-    if (response.status === 401) {
-      emitControllerAuthError({
+    if (response.status === 401 && requestContext) {
+      await emitControllerAuthErrorForRequest({
         status: response.status,
         message,
         url: response.url,
-      });
+      }, requestContext);
     }
     return {
       status: response.status,
@@ -528,12 +926,12 @@ export async function readControllerApiError(
       url: response.url,
     };
   } catch (_error) {
-    if (response.status === 401) {
-      emitControllerAuthError({
+    if (response.status === 401 && requestContext) {
+      await emitControllerAuthErrorForRequest({
         status: response.status,
         message: base,
         url: response.url,
-      });
+      }, requestContext);
     }
     return {
       status: response.status,
@@ -545,27 +943,42 @@ export async function readControllerApiError(
   }
 }
 
-export async function resolveControllerAccessToken(
+export async function resolveControllerRequestContext(
   desired: string | null,
-): Promise<string | null> {
-  const desiredToken = normalizeInjectedToken(desired);
-  if (desiredToken) {
-    return desiredToken;
+): Promise<ControllerRequestContext> {
+  initializeInjectedControllerOverrides();
+  if (controllerReloadPending) {
+    return createControllerRequestContext(null, null);
   }
 
-  if (typeof injectedControllerToken === "undefined") {
-    initializeInjectedControllerToken();
-  }
-  syncControllerAccessTokenFromSearch(
-    typeof window !== "undefined" ? window.location.search : "",
-  );
+  const customBaseIsActive = isActiveCustomControllerBaseUrl();
   const injectedToken = currentInjectedToken();
+  if (customBaseIsActive) {
+    if (!injectedToken || isLikelyExpiredJwt(injectedToken)) {
+      clearInjectedCustomControllerPair();
+      return createControllerRequestContext(null, null);
+    }
+    // A custom controller may only receive the token injected alongside that
+    // base URL. Even an explicitly supplied caller token may be an ambient
+    // Supabase/user token whose audience is the canonical controller.
+    return createControllerRequestContext(injectedToken, "fixed");
+  }
+
+  const desiredToken = normalizeInjectedToken(desired);
+  if (desiredToken) {
+    return createControllerRequestContext(desiredToken, "fixed");
+  }
+
   if (injectedToken) {
     if (isLikelyExpiredJwt(injectedToken)) {
-      setInjectedControllerToken(null);
+      clearControllerAccessTokenOverride();
     } else {
-      return injectedToken;
+      return createControllerRequestContext(injectedToken, "fixed");
     }
+  }
+
+  if (controllerReloadPending) {
+    return createControllerRequestContext(null, null);
   }
 
   const authClient = (
@@ -584,6 +997,9 @@ export async function resolveControllerAccessToken(
   try {
     if (authClient && typeof authClient.getSession === "function") {
       let result = await authClient.getSession();
+      if (controllerReloadPending) {
+        return createControllerRequestContext(null, null);
+      }
       const expiresAt = result.data.session?.expires_at
         ? result.data.session.expires_at * 1000
         : null;
@@ -591,13 +1007,16 @@ export async function resolveControllerAccessToken(
         typeof expiresAt === "number" ? expiresAt - Date.now() < 30_000 : false;
       if (tokenStale && typeof authClient.refreshSession === "function") {
         const refreshed = await authClient.refreshSession().catch(() => null);
+        if (controllerReloadPending) {
+          return createControllerRequestContext(null, null);
+        }
         if (refreshed?.data?.session) {
           result = refreshed;
         }
       }
       const sessionToken = normalizeInjectedToken(result.data.session?.access_token ?? null);
       if (sessionToken) {
-        return sessionToken;
+        return createControllerRequestContext(sessionToken, "ambient");
       }
     }
   } catch (error) {
@@ -608,5 +1027,11 @@ export async function resolveControllerAccessToken(
     );
   }
 
-  return null;
+  return createControllerRequestContext(null, null);
+}
+
+export async function resolveControllerAccessToken(
+  desired: string | null,
+): Promise<string | null> {
+  return (await resolveControllerRequestContext(desired)).accessToken;
 }

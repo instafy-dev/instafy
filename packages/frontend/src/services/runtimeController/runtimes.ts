@@ -1,10 +1,9 @@
 import {
   coerceControllerRuntimeIdleTtlSeconds,
   ControllerApiError,
-  controllerBaseUrl,
   readControllerApiError,
   readControllerError,
-  resolveControllerAccessToken,
+  resolveControllerRequestContext,
   runtimeControllerEnabled,
 } from "./core";
 
@@ -64,25 +63,30 @@ export async function fetchRuntimeStatus(
     return null;
   }
 
-  const accessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const accessToken = requestContext.accessToken;
+  if (!accessToken) {
+    return null;
+  }
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/projects/${encodeURIComponent(params.projectId)}/runtime/status`,
+      `${requestContext.baseUrl}/projects/${encodeURIComponent(params.projectId)}/runtime/status`,
       {
         signal: params.signal,
-        headers: accessToken
-          ? { authorization: `Bearer ${accessToken}` }
-          : undefined,
+        headers: { authorization: `Bearer ${accessToken}` },
       },
     );
 
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
       throw new Error(
-        `fetch runtime status failed (${response.status}): ${text}`,
+        await readControllerError(
+          response,
+          "fetch runtime status failed",
+          requestContext,
+        ),
       );
     }
 
@@ -204,9 +208,10 @@ export async function ensureRuntime(
   if (!runtimeControllerEnabled) {
     return null;
   }
-  const accessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return null;
   }
@@ -231,7 +236,7 @@ export async function ensureRuntime(
     payload.origin_metadata = params.originMetadata;
   }
   try {
-    const response = await fetch(`${controllerBaseUrl}/runtime/ensure`, {
+    const response = await fetch(`${requestContext.baseUrl}/runtime/ensure`, {
       method: "POST",
       signal: params.signal,
       headers: {
@@ -244,6 +249,7 @@ export async function ensureRuntime(
       const errorPayload = await readControllerApiError(
         response,
         "Unable to ensure runtime",
+        requestContext,
       );
       throw new ControllerApiError(errorPayload);
     }
@@ -271,15 +277,16 @@ export async function stopRuntime(
   if (!runtimeControllerEnabled) {
     return false;
   }
-  const accessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return false;
   }
 
   try {
-    const response = await fetch(`${controllerBaseUrl}/runtime/stop`, {
+    const response = await fetch(`${requestContext.baseUrl}/runtime/stop`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -292,8 +299,9 @@ export async function stopRuntime(
     });
 
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`stop runtime failed (${response.status}): ${text}`);
+      throw new Error(
+        await readControllerError(response, "stop runtime failed", requestContext),
+      );
     }
 
     return true;
@@ -321,15 +329,16 @@ export async function stopRuntimeIfIdle(
   if (!runtimeControllerEnabled) {
     return null;
   }
-  const accessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return null;
   }
 
   try {
-    const response = await fetch(`${controllerBaseUrl}/runtime/stop`, {
+    const response = await fetch(`${requestContext.baseUrl}/runtime/stop`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -346,8 +355,13 @@ export async function stopRuntimeIfIdle(
     });
 
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`stop idle runtime failed (${response.status}): ${text}`);
+      throw new Error(
+        await readControllerError(
+          response,
+          "stop idle runtime failed",
+          requestContext,
+        ),
+      );
     }
 
     const body = (await response.json().catch(() => null)) as {
@@ -385,15 +399,16 @@ export async function removeRuntime(
   if (!runtimeControllerEnabled) {
     return false;
   }
-  const accessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return false;
   }
 
   try {
-    const response = await fetch(`${controllerBaseUrl}/runtime/remove`, {
+    const response = await fetch(`${requestContext.baseUrl}/runtime/remove`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -406,8 +421,9 @@ export async function removeRuntime(
     });
 
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`remove runtime failed (${response.status}): ${text}`);
+      throw new Error(
+        await readControllerError(response, "remove runtime failed", requestContext),
+      );
     }
 
     return true;
@@ -550,9 +566,10 @@ export async function requestDesktopRuntime(
   if (!runtimeControllerEnabled) {
     return null;
   }
-  const accessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return null;
   }
@@ -567,7 +584,7 @@ export async function requestDesktopRuntime(
   };
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/projects/${params.projectId}/runtime/request`,
+      `${requestContext.baseUrl}/projects/${params.projectId}/runtime/request`,
       {
         method: "POST",
         headers: {
@@ -581,6 +598,7 @@ export async function requestDesktopRuntime(
       const errorMessage = await readControllerError(
         response,
         "Unable to request desktop runtime",
+        requestContext,
       );
       throw new Error(errorMessage);
     }
@@ -627,16 +645,17 @@ export async function setRuntimePreference(
     return null;
   }
 
-  const accessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return null;
   }
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/projects/${encodeURIComponent(params.projectId)}/runtime/preference`,
+      `${requestContext.baseUrl}/projects/${encodeURIComponent(params.projectId)}/runtime/preference`,
       {
         method: "POST",
         headers: {
@@ -648,9 +667,12 @@ export async function setRuntimePreference(
     );
 
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
       throw new Error(
-        `set runtime preference failed (${response.status}): ${text}`,
+        await readControllerError(
+          response,
+          "set runtime preference failed",
+          requestContext,
+        ),
       );
     }
 
@@ -684,9 +706,10 @@ export async function updateRuntimeActivity(
     return false;
   }
 
-  const sessionToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const sessionToken = requestContext.accessToken;
 
   if (!sessionToken) {
     return false;
@@ -715,7 +738,7 @@ export async function updateRuntimeActivity(
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/projects/${params.projectId}/runtime/activity`,
+      `${requestContext.baseUrl}/projects/${params.projectId}/runtime/activity`,
       {
         method: "POST",
         headers: {
@@ -727,9 +750,12 @@ export async function updateRuntimeActivity(
     );
 
     if (!response.ok) {
-      const text = await response.text();
       throw new Error(
-        `update runtime activity failed (${response.status}): ${text}`,
+        await readControllerError(
+          response,
+          "update runtime activity failed",
+          requestContext,
+        ),
       );
     }
 

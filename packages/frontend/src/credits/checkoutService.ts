@@ -1,6 +1,7 @@
 import {
   controllerBaseUrl,
-  resolveControllerAccessToken,
+  readControllerError,
+  resolveControllerRequestContext,
   runtimeControllerEnabled
 } from "../sdk/instafy";
 
@@ -64,7 +65,8 @@ export async function requestCheckoutSession(
     return { success: false, error: "Select a billing processor before starting checkout." };
   }
 
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return { success: false, error: "Missing controller session token for checkout." };
   }
@@ -79,7 +81,7 @@ export async function requestCheckoutSession(
   };
 
   try {
-    const response = await fetch(`${controllerBaseUrl}/billing/checkout`, {
+    const response = await fetch(`${requestContext.baseUrl}/billing/checkout`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -88,13 +90,9 @@ export async function requestCheckoutSession(
       body: JSON.stringify(payload)
     });
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
       return {
         success: false,
-        error:
-          text?.trim().length > 0
-            ? `Checkout failed (${response.status}): ${text}`
-            : `Checkout failed (${response.status}).`
+        error: await readControllerError(response, "Checkout failed", requestContext),
       };
     }
     const body = (await response.json()) as { checkoutUrl?: string };
@@ -131,7 +129,8 @@ export async function requestPlanChange(params: PlanChangeRequest): Promise<Plan
     return { success: false, error: "Choose a plan before continuing." };
   }
 
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return { success: false, error: "Missing controller session token for plan change." };
   }
@@ -143,7 +142,7 @@ export async function requestPlanChange(params: PlanChangeRequest): Promise<Plan
   };
 
   try {
-    const response = await fetch(`${controllerBaseUrl}/billing/checkout`, {
+    const response = await fetch(`${requestContext.baseUrl}/billing/checkout`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -152,13 +151,9 @@ export async function requestPlanChange(params: PlanChangeRequest): Promise<Plan
       body: JSON.stringify(payload)
     });
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
       return {
         success: false,
-        error:
-          text?.trim().length > 0
-            ? `Plan change failed (${response.status}): ${text}`
-            : `Plan change failed (${response.status}).`
+        error: await readControllerError(response, "Plan change failed", requestContext),
       };
     }
     return { success: true };
@@ -188,7 +183,8 @@ export async function requestBillingPortalSession(
     return { success: false, error: "A return URL is required for billing portal." };
   }
 
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return { success: false, error: "Missing controller session token for billing portal." };
   }
@@ -200,7 +196,7 @@ export async function requestBillingPortalSession(
   };
 
   try {
-    const response = await fetch(`${controllerBaseUrl}/billing/checkout`, {
+    const response = await fetch(`${requestContext.baseUrl}/billing/checkout`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -209,13 +205,9 @@ export async function requestBillingPortalSession(
       body: JSON.stringify(payload)
     });
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
       return {
         success: false,
-        error:
-          text?.trim().length > 0
-            ? `Billing portal failed (${response.status}): ${text}`
-            : `Billing portal failed (${response.status}).`
+        error: await readControllerError(response, "Billing portal failed", requestContext),
       };
     }
 

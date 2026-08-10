@@ -3061,7 +3061,12 @@ export async function prepareStudio(
         }
       } catch {}
       try {
+        window.sessionStorage?.setItem(
+          "instafy.controllerBinding",
+          JSON.stringify({ version: 1, token: null, baseUrl: null }),
+        );
         window.sessionStorage?.removeItem("instafy.controllerAccessToken");
+        window.sessionStorage?.removeItem("instafy.controllerBaseUrl");
       } catch {}
       const runtimeWindow = window as typeof window & {
         __INSTAFY_ACTIVE_PROJECT_ID__?: string | null;

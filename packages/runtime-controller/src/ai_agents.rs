@@ -435,7 +435,7 @@ async fn list_my_agents(
     headers: HeaderMap,
     Query(query): Query<ListMyAgentsQuery>,
 ) -> Result<Json<Vec<AgentProfile>>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let project_id = query
         .project_id
@@ -561,7 +561,7 @@ async fn create_my_agent(
     headers: HeaderMap,
     Json(body): Json<CreateAgentBody>,
 ) -> Result<Json<AgentProfile>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
 
     let credential_id = body
@@ -707,7 +707,7 @@ async fn update_my_agent(
     AxumPath(agent_id_raw): AxumPath<String>,
     Json(body): Json<UpdateAgentBody>,
 ) -> Result<Json<AgentProfile>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
 
     let agent_id = Uuid::from_str(agent_id_raw.trim())
@@ -1027,7 +1027,7 @@ async fn delete_my_agent(
     headers: HeaderMap,
     AxumPath(agent_id_raw): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
 
     let agent_id = Uuid::from_str(agent_id_raw.trim())

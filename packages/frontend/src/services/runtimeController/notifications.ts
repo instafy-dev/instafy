@@ -1,7 +1,7 @@
 import {
   controllerBaseUrl,
   readControllerError,
-  resolveControllerAccessToken,
+  resolveControllerRequestContext,
   runtimeControllerEnabled,
 } from "./core";
 
@@ -81,9 +81,10 @@ export async function upsertMyWebPushSubscription(
     return { success: false, error: "Runtime controller is not configured." };
   }
 
-  const resolvedAccessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const resolvedAccessToken = requestContext.accessToken;
   if (!resolvedAccessToken) {
     return { success: false, error: "Missing controller session token." };
   }
@@ -97,7 +98,7 @@ export async function upsertMyWebPushSubscription(
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/me/notifications/web-push/subscription`,
+      `${requestContext.baseUrl}/me/notifications/web-push/subscription`,
       {
         method: "POST",
         headers: {
@@ -117,6 +118,7 @@ export async function upsertMyWebPushSubscription(
       const errorMessage = await readControllerError(
         response,
         "Unable to save Web Push subscription",
+        requestContext,
       );
       return { success: false, error: errorMessage };
     }
@@ -160,9 +162,10 @@ export async function removeMyWebPushSubscription(
     return { success: false, error: "Runtime controller is not configured." };
   }
 
-  const resolvedAccessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const resolvedAccessToken = requestContext.accessToken;
   if (!resolvedAccessToken) {
     return { success: false, error: "Missing controller session token." };
   }
@@ -174,7 +177,7 @@ export async function removeMyWebPushSubscription(
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/me/notifications/web-push/subscription/remove`,
+      `${requestContext.baseUrl}/me/notifications/web-push/subscription/remove`,
       {
         method: "POST",
         headers: {
@@ -190,6 +193,7 @@ export async function removeMyWebPushSubscription(
       const errorMessage = await readControllerError(
         response,
         "Unable to remove Web Push subscription",
+        requestContext,
       );
       return { success: false, error: errorMessage };
     }
@@ -224,9 +228,10 @@ export async function upsertMyNativePushToken(
     return { success: false, error: "Runtime controller is not configured." };
   }
 
-  const resolvedAccessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const resolvedAccessToken = requestContext.accessToken;
   if (!resolvedAccessToken) {
     return { success: false, error: "Missing controller session token." };
   }
@@ -238,7 +243,7 @@ export async function upsertMyNativePushToken(
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/me/notifications/native-push/token`,
+      `${requestContext.baseUrl}/me/notifications/native-push/token`,
       {
         method: "POST",
         headers: {
@@ -258,6 +263,7 @@ export async function upsertMyNativePushToken(
       const errorMessage = await readControllerError(
         response,
         "Unable to save native push token",
+        requestContext,
       );
       return { success: false, error: errorMessage };
     }
@@ -294,9 +300,10 @@ export async function removeMyNativePushToken(
     return { success: false, error: "Runtime controller is not configured." };
   }
 
-  const resolvedAccessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const resolvedAccessToken = requestContext.accessToken;
   if (!resolvedAccessToken) {
     return { success: false, error: "Missing controller session token." };
   }
@@ -308,7 +315,7 @@ export async function removeMyNativePushToken(
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/me/notifications/native-push/token/remove`,
+      `${requestContext.baseUrl}/me/notifications/native-push/token/remove`,
       {
         method: "POST",
         headers: {
@@ -327,6 +334,7 @@ export async function removeMyNativePushToken(
       const errorMessage = await readControllerError(
         response,
         "Unable to remove native push token",
+        requestContext,
       );
       return { success: false, error: errorMessage };
     }
@@ -372,9 +380,10 @@ export async function listMyNotificationInbox(
     return { success: false, error: "Runtime controller is not configured." };
   }
 
-  const resolvedAccessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const resolvedAccessToken = requestContext.accessToken;
   if (!resolvedAccessToken) {
     return { success: false, error: "Missing controller session token." };
   }
@@ -385,7 +394,7 @@ export async function listMyNotificationInbox(
     : 25;
 
   try {
-    const url = new URL(`${controllerBaseUrl}/me/notifications/inbox`);
+    const url = new URL(`${requestContext.baseUrl}/me/notifications/inbox`);
     url.searchParams.set("limit", limit.toString());
     const response = await fetch(url.toString(), {
       headers: {
@@ -398,6 +407,7 @@ export async function listMyNotificationInbox(
       const errorMessage = await readControllerError(
         response,
         "Unable to load inbox",
+        requestContext,
       );
       return { success: false, error: errorMessage };
     }
@@ -499,9 +509,10 @@ export async function acknowledgeMyNotificationInboxItem(
     return { success: false, error: "Runtime controller is not configured." };
   }
 
-  const resolvedAccessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const resolvedAccessToken = requestContext.accessToken;
   if (!resolvedAccessToken) {
     return { success: false, error: "Missing controller session token." };
   }
@@ -512,7 +523,7 @@ export async function acknowledgeMyNotificationInboxItem(
   }
 
   try {
-    const response = await fetch(`${controllerBaseUrl}/me/notifications/inbox/ack`, {
+    const response = await fetch(`${requestContext.baseUrl}/me/notifications/inbox/ack`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${resolvedAccessToken}`,
@@ -526,6 +537,7 @@ export async function acknowledgeMyNotificationInboxItem(
       const errorMessage = await readControllerError(
         response,
         "Unable to acknowledge inbox item",
+        requestContext,
       );
       return { success: false, error: errorMessage };
     }

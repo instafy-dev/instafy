@@ -107,8 +107,6 @@ pub(crate) struct ConversationUpdateBody {
 pub(crate) struct ConversationRunsQuery {
     #[serde(default)]
     pub(crate) limit: Option<i64>,
-    #[serde(rename = "accessToken", alias = "access_token")]
-    pub(crate) access_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -116,8 +114,6 @@ pub(crate) struct ConversationRunsQuery {
 pub(crate) struct ProjectConversationsQuery {
     #[serde(default)]
     pub(crate) limit: Option<i64>,
-    #[serde(rename = "accessToken", alias = "access_token")]
-    pub(crate) access_token: Option<String>,
     #[serde(default, alias = "rootOnly")]
     pub(crate) roots_only: Option<bool>,
     #[serde(default, alias = "parent_conversation_id")]
@@ -154,8 +150,6 @@ pub(crate) struct ConversationMessagesQuery {
     #[serde(default)]
     pub(crate) limit: Option<i64>,
     pub(crate) cursor: Option<String>,
-    #[serde(rename = "accessToken", alias = "access_token")]
-    pub(crate) access_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -429,8 +423,7 @@ pub(crate) async fn list_project_conversations(
     AxumPath(project_id_raw): AxumPath<String>,
     Query(params): Query<ProjectConversationsQuery>,
 ) -> Result<Json<Vec<ProjectConversationPayload>>, (StatusCode, Json<ApiError>)> {
-    let token_override = params.access_token.clone();
-    let context = authenticate_request(&state.config, &headers, token_override.as_deref()).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let project_id = Uuid::from_str(project_id_raw.trim())
         .map_err(|_| bad_request("projectId must be a valid UUID"))?;
@@ -657,7 +650,7 @@ pub(crate) async fn create_project_conversation(
         has_auth,
         "create_project_conversation received"
     );
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let project_id = Uuid::from_str(project_id_raw.trim())
         .map_err(|_| bad_request("projectId must be a valid UUID"))?;
 
@@ -691,7 +684,7 @@ pub(crate) async fn create_blank_project_conversation(
     AxumPath(project_id_raw): AxumPath<String>,
     axum::Json(body): axum::Json<ConversationCreateBody>,
 ) -> Result<Json<ConversationCreateResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let project_id = Uuid::from_str(project_id_raw.trim())
         .map_err(|_| bad_request("projectId must be a valid UUID"))?;
 
@@ -886,7 +879,7 @@ pub(crate) async fn update_conversation_metadata(
     AxumPath(conversation_id_raw): AxumPath<String>,
     axum::Json(body): axum::Json<ConversationUpdateBody>,
 ) -> Result<Json<ProjectConversationPayload>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let conversation_id = Uuid::from_str(conversation_id_raw.trim())
         .map_err(|_| bad_request("conversationId must be a valid UUID"))?;
@@ -1116,7 +1109,7 @@ pub(crate) async fn record_conversation_message_only(
     AxumPath(conversation_id_raw): AxumPath<String>,
     axum::Json(body): axum::Json<ConversationRecordMessageBody>,
 ) -> Result<Json<ConversationMessagePayload>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let conversation_id = Uuid::from_str(conversation_id_raw.trim())
         .map_err(|_| bad_request("conversationId must be a valid UUID"))?;
@@ -1524,7 +1517,7 @@ pub(crate) async fn interrupt_conversation_runs(
     AxumPath(conversation_id_raw): AxumPath<String>,
     axum::Json(body): axum::Json<ConversationInterruptBody>,
 ) -> Result<Json<ConversationInterruptResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let conversation_id = Uuid::from_str(conversation_id_raw.trim())
         .map_err(|_| bad_request("conversationId must be a valid UUID"))?;
@@ -1799,7 +1792,7 @@ pub(crate) async fn cancel_agent_job(
     AxumPath(job_id_raw): AxumPath<String>,
     body: Option<axum::Json<ConversationInterruptBody>>,
 ) -> Result<Json<ConversationInterruptResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let job_id =
         Uuid::from_str(job_id_raw.trim()).map_err(|_| bad_request("jobId must be a valid UUID"))?;
@@ -1945,7 +1938,7 @@ pub(crate) async fn cancel_plan_group_jobs(
     AxumPath(group_id_raw): AxumPath<String>,
     body: Option<axum::Json<ConversationInterruptBody>>,
 ) -> Result<Json<ConversationInterruptResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let group_id_raw = group_id_raw.trim().to_string();
     let group_id = Uuid::from_str(group_id_raw.as_str())
@@ -2239,7 +2232,7 @@ pub(crate) async fn post_conversation_message(
         has_auth,
         "post_conversation_message received"
     );
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let conversation_id = Uuid::from_str(conversation_id_raw.trim())
         .map_err(|_| bad_request("conversationId must be a valid UUID"))?;
@@ -2321,8 +2314,7 @@ pub(crate) async fn list_conversation_runs(
     AxumPath(conversation_id_raw): AxumPath<String>,
     Query(params): Query<ConversationRunsQuery>,
 ) -> Result<Json<Vec<runs::RunSnapshot>>, (StatusCode, Json<ApiError>)> {
-    let token_override = params.access_token.clone();
-    let context = authenticate_request(&state.config, &headers, token_override.as_deref()).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let conversation_id = Uuid::from_str(conversation_id_raw.trim())
         .map_err(|_| bad_request("conversationId must be a valid UUID"))?;
@@ -2393,8 +2385,7 @@ pub(crate) async fn list_conversation_messages(
     AxumPath(conversation_id_raw): AxumPath<String>,
     Query(params): Query<ConversationMessagesQuery>,
 ) -> Result<Json<ConversationMessagesPage>, (StatusCode, Json<ApiError>)> {
-    let token_override = params.access_token.clone();
-    let context = authenticate_request(&state.config, &headers, token_override.as_deref()).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let conversation_id = Uuid::from_str(conversation_id_raw.trim())
         .map_err(|_| bad_request("conversationId must be a valid UUID"))?;
@@ -3276,7 +3267,7 @@ async fn list_conversation_participants(
     headers: HeaderMap,
     AxumPath(conversation_id_raw): AxumPath<String>,
 ) -> Result<Json<ConversationParticipantsResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let conversation_id = Uuid::from_str(conversation_id_raw.trim())
         .map_err(|_| bad_request("conversationId must be a valid UUID"))?;
 
@@ -3311,7 +3302,7 @@ async fn add_conversation_participant(
     AxumPath(conversation_id_raw): AxumPath<String>,
     axum::Json(body): axum::Json<ConversationParticipantCreateBody>,
 ) -> Result<Json<ConversationParticipantsResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let conversation_id = Uuid::from_str(conversation_id_raw.trim())
         .map_err(|_| bad_request("conversationId must be a valid UUID"))?;
     let target_user_id = Uuid::from_str(body.user_id.trim())
