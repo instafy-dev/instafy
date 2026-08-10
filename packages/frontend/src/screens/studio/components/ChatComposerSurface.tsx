@@ -24,8 +24,10 @@ import { IconButton } from "../../../components/Button";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
 import {
+  DARK_PANEL_BORDER_CLASS,
   DARK_PANEL_SHADOW_CLASS,
   DARK_PANEL_SOFT_BG_CLASS,
+  DARK_RAISED_CONTROL_BG_CLASS,
   DARK_RAISED_CONTROL_CLASS,
 } from "../../../theme/darkSurfaces";
 import { ComposerActionMenu } from "./ComposerActionMenu";
@@ -33,7 +35,6 @@ import { ComposerInviteModal } from "./ComposerInviteModal";
 import { ChatBrowserDock } from "./ChatBrowserDock";
 import { ChatInput, type ChatInputHandle } from "./chat-input/ChatInput";
 import { ChatSendQueueSurface } from "./ChatSendQueueSurface";
-import { ConversationRoster } from "./ConversationRoster";
 import { OctoAgentChip } from "./OctoAgentChip";
 import { OctoSilenceHint } from "./OctoSilenceHint";
 import { StatusPill, StatusPillButton, type StatusPillTone } from "./StatusPill";
@@ -103,7 +104,6 @@ type ChatComposerSurfaceProps = {
   inviteModalProps: ComponentProps<typeof ComposerInviteModal>;
   mutationDisabled?: boolean;
   accessNotice?: string | null;
-  rosterProps?: ComponentProps<typeof ConversationRoster> | null;
   silenceHintProps?: ComponentProps<typeof OctoSilenceHint> | null;
 };
 
@@ -176,7 +176,6 @@ export function ChatComposerSurface({
   inviteModalProps,
   mutationDisabled = false,
   accessNotice = null,
-  rosterProps = null,
   silenceHintProps = null,
 }: ChatComposerSurfaceProps) {
   const showVoiceSecondaryStatus = showVoicePrimaryAction && showVoiceStatus;
@@ -489,23 +488,21 @@ export function ChatComposerSurface({
                 {accessNotice}
               </div>
             ) : null}
-            {rosterProps ? (
-              <div className="mx-1 flex justify-end sm:mx-2">
-                <ConversationRoster {...rosterProps} />
-              </div>
-            ) : null}
             {silenceHintProps ? <OctoSilenceHint {...silenceHintProps} /> : null}
             <ChatSendQueueSurface {...queueSurfaceProps} mutationDisabled={mutationDisabled} />
             <Surface
               tone="default"
               radius="2xl"
               shadow="none"
+              // The composer keeps the raised-control background but borrows the
+              // panel border tier: raised-control (13%) is meant for small
+              // controls, and reads too hard along a full-width composer edge.
               className={
                 browserComposerCondensed
-                  ? `grid grid-cols-[minmax(0,1fr)_auto] items-center overflow-hidden rounded-none border-x-0 border-b-0 border-t border-slate-200/70 bg-slate-50/90 px-3 py-1 ${DARK_RAISED_CONTROL_CLASS}`
+                  ? `grid grid-cols-[minmax(0,1fr)_auto] items-center overflow-hidden rounded-none border-x-0 border-b-0 border-t border-slate-200/70 bg-slate-50/90 px-3 py-1 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`
                   : browserModeActive || compactBrowserViewport
-                  ? `flex flex-col overflow-hidden rounded-none border-x-0 border-b-0 border-t border-slate-200/70 bg-slate-50/90 px-3 pb-0 pt-2 ${DARK_RAISED_CONTROL_CLASS}`
-                  : `flex flex-col overflow-hidden rounded-t-[1.4rem] rounded-b-none border border-b-0 border-slate-200/70 bg-slate-50/90 px-3 pb-0 pt-2.5 sm:px-4 sm:pt-3 ${DARK_RAISED_CONTROL_CLASS}`
+                  ? `flex flex-col overflow-hidden rounded-none border-x-0 border-b-0 border-t border-slate-200/70 bg-slate-50/90 px-3 pb-0 pt-2 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`
+                  : `flex flex-col overflow-hidden rounded-t-3xl rounded-b-none border border-b-0 border-slate-200/70 bg-slate-50/90 px-3 pb-0 pt-2.5 sm:px-4 sm:pt-3 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`
               }
               data-browser-composer-condensed={browserComposerCondensed ? "true" : undefined}
               style={{

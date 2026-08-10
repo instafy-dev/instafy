@@ -238,8 +238,8 @@ export function LoginPage() {
 
   useEffect(() => {
     applyPageMeta({
-      title: recoveryMode ? "Reset Password · Instafy Studio" : "Log In · Instafy Studio",
-      description: "Sign in to Instafy Studio and continue working in your project workspace.",
+      title: recoveryMode ? "Reset Password · Instafy" : "Log In · Instafy",
+      description: "Sign in to Instafy and continue working in your project workspace.",
       image: "/og-image.png",
     });
   }, [recoveryMode]);

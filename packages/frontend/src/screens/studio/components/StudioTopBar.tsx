@@ -573,7 +573,12 @@ export function StudioTopBar() {
             : `bg-white/70 backdrop-blur-md ${DARK_RAIL_BLUR_BG_CLASS}`,
           isLargeScreen
             ? useDesktopTabChrome
-              ? "border-b border-transparent"
+              // No bottom border in tab-chrome mode: the tab strip draws its own
+              // baseline, and a 1px transparent border here still occupies a row
+              // that the header's background paints through — which lands between
+              // the active tab and the panel it fuses into and reads as a hairline
+              // seam. The strip's baseline provides the divider instead.
+              ? ""
               : `border-b border-slate-200/70 ${DARK_DIVIDER_BORDER_CLASS}`
             : hasDesktopTabs
               ? "border-b border-transparent"

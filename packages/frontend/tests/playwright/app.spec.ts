@@ -135,7 +135,7 @@ test.afterEach(async ({ page }) => {
   await resetRuntimeUserState(page, { source: "app:cleanup" }).catch(() => {});
 });
 
-  test.describe("Instafy Studio", () => {
+  test.describe("Instafy Desktop", () => {
     test.setTimeout(120_000);
     test("renders landing hero content", async ({ page }) => {
       await page.goto("/");
@@ -280,9 +280,9 @@ test.afterEach(async ({ page }) => {
           sourceSha: "a".repeat(40),
           architectures: { mac: ["arm64"] },
           artifacts: {
-            macDmg: `${stableBaseUrl}/instafy-studio-${version}-mac-arm64.dmg`,
-            macZip: `${stableBaseUrl}/instafy-studio-${version}-mac-arm64.zip`,
-            windowsExe: `${stableBaseUrl}/instafy-studio-${version}-win.exe`,
+            macDmg: `${stableBaseUrl}/instafy-${version}-mac-arm64.dmg`,
+            macZip: `${stableBaseUrl}/instafy-${version}-mac-arm64.zip`,
+            windowsExe: `${stableBaseUrl}/instafy-${version}-win.exe`,
           },
         }),
       });

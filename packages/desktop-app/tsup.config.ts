@@ -38,7 +38,8 @@ export default defineConfig({
     bundledRuntimeAgent: "src/bundledRuntimeAgent.ts",
     desktopRuntimeActivity: "src/desktopRuntimeActivity.ts",
     desktopControllerTrust: "src/desktopControllerTrust.ts",
-    desktopUpdaterDownload: "src/desktopUpdaterDownload.ts"
+    desktopUpdaterDownload: "src/desktopUpdaterDownload.ts",
+    desktopUpdaterProgress: "src/desktopUpdaterProgress.ts"
   },
   outDir: "dist",
   format: ["cjs"],
