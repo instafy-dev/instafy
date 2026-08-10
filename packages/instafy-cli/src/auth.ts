@@ -346,6 +346,7 @@ export async function login(options: {
   gitSetup?: boolean;
   profile?: string;
   json?: boolean;
+  waitForBrowser?: boolean;
 }): Promise<void> {
   const profile = typeof options.profile === "string" && options.profile.trim() ? options.profile.trim() : null;
   const explicitControllerUrl =
@@ -374,7 +375,18 @@ export async function login(options: {
   const url = new URL("/cli/login", studioUrl);
   url.searchParams.set("serverUrl", controllerUrl);
 
-  if (options.json) {
+  const jsonWantsUrlOnly =
+    Boolean(options.json) &&
+    !normalizeToken(options.token ?? null) &&
+    !normalizeToken(options.email ?? null) &&
+    !normalizeToken(process.env["INSTAFY_LOGIN_EMAIL"] ?? null);
+  if (jsonWantsUrlOnly) {
+    // No credentials were supplied, so there is nothing to log in WITH; emit
+    // the login URL for the caller to open. When credentials ARE supplied,
+    // --json is purely an output format: the login below runs for real and
+    // reports its result as JSON. It used to short-circuit here regardless,
+    // which made `login --token <t> --json` a silent no-op with exit 0 -- an
+    // agent's most natural invocation reported success without authenticating.
     console.log(
       JSON.stringify({
         url: url.toString(),
@@ -419,6 +431,25 @@ export async function login(options: {
     }
   }
 
+  if (!authPayload && !input.isTTY && !options.waitForBrowser) {
+    // Fail fast: without a TTY nobody can paste a token, and waiting on the
+    // browser callback blocked headless callers for up to ten minutes before
+    // dying with a bare "No token provided." An agent's shell timeout usually
+    // killed the process before that error ever printed, teaching it nothing.
+    throw new Error(
+      [
+        "Non-interactive session and no credentials were provided.",
+        "",
+        "Authenticate non-interactively with one of:",
+        "- instafy login --token <token>   (open the URL below in a browser to obtain one)",
+        "- instafy login --email <email> --password <password>   (requires SUPABASE_URL + SUPABASE_ANON_KEY)",
+        "- INSTAFY_LOGIN_EMAIL + INSTAFY_LOGIN_PASSWORD environment variables",
+        "",
+        `Login URL: ${url.toString()}`,
+      ].join("\n"),
+    );
+  }
+
   let callbackServer: CliLoginCallbackServer | null = null;
   if (!authPayload) {
     try {
@@ -430,8 +461,10 @@ export async function login(options: {
     }
   }
 
-  console.log(kleur.green("Instafy CLI login"));
-  console.log("");
+  if (!options.json) {
+    console.log(kleur.green("Instafy CLI login"));
+    console.log("");
+  }
   if (!authPayload) {
     console.log("1) Open this URL in your browser:");
     console.log(kleur.cyan(url.toString()));
@@ -528,8 +561,12 @@ export async function login(options: {
     } else {
       try {
         authPayload = await callbackServer.waitForToken(10 * 60_000);
-      } catch (_error) {
-        // Ignore and fall back to manual copy/paste if possible.
+      } catch (error) {
+        // Without a TTY there is no manual fallback to fall back to; the
+        // timeout message is the only diagnostic the caller will ever see.
+        if (!input.isTTY) {
+          console.error(error instanceof Error ? error.message : String(error));
+        }
       } finally {
         callbackServer.close();
         callbackServer = null;
@@ -603,31 +640,48 @@ export async function login(options: {
     } else {
       writeInstafyCliConfig(update);
     }
-    console.log("");
-    console.log(
-      kleur.green(
-        `Saved token to ${profile ? getInstafyProfileConfigPath(profile) : getInstafyConfigPath()}`,
-      ),
-    );
+    if (!options.json) {
+      console.log("");
+      console.log(
+        kleur.green(
+          `Saved token to ${profile ? getInstafyProfileConfigPath(profile) : getInstafyConfigPath()}`,
+        ),
+      );
+    }
     if (options.gitSetup !== false) {
       try {
         const result = installGitCredentialHelper();
-        if (result.changed) {
+        if (result.changed && !options.json) {
           console.log(kleur.green("Enabled git auth (credential helper installed)."));
         }
       } catch (error) {
-        console.log(
-          kleur.yellow(
-            `Warning: failed to configure git credential helper: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
-          ),
-        );
+        if (!options.json) {
+          console.log(
+            kleur.yellow(
+              `Warning: failed to configure git credential helper: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            ),
+          );
+        }
       }
     }
-  } else if (existing) {
+  } else if (existing && !options.json) {
     console.log("");
     console.log(kleur.yellow("Token not stored (existing token kept)."));
+  }
+
+  if (options.json) {
+    console.log(
+      JSON.stringify({
+        ok: true,
+        profile: profile ?? null,
+        configPath: profile ? getInstafyProfileConfigPath(profile) : getInstafyConfigPath(),
+        stored: !options.noStore,
+        method: usedPasswordGrant ? "password" : "token",
+      }),
+    );
+    return;
   }
 
   console.log("");
