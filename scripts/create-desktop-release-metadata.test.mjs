@@ -17,9 +17,9 @@ function stableManifest(version = "1.2.3", publishedAt = "2026-07-22T12:34:56.98
     sourceSha: "a".repeat(40),
     publishedAt,
     feedUrl: "https://downloads.instafy.dev/desktop-app/stable/",
-    macDmgName: `instafy-studio-${version}-mac-arm64.dmg`,
-    macZipName: `instafy-studio-${version}-mac-arm64.zip`,
-    windowsExeName: `instafy-studio-${version}-win.exe`,
+    macDmgName: `instafy-${version}-mac-arm64.dmg`,
+    macZipName: `instafy-${version}-mac-arm64.zip`,
+    windowsExeName: `instafy-${version}-win.exe`,
   });
 }
 
@@ -91,9 +91,9 @@ test("rejects channel-incompatible artifacts and mismatched stable tags", () => 
       createDesktopReleaseManifest({
         ...stableManifest(),
         tag: "desktop-app-v1.2.4",
-        macDmgName: "instafy-studio-1.2.3-mac-arm64.dmg",
-        macZipName: "instafy-studio-1.2.3-mac-arm64.zip",
-        windowsExeName: "instafy-studio-1.2.3-win.exe",
+        macDmgName: "instafy-1.2.3-mac-arm64.dmg",
+        macZipName: "instafy-1.2.3-mac-arm64.zip",
+        windowsExeName: "instafy-1.2.3-win.exe",
       }),
     /stable tag must exactly match/,
   );
@@ -117,12 +117,12 @@ test("a macOS-only release omits the Windows artifact instead of failing", () =>
     sourceSha: "a".repeat(40),
     publishedAt: "2026-07-22T12:34:56.987Z",
     feedUrl: "https://downloads.instafy.dev/desktop-app/stable/",
-    macDmgName: `instafy-studio-${version}-mac-arm64.dmg`,
-    macZipName: `instafy-studio-${version}-mac-arm64.zip`,
+    macDmgName: `instafy-${version}-mac-arm64.dmg`,
+    macZipName: `instafy-${version}-mac-arm64.zip`,
   });
   assert.equal(manifest.artifacts.windowsExe, undefined);
-  assert.ok(manifest.artifacts.macDmg.endsWith(`instafy-studio-${version}-mac-arm64.dmg`));
-  assert.ok(manifest.artifacts.macZip.endsWith(`instafy-studio-${version}-mac-arm64.zip`));
+  assert.ok(manifest.artifacts.macDmg.endsWith(`instafy-${version}-mac-arm64.dmg`));
+  assert.ok(manifest.artifacts.macZip.endsWith(`instafy-${version}-mac-arm64.zip`));
   assert.deepEqual(manifest.architectures, { mac: ["arm64"] });
 });
 
@@ -138,9 +138,9 @@ test("an included Windows artifact is still validated strictly", () => {
         sourceSha: "a".repeat(40),
         publishedAt: "2026-07-22T12:34:56.987Z",
         feedUrl: "https://downloads.instafy.dev/desktop-app/stable/",
-        macDmgName: "instafy-studio-1.2.3-mac-arm64.dmg",
-        macZipName: "instafy-studio-1.2.3-mac-arm64.zip",
-        windowsExeName: "instafy-studio-9.9.9-win.exe",
+        macDmgName: "instafy-1.2.3-mac-arm64.dmg",
+        macZipName: "instafy-1.2.3-mac-arm64.zip",
+        windowsExeName: "instafy-9.9.9-win.exe",
       }),
     /Windows artifact must name the release version/u,
   );

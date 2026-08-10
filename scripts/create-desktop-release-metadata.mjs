@@ -125,9 +125,9 @@ export function createDesktopReleaseManifest(input) {
   const normalizedFeedUrl = feedUrl.href.replace(/\/$/, "");
   const macDmgName = validateArtifactName(input.macDmgName, "macDmgName");
   const macZipName = validateArtifactName(input.macZipName, "macZipName");
-  const macDmg = new RegExp(`^instafy-studio-${version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-mac-(arm64|x64)\\.dmg$`).exec(macDmgName);
+  const macDmg = new RegExp(`^instafy-${version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}-mac-(arm64|x64)\\.dmg$`).exec(macDmgName);
   const macArch = macDmg?.[1];
-  if (!macArch || macZipName !== `instafy-studio-${version}-mac-${macArch}.zip`) {
+  if (!macArch || macZipName !== `instafy-${version}-mac-${macArch}.zip`) {
     fail("macOS artifacts must name the release version and one consistent architecture.");
   }
   const artifactUrl = (name) => `${normalizedFeedUrl}/${encodeURIComponent(name)}`;
@@ -142,7 +142,7 @@ export function createDesktopReleaseManifest(input) {
   // present.
   if (input.windowsExeName) {
     const windowsExeName = validateArtifactName(input.windowsExeName, "windowsExeName");
-    if (windowsExeName !== `instafy-studio-${version}-win.exe`) {
+    if (windowsExeName !== `instafy-${version}-win.exe`) {
       fail("The Windows artifact must name the release version.");
     }
     artifacts.windowsExe = artifactUrl(windowsExeName);
@@ -150,7 +150,7 @@ export function createDesktopReleaseManifest(input) {
   if (input.linuxAppImageName) {
     const linuxName = validateArtifactName(input.linuxAppImageName, "linuxAppImageName");
     if (channel === "stable") fail("Stable metadata must not include an unsigned Linux artifact.");
-    if (linuxName !== `instafy-studio-${version}-linux.AppImage`) {
+    if (linuxName !== `instafy-${version}-linux.AppImage`) {
       fail("The Linux artifact must name the release version.");
     }
     artifacts.linuxAppImage = artifactUrl(linuxName);

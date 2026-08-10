@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isDesktopShell, showBackToLanding } from "./desktopShell";
+import { desktopWindowChrome, isDesktopShell, showBackToLanding } from "./desktopShell";
 
 describe("isDesktopShell", () => {
   it("detects the preload bridge the desktop shell injects", () => {
@@ -32,5 +32,26 @@ describe("showBackToLanding", () => {
     expect(
       showBackToLanding({ isNativeApp: false, isExtensionEmbed: true, shellWindow: {} }),
     ).toBe(false);
+  });
+});
+
+describe("desktopWindowChrome", () => {
+  it("returns null outside the shell so browsers never get shell chrome", () => {
+    expect(desktopWindowChrome({})).toBe(null);
+    expect(desktopWindowChrome(undefined)).toBe(null);
+  });
+
+  it("degrades an older app shell to the stock layout", () => {
+    // An app built before the integrated title bar exposes the bridge but not
+    // windowChrome; the frontend must keep stock spacing or the traffic
+    // lights of the still-visible title bar would double up with the inset.
+    expect(desktopWindowChrome({ instafyDesktop: {} })).toBe("system");
+  });
+
+  it("reports the integrated chrome only on the exact capability value", () => {
+    expect(desktopWindowChrome({ instafyDesktop: { windowChrome: "hiddenInset" } })).toBe(
+      "hiddenInset",
+    );
+    expect(desktopWindowChrome({ instafyDesktop: { windowChrome: "weird" } })).toBe("system");
   });
 });
