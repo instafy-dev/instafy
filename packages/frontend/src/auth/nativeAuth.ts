@@ -1,6 +1,6 @@
 import { Capacitor } from "@capacitor/core";
 
-import { isDesktopShell } from "../lib/desktopShell";
+import { desktopCanReceiveAuthCallback, isDesktopShell } from "../lib/desktopShell";
 
 export const NATIVE_AUTH_CALLBACK_URL = "instafy://auth";
 export const NATIVE_AUTH_CALLBACK_SCHEME = "instafy";
@@ -80,7 +80,7 @@ export function resolveSupabaseRedirectTo(webPath: string): string | undefined {
   // app stranded the user on the marketing site with the session in the wrong
   // browser. instafy://auth is already allow-listed for mobile and returns to
   // the app through the same deep link.
-  if (isDesktopShell()) {
+  if (isDesktopShell() && desktopCanReceiveAuthCallback()) {
     return NATIVE_AUTH_CALLBACK_URL;
   }
   const path = webPath.trim().startsWith("/") ? webPath.trim() : `/${webPath.trim()}`;

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from "react";
 import {
   consumeDesktopAuthCallback,
+  desktopCanReceiveAuthCallback,
   isDesktopShell,
   onDesktopAuthCallback,
   openDesktopExternalUrl,
@@ -435,7 +436,7 @@ export function useNativeGithubAuth({
     // may have been launched cold by the deep link, or been running with no
     // window at all).
     let desktopUnsubscribe: (() => void) | null = null;
-    if (isDesktopShell()) {
+    if (isDesktopShell() && desktopCanReceiveAuthCallback()) {
       desktopUnsubscribe = onDesktopAuthCallback((url) => {
         void handleCallbackUrl(url);
       });
@@ -552,7 +553,7 @@ export function useNativeGithubAuth({
       // the system browser. Sign-in therefore completed in the browser and the
       // app never saw it. Open the provider deliberately instead, and let the
       // instafy://auth deep link bring the session back.
-      if (isDesktopShell()) {
+      if (isDesktopShell() && desktopCanReceiveAuthCallback()) {
         const desktopResult = await supabase.auth.signInWithOAuth({
           provider: "github",
           options: { redirectTo, queryParams, skipBrowserRedirect: true },

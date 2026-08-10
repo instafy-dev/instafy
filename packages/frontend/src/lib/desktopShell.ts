@@ -79,3 +79,14 @@ export function onDesktopAuthCallback(listener: (url: string) => void): () => vo
   const subscribe = bridge()?.onAuthCallback;
   return typeof subscribe === "function" ? subscribe(listener) : () => {};
 }
+
+// Whether THIS shell can actually receive an OAuth callback. The frontend is
+// hosted and updates independently of the app, so a shell older than the
+// callback bridge would send the user to the provider and then have nowhere to
+// put the result -- turning a sign-in that finished in the wrong place into
+// one that finishes nowhere. Old shells keep the previous behaviour until
+// they update.
+export function desktopCanReceiveAuthCallback(): boolean {
+  const b = bridge();
+  return typeof b?.onAuthCallback === "function" && typeof b?.consumePendingAuthCallback === "function";
+}
