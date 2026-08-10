@@ -90,6 +90,65 @@ describe("startLocalWorkspacePresence", () => {
     await handle.stop();
   });
 
+  it("rotates heartbeat and unregister authorization without restarting", async () => {
+    const calls: Array<{ method: string; authorization: string | null }> = [];
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({
+        method: init?.method ?? "GET",
+        authorization: new Headers(init?.headers).get("authorization"),
+      });
+      return jsonResponse(200);
+    }) as unknown as typeof fetch;
+
+    const handle = await startLocalWorkspacePresence({
+      controllerUrl: "http://127.0.0.1:8788",
+      projectId: "11111111-2222-3333-4444-555555555555",
+      accessToken: "expired-token",
+      workspacePath: "/tmp/demo",
+      deviceId: "device-test",
+      heartbeatIntervalMs: 1_000,
+      fetchImpl,
+    });
+
+    handle.updateAccessToken(" fresh-token ");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await handle.stop();
+
+    expect(calls).toEqual([
+      { method: "PUT", authorization: "Bearer expired-token" },
+      { method: "POST", authorization: "Bearer fresh-token" },
+      { method: "DELETE", authorization: "Bearer fresh-token" },
+    ]);
+  });
+
+  it("rejects an empty rotated token and retains the last valid credential", async () => {
+    const authorizations: Array<string | null> = [];
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      authorizations.push(new Headers(init?.headers).get("authorization"));
+      return jsonResponse(200);
+    }) as unknown as typeof fetch;
+
+    const handle = await startLocalWorkspacePresence({
+      controllerUrl: "http://127.0.0.1:8788",
+      projectId: "11111111-2222-3333-4444-555555555555",
+      accessToken: "valid-token",
+      workspacePath: "/tmp/demo",
+      deviceId: "device-test",
+      heartbeatIntervalMs: 1_000,
+      fetchImpl,
+    });
+
+    expect(() => handle.updateAccessToken("   ")).toThrow(/requires an access token/i);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await handle.stop();
+
+    expect(authorizations).toEqual([
+      "Bearer valid-token",
+      "Bearer valid-token",
+      "Bearer valid-token",
+    ]);
+  });
+
   it("throws when initial registration is rejected", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse(403, { error: "forbidden" })) as unknown as typeof fetch;
 

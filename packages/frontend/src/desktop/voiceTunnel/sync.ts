@@ -7,16 +7,23 @@ import {
 import { isSameSpeechRoute } from "../../voice/speechRoute";
 import { readDesktopVoiceHostStatus } from "../voiceHost/client";
 import {
-  readDesktopSpeechTunnelStatus,
   startDesktopSpeechTunnel,
   type DesktopSpeechTunnelBridgeStatus,
 } from "./client";
-import { resolveControllerAccessToken } from "../../services/runtimeController/core";
+import {
+  resolveControllerRequestContext,
+  type ControllerRequestContext,
+} from "../../services/runtimeController/core";
+
+type BoundControllerRequestContext = ControllerRequestContext & { accessToken: string };
 
 export type ManagedDesktopSpeechRoute = {
   projectId: string;
   publicUrl: string;
   lanBaseUrl?: string | null;
+  /** In-memory only: cleanup must use the exact controller binding that published the route. */
+  controllerRequestContext: BoundControllerRequestContext;
+  controllerBindingId: string;
 };
 
 export type SyncDesktopSpeechRouteResult =
@@ -26,18 +33,16 @@ export type SyncDesktopSpeechRouteResult =
 
 type SyncDesktopSpeechRouteDependencies = {
   readDesktopVoiceHostStatus: typeof readDesktopVoiceHostStatus;
-  readDesktopSpeechTunnelStatus: typeof readDesktopSpeechTunnelStatus;
   startDesktopSpeechTunnel: typeof startDesktopSpeechTunnel;
-  resolveControllerAccessToken: typeof resolveControllerAccessToken;
+  resolveControllerRequestContext: typeof resolveControllerRequestContext;
   readProjectSpeechRoutes: typeof readProjectSpeechRoutes;
   writeProjectSpeechRoutes: typeof writeProjectSpeechRoutes;
 };
 
 const defaultDependencies: SyncDesktopSpeechRouteDependencies = {
   readDesktopVoiceHostStatus,
-  readDesktopSpeechTunnelStatus,
   startDesktopSpeechTunnel,
-  resolveControllerAccessToken,
+  resolveControllerRequestContext,
   readProjectSpeechRoutes,
   writeProjectSpeechRoutes,
 };
@@ -69,10 +74,22 @@ function isDesktopHostReady(status: Awaited<ReturnType<typeof readDesktopVoiceHo
 
 function isMatchingDesktopTunnel(
   status: DesktopSpeechTunnelBridgeStatus | null,
-  projectId: string,
+  input: {
+    projectId: string;
+    controllerUrl: string;
+    controllerCredentialMode: "ambient" | "fixed";
+  },
 ) {
   const publicUrl = normalizeOptionalString(status?.publicUrl);
-  return status?.state === "active" && status.projectId === projectId && Boolean(publicUrl);
+  const controllerBindingId = normalizeOptionalString(status?.controllerBindingId);
+  return Boolean(
+    status?.state === "active" &&
+      status.projectId === input.projectId &&
+      status.controllerUrl === input.controllerUrl &&
+      status.controllerCredentialMode === input.controllerCredentialMode &&
+      publicUrl &&
+      controllerBindingId,
+  );
 }
 
 function isMatchingDesktopRoute(route: ProjectSpeechRoute | null, input: {
@@ -156,13 +173,24 @@ function hasEquivalentRoutes(currentRoutes: ProjectSpeechRoute[], nextRoutes: Pr
 async function clearPreviousManagedRouteIfNeeded(
   previousManagedRoute: ManagedDesktopSpeechRoute | null,
   nextManagedRoute: ManagedDesktopSpeechRoute,
-  accessToken: string,
   dependencies: SyncDesktopSpeechRouteDependencies,
 ) {
-  if (!previousManagedRoute || previousManagedRoute.projectId === nextManagedRoute.projectId) {
+  if (
+    !previousManagedRoute ||
+    (
+      previousManagedRoute.projectId === nextManagedRoute.projectId &&
+      previousManagedRoute.controllerRequestContext.baseUrl ===
+        nextManagedRoute.controllerRequestContext.baseUrl
+    )
+  ) {
     return;
   }
-  const previousRoutes = await dependencies.readProjectSpeechRoutes(previousManagedRoute.projectId, accessToken);
+  const previousRequestContext = previousManagedRoute.controllerRequestContext;
+  const previousRoutes = await dependencies.readProjectSpeechRoutes(
+    previousManagedRoute.projectId,
+    previousRequestContext.accessToken,
+    previousRequestContext,
+  );
   const remainingRoutes = removeManagedDesktopRoutes(previousRoutes, previousManagedRoute);
   if (remainingRoutes.length === previousRoutes.length) {
     return;
@@ -170,7 +198,8 @@ async function clearPreviousManagedRouteIfNeeded(
   await dependencies.writeProjectSpeechRoutes(
     previousManagedRoute.projectId,
     remainingRoutes.length ? remainingRoutes : null,
-    accessToken,
+    previousRequestContext.accessToken,
+    previousRequestContext,
   );
 }
 
@@ -184,7 +213,7 @@ export async function syncDesktopSpeechRouteForProject(
 ): Promise<SyncDesktopSpeechRouteResult> {
   const dependencies = { ...defaultDependencies, ...overrides };
   const projectId = normalizeOptionalString(input.projectId);
-  const controllerUrl = normalizeOptionalString(input.controllerUrl);
+  const requestedControllerUrl = normalizeOptionalString(input.controllerUrl);
   const previousManagedRoute = input.previousManagedRoute ?? null;
 
   if (!projectId) {
@@ -194,7 +223,7 @@ export async function syncDesktopSpeechRouteForProject(
       managedRoute: previousManagedRoute,
     };
   }
-  if (!controllerUrl) {
+  if (!requestedControllerUrl) {
     return {
       status: "skipped",
       reason: "missing_controller_url",
@@ -211,7 +240,16 @@ export async function syncDesktopSpeechRouteForProject(
     };
   }
 
-  const accessToken = normalizeOptionalString(await dependencies.resolveControllerAccessToken(null));
+  const requestContext = await dependencies.resolveControllerRequestContext(null);
+  const controllerUrl = normalizeOptionalString(requestContext.baseUrl);
+  const accessToken = normalizeOptionalString(requestContext.accessToken);
+  if (!controllerUrl) {
+    return {
+      status: "skipped",
+      reason: "missing_controller_url",
+      managedRoute: previousManagedRoute,
+    };
+  }
   if (!accessToken) {
     return {
       status: "skipped",
@@ -220,18 +258,32 @@ export async function syncDesktopSpeechRouteForProject(
     };
   }
 
-  let tunnelStatus = await dependencies.readDesktopSpeechTunnelStatus();
-  if (!isMatchingDesktopTunnel(tunnelStatus, projectId)) {
-    tunnelStatus = await dependencies.startDesktopSpeechTunnel({
-      projectId,
-      controllerUrl,
-      controllerAccessToken: accessToken,
-      forceRestart: false,
-    });
-  }
+  const controllerCredentialMode =
+    requestContext.credentialSource === "ambient" ? "ambient" : "fixed";
+  const boundRequestContext: BoundControllerRequestContext = {
+    ...requestContext,
+    baseUrl: controllerUrl,
+    accessToken,
+  };
+  const tunnelStatus = await dependencies.startDesktopSpeechTunnel({
+    projectId,
+    controllerUrl,
+    controllerAccessToken: accessToken,
+    controllerCredentialMode,
+    forceRestart: false,
+  });
 
   const publicUrl = normalizeOptionalString(tunnelStatus?.publicUrl);
-  if (tunnelStatus?.state !== "active" || tunnelStatus.projectId !== projectId || !publicUrl) {
+  const controllerBindingId = normalizeOptionalString(tunnelStatus?.controllerBindingId);
+  if (
+    !isMatchingDesktopTunnel(tunnelStatus, {
+      projectId,
+      controllerUrl,
+      controllerCredentialMode,
+    }) ||
+    !publicUrl ||
+    !controllerBindingId
+  ) {
     return {
       status: "error",
       error: normalizeOptionalString(tunnelStatus?.lastError) ?? "Desktop speech tunnel is unavailable.",
@@ -240,7 +292,11 @@ export async function syncDesktopSpeechRouteForProject(
   }
 
   const managedRoutes = buildManagedDesktopRoutes(hostStatus, publicUrl);
-  const currentRoutes = await dependencies.readProjectSpeechRoutes(projectId, accessToken);
+  const currentRoutes = await dependencies.readProjectSpeechRoutes(
+    projectId,
+    accessToken,
+    boundRequestContext,
+  );
   const nextRoutes = [
     ...removeManagedDesktopRoutes(currentRoutes, null),
     ...managedRoutes,
@@ -250,6 +306,7 @@ export async function syncDesktopSpeechRouteForProject(
       projectId,
       nextRoutes,
       accessToken,
+      boundRequestContext,
     );
     if (!writeResult.success) {
       return {
@@ -265,9 +322,11 @@ export async function syncDesktopSpeechRouteForProject(
     publicUrl,
     lanBaseUrl:
       managedRoutes.find((route) => route.connectionType === "lan")?.baseUrl ?? null,
+    controllerRequestContext: boundRequestContext,
+    controllerBindingId,
   } satisfies ManagedDesktopSpeechRoute;
 
-  await clearPreviousManagedRouteIfNeeded(previousManagedRoute, managedRoute, accessToken, dependencies).catch(
+  await clearPreviousManagedRouteIfNeeded(previousManagedRoute, managedRoute, dependencies).catch(
     () => undefined,
   );
 

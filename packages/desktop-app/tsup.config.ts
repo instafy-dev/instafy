@@ -37,6 +37,7 @@ export default defineConfig({
     personalBrowserControlServer: "src/personalBrowserControlServer.ts",
     bundledRuntimeAgent: "src/bundledRuntimeAgent.ts",
     desktopRuntimeActivity: "src/desktopRuntimeActivity.ts",
+    desktopControllerTrust: "src/desktopControllerTrust.ts",
     desktopUpdaterDownload: "src/desktopUpdaterDownload.ts"
   },
   outDir: "dist",
