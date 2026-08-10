@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { resolveActiveProfileName, resolveConfiguredAccessToken, type AccessTokenSource } from "./config.js";
+import { resolveActiveProfileName, resolveConfiguredAccessToken, resolveControllerUrl, type AccessTokenSource } from "./config.js";
 import { formatAuthRejectedError } from "./errors.js";
 import { fetchWithControllerAuth } from "./controller-fetch.js";
 
@@ -121,11 +121,13 @@ function parseJsonBody(options: ControllerApiRequestOptions): string | undefined
 }
 
 function buildRequestUrl(options: ControllerApiRequestOptions): URL {
+  // The one shared resolver, not a private fallback chain: this path used to
+  // skip the controller URL that `instafy login` saved, so chat, history,
+  // conversation, agents and api silently talked to localhost while every
+  // other command honored the login. Same resolver everywhere, same answer
+  // everywhere.
   const base = normalizeUrl(
-    options.controllerUrl ??
-      process.env["INSTAFY_SERVER_URL"] ??
-      process.env["CONTROLLER_BASE_URL"] ??
-      "http://127.0.0.1:8788",
+    resolveControllerUrl({ controllerUrl: options.controllerUrl ?? null }),
   );
 
   const rawPath = options.path.trim();

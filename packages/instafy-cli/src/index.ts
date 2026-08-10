@@ -71,13 +71,32 @@ import {
 } from "./providers.js";
 
 export const program = new Command();
+program.showSuggestionAfterError();
+
+// Group commands used to respond to both a bare invocation and an unknown
+// subcommand by printing help to stdout and exiting 0 -- scripts and agents
+// read that as "command succeeded". A group invoked without a valid
+// subcommand has not done anything; say so on stderr and fail.
+function failWithGroupHelp(command: Command) {
+  command.action(() => {
+    const extra = command.args.filter((value) => typeof value === "string" && value.length > 0);
+    if (extra.length > 0) {
+      console.error(`error: unknown command '${extra[0]}' for 'instafy ${command.name()}'`);
+    }
+    command.outputHelp({ error: true });
+    process.exitCode = 1;
+  });
+}
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version?: string };
 
 function addServerUrlOptions(command: Command) {
   return command
-    .option("--server-url <url>", "Instafy server URL")
+    .option(
+      "--server-url <url>",
+      "Instafy server URL (default: INSTAFY_SERVER_URL env, then the URL saved by `instafy login`, then http://127.0.0.1:8788; hosted: https://controller.instafy.dev)",
+    )
     .addOption(new Option("--controller-url <url>").hideHelp());
 }
 
@@ -187,11 +206,16 @@ program
   .option("--no-git-setup", "Do not configure git credential helper")
   .option("--no-store", "Do not save token to ~/.instafy/config.json")
   .option("--json", "Output JSON")
+  .option(
+    "--wait-for-browser",
+    "Without a TTY, wait up to 10 minutes for the browser login callback instead of failing fast (for harnesses that drive the browser)",
+  )
   .action(async (opts) => {
     try {
       await login({
         controllerUrl: opts.serverUrl,
         studioUrl: opts.studioUrl,
+        waitForBrowser: opts.waitForBrowser,
         token: opts.token,
         email: opts.email,
         password: opts.password,
@@ -263,7 +287,7 @@ chatCommand
 
 function registerSpaceCommand(command: Command) {
   command.description("Create/link and manage Instafy spaces");
-  command.action(() => command.outputHelp());
+  failWithGroupHelp(command);
 
   const spaceInitCommand = command
     .command("init")
@@ -325,7 +349,7 @@ function registerSpaceCommand(command: Command) {
     .command("provider-bindings")
     .description("Show, grant, or revoke project-scoped provider bindings");
 
-  providerBindingsCommand.action(() => providerBindingsCommand.outputHelp());
+  failWithGroupHelp(providerBindingsCommand);
 
   providerBindingsCommand
     .command("show")
@@ -402,7 +426,7 @@ function registerSpaceCommand(command: Command) {
     .command("defaults")
     .description("Refresh managed default skills/docs for a space");
 
-  spaceDefaultsCommand.action(() => spaceDefaultsCommand.outputHelp());
+  failWithGroupHelp(spaceDefaultsCommand);
 
   const spaceDefaultsRefreshCommand = spaceDefaultsCommand
     .command("refresh")
@@ -540,13 +564,13 @@ const hardwareCommand = program
   .command("hardware")
   .description("Inspect local host hardware available to Instafy runtimes");
 
-hardwareCommand.action(() => hardwareCommand.outputHelp());
+failWithGroupHelp(hardwareCommand);
 
 const hardwareBindingsCommand = hardwareCommand
   .command("bindings")
   .description("Show, grant, or revoke project-scoped local hardware bindings");
 
-hardwareBindingsCommand.action(() => hardwareBindingsCommand.outputHelp());
+failWithGroupHelp(hardwareBindingsCommand);
 
 hardwareBindingsCommand
   .command("show")
@@ -620,7 +644,7 @@ const hardwareSerialCommand = hardwareCommand
   .command("serial")
   .description("Inspect local USB serial devices visible to this host");
 
-hardwareSerialCommand.action(() => hardwareSerialCommand.outputHelp());
+failWithGroupHelp(hardwareSerialCommand);
 
 hardwareSerialCommand
   .command("list")
@@ -700,7 +724,7 @@ const providersCommand = program
   .command("providers")
   .description("Inspect local providers through the shared provider host surface");
 
-providersCommand.action(() => providersCommand.outputHelp());
+failWithGroupHelp(providersCommand);
 
 const providersListCommand = providersCommand
   .command("list")
@@ -814,7 +838,7 @@ const agentsCommand = program
   .command("agents")
   .description("Inspect agents and scoped agent context");
 
-agentsCommand.action(() => agentsCommand.outputHelp());
+failWithGroupHelp(agentsCommand);
 
 const agentsListCommand = agentsCommand
   .command("list")
@@ -849,7 +873,7 @@ const agentsContextCommand = agentsCommand
   .command("context")
   .description("Inspect and update compact scoped context cards");
 
-agentsContextCommand.action(() => agentsContextCommand.outputHelp());
+failWithGroupHelp(agentsContextCommand);
 
 const agentsContextListCommand = agentsContextCommand
   .command("list")
@@ -992,7 +1016,7 @@ const secretsCommand = program
   .command("secrets")
   .description("Manage space secrets");
 
-secretsCommand.action(() => secretsCommand.outputHelp());
+failWithGroupHelp(secretsCommand);
 
 const secretsListCommand = secretsCommand
   .command("list")
@@ -1144,7 +1168,7 @@ const automationsCommand = program
   .command("automations")
   .description("Manage scheduled automations (run prompts on a schedule)");
 
-automationsCommand.action(() => automationsCommand.outputHelp());
+failWithGroupHelp(automationsCommand);
 
 const automationsListCommand = automationsCommand
   .command("list")
@@ -1324,7 +1348,7 @@ automationsDeleteCommand
 
 const configCommand = program.command("config").description("Get/set saved CLI configuration");
 
-configCommand.action(() => configCommand.outputHelp());
+failWithGroupHelp(configCommand);
 
 configCommand
   .command("path")
@@ -1399,7 +1423,7 @@ const runtimeCommand = program
   .command("runtime")
   .description("Start/stop the local Instafy runtime");
 
-runtimeCommand.action(() => runtimeCommand.outputHelp());
+failWithGroupHelp(runtimeCommand);
 
 const runtimeStartCommand = runtimeCommand
   .command("start")
@@ -1515,13 +1539,13 @@ const opsCommand = program
   .command("ops")
   .description("Internal operator support actions");
 
-opsCommand.action(() => opsCommand.outputHelp());
+failWithGroupHelp(opsCommand);
 
 const opsProjectsCommand = opsCommand
   .command("projects")
   .description("Find projects for operator support");
 
-opsProjectsCommand.action(() => opsProjectsCommand.outputHelp());
+failWithGroupHelp(opsProjectsCommand);
 
 const opsProjectsFindCommand = opsProjectsCommand
   .command("find")
@@ -1552,7 +1576,7 @@ const opsCreditsCommand = opsCommand
   .command("credits")
   .description("Inspect or adjust project credits");
 
-opsCreditsCommand.action(() => opsCreditsCommand.outputHelp());
+failWithGroupHelp(opsCreditsCommand);
 
 const opsCreditsStatusCommand = opsCreditsCommand
   .command("status")
@@ -1635,7 +1659,7 @@ const opsRuntimesCommand = opsCommand
   .command("runtimes")
   .description("List and stop project runtimes");
 
-opsRuntimesCommand.action(() => opsRuntimesCommand.outputHelp());
+failWithGroupHelp(opsRuntimesCommand);
 
 const opsRuntimesListCommand = opsRuntimesCommand
   .command("list")
@@ -1696,7 +1720,7 @@ const tunnelCommand = program
   .command("tunnel")
   .description("Create and manage shareable tunnels");
 
-tunnelCommand.action(() => tunnelCommand.outputHelp());
+failWithGroupHelp(tunnelCommand);
 
 const tunnelStartCommand = tunnelCommand
   .command("start")
@@ -1853,7 +1877,7 @@ const orgCommand = program
   .alias("org")
   .description("Team utilities");
 
-orgCommand.action(() => orgCommand.outputHelp());
+failWithGroupHelp(orgCommand);
 
 const orgListCommand = orgCommand
   .command("list")
@@ -1881,7 +1905,7 @@ const profileCommand = program
   .command("profile")
   .description("Manage saved CLI profiles (~/.instafy/profiles)");
 
-profileCommand.action(() => profileCommand.outputHelp());
+failWithGroupHelp(profileCommand);
 
 profileCommand
   .command("list")
@@ -1928,7 +1952,7 @@ const historyCommand = program
   .command("history")
   .description("Inspect conversation history and related runs");
 
-historyCommand.action(() => historyCommand.outputHelp());
+failWithGroupHelp(historyCommand);
 
 const historyMessagesCommand = historyCommand
   .command("messages")
@@ -2014,7 +2038,7 @@ const conversationCommand = program
   .command("conversation")
   .description("Find and inspect conversations in a space");
 
-conversationCommand.action(() => conversationCommand.outputHelp());
+failWithGroupHelp(conversationCommand);
 
 const conversationCreateCommand = conversationCommand
   .command("create")
@@ -2166,7 +2190,7 @@ const apiCommand = program
   .command("api", { hidden: true })
   .description("Advanced: authenticated requests to the controller API");
 
-apiCommand.action(() => apiCommand.outputHelp());
+failWithGroupHelp(apiCommand);
 
 const apiGetCommand = apiCommand
   .command("get")
@@ -2196,13 +2220,13 @@ const otaCommand = program
   .command("ota")
   .description("Operate the mobile OTA control plane");
 
-otaCommand.action(() => otaCommand.outputHelp());
+failWithGroupHelp(otaCommand);
 
 const otaReleasesCommand = otaCommand
   .command("releases")
   .description("List or register OTA releases");
 
-otaReleasesCommand.action(() => otaReleasesCommand.outputHelp());
+failWithGroupHelp(otaReleasesCommand);
 
 const otaReleasesListCommand = otaReleasesCommand
   .command("list")
@@ -2296,7 +2320,7 @@ const otaChannelsCommand = otaCommand
   .command("channels")
   .description("List or change OTA channel pointers");
 
-otaChannelsCommand.action(() => otaChannelsCommand.outputHelp());
+failWithGroupHelp(otaChannelsCommand);
 
 const otaChannelsListCommand = otaChannelsCommand
   .command("list")
@@ -2393,13 +2417,13 @@ const desktopUpdatesCommand = program
   .command("desktop-updates")
   .description("Operate desktop update promotions");
 
-desktopUpdatesCommand.action(() => desktopUpdatesCommand.outputHelp());
+failWithGroupHelp(desktopUpdatesCommand);
 
 const desktopPromotionsCommand = desktopUpdatesCommand
   .command("promotions")
   .description("List or request desktop promotions");
 
-desktopPromotionsCommand.action(() => desktopPromotionsCommand.outputHelp());
+failWithGroupHelp(desktopPromotionsCommand);
 
 const desktopPromotionsListCommand = desktopPromotionsCommand
   .command("list")

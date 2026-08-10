@@ -28,7 +28,7 @@ describe("@instafy/cli login callback", () => {
       INSTAFY_SERVICE_TOKEN: "",
     };
 
-    const child = spawn(process.execPath, [cliBin, "login", "--studio-url", "http://localhost:5173", "--server-url", "http://127.0.0.1:8788", "--no-git-setup"], {
+    const child = spawn(process.execPath, [cliBin, "login", "--wait-for-browser", "--studio-url", "http://localhost:5173", "--server-url", "http://127.0.0.1:8788", "--no-git-setup"], {
       env,
       stdio: ["pipe", "pipe", "pipe"],
     });

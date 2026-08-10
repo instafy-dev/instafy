@@ -16,6 +16,17 @@ function withBearer(init: RequestInit | undefined, token: string): RequestInit {
   return { ...init, headers };
 }
 
+// Node's fetch has no request timeout, so a stalled controller endpoint
+// pinned any networked command for ~5 minutes of TCP defaults. Agents
+// typically kill the process before that and learn nothing. Callers that
+// genuinely stream for longer can raise INSTAFY_HTTP_TIMEOUT_MS.
+const HTTP_TIMEOUT_MS = Number(process.env["INSTAFY_HTTP_TIMEOUT_MS"] || 60_000);
+
+function withTimeout(init: RequestInit | undefined): RequestInit {
+  if (init?.signal) return init ?? {};
+  return { ...init, signal: AbortSignal.timeout(HTTP_TIMEOUT_MS) };
+}
+
 export async function fetchWithControllerAuth(params: {
   url: string;
   init?: RequestInit;
@@ -24,7 +35,7 @@ export async function fetchWithControllerAuth(params: {
   profile?: string | null;
   cwd?: string | null;
 }): Promise<{ response: Response; accessToken: string }> {
-  const response = await fetch(params.url, withBearer(params.init, params.accessToken));
+  const response = await fetch(params.url, withTimeout(withBearer(params.init, params.accessToken)));
   if (response.ok) {
     return { response, accessToken: params.accessToken };
   }
@@ -43,7 +54,7 @@ export async function fetchWithControllerAuth(params: {
     return { response, accessToken: params.accessToken };
   }
 
-  const retry = await fetch(params.url, withBearer(params.init, refreshed.accessToken));
+  const retry = await fetch(params.url, withTimeout(withBearer(params.init, refreshed.accessToken)));
   return { response: retry, accessToken: refreshed.accessToken };
 }
 
