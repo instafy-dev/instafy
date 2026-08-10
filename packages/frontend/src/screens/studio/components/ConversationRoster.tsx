@@ -11,14 +11,22 @@ import type {
 const MAX_STACK_AVATARS = 5;
 
 /**
- * "Who is in this room": a compact overlapping avatar stack next to the
- * composer — humans first, then AI participants — with a "+N" overflow after
+ * "Who is in this room": a compact overlapping avatar stack pinned to the top
+ * right of the conversation surface — humans first, then AI participants —
+ * with a "+N" overflow after
  * {@link MAX_STACK_AVATARS}. Clicking it opens a popover listing every member;
  * AI members carry a muted "AI · listening" descriptor, which absorbs the old
  * OctoPresenceChip semantics: in skill-mode group conversations agents
  * evaluate every ambient turn and usually stay silent, and this is the quiet
  * trace of that. The roster is static presence — it never hides while someone
  * is typing (the typing indicator is a separate surface).
+ *
+ * Styling is deliberately ambient: the trigger is a bare, transparent avatar
+ * stack (no panel, border, shadow or blur) so it reads as passive information
+ * rather than a control. Each avatar carries a thin ring painted in the chat
+ * surface's own background — white in light mode, `--color-studio-dark-panel`
+ * in dark (see the workspace surface in StudioLayout) — purely to separate
+ * overlapping faces.
  */
 export function ConversationRoster({
   agents,
@@ -36,7 +44,7 @@ export function ConversationRoster({
     ...humans.map((human) => ({
       key: `human:${human.userId}`,
       avatar: (
-        <ChatMessageAvatar kind="human" seed={human.userId} label={human.label} size="xs" />
+        <ChatMessageAvatar kind="human" seed={human.userId} label={human.label} size="2xs" />
       ),
     })),
     ...agents.map((agent) => ({
@@ -45,7 +53,7 @@ export function ConversationRoster({
         <ChatMessageAvatar
           kind="assistant"
           agent={{ handle: agent.handle, avatarSeed: agent.avatarSeed }}
-          size="xs"
+          size="2xs"
         />
       ),
     })),
@@ -62,13 +70,13 @@ export function ConversationRoster({
         radius="full"
         aria-label={`Conversation members (${totalCount})`}
         data-testid="conversation-roster"
-        className="gap-1.5 border border-slate-200/60 bg-white/85 px-0.5 py-0.5 shadow-sm backdrop-blur dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel)]"
+        className="gap-1 border-0 bg-transparent px-1 py-0.5 shadow-none"
       >
-        <span className="flex items-center -space-x-2">
+        <span className="flex items-center -space-x-1.5">
           {visibleStackEntries.map((entry) => (
             <span
               key={entry.key}
-              className="rounded-full ring-2 ring-white dark:ring-[var(--color-studio-dark-panel)]"
+              className="rounded-full ring-1 ring-white dark:ring-[var(--color-studio-dark-panel)]"
             >
               {entry.avatar}
             </span>
@@ -76,14 +84,14 @@ export function ConversationRoster({
         </span>
         {overflowCount > 0 ? (
           <span
-            className="pr-1.5 text-xxs font-medium text-slate-500 dark:text-slate-400"
+            className="pr-0.5 text-xxs font-medium text-slate-500 dark:text-slate-400"
             data-testid="conversation-roster-overflow"
           >
             +{overflowCount}
           </span>
         ) : null}
       </Button>
-      <StudioDialogPopover placement="top" offset={8} className="w-64 overflow-hidden p-0">
+      <StudioDialogPopover placement="bottom end" offset={6} className="w-64 overflow-hidden p-0">
         <div
           data-testid="conversation-roster-popover"
           className="max-h-80 overflow-y-auto p-2"
