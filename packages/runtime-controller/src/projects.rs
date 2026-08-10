@@ -1199,7 +1199,7 @@ async fn list_organizations(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<OrgListResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if context.scoped_claims.is_some() {
         return Err(forbidden("Scoped access tokens cannot list organizations"));
     }
@@ -1274,7 +1274,7 @@ async fn create_organization(
     headers: HeaderMap,
     Json(body): Json<CreateOrgBody>,
 ) -> Result<Json<CreateOrgResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if context.scoped_claims.is_some() {
         return Err(forbidden(
             "Scoped access tokens cannot create organizations",
@@ -1512,7 +1512,7 @@ async fn get_org_limits(
     headers: HeaderMap,
     Path(org_id_raw): Path<String>,
 ) -> Result<Json<OrgLimitsResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let org_id = parse_uuid_param(org_id_raw, "org_id")?;
 
     let mut connection = state
@@ -1573,7 +1573,7 @@ async fn patch_org_limits(
     Path(org_id_raw): Path<String>,
     Json(body): Json<OrgLimitsUpdateRequest>,
 ) -> Result<Json<OrgLimitsResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if !context.is_service_role {
         return Err(forbidden("Only the service role can update org limits."));
     }
@@ -1696,7 +1696,7 @@ async fn get_project_summary(
     headers: HeaderMap,
     Path(project_id_raw): Path<String>,
 ) -> Result<Json<ProjectSummary>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let project_id = parse_uuid_param(project_id_raw, "project_id")?;
 
     let mut connection = state
@@ -1748,7 +1748,7 @@ async fn update_project(
     Path(project_id_raw): Path<String>,
     Json(body): Json<ProjectUpdateRequest>,
 ) -> Result<Json<ProjectSummary>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let project_id = parse_uuid_param(project_id_raw, "project_id")?;
 
     let project_name = body.project_name.unwrap_or_default().trim().to_string();
@@ -1808,7 +1808,7 @@ async fn delete_project(
     headers: HeaderMap,
     Path(project_id_raw): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let project_id = parse_uuid_param(project_id_raw, "project_id")?;
 
     let mut connection = state
@@ -1860,7 +1860,7 @@ async fn list_project_members(
     headers: HeaderMap,
     Path(project_id_raw): Path<String>,
 ) -> Result<Json<ProjectMembersResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let project_id = parse_uuid_param(project_id_raw, "project_id")?;
 
     let mut connection = state
@@ -1893,7 +1893,7 @@ async fn update_project_member(
     Path((project_id_raw, user_id_raw)): Path<(String, String)>,
     Json(body): Json<ProjectMemberUpdateRequest>,
 ) -> Result<Json<ProjectMemberResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let project_id = parse_uuid_param(project_id_raw, "project_id")?;
     let user_id = parse_uuid_param(user_id_raw, "user_id")?;
     let role = normalize_project_share_role(Some(body.role), None)?;
@@ -1943,7 +1943,7 @@ async fn remove_project_member(
     headers: HeaderMap,
     Path((project_id_raw, user_id_raw)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let project_id = parse_uuid_param(project_id_raw, "project_id")?;
     let user_id = parse_uuid_param(user_id_raw, "user_id")?;
 
@@ -1990,7 +1990,7 @@ async fn list_org_projects(
     headers: HeaderMap,
     Path(org_id_raw): Path<String>,
 ) -> Result<Json<ProjectListResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let org_id = parse_uuid_param(org_id_raw, "org_id")?;
 
     let mut connection = state
@@ -2054,7 +2054,7 @@ async fn list_accessible_projects(
     headers: HeaderMap,
 ) -> Result<Json<ProjectListResponse>, (StatusCode, Json<ApiError>)> {
     const ACCESSIBLE_PROJECT_LIST_LIMIT: i64 = 1000;
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if context.scoped_claims.is_some() {
         return Err(forbidden("Scoped access tokens cannot list projects"));
     }
@@ -2153,7 +2153,7 @@ async fn list_org_members(
     Query(params): Query<OrgMembersQuery>,
 ) -> Result<Json<OrgMembersResponse>, (StatusCode, Json<ApiError>)> {
     let org_id = parse_uuid_param(org_id_raw, "org_id")?;
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let mut connection = state
         .pool
@@ -2185,7 +2185,7 @@ async fn add_org_member(
     Json(body): Json<OrgMemberCreateRequest>,
 ) -> Result<Json<OrgMemberResponse>, (StatusCode, Json<ApiError>)> {
     let org_id = parse_uuid_param(org_id_raw, "org_id")?;
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let mut connection = state
         .pool
@@ -2251,7 +2251,7 @@ async fn update_org_member(
 ) -> Result<Json<OrgMemberResponse>, (StatusCode, Json<ApiError>)> {
     let org_id = parse_uuid_param(org_id_raw, "org_id")?;
     let user_id = parse_uuid_param(user_id_raw, "user_id")?;
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let mut connection = state
         .pool
@@ -2315,7 +2315,7 @@ async fn remove_org_member(
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
     let org_id = parse_uuid_param(org_id_raw, "org_id")?;
     let user_id = parse_uuid_param(user_id_raw, "user_id")?;
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let mut connection = state
         .pool
@@ -2369,7 +2369,7 @@ async fn list_org_invitations(
     Query(query): Query<OrgInvitationsQuery>,
 ) -> Result<Json<OrgInvitationsResponse>, (StatusCode, Json<ApiError>)> {
     let org_id = parse_uuid_param(org_id_raw, "org_id")?;
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let project_id = match query.project_id {
         Some(raw) => Some(parse_uuid_param(raw, "projectId")?),
         None => None,
@@ -2503,7 +2503,7 @@ async fn create_org_invitation(
     Json(body): Json<OrgInvitationCreateRequest>,
 ) -> Result<Json<OrgInvitationResponse>, (StatusCode, Json<ApiError>)> {
     let org_id = parse_uuid_param(org_id_raw, "org_id")?;
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let trimmed_email = body.email.trim().to_string();
     if trimmed_email.is_empty() {
@@ -2819,7 +2819,7 @@ async fn list_org_invite_links(
     Query(query): Query<OrgInviteLinkListQuery>,
 ) -> Result<Json<OrgInviteLinksResponse>, (StatusCode, Json<ApiError>)> {
     let org_id = parse_uuid_param(org_id_raw, "org_id")?;
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let project_id = match query.project_id {
         Some(raw) => Some(parse_uuid_param(raw, "projectId")?),
@@ -2954,7 +2954,7 @@ async fn create_org_invite_link(
     Json(body): Json<OrgInviteLinkCreateRequest>,
 ) -> Result<Json<OrgInviteLinkResponse>, (StatusCode, Json<ApiError>)> {
     let org_id = parse_uuid_param(org_id_raw, "org_id")?;
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let mut connection = state
         .pool
@@ -3106,7 +3106,7 @@ async fn revoke_org_invite_link(
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
     let org_id = parse_uuid_param(org_id_raw, "org_id")?;
     let invite_link_id = parse_uuid_param(invite_link_id_raw, "invite_link_id")?;
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let mut connection = state
         .pool
@@ -3183,7 +3183,7 @@ async fn cancel_org_invitation(
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
     let org_id = parse_uuid_param(org_id_raw, "org_id")?;
     let invitation_id = parse_uuid_param(invitation_id_raw, "invitation_id")?;
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let mut connection = state
         .pool
@@ -3249,7 +3249,7 @@ async fn accept_org_invitation(
     headers: HeaderMap,
     Json(body): Json<OrgInvitationAcceptRequest>,
 ) -> Result<Json<OrgInvitationAcceptResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if context.scoped_claims.is_some() {
         return Err(forbidden(
             "Scoped access tokens cannot accept organization invitations",
@@ -3555,7 +3555,7 @@ async fn update_organization(
     Path(org_id_raw): Path<String>,
     Json(body): Json<UpdateOrgBody>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let org_id = parse_uuid_param(org_id_raw, "org_id")?;
 
     let name = match body.name.as_deref().map(str::trim) {
@@ -3642,7 +3642,7 @@ async fn delete_organization(
     headers: HeaderMap,
     Path(org_id_raw): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let org_id = parse_uuid_param(org_id_raw, "org_id")?;
 
     let mut connection = state
@@ -4808,7 +4808,7 @@ async fn bootstrap_project_memory(
     headers: HeaderMap,
     Path(project_id_raw): Path<String>,
 ) -> Result<Json<BootstrapProjectMemoryResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let project_id = parse_uuid_param(project_id_raw, "project_id")?;
 
     let mut connection = state
@@ -5303,7 +5303,7 @@ async fn create_org_project(
     Path(org_id_raw): Path<String>,
     Json(body): Json<CreateOrgProjectBody>,
 ) -> Result<Json<CreateProjectResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let org_id = parse_uuid_param(org_id_raw, "org_id")?;
 
     let requested_owner = parse_optional_uuid_param(body.owner_user_id, "ownerUserId")?;

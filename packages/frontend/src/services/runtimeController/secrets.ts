@@ -1,7 +1,6 @@
 import {
-  controllerBaseUrl,
   readControllerError,
-  resolveControllerAccessToken,
+  resolveControllerRequestContext,
   runtimeControllerEnabled,
 } from "./core";
 
@@ -27,7 +26,7 @@ export async function listProjectSecrets(
   projectId: string,
   params?: { accessToken?: string | null },
 ): Promise<ListProjectSecretsResult> {
-  if (!runtimeControllerEnabled || !controllerBaseUrl) {
+  if (!runtimeControllerEnabled) {
     return { success: false, secrets: [], error: "Runtime controller is not configured." };
   }
 
@@ -36,14 +35,15 @@ export async function listProjectSecrets(
     return { success: false, secrets: [], error: "Missing project id." };
   }
 
-  const accessToken = await resolveControllerAccessToken(params?.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params?.accessToken ?? null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return { success: false, secrets: [], error: "Missing controller session token." };
   }
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/projects/${encodeURIComponent(normalizedProjectId)}/secrets`,
+      `${requestContext.baseUrl}/projects/${encodeURIComponent(normalizedProjectId)}/secrets`,
       {
         method: "GET",
         headers: {
@@ -54,7 +54,11 @@ export async function listProjectSecrets(
     );
 
     if (!response.ok) {
-      const errorMessage = await readControllerError(response, "Unable to load secrets");
+      const errorMessage = await readControllerError(
+        response,
+        "Unable to load secrets",
+        requestContext,
+      );
       return { success: false, secrets: [], error: errorMessage };
     }
 
@@ -117,7 +121,7 @@ export async function createProjectSecret(
   projectId: string,
   params: CreateProjectSecretParams,
 ): Promise<CreateProjectSecretResult> {
-  if (!runtimeControllerEnabled || !controllerBaseUrl) {
+  if (!runtimeControllerEnabled) {
     return { success: false, error: "Runtime controller is not configured." };
   }
 
@@ -126,14 +130,15 @@ export async function createProjectSecret(
     return { success: false, error: "Missing project id." };
   }
 
-  const accessToken = await resolveControllerAccessToken(params.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return { success: false, error: "Missing controller session token." };
   }
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/projects/${encodeURIComponent(normalizedProjectId)}/secrets`,
+      `${requestContext.baseUrl}/projects/${encodeURIComponent(normalizedProjectId)}/secrets`,
       {
         method: "POST",
         headers: {
@@ -151,7 +156,11 @@ export async function createProjectSecret(
     );
 
     if (!response.ok) {
-      const errorMessage = await readControllerError(response, "Unable to create secret");
+      const errorMessage = await readControllerError(
+        response,
+        "Unable to create secret",
+        requestContext,
+      );
       return { success: false, error: errorMessage };
     }
 
@@ -185,7 +194,7 @@ export async function updateProjectSecret(
   secretId: string,
   params: UpdateProjectSecretParams,
 ): Promise<UpdateProjectSecretResult> {
-  if (!runtimeControllerEnabled || !controllerBaseUrl) {
+  if (!runtimeControllerEnabled) {
     return { success: false, error: "Runtime controller is not configured." };
   }
 
@@ -198,14 +207,15 @@ export async function updateProjectSecret(
     return { success: false, error: "Missing secret id." };
   }
 
-  const accessToken = await resolveControllerAccessToken(params.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return { success: false, error: "Missing controller session token." };
   }
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/projects/${encodeURIComponent(normalizedProjectId)}/secrets/${encodeURIComponent(
+      `${requestContext.baseUrl}/projects/${encodeURIComponent(normalizedProjectId)}/secrets/${encodeURIComponent(
         normalizedSecretId,
       )}`,
       {
@@ -224,7 +234,11 @@ export async function updateProjectSecret(
     );
 
     if (!response.ok) {
-      const errorMessage = await readControllerError(response, "Unable to update secret");
+      const errorMessage = await readControllerError(
+        response,
+        "Unable to update secret",
+        requestContext,
+      );
       return { success: false, error: errorMessage };
     }
 
@@ -270,7 +284,7 @@ export async function revokeProjectSecret(
   secretId: string,
   params?: { accessToken?: string | null },
 ): Promise<RevokeProjectSecretResult> {
-  if (!runtimeControllerEnabled || !controllerBaseUrl) {
+  if (!runtimeControllerEnabled) {
     return { success: false, error: "Runtime controller is not configured." };
   }
 
@@ -283,14 +297,15 @@ export async function revokeProjectSecret(
     return { success: false, error: "Missing secret id." };
   }
 
-  const accessToken = await resolveControllerAccessToken(params?.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params?.accessToken ?? null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return { success: false, error: "Missing controller session token." };
   }
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/projects/${encodeURIComponent(normalizedProjectId)}/secrets/${encodeURIComponent(
+      `${requestContext.baseUrl}/projects/${encodeURIComponent(normalizedProjectId)}/secrets/${encodeURIComponent(
         normalizedSecretId,
       )}`,
       {
@@ -303,7 +318,11 @@ export async function revokeProjectSecret(
     );
 
     if (!response.ok) {
-      const errorMessage = await readControllerError(response, "Unable to revoke secret");
+      const errorMessage = await readControllerError(
+        response,
+        "Unable to revoke secret",
+        requestContext,
+      );
       return { success: false, error: errorMessage };
     }
 

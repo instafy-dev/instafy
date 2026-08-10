@@ -36,8 +36,6 @@ pub(crate) struct RuntimeActivityPayload {
     last_interaction_at: Option<String>,
     #[serde(default, rename = "idleTtlSeconds")]
     idle_ttl_seconds: Option<i64>,
-    #[serde(default, rename = "accessToken", alias = "access_token")]
-    access_token: Option<String>,
     #[serde(default)]
     tenants: Option<Vec<RuntimeActivityTenantPayload>>,
 }
@@ -64,7 +62,6 @@ pub(crate) struct RuntimeActivityResponse {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RuntimeStatusQuery {
     session_id: Option<String>,
-    access_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -122,7 +119,6 @@ const RUNTIME_DRAIN_LEASE_SECONDS: i64 = 90;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RuntimeLogsQuery {
     session_id: Option<String>,
-    access_token: Option<String>,
     limit: Option<u32>,
     runtime_id: Option<String>,
     kind: Option<String>,
@@ -231,8 +227,6 @@ pub(crate) struct RuntimePreferenceBody {
     runtime_id: Option<String>,
     #[serde(default)]
     source: Option<String>,
-    #[serde(rename = "accessToken", alias = "access_token")]
-    access_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -324,8 +318,7 @@ pub(crate) async fn runtime_activity(
     let project_id = Uuid::from_str(project_id_raw.trim())
         .map_err(|_| bad_request("project_id must be a valid UUID"))?;
 
-    let auth_context =
-        authenticate_request(&state.config, &headers, payload.access_token.as_deref()).await?;
+    let auth_context = authenticate_request(&state.config, &headers).await?;
     ensure_runtime_activity_identity(&auth_context)?;
 
     let processed_tenants: Vec<(Uuid, Option<String>, Option<String>)> = payload
@@ -556,9 +549,7 @@ pub(crate) async fn runtime_status(
         .map_err(|_| bad_request("project_id must be a valid UUID"))?;
 
     let session_id = parse_optional_uuid_param(query.session_id.clone(), "sessionId")?;
-    let token_override = query.access_token.clone();
-    let auth_context =
-        authenticate_request(&state.config, &headers, token_override.as_deref()).await?;
+    let auth_context = authenticate_request(&state.config, &headers).await?;
 
     let mut connection = state
         .pool
@@ -647,7 +638,7 @@ async fn set_runtime_drain_state(
         .map_err(|_| bad_request("project_id must be a valid UUID"))?;
     let runtime_id = Uuid::from_str(runtime_id_raw.trim())
         .map_err(|_| bad_request("runtime_id must be a valid UUID"))?;
-    let auth_context = authenticate_request(&state.config, &headers, None).await?;
+    let auth_context = authenticate_request(&state.config, &headers).await?;
 
     let mut connection = state
         .pool
@@ -902,9 +893,7 @@ pub(super) async fn runtime_preference(
         .map_err(|_| bad_request("project_id must be a valid UUID"))?;
 
     let session_id = parse_optional_uuid_param(query.session_id.clone(), "sessionId")?;
-    let token_override = query.access_token.clone();
-    let auth_context =
-        authenticate_request(&state.config, &headers, token_override.as_deref()).await?;
+    let auth_context = authenticate_request(&state.config, &headers).await?;
 
     let mut connection = state
         .pool
@@ -1001,8 +990,7 @@ pub(super) async fn set_runtime_preference(
     let project_id = Uuid::from_str(project_id_raw.trim())
         .map_err(|_| bad_request("project_id must be a valid UUID"))?;
 
-    let auth_context =
-        authenticate_request(&state.config, &headers, body.access_token.as_deref()).await?;
+    let auth_context = authenticate_request(&state.config, &headers).await?;
 
     let mut connection = state
         .pool
@@ -1155,9 +1143,7 @@ pub(crate) async fn runtime_logs(
         .map_err(|_| bad_request("project_id must be a valid UUID"))?;
 
     let session_id = parse_optional_uuid_param(query.session_id.clone(), "sessionId")?;
-    let token_override = query.access_token.clone();
-    let auth_context =
-        authenticate_request(&state.config, &headers, token_override.as_deref()).await?;
+    let auth_context = authenticate_request(&state.config, &headers).await?;
 
     let mut connection = state
         .pool

@@ -1,7 +1,6 @@
 import {
-  controllerBaseUrl,
   readControllerError,
-  resolveControllerAccessToken,
+  resolveControllerRequestContext,
   runtimeControllerEnabled,
 } from "./core";
 
@@ -88,7 +87,7 @@ export interface CancelDeviceAuthResult {
 export async function createCodexCredential(
   params: CreateCodexCredentialParams,
 ): Promise<CreateCodexCredentialResult> {
-  if (!runtimeControllerEnabled || !controllerBaseUrl) {
+  if (!runtimeControllerEnabled) {
     return {
       success: false,
       error:
@@ -96,15 +95,16 @@ export async function createCodexCredential(
     };
   }
 
-  const resolvedAccessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const resolvedAccessToken = requestContext.accessToken;
   if (!resolvedAccessToken) {
     return { success: false, error: "Missing controller session token." };
   }
 
   try {
-    const response = await fetch(`${controllerBaseUrl}/me/credentials/codex`, {
+    const response = await fetch(`${requestContext.baseUrl}/me/credentials/codex`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${resolvedAccessToken}`,
@@ -125,6 +125,7 @@ export async function createCodexCredential(
       const errorMessage = await readControllerError(
         response,
         "Unable to save Codex credentials",
+        requestContext,
       );
       return { success: false, error: errorMessage };
     }
@@ -165,7 +166,7 @@ export async function testMyCredential(
   credentialId: string,
   params?: { accessToken?: string | null },
 ): Promise<CredentialTestResult> {
-  if (!runtimeControllerEnabled || !controllerBaseUrl) {
+  if (!runtimeControllerEnabled) {
     return { success: false, error: "Runtime controller is not configured." };
   }
 
@@ -174,14 +175,15 @@ export async function testMyCredential(
     return { success: false, error: "Missing credential id." };
   }
 
-  const resolvedAccessToken = await resolveControllerAccessToken(params?.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params?.accessToken ?? null);
+  const resolvedAccessToken = requestContext.accessToken;
   if (!resolvedAccessToken) {
     return { success: false, error: "Missing controller session token." };
   }
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/me/credentials/${encodeURIComponent(normalizedId)}/test`,
+      `${requestContext.baseUrl}/me/credentials/${encodeURIComponent(normalizedId)}/test`,
       {
         method: "POST",
         headers: {
@@ -195,6 +197,7 @@ export async function testMyCredential(
       const errorMessage = await readControllerError(
         response,
         "Unable to test credential",
+        requestContext,
       );
       return { success: false, error: errorMessage };
     }
@@ -219,7 +222,7 @@ export async function testMyCredential(
 export async function listMyCredentials(params?: {
   accessToken?: string | null;
 }): Promise<ListMyCredentialsResult> {
-  if (!runtimeControllerEnabled || !controllerBaseUrl) {
+  if (!runtimeControllerEnabled) {
     return {
       success: false,
       credentials: [],
@@ -227,15 +230,16 @@ export async function listMyCredentials(params?: {
     };
   }
 
-  const resolvedAccessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params?.accessToken ?? null,
   );
+  const resolvedAccessToken = requestContext.accessToken;
   if (!resolvedAccessToken) {
     return { success: false, credentials: [], error: "Missing controller session token." };
   }
 
   try {
-    const response = await fetch(`${controllerBaseUrl}/me/credentials`, {
+    const response = await fetch(`${requestContext.baseUrl}/me/credentials`, {
       method: "GET",
       headers: {
         authorization: `Bearer ${resolvedAccessToken}`,
@@ -247,6 +251,7 @@ export async function listMyCredentials(params?: {
       const errorMessage = await readControllerError(
         response,
         "Unable to load credentials",
+        requestContext,
       );
       return { success: false, credentials: [], error: errorMessage };
     }
@@ -294,7 +299,7 @@ export async function setDefaultCredential(
   credentialId: string,
   params?: { accessToken?: string | null },
 ): Promise<SetDefaultCredentialResult> {
-  if (!runtimeControllerEnabled || !controllerBaseUrl) {
+  if (!runtimeControllerEnabled) {
     return {
       success: false,
       error: "Runtime controller is not configured.",
@@ -306,16 +311,17 @@ export async function setDefaultCredential(
     return { success: false, error: "Missing credential id." };
   }
 
-  const resolvedAccessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params?.accessToken ?? null,
   );
+  const resolvedAccessToken = requestContext.accessToken;
   if (!resolvedAccessToken) {
     return { success: false, error: "Missing controller session token." };
   }
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/me/credentials/${encodeURIComponent(normalizedId)}/default`,
+      `${requestContext.baseUrl}/me/credentials/${encodeURIComponent(normalizedId)}/default`,
       {
         method: "POST",
         headers: {
@@ -329,6 +335,7 @@ export async function setDefaultCredential(
       const errorMessage = await readControllerError(
         response,
         "Unable to update default credential",
+        requestContext,
       );
       return { success: false, error: errorMessage };
     }
@@ -357,22 +364,23 @@ export async function setDefaultCredential(
 export async function clearDefaultCredential(params?: {
   accessToken?: string | null;
 }): Promise<ClearDefaultCredentialResult> {
-  if (!runtimeControllerEnabled || !controllerBaseUrl) {
+  if (!runtimeControllerEnabled) {
     return {
       success: false,
       error: "Runtime controller is not configured.",
     };
   }
 
-  const resolvedAccessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params?.accessToken ?? null,
   );
+  const resolvedAccessToken = requestContext.accessToken;
   if (!resolvedAccessToken) {
     return { success: false, error: "Missing controller session token." };
   }
 
   try {
-    const response = await fetch(`${controllerBaseUrl}/me/credentials/default`, {
+    const response = await fetch(`${requestContext.baseUrl}/me/credentials/default`, {
       method: "DELETE",
       headers: {
         authorization: `Bearer ${resolvedAccessToken}`,
@@ -384,6 +392,7 @@ export async function clearDefaultCredential(params?: {
       const errorMessage = await readControllerError(
         response,
         "Unable to switch to managed AI",
+        requestContext,
       );
       return { success: false, error: errorMessage };
     }
@@ -403,17 +412,18 @@ export async function startDeviceAuth(
     label?: string | null;
   },
 ): Promise<StartDeviceAuthResult> {
-  if (!runtimeControllerEnabled || !controllerBaseUrl) {
+  if (!runtimeControllerEnabled) {
     return { success: false, error: "Runtime controller is not configured." };
   }
 
-  const resolvedAccessToken = await resolveControllerAccessToken(params?.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params?.accessToken ?? null);
+  const resolvedAccessToken = requestContext.accessToken;
   if (!resolvedAccessToken) {
     return { success: false, error: "Missing controller session token." };
   }
 
   try {
-    let startUrl = `${controllerBaseUrl}/me/auth/device/${encodeURIComponent(provider)}/start`;
+    let startUrl = `${requestContext.baseUrl}/me/auth/device/${encodeURIComponent(provider)}/start`;
     if (provider === "gemini" && (params?.geminiOauthMode || params?.label)) {
       const search = new URLSearchParams();
       if (params?.geminiOauthMode) {
@@ -435,7 +445,11 @@ export async function startDeviceAuth(
     });
 
     if (!response.ok) {
-      const errorMessage = await readControllerError(response, "Unable to start device login");
+      const errorMessage = await readControllerError(
+        response,
+        "Unable to start device login",
+        requestContext,
+      );
       return { success: false, error: errorMessage };
     }
 
@@ -459,7 +473,7 @@ export async function getDeviceAuthStatus(
   sessionId: string,
   params?: { accessToken?: string | null },
 ): Promise<DeviceAuthStatusResult> {
-  if (!runtimeControllerEnabled || !controllerBaseUrl) {
+  if (!runtimeControllerEnabled) {
     return { success: false, error: "Runtime controller is not configured." };
   }
 
@@ -468,13 +482,14 @@ export async function getDeviceAuthStatus(
     return { success: false, error: "Missing device auth session id." };
   }
 
-  const resolvedAccessToken = await resolveControllerAccessToken(params?.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params?.accessToken ?? null);
+  const resolvedAccessToken = requestContext.accessToken;
   if (!resolvedAccessToken) {
     return { success: false, error: "Missing controller session token." };
   }
 
   try {
-    const response = await fetch(`${controllerBaseUrl}/me/auth/device/${encodeURIComponent(normalizedId)}`, {
+    const response = await fetch(`${requestContext.baseUrl}/me/auth/device/${encodeURIComponent(normalizedId)}`, {
       method: "GET",
       headers: {
         authorization: `Bearer ${resolvedAccessToken}`,
@@ -483,7 +498,11 @@ export async function getDeviceAuthStatus(
     });
 
     if (!response.ok) {
-      const errorMessage = await readControllerError(response, "Unable to check device login");
+      const errorMessage = await readControllerError(
+        response,
+        "Unable to check device login",
+        requestContext,
+      );
       return { success: false, error: errorMessage };
     }
 
@@ -512,7 +531,7 @@ export async function cancelDeviceAuth(
   sessionId: string,
   params?: { accessToken?: string | null },
 ): Promise<CancelDeviceAuthResult> {
-  if (!runtimeControllerEnabled || !controllerBaseUrl) {
+  if (!runtimeControllerEnabled) {
     return { success: false, error: "Runtime controller is not configured." };
   }
 
@@ -521,13 +540,14 @@ export async function cancelDeviceAuth(
     return { success: false, error: "Missing device auth session id." };
   }
 
-  const resolvedAccessToken = await resolveControllerAccessToken(params?.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params?.accessToken ?? null);
+  const resolvedAccessToken = requestContext.accessToken;
   if (!resolvedAccessToken) {
     return { success: false, error: "Missing controller session token." };
   }
 
   try {
-    const response = await fetch(`${controllerBaseUrl}/me/auth/device/${encodeURIComponent(normalizedId)}`, {
+    const response = await fetch(`${requestContext.baseUrl}/me/auth/device/${encodeURIComponent(normalizedId)}`, {
       method: "DELETE",
       headers: {
         authorization: `Bearer ${resolvedAccessToken}`,
@@ -540,7 +560,11 @@ export async function cancelDeviceAuth(
     }
 
     if (!response.ok) {
-      const errorMessage = await readControllerError(response, "Unable to cancel device login");
+      const errorMessage = await readControllerError(
+        response,
+        "Unable to cancel device login",
+        requestContext,
+      );
       return { success: false, error: errorMessage };
     }
 
@@ -555,7 +579,7 @@ export async function revokeMyCredential(
   credentialId: string,
   params?: { accessToken?: string | null },
 ): Promise<RevokeCredentialResult> {
-  if (!runtimeControllerEnabled || !controllerBaseUrl) {
+  if (!runtimeControllerEnabled) {
     return {
       success: false,
       error: "Runtime controller is not configured.",
@@ -567,16 +591,17 @@ export async function revokeMyCredential(
     return { success: false, error: "Missing credential id." };
   }
 
-  const resolvedAccessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params?.accessToken ?? null,
   );
+  const resolvedAccessToken = requestContext.accessToken;
   if (!resolvedAccessToken) {
     return { success: false, error: "Missing controller session token." };
   }
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/me/credentials/${encodeURIComponent(normalizedId)}`,
+      `${requestContext.baseUrl}/me/credentials/${encodeURIComponent(normalizedId)}`,
       {
         method: "DELETE",
         headers: {
@@ -590,6 +615,7 @@ export async function revokeMyCredential(
       const errorMessage = await readControllerError(
         response,
         "Unable to revoke credential",
+        requestContext,
       );
       return { success: false, error: errorMessage };
     }
@@ -621,7 +647,7 @@ export interface CredentialRequirementsResult {
 export async function getCredentialRequirements(params?: {
   accessToken?: string | null;
 }): Promise<CredentialRequirementsResult> {
-  if (!runtimeControllerEnabled || !controllerBaseUrl) {
+  if (!runtimeControllerEnabled) {
     return {
       success: false,
       requiresUserCredentials: false,
@@ -632,9 +658,10 @@ export async function getCredentialRequirements(params?: {
     };
   }
 
-  const resolvedAccessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params?.accessToken ?? null,
   );
+  const resolvedAccessToken = requestContext.accessToken;
   if (!resolvedAccessToken) {
     return {
       success: false,
@@ -647,7 +674,7 @@ export async function getCredentialRequirements(params?: {
   }
 
   try {
-    const response = await fetch(`${controllerBaseUrl}/me/credentials/requirements`, {
+    const response = await fetch(`${requestContext.baseUrl}/me/credentials/requirements`, {
       method: "GET",
       headers: {
         authorization: `Bearer ${resolvedAccessToken}`,
@@ -659,6 +686,7 @@ export async function getCredentialRequirements(params?: {
       const errorMessage = await readControllerError(
         response,
         "Unable to load credential requirements",
+        requestContext,
       );
       return {
         success: false,

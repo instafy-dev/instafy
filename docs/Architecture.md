@@ -82,7 +82,10 @@ This does **not** require a dedicated public file server. Private storage stays 
 - Avoid inventing a third "shared mount as truth" story when one of the two modes above already fits.
 
 ## Event Streaming
-- Studio subscribes to controller SSE at `/events` for run updates.
+- Studio subscribes to controller SSE at `/events` for run updates. Browser clients use an
+  authenticated `fetch` stream and send bearer credentials in the `Authorization` header; access
+  tokens must never be placed in the event-stream URL. The client requires the SSE media type and
+  bounds individual lines and accumulated event data before parsing JSON.
 - Supabase is a fallback when the controller is disabled.
 
 ## Runtime Providers

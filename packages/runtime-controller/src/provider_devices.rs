@@ -101,7 +101,7 @@ async fn list_provider_devices(
     AxumPath(project_id_raw): AxumPath<String>,
     Query(query): Query<ListProviderDevicesQuery>,
 ) -> Result<Json<Vec<ProviderDevicePayload>>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if context.user_id.is_none() && !context.is_service_role {
         return Err(unauthorized("user session required"));
     }
@@ -165,7 +165,7 @@ async fn record_provider_device_heartbeat(
     AxumPath(project_id_raw): AxumPath<String>,
     Json(body): Json<ProviderDeviceHeartbeatBody>,
 ) -> Result<Json<ProviderDevicePayload>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if context.user_id.is_none() && !context.is_service_role {
         return Err(unauthorized("user session required"));
     }

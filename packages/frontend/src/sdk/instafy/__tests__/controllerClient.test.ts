@@ -6,6 +6,13 @@ describe("instafy sdk controller client", () => {
   it("exposes the grouped controller surface through the sdk entrypoint", () => {
     expect(instafySdk.controller).toBe(controllerClient);
     expect(controllerClient.core.enabled).toBe(runtimeControllerEnabled);
+    expect(
+      typeof Object.getOwnPropertyDescriptor(controllerClient.core, "baseUrl")?.get,
+    ).toBe("function");
+    expect(
+      typeof Object.getOwnPropertyDescriptor(controllerClient.core, "enabled")?.get,
+    ).toBe("function");
+    expect(typeof controllerClient.core.resolveRequestContext).toBe("function");
     expect(typeof controllerClient.projects.create).toBe("function");
     expect(typeof controllerClient.projects.bootstrapMemory).toBe("function");
     expect(typeof controllerClient.conversations.sendMessage).toBe("function");

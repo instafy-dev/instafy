@@ -1,6 +1,7 @@
 import {
   controllerBaseUrl,
-  resolveControllerAccessToken,
+  readControllerError,
+  resolveControllerRequestContext,
   runtimeControllerEnabled
 } from "../sdk/instafy";
 
@@ -124,7 +125,8 @@ export async function fetchCreditSnapshot(projectId: string): Promise<CreditSnap
     return { success: false, error: "A project id is required to load credits." };
   }
 
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return {
       success: false,
@@ -132,7 +134,7 @@ export async function fetchCreditSnapshot(projectId: string): Promise<CreditSnap
     };
   }
 
-  const url = new URL(`${controllerBaseUrl}/credits/status`);
+  const url = new URL(`${requestContext.baseUrl}/credits/status`);
   url.searchParams.set("projectId", trimmedProjectId);
 
   try {
@@ -142,13 +144,9 @@ export async function fetchCreditSnapshot(projectId: string): Promise<CreditSnap
       }
     });
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
       return {
         success: false,
-        error:
-          text?.trim().length > 0
-            ? `Credits request failed (${response.status}): ${text}`
-            : `Credits request failed (${response.status}).`
+        error: await readControllerError(response, "Credits request failed", requestContext),
       };
     }
 
@@ -223,7 +221,8 @@ export async function fetchCreditLedger(
     return { success: false, error: "A project id is required to load credits." };
   }
 
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return {
       success: false,
@@ -232,7 +231,7 @@ export async function fetchCreditLedger(
   }
 
   const normalizedLimit = Math.min(Math.max(limit, 5), 100);
-  const url = new URL(`${controllerBaseUrl}/credits/ledger`);
+  const url = new URL(`${requestContext.baseUrl}/credits/ledger`);
   url.searchParams.set("projectId", trimmedProjectId);
   url.searchParams.set("limit", normalizedLimit.toString());
 
@@ -243,13 +242,13 @@ export async function fetchCreditLedger(
       }
     });
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
       return {
         success: false,
-        error:
-          text?.trim().length > 0
-            ? `Credits ledger request failed (${response.status}): ${text}`
-            : `Credits ledger request failed (${response.status}).`
+        error: await readControllerError(
+          response,
+          "Credits ledger request failed",
+          requestContext,
+        ),
       };
     }
 
@@ -293,7 +292,8 @@ export async function fetchCreditPolicy(projectId: string): Promise<CreditPolicy
     return { success: false, error: "A project id is required to load credit policy." };
   }
 
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return {
       success: false,
@@ -301,7 +301,7 @@ export async function fetchCreditPolicy(projectId: string): Promise<CreditPolicy
     };
   }
 
-  const url = new URL(`${controllerBaseUrl}/credits/policy`);
+  const url = new URL(`${requestContext.baseUrl}/credits/policy`);
   url.searchParams.set("projectId", trimmedProjectId);
 
   try {
@@ -311,13 +311,13 @@ export async function fetchCreditPolicy(projectId: string): Promise<CreditPolicy
       }
     });
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
       return {
         success: false,
-        error:
-          text?.trim().length > 0
-            ? `Credit policy request failed (${response.status}): ${text}`
-            : `Credit policy request failed (${response.status}).`
+        error: await readControllerError(
+          response,
+          "Credit policy request failed",
+          requestContext,
+        ),
       };
     }
 

@@ -8,7 +8,12 @@ const readControllerErrorMock = vi.hoisted(() =>
 vi.mock("../core", () => ({
   controllerBaseUrl: "http://controller.test",
   readControllerError: readControllerErrorMock,
-  resolveControllerAccessToken: resolveControllerAccessTokenMock,
+  resolveControllerRequestContext: async (desired: string | null) => ({
+    baseUrl: "http://controller.test",
+    accessToken: await resolveControllerAccessTokenMock(desired),
+    credentialSource: "ambient",
+    generation: 1,
+  }),
   runtimeControllerEnabled: true,
   safeJson: (value: unknown) => value,
 }));

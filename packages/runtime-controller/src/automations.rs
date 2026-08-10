@@ -1,7 +1,7 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use axum::extract::{Path as AxumPath, Query, State};
+use axum::extract::{Path as AxumPath, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -30,13 +30,6 @@ const DEFAULT_HOURLY_INTERVAL: i32 = 24;
 const AUTOMATION_SCHEDULER_TICK_SECONDS: u64 = 30;
 const AUTOMATION_SCHEDULER_LOCK_SECONDS: i64 = 10 * 60;
 const AUTOMATION_SCHEDULER_BATCH_SIZE: i64 = 10;
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AutomationQueryParams {
-    #[serde(default, rename = "accessToken", alias = "access_token")]
-    access_token: Option<String>,
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -998,10 +991,8 @@ async fn list_project_automations(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath(project_id_raw): AxumPath<String>,
-    Query(params): Query<AutomationQueryParams>,
 ) -> Result<Json<Vec<AutomationPayload>>, (StatusCode, Json<ApiError>)> {
-    let token_override = params.access_token.clone();
-    let context = authenticate_request(&state.config, &headers, token_override.as_deref()).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let project_id = Uuid::from_str(project_id_raw.trim())
         .map_err(|_| bad_request("projectId must be a valid UUID"))?;
@@ -1085,10 +1076,8 @@ async fn get_automation(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath(automation_id_raw): AxumPath<String>,
-    Query(params): Query<AutomationQueryParams>,
 ) -> Result<Json<AutomationPayload>, (StatusCode, Json<ApiError>)> {
-    let token_override = params.access_token.clone();
-    let context = authenticate_request(&state.config, &headers, token_override.as_deref()).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let automation_id = Uuid::from_str(automation_id_raw.trim())
         .map_err(|_| bad_request("automationId must be a valid UUID"))?;
 
@@ -1180,11 +1169,9 @@ async fn create_project_automation(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath(project_id_raw): AxumPath<String>,
-    Query(params): Query<AutomationQueryParams>,
     Json(body): Json<CreateAutomationBody>,
 ) -> Result<Json<AutomationPayload>, (StatusCode, Json<ApiError>)> {
-    let token_override = params.access_token.clone();
-    let context = authenticate_request(&state.config, &headers, token_override.as_deref()).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let project_id = Uuid::from_str(project_id_raw.trim())
         .map_err(|_| bad_request("projectId must be a valid UUID"))?;
 
@@ -1430,11 +1417,9 @@ async fn update_automation(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath(automation_id_raw): AxumPath<String>,
-    Query(params): Query<AutomationQueryParams>,
     Json(body): Json<UpdateAutomationBody>,
 ) -> Result<Json<AutomationPayload>, (StatusCode, Json<ApiError>)> {
-    let token_override = params.access_token.clone();
-    let context = authenticate_request(&state.config, &headers, token_override.as_deref()).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let automation_id = Uuid::from_str(automation_id_raw.trim())
         .map_err(|_| bad_request("automationId must be a valid UUID"))?;
 
@@ -1745,10 +1730,8 @@ async fn delete_automation(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath(automation_id_raw): AxumPath<String>,
-    Query(params): Query<AutomationQueryParams>,
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
-    let token_override = params.access_token.clone();
-    let context = authenticate_request(&state.config, &headers, token_override.as_deref()).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let automation_id = Uuid::from_str(automation_id_raw.trim())
         .map_err(|_| bad_request("automationId must be a valid UUID"))?;
 
@@ -1823,10 +1806,8 @@ async fn run_automation_now(
     State(state): State<AppState>,
     headers: HeaderMap,
     AxumPath(automation_id_raw): AxumPath<String>,
-    Query(params): Query<AutomationQueryParams>,
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
-    let token_override = params.access_token.clone();
-    let context = authenticate_request(&state.config, &headers, token_override.as_deref()).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let automation_id = Uuid::from_str(automation_id_raw.trim())
         .map_err(|_| bad_request("automationId must be a valid UUID"))?;
 
