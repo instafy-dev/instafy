@@ -1,7 +1,6 @@
 import {
-  controllerBaseUrl,
   readControllerError,
-  resolveControllerAccessToken,
+  resolveControllerRequestContext,
   runtimeControllerEnabled,
 } from "./core";
 import type { BuildLogEntry } from "../../types";
@@ -93,12 +92,13 @@ export async function submitControllerBugReport(
     throw new Error("Bug reports are unavailable in this environment.");
   }
 
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     throw new Error("Login required to submit bug reports.");
   }
 
-  const response = await fetch(`${controllerBaseUrl}/bug-reports`, {
+  const response = await fetch(`${requestContext.baseUrl}/bug-reports`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${accessToken}`,
@@ -118,7 +118,11 @@ export async function submitControllerBugReport(
   });
 
   if (!response.ok) {
-    const message = await readControllerError(response, "bug report failed");
+    const message = await readControllerError(
+      response,
+      "bug report failed",
+      requestContext,
+    );
     throw new Error(message);
   }
 
@@ -142,21 +146,26 @@ export async function listControllerBugReports(limit = 25): Promise<ControllerBu
     throw new Error("Bug reports are unavailable in this environment.");
   }
 
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     throw new Error("Login required to view bug reports.");
   }
 
   const params = new URLSearchParams();
   params.set("limit", String(limit));
-  const response = await fetch(`${controllerBaseUrl}/bug-reports?${params.toString()}`, {
+  const response = await fetch(`${requestContext.baseUrl}/bug-reports?${params.toString()}`, {
     headers: {
       authorization: `Bearer ${accessToken}`,
     },
   });
 
   if (!response.ok) {
-    const message = await readControllerError(response, "bug report list failed");
+    const message = await readControllerError(
+      response,
+      "bug report list failed",
+      requestContext,
+    );
     throw new Error(message);
   }
 
@@ -178,19 +187,24 @@ export async function getControllerBugReport(
     throw new Error("Bug reports are unavailable in this environment.");
   }
 
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     throw new Error("Login required to view bug reports.");
   }
 
-  const response = await fetch(`${controllerBaseUrl}/bug-reports/${bugReportId}`, {
+  const response = await fetch(`${requestContext.baseUrl}/bug-reports/${bugReportId}`, {
     headers: {
       authorization: `Bearer ${accessToken}`,
     },
   });
 
   if (!response.ok) {
-    const message = await readControllerError(response, "bug report load failed");
+    const message = await readControllerError(
+      response,
+      "bug report load failed",
+      requestContext,
+    );
     throw new Error(message);
   }
 

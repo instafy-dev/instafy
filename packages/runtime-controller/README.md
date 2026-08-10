@@ -99,6 +99,11 @@ Additional fields include Redis settings for cross-controller `/events` fanout (
 4. Run `cargo test` inside `packages/runtime-controller` for unit coverage.
 5. Trigger flows from the Studio or harness to observe `/events` and verify run output.
 
+Controller user/session and service-role credentials must be sent as
+`Authorization: Bearer <token>`. Standard controller API endpoints do not authenticate those
+credentials from query parameters or JSON request bodies. Scoped tokens accepted by these APIs
+use the same header; endpoint-specific origin capability transports remain documented separately.
+
 `pnpm controller:up` inherits the current shell environment. For a local TURN test, export the
 three `CONTROLLER_BROWSER_TURN_*` values before starting it; do not put the coturn shared secret
 in `$INSTAFY_ENV_DIR/docker/.env.local`, which configures runtime containers rather than the

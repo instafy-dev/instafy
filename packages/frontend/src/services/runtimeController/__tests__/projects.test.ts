@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const resolveControllerAccessTokenMock = vi.hoisted(() => vi.fn());
+const resolveControllerRequestContextMock = vi.hoisted(() => vi.fn());
+const readControllerErrorMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../core", () => ({
   controllerBaseUrl: "http://controller.test",
@@ -23,8 +24,8 @@ vi.mock("../core", () => ({
       url: response.url,
     };
   }),
-  readControllerError: vi.fn(async () => "controller request failed"),
-  resolveControllerAccessToken: resolveControllerAccessTokenMock,
+  readControllerError: readControllerErrorMock,
+  resolveControllerRequestContext: resolveControllerRequestContextMock,
   runtimeControllerEnabled: true,
 }));
 
@@ -33,16 +34,181 @@ vi.mock("../logging", () => ({
 }));
 
 import {
+  createControllerProject,
+  getControllerProjectSummaryResult,
   importGithubProject,
+  listControllerProjects,
   listControllerOrganizations,
   listControllerOrgMembers,
   listControllerProjectMembers,
 } from "../projects";
 
+const defaultRequestContext = Object.freeze({
+  baseUrl: "http://controller.test",
+  accessToken: "token-123",
+  credentialSource: "ambient" as const,
+  generation: 1,
+});
+
+function resetControllerMocks() {
+  resolveControllerRequestContextMock.mockReset();
+  resolveControllerRequestContextMock.mockResolvedValue(defaultRequestContext);
+  readControllerErrorMock.mockReset();
+  readControllerErrorMock.mockImplementation(
+    async (response: Response, fallback: string) => {
+      const data = (await response.json().catch(() => null)) as
+        | { message?: unknown }
+        | null;
+      return typeof data?.message === "string" && data.message.trim().length > 0
+        ? data.message.trim()
+        : `${fallback} (${response.status})`;
+    },
+  );
+}
+
+describe("project and organization request contexts", () => {
+  beforeEach(() => {
+    resetControllerMocks();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("uses one immutable context while implicitly creating an organization and project", async () => {
+    const originatingContext = Object.freeze({
+      baseUrl: "https://controller-a.test",
+      accessToken: "account-a-token",
+      credentialSource: "ambient" as const,
+      generation: 11,
+    });
+    const switchedAccountContext = Object.freeze({
+      baseUrl: "https://controller-b.test",
+      accessToken: "account-b-token",
+      credentialSource: "ambient" as const,
+      generation: 12,
+    });
+    resolveControllerRequestContextMock
+      .mockResolvedValueOnce(originatingContext)
+      .mockResolvedValueOnce(switchedAccountContext);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            orgId: "22222222-2222-4222-8222-222222222222",
+            orgSlug: "account-a",
+            orgName: "Account A",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            projectId: "11111111-1111-4111-8111-111111111111",
+            projectName: "Context-bound project",
+            orgId: "22222222-2222-4222-8222-222222222222",
+            orgName: "Account A",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      createControllerProject({ projectName: "Context-bound project" }),
+    ).resolves.toMatchObject({
+      projectId: "11111111-1111-4111-8111-111111111111",
+      orgId: "22222222-2222-4222-8222-222222222222",
+    });
+
+    expect(resolveControllerRequestContextMock).toHaveBeenCalledTimes(1);
+    expect(resolveControllerRequestContextMock).toHaveBeenCalledWith(null);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0]).toEqual([
+      "https://controller-a.test/orgs",
+      expect.objectContaining({
+        headers: expect.objectContaining({ authorization: "Bearer account-a-token" }),
+      }),
+    ]);
+    expect(fetchMock.mock.calls[1]).toEqual([
+      "https://controller-a.test/orgs/22222222-2222-4222-8222-222222222222/projects",
+      expect.objectContaining({
+        headers: expect.objectContaining({ authorization: "Bearer account-a-token" }),
+      }),
+    ]);
+  });
+
+  it("routes a project-list 401 through the exact originating context", async () => {
+    const response = new Response(JSON.stringify({ message: "session expired" }), {
+      status: 401,
+      headers: { "content-type": "application/json" },
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+    await expect(listControllerProjects()).resolves.toEqual([]);
+
+    expect(readControllerErrorMock).toHaveBeenCalledWith(
+      response,
+      "list projects failed",
+      defaultRequestContext,
+    );
+  });
+
+  it("keeps unauthorized, forbidden, and missing project responses distinct", async () => {
+    const forbiddenResponse = new Response(JSON.stringify({ message: "forbidden" }), {
+      status: 403,
+      headers: { "content-type": "application/json" },
+    });
+    const unauthorizedResponse = new Response(
+      JSON.stringify({ message: "session expired" }),
+      {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      },
+    );
+    const missingResponse = new Response(JSON.stringify({ message: "missing" }), {
+      status: 404,
+      headers: { "content-type": "application/json" },
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(forbiddenResponse)
+      .mockResolvedValueOnce(unauthorizedResponse)
+      .mockResolvedValueOnce(missingResponse);
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(getControllerProjectSummaryResult("project-1")).resolves.toEqual({
+      summary: null,
+      notFound: false,
+      forbidden: true,
+      unauthorized: false,
+    });
+    await expect(getControllerProjectSummaryResult("project-1")).resolves.toEqual({
+      summary: null,
+      notFound: false,
+      forbidden: false,
+      unauthorized: true,
+    });
+    await expect(getControllerProjectSummaryResult("project-1")).resolves.toEqual({
+      summary: null,
+      notFound: true,
+      forbidden: false,
+      unauthorized: false,
+    });
+
+    expect(readControllerErrorMock).toHaveBeenCalledTimes(2);
+    expect(readControllerErrorMock.mock.calls).toEqual([
+      [forbiddenResponse, "get project failed", defaultRequestContext],
+      [unauthorizedResponse, "get project failed", defaultRequestContext],
+    ]);
+  });
+});
+
 describe("strict controller membership discovery", () => {
   beforeEach(() => {
-    resolveControllerAccessTokenMock.mockReset();
-    resolveControllerAccessTokenMock.mockResolvedValue("token-123");
+    resetControllerMocks();
   });
 
   afterEach(() => {
@@ -67,6 +233,24 @@ describe("strict controller membership discovery", () => {
     ).rejects.toThrow("member directory unavailable");
   });
 
+  it("routes a team-membership 401 through the exact originating context", async () => {
+    const response = new Response(JSON.stringify({ message: "team session expired" }), {
+      status: 401,
+      headers: { "content-type": "application/json" },
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+    await expect(
+      listControllerOrgMembers("org-1", { throwOnError: true }),
+    ).rejects.toThrow("team session expired");
+
+    expect(readControllerErrorMock).toHaveBeenCalledWith(
+      response,
+      "list team members failed",
+      defaultRequestContext,
+    );
+  });
+
   it("distinguishes a project member failure from a successful empty list", async () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("project directory unavailable")));
 
@@ -79,8 +263,7 @@ describe("strict controller membership discovery", () => {
 
 describe("importGithubProject", () => {
   beforeEach(() => {
-    resolveControllerAccessTokenMock.mockReset();
-    resolveControllerAccessTokenMock.mockResolvedValue("token-123");
+    resetControllerMocks();
   });
 
   afterEach(() => {

@@ -557,7 +557,7 @@ pub(crate) async fn agent_login(
     headers: HeaderMap,
     axum::Json(payload): axum::Json<AgentLoginRequest>,
 ) -> Result<Json<runtime::RuntimeRegisterResponse>, (StatusCode, Json<ApiError>)> {
-    let auth_context = authenticate_request(&state.config, &headers, None).await?;
+    let auth_context = authenticate_request(&state.config, &headers).await?;
     if auth_context.scoped_claims.is_some() {
         // `/agent/login` is the user/service bootstrap for self-hosted
         // runtimes. Letting an already-issued runtime/agent token bootstrap a
@@ -2943,7 +2943,7 @@ pub(crate) async fn agent_plan_group_status(
     headers: HeaderMap,
     AxumPath(group_id_raw): AxumPath<String>,
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let group_id_raw = group_id_raw.trim().to_string();
     let group_uuid = Uuid::parse_str(group_id_raw.as_str())

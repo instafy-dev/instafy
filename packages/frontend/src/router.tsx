@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useRef, type ReactNode } from "react";
 import { Capacitor } from "@capacitor/core";
 import {
   createBrowserRouter,
@@ -17,8 +17,8 @@ import { PrivacyPage } from "./screens/PrivacyPage";
 import { RouteErrorPage } from "./screens/RouteErrorPage";
 import { RequireAuth } from "./components/RequireAuth";
 import {
-  syncControllerAccessTokenFromSearch,
-  syncControllerBaseUrlFromSearch,
+  subscribeToControllerReloadRequired,
+  syncControllerOverridesFromSearch,
 } from "./services/runtimeController/core";
 import type { FrontendFeatureComposition } from "./features/frontendFeatureModule";
 
@@ -87,10 +87,27 @@ function ScrollToHash() {
 
 function AppShell() {
   const location = useLocation();
+  const controllerReloadAttemptedRef = useRef(false);
 
   useEffect(() => {
-    syncControllerAccessTokenFromSearch(location.search);
-    syncControllerBaseUrlFromSearch(location.search);
+    const reload = () => {
+      if (controllerReloadAttemptedRef.current) {
+        return;
+      }
+      controllerReloadAttemptedRef.current = true;
+      try {
+        window.location.reload();
+      } catch (_error) {
+        // Some embedded/test location implementations cannot reload. Core
+        // keeps the current document binding immutable and blocks new token
+        // resolution while the reload remains pending.
+      }
+    };
+    return subscribeToControllerReloadRequired(reload);
+  }, []);
+
+  useEffect(() => {
+    syncControllerOverridesFromSearch(location.search);
   }, [location.search]);
 
   return (

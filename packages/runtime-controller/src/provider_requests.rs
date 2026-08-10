@@ -199,7 +199,7 @@ async fn dispatch_provider_tool_call(
     AxumPath(project_id_raw): AxumPath<String>,
     Json(body): Json<DispatchProviderToolCallBody>,
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if context.user_id.is_none() && !context.is_service_role {
         return Err(unauthorized("user session required"));
     }
@@ -279,7 +279,7 @@ async fn dispatch_provider_resource_read(
     AxumPath(project_id_raw): AxumPath<String>,
     Json(body): Json<DispatchProviderResourceReadBody>,
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if context.user_id.is_none() && !context.is_service_role {
         return Err(unauthorized("user session required"));
     }
@@ -360,7 +360,7 @@ async fn list_provider_requests(
     AxumPath(project_id_raw): AxumPath<String>,
     Query(query): Query<ListProviderRequestsQuery>,
 ) -> Result<Json<Vec<ProviderRequestPayload>>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if context.user_id.is_none() && !context.is_service_role {
         return Err(unauthorized("user session required"));
     }
@@ -420,7 +420,7 @@ async fn claim_provider_request(
     AxumPath((project_id_raw, request_id_raw)): AxumPath<(String, String)>,
     Json(body): Json<ClaimProviderRequestBody>,
 ) -> Result<Json<ProviderRequestPayload>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if context.user_id.is_none() && !context.is_service_role {
         return Err(unauthorized("user session required"));
     }
@@ -517,7 +517,7 @@ async fn complete_provider_request(
     AxumPath((project_id_raw, request_id_raw)): AxumPath<(String, String)>,
     Json(body): Json<CompleteProviderRequestBody>,
 ) -> Result<Json<ProviderRequestPayload>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if context.user_id.is_none() && !context.is_service_role {
         return Err(unauthorized("user session required"));
     }

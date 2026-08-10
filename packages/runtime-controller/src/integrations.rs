@@ -147,7 +147,7 @@ async fn list_integration_providers(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<IntegrationProviderDescriptor>>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if context.user_id.is_none() && !context.is_service_role {
         return Err(unauthorized("user session required"));
     }
@@ -162,7 +162,7 @@ async fn get_project_integration(
     headers: HeaderMap,
     AxumPath((project_id_raw, provider_raw)): AxumPath<(String, String)>,
 ) -> Result<Json<Option<ProjectIntegrationItem>>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if context.user_id.is_none() && !context.is_service_role {
         return Err(unauthorized("user session required"));
     }
@@ -202,7 +202,7 @@ async fn list_project_integrations(
     headers: HeaderMap,
     AxumPath(project_id_raw): AxumPath<String>,
 ) -> Result<Json<Vec<ProjectIntegrationItem>>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if context.user_id.is_none() && !context.is_service_role {
         return Err(unauthorized("user session required"));
     }
@@ -242,7 +242,7 @@ async fn upsert_project_integration(
     AxumPath((project_id_raw, provider_raw)): AxumPath<(String, String)>,
     Json(body): Json<UpsertProjectIntegrationBody>,
 ) -> Result<Json<ProjectIntegrationItem>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let project_id = Uuid::from_str(project_id_raw.trim())
         .map_err(|_| bad_request("projectId must be a valid UUID"))?;

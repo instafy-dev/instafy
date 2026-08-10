@@ -508,7 +508,7 @@ pub(crate) async fn runtime_stop(
                 if status != StatusCode::UNAUTHORIZED {
                     return Err((status, payload));
                 }
-                let user_context = authenticate_request(&state.config, &headers, None).await?;
+                let user_context = authenticate_request(&state.config, &headers).await?;
                 StopAuth::User(user_context)
             }
         };
@@ -1179,7 +1179,7 @@ pub(crate) async fn runtime_remove(
                 if status != StatusCode::UNAUTHORIZED {
                     return Err((status, payload));
                 }
-                let user_context = authenticate_request(&state.config, &headers, None).await?;
+                let user_context = authenticate_request(&state.config, &headers).await?;
                 StopAuth::User(user_context)
             }
         };
@@ -1408,7 +1408,7 @@ pub(crate) async fn runtime_idle_reaper(
     headers: HeaderMap,
     axum::Json(payload): axum::Json<RuntimeIdleReaperPayload>,
 ) -> Result<Json<RuntimeIdleReaperResponse>, (StatusCode, Json<ApiError>)> {
-    let auth = authenticate_request(&state.config, &headers, None).await?;
+    let auth = authenticate_request(&state.config, &headers).await?;
     if !auth.is_service_role {
         return Err(unauthorized("runtime idle reaper requires service role"));
     }
@@ -2471,7 +2471,7 @@ pub(crate) async fn runtime_mark_offline(
     let runtime_id = Uuid::from_str(body.runtime_id.trim())
         .map_err(|_| bad_request("runtime_id must be a valid UUID"))?;
 
-    let auth_context = authenticate_request(&state.config, &headers, None).await?;
+    let auth_context = authenticate_request(&state.config, &headers).await?;
 
     let mut connection = state
         .pool

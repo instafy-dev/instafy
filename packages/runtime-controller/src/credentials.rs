@@ -182,7 +182,7 @@ async fn get_my_session(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<(HeaderMap, Json<MySessionResponse>), (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let session = my_session_response(context)?;
     let mut response_headers = HeaderMap::new();
     response_headers.insert(
@@ -592,7 +592,7 @@ async fn get_my_credential_requirements(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<CredentialRequirementsResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
 
     let Some(proxy_base_url) = state.config.proxy_base_url.as_ref() else {
@@ -667,7 +667,7 @@ async fn test_my_credential(
     headers: HeaderMap,
     AxumPath(credential_id_raw): AxumPath<String>,
 ) -> Result<Json<CredentialTestResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
 
     let credential_id = Uuid::from_str(credential_id_raw.trim())
@@ -775,7 +775,7 @@ async fn request_project_editor_completion(
     AxumPath(project_id_raw): AxumPath<String>,
     Json(body): Json<EditorCompletionBody>,
 ) -> Result<Json<EditorCompletionResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
 
     let project_id = Uuid::from_str(project_id_raw.trim())
@@ -873,7 +873,7 @@ async fn request_project_conversation_title(
     AxumPath(project_id_raw): AxumPath<String>,
     Json(body): Json<ConversationTitleBody>,
 ) -> Result<Json<ConversationTitleResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
 
     let project_id = Uuid::from_str(project_id_raw.trim())
@@ -1560,7 +1560,7 @@ async fn list_my_credentials(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<CredentialListItem>>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
 
     let connection = state
@@ -1616,7 +1616,7 @@ async fn create_my_codex_credential(
     headers: HeaderMap,
     Json(body): Json<CreateCodexCredentialBody>,
 ) -> Result<Json<CreateCredentialResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
 
     let auth_object = body
@@ -1652,7 +1652,7 @@ async fn set_my_default_credential(
     headers: HeaderMap,
     AxumPath(credential_id_raw): AxumPath<String>,
 ) -> Result<Json<CreateCredentialResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
     let credential_id = Uuid::from_str(credential_id_raw.trim())
         .map_err(|_| bad_request("credentialId must be a valid UUID"))?;
@@ -1766,7 +1766,7 @@ async fn clear_my_default_credential(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
 
     let mut connection = state
@@ -1824,7 +1824,7 @@ async fn revoke_my_credential(
     headers: HeaderMap,
     AxumPath(credential_id_raw): AxumPath<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
     let credential_id = Uuid::from_str(credential_id_raw.trim())
         .map_err(|_| bad_request("credentialId must be a valid UUID"))?;

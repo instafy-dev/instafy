@@ -1,7 +1,7 @@
 import {
   controllerBaseUrl,
   normalizeUuidParam,
-  resolveControllerAccessToken,
+  resolveControllerRequestContext,
   runtimeControllerEnabled,
 } from "./core";
 
@@ -75,12 +75,15 @@ export function shouldUseControllerSpeechProxy(baseUrl: string): boolean {
 export function buildControllerSpeechProxyBaseUrl(params: {
   projectId: string | null | undefined;
   baseUrl: string;
+  controllerUrl?: string | null;
 }): string | null {
   const projectId = normalizeUuidParam(params.projectId);
   if (!projectId || !shouldUseControllerSpeechProxy(params.baseUrl)) {
     return null;
   }
-  const controllerBase = controllerBaseUrl.trim().replace(/\/+$/, "");
+  const controllerBase = (params.controllerUrl ?? controllerBaseUrl)
+    .trim()
+    .replace(/\/+$/, "");
   if (!controllerBase) {
     return null;
   }
@@ -105,19 +108,22 @@ export async function resolveControllerSpeechProxyRequest(params: {
   baseUrl: string;
   headers: HeadersInit;
 } | null> {
-  const proxiedBaseUrl = buildControllerSpeechProxyBaseUrl(params);
-  if (!proxiedBaseUrl) {
-    return null;
-  }
-  const controllerAccessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
-  if (!controllerAccessToken) {
+  if (!requestContext.accessToken) {
+    return null;
+  }
+  const proxiedBaseUrl = buildControllerSpeechProxyBaseUrl({
+    ...params,
+    controllerUrl: requestContext.baseUrl,
+  });
+  if (!proxiedBaseUrl) {
     return null;
   }
 
   const headers: Record<string, string> = {
-    authorization: `Bearer ${controllerAccessToken}`,
+    authorization: `Bearer ${requestContext.accessToken}`,
   };
   const upstreamAuthToken =
     typeof params.upstreamAuthToken === "string"
