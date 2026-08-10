@@ -233,13 +233,13 @@ export function HorizontalTabStrip({
         {showLeftFade ? (
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute inset-y-0 left-0 z-10 w-8 bg-gradient-to-r from-white via-white/92 to-transparent dark:from-slate-950 dark:via-slate-950/92 dark:to-transparent"
+            className="pointer-events-none absolute inset-y-0 left-0 z-10 w-8 bg-gradient-to-r from-white via-white/92 to-transparent dark:from-[var(--color-studio-dark-canvas)] dark:via-[var(--color-studio-dark-canvas)]/92 dark:to-transparent"
           />
         ) : null}
         {showRightFade ? (
           <div
             aria-hidden="true"
-            className="pointer-events-none absolute inset-y-0 right-0 z-10 w-10 bg-gradient-to-l from-white via-white/92 to-transparent dark:from-slate-950 dark:via-slate-950/92 dark:to-transparent"
+            className="pointer-events-none absolute inset-y-0 right-0 z-10 w-10 bg-gradient-to-l from-white via-white/92 to-transparent dark:from-[var(--color-studio-dark-canvas)] dark:via-[var(--color-studio-dark-canvas)]/92 dark:to-transparent"
           />
         ) : null}
       </div>
