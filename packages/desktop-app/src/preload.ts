@@ -225,6 +225,17 @@ export type DesktopSpeechTunnelStatus = {
 };
 
 contextBridge.exposeInMainWorld("instafyDesktop", {
+  consumePendingAuthCallback: async (): Promise<string | null> => {
+    return (await ipcRenderer.invoke("instafy:consumePendingAuthCallback")) as string | null;
+  },
+  onAuthCallback: (listener: (url: string) => void): (() => void) => {
+    const handler = (_event: unknown, url: string) => listener(url);
+    ipcRenderer.on("instafy:authCallback", handler);
+    return () => ipcRenderer.removeListener("instafy:authCallback", handler);
+  },
+  openExternalUrl: async (url: string): Promise<boolean> => {
+    return (await ipcRenderer.invoke("instafy:openExternalUrl", url)) as boolean;
+  },
   // Static because it cannot change at runtime, and versioned on purpose:
   // frontends older than this property see undefined and keep the layout
   // that suits the stock title bar; apps older than the integrated layout

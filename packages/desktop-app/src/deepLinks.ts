@@ -62,6 +62,10 @@ export function resolveDesktopDeepLinkTargetUrl(rawUrl: string, startUrl: string
 
   const routePath = buildDeepLinkRoutePath(parsed);
   if (routePath === "/auth") {
+    // Not a navigation target: an auth callback carries the session in its
+    // fragment and must reach the renderer as data. Loading it as a URL would
+    // discard the fragment and strand the sign-in. See
+    // isDesktopAuthCallbackDeepLink, which the caller uses to route it.
     return null;
   }
 
@@ -83,4 +87,23 @@ export function resolveDesktopDeepLinkTargetUrl(rawUrl: string, startUrl: string
   target.search = parsed.search;
   target.hash = parsed.hash;
   return target.toString();
+}
+
+// An OAuth provider returning through instafy://auth#access_token=... . The
+// shell must hand this to the renderer rather than navigate to it: the
+// fragment is the session, and navigation drops it.
+export function isDesktopAuthCallbackDeepLink(rawUrl: string | null | undefined): boolean {
+  if (typeof rawUrl !== "string" || !rawUrl.trim()) {
+    return false;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl.trim());
+  } catch {
+    return false;
+  }
+  if (parsed.protocol.toLowerCase() !== `${INSTAFY_DESKTOP_PROTOCOL}:`) {
+    return false;
+  }
+  return buildDeepLinkRoutePath(parsed) === "/auth";
 }
