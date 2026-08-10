@@ -736,7 +736,7 @@ pub(crate) async fn runtime_ensure(
 ) -> Result<Json<RuntimeEnsureResponse>, (StatusCode, Json<ApiError>)> {
     let project_id = Uuid::from_str(&payload.project_id)
         .map_err(|_| bad_request("project_id must be a valid UUID"))?;
-    let auth = authenticate_request(&state.config, &headers, None).await?;
+    let auth = authenticate_request(&state.config, &headers).await?;
     if !auth.is_service_role && auth.user_id.is_none() && !state.config.dev_mode {
         return Err(unauthorized("runtime ensure requires a user session"));
     }
@@ -937,7 +937,7 @@ pub(super) async fn request_runtime(
 ) -> Result<Json<RuntimeRequestResponse>, (StatusCode, Json<ApiError>)> {
     let project_id = Uuid::from_str(&params.project_id)
         .map_err(|_| bad_request("projectId must be a valid UUID"))?;
-    let auth = authenticate_request(&state.config, &headers, None).await?;
+    let auth = authenticate_request(&state.config, &headers).await?;
     request_runtime_inner(&state, project_id, auth, body).await
 }
 

@@ -1,7 +1,6 @@
 import {
-  controllerBaseUrl,
   readControllerError,
-  resolveControllerAccessToken,
+  resolveControllerRequestContext,
   runtimeControllerEnabled,
   safeJson,
 } from "./core";
@@ -53,15 +52,17 @@ export async function acquireWorkspaceLease(
     throw new Error("projectId is required to acquire a project lock");
   }
 
-  const accessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const accessToken = requestContext.accessToken;
+  if (!accessToken) {
+    throw new Error("controller session token is required to acquire a project lock");
+  }
   const headers: Record<string, string> = {
     "content-type": "application/json",
+    authorization: `Bearer ${accessToken}`,
   };
-  if (accessToken) {
-    headers.authorization = `Bearer ${accessToken}`;
-  }
 
   const body: Record<string, unknown> = {
     projectId,
@@ -82,7 +83,7 @@ export async function acquireWorkspaceLease(
     body.metadata = metadata;
   }
 
-  const response = await fetch(`${controllerBaseUrl}/lease/acquire`, {
+  const response = await fetch(`${requestContext.baseUrl}/lease/acquire`, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
@@ -92,6 +93,7 @@ export async function acquireWorkspaceLease(
     const message = await readControllerError(
       response,
       "project lock acquisition failed",
+      requestContext,
     );
     throw new Error(message);
   }
@@ -115,15 +117,17 @@ export async function renewWorkspaceLease(
     );
   }
 
-  const accessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const accessToken = requestContext.accessToken;
+  if (!accessToken) {
+    throw new Error("controller session token is required to renew a project lock");
+  }
   const headers: Record<string, string> = {
     "content-type": "application/json",
+    authorization: `Bearer ${accessToken}`,
   };
-  if (accessToken) {
-    headers.authorization = `Bearer ${accessToken}`;
-  }
 
   const body: Record<string, unknown> = {
     projectId,
@@ -145,7 +149,7 @@ export async function renewWorkspaceLease(
     body.metadata = metadata;
   }
 
-  const response = await fetch(`${controllerBaseUrl}/lease/renew`, {
+  const response = await fetch(`${requestContext.baseUrl}/lease/renew`, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
@@ -155,6 +159,7 @@ export async function renewWorkspaceLease(
     const message = await readControllerError(
       response,
       "project lock renewal failed",
+      requestContext,
     );
     throw new Error(message);
   }
@@ -178,15 +183,17 @@ export async function releaseWorkspaceLease(
     );
   }
 
-  const accessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const accessToken = requestContext.accessToken;
+  if (!accessToken) {
+    throw new Error("controller session token is required to release a project lock");
+  }
   const headers: Record<string, string> = {
     "content-type": "application/json",
+    authorization: `Bearer ${accessToken}`,
   };
-  if (accessToken) {
-    headers.authorization = `Bearer ${accessToken}`;
-  }
 
   const body: Record<string, unknown> = {
     projectId,
@@ -201,7 +208,7 @@ export async function releaseWorkspaceLease(
   const status = params.status ?? "released";
   body.status = status;
 
-  const response = await fetch(`${controllerBaseUrl}/lease/release`, {
+  const response = await fetch(`${requestContext.baseUrl}/lease/release`, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
@@ -211,6 +218,7 @@ export async function releaseWorkspaceLease(
     const message = await readControllerError(
       response,
       "project lock release failed",
+      requestContext,
     );
     throw new Error(message);
   }

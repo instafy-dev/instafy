@@ -57,7 +57,11 @@ import {
   canResumeDesktopRuntimeAfterFailedQuit,
   createDesktopQuitWaitControl,
   readDesktopRuntimeActiveJobCount,
+  resolveRefreshedDesktopRuntimeAccessToken,
+  resolveDesktopRuntimeControllerCredentialAction,
   runDesktopRuntimeExitCleanup,
+  type DesktopRuntimeControllerCredentialMode,
+  type DesktopRuntimeControllerCredentialProvenance,
   withRefreshedDesktopRuntimeAccess,
   withDesktopRuntimeTimeout,
 } from "./desktopRuntimeActivity";
@@ -78,9 +82,15 @@ import {
 import {
   connectDefaultCodexCredential,
   getDefaultCodexAuthJsonStatus,
+  normalizeVisibleInstafySession,
   type DesktopCodexCredentialConnectRequest,
   type DesktopCodexVisibleSession,
 } from "./codexCredentialBridge";
+import {
+  assertDesktopControllerStartSessionBinding,
+  resolveDesktopControllerStartCredentialProvenance,
+  resolveTrustedDesktopControllerForStart,
+} from "./desktopControllerTrust";
 import { resolveVerifiedBundledRuntimeAgent } from "./bundledRuntimeAgent";
 import {
   attestPersonalBrowserIdentity,
@@ -96,6 +106,7 @@ type DesktopRuntimeStartRequest = {
   projectId: string;
   controllerUrl: string;
   controllerAccessToken: string;
+  controllerCredentialMode?: DesktopRuntimeControllerCredentialMode;
   proxyBaseUrl?: string;
   displayName?: string;
   workspaceDir?: string;
@@ -114,6 +125,7 @@ type DesktopSpeechTunnelStartRequest = {
   projectId: string;
   controllerUrl: string;
   controllerAccessToken: string;
+  controllerCredentialMode?: DesktopRuntimeControllerCredentialMode;
   forceRestart?: boolean;
   waitForReady?: boolean;
 };
@@ -688,15 +700,34 @@ type DesktopRuntimeRecord = {
   handle: DesktopRuntimeHandle;
   projectId: string;
   controllerUrl: string;
+  controllerCredentialProvenance: DesktopRuntimeControllerCredentialProvenance;
   logFilePath?: string;
   runtimeId?: string;
   personalBrowser?: DesktopPersonalBrowserCredentials;
   restartOptions: DesktopRuntimeRestartOptions;
 };
 
+function updateDesktopRuntimeControllerAccessToken(
+  runtime: DesktopRuntimeRecord,
+  accessToken: string,
+): void {
+  const nextAccessToken = accessToken.trim();
+  if (!nextAccessToken) {
+    throw new Error("Desktop runtime controller access is unavailable.");
+  }
+  if (runtime.restartOptions.controllerAccessToken === nextAccessToken) {
+    return;
+  }
+  // Update the live workspace-presence heartbeat first. Only after that
+  // succeeds should future restarts and controller disposition use the token.
+  runtime.handle.updateControllerAccessToken(nextAccessToken);
+  runtime.restartOptions.controllerAccessToken = nextAccessToken;
+}
+
 let desktopRuntime: DesktopRuntimeRecord | null = null;
 let pausedPersonalBrowserRuntime: {
   projectId: string;
+  controllerCredentialProvenance: DesktopRuntimeControllerCredentialProvenance;
   restartOptions: DesktopRuntimeRestartOptions;
 } | null = null;
 let desktopRuntimeMutationTail: Promise<void> = Promise.resolve();
@@ -724,9 +755,51 @@ function waitForDesktopQuitPoll(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, DESKTOP_RUNTIME_DRAIN_POLL_MS));
 }
 
+async function resolveDesktopRuntimeControllerCredentialProvenance(options: {
+  event: Electron.IpcMainInvokeEvent;
+  callerUrl: string;
+  controllerUrl: string;
+  controllerAccessToken: string;
+  requestedMode: DesktopRuntimeControllerCredentialMode | undefined;
+}): Promise<{
+  controllerUrl: string;
+  provenance: DesktopRuntimeControllerCredentialProvenance;
+}> {
+  const controllerUrl = resolveTrustedDesktopControllerForStart({
+    appUrl: getStartUrl(),
+    callerUrl: options.callerUrl,
+    requestedControllerUrl: options.controllerUrl,
+    isPackaged: app.isPackaged,
+    startKind: "runtime",
+    credentialMode: options.requestedMode === "ambient" ? "ambient" : "fixed",
+  });
+  // Only the packaged first-party app can ask native code to renew an ambient
+  // credential. Development and self-hosted controller bindings remain fixed
+  // until a native trust configuration exists for those origins, but an
+  // ambient request must still match the exact visible session before launch.
+  if (options.requestedMode !== "ambient") {
+    return { controllerUrl, provenance: { kind: "fixed" } };
+  }
+  const visibleIdentity = normalizeVisibleInstafySession(
+    await resolveVisibleSupabaseSession(options.event),
+  );
+  return {
+    controllerUrl,
+    provenance: resolveDesktopControllerStartCredentialProvenance({
+      credentialMode: "ambient",
+      controllerAccessToken: options.controllerAccessToken,
+      visibleSession: visibleIdentity,
+      allowAmbientRefresh: app.isPackaged,
+    }),
+  };
+}
+
 async function refreshDesktopRuntimeControllerAccess(
   runtime: DesktopRuntimeRecord,
 ): Promise<void> {
+  if (runtime.controllerCredentialProvenance.kind !== "ambient") {
+    return;
+  }
   const window = BrowserWindow.getAllWindows().find((candidate) => !candidate.isDestroyed());
   if (!window) {
     return;
@@ -742,9 +815,15 @@ async function refreshDesktopRuntimeControllerAccess(
     if (!value || typeof value !== "object" || Array.isArray(value)) {
       return;
     }
-    const accessToken = (value as { accessToken?: unknown }).accessToken;
-    if (typeof accessToken === "string" && accessToken.trim()) {
-      runtime.restartOptions.controllerAccessToken = accessToken.trim();
+    const visibleIdentity = normalizeVisibleInstafySession(
+      value as DesktopCodexVisibleSession,
+    );
+    const accessToken = resolveRefreshedDesktopRuntimeAccessToken(
+      runtime.controllerCredentialProvenance,
+      visibleIdentity,
+    );
+    if (accessToken) {
+      updateDesktopRuntimeControllerAccessToken(runtime, accessToken);
     }
   } catch (error) {
     desktopLog("warn", "[instafy-desktop] failed to refresh controller access before quit", {
@@ -760,6 +839,7 @@ async function fetchDesktopRuntimeJson(
   body?: unknown,
 ): Promise<unknown> {
   return await withRefreshedDesktopRuntimeAccess({
+    credentialProvenance: runtime.controllerCredentialProvenance,
     getAccessToken: () => runtime.restartOptions.controllerAccessToken,
     refreshAccessToken: () => refreshDesktopRuntimeControllerAccess(runtime),
     request: async (accessToken) => {
@@ -1300,6 +1380,7 @@ function registerDesktopRuntime(
   options: {
     projectId: string;
     controllerUrl: string;
+    controllerCredentialProvenance: DesktopRuntimeControllerCredentialProvenance;
     logFilePath?: string;
     runtimeId?: string;
     personalBrowser?: DesktopPersonalBrowserCredentials;
@@ -1363,6 +1444,7 @@ async function suspendPersonalBrowserRuntime(projectId: string) {
   }
   pausedPersonalBrowserRuntime = {
     projectId,
+    controllerCredentialProvenance: runtime.controllerCredentialProvenance,
     restartOptions: runtime.restartOptions,
   };
   personalBrowserHost?.setRuntimeId(projectId, null);
@@ -1393,6 +1475,7 @@ async function resumePersonalBrowserRuntime(projectId: string) {
   registerDesktopRuntime(handle, {
     projectId,
     controllerUrl: paused.restartOptions.controllerUrl ?? "",
+    controllerCredentialProvenance: paused.controllerCredentialProvenance,
     logFilePath: paused.restartOptions.logging?.logFilePath,
     runtimeId,
     personalBrowser,
@@ -1722,7 +1805,10 @@ app.whenReady().then(() => {
       let profileUserId: string;
       try {
         profileUserId = await attestPersonalBrowserIdentity(
-          { controllerUrl: payload?.controllerUrl },
+          {
+            controllerUrl: payload?.controllerUrl,
+            controllerAccessToken: payload?.controllerAccessToken,
+          },
           {
             appUrl: getStartUrl(),
             callerUrl,
@@ -2314,23 +2400,57 @@ app.whenReady().then(() => {
     return await desktopSpeechTunnelSupervisor.getStatus();
   });
 
-  ipcMain.handle("instafy:desktopSpeechTunnelStart", async (event, payload: DesktopSpeechTunnelStartRequest) => {
-    assertAllowedCaller(event);
-    if (!desktopSpeechTunnelSupervisor) {
-      return { enabled: false, state: "idle", managed: false, localPort: 8796, readyPath: "/health" };
-    }
-    const options = {
-      projectId: typeof payload?.projectId === "string" ? payload.projectId.trim() : "",
-      controllerUrl: typeof payload?.controllerUrl === "string" ? payload.controllerUrl.trim() : "",
-      controllerAccessToken:
-        typeof payload?.controllerAccessToken === "string" ? payload.controllerAccessToken.trim() : "",
-      forceRestart: payload?.forceRestart === true,
-    };
-    if (payload?.waitForReady === false) {
-      return desktopSpeechTunnelSupervisor.startInBackground(options);
-    }
-    return await desktopSpeechTunnelSupervisor.ensureRunning(options);
-  });
+  ipcMain.handle(
+    "instafy:desktopSpeechTunnelStart",
+    async (event, payload: DesktopSpeechTunnelStartRequest) => {
+      const callerUrl = assertAllowedCaller(event);
+      if (!desktopSpeechTunnelSupervisor) {
+        return {
+          enabled: false,
+          state: "idle",
+          managed: false,
+          localPort: 8796,
+          readyPath: "/health",
+        };
+      }
+      const controllerCredentialMode =
+        payload?.controllerCredentialMode === "ambient" ? "ambient" : "fixed";
+      const requestedControllerUrl =
+        typeof payload?.controllerUrl === "string" ? payload.controllerUrl.trim() : "";
+      const controllerUrl = resolveTrustedDesktopControllerForStart({
+        appUrl: getStartUrl(),
+        callerUrl,
+        requestedControllerUrl,
+        isPackaged: app.isPackaged,
+        startKind: "speech_tunnel",
+        credentialMode: controllerCredentialMode,
+      });
+      const controllerAccessToken =
+        typeof payload?.controllerAccessToken === "string"
+          ? payload.controllerAccessToken.trim()
+          : "";
+      const visibleIdentity =
+        controllerCredentialMode === "ambient"
+          ? normalizeVisibleInstafySession(await resolveVisibleSupabaseSession(event))
+          : null;
+      assertDesktopControllerStartSessionBinding({
+        credentialMode: controllerCredentialMode,
+        controllerAccessToken,
+        visibleSession: visibleIdentity,
+      });
+      const options = {
+        projectId: typeof payload?.projectId === "string" ? payload.projectId.trim() : "",
+        controllerUrl,
+        controllerAccessToken,
+        controllerCredentialMode,
+        forceRestart: payload?.forceRestart === true,
+      };
+      if (payload?.waitForReady === false) {
+        return desktopSpeechTunnelSupervisor.startInBackground(options);
+      }
+      return await desktopSpeechTunnelSupervisor.ensureRunning(options);
+    },
+  );
 
   ipcMain.handle("instafy:desktopSpeechTunnelStop", async (event) => {
     assertAllowedCaller(event);
@@ -2397,6 +2517,7 @@ app.whenReady().then(() => {
           personalBrowserRuntimeConnection = await resolvePersonalBrowserRuntimeConnection(
             {
               controllerUrl: payload?.controllerUrl,
+              controllerAccessToken: payload?.controllerAccessToken,
               proxyBaseUrl: payload?.proxyBaseUrl,
               ambientProxyBaseUrl: process.env.PROXY_BASE_URL,
             },
@@ -2431,6 +2552,33 @@ app.whenReady().then(() => {
           throw error;
         }
       }
+
+      const projectId = requestedProjectId;
+      const requestedControllerUrl =
+        personalBrowserRuntimeConnection?.controllerUrl ??
+        (typeof payload?.controllerUrl === "string" ? payload.controllerUrl.trim() : "");
+      const controllerAccessToken =
+        personalBrowserRuntimeConnection?.controllerAccessToken ??
+        (typeof payload?.controllerAccessToken === "string"
+          ? payload.controllerAccessToken.trim()
+          : "");
+      if (!requestedControllerUrl) {
+        throw new Error("startDesktopRuntime requires controllerUrl.");
+      }
+      if (!controllerAccessToken) {
+        throw new Error("startDesktopRuntime requires controllerAccessToken.");
+      }
+      const trustedControllerBinding =
+        await resolveDesktopRuntimeControllerCredentialProvenance({
+          event,
+          callerUrl,
+          controllerUrl: requestedControllerUrl,
+          controllerAccessToken,
+          requestedMode: payload?.controllerCredentialMode,
+        });
+      const controllerUrl = trustedControllerBinding.controllerUrl;
+      const controllerCredentialProvenance = trustedControllerBinding.provenance;
+
       if (desktopRuntime) {
         const sameProject = desktopRuntime.projectId === requestedProjectId;
         const samePersonalBrowser = personalBrowserCredentials
@@ -2438,7 +2586,28 @@ app.whenReady().then(() => {
             desktopRuntime.personalBrowser.token === personalBrowserCredentials.token &&
             desktopRuntime.personalBrowser.projectId === personalBrowserCredentials.projectId
           : !desktopRuntime.personalBrowser;
-        if (sameProject && samePersonalBrowser) {
+        const controllerCredentialAction =
+          resolveDesktopRuntimeControllerCredentialAction({
+            currentControllerUrl: desktopRuntime.controllerUrl,
+            currentCredentialProvenance:
+              desktopRuntime.controllerCredentialProvenance,
+            currentAccessToken:
+              desktopRuntime.restartOptions.controllerAccessToken ?? "",
+            requestedControllerUrl: controllerUrl,
+            requestedCredentialProvenance: controllerCredentialProvenance,
+            requestedAccessToken: controllerAccessToken,
+          });
+        if (
+          sameProject &&
+          samePersonalBrowser &&
+          controllerCredentialAction !== "replace"
+        ) {
+          if (controllerCredentialAction === "rotate") {
+            updateDesktopRuntimeControllerAccessToken(
+              desktopRuntime,
+              controllerAccessToken,
+            );
+          }
           return {
             pid: desktopRuntime.handle.pid,
             logFilePath: desktopRuntime.logFilePath,
@@ -2456,23 +2625,6 @@ app.whenReady().then(() => {
         if (!previous.personalBrowser && previous.runtimeId) {
           personalBrowserHost?.setRuntimeId(previous.projectId, null);
         }
-      }
-
-      const projectId = requestedProjectId;
-      const controllerUrl =
-        personalBrowserRuntimeConnection?.controllerUrl ??
-        (typeof payload?.controllerUrl === "string" ? payload.controllerUrl.trim() : "");
-      const controllerAccessToken =
-        personalBrowserRuntimeConnection?.controllerAccessToken ??
-        (typeof payload?.controllerAccessToken === "string"
-          ? payload.controllerAccessToken.trim()
-          : "");
-
-      if (!controllerUrl) {
-        throw new Error("startDesktopRuntime requires controllerUrl.");
-      }
-      if (!controllerAccessToken) {
-        throw new Error("startDesktopRuntime requires controllerAccessToken.");
       }
 
       const config = readConfig();
@@ -2578,6 +2730,7 @@ app.whenReady().then(() => {
                 handle,
                 projectId,
                 controllerUrl,
+                controllerCredentialProvenance,
                 logFilePath,
                 runtimeId,
                 personalBrowser: personalBrowserCredentials ?? undefined,
@@ -2593,6 +2746,7 @@ app.whenReady().then(() => {
         registerDesktopRuntime(handle, {
           projectId,
           controllerUrl,
+          controllerCredentialProvenance,
           logFilePath,
           runtimeId,
           personalBrowser: personalBrowserCredentials ?? undefined,

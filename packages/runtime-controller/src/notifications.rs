@@ -233,7 +233,7 @@ async fn list_my_notification_inbox(
     headers: HeaderMap,
     Query(params): Query<NotificationInboxQuery>,
 ) -> Result<Json<NotificationInboxResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
 
     let limit = params.limit.unwrap_or(25).clamp(1, 100);
@@ -390,7 +390,7 @@ async fn acknowledge_my_notification_inbox_item(
     headers: HeaderMap,
     Json(body): Json<NotificationInboxAckBody>,
 ) -> Result<Json<NotificationInboxAckResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
 
     let mut connection = state
@@ -1368,7 +1368,7 @@ async fn upsert_my_web_push_subscription(
     headers: HeaderMap,
     Json(body): Json<WebPushSubscriptionBody>,
 ) -> Result<Json<WebPushSubscriptionResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
 
     let endpoint = body.endpoint.trim().to_string();
@@ -1439,7 +1439,7 @@ async fn remove_my_web_push_subscription(
     headers: HeaderMap,
     Json(body): Json<RemoveWebPushSubscriptionBody>,
 ) -> Result<Json<RemoveWebPushSubscriptionResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
     let endpoint = body.endpoint.trim().to_string();
     if endpoint.is_empty() {
@@ -1501,7 +1501,7 @@ async fn upsert_my_native_push_token(
     headers: HeaderMap,
     Json(body): Json<NativePushTokenBody>,
 ) -> Result<Json<NativePushTokenResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
 
     let token = body.token.trim().to_string();
@@ -1551,7 +1551,7 @@ async fn remove_my_native_push_token(
     headers: HeaderMap,
     Json(body): Json<RemoveNativePushTokenBody>,
 ) -> Result<Json<RemoveWebPushSubscriptionResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
     let token = body.token.trim().to_string();
     if token.is_empty() {

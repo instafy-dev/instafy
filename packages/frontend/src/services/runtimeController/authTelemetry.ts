@@ -1,4 +1,8 @@
-import { controllerBaseUrl, resolveControllerAccessToken, runtimeControllerEnabled } from "./core";
+import {
+  controllerBaseUrl,
+  resolveControllerRequestContext,
+  runtimeControllerEnabled,
+} from "./core";
 
 type AuthTelemetryLevel = "info" | "warning" | "error";
 
@@ -22,18 +26,20 @@ export async function postAuthTelemetryEvent(params: PostAuthTelemetryEventParam
   const headers: Record<string, string> = {
     "content-type": "application/json",
   };
+  let requestBaseUrl = controllerBaseUrl;
 
   try {
-    const accessToken = await resolveControllerAccessToken(null);
-    if (accessToken) {
-      headers.authorization = `Bearer ${accessToken}`;
+    const requestContext = await resolveControllerRequestContext(null);
+    requestBaseUrl = requestContext.baseUrl;
+    if (requestContext.accessToken) {
+      headers.authorization = `Bearer ${requestContext.accessToken}`;
     }
   } catch {
     // ignore token resolution failures; anonymous auth telemetry is allowed server-side
   }
 
   try {
-    const response = await fetch(`${controllerBaseUrl}/telemetry`, {
+    const response = await fetch(`${requestBaseUrl}/telemetry`, {
       method: "POST",
       headers,
       keepalive: true,

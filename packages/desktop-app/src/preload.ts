@@ -38,6 +38,7 @@ export type DesktopRuntimeStartOptions = {
   projectId: string;
   controllerUrl: string;
   controllerAccessToken: string;
+  controllerCredentialMode?: "ambient" | "fixed";
   proxyBaseUrl?: string;
   displayName?: string;
   workspaceDir?: string;
@@ -209,6 +210,9 @@ export type DesktopSpeechTunnelStatus = {
   state: "idle" | "starting" | "active" | "error";
   managed: boolean;
   projectId?: string;
+  controllerUrl?: string;
+  controllerCredentialMode?: "ambient" | "fixed";
+  controllerBindingId?: string;
   tunnelId?: string;
   publicUrl?: string;
   hostname?: string | null;
@@ -338,6 +342,7 @@ contextBridge.exposeInMainWorld("instafyDesktop", {
     projectId: string;
     controllerUrl: string;
     controllerAccessToken: string;
+    controllerCredentialMode?: "ambient" | "fixed";
     forceRestart?: boolean;
     waitForReady?: boolean;
   }): Promise<DesktopSpeechTunnelStatus> => {
@@ -352,6 +357,7 @@ contextBridge.exposeInMainWorld("instafyDesktop", {
   personalBrowserOpen: async (options: {
     projectId: string;
     controllerUrl: string;
+    controllerAccessToken: string;
     /** UI identity scope only; the main process never trusts this for profile selection. */
     profileUserId: string;
     ownerId: string;

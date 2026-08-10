@@ -682,7 +682,7 @@ async fn dispatch_prompt(
     headers: HeaderMap,
     Json(payload): Json<DispatchPromptRequest>,
 ) -> Result<Json<DispatchPromptResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let mut request = normalize_dispatch_request(payload)?;
 
     if !state.config.dev_mode && !context.is_service_role {

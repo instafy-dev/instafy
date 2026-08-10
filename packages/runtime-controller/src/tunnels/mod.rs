@@ -662,7 +662,7 @@ async fn post_tunnel_request(
         .map(|value| parse_required_uuid(value, "runtimeLeaseId"))
         .transpose()?;
 
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let mut human_runtime_id = requested_runtime_id;
     let active_job_binding = if let Some(claims) = context.scoped_claims.as_ref() {
         if claims_have_scopes(claims, RUNTIME_TOKEN_REQUIRED_SCOPES) {
@@ -789,7 +789,7 @@ async fn get_project_tunnel_grants(
 ) -> Result<Json<TunnelGrantListResponse>, (StatusCode, Json<ApiError>)> {
     let project_id = parse_required_uuid(&params.project_id, "projectId")?;
 
-    let auth = authenticate_request(&state.config, &headers, None).await?;
+    let auth = authenticate_request(&state.config, &headers).await?;
     ensure_project_authorized(&state, &project_id, &auth).await?;
 
     let grants = fetch_runtime_tunnel_grants(&state.pool, &project_id).await?;
@@ -835,7 +835,7 @@ async fn post_tunnel_revoke(
         return Err(bad_request("tunnelId is required"));
     }
 
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let (active_job_binding, runtime_machine_binding) =
         if let Some(claims) = context.scoped_claims.as_ref() {
             if claims_have_scopes(claims, RUNTIME_TOKEN_REQUIRED_SCOPES) {
@@ -925,7 +925,7 @@ async fn post_tunnel_status(
     let runtime_machine_binding = if let Some(claims) = scoped_claims.as_ref() {
         Some(authorize_live_runtime_machine_tunnel(&state, claims, &project_id).await?)
     } else {
-        let auth = authenticate_request(&state.config, &headers, None).await?;
+        let auth = authenticate_request(&state.config, &headers).await?;
         if !auth.is_service_role {
             return Err(unauthorized("tunnel status requires service role"));
         }

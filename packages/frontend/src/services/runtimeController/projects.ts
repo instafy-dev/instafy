@@ -1,10 +1,10 @@
 import {
-  controllerBaseUrl,
   normalizeUuidParam,
   readControllerApiError,
   readControllerError,
-  resolveControllerAccessToken,
+  resolveControllerRequestContext,
   runtimeControllerEnabled,
+  type ControllerRequestContext,
 } from "./core";
 export { deriveGithubImportTargetPath } from "./githubImportPath";
 import { logControllerRequestError } from "./logging";
@@ -159,14 +159,16 @@ export interface ControllerOrgInviteLink {
   acceptPath: string;
 }
 
-export async function createControllerOrganization(params?: {
+type ControllerOrganizationCreateParams = {
   orgSlug?: string | null;
   orgName?: string | null;
-}): Promise<ControllerOrgSummary | null> {
-  if (!runtimeControllerEnabled) {
-    return null;
-  }
-  const accessToken = await resolveControllerAccessToken(null);
+};
+
+async function createControllerOrganizationWithContext(
+  params: ControllerOrganizationCreateParams | undefined,
+  requestContext: ControllerRequestContext,
+): Promise<ControllerOrgSummary | null> {
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return null;
   }
@@ -178,7 +180,7 @@ export async function createControllerOrganization(params?: {
     payload.orgName = params.orgName;
   }
   try {
-    const response = await fetch(`${controllerBaseUrl}/orgs`, {
+    const response = await fetch(`${requestContext.baseUrl}/orgs`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${accessToken}`,
@@ -187,7 +189,11 @@ export async function createControllerOrganization(params?: {
       body: JSON.stringify(payload),
     });
     if (!response.ok) {
-      const message = await readControllerError(response, "create org failed");
+      const message = await readControllerError(
+        response,
+        "create org failed",
+        requestContext,
+      );
       throw new Error(message);
     }
     const body = (await response.json().catch(() => null)) as {
@@ -212,13 +218,24 @@ export async function createControllerOrganization(params?: {
   }
 }
 
+export async function createControllerOrganization(
+  params?: ControllerOrganizationCreateParams,
+): Promise<ControllerOrgSummary | null> {
+  if (!runtimeControllerEnabled) {
+    return null;
+  }
+  const requestContext = await resolveControllerRequestContext(null);
+  return createControllerOrganizationWithContext(params, requestContext);
+}
+
 export async function createControllerProject(
   params: ControllerProjectCreateParams = {},
 ): Promise<ControllerProjectCreateResult | null> {
   if (!runtimeControllerEnabled) {
     return null;
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return null;
   }
@@ -230,10 +247,13 @@ export async function createControllerProject(
       typeof params.orgName === "string" && params.orgName.trim().length > 0
         ? params.orgName.trim()
         : PERSONAL_ORG_LABEL;
-    const org = await createControllerOrganization({
-      orgSlug: params.orgSlug ?? null,
-      orgName: fallbackOrgName,
-    });
+    const org = await createControllerOrganizationWithContext(
+      {
+        orgSlug: params.orgSlug ?? null,
+        orgName: fallbackOrgName,
+      },
+      requestContext,
+    );
     resolvedOrgId = org?.id ?? null;
     resolvedOrgName = org?.name ?? resolvedOrgName;
   }
@@ -250,7 +270,7 @@ export async function createControllerProject(
   }
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/orgs/${encodeURIComponent(resolvedOrgId)}/projects`,
+      `${requestContext.baseUrl}/orgs/${encodeURIComponent(resolvedOrgId)}/projects`,
       {
         method: "POST",
         headers: {
@@ -261,7 +281,11 @@ export async function createControllerProject(
       },
     );
     if (!response.ok) {
-      const message = await readControllerError(response, "create project failed");
+      const message = await readControllerError(
+        response,
+        "create project failed",
+        requestContext,
+      );
       throw new Error(message);
     }
     const body = (await response.json().catch(() => null)) as {
@@ -312,14 +336,15 @@ export async function bootstrapControllerProjectMemory(params: {
     return null;
   }
 
-  const accessToken = await resolveControllerAccessToken(params.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return null;
   }
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/projects/${encodeURIComponent(projectId)}/memory/bootstrap`,
+      `${requestContext.baseUrl}/projects/${encodeURIComponent(projectId)}/memory/bootstrap`,
       {
         method: "POST",
         headers: {
@@ -329,7 +354,11 @@ export async function bootstrapControllerProjectMemory(params: {
     );
 
     if (!response.ok) {
-      const message = await readControllerError(response, "bootstrap memory failed");
+      const message = await readControllerError(
+        response,
+        "bootstrap memory failed",
+        requestContext,
+      );
       throw new Error(message);
     }
 
@@ -367,14 +396,15 @@ export async function listControllerProjects(params?: {
   if (!runtimeControllerEnabled) {
     return [];
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return [];
   }
   const normalizedOrgId = normalizeUuidParam(params?.orgId ?? null);
   const url = normalizedOrgId
-    ? `${controllerBaseUrl}/orgs/${encodeURIComponent(normalizedOrgId)}/projects`
-    : `${controllerBaseUrl}/projects`;
+    ? `${requestContext.baseUrl}/orgs/${encodeURIComponent(normalizedOrgId)}/projects`
+    : `${requestContext.baseUrl}/projects`;
   try {
     const response = await fetch(url, {
       headers: {
@@ -382,8 +412,12 @@ export async function listControllerProjects(params?: {
       },
     });
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`list projects failed (${response.status}): ${text}`);
+      const message = await readControllerError(
+        response,
+        "list projects failed",
+        requestContext,
+      );
+      throw new Error(message);
     }
     const payload = (await response.json().catch(() => null)) as {
       projects?: ControllerProjectSummary[];
@@ -416,7 +450,8 @@ export async function importGithubProject(
     return { success: false, error: "repo is required." };
   }
 
-  const accessToken = await resolveControllerAccessToken(params.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return { success: false, error: "Missing controller session token." };
   }
@@ -455,7 +490,7 @@ export async function importGithubProject(
   try {
     for (let attempt = 0; ; attempt += 1) {
       const response = await fetch(
-        `${controllerBaseUrl}/projects/${encodeURIComponent(projectId)}/import/github`,
+        `${requestContext.baseUrl}/projects/${encodeURIComponent(projectId)}/import/github`,
         {
           method: "POST",
           headers: {
@@ -469,7 +504,11 @@ export async function importGithubProject(
       );
 
       if (!response.ok) {
-        const errorPayload = await readControllerApiError(response, "GitHub import failed");
+        const errorPayload = await readControllerApiError(
+          response,
+          "GitHub import failed",
+          requestContext,
+        );
         const retryDelayMs = GITHUB_IMPORT_WORKSPACE_BUSY_RETRY_DELAYS_MS[attempt];
         if (
           idempotencyKey &&
@@ -550,13 +589,14 @@ export async function getControllerProjectSummaryResult(
   if (!normalizedProjectId) {
     return { summary: null, notFound: false, forbidden: false, unauthorized: false };
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return { summary: null, notFound: false, forbidden: false, unauthorized: false };
   }
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/projects/${encodeURIComponent(normalizedProjectId)}`,
+      `${requestContext.baseUrl}/projects/${encodeURIComponent(normalizedProjectId)}`,
       {
         headers: {
           authorization: `Bearer ${accessToken}`,
@@ -567,15 +607,20 @@ export async function getControllerProjectSummaryResult(
       return { summary: null, notFound: true, forbidden: false, unauthorized: false };
     }
     if (response.status === 403) {
+      await readControllerError(response, "get project failed", requestContext);
       return { summary: null, notFound: false, forbidden: true, unauthorized: false };
     }
     if (response.status === 401) {
-      await readControllerError(response, "get project failed");
+      await readControllerError(response, "get project failed", requestContext);
       return { summary: null, notFound: false, forbidden: false, unauthorized: true };
     }
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`get project failed (${response.status}): ${text}`);
+      const message = await readControllerError(
+        response,
+        "get project failed",
+        requestContext,
+      );
+      throw new Error(message);
     }
     const body = (await response.json().catch(() => null)) as
       | ControllerProjectSummary
@@ -618,13 +663,14 @@ export async function updateControllerProjectName(params: {
   if (!projectName) {
     throw new Error("projectName is required");
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return null;
   }
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/projects/${encodeURIComponent(normalizedProjectId)}`,
+      `${requestContext.baseUrl}/projects/${encodeURIComponent(normalizedProjectId)}`,
       {
         method: "PATCH",
         headers: {
@@ -635,8 +681,12 @@ export async function updateControllerProjectName(params: {
       },
     );
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`update project failed (${response.status}): ${text}`);
+      const message = await readControllerError(
+        response,
+        "update project failed",
+        requestContext,
+      );
+      throw new Error(message);
     }
     const body = (await response.json().catch(() => null)) as ControllerProjectSummary | null;
     if (!body || typeof body.projectId !== "string" || !body.projectId.trim()) {
@@ -665,13 +715,14 @@ export async function deleteControllerProject(projectId: string): Promise<boolea
   if (!normalizedProjectId) {
     return false;
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return false;
   }
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/projects/${encodeURIComponent(normalizedProjectId)}`,
+      `${requestContext.baseUrl}/projects/${encodeURIComponent(normalizedProjectId)}`,
       {
         method: "DELETE",
         headers: {
@@ -680,8 +731,12 @@ export async function deleteControllerProject(projectId: string): Promise<boolea
       },
     );
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`delete project failed (${response.status}): ${text}`);
+      const message = await readControllerError(
+        response,
+        "delete project failed",
+        requestContext,
+      );
+      throw new Error(message);
     }
     return true;
   } catch (error) {
@@ -699,13 +754,14 @@ export async function deleteControllerOrganization(orgId: string): Promise<boole
   if (!trimmed) {
     return false;
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return false;
   }
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/orgs/${encodeURIComponent(trimmed)}`,
+      `${requestContext.baseUrl}/orgs/${encodeURIComponent(trimmed)}`,
       {
         method: "DELETE",
         headers: {
@@ -714,8 +770,12 @@ export async function deleteControllerOrganization(orgId: string): Promise<boole
       },
     );
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`delete org failed (${response.status}): ${text}`);
+      const message = await readControllerError(
+        response,
+        "delete org failed",
+        requestContext,
+      );
+      throw new Error(message);
     }
     return true;
   } catch (error) {
@@ -742,7 +802,8 @@ export async function listControllerProjectMembers(
     }
     return [];
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     if (options.throwOnError) {
       throw new Error("Controller authentication is unavailable.");
@@ -751,7 +812,7 @@ export async function listControllerProjectMembers(
   }
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/projects/${encodeURIComponent(normalizedProjectId)}/members`,
+      `${requestContext.baseUrl}/projects/${encodeURIComponent(normalizedProjectId)}/members`,
       {
         headers: {
           authorization: `Bearer ${accessToken}`,
@@ -759,8 +820,12 @@ export async function listControllerProjectMembers(
       },
     );
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`list project members failed (${response.status}): ${text}`);
+      const message = await readControllerError(
+        response,
+        "list project members failed",
+        requestContext,
+      );
+      throw new Error(message);
     }
     const payload = (await response.json().catch(() => null)) as {
       members?: ControllerProjectMember[];
@@ -797,13 +862,14 @@ export async function updateControllerProjectMemberRole(params: {
   if (!normalizedProjectId || !trimmedUser) {
     return null;
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return null;
   }
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/projects/${encodeURIComponent(normalizedProjectId)}/members/${encodeURIComponent(
+      `${requestContext.baseUrl}/projects/${encodeURIComponent(normalizedProjectId)}/members/${encodeURIComponent(
         trimmedUser,
       )}`,
       {
@@ -816,8 +882,12 @@ export async function updateControllerProjectMemberRole(params: {
       },
     );
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`update project member failed (${response.status}): ${text}`);
+      const message = await readControllerError(
+        response,
+        "update project member failed",
+        requestContext,
+      );
+      throw new Error(message);
     }
     const body = (await response.json().catch(() => null)) as {
       member?: ControllerProjectMember;
@@ -845,13 +915,14 @@ export async function removeControllerProjectMember(params: {
   if (!normalizedProjectId || !trimmedUser) {
     return false;
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return false;
   }
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/projects/${encodeURIComponent(normalizedProjectId)}/members/${encodeURIComponent(
+      `${requestContext.baseUrl}/projects/${encodeURIComponent(normalizedProjectId)}/members/${encodeURIComponent(
         trimmedUser,
       )}`,
       {
@@ -862,8 +933,12 @@ export async function removeControllerProjectMember(params: {
       },
     );
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`remove project member failed (${response.status}): ${text}`);
+      const message = await readControllerError(
+        response,
+        "remove project member failed",
+        requestContext,
+      );
+      throw new Error(message);
     }
     return true;
   } catch (error) {
@@ -882,7 +957,8 @@ export async function listControllerOrganizations(
     }
     return [];
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     if (options.throwOnError) {
       throw new Error("Controller authentication is unavailable.");
@@ -890,13 +966,17 @@ export async function listControllerOrganizations(
     return [];
   }
   try {
-    const response = await fetch(`${controllerBaseUrl}/orgs`, {
+    const response = await fetch(`${requestContext.baseUrl}/orgs`, {
       headers: {
         authorization: `Bearer ${accessToken}`,
       },
     });
     if (!response.ok) {
-      const message = await readControllerError(response, "list orgs failed");
+      const message = await readControllerError(
+        response,
+        "list orgs failed",
+        requestContext,
+      );
       throw new Error(message);
     }
     const payload = (await response.json().catch(() => null)) as {
@@ -936,11 +1016,12 @@ export async function updateControllerOrganization(
   if (!trimmed) {
     return false;
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return false;
   }
-  const response = await fetch(`${controllerBaseUrl}/orgs/${encodeURIComponent(trimmed)}`, {
+  const response = await fetch(`${requestContext.baseUrl}/orgs/${encodeURIComponent(trimmed)}`, {
     method: "PATCH",
     headers: {
       authorization: `Bearer ${accessToken}`,
@@ -949,7 +1030,11 @@ export async function updateControllerOrganization(
     body: JSON.stringify(updates),
   });
   if (!response.ok) {
-    const message = await readControllerError(response, "update org failed");
+    const message = await readControllerError(
+      response,
+      "update org failed",
+      requestContext,
+    );
     throw new Error(message);
   }
   return true;
@@ -988,7 +1073,8 @@ export async function listControllerOrgMembersPage(
     }
     return { members: [], nextCursor: null, hasMore: false, total: null };
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     if (options.throwOnError) {
       throw new Error("Controller authentication is unavailable.");
@@ -1014,7 +1100,7 @@ export async function listControllerOrgMembersPage(
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/orgs/${encodeURIComponent(trimmed)}/members${
+      `${requestContext.baseUrl}/orgs/${encodeURIComponent(trimmed)}/members${
         queryString ? `?${queryString}` : ""
       }`,
       {
@@ -1024,8 +1110,12 @@ export async function listControllerOrgMembersPage(
       },
     );
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`list team members failed (${response.status}): ${text}`);
+      const message = await readControllerError(
+        response,
+        "list team members failed",
+        requestContext,
+      );
+      throw new Error(message);
     }
     const payload = (await response.json().catch(() => null)) as {
       members?: ControllerOrgMember[];
@@ -1073,7 +1163,8 @@ export async function addControllerOrgMember(params: {
   if (!trimmedOrg) {
     return null;
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return null;
   }
@@ -1089,7 +1180,7 @@ export async function addControllerOrgMember(params: {
   }
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/orgs/${encodeURIComponent(trimmedOrg)}/members`,
+      `${requestContext.baseUrl}/orgs/${encodeURIComponent(trimmedOrg)}/members`,
       {
         method: "POST",
         headers: {
@@ -1100,8 +1191,12 @@ export async function addControllerOrgMember(params: {
       },
     );
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`add team member failed (${response.status}): ${text}`);
+      const message = await readControllerError(
+        response,
+        "add team member failed",
+        requestContext,
+      );
+      throw new Error(message);
     }
     const body = (await response.json().catch(() => null)) as {
       member?: ControllerOrgMember;
@@ -1130,13 +1225,14 @@ export async function updateControllerOrgMemberRole(params: {
   if (!trimmedOrg || !trimmedUser) {
     return null;
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return null;
   }
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/orgs/${encodeURIComponent(trimmedOrg)}/members/${encodeURIComponent(
+      `${requestContext.baseUrl}/orgs/${encodeURIComponent(trimmedOrg)}/members/${encodeURIComponent(
         trimmedUser,
       )}`,
       {
@@ -1149,8 +1245,12 @@ export async function updateControllerOrgMemberRole(params: {
       },
     );
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`update team member failed (${response.status}): ${text}`);
+      const message = await readControllerError(
+        response,
+        "update team member failed",
+        requestContext,
+      );
+      throw new Error(message);
     }
     const body = (await response.json().catch(() => null)) as {
       member?: ControllerOrgMember;
@@ -1181,13 +1281,14 @@ export async function removeControllerOrgMember(params: {
   if (!trimmedOrg || !trimmedUser) {
     return false;
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return false;
   }
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/orgs/${encodeURIComponent(trimmedOrg)}/members/${encodeURIComponent(
+      `${requestContext.baseUrl}/orgs/${encodeURIComponent(trimmedOrg)}/members/${encodeURIComponent(
         trimmedUser,
       )}`,
       {
@@ -1198,8 +1299,12 @@ export async function removeControllerOrgMember(params: {
       },
     );
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`remove team member failed (${response.status}): ${text}`);
+      const message = await readControllerError(
+        response,
+        "remove team member failed",
+        requestContext,
+      );
+      throw new Error(message);
     }
     return true;
   } catch (error) {
@@ -1221,12 +1326,13 @@ export async function listControllerOrgInvitations(
   if (!trimmed) {
     return [];
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return [];
   }
   try {
-    const url = new URL(`${controllerBaseUrl}/orgs/${encodeURIComponent(trimmed)}/invitations`);
+    const url = new URL(`${requestContext.baseUrl}/orgs/${encodeURIComponent(trimmed)}/invitations`);
     const normalizedProjectId = normalizeUuidParam(projectId ?? null);
     if (normalizedProjectId) {
       url.searchParams.set("projectId", normalizedProjectId);
@@ -1241,8 +1347,12 @@ export async function listControllerOrgInvitations(
       },
     });
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`list team invitations failed (${response.status}): ${text}`);
+      const message = await readControllerError(
+        response,
+        "list team invitations failed",
+        requestContext,
+      );
+      throw new Error(message);
     }
     const payload = (await response.json().catch(() => null)) as {
       invitations?: ControllerOrgInvitation[];
@@ -1290,7 +1400,8 @@ export async function createControllerOrgInvitationStrict(params: {
   if (!trimmedOrg || !trimmedEmail) {
     throw new Error("Team id and email are required.");
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     throw new Error("You need to sign in before inviting people.");
   }
@@ -1317,7 +1428,7 @@ export async function createControllerOrgInvitationStrict(params: {
   let response: Response;
   try {
     response = await fetch(
-      `${controllerBaseUrl}/orgs/${encodeURIComponent(trimmedOrg)}/invitations`,
+      `${requestContext.baseUrl}/orgs/${encodeURIComponent(trimmedOrg)}/invitations`,
       {
         method: "POST",
         headers: {
@@ -1339,7 +1450,13 @@ export async function createControllerOrgInvitationStrict(params: {
     }
   }
   if (!response.ok) {
-    throw new Error(await readControllerError(response, "Unable to create email invite"));
+    throw new Error(
+      await readControllerError(
+        response,
+        "Unable to create email invite",
+        requestContext,
+      ),
+    );
   }
   const body = (await response.json().catch(() => null)) as {
     invitation?: ControllerOrgInvitation;
@@ -1365,12 +1482,13 @@ export async function listControllerOrgInviteLinks(params: {
   if (!trimmedOrg) {
     return [];
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return [];
   }
   const url = new URL(
-    `${controllerBaseUrl}/orgs/${encodeURIComponent(trimmedOrg)}/invite-links`,
+    `${requestContext.baseUrl}/orgs/${encodeURIComponent(trimmedOrg)}/invite-links`,
   );
   const normalizedProjectId = normalizeUuidParam(params.projectId ?? null);
   if (normalizedProjectId) {
@@ -1387,8 +1505,12 @@ export async function listControllerOrgInviteLinks(params: {
       },
     });
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`list invite links failed (${response.status}): ${text}`);
+      const message = await readControllerError(
+        response,
+        "list invite links failed",
+        requestContext,
+      );
+      throw new Error(message);
     }
     const payload = (await response.json().catch(() => null)) as {
       inviteLinks?: ControllerOrgInviteLink[];
@@ -1417,13 +1539,14 @@ export async function revokeControllerOrgInviteLink(params: {
   if (!trimmedOrg || !trimmedLink) {
     return false;
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return false;
   }
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/orgs/${encodeURIComponent(trimmedOrg)}/invite-links/${encodeURIComponent(
+      `${requestContext.baseUrl}/orgs/${encodeURIComponent(trimmedOrg)}/invite-links/${encodeURIComponent(
         trimmedLink,
       )}`,
       {
@@ -1434,8 +1557,12 @@ export async function revokeControllerOrgInviteLink(params: {
       },
     );
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`revoke invite link failed (${response.status}): ${text}`);
+      const message = await readControllerError(
+        response,
+        "revoke invite link failed",
+        requestContext,
+      );
+      throw new Error(message);
     }
     return true;
   } catch (error) {
@@ -1458,7 +1585,8 @@ export async function createControllerOrgInviteLink(params: {
   if (!trimmedOrg) {
     return null;
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return null;
   }
@@ -1476,7 +1604,7 @@ export async function createControllerOrgInviteLink(params: {
   }
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/orgs/${encodeURIComponent(trimmedOrg)}/invite-links`,
+      `${requestContext.baseUrl}/orgs/${encodeURIComponent(trimmedOrg)}/invite-links`,
       {
         method: "POST",
         headers: {
@@ -1487,8 +1615,12 @@ export async function createControllerOrgInviteLink(params: {
       },
     );
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`create team invite link failed (${response.status}): ${text}`);
+      const message = await readControllerError(
+        response,
+        "create team invite link failed",
+        requestContext,
+      );
+      throw new Error(message);
     }
     const body = (await response.json().catch(() => null)) as {
       inviteLink?: ControllerOrgInviteLink;
@@ -1516,13 +1648,14 @@ export async function cancelControllerOrgInvitation(params: {
   if (!trimmedOrg || !trimmedInvitation) {
     return false;
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return false;
   }
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/orgs/${encodeURIComponent(trimmedOrg)}/invitations/${encodeURIComponent(
+      `${requestContext.baseUrl}/orgs/${encodeURIComponent(trimmedOrg)}/invitations/${encodeURIComponent(
         trimmedInvitation,
       )}`,
       {
@@ -1533,8 +1666,12 @@ export async function cancelControllerOrgInvitation(params: {
       },
     );
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`cancel team invitation failed (${response.status}): ${text}`);
+      const message = await readControllerError(
+        response,
+        "cancel team invitation failed",
+        requestContext,
+      );
+      throw new Error(message);
     }
     return true;
   } catch (error) {
@@ -1564,12 +1701,13 @@ export async function acceptControllerOrgInvitation(params: {
   if (!trimmedToken) {
     return null;
   }
-  const accessToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return null;
   }
   try {
-    const response = await fetch(`${controllerBaseUrl}/org-invitations/accept`, {
+    const response = await fetch(`${requestContext.baseUrl}/org-invitations/accept`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${accessToken}`,
@@ -1578,8 +1716,12 @@ export async function acceptControllerOrgInvitation(params: {
       body: JSON.stringify({ token: trimmedToken }),
     });
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(`accept team invitation failed (${response.status}): ${text}`);
+      const message = await readControllerError(
+        response,
+        "accept team invitation failed",
+        requestContext,
+      );
+      throw new Error(message);
     }
     const body = (await response.json().catch(() => null)) as
       | {

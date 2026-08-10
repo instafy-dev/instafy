@@ -1,8 +1,7 @@
 import {
-  controllerBaseUrl,
   normalizeUuidParam,
   readControllerError,
-  resolveControllerAccessToken,
+  resolveControllerRequestContext,
   runtimeControllerEnabled,
 } from "./core";
 
@@ -69,7 +68,7 @@ export interface DiscoverControllerSkillsResult {
 export async function discoverControllerSkills(
   params: DiscoverControllerSkillsParams,
 ): Promise<DiscoverControllerSkillsResult> {
-  if (!runtimeControllerEnabled || !controllerBaseUrl) {
+  if (!runtimeControllerEnabled) {
     return {
       success: false,
       query: params.query ?? "",
@@ -98,7 +97,8 @@ export async function discoverControllerSkills(
 
   const normalizedQuery = (params.query ?? "").trim();
 
-  const accessToken = await resolveControllerAccessToken(params.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
+  const accessToken = requestContext.accessToken;
   if (!accessToken) {
     return {
       success: false,
@@ -113,7 +113,7 @@ export async function discoverControllerSkills(
   }
 
   const url = new URL(
-    `${controllerBaseUrl}/projects/${encodeURIComponent(normalizedProjectId)}/skills/discover`,
+    `${requestContext.baseUrl}/projects/${encodeURIComponent(normalizedProjectId)}/skills/discover`,
   );
   if (normalizedQuery.length > 0) {
     url.searchParams.set("q", normalizedQuery);
@@ -144,7 +144,11 @@ export async function discoverControllerSkills(
       },
     });
     if (!response.ok) {
-      const message = await readControllerError(response, "skill discovery failed");
+      const message = await readControllerError(
+        response,
+        "skill discovery failed",
+        requestContext,
+      );
       return {
         success: false,
         query: normalizedQuery,
