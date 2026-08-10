@@ -72,6 +72,12 @@ import { StudioSidebarAccountSection } from "./StudioSidebarAccountSection";
 import { StudioSidebarMobileDrillIn } from "./StudioSidebarMobileDrillIn";
 import { StudioSidebarMorePanels } from "./StudioSidebarMorePanels";
 import { StudioSidebarWorkspaceSwitcher } from "./StudioSidebarWorkspaceSwitcher";
+import {
+  normalizeSidebarOrgUser,
+  readCachedControllerOrgs,
+  readSidebarOrgSnapshot,
+  writeSidebarOrgSnapshot,
+} from "./sidebarOrgSnapshot";
 
 const TEAM_RAIL_VISIBLE_LIMIT = 4;
 
@@ -152,7 +158,19 @@ export function StudioSidebar({
   const [workspaceOrgKey, setWorkspaceOrgKey] = useState("personal");
   const [workspaceProjectQuery, setWorkspaceProjectQuery] = useState("");
   const [workspaceProjectSearchOpen, setWorkspaceProjectSearchOpen] = useState(false);
-  const [controllerOrgs, setControllerOrgs] = useState<ControllerOrgSummary[]>([]);
+  // Stale-while-revalidate: paint the last known team rail for this user on
+  // frame one instead of reserving zero height until the fetch lands.
+  const [controllerOrgs, setControllerOrgs] = useState<ControllerOrgSummary[]>(() =>
+    readCachedControllerOrgs(userEmail),
+  );
+  const [orgsFetchState, setOrgsFetchState] = useState<"loading" | "ready" | "error">(() =>
+    runtimeControllerEnabled ? "loading" : "ready",
+  );
+  /** Chip count the rail rendered on this user's last successful load (0 = unknown). */
+  const [cachedRailChipCount, setCachedRailChipCount] = useState(
+    () => readSidebarOrgSnapshot(userEmail)?.railChipCount ?? 0,
+  );
+  const hydratedOrgUserRef = useRef<string | null>(normalizeSidebarOrgUser(userEmail));
   const [pendingOrgSwitchKey, setPendingOrgSwitchKey] = useState<string | null>(null);
   const [orgsRefreshEpoch, setOrgsRefreshEpoch] = useState(0);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
@@ -575,19 +593,37 @@ export function StudioSidebar({
     let cancelled = false;
     if (!runtimeControllerEnabled) {
       setControllerOrgs([]);
+      setCachedRailChipCount(0);
+      setOrgsFetchState("ready");
       return () => {
         cancelled = true;
       };
     }
+    // Auth usually resolves after mount, so the lazy initialiser above often
+    // ran with no user. Re-hydrate from this user's snapshot the moment their
+    // identity is known, before the round-trip that replaces it.
+    const userKey = normalizeSidebarOrgUser(userEmail);
+    if (hydratedOrgUserRef.current !== userKey) {
+      hydratedOrgUserRef.current = userKey;
+      setControllerOrgs(readCachedControllerOrgs(userEmail));
+    }
+    setCachedRailChipCount(readSidebarOrgSnapshot(userEmail)?.railChipCount ?? 0);
+    setOrgsFetchState("loading");
     listControllerOrganizations()
       .then((orgs) => {
         if (!cancelled) {
           setControllerOrgs(orgs);
+          setOrgsFetchState("ready");
         }
       })
       .catch(() => {
         if (!cancelled) {
-          setControllerOrgs([]);
+          // Keep whatever the cached snapshot hydrated. Clearing here would
+          // make an already-painted team rail vanish on a failed refresh —
+          // a worse flicker than the pop-in this hydration exists to remove.
+          // A stale rail is still switchable; the next successful fetch
+          // reconciles it, and the snapshot is only rewritten on success.
+          setOrgsFetchState("error");
         }
       });
     // orgsRefreshEpoch is in the dependency array: org profile edits
@@ -764,6 +800,21 @@ export function StudioSidebar({
       return a.name.localeCompare(b.name);
     });
   }, [activeOrgKey, homeAttentionByOrg, orgOptions]);
+  const teamRailVisible = teamRailTeams.length > 1;
+  // Space is reserved during the first load only when this user's snapshot says
+  // a rail is coming. Solo users (the common case) never get a phantom gap.
+  const showTeamRailPlaceholder =
+    !teamRailVisible && orgsFetchState === "loading" && cachedRailChipCount > 1;
+  const teamRailPlaceholderChips = Math.min(cachedRailChipCount, TEAM_RAIL_VISIBLE_LIMIT);
+  const teamRailPlaceholderHasOverflow = cachedRailChipCount > TEAM_RAIL_VISIBLE_LIMIT;
+  // Refresh the snapshot after every successful load (never after a failure —
+  // a flaky request must not erase a rail the user really has).
+  useEffect(() => {
+    if (!runtimeControllerEnabled || orgsFetchState !== "ready") {
+      return;
+    }
+    writeSidebarOrgSnapshot(userEmail, controllerOrgs, teamRailTeams.length);
+  }, [controllerOrgs, orgsFetchState, teamRailTeams.length, userEmail]);
   const activeProjectName = activeProject?.name?.trim() || "Untitled space";
   const selectedWorkspaceOrg = useMemo(
     () => orgOptions.find((org) => org.key === workspaceOrgKey) ?? null,
@@ -1166,7 +1217,7 @@ export function StudioSidebar({
             </Button>
           </li>
 
-          {teamRailTeams.length > 1 ? (
+          {teamRailVisible ? (
             <li
               className="mb-1 border-b border-slate-200/70 pb-2 dark:border-[color:var(--color-studio-dark-divider)]"
               data-testid="sidebar-team-rail"
@@ -1240,6 +1291,28 @@ export function StudioSidebar({
                   >
                     +{teamRailTeams.length - TEAM_RAIL_VISIBLE_LIMIT}
                   </button>
+                ) : null}
+              </div>
+            </li>
+          ) : showTeamRailPlaceholder ? (
+            // Same box, same divider, same chip geometry — held empty so the
+            // real rail drops into place instead of shoving the nav down.
+            <li
+              className="mb-1 border-b border-slate-200/70 pb-2 dark:border-[color:var(--color-studio-dark-divider)]"
+              data-testid="sidebar-team-rail-placeholder"
+              aria-hidden="true"
+            >
+              <div
+                className={[
+                  "flex gap-1.5 px-2 pt-1",
+                  showLabels ? "flex-row flex-wrap items-center" : "flex-col items-center",
+                ].join(" ")}
+              >
+                {Array.from({ length: teamRailPlaceholderChips }, (_, index) => (
+                  <span key={index} className="h-8 w-8 shrink-0 rounded-lg" />
+                ))}
+                {teamRailPlaceholderHasOverflow ? (
+                  <span className="h-8 w-8 shrink-0 rounded-lg" />
                 ) : null}
               </div>
             </li>
