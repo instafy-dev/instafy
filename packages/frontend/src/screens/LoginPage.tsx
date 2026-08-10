@@ -12,6 +12,7 @@ import { TextLink } from "../components/TextLink";
 import { ToggleIconButton } from "../components/ToggleIconButton";
 import { hasSupabaseConfig } from "../lib/supabaseClient";
 import { isDesktopShell, showBackToLanding as computeShowBackToLanding } from "../lib/desktopShell";
+import { AppVersionLabel } from "../components/AppVersionLabel";
 import { useAuth } from "../providers/AuthProvider";
 import { OAUTH_REDIRECT_TARGET_KEY, useNativeGithubAuth } from "./login/useNativeGithubAuth";
 import {
@@ -1072,6 +1073,12 @@ export function LoginPage() {
                   <TextLink to="/privacy" size="xs" tone="muted" target="_blank" rel="noreferrer">
                     Privacy Policy
                   </TextLink>
+                </div>
+              ) : null}
+
+              {!recoveryMode ? (
+                <div className="mt-3 flex items-center justify-center text-[11px] text-slate-400 dark:text-slate-500">
+                  <AppVersionLabel />
                 </div>
               ) : null}
             </div>
