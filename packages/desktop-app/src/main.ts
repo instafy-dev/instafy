@@ -2840,9 +2840,21 @@ async function applyMacWindowChromeDragRegion(webContents: Electron.WebContents)
   }
   try {
     await webContents.insertCSS(
-      `html { padding-top: ${MAC_WINDOW_CHROME_INSET_PX}px !important; box-sizing: border-box; }` +
+      // Feed the app's own safe-area variable rather than padding the
+      // document. The frontend already routes that variable through every
+      // surface that must clear a notch -- the workspace header, dialogs,
+      // toasts, floating menus -- so the header absorbs the inset and the
+      // traffic lights sit INSIDE it. Padding <html> instead stacked an empty
+      // strip above the app's header: two bars where the design wants one.
+      `:root { --safe-area-inset-top: ${MAC_WINDOW_CHROME_INSET_PX}px; }` +
+        // The drag strip stays regardless, and stays transparent: it is the
+        // only thing guaranteeing the window can be moved, for any frontend
+        // version, including one that ignores the variable entirely.
         `#instafy-mac-drag-region { position: fixed; top: 0; left: 0; right: 0; ` +
-        `height: ${MAC_WINDOW_CHROME_INSET_PX}px; z-index: 2147483647; -webkit-app-region: drag; }`,
+        `height: ${MAC_WINDOW_CHROME_INSET_PX}px; z-index: 2147483647; -webkit-app-region: drag; }` +
+        // Anything interactive that reaches into the strip must stay
+        // clickable; only the bare strip drags.
+        `#instafy-mac-drag-region * { -webkit-app-region: no-drag; }`,
     );
     // A real element, not a pseudo-element: -webkit-app-region on pseudo-
     // elements is unreliable in Chromium. Idempotent so repeated loads and
