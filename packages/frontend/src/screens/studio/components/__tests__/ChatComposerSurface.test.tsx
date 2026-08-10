@@ -614,29 +614,17 @@ describe("ChatComposerSurface", () => {
     expect(goalChip?.textContent).toContain("Recent automatic goal turns look repetitive");
   });
 
-  it("renders the participants roster in the composer-adjacent slot when provided", async () => {
-    await act(async () => {
-      root.render(
-        <ChatComposerSurface
-          {...createProps({
-            rosterProps: {
-              humans: [{ userId: "user-self", label: "You", isSelf: true }],
-              agents: [{ handle: "octo", displayName: "Octo", avatarSeed: "octo" }],
-            },
-          })}
-        />,
-      );
-    });
-
-    expect(container.querySelector('[data-testid="mock-conversation-roster"]')).not.toBeNull();
-  });
-
-  it("omits the participants roster slot when no roster is provided", async () => {
+  // The participants roster moved to the persistent top bar: above the input it
+  // sat in the reading hot-path, collided with right-aligned user messages and
+  // shifted the composer on every membership change. The composer must not
+  // render it again — the mock above would surface any re-added import.
+  it("never renders the participants roster in the composer stack", async () => {
     await act(async () => {
       root.render(<ChatComposerSurface {...createProps()} />);
     });
 
     expect(container.querySelector('[data-testid="mock-conversation-roster"]')).toBeNull();
+    expect(container.querySelector('[data-testid="conversation-roster"]')).toBeNull();
   });
 
   it("submits from a native click fallback when press events are unavailable", async () => {

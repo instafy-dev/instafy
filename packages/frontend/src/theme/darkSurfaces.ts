@@ -1,3 +1,38 @@
+/**
+ * Dark-theme surface + border ladder for Studio.
+ *
+ * Rules, in order of how often they get broken:
+ *
+ * 1. Dark borders are NEUTRAL WHITE-ALPHA ONLY. Never `dark:border-slate-*`,
+ *    `dark:border-zinc-*` or `dark:border-gray-*`. The dark surfaces are warm
+ *    neutrals (canvas #141414 / rail #181818 / panel #1d1d1d) while Tailwind's
+ *    slate ramp is a cool blue (#1e293b / #334155), so a slate edge reads
+ *    harder and slightly foreign against them. White-alpha borders tint
+ *    themselves from whatever surface is underneath and stay in family.
+ *
+ * 2. Border strength scales INVERSELY with elevation:
+ *
+ *      floating        5.5%   (--color-studio-dark-floating-border)
+ *      divider         9.5%   (--color-studio-dark-divider)
+ *      panel / active  10.5%  (--color-studio-dark-panel-border /
+ *                              --color-studio-dark-active-border)
+ *      raised control  13%    (--color-studio-dark-raised-control-border)
+ *
+ *    The higher something floats, the more it leans on its shadow instead of
+ *    its edge — popovers and menus already read as detached, so a strong
+ *    outline only adds noise.
+ *
+ * 3. `raised-control` is for SMALL controls (buttons, pills, chips, swatches).
+ *    Large surfaces — panels, composers, cards, anything with a long
+ *    horizontal edge — use the `panel` tier. The same alpha that looks crisp
+ *    on a 32px pill reads as a hard rule across a full-width edge.
+ *
+ * 4. Always compose from the exported helper classes below. Do not re-derive
+ *    colours inline (`dark:border-white/10`, hand-written `var(--…)` strings);
+ *    if a combination is missing, add a helper here so the ladder stays the
+ *    single source of truth.
+ */
+
 export const DARK_CANVAS_CLASS = "dark:bg-[var(--color-studio-dark-canvas)]";
 
 export const DARK_DIVIDER_CLASS = "dark:bg-[var(--color-studio-dark-divider)]";
