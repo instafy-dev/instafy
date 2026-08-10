@@ -78,6 +78,12 @@ export interface DesktopRuntimeHandle {
   pid: number;
   runtimeId?: string;
   process: ChildProcess;
+  /**
+   * Rotate the user credential used only for controller-side workspace
+   * presence. The child runtime continues using its controller-minted scoped
+   * token, so this does not interrupt active work.
+   */
+  updateControllerAccessToken: (accessToken: string) => void;
   stop: () => Promise<void>;
   exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
 }
@@ -891,7 +897,7 @@ export async function startDesktopRuntime(
   // TTL-prunes stale entries on its own.
   let presence: LocalWorkspacePresenceHandle | null = null;
   let stopPresenceRegistration = false;
-  const presenceToken = controllerAccessToken?.trim() || originInternalToken;
+  let presenceToken = controllerAccessToken?.trim() || originInternalToken;
   const registerPresence = async () => {
     if (stopPresenceRegistration || presence || !presenceToken) {
       return;
@@ -900,10 +906,11 @@ export async function startDesktopRuntime(
       return;
     }
     try {
+      const registrationToken = presenceToken;
       const handle = await startLocalWorkspacePresence({
         controllerUrl,
         projectId: options.projectId,
-        accessToken: presenceToken,
+        accessToken: registrationToken,
         workspacePath: projectWorkspacePath,
         log: (message) => console.log(`[instafy-desktop] ${message}`),
       });
@@ -912,6 +919,12 @@ export async function startDesktopRuntime(
         // don't leak a heartbeat for a runtime that is already gone.
         await handle.stop().catch(() => {});
         return;
+      }
+      // A deferred registration can overlap a renderer-driven session
+      // refresh. Move the newly created heartbeat handle to the latest token
+      // before publishing it as the active presence registration.
+      if (registrationToken !== presenceToken) {
+        handle.updateAccessToken(presenceToken);
       }
       presence = handle;
     } catch (error) {
@@ -962,6 +975,14 @@ export async function startDesktopRuntime(
     pid: child.pid ?? -1,
     runtimeId,
     process: child,
+    updateControllerAccessToken(accessToken: string) {
+      const nextAccessToken = accessToken.trim();
+      if (!nextAccessToken) {
+        throw new Error("Desktop runtime controller access is unavailable.");
+      }
+      presenceToken = nextAccessToken;
+      presence?.updateAccessToken(nextAccessToken);
+    },
     stop,
     exited,
   };

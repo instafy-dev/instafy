@@ -16,6 +16,7 @@ export interface LocalWorkspacePresenceOptions {
 
 export interface LocalWorkspacePresenceHandle {
   deviceId: string;
+  updateAccessToken: (accessToken: string) => void;
   stop: () => Promise<void>;
 }
 
@@ -64,15 +65,27 @@ export async function startLocalWorkspacePresence(
   const deviceId = options.deviceId ?? resolveDeviceId();
   const base = options.controllerUrl.replace(/\/$/, "");
   const endpoint = `${base}/projects/${encodeURIComponent(options.projectId)}/workspaces/local`;
-  const headers = {
-    authorization: `Bearer ${options.accessToken}`,
+  let accessToken = options.accessToken.trim();
+  if (!accessToken) {
+    throw new Error("local workspace presence requires an access token");
+  }
+  const requestHeaders = () => ({
+    authorization: `Bearer ${accessToken}`,
     "content-type": "application/json",
+  });
+
+  const updateAccessToken = (value: string) => {
+    const nextAccessToken = value.trim();
+    if (!nextAccessToken) {
+      throw new Error("local workspace presence requires an access token");
+    }
+    accessToken = nextAccessToken;
   };
 
   const register = async () => {
     const response = await fetchImpl(endpoint, {
       method: "PUT",
-      headers,
+      headers: requestHeaders(),
       body: JSON.stringify({
         path: options.workspacePath,
         deviceId,
@@ -98,7 +111,7 @@ export async function startLocalWorkspacePresence(
     try {
       const response = await fetchImpl(`${endpoint}/heartbeat`, {
         method: "POST",
-        headers,
+        headers: requestHeaders(),
         body: JSON.stringify({ deviceId }),
       });
       if (response.status === 400) {
@@ -131,7 +144,7 @@ export async function startLocalWorkspacePresence(
     try {
       await fetchImpl(endpoint, {
         method: "DELETE",
-        headers,
+        headers: requestHeaders(),
         body: JSON.stringify({ deviceId }),
       });
       log(`unregistered local workspace presence for ${options.projectId}`);
@@ -141,5 +154,5 @@ export async function startLocalWorkspacePresence(
     }
   };
 
-  return { deviceId, stop };
+  return { deviceId, updateAccessToken, stop };
 }
