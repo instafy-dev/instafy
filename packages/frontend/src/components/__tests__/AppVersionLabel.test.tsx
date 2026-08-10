@@ -49,6 +49,21 @@ describe("AppVersionLabel", () => {
     expect(label()).toBe("Instafy 0.2.3");
   });
 
+  it("ignores an unpackaged shell, whose version is Electron's not the app's", async () => {
+    // Observed for real: a dev run reported "Instafy 43.1.1".
+    (window as { instafyDesktop?: unknown }).instafyDesktop = {
+      desktopUpdaterStatus: async () => ({
+        isEnabled: false,
+        channel: "stable",
+        currentVersion: "43.1.1",
+        feedUrl: "https://downloads.instafy.dev/desktop-app/stable",
+        phase: "idle",
+      }),
+    };
+    await renderLabel();
+    expect(label()).not.toContain("43.1.1");
+  });
+
   it("falls back to the frontend build when the bridge read fails", async () => {
     // An empty slot would read as a rendering bug rather than a degraded read.
     (window as { instafyDesktop?: unknown }).instafyDesktop = {
