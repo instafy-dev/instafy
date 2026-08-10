@@ -11,7 +11,7 @@ import { Text } from "../components/Text";
 import { TextLink } from "../components/TextLink";
 import { ToggleIconButton } from "../components/ToggleIconButton";
 import { hasSupabaseConfig } from "../lib/supabaseClient";
-import { showBackToLanding as computeShowBackToLanding } from "../lib/desktopShell";
+import { isDesktopShell, showBackToLanding as computeShowBackToLanding } from "../lib/desktopShell";
 import { useAuth } from "../providers/AuthProvider";
 import { OAUTH_REDIRECT_TARGET_KEY, useNativeGithubAuth } from "./login/useNativeGithubAuth";
 import {
@@ -130,6 +130,7 @@ export function LoginPage() {
   const isExtensionEmbed = embedMode.startsWith("extension");
   const isNativeApp = Capacitor.isNativePlatform();
   const showBackToLanding = computeShowBackToLanding({ isNativeApp, isExtensionEmbed });
+  const isDesktopSurface = isDesktopShell();
   const recoveryMode = useMemo(
     () => parseRecoveryMode(location.hash ?? "", location.search ?? ""),
     [location.hash, location.search],
@@ -998,8 +999,15 @@ export function LoginPage() {
           <section
             className={[
               "w-full p-0",
-              "sm:rounded-[32px] sm:border sm:border-white/70 sm:bg-white/90 sm:shadow-[0_18px_60px_rgba(15,23,42,0.12)]",
-              "sm:dark:border-slate-800/80 sm:dark:bg-slate-950/70 sm:dark:shadow-[0_18px_60px_rgba(0,0,0,0.5)]",
+              // The card exists because a web page has to carve a bounded
+              // region out of an unbounded canvas. A desktop window already is
+              // that region, so the border, fill and shadow read as a box
+              // inside a box. Drop the frame there and let the content sit in
+              // the window, the way native apps do; keep the padding so the
+              // layout is unchanged.
+              isDesktopSurface
+                ? ""
+                : "sm:rounded-[32px] sm:border sm:border-white/70 sm:bg-white/90 sm:shadow-[0_18px_60px_rgba(15,23,42,0.12)] sm:dark:border-slate-800/80 sm:dark:bg-slate-950/70 sm:dark:shadow-[0_18px_60px_rgba(0,0,0,0.5)]",
               isExtensionEmbed ? "sm:p-6" : "sm:p-8 sm:[@media(max-height:740px)]:p-6",
             ].join(" ")}
           >
