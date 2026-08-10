@@ -516,8 +516,8 @@ function StudioLayoutInner() {
   useEffect(() => {
     const projectName = (activeProjectName ?? "").trim();
     applyPageMeta({
-      title: projectName ? `${projectName} · Instafy Studio` : "Instafy Studio",
-      description: "Chat with Octo, edit files, and manage your space in Instafy Studio.",
+      title: projectName ? `${projectName} · Instafy` : "Instafy",
+      description: "Chat with Octo, edit files, and manage your space in Instafy.",
       image: "/og-image.png",
     });
   }, [activeProjectName]);
@@ -2162,7 +2162,7 @@ function DesktopRuntimeHelpDialog() {
     } | null>(null);
 
   const serverUrl =
-    (import.meta.env.VITE_CONTROLLER_URL ?? "").trim() || "http://127.0.0.1:8788";
+    controllerClient.core.baseUrl || "http://127.0.0.1:8788";
   const cliCommand = `instafy runtime start --space ${activeProjectId ?? "<space-id>"} --server-url ${serverUrl} --supabase-access-token <your-supabase-token>`;
   const canUseDesktopApp =
     typeof window !== "undefined" &&
@@ -2227,17 +2227,19 @@ function DesktopRuntimeHelpDialog() {
 
     setDesktopRuntimeBusy(true);
     try {
-      const accessToken = await controllerClient.core.resolveAccessToken(null);
-      if (!accessToken) {
+      const requestContext = await controllerClient.core.resolveRequestContext(null);
+      if (!requestContext.accessToken) {
         showStatus("Login required to start the desktop runtime.", "error", 4500);
         return;
       }
-      await window.instafyDesktop.startDesktopRuntime({
+      const desktopRuntimeOptions = {
         projectId: activeProjectId,
-        controllerUrl: serverUrl,
-        controllerAccessToken: accessToken,
+        controllerUrl: requestContext.baseUrl,
+        controllerAccessToken: requestContext.accessToken,
+        controllerCredentialMode: requestContext.credentialSource ?? "fixed",
         displayName: "Instafy Desktop",
-      });
+      } as const;
+      await window.instafyDesktop.startDesktopRuntime(desktopRuntimeOptions);
       const refreshed = await window.instafyDesktop.desktopRuntimeStatus?.().catch(() => null);
       if (refreshed) {
         setDesktopRuntimeStatus({

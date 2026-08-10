@@ -1,9 +1,9 @@
 {
   "name": "@instafy/desktop-app",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.2.3",
   "license": "AGPL-3.0-only",
-  "description": "Instafy Studio desktop app (Electron).",
+  "description": "Instafy desktop app (Electron).",
   "desktopName": "dev.instafy.studio.desktop",
   "type": "commonjs",
   "main": "dist/main.js",
@@ -38,7 +38,7 @@
   },
   "build": {
     "appId": "dev.instafy.studio",
-    "productName": "Instafy Studio",
+    "productName": "Instafy",
     "directories": {
       "output": "release"
     },
@@ -46,7 +46,7 @@
       "provider": "generic",
       "url": "https://downloads.instafy.dev/desktop-app/stable"
     },
-    "artifactName": "instafy-studio-${version}-${os}.${ext}",
+    "artifactName": "instafy-${version}-${os}.${ext}",
     "afterPack": "scripts/finalize-runtime-agent-manifest.cjs",
     "afterSign": "scripts/notarize.cjs",
     "files": [
@@ -76,15 +76,15 @@
       }
     ],
     "mac": {
-      "artifactName": "instafy-studio-${version}-mac-${arch}.${ext}",
+      "artifactName": "instafy-${version}-mac-${arch}.${ext}",
       "category": "public.app-category.developer-tools",
       "icon": "assets/icon.png",
       "binaries": [
         "Contents/Resources/runtime-agent/runtime-agent"
       ],
       "extendInfo": {
-        "NSBluetoothAlwaysUsageDescription": "Instafy Studio uses Bluetooth to connect to hardware selected by you.",
-        "NSBluetoothPeripheralUsageDescription": "Instafy Studio uses Bluetooth to connect to hardware selected by you."
+        "NSBluetoothAlwaysUsageDescription": "Instafy uses Bluetooth to connect to hardware selected by you.",
+        "NSBluetoothPeripheralUsageDescription": "Instafy uses Bluetooth to connect to hardware selected by you."
       },
       "hardenedRuntime": true,
       "gatekeeperAssess": false,

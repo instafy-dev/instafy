@@ -1321,7 +1321,7 @@ async fn start_device_auth(
 ) -> Result<Json<DeviceAuthStartResponse>, (HttpStatusCode, Json<ApiError>)> {
     let provider = provider.trim().to_ascii_lowercase();
 
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
     let now = Utc::now();
     let session_id = Uuid::new_v4();
@@ -1565,7 +1565,7 @@ async fn get_device_auth_status(
     headers: HeaderMap,
     AxumPath(session_id): AxumPath<String>,
 ) -> Result<Json<DeviceAuthStatusResponse>, (HttpStatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
 
     let session_id = Uuid::parse_str(session_id.trim())
@@ -1625,7 +1625,7 @@ async fn cancel_device_auth(
     headers: HeaderMap,
     AxumPath(session_id): AxumPath<String>,
 ) -> Result<HttpStatusCode, (HttpStatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
 
     let session_id = Uuid::parse_str(session_id.trim())

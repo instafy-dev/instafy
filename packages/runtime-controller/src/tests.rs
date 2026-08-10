@@ -5437,7 +5437,7 @@ async fn concurrent_invite_link_rotation_leaves_one_active_link_per_scope() -> a
 }
 
 #[tokio::test]
-async fn conversation_event_stream_reauthorizes_private_conversations_per_event(
+async fn controller_auth_is_header_only_and_event_stream_reauthorizes_private_conversations_per_event(
 ) -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {
         eprintln!("skipping conversation event access test: TEST_DATABASE_URL not set");
@@ -5509,6 +5509,87 @@ async fn conversation_event_stream_reauthorizes_private_conversations_per_event(
         .token;
     let state = build_test_state(pool.clone(), config);
     let app = crate::events::router().with_state(state.clone());
+
+    let denied_query_only = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/events?projectId={project_id}&conversationId={private_conversation_id}&accessToken={owner_token}"
+                ))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(denied_query_only.status(), StatusCode::UNAUTHORIZED);
+
+    let denied_query_override = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/events?projectId={project_id}&conversationId={private_conversation_id}&accessToken={owner_token}"
+                ))
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {project_member_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(denied_query_override.status(), StatusCode::FORBIDDEN);
+
+    let workspace_app = crate::workspace::router().with_state(state.clone());
+    let workspace_body = json!({
+        "path": "workspace",
+        "deviceId": "header-only-auth-test",
+        "accessToken": owner_token,
+    });
+    let denied_body_only = workspace_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/projects/{project_id}/workspaces/local"))
+                .header("content-type", "application/json")
+                .body(Body::from(workspace_body.to_string()))?,
+        )
+        .await?;
+    assert_eq!(denied_body_only.status(), StatusCode::UNAUTHORIZED);
+
+    let allowed_header_over_body = workspace_app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/projects/{project_id}/workspaces/local"))
+                .header("content-type", "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {project_member_token}"),
+                )
+                .body(Body::from(workspace_body.to_string()))?,
+        )
+        .await?;
+    assert_eq!(allowed_header_over_body.status(), StatusCode::OK);
+    assert!(state
+        .local_workspaces
+        .get_active(
+            &project_id,
+            &project_member_user_id,
+            crate::workspace::local_workspace_ttl(),
+        )
+        .await
+        .is_some());
+    assert!(state
+        .local_workspaces
+        .get_active(
+            &project_id,
+            &owner_user_id,
+            crate::workspace::local_workspace_ttl(),
+        )
+        .await
+        .is_none());
 
     let denied_explicit = app
         .clone()

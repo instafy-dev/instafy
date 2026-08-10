@@ -572,8 +572,8 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
     expect(path.resolve(packagedProof.executablePath)).toBe(
       path.resolve(packagedExecutablePath),
     );
-    expect(packagedProof.resourcesPath).toContain("Instafy Studio.app/Contents/Resources");
-    expect(packagedProof.appPath).toContain("Instafy Studio.app/Contents/Resources");
+    expect(packagedProof.resourcesPath).toContain("Instafy.app/Contents/Resources");
+    expect(packagedProof.appPath).toContain("Instafy.app/Contents/Resources");
     expect(packagedProof.ambientRuntimeAgentOverride).toBe(poisonedRuntimeOverride);
     expect(readPackagedPersonalBrowserCapabilityContract(packagedProof.resourcesPath)).toEqual(
       EXPECTED_PACKAGED_PERSONAL_BROWSER_CAPABILITY_CONTRACT,

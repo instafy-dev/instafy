@@ -1774,7 +1774,7 @@ pub(crate) async fn require_operator_access(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<RequestContext, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, headers, None).await?;
+    let context = authenticate_request(&state.config, headers).await?;
     if context.is_service_role {
         return Ok(context);
     }

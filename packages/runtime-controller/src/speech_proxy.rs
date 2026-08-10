@@ -139,7 +139,7 @@ async fn authorize_project_request(
     project_id_raw: String,
     require_write: bool,
 ) -> Result<uuid::Uuid, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, headers, None).await?;
+    let context = authenticate_request(&state.config, headers).await?;
     let project_id = parse_optional_uuid_param(Some(project_id_raw), "projectId")?
         .ok_or_else(|| bad_request("projectId is required"))?;
 

@@ -24,9 +24,9 @@ function releasePayload(version = "0.2.0") {
     sourceSha: "a".repeat(40),
     architectures: { mac: ["arm64"] },
     artifacts: {
-      macDmg: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-studio-${version}-mac-arm64.dmg`,
-      macZip: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-studio-${version}-mac-arm64.zip`,
-      windowsExe: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-studio-${version}-win.exe`,
+      macDmg: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-${version}-mac-arm64.dmg`,
+      macZip: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-${version}-mac-arm64.zip`,
+      windowsExe: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-${version}-win.exe`,
     },
   };
 }

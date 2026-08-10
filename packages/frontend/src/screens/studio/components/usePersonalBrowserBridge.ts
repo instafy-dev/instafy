@@ -2,7 +2,6 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { SubmitConversationRuntimeOverride } from "../../../conversations/useConversation";
 import { runtimeEntryIsDispatchable } from "../../../runtime/utils/runtimeEntry";
 import { controllerClient } from "../../../sdk/instafy";
-import { controllerBaseUrl } from "../../../services/runtimeController/core";
 import { normalizeBrowserAddress } from "./browserAddress";
 
 export type BrowserTransport = "personal" | "shared";
@@ -300,9 +299,19 @@ export function usePersonalBrowserBridge({
     void (async () => {
       let shouldRetry = false;
       try {
+        const requestContext = await controllerClient.core.resolveRequestContext(null);
+        if (
+          !requestContext.accessToken ||
+          requestContext.credentialSource !== "ambient"
+        ) {
+          throw new Error(
+            "Personal Browser is unavailable for an overridden controller session.",
+          );
+        }
         const next = await openPersonalBrowser({
           projectId,
-          controllerUrl: controllerBaseUrl,
+          controllerUrl: requestContext.baseUrl,
+          controllerAccessToken: requestContext.accessToken,
           profileUserId,
           ownerId: openingOwnerId,
         });
@@ -401,17 +410,23 @@ export function usePersonalBrowserBridge({
       desiredIdentityScopeRef.current === startingIdentityScope &&
       personalBrowserOwnerIdRef.current === startingOwnerId;
     void (async () => {
-      const controllerAccessToken = await controllerClient.core.resolveAccessToken(null);
+      const requestContext = await controllerClient.core.resolveRequestContext(null);
       if (!startAttemptIsCurrent()) {
         return;
       }
-      if (!controllerAccessToken) {
-        throw new Error("Sign in again to enable personal browser agent control.");
+      if (
+        !requestContext.accessToken ||
+        requestContext.credentialSource !== "ambient"
+      ) {
+        throw new Error(
+          "Personal Browser is unavailable for an overridden controller session.",
+        );
       }
       const result = await bridge.startDesktopRuntime?.({
         projectId,
-        controllerUrl: controllerBaseUrl,
-        controllerAccessToken,
+        controllerUrl: requestContext.baseUrl,
+        controllerAccessToken: requestContext.accessToken,
+        controllerCredentialMode: "ambient",
         displayName: "Instafy Personal Browser",
         enablePersonalBrowser: true,
         personalBrowserOwnerId: startingOwnerId,

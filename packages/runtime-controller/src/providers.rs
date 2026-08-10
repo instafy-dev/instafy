@@ -401,7 +401,7 @@ async fn list_providers(
     axum::extract::State(state): axum::extract::State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<Vec<ProviderResponse>>, (axum::http::StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if !context.is_service_role {
         return Err(forbidden("service role required"));
     }
@@ -422,7 +422,7 @@ async fn refresh_providers(
     axum::extract::State(state): axum::extract::State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<ProviderRefreshResponse>, (axum::http::StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if !context.is_service_role {
         return Err(forbidden("service role required"));
     }
@@ -442,7 +442,7 @@ async fn upsert_provider(
     headers: axum::http::HeaderMap,
     Json(payload): Json<ProviderUpsertRequest>,
 ) -> Result<Json<ProviderResponse>, (axum::http::StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if !context.is_service_role {
         return Err(forbidden("service role required"));
     }

@@ -2,6 +2,11 @@ import { BrowserWindow, app, dialog } from "electron";
 import { autoUpdater } from "electron-updater";
 import { desktopLog } from "./logging";
 import { settleDesktopUpdaterDownload } from "./desktopUpdaterDownload";
+import {
+  applyDesktopUpdaterDownloadProgress,
+  clearDesktopUpdaterDownloadProgress,
+  type DesktopUpdaterDownloadProgress,
+} from "./desktopUpdaterProgress";
 
 export type DesktopUpdaterPhase =
   | "idle"
@@ -23,6 +28,7 @@ export type DesktopUpdaterStatus = {
   lastDownloadedAt?: string;
   lastError?: string;
   lastInstallRequestAccepted?: boolean;
+  downloadProgress?: DesktopUpdaterDownloadProgress;
 };
 
 export type DesktopUpdaterInstallRequest = {
@@ -200,6 +206,38 @@ export function performDesktopUpdaterInstallAfterQuitApproved(): boolean {
   return true;
 }
 
+function setWindowDownloadIndicator(value: number) {
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.setProgressBar(value);
+  }
+}
+
+// The menu item's contract differs from background checks: a person clicked
+// it, so silence is not an acceptable outcome. Found updates reuse the normal
+// prompt flow; "already current" and failures get told to the user's face.
+export async function checkForDesktopUpdatesInteractively() {
+  const status = await runDesktopUpdateCheck();
+  if (status.phase === "up_to_date") {
+    const window = getFocusedWindow() ?? undefined;
+    await dialog.showMessageBox(window, {
+      type: "info",
+      buttons: ["OK"],
+      title: "You're up to date",
+      message: `Instafy ${status.currentVersion} is the latest version.`,
+    });
+  } else if (status.phase === "error") {
+    const window = getFocusedWindow() ?? undefined;
+    await dialog.showMessageBox(window, {
+      type: "warning",
+      buttons: ["OK"],
+      title: "Could not check for updates",
+      message: status.lastError ?? "The update check failed.",
+      detail: "Check your connection and try again.",
+    });
+  }
+  return status;
+}
+
 export function triggerDesktopUpdaterCheck() {
   return runDesktopUpdateCheck({ suppressPrompts: true });
 }
@@ -227,7 +265,7 @@ async function showDownloadedDesktopUpdatePrompt(version: string) {
       defaultId: 0,
       cancelId: 1,
       title: "Update ready",
-      message: `Instafy Studio ${version} has been downloaded.`,
+      message: `Instafy ${version} has been downloaded.`,
       detail: "Restart now to apply the update, or keep working and install it later.",
     });
     if (result.response === 0) {
@@ -278,7 +316,16 @@ export function startDesktopUpdater(options: StartDesktopUpdaterOptions = {}) {
       desktopUpdaterStatus.phase = "error";
     }
     desktopUpdaterStatus.lastError = message;
+    setWindowDownloadIndicator(clearDesktopUpdaterDownloadProgress(desktopUpdaterStatus));
     desktopLog("warn", "[instafy-desktop] updater error", { feedUrl, message });
+  });
+
+  // The update download is large and previously gave no feedback at all
+  // between "Download update" and the ready-to-install prompt. Progress now
+  // reaches both surfaces users actually see: the dock icon (native progress
+  // bar) and the renderer status the sidebar dialog polls.
+  autoUpdater.on("download-progress", (event) => {
+    setWindowDownloadIndicator(applyDesktopUpdaterDownloadProgress(desktopUpdaterStatus, event));
   });
 
   autoUpdater.on("update-available", async (info) => {
@@ -305,7 +352,7 @@ export function startDesktopUpdater(options: StartDesktopUpdaterOptions = {}) {
         defaultId: 0,
         cancelId: 1,
         title: "Update available",
-        message: `Instafy Studio ${info.version} is available.`,
+        message: `Instafy ${info.version} is available.`,
         detail: "Download it now, then choose when to restart and install it.",
       });
       shouldDownload = result.response === 0;
@@ -328,6 +375,7 @@ export function startDesktopUpdater(options: StartDesktopUpdaterOptions = {}) {
   });
 
   autoUpdater.on("update-not-available", () => {
+    setWindowDownloadIndicator(clearDesktopUpdaterDownloadProgress(desktopUpdaterStatus));
     if (desktopUpdaterStatus.phase === "downloaded") {
       suppressAvailablePrompt = false;
       return;
@@ -338,6 +386,7 @@ export function startDesktopUpdater(options: StartDesktopUpdaterOptions = {}) {
   });
 
   autoUpdater.on("update-downloaded", async (info) => {
+    setWindowDownloadIndicator(clearDesktopUpdaterDownloadProgress(desktopUpdaterStatus));
     desktopUpdaterStatus.phase = "downloaded";
     desktopUpdaterStatus.availableVersion = info.version;
     desktopUpdaterStatus.lastDownloadedAt = new Date().toISOString();

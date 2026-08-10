@@ -28,9 +28,9 @@ function availableLookup(): ReturnType<typeof useDesktopReleaseLookup> {
         feedUrl: DESKTOP_APP_STABLE_BASE_URL,
         publishedAt: "2026-07-22T10:00:00.000Z",
         artifacts: {
-          macDmg: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-studio-${version}-mac-arm64.dmg`,
+          macDmg: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-${version}-mac-arm64.dmg`,
           macArch: "arm64" as const,
-          windowsExe: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-studio-${version}-win.exe`,
+          windowsExe: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-${version}-win.exe`,
         },
       },
     },

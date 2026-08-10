@@ -47,11 +47,11 @@ describe("desktop downloads build configuration", () => {
         architectures: { mac: ["arm64"] },
         artifacts: {
           macDmg:
-            `https://cdn.example.test/products/desktop/stable/instafy-studio-${version}-mac-arm64.dmg`,
+            `https://cdn.example.test/products/desktop/stable/instafy-${version}-mac-arm64.dmg`,
           macZip:
-            `https://cdn.example.test/products/desktop/stable/instafy-studio-${version}-mac-arm64.zip`,
+            `https://cdn.example.test/products/desktop/stable/instafy-${version}-mac-arm64.zip`,
           windowsExe:
-            `https://cdn.example.test/products/desktop/stable/instafy-studio-${version}-win.exe`,
+            `https://cdn.example.test/products/desktop/stable/instafy-${version}-win.exe`,
         },
       };
 
@@ -61,7 +61,7 @@ describe("desktop downloads build configuration", () => {
       expect(releases.parseDesktopAppLatestPayload(payload)?.version).toBe(version);
 
       payload.artifacts.windowsExe =
-        `https://downloads.instafy.dev/desktop-app/stable/instafy-studio-${version}-win.exe`;
+        `https://downloads.instafy.dev/desktop-app/stable/instafy-${version}-win.exe`;
       expect(releases.parseDesktopAppLatestPayload(payload)).toBeNull();
     } finally {
       vi.unstubAllEnvs();

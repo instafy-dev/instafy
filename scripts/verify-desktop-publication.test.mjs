@@ -37,11 +37,11 @@ function updaterYaml(entries) {
 
 function stableFixture() {
   const files = {
-    "instafy-studio-1.2.3-mac-arm64.dmg": Buffer.from("signed macOS disk image"),
-    "instafy-studio-1.2.3-mac-arm64.zip": Buffer.from("signed macOS updater archive"),
-    "instafy-studio-1.2.3-win.exe": Buffer.from("signed Windows installer"),
-    "instafy-studio-1.2.3-mac-arm64.zip.blockmap": Buffer.from("mac blockmap"),
-    "instafy-studio-1.2.3-win.exe.blockmap": Buffer.from("windows blockmap"),
+    "instafy-1.2.3-mac-arm64.dmg": Buffer.from("signed macOS disk image"),
+    "instafy-1.2.3-mac-arm64.zip": Buffer.from("signed macOS updater archive"),
+    "instafy-1.2.3-win.exe": Buffer.from("signed Windows installer"),
+    "instafy-1.2.3-mac-arm64.zip.blockmap": Buffer.from("mac blockmap"),
+    "instafy-1.2.3-win.exe.blockmap": Buffer.from("windows blockmap"),
   };
   const latest = {
     tag: TAG,
@@ -52,17 +52,17 @@ function stableFixture() {
     feedUrl: FEED_URL,
     architectures: { mac: ["arm64"] },
     artifacts: {
-      macDmg: `${FEED_URL}/instafy-studio-1.2.3-mac-arm64.dmg`,
-      macZip: `${FEED_URL}/instafy-studio-1.2.3-mac-arm64.zip`,
-      windowsExe: `${FEED_URL}/instafy-studio-1.2.3-win.exe`,
+      macDmg: `${FEED_URL}/instafy-1.2.3-mac-arm64.dmg`,
+      macZip: `${FEED_URL}/instafy-1.2.3-mac-arm64.zip`,
+      windowsExe: `${FEED_URL}/instafy-1.2.3-win.exe`,
     },
   };
   const macYaml = updaterYaml([
-    { name: "instafy-studio-1.2.3-mac-arm64.zip", body: files["instafy-studio-1.2.3-mac-arm64.zip"] },
-    { name: "instafy-studio-1.2.3-mac-arm64.dmg", body: files["instafy-studio-1.2.3-mac-arm64.dmg"] },
+    { name: "instafy-1.2.3-mac-arm64.zip", body: files["instafy-1.2.3-mac-arm64.zip"] },
+    { name: "instafy-1.2.3-mac-arm64.dmg", body: files["instafy-1.2.3-mac-arm64.dmg"] },
   ]);
   const windowsYaml = updaterYaml([
-    { name: "instafy-studio-1.2.3-win.exe", body: files["instafy-studio-1.2.3-win.exe"] },
+    { name: "instafy-1.2.3-win.exe", body: files["instafy-1.2.3-win.exe"] },
   ]);
   const resources = new Map([
     ["/desktop-app/stable/latest.json", JSON.stringify(latest)],
@@ -82,13 +82,13 @@ function internalFixture() {
   const feedUrl = `${BASE_URL}/desktop-app/internal`;
   const tag = `desktop-app-v${VERSION}-internal-deadbeef-42-1`;
   const files = {
-    "instafy-studio-1.2.3-mac-x64.dmg": Buffer.from("engineering macOS disk image"),
-    "instafy-studio-1.2.3-mac-x64.zip": Buffer.from("engineering macOS updater archive"),
-    "instafy-studio-1.2.3-win.exe": Buffer.from("engineering Windows installer"),
-    "instafy-studio-1.2.3-linux.AppImage": Buffer.from("engineering Linux AppImage"),
-    "instafy-studio-1.2.3-mac-x64.zip.blockmap": Buffer.from("mac blockmap"),
-    "instafy-studio-1.2.3-win.exe.blockmap": Buffer.from("windows blockmap"),
-    "instafy-studio-1.2.3-linux.AppImage.blockmap": Buffer.from("linux blockmap"),
+    "instafy-1.2.3-mac-x64.dmg": Buffer.from("engineering macOS disk image"),
+    "instafy-1.2.3-mac-x64.zip": Buffer.from("engineering macOS updater archive"),
+    "instafy-1.2.3-win.exe": Buffer.from("engineering Windows installer"),
+    "instafy-1.2.3-linux.AppImage": Buffer.from("engineering Linux AppImage"),
+    "instafy-1.2.3-mac-x64.zip.blockmap": Buffer.from("mac blockmap"),
+    "instafy-1.2.3-win.exe.blockmap": Buffer.from("windows blockmap"),
+    "instafy-1.2.3-linux.AppImage.blockmap": Buffer.from("linux blockmap"),
   };
   const latest = {
     tag,
@@ -99,21 +99,21 @@ function internalFixture() {
     feedUrl,
     architectures: { mac: ["x64"] },
     artifacts: {
-      macDmg: `${feedUrl}/instafy-studio-1.2.3-mac-x64.dmg`,
-      macZip: `${feedUrl}/instafy-studio-1.2.3-mac-x64.zip`,
-      windowsExe: `${feedUrl}/instafy-studio-1.2.3-win.exe`,
-      linuxAppImage: `${feedUrl}/instafy-studio-1.2.3-linux.AppImage`,
+      macDmg: `${feedUrl}/instafy-1.2.3-mac-x64.dmg`,
+      macZip: `${feedUrl}/instafy-1.2.3-mac-x64.zip`,
+      windowsExe: `${feedUrl}/instafy-1.2.3-win.exe`,
+      linuxAppImage: `${feedUrl}/instafy-1.2.3-linux.AppImage`,
     },
   };
   const macYaml = updaterYaml([
-    { name: "instafy-studio-1.2.3-mac-x64.zip", body: files["instafy-studio-1.2.3-mac-x64.zip"] },
-    { name: "instafy-studio-1.2.3-mac-x64.dmg", body: files["instafy-studio-1.2.3-mac-x64.dmg"] },
+    { name: "instafy-1.2.3-mac-x64.zip", body: files["instafy-1.2.3-mac-x64.zip"] },
+    { name: "instafy-1.2.3-mac-x64.dmg", body: files["instafy-1.2.3-mac-x64.dmg"] },
   ]);
   const windowsYaml = updaterYaml([
-    { name: "instafy-studio-1.2.3-win.exe", body: files["instafy-studio-1.2.3-win.exe"] },
+    { name: "instafy-1.2.3-win.exe", body: files["instafy-1.2.3-win.exe"] },
   ]);
   const linuxYaml = updaterYaml([
-    { name: "instafy-studio-1.2.3-linux.AppImage", body: files["instafy-studio-1.2.3-linux.AppImage"] },
+    { name: "instafy-1.2.3-linux.AppImage", body: files["instafy-1.2.3-linux.AppImage"] },
   ]);
   const resources = new Map([
     ["/desktop-app/internal/latest.json", JSON.stringify(latest)],
@@ -240,7 +240,7 @@ test("rejects non-canonical numeric prerelease identifiers before any public req
 test("candidate verification catches bad immutable bytes before stable selection", async () => {
   const { resources } = stableFixture();
   resources.set(
-    `/desktop-app/${TAG}/instafy-studio-1.2.3-win.exe`,
+    `/desktop-app/${TAG}/instafy-1.2.3-win.exe`,
     Buffer.from("corrupt candidate"),
   );
 
@@ -258,7 +258,7 @@ test("candidate verification catches bad immutable bytes before stable selection
       retryDelayMs: 0,
       logger: quietLogger,
     }),
-    /immutable candidate artifact instafy-studio-1\.2\.3-win\.exe failed.*does not match metadata size/s,
+    /immutable candidate artifact instafy-1\.2\.3-win\.exe failed.*does not match metadata size/s,
   );
 });
 
@@ -283,7 +283,7 @@ test("verifies the unsigned internal channel including its Linux updater feed", 
 
 test("fails closed when a public artifact does not match the updater SHA-512", async () => {
   const { resources } = stableFixture();
-  resources.set("/desktop-app/stable/instafy-studio-1.2.3-win.exe", Buffer.from("different public bytes"));
+  resources.set("/desktop-app/stable/instafy-1.2.3-win.exe", Buffer.from("different public bytes"));
 
   await assert.rejects(
     verifyDesktopPublicRelease({
@@ -298,15 +298,15 @@ test("fails closed when a public artifact does not match the updater SHA-512", a
       retryDelayMs: 0,
       logger: quietLogger,
     }),
-    /channel artifact instafy-studio-1\.2\.3-win\.exe failed.*does not match metadata size/s,
+    /channel artifact instafy-1\.2\.3-win\.exe failed.*does not match metadata size/s,
   );
 });
 
 test("fails closed when an immutable tag artifact differs from its channel copy", async () => {
   const { resources } = stableFixture();
-  const original = resources.get("/desktop-app/stable/instafy-studio-1.2.3-win.exe");
+  const original = resources.get("/desktop-app/stable/instafy-1.2.3-win.exe");
   resources.set(
-    `/desktop-app/${TAG}/instafy-studio-1.2.3-win.exe`,
+    `/desktop-app/${TAG}/instafy-1.2.3-win.exe`,
     Buffer.alloc(original.byteLength, "x"),
   );
 
@@ -323,7 +323,7 @@ test("fails closed when an immutable tag artifact differs from its channel copy"
       retryDelayMs: 0,
       logger: quietLogger,
     }),
-    /immutable artifact instafy-studio-1\.2\.3-win\.exe failed.*SHA-512 does not match updater metadata/s,
+    /immutable artifact instafy-1\.2\.3-win\.exe failed.*SHA-512 does not match updater metadata/s,
   );
 });
 
@@ -350,9 +350,9 @@ test("fails closed when immutable updater YAML differs from the channel copy", a
 
 test("fails closed when an immutable blockmap checksum differs from its channel copy", async () => {
   const { resources } = stableFixture();
-  const original = resources.get("/desktop-app/stable/instafy-studio-1.2.3-win.exe.blockmap");
+  const original = resources.get("/desktop-app/stable/instafy-1.2.3-win.exe.blockmap");
   resources.set(
-    `/desktop-app/${TAG}/instafy-studio-1.2.3-win.exe.blockmap`,
+    `/desktop-app/${TAG}/instafy-1.2.3-win.exe.blockmap`,
     Buffer.alloc(original.byteLength, "x"),
   );
 
@@ -369,7 +369,7 @@ test("fails closed when an immutable blockmap checksum differs from its channel 
       retryDelayMs: 0,
       logger: quietLogger,
     }),
-    /Immutable and channel blockmap checksum or size differs for instafy-studio-1\.2\.3-win\.exe\.blockmap/,
+    /Immutable and channel blockmap checksum or size differs for instafy-1\.2\.3-win\.exe\.blockmap/,
   );
 });
 
@@ -459,8 +459,42 @@ test("rejects incomplete updater checksum metadata", () => {
   assert.throws(
     () =>
       parseDesktopUpdaterYaml(
-        ["version: 1.2.3", "files:", "  - url: instafy-studio-1.2.3-win.exe", "    size: 10", ""].join("\n"),
+        ["version: 1.2.3", "files:", "  - url: instafy-1.2.3-win.exe", "    size: 10", ""].join("\n"),
       ),
     /canonical base64-encoded SHA-512 digest/,
   );
+});
+
+test("a macOS-only stable release verifies without any Windows manifest", async () => {
+  // The exact shape of the first real stable release (run 31324077906):
+  // Windows disabled, arm64 macOS only. The candidate phase failed there by
+  // polling desktop-app-v0.2.0/latest.yml — a Windows updater manifest no
+  // build had produced — for 18 attempts of HTTP 404. A release must only be
+  // asked to prove the platforms it actually contains.
+  const { files, resources } = stableFixture();
+  for (const key of [...resources.keys()]) {
+    if (key.endsWith("/latest.yml") || key.includes("-win.exe")) resources.delete(key);
+  }
+  for (const key of ["/desktop-app/stable/latest.json", "/desktop-app/latest.json", `/desktop-app/${TAG}/latest.json`]) {
+    const latest = JSON.parse(resources.get(key));
+    delete latest.artifacts.windowsExe;
+    resources.set(key, JSON.stringify(latest));
+  }
+  delete files["instafy-1.2.3-win.exe"];
+  delete files["instafy-1.2.3-win.exe.blockmap"];
+
+  const result = await verifyDesktopPublicRelease({
+    downloadsBaseUrl: BASE_URL,
+    desktopPrefix: "desktop-app",
+    channel: "stable",
+    expectedVersion: VERSION,
+    expectedTag: TAG,
+    expectedSourceSha: SOURCE_SHA,
+    fetchImpl: mockFetch(resources, []),
+    metadataAttempts: 1,
+    artifactAttempts: 1,
+    retryDelayMs: 0,
+    logger: quietLogger,
+  });
+  assert.deepEqual(result, { feedUrl: FEED_URL, artifactsVerified: 2, blockmapsVerified: 1 });
 });

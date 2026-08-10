@@ -335,18 +335,18 @@ function requireLatestJson(payload, expected, feedUrl) {
     ]),
   );
   const escapedVersion = expected.version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const dmg = new RegExp(`^instafy-studio-${escapedVersion}-mac-(arm64|x64)\\.dmg$`).exec(artifacts.macDmg.name);
-  const zip = new RegExp(`^instafy-studio-${escapedVersion}-mac-(arm64|x64)\\.zip$`).exec(artifacts.macZip.name);
+  const dmg = new RegExp(`^instafy-${escapedVersion}-mac-(arm64|x64)\\.dmg$`).exec(artifacts.macDmg.name);
+  const zip = new RegExp(`^instafy-${escapedVersion}-mac-(arm64|x64)\\.zip$`).exec(artifacts.macZip.name);
   if (!dmg || !zip || dmg[1] !== zip[1]) {
     throw new Error("latest.json macOS artifacts must contain the expected version and one matching architecture.");
   }
   if (
     artifacts.windowsExe &&
-    artifacts.windowsExe.name !== `instafy-studio-${expected.version}-win.exe`
+    artifacts.windowsExe.name !== `instafy-${expected.version}-win.exe`
   ) {
     throw new Error("latest.json Windows artifact does not contain the expected version.");
   }
-  if (expected.channel === "internal" && artifacts.linuxAppImage.name !== `instafy-studio-${expected.version}-linux.AppImage`) {
+  if (expected.channel === "internal" && artifacts.linuxAppImage.name !== `instafy-${expected.version}-linux.AppImage`) {
     throw new Error("latest.json Linux artifact does not contain the expected version.");
   }
   if (
@@ -509,8 +509,16 @@ export async function verifyDesktopPublicRelease(options) {
     }, expected.tag);
   }
 
-  const metadataNames =
-    expected.channel === "stable" ? ["latest-mac.yml", "latest.yml"] : ["latest-mac.yml", "latest.yml", "latest-linux.yml"];
+  // Derived from the artifacts that exist, for the same reason macDmg/macZip
+  // are the only required kinds above: macOS is the one platform every release
+  // contains, and each other platform's updater manifest exists exactly when
+  // its artifact does. Requiring latest.yml unconditionally made a macOS-only
+  // stable release fail its own publication verification, polling for a
+  // Windows manifest no build had produced (run 31324077906: 18 attempts,
+  // all HTTP 404, after the artifacts had uploaded cleanly).
+  const metadataNames = ["latest-mac.yml"];
+  if (artifacts.windowsExe) metadataNames.push("latest.yml");
+  if (artifacts.linuxAppImage) metadataNames.push("latest-linux.yml");
   const channelEntriesByName = new Map();
   const immutableEntriesByName = new Map();
   for (const metadataName of metadataNames) {

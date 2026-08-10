@@ -251,4 +251,59 @@ describe("projectSpeechRoute", () => {
       }),
     );
   });
+
+  it("keeps an explicit controller request context on both route reads and writes", async () => {
+    const requestContext = {
+      baseUrl: "https://old-controller.example.com",
+      accessToken: "old-access-token",
+      credentialSource: "fixed" as const,
+      generation: 7,
+    };
+    listForProjectMock.mockResolvedValue({
+      success: true,
+      integrations: [],
+    });
+    upsertMock.mockResolvedValue({
+      success: true,
+      integration: {
+        id: "speech-1",
+      },
+    });
+
+    await expect(
+      readProjectSpeechRoutes("project-123", "old-access-token", requestContext),
+    ).resolves.toEqual([]);
+    await expect(
+      writeProjectSpeechRoute(
+        "project-123",
+        {
+          baseUrl: "https://speech.example.com",
+          connectionType: "tunnel",
+          hostMode: "desktop",
+        },
+        "old-access-token",
+        requestContext,
+      ),
+    ).resolves.toEqual({
+      success: true,
+      scope: "project",
+    });
+
+    expect(listForProjectMock).toHaveBeenNthCalledWith(1, "project-123", {
+      accessToken: "old-access-token",
+      requestContext,
+    });
+    expect(listForProjectMock).toHaveBeenNthCalledWith(2, "project-123", {
+      accessToken: "old-access-token",
+      requestContext,
+    });
+    expect(upsertMock).toHaveBeenCalledWith(
+      "project-123",
+      "speech",
+      expect.objectContaining({
+        accessToken: "old-access-token",
+        requestContext,
+      }),
+    );
+  });
 });

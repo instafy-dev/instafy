@@ -66,6 +66,7 @@ type InstafyDesktopRuntimeStartOptions = {
   projectId: string;
   controllerUrl: string;
   controllerAccessToken: string;
+  controllerCredentialMode?: "ambient" | "fixed";
   proxyBaseUrl?: string;
   displayName?: string;
   workspaceDir?: string;
@@ -301,6 +302,9 @@ type InstafyDesktopSpeechTunnelStatus = {
   state: "idle" | "starting" | "active" | "error";
   managed: boolean;
   projectId?: string;
+  controllerUrl?: string;
+  controllerCredentialMode?: "ambient" | "fixed";
+  controllerBindingId?: string;
   tunnelId?: string;
   publicUrl?: string;
   hostname?: string | null;
@@ -341,6 +345,7 @@ type InstafyDesktopPersonalBrowserBounds = {
 
 interface Window {
   instafyDesktop?: {
+    windowChrome?: "hiddenInset" | "system";
     notify: (payload: InstafyDesktopNotificationPayload) => Promise<void>;
     invokeDesktopExtension?: (
       options: InstafyDesktopExtensionInvokeOptions,
@@ -391,6 +396,7 @@ interface Window {
       projectId: string;
       controllerUrl: string;
       controllerAccessToken: string;
+      controllerCredentialMode?: "ambient" | "fixed";
       forceRestart?: boolean;
       waitForReady?: boolean;
     }) => Promise<InstafyDesktopSpeechTunnelStatus>;
@@ -399,6 +405,7 @@ interface Window {
     personalBrowserOpen?: (options: {
       projectId: string;
       controllerUrl: string;
+      controllerAccessToken: string;
       /** UI identity scope only; Electron uses a server-attested identity. */
       profileUserId: string;
       ownerId: string;

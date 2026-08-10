@@ -8,13 +8,14 @@ import {
 
 const USER_ID = "22222222-2222-4222-8222-222222222222";
 const OTHER_USER_ID = "33333333-3333-4333-8333-333333333333";
+const SESSION_EXPIRES_AT = Math.floor(Date.now() / 1000) + 3600;
 
 function encodeJwtPart(value) {
   return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
 }
 
 function visibleSession(userId = USER_ID, tokenSubject = userId) {
-  const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+  const expiresAt = SESSION_EXPIRES_AT;
   return {
     accessToken: `${encodeJwtPart({ alg: "HS256", typ: "JWT" })}.${encodeJwtPart({
       sub: tokenSubject,
@@ -43,7 +44,10 @@ test("uses the authenticated controller identity and sealed visible bearer", asy
   const activeSession = visibleSession();
   let observed = null;
   const userId = await attestPersonalBrowserIdentity(
-    { controllerUrl: "https://controller.instafy.dev" },
+    {
+      controllerUrl: "https://controller.instafy.dev",
+      controllerAccessToken: activeSession.accessToken,
+    },
     productionOptions({
       resolveCurrentSession: async () => activeSession,
       fetch: async (url, init) => {
@@ -70,7 +74,10 @@ test("uses the authenticated controller identity and sealed visible bearer", asy
 test("fails closed when the controller and visible session identify different users", async () => {
   await assert.rejects(
     attestPersonalBrowserIdentity(
-      { controllerUrl: "https://controller.instafy.dev" },
+      {
+        controllerUrl: "https://controller.instafy.dev",
+        controllerAccessToken: visibleSession().accessToken,
+      },
       productionOptions({
         fetch: async () => ({
           ok: true,
@@ -87,7 +94,10 @@ test("fails closed when the visible account changes during attestation", async (
   let resolution = 0;
   await assert.rejects(
     attestPersonalBrowserIdentity(
-      { controllerUrl: "https://controller.instafy.dev" },
+      {
+        controllerUrl: "https://controller.instafy.dev",
+        controllerAccessToken: visibleSession().accessToken,
+      },
       productionOptions({
         resolveCurrentSession: async () => {
           resolution += 1;
@@ -106,7 +116,10 @@ test("rejects a forged local subject before contacting the controller", async ()
   let fetchCalled = false;
   await assert.rejects(
     attestPersonalBrowserIdentity(
-      { controllerUrl: "https://controller.instafy.dev" },
+      {
+        controllerUrl: "https://controller.instafy.dev",
+        controllerAccessToken: visibleSession(USER_ID, OTHER_USER_ID).accessToken,
+      },
       productionOptions({
         resolveCurrentSession: async () => visibleSession(USER_ID, OTHER_USER_ID),
         fetch: async () => {
@@ -120,7 +133,7 @@ test("rejects a forged local subject before contacting the controller", async ()
   assert.equal(fetchCalled, false);
 });
 
-test("does not accept renderer identity or bearer credentials", async () => {
+test("does not accept renderer identity or an ambient session bearer", async () => {
   let sessionResolved = false;
   for (const request of [
     {
@@ -129,7 +142,7 @@ test("does not accept renderer identity or bearer credentials", async () => {
     },
     {
       controllerUrl: "https://controller.instafy.dev",
-      controllerAccessToken: "renderer-token",
+      sessionAccessToken: "renderer-token",
     },
   ]) {
     await assert.rejects(
@@ -148,11 +161,34 @@ test("does not accept renderer identity or bearer credentials", async () => {
   assert.equal(sessionResolved, false);
 });
 
+test("rejects a controller token that is not the visible session before attestation", async () => {
+  let fetchCalled = false;
+  await assert.rejects(
+    attestPersonalBrowserIdentity(
+      {
+        controllerUrl: "https://controller.instafy.dev",
+        controllerAccessToken: "fixed-override-token",
+      },
+      productionOptions({
+        fetch: async () => {
+          fetchCalled = true;
+          throw new Error("should not run");
+        },
+      }),
+    ),
+    /overridden controller session/i,
+  );
+  assert.equal(fetchCalled, false);
+});
+
 test("pins production attestation to the trusted controller", async () => {
   let fetchCalled = false;
   await assert.rejects(
     attestPersonalBrowserIdentity(
-      { controllerUrl: "https://attacker.example" },
+      {
+        controllerUrl: "https://attacker.example",
+        controllerAccessToken: visibleSession().accessToken,
+      },
       productionOptions({
         fetch: async () => {
           fetchCalled = true;
@@ -168,7 +204,10 @@ test("pins production attestation to the trusted controller", async () => {
 test("seals a packaged Personal runtime to the native session and trusted controller", async () => {
   const activeSession = visibleSession();
   const connection = await resolvePersonalBrowserRuntimeConnection(
-    { controllerUrl: "https://controller.instafy.dev" },
+    {
+      controllerUrl: "https://controller.instafy.dev",
+      controllerAccessToken: activeSession.accessToken,
+    },
     {
       appUrl: "https://prod.instafy.dev/studio",
       callerUrl: "https://prod.instafy.dev/studio?projectId=test",
@@ -185,14 +224,35 @@ test("seals a packaged Personal runtime to the native session and trusted contro
   });
 });
 
+test("rejects a Personal runtime whose controller token is fixed to another binding", async () => {
+  await assert.rejects(
+    resolvePersonalBrowserRuntimeConnection(
+      {
+        controllerUrl: "https://controller.instafy.dev",
+        controllerAccessToken: "fixed-override-token",
+      },
+      {
+        appUrl: "https://prod.instafy.dev/studio",
+        callerUrl: "https://prod.instafy.dev/studio",
+        packaged: true,
+        attestedProfileUserId: USER_ID,
+        resolveCurrentSession: async () => visibleSession(),
+      },
+    ),
+    /overridden controller session/i,
+  );
+});
+
 test("rejects renderer and ambient proxy overrides for packaged Personal runtimes", async () => {
   for (const request of [
     {
       controllerUrl: "https://controller.instafy.dev",
+      controllerAccessToken: visibleSession().accessToken,
       proxyBaseUrl: "http://127.0.0.1:8789",
     },
     {
       controllerUrl: "https://controller.instafy.dev",
+      controllerAccessToken: visibleSession().accessToken,
       ambientProxyBaseUrl: "http://127.0.0.1:8789",
     },
   ]) {
@@ -212,7 +272,10 @@ test("rejects renderer and ambient proxy overrides for packaged Personal runtime
 test("rejects a Personal runtime when the visible account no longer owns the profile", async () => {
   await assert.rejects(
     resolvePersonalBrowserRuntimeConnection(
-      { controllerUrl: "https://controller.instafy.dev" },
+      {
+        controllerUrl: "https://controller.instafy.dev",
+        controllerAccessToken: visibleSession().accessToken,
+      },
       {
         appUrl: "https://prod.instafy.dev/studio",
         callerUrl: "https://prod.instafy.dev/studio",
@@ -226,16 +289,20 @@ test("rejects a Personal runtime when the visible account no longer owns the pro
 });
 
 test("allows only origin-only loopback runtime endpoints in development", async () => {
+  const activeSession = visibleSession();
   const options = {
     appUrl: "http://127.0.0.1:5173/studio",
     callerUrl: "http://127.0.0.1:5173/studio",
     packaged: false,
     attestedProfileUserId: USER_ID,
-    resolveCurrentSession: async () => visibleSession(),
+    resolveCurrentSession: async () => activeSession,
   };
 
   const defaultProxy = await resolvePersonalBrowserRuntimeConnection(
-    { controllerUrl: "http://localhost:8788" },
+    {
+      controllerUrl: "http://localhost:8788",
+      controllerAccessToken: activeSession.accessToken,
+    },
     options,
   );
   assert.equal(defaultProxy.controllerUrl, "http://localhost:8788");
@@ -244,6 +311,7 @@ test("allows only origin-only loopback runtime endpoints in development", async 
   const explicitProxy = await resolvePersonalBrowserRuntimeConnection(
     {
       controllerUrl: "http://127.0.0.1:8788",
+      controllerAccessToken: activeSession.accessToken,
       proxyBaseUrl: "http://localhost:9797",
     },
     options,
@@ -265,7 +333,10 @@ test("allows only origin-only loopback runtime endpoints in development", async 
     },
   ]) {
     await assert.rejects(
-      resolvePersonalBrowserRuntimeConnection(request, options),
+      resolvePersonalBrowserRuntimeConnection(
+        { ...request, controllerAccessToken: activeSession.accessToken },
+        options,
+      ),
       /loopback origins/i,
     );
   }
@@ -282,7 +353,7 @@ test("rejects production controller overrides before resolving the runtime sessi
   ]) {
     await assert.rejects(
       resolvePersonalBrowserRuntimeConnection(
-        { controllerUrl },
+        { controllerUrl, controllerAccessToken: visibleSession().accessToken },
         {
           appUrl: "https://prod.instafy.dev/studio",
           callerUrl,

@@ -1,7 +1,6 @@
 import {
-  controllerBaseUrl,
   readControllerError,
-  resolveControllerAccessToken,
+  resolveControllerRequestContext,
   runtimeControllerEnabled,
 } from "./core";
 
@@ -28,7 +27,7 @@ export interface ProjectEditorInlineCompletionResult {
 export async function requestProjectEditorInlineCompletion(
   params: ProjectEditorInlineCompletionParams,
 ): Promise<ProjectEditorInlineCompletionResult> {
-  if (!runtimeControllerEnabled || !controllerBaseUrl) {
+  if (!runtimeControllerEnabled) {
     return { success: false, completion: null, error: "Runtime controller is not configured." };
   }
 
@@ -41,14 +40,15 @@ export async function requestProjectEditorInlineCompletion(
     return { success: false, completion: null, error: "Missing file path." };
   }
 
-  const resolvedAccessToken = await resolveControllerAccessToken(params.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
+  const resolvedAccessToken = requestContext.accessToken;
   if (!resolvedAccessToken) {
     return { success: false, completion: null, error: "Missing controller session token." };
   }
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/projects/${encodeURIComponent(projectId)}/editor/completions`,
+      `${requestContext.baseUrl}/projects/${encodeURIComponent(projectId)}/editor/completions`,
       {
         method: "POST",
         headers: {
@@ -71,6 +71,7 @@ export async function requestProjectEditorInlineCompletion(
       const errorMessage = await readControllerError(
         response,
         "Unable to load editor completion",
+        requestContext,
       );
       return { success: false, completion: null, error: errorMessage };
     }

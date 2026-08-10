@@ -40,8 +40,6 @@ struct EventsQuery {
     kind: Option<String>,
     #[serde(default)]
     kinds: Vec<String>,
-    #[serde(rename = "accessToken", alias = "access_token")]
-    access_token: Option<String>,
     #[serde(rename = "conversationId", alias = "conversation_id")]
     conversation_id: Option<String>,
 }
@@ -61,8 +59,7 @@ async fn events_stream(
     headers: HeaderMap,
     Query(params): Query<EventsQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
-    let token_override = params.access_token.clone();
-    let context = authenticate_request(&state.config, &headers, token_override.as_deref()).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let filters = build_event_filters(&state, params, &context).await?;
 
     let permit = if !state.config.dev_mode && !context.is_service_role {
@@ -255,7 +252,6 @@ async fn build_event_filters(
         run_id,
         kind,
         kinds,
-        access_token: _,
         conversation_id,
     } = params;
 

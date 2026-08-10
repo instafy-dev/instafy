@@ -47,7 +47,7 @@ export function NewsPage() {
 
   useEffect(() => {
     applyPageMeta({
-      title: "News & Updates · Instafy Studio",
+      title: "News & Updates · Instafy",
       description: heroDescription,
       image: "/og-image.png",
     });

@@ -2,10 +2,9 @@ import * as capabilities from "@instafy/sdk/capabilities";
 import * as builtInAgents from "../../assistants/localBuiltInAssistantCatalog";
 import { controllerClient } from "./controllerClient";
 
-export const controllerBaseUrl = controllerClient.core.baseUrl;
-export const runtimeControllerEnabled = controllerClient.core.enabled;
 export const clearControllerAccessTokenOverride = controllerClient.core.clearAccessTokenOverride;
 export const resolveControllerAccessToken = controllerClient.core.resolveAccessToken;
+export const resolveControllerRequestContext = controllerClient.core.resolveRequestContext;
 export const readControllerError = controllerClient.core.readError;
 export const CONTROLLER_RUNTIME_IDLE_TTL_SECONDS_DEFAULT =
   controllerClient.core.runtimeIdleTtlSecondsDefault;
@@ -32,6 +31,11 @@ export type * from "../../services/runtimeControllerService";
 export type * from "../../services/runtimeController/browserSession";
 export type * from "../../services/runtimeController/browserApproval";
 export type { ControllerAuthErrorDetail } from "../../services/runtimeController/core";
+export {
+  controllerBaseUrl,
+  runtimeControllerEnabled,
+} from "../../services/runtimeController/core";
+export type { ControllerRequestContext } from "../../services/runtimeController/core";
 export * from "@instafy/sdk/capabilities";
 export * from "@instafy/sdk/controller-client";
 export * from "../../assistants/localBuiltInAssistantCatalog";

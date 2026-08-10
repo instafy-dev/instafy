@@ -1,8 +1,7 @@
 import {
   coerceControllerRuntimeIdleTtlSeconds,
-  controllerBaseUrl,
   readControllerError,
-  resolveControllerAccessToken,
+  resolveControllerRequestContext,
   runtimeControllerEnabled,
   safeJson,
 } from "./core";
@@ -362,9 +361,10 @@ export async function updateControllerConversationMetadata(params: {
     return null;
   }
 
-  const sessionToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const sessionToken = requestContext.accessToken;
 
   if (!sessionToken) {
     console.warn(
@@ -379,7 +379,7 @@ export async function updateControllerConversationMetadata(params: {
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/conversations/${params.conversationId}`,
+      `${requestContext.baseUrl}/conversations/${params.conversationId}`,
       {
         method: "PATCH",
         headers: {
@@ -391,8 +391,13 @@ export async function updateControllerConversationMetadata(params: {
     );
 
     if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`update conversation failed (${response.status}): ${text}`);
+      throw new Error(
+        await readControllerError(
+          response,
+          "update conversation failed",
+          requestContext,
+        ),
+      );
     }
 
     return (await response.json()) as ControllerProjectConversation;
@@ -406,7 +411,7 @@ export async function updateControllerConversationMetadata(params: {
 export async function requestProjectConversationTitle(
   params: ProjectConversationTitleParams,
 ): Promise<ProjectConversationTitleResult> {
-  if (!runtimeControllerEnabled || !controllerBaseUrl) {
+  if (!runtimeControllerEnabled) {
     return { success: false, title: null, error: "Runtime controller is not configured." };
   }
 
@@ -419,14 +424,15 @@ export async function requestProjectConversationTitle(
     return { success: false, title: null, error: "Missing message." };
   }
 
-  const resolvedAccessToken = await resolveControllerAccessToken(params.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
+  const resolvedAccessToken = requestContext.accessToken;
   if (!resolvedAccessToken) {
     return { success: false, title: null, error: "Missing controller session token." };
   }
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/projects/${encodeURIComponent(projectId)}/conversation/title`,
+      `${requestContext.baseUrl}/projects/${encodeURIComponent(projectId)}/conversation/title`,
       {
         method: "POST",
         headers: {
@@ -443,7 +449,11 @@ export async function requestProjectConversationTitle(
     );
 
     if (!response.ok) {
-      const errorMessage = await readControllerError(response, "Unable to generate conversation title");
+      const errorMessage = await readControllerError(
+        response,
+        "Unable to generate conversation title",
+        requestContext,
+      );
       return { success: false, title: null, error: errorMessage };
     }
 
@@ -472,9 +482,10 @@ export async function createControllerConversation(
     return null;
   }
 
-  const sessionToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const sessionToken = requestContext.accessToken;
 
   if (!sessionToken) {
     console.warn(
@@ -504,7 +515,7 @@ export async function createControllerConversation(
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/projects/${params.projectId}/conversations`,
+      `${requestContext.baseUrl}/projects/${params.projectId}/conversations`,
       {
         method: "POST",
         headers: {
@@ -516,7 +527,11 @@ export async function createControllerConversation(
     );
 
     if (!response.ok) {
-      const message = await readControllerError(response, "create conversation failed");
+      const message = await readControllerError(
+        response,
+        "create conversation failed",
+        requestContext,
+      );
       throw new Error(message);
     }
 
@@ -542,9 +557,10 @@ export async function createBlankControllerConversation(
     return null;
   }
 
-  const sessionToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const sessionToken = requestContext.accessToken;
 
   if (!sessionToken) {
     console.warn(
@@ -563,7 +579,7 @@ export async function createBlankControllerConversation(
   const request = async (): Promise<CreateControllerConversationResponse | null> => {
     try {
       const response = await fetch(
-        `${controllerBaseUrl}/projects/${params.projectId}/conversations/blank`,
+        `${requestContext.baseUrl}/projects/${params.projectId}/conversations/blank`,
         {
           method: "POST",
           headers: {
@@ -575,9 +591,12 @@ export async function createBlankControllerConversation(
       );
 
       if (!response.ok) {
-        const text = await response.text();
         throw new Error(
-          `create blank conversation failed (${response.status}): ${text}`,
+          await readControllerError(
+            response,
+            "create blank conversation failed",
+            requestContext,
+          ),
         );
       }
 
@@ -633,7 +652,8 @@ export async function listControllerConversationParticipants(params: {
     return null;
   }
 
-  const sessionToken = await resolveControllerAccessToken(params.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
+  const sessionToken = requestContext.accessToken;
   if (!sessionToken) {
     console.warn(
       "[runtime-controller] No access token available; skipping conversation participants fetch.",
@@ -643,7 +663,7 @@ export async function listControllerConversationParticipants(params: {
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/conversations/${params.conversationId}/participants`,
+      `${requestContext.baseUrl}/conversations/${params.conversationId}/participants`,
       {
         headers: {
           authorization: `Bearer ${sessionToken}`,
@@ -652,9 +672,12 @@ export async function listControllerConversationParticipants(params: {
     );
 
     if (!response.ok) {
-      const text = await response.text();
       throw new Error(
-        `fetch conversation participants failed (${response.status}): ${text}`,
+        await readControllerError(
+          response,
+          "fetch conversation participants failed",
+          requestContext,
+        ),
       );
     }
 
@@ -681,7 +704,8 @@ export async function addControllerConversationParticipant(params: {
     return null;
   }
 
-  const sessionToken = await resolveControllerAccessToken(params.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
+  const sessionToken = requestContext.accessToken;
   if (!sessionToken) {
     console.warn(
       "[runtime-controller] No access token available; skipping conversation participant add.",
@@ -698,7 +722,7 @@ export async function addControllerConversationParticipant(params: {
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/conversations/${params.conversationId}/participants`,
+      `${requestContext.baseUrl}/conversations/${params.conversationId}/participants`,
       {
         method: "POST",
         headers: {
@@ -710,9 +734,12 @@ export async function addControllerConversationParticipant(params: {
     );
 
     if (!response.ok) {
-      const text = await response.text();
       throw new Error(
-        `add conversation participant failed (${response.status}): ${text}`,
+        await readControllerError(
+          response,
+          "add conversation participant failed",
+          requestContext,
+        ),
       );
     }
 
@@ -736,9 +763,10 @@ export async function recordControllerConversationMessage(
     return null;
   }
 
-  const sessionToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const sessionToken = requestContext.accessToken;
 
   if (!sessionToken) {
     console.warn(
@@ -763,7 +791,7 @@ export async function recordControllerConversationMessage(
   for (let attempt = 0; attempt <= CONTROLLER_MESSAGE_RECORD_RETRY_DELAYS_MS.length; attempt += 1) {
     try {
       const response = await fetch(
-        `${controllerBaseUrl}/conversations/${params.conversationId}/messages/record`,
+        `${requestContext.baseUrl}/conversations/${params.conversationId}/messages/record`,
         {
           method: "POST",
           headers: {
@@ -775,7 +803,6 @@ export async function recordControllerConversationMessage(
       );
 
       if (!response.ok) {
-        const text = await response.text();
         if (
           isRetryableConversationRecordStatus(response.status) &&
           attempt < CONTROLLER_MESSAGE_RECORD_RETRY_DELAYS_MS.length
@@ -784,7 +811,11 @@ export async function recordControllerConversationMessage(
           continue;
         }
         throw new Error(
-          `record conversation message failed (${response.status}): ${text}`,
+          await readControllerError(
+            response,
+            "record conversation message failed",
+            requestContext,
+          ),
         );
       }
 
@@ -821,9 +852,10 @@ export async function resolveControllerConversationParticipation(
     return null;
   }
 
-  const sessionToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const sessionToken = requestContext.accessToken;
   if (!sessionToken) {
     console.warn(
       "[runtime-controller] No access token available; skipping conversation participation resolution.",
@@ -838,7 +870,7 @@ export async function resolveControllerConversationParticipation(
   );
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/conversations/${params.conversationId}/participation/resolve`,
+      `${requestContext.baseUrl}/conversations/${params.conversationId}/participation/resolve`,
       {
         method: "POST",
         headers: {
@@ -877,6 +909,7 @@ export async function resolveControllerConversationParticipation(
       const message = await readControllerError(
         response,
         "conversation participation resolution failed",
+        requestContext,
       );
       throw new Error(message);
     }
@@ -969,9 +1002,10 @@ export async function sendControllerConversationMessage(
     return null;
   }
 
-  const sessionToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const sessionToken = requestContext.accessToken;
 
   if (!sessionToken) {
     console.warn(
@@ -998,7 +1032,7 @@ export async function sendControllerConversationMessage(
   };
 
   const response = await fetch(
-    `${controllerBaseUrl}/conversations/${params.conversationId}/messages`,
+    `${requestContext.baseUrl}/conversations/${params.conversationId}/messages`,
     {
       method: "POST",
       headers: {
@@ -1010,7 +1044,11 @@ export async function sendControllerConversationMessage(
   );
 
   if (!response.ok) {
-    const message = await readControllerError(response, "conversation message failed");
+    const message = await readControllerError(
+      response,
+      "conversation message failed",
+      requestContext,
+    );
     throw new Error(message);
   }
 
@@ -1030,7 +1068,8 @@ export async function interruptControllerConversationRuns(params: {
     return null;
   }
 
-  const sessionToken = await resolveControllerAccessToken(params.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
+  const sessionToken = requestContext.accessToken;
 
   if (!sessionToken) {
     console.warn("[runtime-controller] No access token available; skipping conversation interrupt.");
@@ -1041,7 +1080,7 @@ export async function interruptControllerConversationRuns(params: {
     reason: params.reason ?? undefined,
   };
 
-  const response = await fetch(`${controllerBaseUrl}/conversations/${params.conversationId}/interrupt`, {
+  const response = await fetch(`${requestContext.baseUrl}/conversations/${params.conversationId}/interrupt`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -1051,7 +1090,11 @@ export async function interruptControllerConversationRuns(params: {
   });
 
   if (!response.ok) {
-    const message = await readControllerError(response, "conversation interrupt failed");
+    const message = await readControllerError(
+      response,
+      "conversation interrupt failed",
+      requestContext,
+    );
     throw new Error(message);
   }
 
@@ -1069,9 +1112,10 @@ export async function fetchConversationMessagesFromController(
     return null;
   }
 
-  const sessionToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const sessionToken = requestContext.accessToken;
 
   if (!sessionToken) {
     console.warn(
@@ -1090,7 +1134,7 @@ export async function fetchConversationMessagesFromController(
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/conversations/${params.conversationId}/messages?${search.toString()}`,
+      `${requestContext.baseUrl}/conversations/${params.conversationId}/messages?${search.toString()}`,
       {
         headers: {
           authorization: `Bearer ${sessionToken}`,
@@ -1103,8 +1147,13 @@ export async function fetchConversationMessagesFromController(
     }
 
     if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`fetch messages failed (${response.status}): ${text}`);
+      throw new Error(
+        await readControllerError(
+          response,
+          "fetch messages failed",
+          requestContext,
+        ),
+      );
     }
 
     const data = (await response.json()) as ControllerConversationMessagesPage;
@@ -1137,9 +1186,10 @@ export async function fetchProjectConversationsFromController(
     return null;
   }
 
-  const sessionToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const sessionToken = requestContext.accessToken;
 
   if (!sessionToken) {
     console.warn(
@@ -1167,7 +1217,7 @@ export async function fetchProjectConversationsFromController(
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/projects/${params.projectId}/conversations?${search.toString()}`,
+      `${requestContext.baseUrl}/projects/${params.projectId}/conversations?${search.toString()}`,
       {
         headers: {
           authorization: `Bearer ${sessionToken}`,
@@ -1179,6 +1229,7 @@ export async function fetchProjectConversationsFromController(
       const errorMessage = await readControllerError(
         response,
         "fetch project conversations failed",
+        requestContext,
       );
       throw new Error(errorMessage);
     }

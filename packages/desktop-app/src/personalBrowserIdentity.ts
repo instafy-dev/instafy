@@ -9,10 +9,12 @@ const UUID_PATTERN =
 
 export type PersonalBrowserIdentityRequest = {
   controllerUrl?: string;
+  controllerAccessToken?: string;
 };
 
 export type PersonalBrowserRuntimeConnectionRequest = {
   controllerUrl?: string;
+  controllerAccessToken?: string;
   proxyBaseUrl?: string;
   ambientProxyBaseUrl?: string;
 };
@@ -119,6 +121,15 @@ export async function resolvePersonalBrowserRuntimeConnection(
   if (currentIdentity.userId !== attestedProfileUserId) {
     throw new Error("The active Instafy session changed. Sign in again and retry.");
   }
+  const pairedControllerAccessToken = nonEmptyString(request.controllerAccessToken);
+  if (
+    !pairedControllerAccessToken ||
+    pairedControllerAccessToken !== currentIdentity.accessToken
+  ) {
+    throw new Error(
+      "Personal Browser is unavailable for an overridden controller session.",
+    );
+  }
 
   const requestedProxyBaseUrl = nonEmptyString(request.proxyBaseUrl);
   const ambientProxyBaseUrl = nonEmptyString(request.ambientProxyBaseUrl);
@@ -155,7 +166,6 @@ export async function attestPersonalBrowserIdentity(
   options: AttestPersonalBrowserIdentityOptions,
 ): Promise<string> {
   if (
-    Object.prototype.hasOwnProperty.call(request, "controllerAccessToken") ||
     Object.prototype.hasOwnProperty.call(request, "sessionAccessToken") ||
     Object.prototype.hasOwnProperty.call(request, "profileUserId")
   ) {
@@ -173,6 +183,15 @@ export async function attestPersonalBrowserIdentity(
   const localIdentity = normalizeVisibleInstafySession(
     await options.resolveCurrentSession(),
   );
+  const pairedControllerAccessToken = nonEmptyString(request.controllerAccessToken);
+  if (
+    !pairedControllerAccessToken ||
+    pairedControllerAccessToken !== localIdentity.accessToken
+  ) {
+    throw new Error(
+      "Personal Browser is unavailable for an overridden controller session.",
+    );
+  }
 
   const abortController = new AbortController();
   const timer = setTimeout(

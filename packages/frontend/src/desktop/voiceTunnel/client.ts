@@ -4,6 +4,9 @@ export interface DesktopSpeechTunnelBridgeStatus {
   state: "idle" | "starting" | "active" | "error";
   managed: boolean;
   projectId?: string;
+  controllerUrl?: string;
+  controllerCredentialMode?: "ambient" | "fixed";
+  controllerBindingId?: string;
   tunnelId?: string;
   publicUrl?: string;
   hostname?: string | null;
@@ -38,6 +41,12 @@ function normalizeStatus(
     state: value.state,
     managed: value.managed === true,
     projectId: normalizeOptionalString(value.projectId),
+    controllerUrl: normalizeOptionalString(value.controllerUrl),
+    controllerCredentialMode:
+      value.controllerCredentialMode === "ambient" || value.controllerCredentialMode === "fixed"
+        ? value.controllerCredentialMode
+        : undefined,
+    controllerBindingId: normalizeOptionalString(value.controllerBindingId),
     tunnelId: normalizeOptionalString(value.tunnelId),
     publicUrl: normalizeOptionalString(value.publicUrl),
     hostname: normalizeOptionalString(value.hostname) ?? null,
@@ -65,6 +74,7 @@ export async function startDesktopSpeechTunnel(options: {
   projectId: string;
   controllerUrl: string;
   controllerAccessToken: string;
+  controllerCredentialMode?: "ambient" | "fixed";
   forceRestart?: boolean;
 }): Promise<DesktopSpeechTunnelBridgeStatus | null> {
   if (typeof window === "undefined" || typeof window.instafyDesktop?.desktopSpeechTunnelStart !== "function") {

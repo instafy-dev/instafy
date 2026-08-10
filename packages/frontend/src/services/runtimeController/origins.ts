@@ -7,7 +7,8 @@ import type {
 import {
   controllerBaseUrl,
   normalizeOriginEndpointForClient,
-  resolveControllerAccessToken,
+  readControllerError,
+  resolveControllerRequestContext,
   runtimeControllerEnabled,
 } from "./core";
 import { logControllerRequestError } from "./logging";
@@ -37,22 +38,32 @@ export async function fetchLocalWorkspacePresence(
     return null;
   }
 
-  const resolvedAccessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
-  const url = `${controllerBaseUrl}/projects/${encodeURIComponent(params.projectId)}/workspaces/local`;
+  const resolvedAccessToken = requestContext.accessToken;
+  if (!resolvedAccessToken) {
+    return null;
+  }
+  const url = `${requestContext.baseUrl}/projects/${encodeURIComponent(params.projectId)}/workspaces/local`;
 
   try {
     const response = await fetch(url, {
-      headers: resolvedAccessToken
-        ? { authorization: `Bearer ${resolvedAccessToken}` }
-        : undefined,
+      headers: { authorization: `Bearer ${resolvedAccessToken}` },
     });
 
     if (response.status === 404) {
       return null;
     }
-    if (response.status === 401 || response.status === 403) {
+    if (response.status === 401) {
+      await readControllerError(
+        response,
+        "fetch local workspace failed",
+        requestContext,
+      );
+      return null;
+    }
+    if (response.status === 403) {
       return null;
     }
 
@@ -81,7 +92,7 @@ export async function fetchLocalWorkspacePresence(
         const origin = await fetchOriginSummary({
           projectId: params.projectId,
           protocol: "http",
-          accessToken: resolvedAccessToken ?? params.accessToken ?? null,
+          accessToken: params.accessToken ?? null,
         });
         if (origin && origin.presence) {
           const originStatus = origin.presence.status;
@@ -152,12 +163,15 @@ const originAccessTokenInFlight = new Map<
   Promise<OriginAccessTokenResponse | null>
 >();
 
-function buildControllerOriginProxyEndpoint(originId: string): string {
+function buildControllerOriginProxyEndpoint(
+  originId: string,
+  controllerUrl = controllerBaseUrl,
+): string {
   const normalizedOriginId = originId.trim();
   if (!normalizedOriginId) {
     return "";
   }
-  const base = controllerBaseUrl.replace(/\/+$/, "");
+  const base = controllerUrl.replace(/\/+$/, "");
   if (!base) {
     return "";
   }
@@ -237,15 +251,18 @@ export async function fetchOriginSummary(
     search.set("protocol", protocol);
   }
 
-  const accessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
-  const headers: Record<string, string> = {};
-  if (accessToken) {
-    headers.authorization = `Bearer ${accessToken}`;
+  const accessToken = requestContext.accessToken;
+  if (!accessToken) {
+    return null;
   }
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${accessToken}`,
+  };
 
-  const basePath = `${controllerBaseUrl}/projects/${encodeURIComponent(projectId)}/origin`;
+  const basePath = `${requestContext.baseUrl}/projects/${encodeURIComponent(projectId)}/origin`;
   const query = search.toString();
   const url = query.length > 0 ? `${basePath}?${query}` : basePath;
 
@@ -254,7 +271,11 @@ export async function fetchOriginSummary(
     if (response.status === 404) {
       return null;
     }
-    if (response.status === 401 || response.status === 403) {
+    if (response.status === 401) {
+      await readControllerError(response, "fetch origin failed", requestContext);
+      return null;
+    }
+    if (response.status === 403) {
       return null;
     }
     if (!response.ok) {
@@ -273,7 +294,8 @@ export async function fetchOriginSummary(
       typeof payload.endpoint === "string" ? payload.endpoint : "";
     const endpointNormalized = normalizeOriginEndpointForClient(endpointRaw);
     const endpoint =
-      buildControllerOriginProxyEndpoint(originId) || endpointNormalized;
+      buildControllerOriginProxyEndpoint(originId, requestContext.baseUrl) ||
+      endpointNormalized;
     const mode = typeof payload.mode === "string" ? payload.mode : "unknown";
     const runtimeId =
       typeof payload.runtime_id === "string"
@@ -389,9 +411,13 @@ export async function requestOriginAccessToken(
   }
 
   const protocol = params.protocol ?? "webdav";
-  const accessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  const accessToken = requestContext.accessToken;
+  if (!accessToken) {
+    return null;
+  }
 
   const cacheKey = shouldCacheOriginAccessToken(params)
     ? buildOriginAccessTokenCacheKey({
@@ -402,7 +428,7 @@ export async function requestOriginAccessToken(
         preferHosted: params.preferHosted === true,
         preferRuntime: params.preferRuntime ?? null,
         browserSessionId: params.browserSessionId ?? null,
-        controllerAccessToken: accessToken ?? null,
+        controllerAccessToken: accessToken,
       })
     : null;
 
@@ -435,10 +461,8 @@ export async function requestOriginAccessToken(
 
   const headers: Record<string, string> = {
     "content-type": "application/json",
+    authorization: `Bearer ${accessToken}`,
   };
-  if (accessToken) {
-    headers.authorization = `Bearer ${accessToken}`;
-  }
 
   const body: Record<string, unknown> = {
     projectId,
@@ -472,7 +496,7 @@ export async function requestOriginAccessToken(
             }, requestTimeoutMs)
           : null;
 
-      const response = await fetch(`${controllerBaseUrl}/access_token`, {
+      const response = await fetch(`${requestContext.baseUrl}/access_token`, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
@@ -487,9 +511,12 @@ export async function requestOriginAccessToken(
         return null;
       }
       if (!response.ok) {
-        const text = await response.text();
         throw new Error(
-          `request origin access token failed (${response.status}): ${text}`,
+          await readControllerError(
+            response,
+            "request origin access token failed",
+            requestContext,
+          ),
         );
       }
 
@@ -505,7 +532,8 @@ export async function requestOriginAccessToken(
       // Always route browser requests through the controller origin proxy so the UI never
       // talks to private runtime hosts directly (avoids mixed-content/CORS regressions).
       const endpoint =
-        buildControllerOriginProxyEndpoint(originId) || endpointNormalized;
+        buildControllerOriginProxyEndpoint(originId, requestContext.baseUrl) ||
+        endpointNormalized;
       const mode = typeof payload.mode === "string" ? payload.mode : "unknown";
       const tokenValue = typeof payload.token === "string" ? payload.token : "";
       const expiresIn =

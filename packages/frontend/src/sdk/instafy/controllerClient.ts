@@ -16,6 +16,7 @@ import {
   clearDefaultCredential,
   readControllerError,
   resolveControllerAccessToken,
+  resolveControllerRequestContext,
   createProjectAutomationInController,
   createProjectSecret,
   createBlankControllerConversation,
@@ -149,13 +150,18 @@ import {
 
 export const controllerClient = createControllerClient({
   core: Object.freeze({
-    enabled: runtimeControllerEnabled,
-    baseUrl: controllerBaseUrl,
+    get enabled() {
+      return runtimeControllerEnabled;
+    },
+    get baseUrl() {
+      return controllerBaseUrl;
+    },
     clearAccessTokenOverride: clearControllerAccessTokenOverride,
     runtimeIdleTtlSecondsDefault: CONTROLLER_RUNTIME_IDLE_TTL_SECONDS_DEFAULT,
     runtimeIdleTtlSecondsMin: CONTROLLER_RUNTIME_IDLE_TTL_SECONDS_MIN,
     coerceRuntimeIdleTtlSeconds: coerceControllerRuntimeIdleTtlSeconds,
     resolveAccessToken: resolveControllerAccessToken,
+    resolveRequestContext: resolveControllerRequestContext,
     readError: readControllerError,
     authErrorEvent: CONTROLLER_AUTH_ERROR_EVENT,
     jsonRequest: controllerJsonRequest,

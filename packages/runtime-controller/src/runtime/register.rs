@@ -536,7 +536,7 @@ pub(crate) async fn runtime_register(
         None
     } else {
         // Fallback: allow service role (or dev mode) tokens to proceed, to keep local/dev stacks usable.
-        let auth = authenticate_request(&state.config, &headers, None).await?;
+        let auth = authenticate_request(&state.config, &headers).await?;
         if !auth.is_service_role && !state.config.dev_mode {
             info!("runtime register missing scoped runtime token");
             return Err(unauthorized(

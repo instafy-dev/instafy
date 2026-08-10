@@ -4550,7 +4550,7 @@ async fn get_project_origin(
     Query(query): Query<ProjectOriginQuery>,
     headers: HeaderMap,
 ) -> Result<Json<ProjectOriginResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let project_id = parse_optional_uuid_param(Some(params.project_id), "projectId")?
         .ok_or_else(|| bad_request("projectId is required"))?;
@@ -5960,7 +5960,7 @@ async fn get_project_lease(
     Path(params): Path<ProjectOriginPathParams>,
     headers: HeaderMap,
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let project_id = parse_optional_uuid_param(Some(params.project_id), "projectId")?
         .ok_or_else(|| bad_request("projectId is required"))?;
     if let Some(claims) = context.scoped_claims.as_ref() {
@@ -6038,7 +6038,7 @@ async fn post_lease_acquire(
     headers: HeaderMap,
     Json(body): Json<LeaseAcquireBody>,
 ) -> Result<Json<LeaseResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let project_id = parse_optional_uuid_param(Some(body.project_id), "projectId")?
         .ok_or_else(|| bad_request("projectId is required"))?;
@@ -6158,7 +6158,7 @@ async fn post_lease_renew(
     headers: HeaderMap,
     Json(body): Json<LeaseRenewBody>,
 ) -> Result<Json<LeaseResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let lease_id = parse_optional_uuid_param(Some(body.lease_id), "leaseId")?
         .ok_or_else(|| bad_request("leaseId is required"))?;
     let project_id = parse_optional_uuid_param(Some(body.project_id), "projectId")?
@@ -6273,7 +6273,7 @@ async fn post_lease_release(
     headers: HeaderMap,
     Json(body): Json<LeaseReleaseBody>,
 ) -> Result<Json<LeaseResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let lease_id = parse_optional_uuid_param(Some(body.lease_id), "leaseId")?
         .ok_or_else(|| bad_request("leaseId is required"))?;
@@ -6558,7 +6558,7 @@ async fn post_git_access_token(
     headers: HeaderMap,
     Json(body): Json<GitAccessTokenRequest>,
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let project_id = parse_optional_uuid_param(Some(params.project_id), "projectId")?
         .ok_or_else(|| bad_request("projectId is required"))?;
@@ -6763,7 +6763,7 @@ async fn get_git_shard_route(
     Path(params): Path<GitAccessTokenPathParams>,
     headers: HeaderMap,
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if !context.is_service_role {
         return Err(forbidden("service authentication required"));
     }
@@ -6872,7 +6872,7 @@ pub(crate) async fn post_access_token(
     headers: HeaderMap,
     Json(body): Json<AccessTokenRequest>,
 ) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let project_id = parse_optional_uuid_param(Some(body.project_id), "projectId")?
         .ok_or_else(|| bad_request("projectId is required"))?;
