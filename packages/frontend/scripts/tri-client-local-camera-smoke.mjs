@@ -2293,7 +2293,7 @@ async function connectAndroidWebView(serial, port) {
   const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
   const context = browser.contexts()[0];
   const page = context.pages().find((entry) => entry.url().includes('/studio') || entry.url().includes('/login')) || context.pages()[0];
-  if (!page) throw new Error('Unable to find the Instafy Studio page in the Android WebView.');
+  if (!page) throw new Error('Unable to find the Instafy page in the Android WebView.');
   await waitForPhoneReady(page);
   await ensureAndroidDeviceUnlocked(serial, 'android webview bootstrap');
   return { browser, context, page };

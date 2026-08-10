@@ -140,8 +140,13 @@ async function readStableReleasePointer(bucket: R2Bucket, desktopPrefix: string)
 }
 
 function versionedArtifactTag(name: string) {
-  const mac = /^instafy-studio-(.+)-mac-(?:arm64|x64)\.(?:dmg|zip)(?:\.blockmap)?$/.exec(name);
-  const windows = /^instafy-studio-(.+)-win\.exe(?:\.blockmap)?$/.exec(name);
+  // Both artifact generations parse forever: releases up to 0.2.2 shipped as
+  // instafy-studio-*, 0.2.3 onward as instafy-*. The immutable prefixes for
+  // old versions keep their original filenames, and installed clients fetch
+  // them (differential updates read old-version blockmaps), so dropping the
+  // legacy prefix here would break every pre-rename install's update path.
+  const mac = /^instafy-(?:studio-)?(.+)-mac-(?:arm64|x64)\.(?:dmg|zip)(?:\.blockmap)?$/.exec(name);
+  const windows = /^instafy-(?:studio-)?(.+)-win\.exe(?:\.blockmap)?$/.exec(name);
   const version = mac?.[1] ?? windows?.[1];
   return version && SEMVER.test(version) ? `desktop-app-v${version}` : null;
 }

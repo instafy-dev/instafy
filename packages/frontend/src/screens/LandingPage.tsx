@@ -19,7 +19,7 @@ export function LandingPage() {
 
   useEffect(() => {
     applyPageMeta({
-      title: "Instafy Studio · Your coding agent, your repo, any device",
+      title: "Instafy · Your coding agent, your repo, any device",
       description:
         "Bring your own ChatGPT or Codex subscription. An AI agent edits real files in a local or hosted git repo you own that you can open from any device, including your phone.",
       image: "/og-image.png",

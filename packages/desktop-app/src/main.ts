@@ -1,4 +1,4 @@
-import { BrowserWindow, Notification, app, dialog, ipcMain, net, shell } from "electron";
+import { BrowserWindow, Menu, Notification, app, dialog, ipcMain, net, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -39,6 +39,7 @@ import {
   desktopUpdaterStatus,
   isDesktopUpdaterReadyToInstall,
   performDesktopUpdaterInstallAfterQuitApproved,
+  checkForDesktopUpdatesInteractively,
   startDesktopUpdater,
   triggerDesktopUpdaterCheck,
   triggerDesktopUpdaterDownload,
@@ -584,6 +585,17 @@ function createMainWindow(initialUrl?: string) {
     width: 1240,
     height: 780,
     backgroundColor: "#0b0b0d",
+    // No stock title bar on macOS: the traffic lights float over the app's
+    // own chrome and content runs flush to the top, like every polished Mac
+    // Electron app. Because hiding the bar removes the only way to drag the
+    // window, the shell injects its own drag region and top inset after every
+    // load (applyMacWindowChromeDragRegion) -- it does NOT depend on the
+    // loaded frontend providing them. The shell hides the bar and the shell
+    // makes the window movable, atomically, so a frontend of any version
+    // (including one rolled back below this release) is always draggable.
+    ...(process.platform === "darwin"
+      ? { titleBarStyle: "hiddenInset" as const, trafficLightPosition: { x: 14, y: 12 } }
+      : {}),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
@@ -625,6 +637,7 @@ function createMainWindow(initialUrl?: string) {
   });
 
   mainWindow.webContents.on("did-finish-load", () => {
+    void applyMacWindowChromeDragRegion(mainWindow.webContents);
     desktopLog("info", "[instafy-desktop] did-finish-load", {
       url: mainWindow.webContents.getURL(),
     });
@@ -994,7 +1007,7 @@ async function confirmDesktopRuntimeQuit(
   activeJobCount: number | null,
   installUpdate: boolean,
 ): Promise<"drain" | "force" | "cancel"> {
-  const action = installUpdate ? "restart and install the update" : "quit Instafy Studio";
+  const action = installUpdate ? "restart and install the update" : "quit Instafy";
   const actionLabel = installUpdate ? "Restart" : "Quit";
   if (activeJobCount === null) {
     const result = await showDesktopQuitMessageBox({
@@ -1182,8 +1195,8 @@ async function coordinateDesktopQuit(installUpdate: boolean): Promise<boolean> {
       new Notification({
         title: "Finishing local agent work",
         body: installUpdate
-          ? "Instafy Studio will restart and install the update when the current job finishes."
-          : "Instafy Studio will quit when the current job finishes.",
+          ? "Instafy will restart and install the update when the current job finishes."
+          : "Instafy will quit when the current job finishes.",
       }).show();
     }
 
@@ -1759,6 +1772,7 @@ app.whenReady().then(() => {
       return await requestCoordinatedDesktopQuit({ installUpdate: true });
     },
   });
+  installDesktopApplicationMenu();
 
   ipcMain.handle("instafy:personalBrowserStatus", async (event) => {
     assertAllowedCaller(event);
@@ -2809,3 +2823,78 @@ app.on("before-quit", (event) => {
     installUpdate: isDesktopUpdaterReadyToInstall(),
   });
 });
+
+
+// The shell hides the macOS title bar, which also removes the OS drag handle,
+// so it must supply one. A fixed strip across the top carries
+// -webkit-app-region: drag (making the window movable there), and a matching
+// document inset keeps app content clear of the floating traffic lights. This
+// is injected by the shell rather than the frontend on purpose: the packaged
+// app loads a remotely hosted frontend that versions independently, and an
+// undraggable window is not an acceptable failure mode for a frontend that
+// happens to be older or newer than this release.
+const MAC_WINDOW_CHROME_INSET_PX = 38;
+async function applyMacWindowChromeDragRegion(webContents: Electron.WebContents): Promise<void> {
+  if (process.platform !== "darwin") {
+    return;
+  }
+  try {
+    await webContents.insertCSS(
+      `html { padding-top: ${MAC_WINDOW_CHROME_INSET_PX}px !important; box-sizing: border-box; }` +
+        `#instafy-mac-drag-region { position: fixed; top: 0; left: 0; right: 0; ` +
+        `height: ${MAC_WINDOW_CHROME_INSET_PX}px; z-index: 2147483647; -webkit-app-region: drag; }`,
+    );
+    // A real element, not a pseudo-element: -webkit-app-region on pseudo-
+    // elements is unreliable in Chromium. Idempotent so repeated loads and
+    // in-app navigations do not stack copies.
+    await webContents.executeJavaScript(
+      `(() => { if (!document.getElementById("instafy-mac-drag-region")) {` +
+        `const el = document.createElement("div"); el.id = "instafy-mac-drag-region";` +
+        `el.setAttribute("aria-hidden", "true"); document.body.prepend(el); } })();`,
+      true,
+    );
+  } catch (error) {
+    desktopLog("warn", "[instafy-desktop] failed to apply macOS window chrome", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+// macOS convention: updates are reachable from the application menu, not only
+// via background prompts. Electron's default menu has every standard role but
+// no update item, so the menu is rebuilt with one addition rather than
+// replaced wholesale. Other platforms keep the default menu untouched; this
+// release ships macOS only.
+function installDesktopApplicationMenu() {
+  if (process.platform !== "darwin") {
+    return;
+  }
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      {
+        label: app.name,
+        submenu: [
+          { role: "about" },
+          {
+            label: "Check for Updates\u2026",
+            click: () => {
+              void checkForDesktopUpdatesInteractively();
+            },
+          },
+          { type: "separator" },
+          { role: "services" },
+          { type: "separator" },
+          { role: "hide" },
+          { role: "hideOthers" },
+          { role: "unhide" },
+          { type: "separator" },
+          { role: "quit" },
+        ],
+      },
+      { role: "fileMenu" },
+      { role: "editMenu" },
+      { role: "viewMenu" },
+      { role: "windowMenu" },
+    ]),
+  );
+}

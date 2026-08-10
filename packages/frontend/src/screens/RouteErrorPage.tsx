@@ -9,7 +9,7 @@ function resolveRouteError(error: unknown) {
       title: error.status === 404 ? "Page not found" : "Navigation failed",
       detail:
         error.status === 404
-          ? "That route does not exist in Instafy Studio."
+          ? "That route does not exist in Instafy."
           : error.statusText || "The app could not finish loading this route.",
     };
   }
@@ -38,8 +38,8 @@ export function RouteErrorPage() {
 
   useEffect(() => {
     applyPageMeta({
-      title: `${routeError.status === 404 ? "404" : "Navigation error"} | Instafy Studio`,
-      description: "Instafy Studio could not open this route.",
+      title: `${routeError.status === 404 ? "404" : "Navigation error"} | Instafy`,
+      description: "Instafy could not open this route.",
     });
   }, [routeError.status]);
 

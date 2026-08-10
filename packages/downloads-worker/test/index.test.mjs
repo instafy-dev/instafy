@@ -466,3 +466,20 @@ test("missing and root objects return 404", async () => {
   assert.equal(root.status, 404);
   assert.deepEqual(requestedKeys, [POINTER_KEY]);
 });
+
+test("post-rename artifact names resolve to their immutable release exactly like legacy names", async () => {
+  // 0.2.3 renamed artifacts from instafy-studio-<v>-* to instafy-<v>-*.
+  // Both generations must parse forever: old immutable prefixes keep their
+  // original filenames and installed pre-rename clients still fetch them.
+  const publicKey = "desktop-app/stable/instafy-1.2.3-mac-arm64.zip.blockmap";
+  const storageKey = `desktop-app/${RELEASE_TAG}/instafy-1.2.3-mac-arm64.zip.blockmap`;
+  const { env, requestedKeys } = createEnv(new Map([[storageKey, createObject("blockmap")]]));
+  const response = await worker.fetch(
+    new Request(`https://downloads.instafy.dev/${publicKey}`),
+    env,
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("x-instafy-desktop-release"), RELEASE_TAG);
+  assert.deepEqual(requestedKeys, [storageKey]);
+});

@@ -10,9 +10,9 @@ const CONTACT_EMAIL = "contact@instafy.dev";
 export function TermsPage() {
   useEffect(() => {
     applyPageMeta({
-      title: "Terms of Use · Instafy Studio",
+      title: "Terms of Use · Instafy",
       description:
-        "These Terms of Use govern access to Instafy Studio, a chat-first AI space for editing real files.",
+        "These Terms of Use govern access to Instafy, a chat-first AI space for editing real files.",
       image: "/og-image.png",
     });
   }, []);
@@ -35,7 +35,7 @@ export function TermsPage() {
               Terms of Use
             </Heading>
             <Text variant="lead" tone="secondary" className="mt-4 max-w-prose">
-              These Terms of Use (“Terms”) govern your access to and use of Instafy Studio (the “Service”).
+              These Terms of Use (“Terms”) govern your access to and use of Instafy (the “Service”).
               By accessing or using the Service, you agree to these Terms.
             </Text>
           </header>
@@ -45,7 +45,7 @@ export function TermsPage() {
               1. The Service
             </Heading>
             <Text variant="bodyLg" tone="secondary" className="max-w-prose">
-              Instafy Studio is a chat-first AI space that helps you create, edit, and manage spaces with real
+              Instafy is a chat-first AI space that helps you create, edit, and manage spaces with real
               files. The Service includes an assistant surface, a file explorer and editor, and a credits and
               billing surface.
             </Text>
