@@ -29,6 +29,7 @@ import {
   findInstafyDesktopDeepLinkArg,
   INSTAFY_DESKTOP_PROTOCOL,
   resolveDesktopDeepLinkTargetUrl,
+  isDesktopAuthCallbackDeepLink,
 } from "./deepLinks";
 import {
   createBluetoothSelectionCoordinator,
@@ -539,6 +540,12 @@ function appendBluetoothDebugLog(event: string, payload: Record<string, unknown>
 }
 
 let pendingDesktopDeepLinkTargetUrl: string | null = null;
+// An auth callback can arrive before any renderer exists: launched cold by the
+// deep link, or (on macOS) while the app is running with every window closed.
+// webContents.send would be delivered to nobody, so the URL is parked here and
+// the renderer drains it on mount, mirroring how the mobile bridge hands over
+// its pending URL.
+let pendingDesktopAuthCallbackUrl: string | null = null;
 
 function focusMainWindow(mainWindow: BrowserWindow) {
   if (mainWindow.isMinimized()) {
@@ -560,6 +567,23 @@ function openUrlInMainWindow(targetUrl: string) {
 function handleDesktopDeepLink(rawUrl: string | null | undefined): boolean {
   if (typeof rawUrl !== "string") {
     return false;
+  }
+  if (isDesktopAuthCallbackDeepLink(rawUrl)) {
+    // Park it unconditionally, then try live delivery. The renderer drains the
+    // slot on mount, so a callback that arrives before it is listening -- or
+    // with no window at all -- still completes the sign-in.
+    pendingDesktopAuthCallbackUrl = rawUrl;
+    const window = BrowserWindow.getAllWindows().at(0) ?? null;
+    if (window) {
+      window.webContents.send("instafy:authCallback", rawUrl);
+      focusMainWindow(window);
+    } else if (app.isReady()) {
+      createMainWindow();
+    }
+    desktopLog("info", "[instafy-desktop] auth callback received", {
+      delivered: Boolean(window),
+    });
+    return true;
   }
   const targetUrl = resolveDesktopDeepLinkTargetUrl(rawUrl, getStartUrl());
   if (!targetUrl) {
@@ -1773,6 +1797,36 @@ app.whenReady().then(() => {
     },
   });
   installDesktopApplicationMenu();
+
+  // Drained by the renderer on mount. assertAllowedCaller matters especially
+  // here: this hands over session material, so only the app's own origin may
+  // ask for it.
+  ipcMain.handle("instafy:consumePendingAuthCallback", async (event) => {
+    assertAllowedCaller(event);
+    const pending = pendingDesktopAuthCallbackUrl;
+    pendingDesktopAuthCallbackUrl = null;
+    return pending;
+  });
+
+  // The sanctioned way out to a browser. Restricted to http/https so a
+  // compromised renderer cannot use it to launch arbitrary schemes, and
+  // explicit so OAuth no longer depends on the will-navigate guard catching a
+  // navigation by accident.
+  ipcMain.handle("instafy:openExternalUrl", async (event, rawUrl: unknown) => {
+    assertAllowedCaller(event);
+    const value = typeof rawUrl === "string" ? rawUrl.trim() : "";
+    let parsed: URL;
+    try {
+      parsed = new URL(value);
+    } catch {
+      throw new Error("openExternalUrl requires an absolute URL.");
+    }
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      throw new Error(`Refusing to open ${parsed.protocol} externally.`);
+    }
+    await shell.openExternal(parsed.toString());
+    return true;
+  });
 
   ipcMain.handle("instafy:personalBrowserStatus", async (event) => {
     assertAllowedCaller(event);

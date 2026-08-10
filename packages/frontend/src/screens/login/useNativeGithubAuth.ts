@@ -1,4 +1,10 @@
 import { useCallback, useEffect, useRef } from "react";
+import {
+  consumeDesktopAuthCallback,
+  isDesktopShell,
+  onDesktopAuthCallback,
+  openDesktopExternalUrl,
+} from "../../lib/desktopShell";
 import { Capacitor } from "@capacitor/core";
 import {
   clearNativeAuthCallbackAttemptId,
@@ -421,6 +427,25 @@ export function useNativeGithubAuth({
       }
     };
 
+    // The desktop shell returns through the same instafy://auth callback, so
+    // it reuses handleCallbackUrl verbatim -- the parsing, the PKCE-or-token
+    // branch, and the telemetry are identical. Only the transport differs:
+    // an Electron IPC message rather than a Capacitor plugin event. Drain
+    // first, because the callback can land before this effect runs (the app
+    // may have been launched cold by the deep link, or been running with no
+    // window at all).
+    let desktopUnsubscribe: (() => void) | null = null;
+    if (isDesktopShell()) {
+      desktopUnsubscribe = onDesktopAuthCallback((url) => {
+        void handleCallbackUrl(url);
+      });
+      void consumeDesktopAuthCallback().then((pending) => {
+        if (pending) {
+          void handleCallbackUrl(pending);
+        }
+      });
+    }
+
     (async () => {
       bridgeListener = (await nativeAuthBridgePlugin.addListener?.("urlOpen", (event) => {
         const url = typeof event?.url === "string" ? event.url : "";
@@ -453,6 +478,7 @@ export function useNativeGithubAuth({
       if (resumeDrainTimeout !== null) {
         window.clearTimeout(resumeDrainTimeout);
       }
+      desktopUnsubscribe?.();
       void bridgeListener?.remove?.();
       void appUrlListener?.remove?.();
       void resumeListener?.remove?.();
@@ -516,6 +542,30 @@ export function useNativeGithubAuth({
           // ignore browsers that do not support browserFinished
         }
         await Browser.open({ url });
+        setSubmitting(false);
+        return;
+      }
+
+      // The desktop shell is neither Capacitor-native nor a browser tab, and
+      // it had no branch here at all: it fell through to the web path, whose
+      // in-window navigation the shell's will-navigate guard then bounced to
+      // the system browser. Sign-in therefore completed in the browser and the
+      // app never saw it. Open the provider deliberately instead, and let the
+      // instafy://auth deep link bring the session back.
+      if (isDesktopShell()) {
+        const desktopResult = await supabase.auth.signInWithOAuth({
+          provider: "github",
+          options: { redirectTo, queryParams, skipBrowserRedirect: true },
+        });
+        if (desktopResult.error) {
+          throw desktopResult.error;
+        }
+        const url = desktopResult.data?.url;
+        if (!url) {
+          throw new Error("Unable to start GitHub login.");
+        }
+        await openDesktopExternalUrl(url);
+        setMessage("Finish signing in with GitHub in your browser…");
         setSubmitting(false);
         return;
       }

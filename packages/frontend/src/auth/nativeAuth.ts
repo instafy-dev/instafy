@@ -1,5 +1,7 @@
 import { Capacitor } from "@capacitor/core";
 
+import { isDesktopShell } from "../lib/desktopShell";
+
 export const NATIVE_AUTH_CALLBACK_URL = "instafy://auth";
 export const NATIVE_AUTH_CALLBACK_SCHEME = "instafy";
 export const NATIVE_AUTH_CALLBACK_HOST = "auth";
@@ -70,6 +72,15 @@ export function resolveSupabaseRedirectTo(webPath: string): string | undefined {
     return undefined;
   }
   if (Capacitor.isNativePlatform()) {
+    return NATIVE_AUTH_CALLBACK_URL;
+  }
+  // The desktop shell loads a hosted origin (prod.instafy.dev) that is not in
+  // Supabase's redirect allow-list, so a web-style redirectTo is rejected and
+  // the provider falls back to site_url -- which is how signing in from the
+  // app stranded the user on the marketing site with the session in the wrong
+  // browser. instafy://auth is already allow-listed for mobile and returns to
+  // the app through the same deep link.
+  if (isDesktopShell()) {
     return NATIVE_AUTH_CALLBACK_URL;
   }
   const path = webPath.trim().startsWith("/") ? webPath.trim() : `/${webPath.trim()}`;

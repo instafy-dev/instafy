@@ -7,7 +7,7 @@
 
 type ShellWindow = { instafyDesktop?: { windowChrome?: unknown } | unknown };
 
-function defaultWindow(): ShellWindow | undefined {
+function defaultWindow(): (ShellWindow & { open?: Window["open"] }) | undefined {
   return typeof window === "undefined" ? undefined : (window as ShellWindow);
 }
 
@@ -42,4 +42,40 @@ export function desktopWindowChrome(
   if (!isDesktopShell(shellWindow)) return null;
   const bridge = shellWindow?.instafyDesktop as { windowChrome?: unknown } | undefined;
   return bridge?.windowChrome === "hiddenInset" ? "hiddenInset" : "system";
+}
+
+type DesktopBridge = {
+  openExternalUrl?: (url: string) => Promise<boolean>;
+  consumePendingAuthCallback?: () => Promise<string | null>;
+  onAuthCallback?: (listener: (url: string) => void) => () => void;
+};
+
+function bridge(): DesktopBridge | undefined {
+  const w = defaultWindow() as { instafyDesktop?: DesktopBridge } | undefined;
+  return w?.instafyDesktop;
+}
+
+// Opening the provider is a deliberate act, not a navigation the shell happens
+// to intercept. Falls back to window.open, which the shell's window-open
+// handler already routes externally, so this still works against a shell too
+// old to expose the method.
+export async function openDesktopExternalUrl(url: string): Promise<void> {
+  const open = bridge()?.openExternalUrl;
+  if (typeof open === "function") {
+    await open(url);
+    return;
+  }
+  defaultWindow()?.open?.(url, "_blank", "noopener");
+}
+
+// Drained on mount, because a callback can arrive before the renderer is
+// listening -- or with no window at all.
+export async function consumeDesktopAuthCallback(): Promise<string | null> {
+  const consume = bridge()?.consumePendingAuthCallback;
+  return typeof consume === "function" ? await consume() : null;
+}
+
+export function onDesktopAuthCallback(listener: (url: string) => void): () => void {
+  const subscribe = bridge()?.onAuthCallback;
+  return typeof subscribe === "function" ? subscribe(listener) : () => {};
 }
