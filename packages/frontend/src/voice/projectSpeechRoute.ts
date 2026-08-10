@@ -1,5 +1,6 @@
 import { controllerClient } from "../sdk/instafy";
 import type { ControllerProjectIntegration } from "../services/runtimeController/integrations";
+import type { ControllerRequestContext } from "../services/runtimeController/core";
 import {
   SPEECH_PROVIDER_ID,
   SPEECH_SYNTHESIS_CAPABILITY_ID,
@@ -106,6 +107,7 @@ function selectLegacyProjectSpeechRoute(routes: ProjectSpeechRoute[]) {
 async function loadProjectSpeechIntegration(
   projectId: string,
   accessToken?: string | null,
+  requestContext?: ControllerRequestContext,
 ): Promise<{
   success: boolean;
   integration: ControllerProjectIntegration | null;
@@ -115,6 +117,7 @@ async function loadProjectSpeechIntegration(
   const result = await controllerClient.integrations
     .listForProject(projectId, {
       accessToken: accessToken ?? null,
+      requestContext,
     })
     .catch((error: unknown) => ({
       success: false,
@@ -170,13 +173,18 @@ function normalizeProjectSpeechRouteInputs(routes: ProjectSpeechRouteInput[] | n
 export async function readProjectSpeechRoutes(
   projectId: string | null | undefined,
   accessToken?: string | null,
+  requestContext?: ControllerRequestContext,
 ): Promise<ProjectSpeechRoute[]> {
   const normalizedProjectId = typeof projectId === "string" ? projectId.trim() : "";
   if (!normalizedProjectId) {
     return [];
   }
 
-  const result = await loadProjectSpeechIntegration(normalizedProjectId, accessToken);
+  const result = await loadProjectSpeechIntegration(
+    normalizedProjectId,
+    accessToken,
+    requestContext,
+  );
   if (!result.success || !result.integration || !isRecord(result.integration.metadata)) {
     return [];
   }
@@ -190,8 +198,9 @@ export async function readProjectSpeechRoutes(
 export async function readProjectSpeechRoute(
   projectId: string | null | undefined,
   accessToken?: string | null,
+  requestContext?: ControllerRequestContext,
 ): Promise<ProjectSpeechRoute | null> {
-  const routes = await readProjectSpeechRoutes(projectId, accessToken);
+  const routes = await readProjectSpeechRoutes(projectId, accessToken, requestContext);
   return selectLegacyProjectSpeechRoute(routes);
 }
 
@@ -199,6 +208,7 @@ export async function writeProjectSpeechRoutes(
   projectId: string | null | undefined,
   routes: ProjectSpeechRouteInput[] | null,
   accessToken?: string | null,
+  requestContext?: ControllerRequestContext,
 ): Promise<{
   success: boolean;
   scope: "project";
@@ -213,7 +223,11 @@ export async function writeProjectSpeechRoutes(
     };
   }
 
-  const result = await loadProjectSpeechIntegration(normalizedProjectId, accessToken);
+  const result = await loadProjectSpeechIntegration(
+    normalizedProjectId,
+    accessToken,
+    requestContext,
+  );
   if (!result.success) {
     return {
       success: false,
@@ -262,6 +276,7 @@ export async function writeProjectSpeechRoutes(
     SPEECH_PROVIDER_ID,
     {
       accessToken: accessToken ?? null,
+      requestContext,
       status: existingIntegration?.status ?? "available",
       connectionType:
         normalizeSpeechRouteConnectionType(legacyRoute?.connectionType) ??
@@ -300,6 +315,7 @@ export async function writeProjectSpeechRoute(
     hostMode?: ProjectSpeechRouteHostMode | null;
   } | null,
   accessToken?: string | null,
+  requestContext?: ControllerRequestContext,
 ): Promise<{
   success: boolean;
   scope: "project";
@@ -312,5 +328,10 @@ export async function writeProjectSpeechRoute(
       error: "Missing speech route URL.",
     };
   }
-  return await writeProjectSpeechRoutes(projectId, route ? [route] : null, accessToken);
+  return await writeProjectSpeechRoutes(
+    projectId,
+    route ? [route] : null,
+    accessToken,
+    requestContext,
+  );
 }

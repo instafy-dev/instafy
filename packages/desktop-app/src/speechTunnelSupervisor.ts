@@ -1,7 +1,12 @@
-import type { DesktopSpeechTunnelHandle, StartSpeechTunnelOptions } from "@instafy/desktop-runtime-agent";
+import { randomUUID } from "node:crypto";
+import type {
+  DesktopSpeechTunnelHandle,
+  StartSpeechTunnelOptions,
+} from "@instafy/desktop-runtime-agent";
 import { startSpeechTunnel } from "@instafy/desktop-runtime-agent";
 
 export type DesktopSpeechTunnelState = "idle" | "starting" | "active" | "error";
+export type DesktopSpeechTunnelControllerCredentialMode = "ambient" | "fixed";
 
 export type DesktopSpeechTunnelStatus = {
   enabled: boolean;
@@ -9,6 +14,9 @@ export type DesktopSpeechTunnelStatus = {
   state: DesktopSpeechTunnelState;
   managed: boolean;
   projectId?: string;
+  controllerUrl?: string;
+  controllerCredentialMode?: DesktopSpeechTunnelControllerCredentialMode;
+  controllerBindingId?: string;
   tunnelId?: string;
   publicUrl?: string;
   hostname?: string | null;
@@ -36,6 +44,21 @@ type DesktopSpeechTunnelSupervisorOptions = {
   startTunnelImpl?: (options: StartSpeechTunnelOptions) => Promise<DesktopSpeechTunnelHandle>;
 };
 
+type DesktopSpeechTunnelStartOptions = {
+  projectId: string;
+  controllerUrl: string;
+  controllerAccessToken: string;
+  controllerCredentialMode?: DesktopSpeechTunnelControllerCredentialMode;
+  forceRestart?: boolean;
+};
+
+type DesktopSpeechTunnelControllerBinding = {
+  id: string;
+  controllerUrl: string;
+  controllerAccessToken: string;
+  credentialMode: DesktopSpeechTunnelControllerCredentialMode;
+};
+
 const DEFAULT_LOCAL_PORT = 8796;
 const DEFAULT_READY_PATH = "/health";
 
@@ -57,8 +80,11 @@ export class DesktopSpeechTunnelSupervisor {
   private readonly ensureVoiceHostRunning: (() => Promise<unknown>) | null;
   private readonly startTunnelImpl: (options: StartSpeechTunnelOptions) => Promise<DesktopSpeechTunnelHandle>;
   private currentHandle: DesktopSpeechTunnelHandle | null = null;
+  private currentControllerBinding: DesktopSpeechTunnelControllerBinding | null = null;
   private currentStatus: DesktopSpeechTunnelStatus;
   private ensurePromise: Promise<DesktopSpeechTunnelStatus> | null = null;
+  private stopPromise: Promise<void> | null = null;
+  private lifecycleGeneration = 0;
   private shuttingDown = false;
 
   constructor(options: DesktopSpeechTunnelSupervisorOptions = {}) {
@@ -100,40 +126,38 @@ export class DesktopSpeechTunnelSupervisor {
     return { ...this.currentStatus };
   }
 
-  async ensureRunning(options: {
-    projectId: string;
-    controllerUrl: string;
-    controllerAccessToken: string;
-    forceRestart?: boolean;
-  }) {
+  async ensureRunning(options: DesktopSpeechTunnelStartOptions) {
     if (!this.enabled) {
       return { ...this.currentStatus };
     }
-    if (this.ensurePromise) {
-      return await this.ensurePromise;
+    if (this.stopPromise) {
+      await this.stopPromise;
+      return await this.ensureRunning(options);
     }
-    this.ensurePromise = this.ensureRunningInternal(options);
+    if (this.ensurePromise) {
+      await this.ensurePromise;
+      return await this.ensureRunning(options);
+    }
+    const ensurePromise = this.ensureRunningInternal(options);
+    this.ensurePromise = ensurePromise;
     try {
-      return await this.ensurePromise;
+      return await ensurePromise;
     } finally {
-      this.ensurePromise = null;
+      if (this.ensurePromise === ensurePromise) {
+        this.ensurePromise = null;
+      }
     }
   }
 
-  startInBackground(options: {
-    projectId: string;
-    controllerUrl: string;
-    controllerAccessToken: string;
-    forceRestart?: boolean;
-  }) {
+  startInBackground(options: DesktopSpeechTunnelStartOptions) {
     if (!this.enabled) {
       return { ...this.currentStatus };
     }
-    if (!this.ensurePromise) {
-      this.ensurePromise = this.ensureRunningInternal(options).finally(() => {
-        this.ensurePromise = null;
+    void this.ensureRunning(options).catch((error) => {
+      this.logger("warn", "[instafy-desktop] desktop speech tunnel background start failed", {
+        message: error instanceof Error ? error.message : String(error),
       });
-    }
+    });
     this.currentStatus = {
       ...this.currentStatus,
       lastCheckedAt: new Date().toISOString(),
@@ -145,6 +169,7 @@ export class DesktopSpeechTunnelSupervisor {
     projectId: string;
     controllerUrl: string;
     controllerAccessToken: string;
+    controllerCredentialMode?: DesktopSpeechTunnelControllerCredentialMode;
   }) {
     return await this.ensureRunning({
       ...options,
@@ -153,9 +178,26 @@ export class DesktopSpeechTunnelSupervisor {
   }
 
   async stop() {
+    if (this.stopPromise) {
+      return await this.stopPromise;
+    }
+    const stopPromise = this.stopInternal();
+    this.stopPromise = stopPromise;
+    try {
+      await stopPromise;
+    } finally {
+      if (this.stopPromise === stopPromise) {
+        this.stopPromise = null;
+      }
+    }
+  }
+
+  private async stopInternal() {
+    this.lifecycleGeneration += 1;
     this.shuttingDown = true;
     const handle = this.currentHandle;
     this.currentHandle = null;
+    this.currentControllerBinding = null;
     if (handle) {
       await handle.stop().catch(() => undefined);
     }
@@ -163,6 +205,10 @@ export class DesktopSpeechTunnelSupervisor {
       ...this.currentStatus,
       state: "idle",
       managed: false,
+      projectId: undefined,
+      controllerUrl: undefined,
+      controllerCredentialMode: undefined,
+      controllerBindingId: undefined,
       pid: undefined,
       tunnelId: undefined,
       publicUrl: undefined,
@@ -172,15 +218,14 @@ export class DesktopSpeechTunnelSupervisor {
     this.shuttingDown = false;
   }
 
-  private async ensureRunningInternal(options: {
-    projectId: string;
-    controllerUrl: string;
-    controllerAccessToken: string;
-    forceRestart?: boolean;
-  }) {
+  private async ensureRunningInternal(options: DesktopSpeechTunnelStartOptions) {
+    const lifecycleGeneration = this.lifecycleGeneration;
+    const startupIsCurrent = () => lifecycleGeneration === this.lifecycleGeneration;
     const projectId = normalizeOptionalString(options.projectId);
     const controllerUrl = normalizeOptionalString(options.controllerUrl);
     const controllerAccessToken = normalizeOptionalString(options.controllerAccessToken);
+    const controllerCredentialMode =
+      options.controllerCredentialMode === "ambient" ? "ambient" : "fixed";
     if (!projectId) {
       throw new Error("Desktop speech tunnel requires projectId.");
     }
@@ -193,8 +238,12 @@ export class DesktopSpeechTunnelSupervisor {
 
     if (
       this.currentHandle &&
+      this.currentControllerBinding &&
       !options.forceRestart &&
       this.currentHandle.projectId === projectId &&
+      this.currentControllerBinding.controllerUrl === controllerUrl &&
+      this.currentControllerBinding.controllerAccessToken === controllerAccessToken &&
+      this.currentControllerBinding.credentialMode === controllerCredentialMode &&
       this.currentHandle.process.exitCode === null
     ) {
       this.currentStatus = {
@@ -202,6 +251,9 @@ export class DesktopSpeechTunnelSupervisor {
         state: "active",
         managed: true,
         projectId,
+        controllerUrl,
+        controllerCredentialMode,
+        controllerBindingId: this.currentControllerBinding.id,
         pid: this.currentHandle.pid,
         tunnelId: this.currentHandle.tunnelId,
         publicUrl: this.currentHandle.publicUrl,
@@ -213,15 +265,16 @@ export class DesktopSpeechTunnelSupervisor {
 
     const previousHandle = this.currentHandle;
     this.currentHandle = null;
-    if (previousHandle) {
-      await previousHandle.stop().catch(() => undefined);
-    }
+    this.currentControllerBinding = null;
 
     this.currentStatus = {
       ...this.currentStatus,
       state: "starting",
       managed: false,
       projectId,
+      controllerUrl,
+      controllerCredentialMode,
+      controllerBindingId: undefined,
       pid: undefined,
       tunnelId: undefined,
       publicUrl: undefined,
@@ -230,8 +283,18 @@ export class DesktopSpeechTunnelSupervisor {
       lastError: undefined,
     };
 
+    if (previousHandle) {
+      await previousHandle.stop().catch(() => undefined);
+    }
+    if (!startupIsCurrent()) {
+      return { ...this.currentStatus };
+    }
+
     try {
       await this.ensureVoiceHostRunning?.();
+      if (!startupIsCurrent()) {
+        return { ...this.currentStatus };
+      }
       const handle = await this.startTunnelImpl({
         controllerUrl,
         projectId,
@@ -243,13 +306,36 @@ export class DesktopSpeechTunnelSupervisor {
           this.logger("info", message);
         },
       });
+      if (!startupIsCurrent()) {
+        await handle.stop().catch((error) => {
+          this.logger(
+            "warn",
+            "[instafy-desktop] failed to stop a late desktop speech tunnel startup",
+            {
+              message: error instanceof Error ? error.message : String(error),
+              projectId,
+            },
+          );
+        });
+        return { ...this.currentStatus };
+      }
+      const controllerBinding: DesktopSpeechTunnelControllerBinding = {
+        id: randomUUID(),
+        controllerUrl,
+        controllerAccessToken,
+        credentialMode: controllerCredentialMode,
+      };
       this.currentHandle = handle;
+      this.currentControllerBinding = controllerBinding;
       this.currentStatus = {
         enabled: true,
         hostMode: "desktop",
         state: "active",
         managed: true,
         projectId,
+        controllerUrl,
+        controllerCredentialMode,
+        controllerBindingId: controllerBinding.id,
         tunnelId: handle.tunnelId,
         publicUrl: handle.publicUrl,
         hostname: handle.hostname,
@@ -264,10 +350,12 @@ export class DesktopSpeechTunnelSupervisor {
           return;
         }
         this.currentHandle = null;
+        this.currentControllerBinding = null;
         this.currentStatus = {
           ...this.currentStatus,
           state: this.shuttingDown ? "idle" : "error",
           managed: false,
+          controllerBindingId: undefined,
           pid: undefined,
           lastCheckedAt: new Date().toISOString(),
           lastError:
@@ -278,6 +366,9 @@ export class DesktopSpeechTunnelSupervisor {
       });
       return { ...this.currentStatus };
     } catch (error) {
+      if (!startupIsCurrent()) {
+        return { ...this.currentStatus };
+      }
       const message = error instanceof Error ? error.message : String(error);
       this.logger("warn", "[instafy-desktop] desktop speech tunnel startup failed", {
         message,

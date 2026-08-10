@@ -6,12 +6,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const controllerMocks = vi.hoisted(() => ({
   fetchStatus: vi.fn(),
-  resolveAccessToken: vi.fn(),
+  resolveRequestContext: vi.fn(),
 }));
 
 vi.mock("../../../../sdk/instafy", () => ({
   controllerClient: {
-    core: { resolveAccessToken: controllerMocks.resolveAccessToken },
+    core: { resolveRequestContext: controllerMocks.resolveRequestContext },
     runtimes: { fetchStatus: controllerMocks.fetchStatus },
   },
 }));
@@ -50,6 +50,18 @@ function personalBrowserStatus(
     canGoForward: false,
     agentControlEnabled: false,
     ...overrides,
+  };
+}
+
+function controllerRequestContext(
+  accessToken: string | null = "controller-token",
+  credentialSource: "ambient" | "fixed" | null = accessToken ? "ambient" : null,
+) {
+  return {
+    baseUrl: "https://controller.example.test",
+    accessToken,
+    credentialSource,
+    generation: 1,
   };
 }
 
@@ -94,7 +106,8 @@ describe("usePersonalBrowserBridge lifecycle", () => {
     mounted = true;
     statusListener = null;
     controllerMocks.fetchStatus.mockReset();
-    controllerMocks.resolveAccessToken.mockReset();
+    controllerMocks.resolveRequestContext.mockReset();
+    controllerMocks.resolveRequestContext.mockResolvedValue(controllerRequestContext());
   });
 
   afterEach(async () => {
@@ -155,6 +168,7 @@ describe("usePersonalBrowserBridge lifecycle", () => {
     expect(open).toHaveBeenCalledWith(
       expect.objectContaining({
         controllerUrl: "https://controller.example.test",
+        controllerAccessToken: "controller-token",
         profileUserId: "user-1",
       }),
     );
@@ -175,6 +189,29 @@ describe("usePersonalBrowserBridge lifecycle", () => {
     expect(owners[1]).not.toBe(firstOwnerId);
     expect(replacementResultRef.current?.status?.url).toBe("https://example.test/kept");
     expect(close).not.toHaveBeenCalled();
+  });
+
+  it("does not open Personal Browser for a fixed controller binding", async () => {
+    const closed = personalBrowserStatus();
+    const open = vi.fn(async () => closed);
+    controllerMocks.resolveRequestContext.mockResolvedValue(
+      controllerRequestContext("fixed-override-token", "fixed"),
+    );
+    window.instafyDesktop = {
+      notify: vi.fn(async () => undefined),
+      personalBrowserOpen: open,
+      personalBrowserSetBounds: vi.fn(async () => closed),
+      personalBrowserStatus: vi.fn(async () => closed),
+    };
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+
+    await act(async () => {
+      root.render(<Harness resultRef={resultRef} />);
+    });
+    await waitUntil(() => resultRef.current?.status?.state === "error");
+
+    expect(open).not.toHaveBeenCalled();
+    expect(resultRef.current?.status?.error).toContain("overridden controller session");
   });
 
   it("keeps the same owner and page while the Browser subtab is temporarily inactive", async () => {
@@ -437,7 +474,7 @@ describe("usePersonalBrowserBridge lifecycle", () => {
   });
 
   it("invalidates a runtime start when agent control is paused and retries after resume", async () => {
-    const firstToken = deferred<string | null>();
+    const firstContext = deferred<ReturnType<typeof controllerRequestContext>>();
     const closed = personalBrowserStatus();
     let ownerId = "";
     const ready = () =>
@@ -475,9 +512,10 @@ describe("usePersonalBrowserBridge lifecycle", () => {
       startDesktopRuntime: startRuntime,
       stopDesktopRuntime: vi.fn(async () => undefined),
     };
-    controllerMocks.resolveAccessToken
-      .mockReturnValueOnce(firstToken.promise)
-      .mockResolvedValue("controller-token");
+    controllerMocks.resolveRequestContext
+      .mockResolvedValueOnce(controllerRequestContext())
+      .mockReturnValueOnce(firstContext.promise)
+      .mockResolvedValue(controllerRequestContext());
     controllerMocks.fetchStatus.mockResolvedValue({
       preferredRuntimeId: null,
       runtimes: [
@@ -497,7 +535,7 @@ describe("usePersonalBrowserBridge lifecycle", () => {
     await act(async () => {
       root.render(<Harness resultRef={resultRef} />);
     });
-    await waitUntil(() => controllerMocks.resolveAccessToken.mock.calls.length === 1);
+    await waitUntil(() => controllerMocks.resolveRequestContext.mock.calls.length === 2);
 
     await act(async () => {
       statusListener?.(
@@ -509,9 +547,9 @@ describe("usePersonalBrowserBridge lifecycle", () => {
         }),
       );
     });
-    firstToken.resolve("stale-token");
+    firstContext.resolve(controllerRequestContext("stale-token"));
     await act(async () => {
-      await firstToken.promise;
+      await firstContext.promise;
       await Promise.resolve();
     });
     expect(startRuntime).not.toHaveBeenCalled();
@@ -524,7 +562,10 @@ describe("usePersonalBrowserBridge lifecycle", () => {
     await waitUntil(() => resultRef.current?.agentPhase === "ready");
     expect(resultRef.current?.runtimeOverride?.runtimeId).toBe("runtime-2");
     expect(startRuntime).toHaveBeenCalledWith(
-      expect.objectContaining({ personalBrowserOwnerId: ownerId }),
+      expect.objectContaining({
+        personalBrowserOwnerId: ownerId,
+        controllerCredentialMode: "ambient",
+      }),
     );
   });
 
