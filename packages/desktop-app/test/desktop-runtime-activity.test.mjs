@@ -15,10 +15,66 @@ const {
   canResumeDesktopRuntimeAfterFailedQuit,
   createDesktopQuitWaitControl,
   readDesktopRuntimeActiveJobCount,
+  resolveDesktopRuntimeControllerCredentialAction,
+  resolveRefreshedDesktopRuntimeAccessToken,
   runDesktopRuntimeExitCleanup,
   withRefreshedDesktopRuntimeAccess,
   withDesktopRuntimeTimeout,
 } = await import(modulePath);
+
+test("desktop runtime credential reuse rotates only the same ambient user binding", () => {
+  const ambientUserOne = { kind: "ambient", userId: "user-1" };
+  const base = {
+    currentControllerUrl: "https://controller.example",
+    currentCredentialProvenance: ambientUserOne,
+    currentAccessToken: "old-token",
+    requestedControllerUrl: "https://controller.example",
+    requestedCredentialProvenance: ambientUserOne,
+    requestedAccessToken: "new-token",
+  };
+
+  assert.equal(resolveDesktopRuntimeControllerCredentialAction(base), "rotate");
+  assert.equal(
+    resolveDesktopRuntimeControllerCredentialAction({
+      ...base,
+      requestedAccessToken: "old-token",
+    }),
+    "reuse",
+  );
+  assert.equal(
+    resolveDesktopRuntimeControllerCredentialAction({
+      ...base,
+      requestedCredentialProvenance: { kind: "ambient", userId: "user-2" },
+    }),
+    "replace",
+  );
+  assert.equal(
+    resolveDesktopRuntimeControllerCredentialAction({
+      ...base,
+      requestedControllerUrl: "https://other-controller.example",
+    }),
+    "replace",
+  );
+});
+
+test("fixed desktop runtime credentials require an exact token pair", () => {
+  const base = {
+    currentControllerUrl: "https://controller.example",
+    currentCredentialProvenance: { kind: "fixed" },
+    currentAccessToken: "fixed-token",
+    requestedControllerUrl: "https://controller.example",
+    requestedCredentialProvenance: { kind: "fixed" },
+    requestedAccessToken: "fixed-token",
+  };
+  assert.equal(resolveDesktopRuntimeControllerCredentialAction(base), "reuse");
+  assert.equal(
+    resolveDesktopRuntimeControllerCredentialAction({
+      ...base,
+      requestedAccessToken: "other-fixed-token",
+    }),
+    "replace",
+  );
+});
 
 test("buildDesktopRuntimeStopUrl preserves a configured controller path", () => {
   assert.equal(
@@ -179,6 +235,7 @@ test("withRefreshedDesktopRuntimeAccess rotates an expired token once", async ()
   let refreshes = 0;
 
   const result = await withRefreshedDesktopRuntimeAccess({
+    credentialProvenance: { kind: "ambient", userId: "user-1" },
     getAccessToken: () => token,
     refreshAccessToken: async () => {
       refreshes += 1;
@@ -202,6 +259,7 @@ test("withRefreshedDesktopRuntimeAccess does not retry non-authentication failur
   let refreshes = 0;
   await assert.rejects(
     withRefreshedDesktopRuntimeAccess({
+      credentialProvenance: { kind: "ambient", userId: "user-1" },
       getAccessToken: () => "token",
       refreshAccessToken: async () => {
         refreshes += 1;
@@ -213,6 +271,52 @@ test("withRefreshedDesktopRuntimeAccess does not retry non-authentication failur
     /HTTP 500/,
   );
   assert.equal(refreshes, 0);
+});
+
+test("withRefreshedDesktopRuntimeAccess never substitutes ambient access for fixed credentials", async () => {
+  let refreshes = 0;
+  const requestedTokens = [];
+  await assert.rejects(
+    withRefreshedDesktopRuntimeAccess({
+      credentialProvenance: { kind: "fixed" },
+      getAccessToken: () => "fixed-override-token",
+      refreshAccessToken: async () => {
+        refreshes += 1;
+      },
+      request: async (accessToken) => {
+        requestedTokens.push(accessToken);
+        throw new DesktopRuntimeHttpError(403);
+      },
+    }),
+    /HTTP 403/,
+  );
+  assert.equal(refreshes, 0);
+  assert.deepEqual(requestedTokens, ["fixed-override-token"]);
+});
+
+test("ambient refresh stays bound to the runtime's originating user", () => {
+  const provenance = { kind: "ambient", userId: "user-1" };
+  assert.equal(
+    resolveRefreshedDesktopRuntimeAccessToken(provenance, {
+      accessToken: "fresh-token",
+      userId: "user-1",
+    }),
+    "fresh-token",
+  );
+  assert.equal(
+    resolveRefreshedDesktopRuntimeAccessToken(provenance, {
+      accessToken: "other-user-token",
+      userId: "user-2",
+    }),
+    null,
+  );
+  assert.equal(
+    resolveRefreshedDesktopRuntimeAccessToken(
+      { kind: "fixed" },
+      { accessToken: "ambient-token", userId: "user-1" },
+    ),
+    null,
+  );
 });
 
 test("withDesktopRuntimeTimeout bounds a renderer session read that never settles", async () => {

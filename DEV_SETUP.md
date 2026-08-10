@@ -258,6 +258,24 @@ The Studio now talks to the **runtime controller** for prompt runs, SSE, and wor
 VITE_CONTROLLER_URL=https://controller.dev.your-domain.com
 ```
 
+Hosted browser builds treat that configured URL as the controller authority and ignore controller
+URL overrides from the page query, browser globals, and session storage. Localhost/development and
+native harnesses may use a custom `controllerUrl` only when they also provide an explicit
+`controllerAccessToken`; a custom controller never receives the signed-in user's ambient Supabase
+session. Studio sends that token in the `Authorization` header, including for `/events`, rather than
+putting it in a request URL. A controller URL and credential are bound together for the lifetime of
+the page; changing or rejecting an override scrubs its query parameters and reloads before any new
+controller request can start.
+
+Personal Browser requires the normal ambient signed-in session and is unavailable while a fixed or
+custom controller credential is active. Desktop runtimes remember whether their launch credential
+was fixed or ambient. Only a packaged first-party build connected to the pinned production
+controller may refresh an ambient credential, and that refresh remains bound to the same user;
+fixed credentials are never replaced from the visible browser session.
+Desktop's native runtime and speech-tunnel bridges enforce that controller boundary again before
+using any renderer-supplied bearer: packaged builds accept only the pinned production controller,
+while unpackaged development builds accept only origin-only loopback controllers.
+
 In local development you can run the controller via `cargo run` (see `packages/runtime-controller/README.md`) or point
 at a shared dev instance. Large artifacts (images/logs) should be written to the shared workspace (local dir/EFS) and
 fetched through the controller `/fs/*` endpoints rather than Supabase Storage. When running the controller locally,

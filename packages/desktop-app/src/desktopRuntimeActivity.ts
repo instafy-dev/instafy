@@ -16,6 +16,68 @@ export class DesktopRuntimeHttpError extends Error {
   }
 }
 
+export type DesktopRuntimeControllerCredentialMode = "ambient" | "fixed";
+
+export type DesktopRuntimeControllerCredentialProvenance =
+  | { kind: "fixed" }
+  | { kind: "ambient"; userId: string };
+
+export type DesktopRuntimeControllerCredentialAction =
+  | "replace"
+  | "reuse"
+  | "rotate";
+
+/**
+ * Decide whether a renderer-verified controller credential may keep the
+ * existing runtime process. Ambient rotation is allowed only inside the exact
+ * controller and user binding; fixed credentials remain exact pairs.
+ */
+export function resolveDesktopRuntimeControllerCredentialAction(options: {
+  currentControllerUrl: string;
+  currentCredentialProvenance: DesktopRuntimeControllerCredentialProvenance;
+  currentAccessToken: string;
+  requestedControllerUrl: string;
+  requestedCredentialProvenance: DesktopRuntimeControllerCredentialProvenance;
+  requestedAccessToken: string;
+}): DesktopRuntimeControllerCredentialAction {
+  const currentProvenance = options.currentCredentialProvenance;
+  const requestedProvenance = options.requestedCredentialProvenance;
+  if (
+    options.currentControllerUrl !== options.requestedControllerUrl ||
+    currentProvenance.kind !== requestedProvenance.kind
+  ) {
+    return "replace";
+  }
+  if (currentProvenance.kind === "fixed" || requestedProvenance.kind === "fixed") {
+    return options.currentAccessToken === options.requestedAccessToken
+      ? "reuse"
+      : "replace";
+  }
+  if (currentProvenance.userId !== requestedProvenance.userId) {
+    return "replace";
+  }
+  return options.currentAccessToken === options.requestedAccessToken
+    ? "reuse"
+    : "rotate";
+}
+
+export function resolveRefreshedDesktopRuntimeAccessToken(
+  provenance: DesktopRuntimeControllerCredentialProvenance,
+  session: { accessToken: string; userId: string },
+): string | null {
+  const accessToken = session.accessToken.trim();
+  const userId = session.userId.trim();
+  if (
+    provenance.kind !== "ambient" ||
+    !accessToken ||
+    !userId ||
+    provenance.userId !== userId
+  ) {
+    return null;
+  }
+  return accessToken;
+}
+
 function requireDesktopRuntimeAccessToken(getAccessToken: () => string | undefined): string {
   const token = getAccessToken()?.trim();
   if (!token) {
@@ -25,12 +87,13 @@ function requireDesktopRuntimeAccessToken(getAccessToken: () => string | undefin
 }
 
 /**
- * Retry one authenticated controller request after refreshing the visible
- * renderer session. Long-running local jobs can outlive the JWT that launched
- * them, so a safe update wait must rotate credentials without abandoning its
- * runtime fence.
+ * Retry one authenticated controller request only when its retained
+ * provenance permits refreshing the visible renderer session. Long-running
+ * local jobs can outlive the JWT that launched them, while fixed controller
+ * pairs must keep using the exact token that launched them.
  */
 export async function withRefreshedDesktopRuntimeAccess<T>(options: {
+  credentialProvenance: DesktopRuntimeControllerCredentialProvenance;
   getAccessToken: () => string | undefined;
   refreshAccessToken: () => Promise<void>;
   request: (accessToken: string) => Promise<T>;
@@ -43,6 +106,9 @@ export async function withRefreshedDesktopRuntimeAccess<T>(options: {
       !(error instanceof DesktopRuntimeHttpError) ||
       (error.status !== 401 && error.status !== 403)
     ) {
+      throw error;
+    }
+    if (options.credentialProvenance.kind !== "ambient") {
       throw error;
     }
   }

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import type { StatusContextValue } from "../status/StatusProvider";
-import { controllerBaseUrl, resolveControllerAccessToken } from "../services/runtimeController/core";
+import { resolveControllerRequestContext } from "../services/runtimeController/core";
 import {
   readProjectSpeechRoute,
   writeProjectSpeechRoute,
@@ -109,11 +109,20 @@ export function useDesktopSpeechHostState(
           }
 
           if (projectId && options.runtimeControllerEnabled) {
-            const accessToken = await resolveControllerAccessToken(null);
-            if (accessToken) {
-              const currentRoute = await readProjectSpeechRoute(projectId, accessToken);
+            const requestContext = await resolveControllerRequestContext(null);
+            if (requestContext.accessToken) {
+              const currentRoute = await readProjectSpeechRoute(
+                projectId,
+                requestContext.accessToken,
+                requestContext,
+              );
               if (currentRoute?.hostMode === "desktop" && currentRoute.connectionType === "tunnel") {
-                await writeProjectSpeechRoute(projectId, null, accessToken);
+                await writeProjectSpeechRoute(
+                  projectId,
+                  null,
+                  requestContext.accessToken,
+                  requestContext,
+                );
               }
             }
           }
@@ -245,19 +254,18 @@ export function useDesktopSpeechHostState(
     if (!desktopSpeechTunnelBridgeAvailable()) {
       return;
     }
-    const controllerUrl = controllerBaseUrl.trim();
-    if (!controllerUrl) {
-      options.showStatus(
-        "Controller URL is missing, so Desktop cannot expose the speech tunnel.",
-        "error",
-        3600,
-      );
-      return;
-    }
     setDesktopSpeechTunnelBusy(true);
     try {
-      const accessToken = await resolveControllerAccessToken(null);
-      if (!accessToken) {
+      const requestContext = await resolveControllerRequestContext(null);
+      if (!requestContext.baseUrl) {
+        options.showStatus(
+          "Controller URL is missing, so Desktop cannot expose the speech tunnel.",
+          "error",
+          3600,
+        );
+        return;
+      }
+      if (!requestContext.accessToken) {
         options.showStatus(
           "Login required before Desktop can expose the speech tunnel.",
           "error",
@@ -265,14 +273,24 @@ export function useDesktopSpeechHostState(
         );
         return;
       }
+      const controllerCredentialMode =
+        requestContext.credentialSource === "ambient" ? "ambient" : "fixed";
       const next = await startDesktopSpeechTunnel({
         projectId,
-        controllerUrl,
-        controllerAccessToken: accessToken,
+        controllerUrl: requestContext.baseUrl,
+        controllerAccessToken: requestContext.accessToken,
+        controllerCredentialMode,
         forceRestart: true,
       });
       setDesktopSpeechTunnelStatus(next);
-      if (!next || next.state !== "active" || !next.publicUrl) {
+      if (
+        !next ||
+        next.state !== "active" ||
+        !next.publicUrl ||
+        !next.controllerBindingId ||
+        next.controllerUrl !== requestContext.baseUrl ||
+        next.controllerCredentialMode !== controllerCredentialMode
+      ) {
         options.showStatus(
           next?.lastError ?? "Desktop could not expose the speech tunnel for this space.",
           "error",
@@ -287,7 +305,8 @@ export function useDesktopSpeechHostState(
           connectionType: "tunnel",
           hostMode: "desktop",
         },
-        accessToken,
+        requestContext.accessToken,
+        requestContext,
       );
       if (!routeResult.success) {
         options.showStatus(
