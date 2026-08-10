@@ -10,9 +10,9 @@ const CONTACT_EMAIL = "contact@instafy.dev";
 export function PrivacyPage() {
   useEffect(() => {
     applyPageMeta({
-      title: "Privacy Policy · Instafy Studio",
+      title: "Privacy Policy · Instafy",
       description:
-        "Learn how Instafy Studio collects, uses, and shares information when you use our chat-first AI space.",
+        "Learn how Instafy collects, uses, and shares information when you use our chat-first AI space.",
       image: "/og-image.png",
     });
   }, []);
@@ -36,7 +36,7 @@ export function PrivacyPage() {
             </Heading>
             <Text variant="lead" tone="secondary" className="mt-4 max-w-prose">
               This Privacy Policy explains how Instafy (“we”, “us”) collects, uses, and shares information
-              when you use Instafy Studio (the “Service”).
+              when you use Instafy (the “Service”).
             </Text>
           </header>
 

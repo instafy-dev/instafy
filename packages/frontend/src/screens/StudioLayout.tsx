@@ -516,8 +516,8 @@ function StudioLayoutInner() {
   useEffect(() => {
     const projectName = (activeProjectName ?? "").trim();
     applyPageMeta({
-      title: projectName ? `${projectName} · Instafy Studio` : "Instafy Studio",
-      description: "Chat with Octo, edit files, and manage your space in Instafy Studio.",
+      title: projectName ? `${projectName} · Instafy` : "Instafy",
+      description: "Chat with Octo, edit files, and manage your space in Instafy.",
       image: "/og-image.png",
     });
   }, [activeProjectName]);

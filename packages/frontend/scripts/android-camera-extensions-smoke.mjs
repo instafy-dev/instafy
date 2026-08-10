@@ -235,7 +235,7 @@ async function waitForStudioReady(page) {
       async () => {
         await ensureLoggedIn(page).catch(() => {});
         const title = await page.title().catch(() => "");
-        return Boolean(title.includes("Instafy Studio") && (await studioShellVisible(page)));
+        return Boolean(title.includes("Instafy") && (await studioShellVisible(page)));
       },
       {
         timeout: 60_000,
@@ -1232,7 +1232,7 @@ async function main() {
   const context = browser.contexts()[0];
   const page = context.pages().find((entry) => entry.url().includes("/studio")) ?? context.pages()[0];
   if (!page) {
-    throw new Error("Unable to find the Instafy Studio page in the Android WebView.");
+    throw new Error("Unable to find the Instafy page in the Android WebView.");
   }
 
   const consoleMessages = [];

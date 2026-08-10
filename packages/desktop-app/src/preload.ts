@@ -90,6 +90,12 @@ export type DesktopUpdaterStatus = {
   lastDownloadedAt?: string;
   lastError?: string;
   lastInstallRequestAccepted?: boolean;
+  downloadProgress?: {
+    percent: number;
+    transferredBytes: number;
+    totalBytes: number;
+    bytesPerSecond: number;
+  };
 };
 
 export type DesktopVoiceHostServiceStatus = {

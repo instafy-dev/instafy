@@ -1,4 +1,4 @@
-import { BrowserWindow, Notification, app, dialog, ipcMain, net, shell } from "electron";
+import { BrowserWindow, Menu, Notification, app, dialog, ipcMain, net, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -39,6 +39,7 @@ import {
   desktopUpdaterStatus,
   isDesktopUpdaterReadyToInstall,
   performDesktopUpdaterInstallAfterQuitApproved,
+  checkForDesktopUpdatesInteractively,
   startDesktopUpdater,
   triggerDesktopUpdaterCheck,
   triggerDesktopUpdaterDownload,
@@ -914,7 +915,7 @@ async function confirmDesktopRuntimeQuit(
   activeJobCount: number | null,
   installUpdate: boolean,
 ): Promise<"drain" | "force" | "cancel"> {
-  const action = installUpdate ? "restart and install the update" : "quit Instafy Studio";
+  const action = installUpdate ? "restart and install the update" : "quit Instafy";
   const actionLabel = installUpdate ? "Restart" : "Quit";
   if (activeJobCount === null) {
     const result = await showDesktopQuitMessageBox({
@@ -1102,8 +1103,8 @@ async function coordinateDesktopQuit(installUpdate: boolean): Promise<boolean> {
       new Notification({
         title: "Finishing local agent work",
         body: installUpdate
-          ? "Instafy Studio will restart and install the update when the current job finishes."
-          : "Instafy Studio will quit when the current job finishes.",
+          ? "Instafy will restart and install the update when the current job finishes."
+          : "Instafy will quit when the current job finishes.",
       }).show();
     }
 
@@ -1676,6 +1677,7 @@ app.whenReady().then(() => {
       return await requestCoordinatedDesktopQuit({ installUpdate: true });
     },
   });
+  installDesktopApplicationMenu();
 
   ipcMain.handle("instafy:personalBrowserStatus", async (event) => {
     assertAllowedCaller(event);
@@ -2655,3 +2657,43 @@ app.on("before-quit", (event) => {
     installUpdate: isDesktopUpdaterReadyToInstall(),
   });
 });
+
+
+// macOS convention: updates are reachable from the application menu, not only
+// via background prompts. Electron's default menu has every standard role but
+// no update item, so the menu is rebuilt with one addition rather than
+// replaced wholesale. Other platforms keep the default menu untouched; this
+// release ships macOS only.
+function installDesktopApplicationMenu() {
+  if (process.platform !== "darwin") {
+    return;
+  }
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      {
+        label: app.name,
+        submenu: [
+          { role: "about" },
+          {
+            label: "Check for Updates\u2026",
+            click: () => {
+              void checkForDesktopUpdatesInteractively();
+            },
+          },
+          { type: "separator" },
+          { role: "services" },
+          { type: "separator" },
+          { role: "hide" },
+          { role: "hideOthers" },
+          { role: "unhide" },
+          { type: "separator" },
+          { role: "quit" },
+        ],
+      },
+      { role: "fileMenu" },
+      { role: "editMenu" },
+      { role: "viewMenu" },
+      { role: "windowMenu" },
+    ]),
+  );
+}

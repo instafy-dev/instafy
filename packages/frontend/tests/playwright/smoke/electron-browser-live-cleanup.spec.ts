@@ -936,7 +936,7 @@ test.describe("Electron Shared Browser live harness safety", () => {
 
   test("launches a packaged executable without source argv and isolates its workspace", async () => {
     const packageDir = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-packaged-launch-"));
-    const executablePath = path.join(packageDir, "Instafy Studio");
+    const executablePath = path.join(packageDir, "Instafy");
     fs.writeFileSync(executablePath, "packaged fixture", { mode: 0o700 });
     let launchOptions: {
       args?: string[];

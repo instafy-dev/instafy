@@ -20,9 +20,9 @@ function validManifest() {
     feedUrl: DESKTOP_APP_STABLE_BASE_URL,
     architectures: { mac: ["arm64"] },
     artifacts: {
-      macDmg: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-studio-${VERSION}-mac-arm64.dmg`,
-      macZip: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-studio-${VERSION}-mac-arm64.zip`,
-      windowsExe: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-studio-${VERSION}-win.exe`,
+      macDmg: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-${VERSION}-mac-arm64.dmg`,
+      macZip: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-${VERSION}-mac-arm64.zip`,
+      windowsExe: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-${VERSION}-win.exe`,
     },
   };
 }
@@ -36,9 +36,9 @@ describe("parseDesktopAppLatestPayload", () => {
       feedUrl: DESKTOP_APP_STABLE_BASE_URL,
       publishedAt: "2026-07-21T12:00:00Z",
       artifacts: {
-        macDmg: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-studio-${VERSION}-mac-arm64.dmg`,
+        macDmg: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-${VERSION}-mac-arm64.dmg`,
         macArch: "arm64",
-        windowsExe: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-studio-${VERSION}-win.exe`,
+        windowsExe: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-${VERSION}-win.exe`,
       },
     });
   });
@@ -46,7 +46,7 @@ describe("parseDesktopAppLatestPayload", () => {
   it("rejects artifacts that do not exactly match the release version and feed", () => {
     const payload = validManifest();
     payload.artifacts.macDmg =
-      `${DESKTOP_APP_STABLE_BASE_URL}/archive/instafy-studio-${VERSION}-mac-arm64.dmg`;
+      `${DESKTOP_APP_STABLE_BASE_URL}/archive/instafy-${VERSION}-mac-arm64.dmg`;
 
     expect(parseDesktopAppLatestPayload(payload)).toBeNull();
   });
@@ -64,7 +64,7 @@ describe("parseDesktopAppLatestPayload", () => {
       artifacts: ReturnType<typeof validManifest>["artifacts"] & { linuxAppImage: string };
     };
     payload.artifacts.linuxAppImage =
-      `${DESKTOP_APP_STABLE_BASE_URL}/instafy-studio-${VERSION}-linux.AppImage`;
+      `${DESKTOP_APP_STABLE_BASE_URL}/instafy-${VERSION}-linux.AppImage`;
 
     expect(parseDesktopAppLatestPayload(payload)).toBeNull();
   });
@@ -203,11 +203,11 @@ describe("fetchDesktopReleaseManifest", () => {
       payload.version = version;
       payload.tag = `desktop-app-v${version}`;
       payload.artifacts.macDmg =
-        `${DESKTOP_APP_STABLE_BASE_URL}/instafy-studio-${version}-mac-arm64.dmg`;
+        `${DESKTOP_APP_STABLE_BASE_URL}/instafy-${version}-mac-arm64.dmg`;
       payload.artifacts.macZip =
-        `${DESKTOP_APP_STABLE_BASE_URL}/instafy-studio-${version}-mac-arm64.zip`;
+        `${DESKTOP_APP_STABLE_BASE_URL}/instafy-${version}-mac-arm64.zip`;
       payload.artifacts.windowsExe =
-        `${DESKTOP_APP_STABLE_BASE_URL}/instafy-studio-${version}-win.exe`;
+        `${DESKTOP_APP_STABLE_BASE_URL}/instafy-${version}-win.exe`;
 
       expect(parseDesktopAppLatestPayload(payload)?.version).toBe(version);
     },

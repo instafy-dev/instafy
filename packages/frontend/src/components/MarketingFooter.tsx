@@ -2,7 +2,7 @@ import { TextLink } from "./TextLink";
 import { Text } from "./Text";
 
 export function MarketingFooter(props: { productName?: string }) {
-  const productName = props.productName ?? "Instafy Studio";
+  const productName = props.productName ?? "Instafy";
 
   return (
     <footer className="w-full pt-16 pb-10 text-center">
