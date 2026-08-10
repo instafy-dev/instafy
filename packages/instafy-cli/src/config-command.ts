@@ -1,3 +1,4 @@
+import { resolveControllerUrl } from "./config.js";
 import kleur from "kleur";
 import {
   clearInstafyCliConfig,
@@ -61,6 +62,10 @@ export function configList(options?: { json?: boolean }): void {
   const payload = {
     path: getInstafyConfigPath(),
     controllerUrl: config.controllerUrl ?? null,
+    // The effective URL a command will actually reach, after env and defaults
+    // are applied. "controllerUrl: (not set)" alone misled agents into thinking
+    // nothing would work, when the localhost default was in force.
+    effectiveControllerUrl: resolveControllerUrl(),
     studioUrl: config.studioUrl ?? null,
     accessTokenSet: Boolean(config.accessToken),
     refreshTokenSet: Boolean(config.refreshToken),
@@ -75,6 +80,7 @@ export function configList(options?: { json?: boolean }): void {
   console.log(kleur.green("Instafy CLI config"));
   console.log(`Path: ${payload.path}`);
   console.log(`controller-url: ${payload.controllerUrl ?? kleur.yellow("(not set)")}`);
+  console.log(`controller-url (effective): ${payload.effectiveControllerUrl}`);
   console.log(`studio-url: ${payload.studioUrl ?? kleur.yellow("(not set)")}`);
   console.log(`access-token: ${payload.accessTokenSet ? kleur.green("(set)") : kleur.yellow("(not set)")}`);
   console.log(`refresh-token: ${payload.refreshTokenSet ? kleur.green("(set)") : kleur.yellow("(not set)")}`);
