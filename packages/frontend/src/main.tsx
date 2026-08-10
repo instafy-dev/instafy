@@ -10,6 +10,7 @@ import { AuthProvider } from "./providers/AuthProvider";
 import { ProfileProvider } from "./profile/ProfileProvider";
 import { ThemeProvider } from "./theme/ThemeProvider";
 import { installDesktopUpdateBootstrap } from "./desktop/updates/bootstrap";
+import { installDesktopWindowChromeBootstrap } from "./desktop/windowChrome/bootstrap";
 import { installNativeOtaBootstrap } from "./mobile/ota/bootstrap";
 import { installNativeDeepLinkBootstrap } from "./native/nativeDeepLinks";
 
@@ -72,6 +73,7 @@ if (import.meta.env.PROD && typeof window !== "undefined" && "serviceWorker" in 
 
 installServiceWorkerPushDebugListener();
 installDesktopUpdateBootstrap();
+installDesktopWindowChromeBootstrap();
 void installNativeOtaBootstrap();
 installNativeDeepLinkBootstrap(router);
 

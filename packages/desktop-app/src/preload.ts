@@ -221,6 +221,11 @@ export type DesktopSpeechTunnelStatus = {
 };
 
 contextBridge.exposeInMainWorld("instafyDesktop", {
+  // Static because it cannot change at runtime, and versioned on purpose:
+  // frontends older than this property see undefined and keep the layout
+  // that suits the stock title bar; apps older than the integrated layout
+  // never expose it, so the frontend keeps the stock spacing there too.
+  windowChrome: process.platform === "darwin" ? "hiddenInset" : "system",
   notify: async (payload: DesktopNotificationPayload) => {
     await ipcRenderer.invoke("instafy:notify", payload);
   },

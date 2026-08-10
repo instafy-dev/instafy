@@ -353,3 +353,19 @@ body.dark {
   opacity: 0.96;
   filter: saturate(1.14) brightness(1.12);
 }
+
+/* Desktop shell with a hidden macOS title bar: the strip is the only way to
+   drag the window, and the inset keeps content clear of the traffic lights.
+   Gated by the bootstrap -- browsers never carry this class. */
+html.desktop-window-chrome-inset body {
+  padding-top: 38px;
+}
+.desktop-window-drag-strip {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 38px;
+  z-index: 60;
+  -webkit-app-region: drag;
+}

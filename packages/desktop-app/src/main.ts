@@ -573,6 +573,15 @@ function createMainWindow(initialUrl?: string) {
     width: 1240,
     height: 780,
     backgroundColor: "#0b0b0d",
+    // No stock title bar on macOS: the traffic lights float over the app's
+    // own chrome and content runs flush to the top, like every polished Mac
+    // Electron app. The frontend detects this via the bridge's windowChrome
+    // and provides the drag region and top inset itself -- an older frontend
+    // without that support would leave the window undraggable, so the two
+    // sides are versioned together through the bridge property.
+    ...(process.platform === "darwin"
+      ? { titleBarStyle: "hiddenInset" as const, trafficLightPosition: { x: 14, y: 12 } }
+      : {}),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,

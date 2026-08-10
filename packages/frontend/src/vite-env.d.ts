@@ -341,6 +341,7 @@ type InstafyDesktopPersonalBrowserBounds = {
 
 interface Window {
   instafyDesktop?: {
+    windowChrome?: "hiddenInset" | "system";
     notify: (payload: InstafyDesktopNotificationPayload) => Promise<void>;
     invokeDesktopExtension?: (
       options: InstafyDesktopExtensionInvokeOptions,
