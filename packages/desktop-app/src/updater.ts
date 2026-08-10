@@ -2,6 +2,7 @@ import { BrowserWindow, app, dialog } from "electron";
 import { autoUpdater } from "electron-updater";
 import { desktopLog } from "./logging";
 import { settleDesktopUpdaterDownload } from "./desktopUpdaterDownload";
+import { nextDeclinedVersion, shouldPromptForUpdate } from "./desktopUpdaterPromptPolicy";
 import {
   applyDesktopUpdaterDownloadProgress,
   clearDesktopUpdaterDownloadProgress,
@@ -46,7 +47,19 @@ export type StartDesktopUpdaterOptions = {
 
 const DEFAULT_DESKTOP_UPDATE_FEED_BASE_URL = "https://downloads.instafy.dev/desktop-app";
 const DEFAULT_DESKTOP_UPDATE_CHANNEL = "stable";
-const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+// Six hours meant a release could sit unnoticed most of a working day. A
+// check is one ~500-byte manifest fetch, so the interval was never paying for
+// anything -- what actually costs the user is the PROMPT, and that is now
+// bounded separately (see declinedVersion). Check often, interrupt rarely.
+const UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
+// Returning to the app is the moment an update is least disruptive to learn
+// about, so focus triggers a check -- throttled, because focus fires whenever
+// a window is clicked, alt-tabbed to, or restored.
+const FOCUS_CHECK_THROTTLE_MS = 5 * 60 * 1000;
+let lastCheckStartedAtMs = 0;
+// A declined version stays declined. Without this, shortening the interval
+// converts one polite prompt into a nag every interval forever.
+let declinedVersion: string | null = null;
 
 let promptInFlight = false;
 let pendingDownloadedPromptVersion: string | null = null;
@@ -82,7 +95,11 @@ function getFocusedWindow(): BrowserWindow | null {
   return BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows().at(0) ?? null;
 }
 
-async function runDesktopUpdateCheck(options: { suppressPrompts?: boolean } = {}) {
+async function runDesktopUpdateCheck(options: { suppressPrompts?: boolean; throttleMs?: number } = {}) {
+  if (options.throttleMs && Date.now() - lastCheckStartedAtMs < options.throttleMs) {
+    return desktopUpdaterStatus;
+  }
+  lastCheckStartedAtMs = Date.now();
   if (!app.isPackaged) {
     desktopUpdaterStatus.isEnabled = false;
     desktopUpdaterStatus.lastError = "Desktop updates are only available in packaged builds.";
@@ -335,11 +352,18 @@ export function startDesktopUpdater(options: StartDesktopUpdaterOptions = {}) {
     }
     desktopUpdaterStatus.phase = "update_available";
     desktopUpdaterStatus.availableVersion = info.version;
+    // The status above still reports the update regardless, so the in-app
+    // surface and the menu item can offer it whenever the user goes looking.
+    const mayPrompt = shouldPromptForUpdate(info.version, {
+      phase: desktopUpdaterStatus.phase,
+      suppressAvailablePrompt,
+      promptInFlight,
+      declinedVersion,
+    });
     if (suppressAvailablePrompt) {
       suppressAvailablePrompt = false;
-      return;
     }
-    if (promptInFlight) {
+    if (!mayPrompt) {
       return;
     }
     promptInFlight = true;
@@ -356,6 +380,7 @@ export function startDesktopUpdater(options: StartDesktopUpdaterOptions = {}) {
         detail: "Download it now, then choose when to restart and install it.",
       });
       shouldDownload = result.response === 0;
+      declinedVersion = nextDeclinedVersion(info.version, shouldDownload, declinedVersion);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       desktopLog("warn", "[instafy-desktop] updater prompt failed", { message });
@@ -391,6 +416,14 @@ export function startDesktopUpdater(options: StartDesktopUpdaterOptions = {}) {
     desktopUpdaterStatus.availableVersion = info.version;
     desktopUpdaterStatus.lastDownloadedAt = new Date().toISOString();
     await showDownloadedDesktopUpdatePrompt(info.version);
+  });
+
+  // Coming back to the app is when learning about an update costs least.
+  app.on("browser-window-focus", () => {
+    void runDesktopUpdateCheck({
+      suppressPrompts: false,
+      throttleMs: FOCUS_CHECK_THROTTLE_MS,
+    });
   });
 
   void runDesktopUpdateCheck();
