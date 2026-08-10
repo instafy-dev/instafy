@@ -18,8 +18,19 @@ vi.mock("react-aria-components", async (importOriginal) => {
   };
 });
 
+const popoverPlacements: unknown[] = [];
+
 vi.mock("../../../../components/aria/StudioPopover", () => ({
-  StudioDialogPopover: ({ children }: { children: ReactNode }) => <div>{children}</div>,
+  StudioDialogPopover: ({
+    children,
+    placement,
+  }: {
+    children: ReactNode;
+    placement?: unknown;
+  }) => {
+    popoverPlacements.push(placement);
+    return <div>{children}</div>;
+  },
 }));
 
 function human(userId: string, label: string, isSelf = false): ConversationRosterHuman {
@@ -35,6 +46,7 @@ describe("ConversationRoster", () => {
   let root: Root;
 
   beforeEach(() => {
+    popoverPlacements.length = 0;
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -156,5 +168,38 @@ describe("ConversationRoster", () => {
   it("renders nothing when there are no members", async () => {
     await renderRoster([], []);
     expect(container.querySelector('[data-testid="conversation-roster"]')).toBeNull();
+  });
+
+  it("keeps the trigger ambient: no panel background, border, shadow or blur", async () => {
+    await renderRoster([human("user-self", "Taylor", true)], [agent("octo", "Octo", "octo")]);
+
+    const trigger = container.querySelector('[data-testid="conversation-roster"]');
+    const triggerClass = trigger?.getAttribute("class") ?? "";
+    expect(triggerClass).toContain("bg-transparent");
+    expect(triggerClass).toContain("border-0");
+    expect(triggerClass).toContain("shadow-none");
+    expect(triggerClass).not.toContain("backdrop-blur");
+    expect(triggerClass).not.toContain("bg-white/85");
+    expect(triggerClass).not.toContain("shadow-sm");
+    // Hover is only the shared ghost variant's subtle wash — the roster adds no
+    // competing hover background of its own.
+    expect(triggerClass).toContain("hover:bg-slate-100 ");
+
+    // The only ring left is the hairline that separates overlapping faces, and
+    // it is painted in the chat surface's own background in both themes (white
+    // / --color-studio-dark-panel), not the workspace canvas.
+    const ringWrapper = trigger?.querySelector('[data-testid="chat-avatar-human"]')?.parentElement;
+    const ringClass = ringWrapper?.getAttribute("class") ?? "";
+    expect(ringClass).toContain("ring-1");
+    expect(ringClass).toContain("ring-white");
+    expect(ringClass).toContain("dark:ring-[var(--color-studio-dark-panel)]");
+    expect(ringClass).not.toContain("dark:ring-[var(--color-studio-dark-canvas)]");
+    expect(ringClass).not.toContain("ring-2");
+  });
+
+  it("opens the popover downward, away from the conversation top edge", async () => {
+    await renderRoster([human("user-self", "Taylor", true)], [agent("octo", "Octo", "octo")]);
+
+    expect(popoverPlacements).toContain("bottom end");
   });
 });

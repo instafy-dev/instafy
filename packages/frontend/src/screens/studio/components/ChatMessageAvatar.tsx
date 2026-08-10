@@ -72,7 +72,7 @@ export function ChatMessageAvatar({
   motion?: AssistantAvatarMotion;
   scrollReactive?: boolean;
   seed?: string | null;
-  size?: "xs" | "sm" | "lg";
+  size?: "2xs" | "xs" | "sm" | "lg";
 }) {
   const agentIdentity =
     kind === "assistant"
@@ -110,9 +110,25 @@ export function ChatMessageAvatar({
   const humanLabel = typeof label === "string" ? label.trim() : "";
   const humanText = humanLabel ? resolveAgentAvatarText({ displayName: humanLabel }) : null;
 
-  const sizeClassName = size === "lg" ? "h-12 w-12" : size === "xs" ? "h-7 w-7" : "h-8 w-8";
-  const iconClassName = size === "lg" ? "h-6 w-6" : size === "xs" ? "h-3.5 w-3.5" : "h-4 w-4";
-  const textClassName = size === "lg" ? "text-sm" : "text-xs";
+  // "2xs" exists for ambient presence surfaces (the top-bar conversation
+  // roster), where a transcript-sized face reads far too loud.
+  const sizeClassName =
+    size === "lg"
+      ? "h-12 w-12"
+      : size === "2xs"
+        ? "h-6 w-6"
+        : size === "xs"
+          ? "h-7 w-7"
+          : "h-8 w-8";
+  const iconClassName =
+    size === "lg"
+      ? "h-6 w-6"
+      : size === "2xs"
+        ? "h-3 w-3"
+        : size === "xs"
+          ? "h-3.5 w-3.5"
+          : "h-4 w-4";
+  const textClassName = size === "lg" ? "text-sm" : size === "2xs" ? "text-xxs" : "text-xs";
 
   return (
     <div

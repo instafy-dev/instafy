@@ -162,26 +162,33 @@ test("runtime downloads verify architecture-bound checksums before extraction", 
   );
   assert.equal(
     [...source.matchAll(/sha256sum --check --status/gu)].length,
-    5,
+    7,
     "runtime and webdev downloads must each verify their archive",
   );
   assert.equal(
     [...source.matchAll(/curl --proto '=https' --tlsv1\.2/gu)].length,
-    5,
+    7,
     "runtime release downloads must enforce HTTPS and TLS 1.2+",
   );
 
-  // The CVE-2026-14257 patch of npm's vendored brace-expansion must stay
-  // pinned by exact version and tarball checksum, and both runtime flavors
-  // must verify the replaced module's version after extraction.
+  // npm's vendored vulnerable packages must stay pinned by exact version and
+  // tarball checksum, and both runtime flavors must verify every replaced
+  // module's version after extraction.
   assert.equal(
     argumentDefaults(source).get("BRACE_EXPANSION_VERSION"),
-    "5.0.8",
+    "5.0.9",
   );
   assertPinnedChecksumArgument(
     source,
     "BRACE_EXPANSION_SHA256",
-    "a03b06e66d862d0278b1ff45b66427f245f99c665800dc9bd790c0c13d2247fe",
+    "5d06001fddd25cbee90c96db4dc5b7b57711b984c3141e28d10f143deb52dbaf",
+    relativePath,
+  );
+  assert.equal(argumentDefaults(source).get("IP_ADDRESS_VERSION"), "10.3.1");
+  assertPinnedChecksumArgument(
+    source,
+    "IP_ADDRESS_SHA256",
+    "ad1790063beea11a312c801df30d58e147de762f4f77787552376eb7424623e5",
     relativePath,
   );
   // Patch EVERY npm installation in the image, not one hardcoded prefix: the
@@ -199,15 +206,32 @@ test("runtime downloads verify architecture-bound checksums before extraction", 
     /tar -xzf \/tmp\/brace-expansion\.tgz -C \/usr\/local/u,
     "the patch must not target a single hardcoded npm prefix",
   );
+  assert.equal(
+    [...source.matchAll(
+      /for ia_dir in \$\(find \/usr -type d -path '\*\/node_modules\/npm\/node_modules\/ip-address'/gu,
+    )].length,
+    2,
+    "both runtime flavors must patch every npm root's ip-address",
+  );
+  assert.doesNotMatch(
+    source,
+    /tar -xzf \/tmp\/ip-address\.tgz -C \/usr\/local/u,
+    "the patch must not target a single hardcoded npm prefix",
+  );
   // Each flavor fails the build if any vendored copy is left unpatched.
   assert.equal(
     [...source.matchAll(/unpatched brace-expansion copies/gu)].length,
     2,
     "both runtime flavors must fail closed on a remaining vulnerable copy",
   );
+  assert.equal(
+    [...source.matchAll(/unpatched ip-address copies/gu)].length,
+    2,
+    "both runtime flavors must fail closed on a remaining vulnerable copy",
+  );
 
   // Anchor each download on its own URL/target rather than "first curl in the
-  // stage": the stages also contain the brace-expansion patch download.
+  // stage": the stages also contain the npm dependency patch downloads.
   const ratholeCurl = 'curl --proto \'=https\' --tlsv1.2 --fail --location --silent --show-error -o /tmp/rathole.zip';
   const firstRathole = source.indexOf(
     ratholeCurl,

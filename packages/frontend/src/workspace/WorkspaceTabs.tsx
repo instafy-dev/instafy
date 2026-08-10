@@ -55,7 +55,7 @@ const CONVERSATION_MENU_PADDING = 12;
 
 function getWorkspaceTabBaseClassName(showBaseline: boolean): string {
   return showBaseline
-    ? "inline-flex h-[48px] items-center gap-2 rounded-none border border-transparent px-4 text-sm font-medium"
+    ? "inline-flex h-[48px] items-center gap-2 rounded-t-xl rounded-b-none border border-transparent px-4 text-sm font-medium"
     : "inline-flex h-10 items-center gap-2 rounded-xl border border-transparent px-3.5 text-sm font-medium";
 }
 
@@ -67,7 +67,7 @@ function getInactiveWorkspaceTabClassName(showBaseline: boolean): string {
 
 function getActiveWorkspaceTabClassName(showBaseline: boolean): string {
   return showBaseline
-    ? "relative z-10 -mb-px !bg-white !text-slate-950 !border-slate-200/70 !border-b-white shadow-none after:pointer-events-none after:absolute after:-bottom-px after:left-0 after:right-0 after:h-[2px] after:bg-white dark:!bg-[var(--color-studio-dark-canvas)] dark:!text-slate-50 dark:!border-[color:var(--color-studio-dark-panel-border)] dark:!border-b-transparent dark:after:bg-[var(--color-studio-dark-canvas)]"
+    ? "relative z-10 -mb-px !bg-white !text-slate-950 !border-slate-200/70 !border-b-white shadow-none after:pointer-events-none after:absolute after:-bottom-px after:left-0 after:right-0 after:h-[2px] after:bg-white dark:!bg-[var(--color-studio-dark-panel)] dark:!text-slate-50 dark:!border-[color:var(--color-studio-dark-panel-border)] dark:!border-b-transparent dark:after:bg-[var(--color-studio-dark-panel)]"
     : "z-10 !bg-slate-100 !text-slate-950 !border-slate-200/70 shadow-none dark:!bg-[var(--color-studio-dark-active)] dark:!text-slate-50 dark:!border-transparent";
 }
 
@@ -860,8 +860,18 @@ function WorkspaceSortableTab({
   const tabBaseClassName = getWorkspaceTabBaseClassName(showBaseline);
   const activeClassName = getActiveWorkspaceTabClassName(showBaseline);
   const inactiveClassName = getInactiveWorkspaceTabClassName(showBaseline);
-  const startEdgeClassName =
-    showBaseline && isActive && isFirstTab ? "!border-l-transparent dark:!border-l-transparent" : "";
+  // The first tab sits flush against the rail's right edge (rail is w-[4rem];
+  // the tab starts at exactly 64px), so it is attached on that side, not free.
+  // Radius belongs only on free edges: squaring the top-left lets the rail's
+  // vertical divider run straight into the tab's flat edge instead of a curve
+  // pulling away from it. Applied to every first tab, not just the active one,
+  // so the hover shape lines up too.
+  const startEdgeClassName = [
+    showBaseline && isFirstTab ? "!rounded-tl-none" : "",
+    showBaseline && isActive && isFirstTab ? "!border-l-transparent dark:!border-l-transparent" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
   return (
     <div
       ref={setNodeRef}
