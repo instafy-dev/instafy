@@ -39,7 +39,8 @@ export default defineConfig({
     desktopRuntimeActivity: "src/desktopRuntimeActivity.ts",
     desktopControllerTrust: "src/desktopControllerTrust.ts",
     desktopUpdaterDownload: "src/desktopUpdaterDownload.ts",
-    desktopUpdaterProgress: "src/desktopUpdaterProgress.ts"
+    desktopUpdaterProgress: "src/desktopUpdaterProgress.ts",
+    desktopUpdaterPromptPolicy: "src/desktopUpdaterPromptPolicy.ts"
   },
   outDir: "dist",
   format: ["cjs"],
