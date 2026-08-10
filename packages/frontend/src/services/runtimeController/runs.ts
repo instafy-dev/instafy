@@ -1,8 +1,10 @@
 import type { RunRecord } from "../../types";
 import {
-  controllerBaseUrl,
+  emitControllerAuthErrorForRequest,
+  isControllerDocumentReloadPending,
   normalizeUuidParam,
-  resolveControllerAccessToken,
+  readControllerError,
+  resolveControllerRequestContext,
   runtimeControllerEnabled,
 } from "./core";
 import {
@@ -127,20 +129,28 @@ export async function fetchRunResultFromController(
     return null;
   }
 
-  const token = await resolveControllerAccessToken(accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(accessToken ?? null);
+  if (!requestContext.accessToken) {
+    return null;
+  }
 
   try {
-    const response = await fetch(`${controllerBaseUrl}/runs/${runId}/result`, {
+    const response = await fetch(`${requestContext.baseUrl}/runs/${runId}/result`, {
       method: "GET",
       headers: {
         "content-type": "application/json",
-        ...(token ? { authorization: `Bearer ${token}` } : {}),
+        authorization: `Bearer ${requestContext.accessToken}`,
       },
     });
 
     if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`fetch run result failed (${response.status}): ${text}`);
+      throw new Error(
+        await readControllerError(
+          response,
+          "fetch run result failed",
+          requestContext,
+        ),
+      );
     }
 
     const payload = (await response.json()) as {
@@ -187,13 +197,15 @@ export interface FetchControllerRunsParams {
 export interface FetchControllerRunsResult {
   runs: RunRecord[];
   notFound: boolean;
+  unauthorized: boolean;
+  forbidden: boolean;
 }
 
 export async function fetchRunsFromController(
   params: FetchControllerRunsParams,
 ): Promise<FetchControllerRunsResult> {
   if (!runtimeControllerEnabled) {
-    return { runs: [], notFound: false };
+    return { runs: [], notFound: false, unauthorized: false, forbidden: false };
   }
 
   const search = new URLSearchParams();
@@ -214,39 +226,46 @@ export async function fetchRunsFromController(
     );
   }
 
-  const url = `${controllerBaseUrl}/runs${search.toString() ? `?${search.toString()}` : ""}`;
-
-  const accessToken = await resolveControllerAccessToken(
+  const requestContext = await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  if (!requestContext.accessToken) {
+    return { runs: [], notFound: false, unauthorized: false, forbidden: false };
+  }
+  const url = `${requestContext.baseUrl}/runs${search.toString() ? `?${search.toString()}` : ""}`;
 
   try {
     const response = await fetch(url, {
-      headers: accessToken
-        ? { authorization: `Bearer ${accessToken}` }
-        : undefined,
+      headers: { authorization: `Bearer ${requestContext.accessToken}` },
     });
     if (response.status === 404) {
-      return { runs: [], notFound: true };
+      return { runs: [], notFound: true, unauthorized: false, forbidden: false };
     }
     if (response.status === 401 || response.status === 403) {
-      return { runs: [], notFound: true };
+      await readControllerError(response, "fetch runs failed", requestContext);
+      return {
+        runs: [],
+        notFound: false,
+        unauthorized: response.status === 401,
+        forbidden: response.status === 403,
+      };
     }
     if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`fetch runs failed (${response.status}): ${text}`);
+      throw new Error(
+        await readControllerError(response, "fetch runs failed", requestContext),
+      );
     }
 
     const payload = (await response.json()) as ControllerRunSnapshot[];
     const runs = payload
       .map(mapRunSnapshotToRecord)
       .filter((run): run is RunRecord => Boolean(run));
-    return { runs, notFound: false };
+    return { runs, notFound: false, unauthorized: false, forbidden: false };
   } catch (error) {
     logControllerRequestError("[runtime-controller] fetchRuns error:", error, {
       suppressLikelyConnectionNoise: true,
     });
-    return { runs: [], notFound: false };
+    return { runs: [], notFound: false, unauthorized: false, forbidden: false };
   }
 }
 
@@ -257,9 +276,238 @@ export interface SubscribeControllerRunsParams {
   accessToken?: string | null;
   quietErrors?: boolean;
   onRun: (run: RunRecord, event: "INSERT" | "UPDATE") => void;
+  onAccessDenied?: (denial: ControllerStreamAccessDenied) => void;
   onError?: (message: string) => void;
   onEvent?: (event: ControllerEventPayload) => void;
   onOpen?: () => void;
+}
+
+export interface ControllerStreamAccessDenied {
+  status: 401 | 403;
+  message: string;
+}
+
+interface ParsedServerSentEvent {
+  data: string;
+  event: string;
+  lastEventId: string;
+}
+
+const MAX_SERVER_SENT_EVENT_DATA_BYTES = 1024 * 1024;
+// Axum's SseEvent::json_data emits the complete JSON payload as one `data: `
+// line. Let a maximum-size event fit on that line, including a possible UTF-8
+// BOM at the start of the stream, while keeping the independent data cap.
+const MAX_SERVER_SENT_EVENT_LINE_BYTES =
+  MAX_SERVER_SENT_EVENT_DATA_BYTES + "data: ".length + 3;
+const DEFAULT_SERVER_SENT_EVENT_RECONNECT_DELAY_MS = 3000;
+
+class ServerSentEventProtocolError extends Error {
+  constructor(message: string) {
+    super(`event stream protocol error: ${message}`);
+    this.name = "ServerSentEventProtocolError";
+  }
+}
+
+class TerminalServerSentEventError extends Error {
+  constructor(readonly denial: ControllerStreamAccessDenied) {
+    super(denial.message);
+    this.name = "TerminalServerSentEventError";
+  }
+}
+
+function assertServerSentEventContentType(response: Response) {
+  const contentType = response.headers.get("content-type");
+  const mediaType = contentType?.split(";", 1)[0]?.trim().toLowerCase();
+  if (mediaType === "text/event-stream") {
+    return;
+  }
+  const received =
+    contentType === null
+      ? "missing Content-Type"
+      : `Content-Type ${JSON.stringify(contentType.slice(0, 160))}`;
+  throw new ServerSentEventProtocolError(
+    `expected Content-Type text/event-stream; received ${received}`,
+  );
+}
+
+class ServerSentEventParser {
+  private readonly lineBuffer = new Uint8Array(
+    MAX_SERVER_SENT_EVENT_LINE_BYTES,
+  );
+  private lineLength = 0;
+  private skipLeadingLineFeed = false;
+  private atStreamStart = true;
+  private readonly decoder = new TextDecoder("utf-8", {
+    fatal: true,
+    // Preserve a BOM so it can be removed only once, at the start of the
+    // stream. Calling decode once per line must not strip later U+FEFF values.
+    ignoreBOM: true,
+  });
+  private readonly encoder = new TextEncoder();
+  private dataLines: string[] = [];
+  private dataByteLength = 0;
+  private eventType = "";
+  private lastEventId: string;
+  private pendingLastEventId: string | null = null;
+
+  constructor(
+    initialLastEventId: string,
+    private readonly onEvent: (event: ParsedServerSentEvent) => void,
+    private readonly onLastEventId: (lastEventId: string) => void,
+    private readonly onRetry: (retryMs: number) => void,
+  ) {
+    this.lastEventId = initialLastEventId;
+  }
+
+  push(chunk: Uint8Array) {
+    if (chunk.byteLength === 0) {
+      return;
+    }
+
+    let offset = 0;
+    if (this.skipLeadingLineFeed) {
+      this.skipLeadingLineFeed = false;
+      if (chunk[0] === 0x0a) {
+        offset = 1;
+      }
+    }
+
+    let segmentStart = offset;
+    for (; offset < chunk.byteLength; offset += 1) {
+      const byte = chunk[offset];
+      if (byte !== 0x0d && byte !== 0x0a) {
+        continue;
+      }
+
+      this.appendLineBytes(chunk.subarray(segmentStart, offset));
+      this.processBufferedLine();
+
+      if (byte === 0x0d) {
+        if (offset + 1 < chunk.byteLength && chunk[offset + 1] === 0x0a) {
+          offset += 1;
+        } else if (offset + 1 === chunk.byteLength) {
+          this.skipLeadingLineFeed = true;
+        }
+      }
+      segmentStart = offset + 1;
+    }
+    this.appendLineBytes(chunk.subarray(segmentStart));
+  }
+
+  finish() {
+    this.skipLeadingLineFeed = false;
+    this.lineLength = 0;
+    this.dataLines = [];
+    this.dataByteLength = 0;
+    this.eventType = "";
+    this.pendingLastEventId = null;
+  }
+
+  private appendLineBytes(bytes: Uint8Array) {
+    if (bytes.byteLength > MAX_SERVER_SENT_EVENT_LINE_BYTES - this.lineLength) {
+      throw new ServerSentEventProtocolError(
+        `line exceeds ${MAX_SERVER_SENT_EVENT_LINE_BYTES}-byte limit`,
+      );
+    }
+    this.lineBuffer.set(bytes, this.lineLength);
+    this.lineLength += bytes.byteLength;
+  }
+
+  private processBufferedLine() {
+    const bytes = this.lineBuffer.subarray(0, this.lineLength);
+    this.lineLength = 0;
+    let line: string;
+    try {
+      line = this.decoder.decode(bytes);
+    } catch {
+      throw new ServerSentEventProtocolError("stream contains invalid UTF-8");
+    }
+    if (this.atStreamStart) {
+      this.atStreamStart = false;
+      if (line.startsWith("\uFEFF")) {
+        line = line.slice(1);
+      }
+    }
+    this.processLine(line);
+  }
+
+  private processLine(line: string) {
+    if (line.length === 0) {
+      this.dispatchEvent();
+      return;
+    }
+    if (line.startsWith(":")) {
+      return;
+    }
+
+    const separator = line.indexOf(":");
+    const field = separator >= 0 ? line.slice(0, separator) : line;
+    let value = separator >= 0 ? line.slice(separator + 1) : "";
+    if (value.startsWith(" ")) {
+      value = value.slice(1);
+    }
+
+    switch (field) {
+      case "event":
+        this.eventType = value;
+        break;
+      case "data": {
+        const nextByteLength =
+          this.dataByteLength +
+          (this.dataLines.length > 0 ? 1 : 0) +
+          this.encoder.encode(value).byteLength;
+        if (nextByteLength > MAX_SERVER_SENT_EVENT_DATA_BYTES) {
+          throw new ServerSentEventProtocolError(
+            `event data exceeds ${MAX_SERVER_SENT_EVENT_DATA_BYTES}-byte limit`,
+          );
+        }
+        this.dataLines.push(value);
+        this.dataByteLength = nextByteLength;
+        break;
+      }
+      case "id":
+        if (!value.includes("\0")) {
+          this.pendingLastEventId = value;
+        }
+        break;
+      case "retry":
+        if (/^[0-9]+$/.test(value)) {
+          const retryMs = Number(value);
+          if (
+            Number.isSafeInteger(retryMs) &&
+            retryMs >= 0 &&
+            retryMs <= 2_147_483_647
+          ) {
+            this.onRetry(retryMs);
+          }
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  private dispatchEvent() {
+    const dataLines = this.dataLines;
+    const eventType = this.eventType || "message";
+    const pendingLastEventId = this.pendingLastEventId;
+    this.dataLines = [];
+    this.dataByteLength = 0;
+    this.eventType = "";
+    this.pendingLastEventId = null;
+    if (pendingLastEventId !== null) {
+      this.lastEventId = pendingLastEventId;
+      this.onLastEventId(pendingLastEventId);
+    }
+    if (dataLines.length === 0) {
+      return;
+    }
+    this.onEvent({
+      data: dataLines.join("\n"),
+      event: eventType,
+      lastEventId: this.lastEventId,
+    });
+  }
 }
 
 export function subscribeToRunsFromController(
@@ -269,7 +517,11 @@ export function subscribeToRunsFromController(
     return () => {};
   }
 
-  if (typeof window === "undefined" || typeof EventSource === "undefined") {
+  if (
+    typeof window === "undefined" ||
+    typeof fetch === "undefined" ||
+    typeof AbortController === "undefined"
+  ) {
     return () => {};
   }
 
@@ -294,35 +546,21 @@ export function subscribeToRunsFromController(
 
   const quietErrors = Boolean(params.quietErrors);
 
-  const buildUrl = async () => {
-    const accessToken = await resolveControllerAccessToken(
-      params.accessToken ?? null,
-    );
-    const search = new URLSearchParams(baseSearch);
-    if (accessToken) {
-      search.set("accessToken", accessToken);
-    }
-    return `${controllerBaseUrl}/events?${search.toString()}`;
-  };
-  if (import.meta.env.DEV && !quietErrors) {
-    buildUrl().then((url) => {
-      // eslint-disable-next-line no-console
-      console.info("[runtime-controller] event-stream url", url);
-    });
-  }
-
-  let currentSource: EventSource | null = null;
+  let currentController: AbortController | null = null;
+  let currentReader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let reconnectDelayMs = DEFAULT_SERVER_SENT_EVENT_RECONNECT_DELAY_MS;
+  let lastEventId = "";
   let cancelled = false;
 
-  const scheduleReconnect = () => {
-    if (cancelled || reconnectTimer) {
+  const scheduleReconnect = (delayMs = reconnectDelayMs) => {
+    if (cancelled || reconnectTimer || isControllerDocumentReloadPending()) {
       return;
     }
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       void connect();
-    }, 3000);
+    }, delayMs);
   };
 
   const connect = async () => {
@@ -330,63 +568,237 @@ export function subscribeToRunsFromController(
       return;
     }
 
-    const url = await buildUrl();
+    const controller = new AbortController();
+    currentController = controller;
+    let opened = false;
+    let url: string | null = null;
     try {
+      const requestContext = await resolveControllerRequestContext(
+        params.accessToken ?? null,
+      );
+      if (
+        cancelled ||
+        currentController !== controller ||
+        isControllerDocumentReloadPending() ||
+        !requestContext.accessToken
+      ) {
+        return;
+      }
+
+      url = `${requestContext.baseUrl}/events?${baseSearch.toString()}`;
+      if (import.meta.env.DEV && !quietErrors) {
+        // eslint-disable-next-line no-console
+        console.info("[runtime-controller] event-stream url", url);
+      }
+
       if (!quietErrors) {
         console.warn(`[runtime-controller] opening event stream url=${url}`);
       }
-      const source = new EventSource(url);
-      currentSource = source;
-
-      source.addEventListener("open", () => {
-        if (import.meta.env.DEV && !isAutomationBrowser()) {
-          console.info("[runtime-controller] sse open", { url });
-        }
-        params.onOpen?.();
-      });
-      if (import.meta.env.DEV && !quietErrors && !isAutomationBrowser()) {
-        source.addEventListener("message", (evt) => {
-          const preview =
-            typeof evt?.data === "string" ? evt.data.slice(0, 200) : null;
-          console.info("[runtime-controller] sse message", { url, preview });
-        });
-        source.addEventListener("error", (error) => {
-          console.warn("[runtime-controller] sse error", error);
-        });
+      const headers: Record<string, string> = {
+        accept: "text/event-stream",
+        authorization: `Bearer ${requestContext.accessToken}`,
+      };
+      if (lastEventId) {
+        headers["last-event-id"] = lastEventId;
       }
 
-      source.onmessage = (event) => {
-        try {
-          const parsed = JSON.parse(event.data) as ControllerEventPayload;
-          handleControllerEvent(parsed, params.onRun, params.onEvent);
-        } catch (parseError) {
-          const message =
-            parseError instanceof Error
-              ? parseError.message
-              : String(parseError);
-          console.warn("[runtime-controller] event parse error:", message);
-          params.onError?.(message);
+      const response = await fetch(url, {
+        method: "GET",
+        headers,
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      if (cancelled || currentController !== controller) {
+        return;
+      }
+      // A 204 response is the EventSource protocol's explicit instruction to
+      // stop reconnecting. It is not an opened stream and not an error.
+      if (response.status === 204) {
+        return;
+      }
+      if (!response.ok) {
+        const responseMessage = await readControllerError(
+          response,
+          "event stream request failed",
+        );
+        const authStatus =
+          response.status === 401 || response.status === 403
+            ? response.status
+            : null;
+        let terminalAuthFailure = authStatus === 403;
+        if (response.status === 401) {
+          const requestCredentialIsCurrent =
+            await emitControllerAuthErrorForRequest(
+              {
+                status: response.status,
+                message: responseMessage,
+                url: response.url,
+              },
+              requestContext,
+            );
+          // A rejected one-off/fixed credential will be reused unchanged, so
+          // it is terminal even though it is not the document's active auth
+          // binding. A stale ambient credential may reconnect only when a
+          // different ambient token actually replaced it. A missing session
+          // or a failed session lookup must remain terminal; otherwise the
+          // reconnect resolves no token and silently leaves stale project
+          // state visible.
+          if (
+            requestContext.credentialSource === "ambient" &&
+            !requestCredentialIsCurrent
+          ) {
+            const replacementContext =
+              await resolveControllerRequestContext(null);
+            const hasReplacementAmbientCredential =
+              replacementContext.credentialSource === "ambient" &&
+              Boolean(replacementContext.accessToken) &&
+              replacementContext.accessToken !== requestContext.accessToken;
+            terminalAuthFailure = !hasReplacementAmbientCredential;
+          } else {
+            terminalAuthFailure = true;
+          }
         }
-      };
-      source.onerror = (event) => {
-        if (cancelled || currentSource !== source) {
+        if (cancelled || currentController !== controller) {
           return;
         }
-        if (!quietErrors) {
-          console.warn(`[runtime-controller] event stream error [url=${url}]`, event);
+        if (terminalAuthFailure && authStatus !== null) {
+          const denial = {
+            status: authStatus,
+            message: responseMessage,
+          } satisfies ControllerStreamAccessDenied;
+          try {
+            params.onAccessDenied?.(denial);
+          } catch (callbackError) {
+            console.warn(
+              "[runtime-controller] event stream access-denied callback failed:",
+              getControllerErrorMessage(callbackError),
+            );
+          }
+          if (cancelled || currentController !== controller) {
+            return;
+          }
+          throw new TerminalServerSentEventError(denial);
         }
-        params.onError?.("event stream error");
-        source.close();
-        currentSource = null;
-        scheduleReconnect();
-      };
+        throw new Error(responseMessage);
+      }
+      try {
+        assertServerSentEventContentType(response);
+      } catch (error) {
+        void response.body?.cancel(error).catch(() => undefined);
+        throw error;
+      }
+      if (!response.body) {
+        throw new Error("event stream response body is unavailable");
+      }
+
+      opened = true;
+      if (import.meta.env.DEV && !isAutomationBrowser()) {
+        console.info("[runtime-controller] sse open", { url });
+      }
+      params.onOpen?.();
+      if (cancelled || currentController !== controller) {
+        return;
+      }
+
+      const parser = new ServerSentEventParser(
+        lastEventId,
+        (event) => {
+          if (import.meta.env.DEV && !quietErrors && !isAutomationBrowser()) {
+            console.info("[runtime-controller] sse message", {
+              url,
+              event: event.event,
+              lastEventId: event.lastEventId,
+            });
+          }
+          try {
+            const parsed = JSON.parse(event.data) as ControllerEventPayload;
+            handleControllerEvent(parsed, params.onRun, params.onEvent);
+          } catch (parseError) {
+            const message =
+              parseError instanceof Error
+                ? parseError.message
+                : String(parseError);
+            console.warn("[runtime-controller] event parse error:", message);
+            params.onError?.(message);
+          }
+        },
+        (value) => {
+          lastEventId = value;
+        },
+        (value) => {
+          reconnectDelayMs = value;
+        },
+      );
+      const reader = response.body.getReader();
+      currentReader = reader;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) {
+            if (cancelled || currentController !== controller) {
+              return;
+            }
+            parser.finish();
+            break;
+          }
+          if (value) {
+            parser.push(value);
+          }
+          if (cancelled || currentController !== controller) {
+            return;
+          }
+        }
+      } catch (error) {
+        await reader.cancel(error).catch(() => undefined);
+        throw error;
+      } finally {
+        if (currentReader === reader) {
+          currentReader = null;
+        }
+        reader.releaseLock();
+      }
+
+      if (!cancelled && currentController === controller) {
+        throw new Error("event stream ended");
+      }
     } catch (error) {
+      if (
+        cancelled ||
+        controller.signal.aborted ||
+        currentController !== controller ||
+        isControllerDocumentReloadPending()
+      ) {
+        return;
+      }
       const message = getControllerErrorMessage(error);
-      logControllerRequestError("[runtime-controller] failed to open event stream:", error, {
-        suppressLikelyConnectionNoise: true,
-      });
-      params.onError?.(message);
-      scheduleReconnect();
+      const protocolError = error instanceof ServerSentEventProtocolError;
+      const terminalError = error instanceof TerminalServerSentEventError;
+      if (opened) {
+        if (!quietErrors) {
+          console.warn(`[runtime-controller] event stream error [url=${url}]`, message);
+        }
+        params.onError?.(protocolError ? message : "event stream error");
+      } else {
+        logControllerRequestError(
+          "[runtime-controller] failed to open event stream:",
+          error,
+          { suppressLikelyConnectionNoise: true },
+        );
+        params.onError?.(message);
+      }
+      controller.abort();
+      currentController = null;
+      if (!terminalError) {
+        scheduleReconnect(
+          protocolError
+            ? DEFAULT_SERVER_SENT_EVENT_RECONNECT_DELAY_MS
+            : reconnectDelayMs,
+        );
+      }
+    } finally {
+      if (currentController === controller) {
+        currentController = null;
+      }
     }
   };
 
@@ -397,8 +809,12 @@ export function subscribeToRunsFromController(
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
     }
-    currentSource?.close();
-    currentSource = null;
+    reconnectTimer = null;
+    const reader = currentReader;
+    currentReader = null;
+    void reader?.cancel().catch(() => undefined);
+    currentController?.abort();
+    currentController = null;
   };
 }
 

@@ -109,7 +109,7 @@ async fn authorize_conversation(
     conversation_id_raw: &str,
     require_prompt_access: bool,
 ) -> Result<(RequestContext, Uuid, ConversationAccess), (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, headers, None).await?;
+    let context = authenticate_request(&state.config, headers).await?;
     let conversation_id = Uuid::from_str(conversation_id_raw.trim())
         .map_err(|_| bad_request("conversationId must be a valid UUID"))?;
 

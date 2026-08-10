@@ -384,7 +384,7 @@ pub(super) async fn mint_runtime_access_token(
     headers: HeaderMap,
     Json(body): Json<RuntimeTokenRequest>,
 ) -> Result<Json<RuntimeTokenResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     // Shipped production behavior (shared-browser collaboration): a scoped
     // access token may never mint a runtime access token. Runtime tokens carry
     // the machine-identity, lease and self-hosted generation bounds that a

@@ -1366,7 +1366,7 @@ async fn import_github_project(
     let project_uuid =
         Uuid::parse_str(project_id.trim()).map_err(|_| bad_request("invalid project id"))?;
 
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = context
         .user_id
         .ok_or_else(|| unauthorized("user session required"))?;

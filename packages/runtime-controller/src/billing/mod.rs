@@ -74,7 +74,7 @@ async fn post_checkout(
         .map_err(|_| bad_request("projectId must be a valid UUID"))?;
     tracing::Span::current().record("project_id", &field::display(project_id));
     let session_id = parse_optional_uuid_param(payload.session_id.clone(), "sessionId")?;
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let mut connection = state
         .pool

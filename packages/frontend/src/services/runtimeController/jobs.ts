@@ -1,7 +1,6 @@
 import {
-  controllerBaseUrl,
   readControllerError,
-  resolveControllerAccessToken,
+  resolveControllerRequestContext,
   runtimeControllerEnabled,
 } from "./core";
 
@@ -26,7 +25,8 @@ async function postControllerJobCancel(params: {
     return null;
   }
 
-  const sessionToken = await resolveControllerAccessToken(null);
+  const requestContext = await resolveControllerRequestContext(null);
+  const sessionToken = requestContext.accessToken;
 
   if (!sessionToken) {
     console.warn("[runtime-controller] No access token available; skipping job cancel.");
@@ -37,7 +37,7 @@ async function postControllerJobCancel(params: {
     reason: params.reason ?? undefined,
   };
 
-  const response = await fetch(`${controllerBaseUrl}${params.path}`, {
+  const response = await fetch(`${requestContext.baseUrl}${params.path}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -47,7 +47,11 @@ async function postControllerJobCancel(params: {
   });
 
   if (!response.ok) {
-    const message = await readControllerError(response, params.fallbackError);
+    const message = await readControllerError(
+      response,
+      params.fallbackError,
+      requestContext,
+    );
     throw new Error(message);
   }
 

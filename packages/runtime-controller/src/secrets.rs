@@ -315,7 +315,7 @@ async fn list_project_secrets(
     headers: HeaderMap,
     AxumPath(project_id_raw): AxumPath<String>,
 ) -> Result<Json<Vec<ProjectSecretListItem>>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let project_id = Uuid::from_str(project_id_raw.trim())
         .map_err(|_| bad_request("projectId must be a valid UUID"))?;
@@ -516,7 +516,7 @@ async fn create_project_secret(
     AxumPath(project_id_raw): AxumPath<String>,
     Json(body): Json<CreateProjectSecretBody>,
 ) -> Result<Json<CreateProjectSecretResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = context
         .user_id
         .ok_or_else(|| unauthorized("user session required"))?;
@@ -724,7 +724,7 @@ async fn update_project_secret(
     AxumPath((project_id_raw, secret_id_raw)): AxumPath<(String, String)>,
     Json(body): Json<UpdateProjectSecretBody>,
 ) -> Result<Json<ProjectSecretListItem>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = context
         .user_id
         .ok_or_else(|| unauthorized("user session required"))?;
@@ -1008,7 +1008,7 @@ async fn revoke_project_secret(
     headers: HeaderMap,
     AxumPath((project_id_raw, secret_id_raw)): AxumPath<(String, String)>,
 ) -> Result<Json<RevokeProjectSecretResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if context.user_id.is_none() && !context.is_service_role {
         return Err(unauthorized("user session required"));
     }

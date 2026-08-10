@@ -1,8 +1,7 @@
 import {
-  controllerBaseUrl,
   normalizeUuidParam,
   readControllerError,
-  resolveControllerAccessToken,
+  resolveControllerRequestContext,
   runtimeControllerEnabled,
 } from "./core";
 
@@ -162,19 +161,24 @@ export async function fetchProjectAutomationsFromController(params: {
     return null;
   }
 
-  const sessionToken = await resolveControllerAccessToken(params.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
+  const sessionToken = requestContext.accessToken;
   if (!sessionToken) {
     return null;
   }
 
-  const response = await fetch(`${controllerBaseUrl}/projects/${projectId}/automations`, {
+  const response = await fetch(`${requestContext.baseUrl}/projects/${projectId}/automations`, {
     headers: {
       authorization: `Bearer ${sessionToken}`,
     },
   });
 
   if (!response.ok) {
-    const message = await readControllerError(response, "fetch automations failed");
+    const message = await readControllerError(
+      response,
+      "fetch automations failed",
+      requestContext,
+    );
     throw new Error(message);
   }
 
@@ -199,7 +203,8 @@ export async function createProjectAutomationInController(
     return null;
   }
 
-  const sessionToken = await resolveControllerAccessToken(params.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
+  const sessionToken = requestContext.accessToken;
   if (!sessionToken) {
     return null;
   }
@@ -220,7 +225,7 @@ export async function createProjectAutomationInController(
     metadata: params.metadata ?? undefined,
   };
 
-  const response = await fetch(`${controllerBaseUrl}/projects/${projectId}/automations`, {
+  const response = await fetch(`${requestContext.baseUrl}/projects/${projectId}/automations`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${sessionToken}`,
@@ -230,7 +235,11 @@ export async function createProjectAutomationInController(
   });
 
   if (!response.ok) {
-    const message = await readControllerError(response, "create automation failed");
+    const message = await readControllerError(
+      response,
+      "create automation failed",
+      requestContext,
+    );
     throw new Error(message);
   }
 
@@ -250,7 +259,8 @@ export async function updateAutomationInController(
     return null;
   }
 
-  const sessionToken = await resolveControllerAccessToken(params.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
+  const sessionToken = requestContext.accessToken;
   if (!sessionToken) {
     return null;
   }
@@ -276,7 +286,7 @@ export async function updateAutomationInController(
   writeIfDefined("runtimeProvider", params.runtimeProvider ?? undefined);
   writeIfDefined("status", params.status ?? undefined);
 
-  const response = await fetch(`${controllerBaseUrl}/automations/${automationId}`, {
+  const response = await fetch(`${requestContext.baseUrl}/automations/${automationId}`, {
     method: "PATCH",
     headers: {
       authorization: `Bearer ${sessionToken}`,
@@ -286,7 +296,11 @@ export async function updateAutomationInController(
   });
 
   if (!response.ok) {
-    const message = await readControllerError(response, "update automation failed");
+    const message = await readControllerError(
+      response,
+      "update automation failed",
+      requestContext,
+    );
     throw new Error(message);
   }
 
@@ -307,12 +321,13 @@ export async function deleteAutomationInController(params: {
     return false;
   }
 
-  const sessionToken = await resolveControllerAccessToken(params.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
+  const sessionToken = requestContext.accessToken;
   if (!sessionToken) {
     return false;
   }
 
-  const response = await fetch(`${controllerBaseUrl}/automations/${automationId}`, {
+  const response = await fetch(`${requestContext.baseUrl}/automations/${automationId}`, {
     method: "DELETE",
     headers: {
       authorization: `Bearer ${sessionToken}`,
@@ -320,7 +335,11 @@ export async function deleteAutomationInController(params: {
   });
 
   if (!response.ok) {
-    const message = await readControllerError(response, "delete automation failed");
+    const message = await readControllerError(
+      response,
+      "delete automation failed",
+      requestContext,
+    );
     throw new Error(message);
   }
 
@@ -340,12 +359,13 @@ export async function runAutomationNowInController(params: {
     return false;
   }
 
-  const sessionToken = await resolveControllerAccessToken(params.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
+  const sessionToken = requestContext.accessToken;
   if (!sessionToken) {
     return false;
   }
 
-  const response = await fetch(`${controllerBaseUrl}/automations/${automationId}/run`, {
+  const response = await fetch(`${requestContext.baseUrl}/automations/${automationId}/run`, {
     method: "POST",
     headers: {
       authorization: `Bearer ${sessionToken}`,
@@ -353,7 +373,11 @@ export async function runAutomationNowInController(params: {
   });
 
   if (!response.ok) {
-    const message = await readControllerError(response, "run automation failed");
+    const message = await readControllerError(
+      response,
+      "run automation failed",
+      requestContext,
+    );
     throw new Error(message);
   }
 

@@ -237,7 +237,7 @@ async fn reset_browser_profile(
     headers: HeaderMap,
     Path(project_id_raw): Path<String>,
 ) -> Result<Json<BrowserProfileResetResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if context.user_id.is_none() && !context.is_service_role {
         return Err(unauthorized("user session required"));
     }

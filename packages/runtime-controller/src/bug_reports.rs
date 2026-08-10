@@ -276,7 +276,7 @@ async fn post_bug_report(
     headers: HeaderMap,
     Json(body): Json<CreateBugReportRequest>,
 ) -> Result<(StatusCode, Json<CreateBugReportResponse>), (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if !context.is_service_role {
         require_user_session(&context)?;
     }
@@ -504,7 +504,7 @@ async fn list_bug_reports(
     headers: HeaderMap,
     Query(query): Query<ListBugReportsQuery>,
 ) -> Result<Json<BugReportListResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if !context.is_service_role {
         require_user_session(&context)?;
     }
@@ -620,7 +620,7 @@ async fn get_bug_report(
     headers: HeaderMap,
     Path(bug_report_id_raw): Path<String>,
 ) -> Result<Json<BugReportDetailResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if !context.is_service_role {
         require_user_session(&context)?;
     }

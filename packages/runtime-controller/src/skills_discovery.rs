@@ -390,7 +390,7 @@ async fn discover_skills(
     let project_id =
         Uuid::parse_str(project_id_raw.trim()).map_err(|_| bad_request("invalid project id"))?;
 
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     if context.user_id.is_none() && !context.is_service_role {
         return Err(unauthorized("user session required"));
     }

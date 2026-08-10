@@ -1,8 +1,7 @@
 import type { DispatchControllerPromptResponse } from "./conversations";
 import {
-  controllerBaseUrl,
   readControllerError,
-  resolveControllerAccessToken,
+  resolveControllerRequestContext,
   runtimeControllerEnabled,
   safeJson,
 } from "./core";
@@ -83,7 +82,8 @@ export async function listSendQueue(params: {
     return null;
   }
 
-  const sessionToken = await resolveControllerAccessToken(params.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
+  const sessionToken = requestContext.accessToken;
   if (!sessionToken) {
     console.warn(
       "[runtime-controller] No access token available; skipping send queue fetch.",
@@ -93,7 +93,7 @@ export async function listSendQueue(params: {
 
   try {
     const response = await fetch(
-      `${controllerBaseUrl}/conversations/${encodeURIComponent(params.conversationId)}/send-queue`,
+      `${requestContext.baseUrl}/conversations/${encodeURIComponent(params.conversationId)}/send-queue`,
       {
         headers: {
           authorization: `Bearer ${sessionToken}`,
@@ -102,7 +102,11 @@ export async function listSendQueue(params: {
     );
 
     if (!response.ok) {
-      const message = await readControllerError(response, "fetch send queue failed");
+      const message = await readControllerError(
+        response,
+        "fetch send queue failed",
+        requestContext,
+      );
       throw new Error(message);
     }
 
@@ -127,7 +131,8 @@ export async function enqueueSendQueueEntry(params: {
     return null;
   }
 
-  const sessionToken = await resolveControllerAccessToken(params.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
+  const sessionToken = requestContext.accessToken;
   if (!sessionToken) {
     console.warn(
       "[runtime-controller] No access token available; skipping send queue enqueue.",
@@ -141,7 +146,7 @@ export async function enqueueSendQueueEntry(params: {
   };
 
   const response = await fetch(
-    `${controllerBaseUrl}/conversations/${encodeURIComponent(params.conversationId)}/send-queue`,
+    `${requestContext.baseUrl}/conversations/${encodeURIComponent(params.conversationId)}/send-queue`,
     {
       method: "POST",
       headers: {
@@ -153,7 +158,11 @@ export async function enqueueSendQueueEntry(params: {
   );
 
   if (!response.ok) {
-    const message = await readControllerError(response, "send queue enqueue failed");
+    const message = await readControllerError(
+      response,
+      "send queue enqueue failed",
+      requestContext,
+    );
     throw new Error(message);
   }
 
@@ -169,7 +178,8 @@ export async function cancelSendQueueEntry(params: {
     return null;
   }
 
-  const sessionToken = await resolveControllerAccessToken(params.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
+  const sessionToken = requestContext.accessToken;
   if (!sessionToken) {
     console.warn(
       "[runtime-controller] No access token available; skipping send queue cancel.",
@@ -178,7 +188,7 @@ export async function cancelSendQueueEntry(params: {
   }
 
   const response = await fetch(
-    `${controllerBaseUrl}/conversations/${encodeURIComponent(params.conversationId)}/send-queue/${encodeURIComponent(params.entryId)}`,
+    `${requestContext.baseUrl}/conversations/${encodeURIComponent(params.conversationId)}/send-queue/${encodeURIComponent(params.entryId)}`,
     {
       method: "DELETE",
       headers: {
@@ -188,7 +198,11 @@ export async function cancelSendQueueEntry(params: {
   );
 
   if (!response.ok) {
-    const message = await readControllerError(response, "send queue cancel failed");
+    const message = await readControllerError(
+      response,
+      "send queue cancel failed",
+      requestContext,
+    );
     throw new Error(message);
   }
 
@@ -208,7 +222,8 @@ export async function dispatchSendQueueEntryNow(params: {
     return null;
   }
 
-  const sessionToken = await resolveControllerAccessToken(params.accessToken ?? null);
+  const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
+  const sessionToken = requestContext.accessToken;
   if (!sessionToken) {
     console.warn(
       "[runtime-controller] No access token available; skipping send queue dispatch.",
@@ -217,7 +232,7 @@ export async function dispatchSendQueueEntryNow(params: {
   }
 
   const response = await fetch(
-    `${controllerBaseUrl}/conversations/${encodeURIComponent(params.conversationId)}/send-queue/${encodeURIComponent(params.entryId)}/dispatch`,
+    `${requestContext.baseUrl}/conversations/${encodeURIComponent(params.conversationId)}/send-queue/${encodeURIComponent(params.entryId)}/dispatch`,
     {
       method: "POST",
       headers: {
@@ -233,7 +248,11 @@ export async function dispatchSendQueueEntryNow(params: {
       // The entry id is unknown or was canceled; it is no longer queued.
       return { outcome: "notFound", response: null };
     }
-    const message = await readControllerError(response, "send queue dispatch failed");
+    const message = await readControllerError(
+      response,
+      "send queue dispatch failed",
+      requestContext,
+    );
     throw new Error(message);
   }
 

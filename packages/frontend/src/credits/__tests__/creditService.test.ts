@@ -6,7 +6,13 @@ const resolveTokenMock = vi.hoisted(() => vi.fn());
 vi.mock("../../sdk/instafy", () => ({
   controllerBaseUrl: "http://controller.test",
   runtimeControllerEnabled: true,
-  resolveControllerAccessToken: resolveTokenMock
+  readControllerError: vi.fn(async (_response: Response, fallback: string) => fallback),
+  resolveControllerRequestContext: async (desired: string | null) => ({
+    baseUrl: "http://controller.test",
+    accessToken: await resolveTokenMock(desired),
+    credentialSource: "ambient",
+    generation: 1,
+  }),
 }));
 
 import { fetchCreditLedger, fetchCreditPolicy, fetchCreditSnapshot } from "../creditService";
