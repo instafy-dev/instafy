@@ -8,11 +8,13 @@ ARG CLI_NODE_IMAGE=node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134
 ARG PLAYWRIGHT_VERSION=1.61.1
 ARG NPM_VERSION=12.0.1
 ARG PNPM_VERSION=11.17.0
-# npm (through 12.0.2) vendors brace-expansion 5.0.7, which is vulnerable to
-# CVE-2026-14257 (HIGH, ReDoS). Until an npm release vendors >= 5.0.8, replace
-# the vendored copy with the exact fixed tarball, checksum-verified.
-ARG BRACE_EXPANSION_VERSION=5.0.8
-ARG BRACE_EXPANSION_SHA256=a03b06e66d862d0278b1ff45b66427f245f99c665800dc9bd790c0c13d2247fe
+# npm (through 12.0.2) vendors vulnerable brace-expansion and ip-address
+# versions. Replace every vendored copy with exact fixed tarballs whose
+# checksums are committed here until npm ships both fixes itself.
+ARG BRACE_EXPANSION_VERSION=5.0.9
+ARG BRACE_EXPANSION_SHA256=5d06001fddd25cbee90c96db4dc5b7b57711b984c3141e28d10f143deb52dbaf
+ARG IP_ADDRESS_VERSION=10.3.1
+ARG IP_ADDRESS_SHA256=ad1790063beea11a312c801df30d58e147de762f4f77787552376eb7424623e5
 # Rathole is used for self-hosted tunnel ingress. The crates.io release currently
 # depends on older `time` versions that fail to compile on newer Rust toolchains,
 # so we install a prebuilt release binary instead of `cargo install`.
@@ -191,6 +193,8 @@ ARG NPM_VERSION
 ARG PNPM_VERSION
 ARG BRACE_EXPANSION_VERSION
 ARG BRACE_EXPANSION_SHA256
+ARG IP_ADDRESS_VERSION
+ARG IP_ADDRESS_SHA256
 
 COPY --from=node-runtime /usr/local/ /usr/local/
 RUN apt-get update && \
@@ -226,6 +230,17 @@ RUN npm install -g "npm@${NPM_VERSION}" && \
     rm /tmp/brace-expansion.tgz && \
     unpatched="$(find /usr -type f -path '*/node_modules/npm/node_modules/brace-expansion/package.json' -exec grep -L "\"version\": \"${BRACE_EXPANSION_VERSION}\"" {} + 2>/dev/null || true)" && \
     if [ -n "$unpatched" ]; then echo "unpatched brace-expansion copies: $unpatched" >&2; exit 1; fi && \
+    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+      "https://registry.npmjs.org/ip-address/-/ip-address-${IP_ADDRESS_VERSION}.tgz" \
+      --output /tmp/ip-address.tgz && \
+    printf '%s  %s\n' "${IP_ADDRESS_SHA256}" /tmp/ip-address.tgz | sha256sum --check --status && \
+    for ia_dir in $(find /usr -type d -path '*/node_modules/npm/node_modules/ip-address' 2>/dev/null); do \
+      rm -rf "$ia_dir" && mkdir -p "$ia_dir" && \
+      tar -xzf /tmp/ip-address.tgz -C "$ia_dir" --strip-components=1; \
+    done && \
+    rm /tmp/ip-address.tgz && \
+    unpatched="$(find /usr -type f -path '*/node_modules/npm/node_modules/ip-address/package.json' -exec grep -L "\"version\": \"${IP_ADDRESS_VERSION}\"" {} + 2>/dev/null || true)" && \
+    if [ -n "$unpatched" ]; then echo "unpatched ip-address copies: $unpatched" >&2; exit 1; fi && \
     rm -rf /root/.npm
 
 ARG BUILD_PROFILE=dev
@@ -306,6 +321,8 @@ ARG NPM_VERSION
 ARG PNPM_VERSION
 ARG BRACE_EXPANSION_VERSION
 ARG BRACE_EXPANSION_SHA256
+ARG IP_ADDRESS_VERSION
+ARG IP_ADDRESS_SHA256
 # uBlock Origin Lite (Manifest V3) provides ad blocking on modern Chromium builds.
 # uBlock Origin itself is Manifest V2 which may be blocked/disabled in newer releases.
 ARG UBOLITE_VERSION=2026.301.2014
@@ -348,6 +365,17 @@ RUN npm install -g "npm@${NPM_VERSION}" && \
     rm /tmp/brace-expansion.tgz && \
     unpatched="$(find /usr -type f -path '*/node_modules/npm/node_modules/brace-expansion/package.json' -exec grep -L "\"version\": \"${BRACE_EXPANSION_VERSION}\"" {} + 2>/dev/null || true)" && \
     if [ -n "$unpatched" ]; then echo "unpatched brace-expansion copies: $unpatched" >&2; exit 1; fi && \
+    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+      "https://registry.npmjs.org/ip-address/-/ip-address-${IP_ADDRESS_VERSION}.tgz" \
+      --output /tmp/ip-address.tgz && \
+    printf '%s  %s\n' "${IP_ADDRESS_SHA256}" /tmp/ip-address.tgz | sha256sum --check --status && \
+    for ia_dir in $(find /usr -type d -path '*/node_modules/npm/node_modules/ip-address' 2>/dev/null); do \
+      rm -rf "$ia_dir" && mkdir -p "$ia_dir" && \
+      tar -xzf /tmp/ip-address.tgz -C "$ia_dir" --strip-components=1; \
+    done && \
+    rm /tmp/ip-address.tgz && \
+    unpatched="$(find /usr -type f -path '*/node_modules/npm/node_modules/ip-address/package.json' -exec grep -L "\"version\": \"${IP_ADDRESS_VERSION}\"" {} + 2>/dev/null || true)" && \
+    if [ -n "$unpatched" ]; then echo "unpatched ip-address copies: $unpatched" >&2; exit 1; fi && \
     rm -rf /root/.npm
 
 # Keep the headed browser usable for humans by shipping an ad blocker extension.
