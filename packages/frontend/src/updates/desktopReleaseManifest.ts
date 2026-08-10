@@ -140,11 +140,11 @@ export function parseDesktopAppLatestPayload(
   const macArch = macArchitectures[0];
   const macDmg = parseDesktopArtifactUrl(
     artifactRecord.macDmg,
-    `instafy-studio-${version}-mac-${macArch}.dmg`,
+    `instafy-${version}-mac-${macArch}.dmg`,
   );
   const macZip = parseDesktopArtifactUrl(
     artifactRecord.macZip,
-    `instafy-studio-${version}-mac-${macArch}.zip`,
+    `instafy-${version}-mac-${macArch}.zip`,
   );
   if (!macDmg || !macZip) return null;
 
@@ -155,7 +155,7 @@ export function parseDesktopAppLatestPayload(
   if ("windowsExe" in artifactRecord) {
     const parsed = parseDesktopArtifactUrl(
       artifactRecord.windowsExe,
-      `instafy-studio-${version}-win.exe`,
+      `instafy-${version}-win.exe`,
     );
     if (!parsed) return null;
     windowsExe = parsed;

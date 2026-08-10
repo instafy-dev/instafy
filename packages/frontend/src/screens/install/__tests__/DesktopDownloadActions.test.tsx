@@ -19,9 +19,9 @@ function availableLookup(): DesktopReleaseLookup {
       feedUrl: DESKTOP_APP_STABLE_BASE_URL,
       publishedAt: "2026-07-21T12:00:00Z",
       artifacts: {
-        macDmg: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-studio-1.2.3-mac-arm64.dmg`,
+        macDmg: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-1.2.3-mac-arm64.dmg`,
         macArch: "arm64",
-        windowsExe: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-studio-1.2.3-win.exe`,
+        windowsExe: `${DESKTOP_APP_STABLE_BASE_URL}/instafy-1.2.3-win.exe`,
       },
     },
   };
@@ -88,7 +88,7 @@ describe("DesktopDownloadActions", () => {
       "Windows (EXE)",
     ]);
     expect(links[0]?.href).toBe(
-      `${DESKTOP_APP_STABLE_BASE_URL}/instafy-studio-1.2.3-mac-arm64.dmg`,
+      `${DESKTOP_APP_STABLE_BASE_URL}/instafy-1.2.3-mac-arm64.dmg`,
     );
   });
 
@@ -106,7 +106,7 @@ describe("DesktopDownloadActions", () => {
     });
 
     const macLink = container.querySelector<HTMLAnchorElement>(
-      'a[href$="instafy-studio-1.2.3-mac-arm64.dmg"]',
+      'a[href$="instafy-1.2.3-mac-arm64.dmg"]',
     );
     expect(macLink?.textContent).toContain("Apple silicon");
     expect(container.querySelector('a[href="undefined"]')).toBeNull();
