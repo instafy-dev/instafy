@@ -19,7 +19,6 @@ import {
 import type { RuntimeAction } from "../runtimeStore";
 import { extractAgentTokenSnapshotFromEvent } from "../runtimeStore";
 import { runtimeDebugLog } from "../utils/runtimeDebug";
-import { clearProjectState } from "../../workspace/projectClear";
 import { formatRuntimeStreamDisconnectedMessage } from "../controllerConnectionErrors";
 import { isAutomationBrowser } from "../../services/runtimeController/logging";
 import {
@@ -100,8 +99,15 @@ export function useRuntimeControllerSync({
 
   useEffect(() => {
     let cancelled = false;
+    let controllerSyncTerminated = false;
     let unsubscribe: () => void = () => {};
     let lastOriginHydrationAt = 0;
+    let runEventSequence = 0;
+    let runReconciliationGeneration = 0;
+    const latestRunEvents = new Map<
+      string,
+      { run: RunRecord; sequence: number }
+    >();
     streamOpenedRef.current = false;
     initialStreamErrorNotifiedRef.current = false;
     lastStreamErrorRef.current = 0;
@@ -113,14 +119,31 @@ export function useRuntimeControllerSync({
       dispatch({ type: "setRunsState", runs: {}, latestRunIds: {} });
     };
 
+    const clearProjectDerivedRuntimeState = () => {
+      resetRuns();
+      dispatch({ type: "setLocalWorkspace", workspace: null });
+      dispatch({
+        type: "applyOriginSummary",
+        summary: null,
+        derivedPresence: null,
+      });
+      dispatch({
+        type: "setRuntimeStatuses",
+        statuses: [],
+        preferredRuntimeId: null,
+      });
+      dispatch({ type: "setSessionRuntime", runtimeId: null });
+      dispatch({ type: "clearConversationMessages", messageIds: [] });
+      dispatch({ type: "clearConversationCreations", conversationIds: [] });
+      dispatch({ type: "clearConversationUpdates", conversationIds: [] });
+    };
+
     if (!projectReady || !resolvedProjectId) {
       runtimeDebugLog("runtime-sync:skipped", {
         reason: projectReady ? "no-project-id" : "not-initialized",
         projectId: resolvedProjectId ?? activeProjectId ?? null
       });
-      resetRuns();
-      dispatch({ type: "clearConversationMessages", messageIds: [] });
-      dispatch({ type: "clearConversationCreations", conversationIds: [] });
+      clearProjectDerivedRuntimeState();
       updateRuntime((current) => ({
         ...current,
         controllerReady: false,
@@ -185,6 +208,9 @@ export function useRuntimeControllerSync({
     };
 
     const handleStreamError = (message: string) => {
+      if (controllerSyncTerminated) {
+        return;
+      }
       const now = Date.now();
       const sinceLast = now - lastStreamErrorRef.current;
       lastStreamErrorRef.current = now;
@@ -217,6 +243,100 @@ export function useRuntimeControllerSync({
       }));
     };
 
+    const handleControllerAccessDenied = (status: 401 | 403) => {
+      if (cancelled) {
+        return;
+      }
+      controllerSyncTerminated = true;
+      runReconciliationGeneration += 1;
+      unsubscribe();
+      runtimeDebugLog("runtime-sync:controller-access-denied", {
+        projectId,
+        status,
+      });
+      clearProjectDerivedRuntimeState();
+      updateRuntime((current) => ({
+        ...current,
+        controllerReady: false,
+        controllerProjectMissing: false,
+        controllerUnavailable: false,
+        controllerStreamDisconnected: false,
+        controllerStreamDisconnectMessage: null,
+      }));
+    };
+
+    const handleControllerProjectMissing = () => {
+      if (cancelled) {
+        return;
+      }
+      controllerSyncTerminated = true;
+      runReconciliationGeneration += 1;
+      unsubscribe();
+      runtimeDebugLog("runtime-sync:controller-not-found", {
+        projectId,
+      });
+      clearProjectDerivedRuntimeState();
+      updateRuntime((current) => ({
+        ...current,
+        controllerReady: false,
+        controllerProjectMissing: true,
+        controllerUnavailable: false,
+        controllerStreamDisconnected: false,
+        controllerStreamDisconnectMessage: null,
+      }));
+    };
+
+    const reconcileRunsAfterReconnect = async () => {
+      const reconciliationGeneration = ++runReconciliationGeneration;
+      const eventSequenceAtStart = runEventSequence;
+      try {
+        const result = await fetchRunsFromController({ projectId });
+        if (
+          cancelled ||
+          controllerSyncTerminated ||
+          reconciliationGeneration !== runReconciliationGeneration
+        ) {
+          return;
+        }
+        if (result.unauthorized || result.forbidden) {
+          handleControllerAccessDenied(result.unauthorized ? 401 : 403);
+          return;
+        }
+        if (result.notFound) {
+          handleControllerProjectMissing();
+          return;
+        }
+        result.runs.forEach((run) => {
+          const latestRunEvent = latestRunEvents.get(run.id);
+          const snapshotUpdatedAt = Date.parse(run.updatedAt ?? "");
+          const eventUpdatedAt = Date.parse(latestRunEvent?.run.updatedAt ?? "");
+          // Prefer an SSE update received while this request was in flight
+          // unless the authoritative snapshot proves it is at least as new.
+          if (
+            !latestRunEvent ||
+            latestRunEvent.sequence <= eventSequenceAtStart ||
+            (Number.isFinite(snapshotUpdatedAt) &&
+              Number.isFinite(eventUpdatedAt) &&
+              snapshotUpdatedAt >= eventUpdatedAt)
+          ) {
+            upsertRun(run);
+          }
+        });
+      } catch (error) {
+        if (
+          cancelled ||
+          controllerSyncTerminated ||
+          reconciliationGeneration !== runReconciliationGeneration
+        ) {
+          return;
+        }
+        runtimeDebugLog("runtime-sync:run-reconciliation-error", {
+          projectId,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    };
+
     const connectControllerStream = () => {
       unsubscribe();
       unsubscribe = subscribeToRunsFromController({
@@ -225,7 +345,15 @@ export function useRuntimeControllerSync({
         onRun: (run) => {
           logRunEvent("controller:onRun", run);
           receivedRunEventRef.current = true;
+          runEventSequence += 1;
+          latestRunEvents.set(run.id, {
+            run,
+            sequence: runEventSequence,
+          });
           upsertRun(run);
+        },
+        onAccessDenied: ({ status }) => {
+          handleControllerAccessDenied(status);
         },
         onError: handleStreamError,
         onOpen: () => {
@@ -241,14 +369,17 @@ export function useRuntimeControllerSync({
                 }
               : current,
           );
-          if (streamErrorSinceLastOpenRef.current && typeof window !== "undefined") {
+          if (streamErrorSinceLastOpenRef.current) {
             streamErrorSinceLastOpenRef.current = false;
             streamDisconnectNotifiedRef.current = false;
-            window.dispatchEvent(
-              new CustomEvent("instafy:controller-stream-reconnected", {
-                detail: { projectId },
-              }),
-            );
+            void reconcileRunsAfterReconnect();
+            if (typeof window !== "undefined") {
+              window.dispatchEvent(
+                new CustomEvent("instafy:controller-stream-reconnected", {
+                  detail: { projectId },
+                }),
+              );
+            }
           }
         },
         onEvent: (event) => {
@@ -450,33 +581,15 @@ export function useRuntimeControllerSync({
         const result = await fetchRunsFromController({
           projectId,
         });
-        if (result.notFound) {
-          unsubscribe();
-          runtimeDebugLog("runtime-sync:controller-not-found", {
-            projectId
-          });
-          dispatch({ type: "setLocalWorkspace", workspace: null });
-          dispatch({
-            type: "applyOriginSummary",
-            summary: null,
-            derivedPresence: null
-          });
-          dispatch({
-            type: "setRuntimeStatuses",
-            statuses: [],
-            preferredRuntimeId: null
-          });
-          updateRuntime((current) => ({
-            ...current,
-            controllerReady: false,
-            controllerProjectMissing: true,
-            controllerUnavailable: false,
-            controllerStreamDisconnected: false,
-            controllerStreamDisconnectMessage: null,
-          }));
+        if (cancelled) {
           return;
         }
-        if (cancelled) {
+        if (result.unauthorized || result.forbidden) {
+          handleControllerAccessDenied(result.unauthorized ? 401 : 403);
+          return;
+        }
+        if (result.notFound) {
+          handleControllerProjectMissing();
           return;
         }
         connectControllerStream();
@@ -501,36 +614,15 @@ export function useRuntimeControllerSync({
           return;
         }
       } catch (error) {
+        if (cancelled) {
+          return;
+        }
         const message = error instanceof Error ? error.message : String(error);
         console.warn("hydrateFromController failed", message);
         runtimeDebugLog("runtime-sync:controller-error", {
           projectId: resolvedProjectId,
           message
         });
-        if (message.includes("403") || message.includes("401")) {
-          unsubscribe();
-          clearProjectState({ resetWorkspace: false });
-          dispatch({ type: "setLocalWorkspace", workspace: null });
-          dispatch({
-            type: "applyOriginSummary",
-            summary: null,
-            derivedPresence: null
-          });
-          dispatch({
-            type: "setRuntimeStatuses",
-            statuses: [],
-            preferredRuntimeId: null
-          });
-          updateRuntime((current) => ({
-            ...current,
-            controllerReady: false,
-            controllerProjectMissing: true,
-            controllerUnavailable: false,
-            controllerStreamDisconnected: false,
-            controllerStreamDisconnectMessage: null,
-          }));
-          return;
-        }
         markControllerUnavailable();
       }
     };
@@ -578,9 +670,15 @@ export function useRuntimeControllerSync({
       }
     };
 
-    resetRuns();
-    dispatch({ type: "clearConversationMessages", messageIds: [] });
-    dispatch({ type: "clearConversationCreations", conversationIds: [] });
+    clearProjectDerivedRuntimeState();
+    updateRuntime((current) => ({
+      ...current,
+      controllerReady: false,
+      controllerProjectMissing: false,
+      controllerUnavailable: false,
+      controllerStreamDisconnected: false,
+      controllerStreamDisconnectMessage: null,
+    }));
     if (runtimeControllerEnabled) {
       void hydrateFromController();
     } else {
@@ -592,6 +690,7 @@ export function useRuntimeControllerSync({
 
     return () => {
       cancelled = true;
+      runReconciliationGeneration += 1;
       unsubscribe();
     };
   }, [

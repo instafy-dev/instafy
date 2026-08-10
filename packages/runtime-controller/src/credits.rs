@@ -46,8 +46,6 @@ pub(crate) struct CreditStatusQuery {
     project_id: Option<String>,
     #[serde(alias = "session_id")]
     session_id: Option<String>,
-    #[serde(alias = "access_token")]
-    access_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -177,8 +175,6 @@ pub(crate) struct CreditPolicyQuery {
     project_id: Option<String>,
     #[serde(alias = "session_id")]
     session_id: Option<String>,
-    #[serde(alias = "access_token")]
-    access_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -188,8 +184,6 @@ pub(crate) struct CreditLedgerQuery {
     project_id: Option<String>,
     #[serde(alias = "session_id")]
     session_id: Option<String>,
-    #[serde(alias = "access_token")]
-    access_token: Option<String>,
     limit: Option<usize>,
 }
 
@@ -409,8 +403,7 @@ pub(crate) async fn credit_status(
     tracing::Span::current().record("project_id", &field::display(project_id));
 
     let session_id = parse_optional_uuid_param(params.session_id.clone(), "sessionId")?;
-    let token_override = params.access_token.clone();
-    let context = authenticate_request(&state.config, &headers, token_override.as_deref()).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let mut connection = state.pool.get().await.map_err(|error| {
         tracing::error!(project_id = %project_id, %error, "credits status: pool error");
@@ -500,8 +493,7 @@ pub(crate) async fn credit_policy(
     tracing::Span::current().record("project_id", &field::display(project_id));
 
     let session_id = parse_optional_uuid_param(params.session_id.clone(), "sessionId")?;
-    let token_override = params.access_token.clone();
-    let context = authenticate_request(&state.config, &headers, token_override.as_deref()).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let mut connection = state
         .pool
@@ -692,8 +684,7 @@ pub(crate) async fn credit_ledger(
     tracing::Span::current().record("project_id", &field::display(project_id));
 
     let session_id = parse_optional_uuid_param(params.session_id.clone(), "sessionId")?;
-    let token_override = params.access_token.clone();
-    let context = authenticate_request(&state.config, &headers, token_override.as_deref()).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let mut connection = state.pool.get().await.map_err(|error| {
         tracing::error!(project_id = %project_id, %error, "credits ledger: pool error");
@@ -763,7 +754,7 @@ pub(crate) async fn credit_event(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
-    let auth = authenticate_request(&state.config, &headers, None).await?;
+    let auth = authenticate_request(&state.config, &headers).await?;
     if !auth.is_service_role {
         return Err(unauthorized("credit refresh requires service role"));
     }

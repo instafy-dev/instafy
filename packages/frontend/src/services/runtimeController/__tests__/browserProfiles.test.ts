@@ -12,7 +12,12 @@ vi.mock("../core", () => ({
       ? payload.message
       : `${fallback} (${response.status})`;
   }),
-  resolveControllerAccessToken: resolveControllerAccessTokenMock,
+  resolveControllerRequestContext: async (desired: string | null) => ({
+    baseUrl: "http://controller.test",
+    accessToken: await resolveControllerAccessTokenMock(desired),
+    credentialSource: "ambient",
+    generation: 1,
+  }),
   runtimeControllerEnabled: true,
 }));
 

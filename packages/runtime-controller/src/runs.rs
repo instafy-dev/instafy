@@ -32,8 +32,6 @@ pub(crate) struct RunsQuery {
     pub(crate) run_id: Option<String>,
     #[serde(default)]
     pub(crate) limit: Option<i64>,
-    #[serde(rename = "accessToken", alias = "access_token")]
-    pub(crate) access_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -79,8 +77,7 @@ pub(crate) async fn list_runs(
     headers: HeaderMap,
     Query(params): Query<RunsQuery>,
 ) -> Result<Json<Vec<RunSnapshot>>, (StatusCode, Json<ApiError>)> {
-    let token_override = params.access_token.clone();
-    let context = authenticate_request(&state.config, &headers, token_override.as_deref()).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let scope = resolve_scope(
         &state,
@@ -223,7 +220,7 @@ pub(crate) async fn get_run_result(
     headers: HeaderMap,
     axum::extract::Path(run_id_raw): axum::extract::Path<String>,
 ) -> Result<Json<RunResultResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let run_id =
         Uuid::from_str(run_id_raw.trim()).map_err(|_| bad_request("runId must be a valid UUID"))?;
 

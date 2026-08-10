@@ -2,6 +2,7 @@ import {
   controllerJsonRequest,
 } from "./client";
 import type { CapabilityId } from "@instafy/sdk/capabilities";
+import type { ControllerRequestContext } from "./core";
 
 export interface ControllerIntegrationProvider {
   id: string;
@@ -47,6 +48,7 @@ export interface UpsertProjectIntegrationParams {
   requiredScopes?: string[];
   capabilities?: CapabilityId[];
   accessToken?: string | null;
+  requestContext?: ControllerRequestContext;
 }
 
 export interface UpsertProjectIntegrationResult {
@@ -127,7 +129,10 @@ export async function listIntegrationProviders(params?: {
 
 export async function listProjectIntegrations(
   projectId: string,
-  params?: { accessToken?: string | null },
+  params?: {
+    accessToken?: string | null;
+    requestContext?: ControllerRequestContext;
+  },
 ): Promise<ListProjectIntegrationsResult> {
   const normalizedProjectId = projectId.trim();
   if (!normalizedProjectId) {
@@ -137,6 +142,7 @@ export async function listProjectIntegrations(
   const response = await controllerJsonRequest<unknown>({
     path: `/projects/${encodeURIComponent(normalizedProjectId)}/integrations`,
     accessToken: params?.accessToken ?? null,
+    requestContext: params?.requestContext,
     fallbackError: "Unable to load project integrations",
   });
 
@@ -198,6 +204,7 @@ export async function upsertProjectIntegration(
     path: `/projects/${encodeURIComponent(normalizedProjectId)}/integrations/${encodeURIComponent(normalizedProvider)}`,
     method: "PUT",
     accessToken: params.accessToken ?? null,
+    requestContext: params.requestContext,
     body: payload,
     fallbackError: "Unable to update integration",
   });

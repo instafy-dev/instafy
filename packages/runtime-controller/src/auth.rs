@@ -149,33 +149,13 @@ async fn refresh_supabase_jwks_on_auth_retry(config: &AppConfig) -> bool {
 pub(crate) async fn authenticate_request(
     config: &AppConfig,
     headers: &HeaderMap,
-    token_override: Option<&str>,
 ) -> Result<RequestContext, (StatusCode, Json<ApiError>)> {
-    #[derive(Clone, Copy)]
-    enum TokenSource {
-        Override,
-        Header,
-    }
-
-    let override_token = token_override
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-
-    let header_token = headers
+    let Some(raw_value) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
-
-    let token_choice = if let Some(value) = override_token {
-        Some((value, TokenSource::Override))
-    } else if let Some(value) = header_token {
-        Some((value, TokenSource::Header))
-    } else {
-        None
-    };
-
-    let Some((raw_value, source)) = token_choice else {
+        .filter(|value| !value.is_empty())
+    else {
         return Ok(RequestContext {
             user_id: None,
             is_service_role: false,
@@ -183,39 +163,23 @@ pub(crate) async fn authenticate_request(
         });
     };
 
-    let token = match source {
-        TokenSource::Header => {
-            if !raw_value.starts_with("Bearer ") {
-                return Err(unauthorized("authorization header must be Bearer token"));
-            }
-            raw_value.trim_start_matches("Bearer ").trim().to_string()
-        }
-        TokenSource::Override => raw_value
-            .trim_start_matches("Bearer ")
-            .trim()
-            .replace(' ', "+"),
-    };
+    if !raw_value.starts_with("Bearer ") {
+        return Err(unauthorized("authorization header must be Bearer token"));
+    }
+    let token = raw_value.trim_start_matches("Bearer ").trim().to_string();
 
     if token.is_empty() {
         return Err(unauthorized("authorization token is empty"));
     }
 
-    let token_source = match source {
-        TokenSource::Header => "header",
-        TokenSource::Override => "override",
-    };
-
     info!(
         token_len = token.len(),
-        token_source, "access token received"
+        "access token received from authorization header"
     );
 
     if let Some(internal_token) = config.controller_internal_token.as_ref() {
         if ConstantTimeEq::ct_eq(token.as_bytes(), internal_token.as_bytes()).unwrap_u8() == 1 {
-            info!(
-                token_source,
-                "controller internal token accepted via direct match"
-            );
+            info!("controller internal token accepted via direct match");
             return Ok(RequestContext {
                 user_id: None,
                 is_service_role: true,
@@ -226,7 +190,7 @@ pub(crate) async fn authenticate_request(
 
     if let Some(service_role_key) = config.supabase_service_role_key.as_ref() {
         if ConstantTimeEq::ct_eq(token.as_bytes(), service_role_key.as_bytes()).unwrap_u8() == 1 {
-            info!(token_source, "service role token accepted via direct match");
+            info!("service role token accepted via direct match");
             return Ok(RequestContext {
                 user_id: None,
                 is_service_role: true,
@@ -554,7 +518,7 @@ pub(crate) async fn create_controller_session(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<ControllerSessionResponse>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
 
     let token = issue_controller_token(&state.config, &user_id)?;
@@ -1000,7 +964,7 @@ mod tests {
     async fn authenticate_request_allows_missing_token() {
         let config = base_app_config();
         let headers = HeaderMap::new();
-        let context = authenticate_request(&config, &headers, None)
+        let context = authenticate_request(&config, &headers)
             .await
             .expect("auth should succeed");
         assert!(context.user_id.is_none());
@@ -1020,7 +984,7 @@ mod tests {
         config.supabase_service_role_key = Some(service_token.clone());
 
         let headers = header_with_token(&service_token);
-        let context = authenticate_request(&config, &headers, None)
+        let context = authenticate_request(&config, &headers)
             .await
             .expect("auth should succeed");
         assert!(context.is_service_role);
@@ -1034,7 +998,7 @@ mod tests {
         let headers = header_with_token("credential-lease-only");
 
         assert!(
-            authenticate_request(&config, &headers, None).await.is_err(),
+            authenticate_request(&config, &headers).await.is_err(),
             "the route-scoped lease token must not authorize credits or other service routes",
         );
     }
@@ -1071,7 +1035,7 @@ mod tests {
         .expect("token should decode");
 
         let headers = header_with_token(&token);
-        let context = authenticate_request(&config, &headers, None)
+        let context = authenticate_request(&config, &headers)
             .await
             .expect("auth should succeed");
         assert_eq!(context.user_id, Some(user_id));
@@ -1092,7 +1056,7 @@ mod tests {
         );
 
         let headers = header_with_token(&token);
-        let context = authenticate_request(&config, &headers, None)
+        let context = authenticate_request(&config, &headers)
             .await
             .expect("auth should succeed");
         assert_eq!(context.user_id, Some(user_id));
@@ -1120,7 +1084,7 @@ mod tests {
         );
 
         let headers = header_with_token(&token);
-        let context = authenticate_request(&config, &headers, None)
+        let context = authenticate_request(&config, &headers)
             .await
             .expect("auth should succeed after JWKS refresh");
         assert_eq!(context.user_id, Some(user_id));
@@ -1130,7 +1094,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticate_request_accepts_override_token() {
+    async fn authenticate_request_uses_authorization_header_as_sole_token_transport() {
         let mut config = base_app_config();
         config.supabase_service_role_key = None;
         let user_id = Uuid::new_v4();
@@ -1141,11 +1105,14 @@ mod tests {
             Some(user_id),
             None,
         );
-        let override_value = format!("Bearer {token}");
-        let headers = HeaderMap::new();
-        let context = authenticate_request(&config, &headers, Some(override_value.as_str()))
+        let context = authenticate_request(&config, &HeaderMap::new())
             .await
             .unwrap();
+        assert_eq!(context.user_id, None);
+        assert!(!context.is_service_role);
+
+        let headers = header_with_token(&token);
+        let context = authenticate_request(&config, &headers).await.unwrap();
         assert_eq!(context.user_id, Some(user_id));
         assert!(!context.is_service_role);
     }
@@ -1177,7 +1144,7 @@ mod tests {
         .token;
 
         let headers = header_with_token(&token);
-        let context = authenticate_request(&config, &headers, None)
+        let context = authenticate_request(&config, &headers)
             .await
             .expect("auth should succeed");
         assert_eq!(context.user_id, Some(user_id));

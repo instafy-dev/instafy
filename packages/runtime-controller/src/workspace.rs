@@ -124,8 +124,6 @@ pub(crate) fn spawn_local_workspace_housekeeping(state: &AppState) {
 pub(crate) struct WorkspaceListQuery {
     project_id: Option<String>,
     path: Option<String>,
-    #[serde(rename = "accessToken", alias = "access_token")]
-    access_token: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -153,8 +151,6 @@ pub(crate) struct WorkspaceFileEntry {
 pub(crate) struct WorkspaceReadQuery {
     project_id: Option<String>,
     path: Option<String>,
-    #[serde(rename = "accessToken", alias = "access_token")]
-    access_token: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -179,8 +175,6 @@ pub(crate) struct WorkspaceDeleteBody {
     path: Option<String>,
     #[serde(default)]
     recursive: Option<bool>,
-    #[serde(rename = "accessToken", alias = "access_token")]
-    access_token: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -206,8 +200,6 @@ struct RegisterLocalWorkspaceBody {
     platform: Option<String>,
     release: Option<String>,
     arch: Option<String>,
-    #[serde(rename = "accessToken", alias = "access_token")]
-    access_token: Option<String>,
     #[serde(rename = "runtimeId", alias = "runtime_id")]
     runtime_id: Option<String>,
     #[serde(rename = "presenceStatus", alias = "presence_status")]
@@ -218,8 +210,6 @@ struct RegisterLocalWorkspaceBody {
 #[serde(rename_all = "camelCase")]
 struct LocalWorkspaceHeartbeatBody {
     device_id: String,
-    #[serde(rename = "accessToken", alias = "access_token")]
-    access_token: Option<String>,
     #[serde(rename = "runtimeId", alias = "runtime_id")]
     runtime_id: Option<String>,
     #[serde(rename = "presenceStatus", alias = "presence_status")]
@@ -231,8 +221,6 @@ struct LocalWorkspaceHeartbeatBody {
 struct LocalWorkspaceDeleteBody {
     #[serde(default)]
     device_id: Option<String>,
-    #[serde(rename = "accessToken", alias = "access_token")]
-    access_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -252,14 +240,7 @@ async fn register_local_workspace(
 ) -> Result<Json<LocalWorkspaceResponse>, (StatusCode, Json<ApiError>)> {
     let project_id = parse_project_id(&params.project_id)?;
 
-    let context = ensure_project_authorized(
-        &state,
-        &headers,
-        &project_id,
-        body.access_token.as_deref(),
-        true,
-    )
-    .await?;
+    let context = ensure_project_authorized(&state, &headers, &project_id, true).await?;
     let owner_user_id = context
         .user_id
         .ok_or_else(|| unauthorized("local workspace requires an authenticated user"))?;
@@ -331,14 +312,7 @@ async fn heartbeat_local_workspace(
     Json(body): Json<LocalWorkspaceHeartbeatBody>,
 ) -> Result<Json<LocalWorkspaceResponse>, (StatusCode, Json<ApiError>)> {
     let project_id = parse_project_id(&params.project_id)?;
-    let context = ensure_project_authorized(
-        &state,
-        &headers,
-        &project_id,
-        body.access_token.as_deref(),
-        true,
-    )
-    .await?;
+    let context = ensure_project_authorized(&state, &headers, &project_id, true).await?;
     let owner_user_id = context
         .user_id
         .ok_or_else(|| unauthorized("local workspace requires an authenticated user"))?;
@@ -417,14 +391,7 @@ async fn unregister_local_workspace(
     Json(body): Json<LocalWorkspaceDeleteBody>,
 ) -> Result<Json<LocalWorkspaceResponse>, (StatusCode, Json<ApiError>)> {
     let project_id = parse_project_id(&params.project_id)?;
-    let context = ensure_project_authorized(
-        &state,
-        &headers,
-        &project_id,
-        body.access_token.as_deref(),
-        true,
-    )
-    .await?;
+    let context = ensure_project_authorized(&state, &headers, &project_id, true).await?;
     let owner_user_id = context
         .user_id
         .ok_or_else(|| unauthorized("local workspace requires an authenticated user"))?;
@@ -472,7 +439,7 @@ async fn get_local_workspace(
     headers: HeaderMap,
 ) -> Result<Json<LocalWorkspaceResponse>, (StatusCode, Json<ApiError>)> {
     let project_id = parse_project_id(&params.project_id)?;
-    let context = ensure_project_authorized(&state, &headers, &project_id, None, false).await?;
+    let context = ensure_project_authorized(&state, &headers, &project_id, false).await?;
     let owner_user_id = context
         .user_id
         .ok_or_else(|| unauthorized("local workspace requires an authenticated user"))?;
@@ -548,10 +515,9 @@ async fn ensure_project_authorized(
     state: &AppState,
     headers: &HeaderMap,
     project_id: &Uuid,
-    token_override: Option<&str>,
     require_write: bool,
 ) -> Result<crate::auth::RequestContext, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, headers, token_override).await?;
+    let context = authenticate_request(&state.config, headers).await?;
 
     let mut conn = state
         .pool
@@ -595,8 +561,7 @@ pub(crate) async fn list_workspace_files(
     let project_id = Uuid::from_str(project_id_raw.trim())
         .map_err(|_| bad_request("projectId must be a valid UUID"))?;
 
-    let token_override = params.access_token.clone();
-    let context = authenticate_request(&state.config, &headers, token_override.as_deref()).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let mut conn = state
         .pool
@@ -771,8 +736,7 @@ pub(crate) async fn read_workspace_file(
     let project_id = Uuid::from_str(project_id_raw.trim())
         .map_err(|_| bad_request("projectId must be a valid UUID"))?;
 
-    let token_override = params.access_token.clone();
-    let context = authenticate_request(&state.config, &headers, token_override.as_deref()).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let mut conn = state
         .pool
@@ -836,8 +800,7 @@ pub(crate) async fn raw_workspace_file(
     let project_id = Uuid::from_str(project_id_raw.trim())
         .map_err(|_| bad_request("projectId must be a valid UUID"))?;
 
-    let token_override = params.access_token.clone();
-    let context = authenticate_request(&state.config, &headers, token_override.as_deref()).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let mut conn = state
         .pool
@@ -915,8 +878,7 @@ pub(crate) async fn delete_workspace_entry(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| bad_request("path is required"))?;
 
-    let token_override = body.access_token.clone();
-    let context = authenticate_request(&state.config, &headers, token_override.as_deref()).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
 
     let mut conn = state
         .pool

@@ -332,7 +332,7 @@ pub(crate) async fn resolve_group_participation(
     AxumPath(conversation_id_raw): AxumPath<String>,
     Json(body): Json<GroupParticipationResolveBody>,
 ) -> Result<Json<GroupParticipationResolution>, (StatusCode, Json<ApiError>)> {
-    let context = authenticate_request(&state.config, &headers, None).await?;
+    let context = authenticate_request(&state.config, &headers).await?;
     let conversation_id = Uuid::from_str(conversation_id_raw.trim())
         .map_err(|_| bad_request("conversationId must be a valid UUID"))?;
     let content = body.content.trim();
