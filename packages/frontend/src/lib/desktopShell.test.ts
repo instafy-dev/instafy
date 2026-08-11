@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { desktopWindowChrome, isDesktopShell, showBackToLanding } from "./desktopShell";
+import {
+  DESKTOP_TITLE_BAR_HEIGHT_PX,
+  DESKTOP_TITLE_BAR_TAB_OFFSET_PX,
+  desktopTitleBarFree,
+  desktopWindowChrome,
+  isDesktopShell,
+  showBackToLanding,
+} from "./desktopShell";
 
 describe("isDesktopShell", () => {
   it("detects the preload bridge the desktop shell injects", () => {
@@ -53,5 +60,47 @@ describe("desktopWindowChrome", () => {
       "hiddenInset",
     );
     expect(desktopWindowChrome({ instafyDesktop: { windowChrome: "weird" } })).toBe("system");
+  });
+});
+
+describe("desktopTitleBarFree", () => {
+  it("is true only when the shell declares it", () => {
+    expect(desktopTitleBarFree({ instafyDesktop: { titleBarFree: true } })).toBe(true);
+  });
+
+  it("is false on a shell that predates the integrated title bar", () => {
+    // The whole point of the flag. The frontend is published to the web and
+    // reaches installed apps at once, so it routinely runs inside older
+    // shells. Those still paint a full-width drag strip at maximum z-index
+    // across the top row: a tab raised into it receives a window drag rather
+    // than a click, so every tab in the app stops responding. Absent property
+    // must mean "keep the stock layout", never "assume the new one".
+    expect(desktopTitleBarFree({ instafyDesktop: {} })).toBe(false);
+    expect(desktopTitleBarFree({ instafyDesktop: { titleBarFree: false } })).toBe(false);
+    // Truthy-but-not-true must not pass either: only an explicit boolean from
+    // a shell that really narrowed its drag region counts.
+    expect(desktopTitleBarFree({ instafyDesktop: { titleBarFree: "yes" } })).toBe(false);
+    expect(desktopTitleBarFree({ instafyDesktop: { titleBarFree: 1 } })).toBe(false);
+  });
+
+  it("is false outside the desktop shell", () => {
+    expect(desktopTitleBarFree({})).toBe(false);
+    expect(desktopTitleBarFree(undefined)).toBe(false);
+  });
+});
+
+describe("integrated title bar geometry", () => {
+  it("matches the tab strip height so the rail meets the tab underline", () => {
+    // Not an arbitrary inset: the rail's top edge and the tab strip's
+    // underline have to land on the same row, or the rail sits short of the
+    // line and the seam is visible. 48px is the tab strip's own height.
+    expect(DESKTOP_TITLE_BAR_HEIGHT_PX).toBe(48);
+  });
+
+  it("offsets the first tab clear of the window buttons", () => {
+    // Traffic lights are three 12px dots on a 20px pitch from x=13, ending at
+    // x=65. The strip starts at the rail's edge (64), so the offset must carry
+    // the first tab past 65.
+    expect(64 + DESKTOP_TITLE_BAR_TAB_OFFSET_PX).toBeGreaterThan(65);
   });
 });
