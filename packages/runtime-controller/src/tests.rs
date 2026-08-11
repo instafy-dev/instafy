@@ -38,7 +38,7 @@ use chrono::{Duration as ChronoDuration, Utc};
 use futures_util::StreamExt;
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
-use runtime_contracts::AccessTokenClaims;
+use runtime_contracts::{AccessTokenClaims, GIT_DELETE_SCOPE, GIT_DELETE_TOKEN_TTL_SECONDS};
 use serde_json::json;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -3832,6 +3832,105 @@ async fn project_roles_gate_write_credentials_and_scoped_token_exchanges() -> an
             .await?;
         assert_eq!(exchange.status(), StatusCode::FORBIDDEN);
     }
+
+    for (caller, bearer) in [
+        ("human", builder_token.as_str()),
+        ("origin", scoped_read_token.as_str()),
+        ("runtime", runtime_capability_token.as_str()),
+    ] {
+        let response = origin_app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/projects/{project_id}/git/access_token"))
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {bearer}"))
+                    .body(Body::from(
+                        json!({ "scopes": ["git.delete"], "ttlSeconds": 600 }).to_string(),
+                    ))?,
+            )
+            .await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "{caller} minted git.delete"
+        );
+    }
+
+    let mixed_delete_scope = origin_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/projects/{project_id}/git/access_token"))
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer internal")
+                .body(Body::from(
+                    json!({ "scopes": ["git.read", "git.delete"] }).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(mixed_delete_scope.status(), StatusCode::BAD_REQUEST);
+
+    let configured_service_role_delete_token = origin_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/projects/{project_id}/git/access_token"))
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer service-role-token")
+                .body(Body::from(
+                    json!({ "scopes": ["git.delete"], "ttlSeconds": 60 }).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(
+        configured_service_role_delete_token.status(),
+        StatusCode::OK
+    );
+
+    let service_delete_token = origin_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/projects/{project_id}/git/access_token"))
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer internal")
+                .body(Body::from(
+                    json!({ "scopes": ["git.delete"], "ttlSeconds": 600 }).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(service_delete_token.status(), StatusCode::OK);
+    let service_delete_token: serde_json::Value =
+        serde_json::from_slice(&to_bytes(service_delete_token.into_body(), usize::MAX).await?)?;
+    assert_eq!(service_delete_token["scopes"], json!([GIT_DELETE_SCOPE]));
+    assert_eq!(
+        service_delete_token["expiresIn"],
+        GIT_DELETE_TOKEN_TTL_SECONDS
+    );
+    let service_delete_claims = decode_scoped_token(
+        &config,
+        service_delete_token["token"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("service git.delete response omitted token"))?,
+        "service git delete token",
+    )
+    .map_err(|error| controller_error("decode service git.delete token", error))?;
+    assert_eq!(service_delete_claims.aud, "git");
+    assert_eq!(service_delete_claims.protocol.as_deref(), Some("git"));
+    assert_eq!(service_delete_claims.scopes, vec![GIT_DELETE_SCOPE]);
+    assert_eq!(
+        service_delete_claims.exp - service_delete_claims.iat,
+        GIT_DELETE_TOKEN_TTL_SECONDS
+    );
+    assert!(service_delete_claims.runtime_id.is_none());
+    assert!(service_delete_claims.origin_id.is_none());
+    assert!(service_delete_claims.lease_id.is_none());
+    assert!(service_delete_claims.run_id.is_none());
 
     let runtime_git_write = origin_app
         .clone()

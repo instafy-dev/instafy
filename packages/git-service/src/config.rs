@@ -110,6 +110,8 @@ pub struct GitShardConfig {
     pub repo_root: PathBuf,
     pub auto_init: bool,
     pub default_branch: String,
+    pub jwks_url: Url,
+    pub audience: String,
     pub events_webhook: Option<GitEventsWebhookConfig>,
 }
 
@@ -139,6 +141,12 @@ impl GitShardConfig {
         );
         let default_branch =
             std::env::var("GIT_DEFAULT_BRANCH").unwrap_or_else(|_| "main".to_string());
+        let jwks_url_raw = std::env::var("GIT_JWKS_URL").unwrap_or_else(|_| {
+            "http://host.docker.internal:8788/.well-known/jwks.json".to_string()
+        });
+        let jwks_url = Url::parse(&jwks_url_raw)
+            .with_context(|| format!("invalid GIT_JWKS_URL={jwks_url_raw}"))?;
+        let audience = std::env::var("GIT_AUDIENCE").unwrap_or_else(|_| "git".to_string());
         let events_webhook = std::env::var("GIT_EVENTS_WEBHOOK_URL")
             .ok()
             .map(|value| value.trim().to_string())
@@ -169,6 +177,8 @@ impl GitShardConfig {
             repo_root,
             auto_init,
             default_branch,
+            jwks_url,
+            audience,
             events_webhook,
         })
     }
