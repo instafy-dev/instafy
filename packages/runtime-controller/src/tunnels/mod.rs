@@ -1677,6 +1677,9 @@ async fn revoke_tunnel_record(
                 ?error,
                 "tunnel broker revoke failed"
             );
+            return Err(internal_error(
+                "tunnel broker revoke failed; the local grant remains active",
+            ));
         }
     }
 

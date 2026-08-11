@@ -41,6 +41,9 @@ Self-contained tunnel service for Instafy. Issues tunnel assignments, writes DNS
 - DNS is served via PowerDNS (gpgsql) and rathole provides per-tunnel TCP ingress. Traefik can optionally front rathole to route hostnames to the right binding.
 - Auth: `BROKER_API_TOKENS` (comma-separated) protects tunnel endpoints; empty means allow-all (dev only). Tunnel tokens returned to clients are signed JWTs using `TOKEN_SIGNING_KEY` / `TOKEN_ISSUER` (optional `TOKEN_AUDIENCE`) and default TTL `TUNNEL_TOKEN_TTL_SECONDS`.
 - Rathole tokens: set `RATHOLE_SHARED_TOKEN` to force a shared client token (matching rathole `default_token`) if you want to skip per-tunnel tokens.
+- Revocation clears the stored client token and its expiry before the broker
+  reports success. The database constraint rejects any future transition that
+  would leave credential material on a revoked tunnel row.
 - Ingress nodes: every ingress node should run `ingress_sidecar` with its own `INGRESS_HOST`/`INGRESS_PORT` and public `INGRESS_IPV4`/`INGRESS_IPV6`. The sidecar upserts the `ingress_nodes` row (acting as a simple heartbeat) and renders configs for that ingress node only.
 - Rathole bindings: broker allocates per-tunnel `rathole_service` and `rathole_port` from `RATHOLE_PORT_RANGE_START/END`, scoped per ingress node (ports can be reused across ingress nodes). Use `cargo run --bin render_rathole` (or set `RATHOLE_CONFIG_OUTPUT`) to render the server config for the local ingress node.
 - Ingress sidecar: `cargo run --bin ingress_sidecar` periodically revokes expired tunnels for the local ingress node, rerenders `server.toml` from Postgres, optionally reloads rathole via `RATHOLE_RELOAD_COMMAND` or `RATHOLE_PID_FILE`, and writes Traefik dynamic config when `TRAEFIK_CONFIG_OUTPUT` is set. New tunnel writes also emit Postgres `NOTIFY` on `RATHOLE_CONFIG_NOTIFY_CHANNEL` so ingress nodes can refresh immediately after commit instead of waiting for the next polling tick.
