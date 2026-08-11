@@ -1179,7 +1179,14 @@ export function StudioSidebar({
     <>
       <nav
         ref={navRef}
-        className={`${widthClass} group relative flex h-full min-h-0 shrink-0 flex-col overflow-hidden border-r border-slate-200/70 bg-slate-50/80 pb-4 text-slate-600 transition-[width] duration-200 ease-in-out dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-rail)] dark:text-slate-300`}
+        // The rail is the full-height column at the very left edge, so on
+        // macOS it -- not the workspace header -- is what sits under the
+        // traffic lights. Absorb the same safe-area inset the header uses, or
+        // the collapse toggle renders directly beneath the window buttons.
+        // The variable is 0 everywhere except the macOS desktop shell, so web
+        // and Windows/Linux are unaffected. Padding (not margin) keeps the
+        // rail's background behind the buttons.
+        className={`${widthClass} group relative flex h-full min-h-0 shrink-0 flex-col overflow-hidden border-r border-slate-200/70 bg-slate-50/80 pb-4 pt-[var(--instafy-safe-area-inset-top)] text-slate-600 transition-[width] duration-200 ease-in-out dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-rail)] dark:text-slate-300`}
       >
         <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto overflow-x-hidden pb-2">
           <li className={showLabels ? "" : "flex justify-center"}>
