@@ -101,7 +101,9 @@ fn format_pem_block(label: &str, der: &[u8]) -> String {
 }
 
 #[derive(Clone, Default)]
-struct StubTunnelBroker;
+struct StubTunnelBroker {
+    fail_revoke: bool,
+}
 
 #[async_trait]
 impl TunnelBroker for StubTunnelBroker {
@@ -140,6 +142,9 @@ impl TunnelBroker for StubTunnelBroker {
         _tunnel_id: &str,
         _metadata: Option<&serde_json::Value>,
     ) -> anyhow::Result<()> {
+        if self.fail_revoke {
+            anyhow::bail!("injected broker revoke failure");
+        }
         Ok(())
     }
 }
@@ -6977,6 +6982,28 @@ async fn tunnel_routes_issue_list_revoke() -> anyhow::Result<()> {
             .and_then(|value| value.as_str()),
         Some(tunnel_id_second.as_str())
     );
+
+    let mut failing_revoke_state = state.clone();
+    failing_revoke_state.tunnel_broker = Some(Arc::new(StubTunnelBroker { fail_revoke: true }));
+    let failed_revoke = revoke_tunnels_for_scope(
+        &failing_revoke_state,
+        &project_id,
+        Some(&runtime_id_second),
+        None,
+        "test.failed_auto_revoke",
+    )
+    .await;
+    assert!(failed_revoke.is_err());
+    let status_after_failed_revoke: String = pool
+        .get()
+        .await?
+        .query_one(
+            "SELECT status FROM runtime_tunnel_grants WHERE tunnel_id = $1",
+            &[&tunnel_id_second],
+        )
+        .await?
+        .get("status");
+    assert_eq!(status_after_failed_revoke, "active");
 
     let auto_revoked = revoke_tunnels_for_scope(
         &state,
