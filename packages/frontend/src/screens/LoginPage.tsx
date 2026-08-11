@@ -598,26 +598,22 @@ export function LoginPage() {
                         </span>
                       ) : null}
                     </div>
+                    {/*
+                      Name and email only. The provider is already stated by
+                      the badge on the avatar; a pill beside the name and a
+                      "Continue with GitHub" line under the email said the same
+                      thing twice more, which crowded the chip without adding
+                      anything. The badge stays because it is the compact form.
+                      The button's aria-label still names the provider, so the
+                      affordance survives for anyone who cannot see the badge.
+                    */}
                     <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <div className="truncate text-sm font-semibold text-slate-900 dark:text-slate-50">
-                          {account.displayName}
-                        </div>
-                        {isGithubAccount ? (
-                          <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-xxs font-semibold text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
-                            <GitHubIcon className="h-3 w-3" />
-                            GitHub
-                          </span>
-                        ) : null}
+                      <div className="truncate text-sm font-semibold text-slate-900 dark:text-slate-50">
+                        {account.displayName}
                       </div>
                       <div className="truncate text-xs text-slate-600 dark:text-slate-300">
                         {account.email}
                       </div>
-                      {isGithubAccount ? (
-                        <div className="mt-1 text-xxs font-medium text-slate-500 dark:text-slate-400">
-                          Continue with GitHub
-                        </div>
-                      ) : null}
                     </div>
                   </button>
                   <IconButton
