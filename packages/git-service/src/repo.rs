@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
 use anyhow::{Context, Result};
 
 use crate::config::GitShardConfig;
@@ -103,6 +106,195 @@ pub fn ensure_repo_exists(
         .map_err(|error| ServiceError::internal(error.to_string()))?;
 
     Ok(repo_path)
+}
+
+/// Delete one canonical project bare repository.
+///
+/// The caller must still authenticate and classify the HTTP request. This
+/// filesystem boundary repeats the important route constraints so a future
+/// shard caller cannot turn an arbitrary string into a recursive delete.
+pub fn delete_bare_repo(config: &GitShardConfig, repo_dir: &str) -> Result<(), ServiceError> {
+    let repo_name = repo_dir
+        .strip_suffix(".git")
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| ServiceError::bad_request("invalid repository deletion target"))?;
+    let project_id = uuid::Uuid::parse_str(repo_name)
+        .ok()
+        .filter(|project_id| project_id.to_string() == repo_name)
+        .ok_or_else(|| {
+            ServiceError::bad_request(
+                "repository deletion requires a canonical lowercase UUID repo name",
+            )
+        })?;
+    if repo_dir != format!("{project_id}.git") {
+        return Err(ServiceError::bad_request(
+            "repository deletion target must be one direct repo-root child",
+        ));
+    }
+
+    let root_metadata = std::fs::symlink_metadata(&config.repo_root).map_err(|error| {
+        ServiceError::internal(format!(
+            "failed to inspect configured repo root {:?}: {error}",
+            config.repo_root
+        ))
+    })?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err(ServiceError::internal(
+            "configured repo root must be a real directory",
+        ));
+    }
+    let canonical_root = config.repo_root.canonicalize().map_err(|error| {
+        ServiceError::internal(format!(
+            "failed to resolve configured repo root {:?}: {error}",
+            config.repo_root
+        ))
+    })?;
+
+    #[cfg(unix)]
+    let root_device = root_metadata.dev();
+
+    let repo_path = config.repo_root.join(repo_dir);
+    let repo_metadata = match std::fs::symlink_metadata(&repo_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ServiceError::not_found("repo not found"));
+        }
+        Err(error) => {
+            return Err(ServiceError::internal(format!(
+                "failed to inspect repository deletion target {:?}: {error}",
+                repo_path
+            )));
+        }
+    };
+    if repo_metadata.file_type().is_symlink() {
+        return Err(ServiceError::bad_request(
+            "repository deletion target must not be a symlink",
+        ));
+    }
+    if !repo_metadata.is_dir() {
+        return Err(ServiceError::bad_request(
+            "repository deletion target must be a directory",
+        ));
+    }
+
+    #[cfg(unix)]
+    ensure_expected_device(&repo_path, repo_metadata.dev(), root_device)?;
+
+    let canonical_repo = repo_path.canonicalize().map_err(|error| {
+        ServiceError::internal(format!(
+            "failed to resolve repository deletion target {:?}: {error}",
+            repo_path
+        ))
+    })?;
+    if canonical_repo.parent() != Some(canonical_root.as_path()) {
+        return Err(ServiceError::bad_request(
+            "repository deletion target escaped the configured repo root",
+        ));
+    }
+
+    // Refuse to recursively remove an arbitrary UUID-named directory if the
+    // volume was misconfigured or corrupted. These are the stable structural
+    // markers written by `git init --bare`.
+    ensure_bare_repo_marker(&canonical_repo.join("HEAD"), false)?;
+    ensure_bare_repo_marker(&canonical_repo.join("config"), false)?;
+    ensure_bare_repo_marker(&canonical_repo.join("objects"), true)?;
+    ensure_bare_repo_marker(&canonical_repo.join("refs"), true)?;
+
+    // `remove_dir_all` can otherwise descend into a nested bind mount or
+    // mountpoint. Preserve the old cleanup's `find -xdev` containment by
+    // rejecting the entire operation before deletion when any entry crosses
+    // the repository root's filesystem boundary.
+    #[cfg(unix)]
+    ensure_tree_on_device(&canonical_repo, root_device)?;
+
+    std::fs::remove_dir_all(&canonical_repo).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            ServiceError::not_found("repo not found")
+        } else {
+            ServiceError::internal(format!(
+                "failed to delete bare repository {:?}: {error}",
+                canonical_repo
+            ))
+        }
+    })?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_tree_on_device(root: &Path, expected_device: u64) -> Result<(), ServiceError> {
+    ensure_tree_on_device_with(root, expected_device, |_, metadata| metadata.dev())
+}
+
+#[cfg(unix)]
+fn ensure_tree_on_device_with<F>(
+    root: &Path,
+    expected_device: u64,
+    device_for: F,
+) -> Result<(), ServiceError>
+where
+    F: Fn(&Path, &std::fs::Metadata) -> u64,
+{
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(path) = pending.pop() {
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            ServiceError::internal(format!(
+                "failed to inspect repository deletion entry {:?}: {error}",
+                path
+            ))
+        })?;
+        ensure_expected_device(&path, device_for(&path, &metadata), expected_device)?;
+
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            let entries = std::fs::read_dir(&path).map_err(|error| {
+                ServiceError::internal(format!(
+                    "failed to enumerate repository deletion entry {:?}: {error}",
+                    path
+                ))
+            })?;
+            for entry in entries {
+                let entry = entry.map_err(|error| {
+                    ServiceError::internal(format!(
+                        "failed to enumerate repository deletion entry {:?}: {error}",
+                        path
+                    ))
+                })?;
+                pending.push(entry.path());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_expected_device(
+    path: &Path,
+    actual_device: u64,
+    expected_device: u64,
+) -> Result<(), ServiceError> {
+    if actual_device != expected_device {
+        return Err(ServiceError::bad_request(format!(
+            "repository deletion entry {:?} crosses a filesystem boundary",
+            path
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_bare_repo_marker(path: &Path, directory: bool) -> Result<(), ServiceError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|_| {
+        ServiceError::bad_request("repository deletion target is not a bare git repository")
+    })?;
+    let expected_type = if directory {
+        metadata.is_dir()
+    } else {
+        metadata.is_file()
+    };
+    if metadata.file_type().is_symlink() || !expected_type {
+        return Err(ServiceError::bad_request(
+            "repository deletion target is not a bare git repository",
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_repo_policy(repo_path: &Path, default_branch: &str) -> Result<()> {
@@ -625,6 +817,19 @@ mod tests {
         Ok(output.stdout)
     }
 
+    fn test_config(repo_root: PathBuf, auto_init: bool) -> GitShardConfig {
+        GitShardConfig {
+            bind_host: "127.0.0.1".to_string(),
+            bind_port: 0,
+            repo_root,
+            auto_init,
+            default_branch: "main".to_string(),
+            jwks_url: reqwest::Url::parse("http://127.0.0.1/jwks").unwrap(),
+            audience: "git".to_string(),
+            events_webhook: None,
+        }
+    }
+
     #[test]
     fn seed_initial_commit_includes_instafy_scaffold() -> Result<()> {
         let temp_root = unique_temp_dir("instafy-git-service-seed");
@@ -710,6 +915,147 @@ mod tests {
         assert_eq!(group_participation, GROUP_PARTICIPATION_TEMPLATE);
         assert!(group_participation.contains("targetMessageId"));
 
+        let _ = std::fs::remove_dir_all(&temp_root);
+        Ok(())
+    }
+
+    #[test]
+    fn delete_bare_repo_removes_only_canonical_uuid_repo_root() -> Result<()> {
+        let temp_root = unique_temp_dir("instafy-git-service-delete");
+        let repo_root = temp_root.join("repos");
+        std::fs::create_dir_all(&repo_root)?;
+        let project_id = uuid::Uuid::new_v4();
+        let repo_dir = format!("{project_id}.git");
+        let repo_path = repo_root.join(&repo_dir);
+        init_bare_repo(&repo_path, "main")?;
+        let config = test_config(repo_root, true);
+
+        delete_bare_repo(&config, &repo_dir).expect("delete exact bare repo");
+        assert!(!repo_path.exists());
+        assert!(matches!(
+            delete_bare_repo(&config, &repo_dir),
+            Err(ServiceError::NotFound(_))
+        ));
+        assert!(
+            !repo_path.exists(),
+            "a repeated delete must not auto-initialize the repository"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+        Ok(())
+    }
+
+    #[test]
+    fn delete_bare_repo_rejects_traversal_non_directory_and_non_repo_targets() -> Result<()> {
+        let temp_root = unique_temp_dir("instafy-git-service-delete-invalid");
+        let repo_root = temp_root.join("repos");
+        std::fs::create_dir_all(&repo_root)?;
+        let config = test_config(repo_root.clone(), true);
+
+        let file_project_id = uuid::Uuid::new_v4();
+        let file_repo_dir = format!("{file_project_id}.git");
+        std::fs::write(repo_root.join(&file_repo_dir), b"not a repo")?;
+        assert!(matches!(
+            delete_bare_repo(&config, &file_repo_dir),
+            Err(ServiceError::BadRequest(_))
+        ));
+
+        let directory_project_id = uuid::Uuid::new_v4();
+        let directory_repo_dir = format!("{directory_project_id}.git");
+        std::fs::create_dir(repo_root.join(&directory_repo_dir))?;
+        assert!(matches!(
+            delete_bare_repo(&config, &directory_repo_dir),
+            Err(ServiceError::BadRequest(_))
+        ));
+        assert!(repo_root.join(&directory_repo_dir).exists());
+
+        assert!(matches!(
+            delete_bare_repo(&config, &format!("../{}.git", uuid::Uuid::new_v4())),
+            Err(ServiceError::BadRequest(_))
+        ));
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_bare_repo_rejects_symlink_target_without_touching_destination() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let temp_root = unique_temp_dir("instafy-git-service-delete-symlink");
+        let repo_root = temp_root.join("repos");
+        std::fs::create_dir_all(&repo_root)?;
+        let outside_repo = temp_root.join("outside.git");
+        init_bare_repo(&outside_repo, "main")?;
+        let project_id = uuid::Uuid::new_v4();
+        let repo_dir = format!("{project_id}.git");
+        symlink(&outside_repo, repo_root.join(&repo_dir))?;
+        let config = test_config(repo_root, false);
+
+        assert!(matches!(
+            delete_bare_repo(&config, &repo_dir),
+            Err(ServiceError::BadRequest(_))
+        ));
+        assert!(outside_repo.exists());
+        assert!(outside_repo.join("HEAD").is_file());
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_bare_repo_rejects_symlink_configured_root() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let temp_root = unique_temp_dir("instafy-git-service-delete-root-symlink");
+        let real_repo_root = temp_root.join("real-repos");
+        std::fs::create_dir_all(&real_repo_root)?;
+        let project_id = uuid::Uuid::new_v4();
+        let repo_dir = format!("{project_id}.git");
+        let repo_path = real_repo_root.join(&repo_dir);
+        init_bare_repo(&repo_path, "main")?;
+        let linked_repo_root = temp_root.join("linked-repos");
+        symlink(&real_repo_root, &linked_repo_root)?;
+        let config = test_config(linked_repo_root, false);
+
+        assert!(matches!(
+            delete_bare_repo(&config, &repo_dir),
+            Err(ServiceError::Internal(_))
+        ));
+        assert!(repo_path.exists());
+
+        let _ = std::fs::remove_dir_all(&temp_root);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_delete_device_guard_rejects_cross_filesystem_entry() -> Result<()> {
+        let temp_root = unique_temp_dir("instafy-git-service-delete-device");
+        let repo_path = temp_root.join("repo.git");
+        let mounted_path = repo_path.join("objects/mounted");
+        std::fs::create_dir_all(&mounted_path)?;
+        std::fs::write(mounted_path.join("outside-data"), b"preserve")?;
+
+        let expected_device = std::fs::symlink_metadata(&repo_path)?.dev();
+        ensure_tree_on_device(&repo_path, expected_device)?;
+
+        let foreign_device = expected_device.wrapping_add(1);
+        assert!(matches!(
+            ensure_tree_on_device_with(&repo_path, expected_device, |path, metadata| {
+                if path == mounted_path {
+                    foreign_device
+                } else {
+                    metadata.dev()
+                }
+            }),
+            Err(ServiceError::BadRequest(message))
+                if message.contains("crosses a filesystem boundary")
+        ));
+
+        assert!(mounted_path.join("outside-data").exists());
         let _ = std::fs::remove_dir_all(&temp_root);
         Ok(())
     }

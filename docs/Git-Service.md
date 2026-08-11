@@ -100,6 +100,46 @@ instafy api post "/projects/<uuid>/git/access_token" --access-token "$INSTAFY_AC
 git -c "http.extraHeader=Authorization: Bearer <token>" clone "<git-base>/<uuid>.git"
 ```
 
+### Controller-only disposable repository cleanup
+
+Trusted backend automation can remove an exact disposable project repository without SSH access
+to a shard. This capability is intentionally separate from human and runtime Git access:
+
+1. Use an unscoped controller-internal or Supabase service-role bearer to call
+   `POST /projects/<uuid>/git/access_token` with
+   `{"scopes":["git.delete"],"ttlSeconds":60}`.
+2. Send the returned token as a bearer credential on exact
+   `DELETE <git-base>/<uuid>.git`.
+
+`git.delete` must be the only requested scope, always mints with a fixed 60-second lifetime, and
+cannot be minted by a human session or any scoped runtime, job, or origin token. Git Edge requires
+authentication for this operation even when the local-only `GIT_EDGE_SKIP_AUTH` switch is enabled.
+A successful
+deletion returns `204 No Content`; an already-absent repository returns `404 Not Found`, which
+callers may treat as an idempotent cleanup result only with the matching acknowledgement below.
+
+Git Shard independently verifies the signed bearer against `GIT_JWKS_URL` and `GIT_AUDIENCE`
+(the same values used by Git Edge), then requires the exact project binding, protocol, sole scope,
+and absence of runtime/origin/lease/run bindings. This keeps rolling upgrades fail-closed if a new
+shard briefly receives traffic through an older edge.
+
+New shards attach a fixed, status-bound acknowledgement which Git Edge validates and preserves:
+
+- `204 No Content` with `X-Instafy-Git-Delete-Result: deleted-v1`
+- `404 Not Found` with `X-Instafy-Git-Delete-Result: absent-v1`
+
+For a delete request, Git Edge turns every missing, duplicated, mismatched, or unexpected upstream
+acknowledgement/status into `502 Bad Gateway`. This prevents an older shard's ordinary Smart HTTP
+`404` from being mistaken for deletion during a rolling upgrade. Cleanup automation must require
+the exact header/status pair; an initial cleanup normally observes `deleted-v1`, and a second exact
+`DELETE` provides readback proof as `404` plus `absent-v1`.
+
+The route has no compatibility variants: a query string, trailing slash, Smart HTTP subpath,
+non-canonical UUID, or different HTTP method does not authorize deletion. The private shard repeats
+the exact-root validation; refuses symlinks, non-direct children, non-directories, cross-filesystem
+entries (including nested mounts), and directories that do not have the structural markers of a
+bare Git repository; and never auto-initializes a repository while handling `DELETE`.
+
 ## Concurrency (human-style)
 - Agents/runtimes work on branches or local commits.
 - To update `main`, they: `fetch main → rebase/merge → push` (FF-only).
