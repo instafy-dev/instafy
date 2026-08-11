@@ -256,7 +256,11 @@ export function useNativeGithubAuth({
     if (typeof window === "undefined") {
       return;
     }
-    if (!Capacitor.isNativePlatform()) {
+    // The desktop shell is a *web* platform as far as Capacitor is concerned,
+    // so this effect must not bail on it: it also owns the Electron IPC
+    // transport for the shared instafy://auth callback.
+    const desktopCallbackAvailable = isDesktopShell() && desktopCanReceiveAuthCallback();
+    if (!Capacitor.isNativePlatform() && !desktopCallbackAvailable) {
       return;
     }
     if (!hasSupabaseConfig || !supabase?.auth) {
@@ -290,9 +294,12 @@ export function useNativeGithubAuth({
 
     const appPlugin = capacitorPlugins?.App;
     const nativeAuthBridgePlugin = capacitorPlugins?.InstafyAuthBridge;
-    if (!appPlugin || !nativeAuthBridgePlugin) {
-      return;
-    }
+    // Deliberately NOT an early return. The Capacitor plugins are absent under
+    // Electron, and returning here made the desktop wiring below unreachable:
+    // the shell parked the OAuth callback correctly and nothing ever came to
+    // collect it, leaving sign-in stuck on "finish in your browser". The guard
+    // now scopes only the native listeners that actually need those plugins.
+    const nativePluginsAvailable = Boolean(appPlugin && nativeAuthBridgePlugin);
 
     let cancelled = false;
     const handled = new Set<string>();
@@ -421,7 +428,7 @@ export function useNativeGithubAuth({
     };
 
     const drainPendingBridgeUrl = async () => {
-      const result = await nativeAuthBridgePlugin.consumePendingUrl?.();
+      const result = await nativeAuthBridgePlugin?.consumePendingUrl?.();
       const pendingUrl = typeof result?.url === "string" ? result.url.trim() : "";
       if (pendingUrl) {
         await handleCallbackUrl(pendingUrl);
@@ -439,6 +446,12 @@ export function useNativeGithubAuth({
     if (isDesktopShell() && desktopCanReceiveAuthCallback()) {
       desktopUnsubscribe = onDesktopAuthCallback((url) => {
         void handleCallbackUrl(url);
+        // The shell parks every callback *and* sends it, so a live delivery
+        // leaves a copy behind. Clear it, or the next mount of this page
+        // drains a spent token and reports a failure over a good sign-in.
+        // handleCallbackUrl has already recorded the URL synchronously, so
+        // the drained value is deduplicated rather than replayed.
+        void consumeDesktopAuthCallback();
       });
       void consumeDesktopAuthCallback().then((pending) => {
         if (pending) {
@@ -448,6 +461,9 @@ export function useNativeGithubAuth({
     }
 
     (async () => {
+      if (!nativePluginsAvailable || !appPlugin || !nativeAuthBridgePlugin) {
+        return;
+      }
       bridgeListener = (await nativeAuthBridgePlugin.addListener?.("urlOpen", (event) => {
         const url = typeof event?.url === "string" ? event.url : "";
         void handleCallbackUrl(url);
