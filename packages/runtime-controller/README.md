@@ -49,6 +49,7 @@ This document explains how the Instafy runtime controller is structured and how 
 | POST | `/agent/login` | Exchange shared key for agent token, lease/heartbeat URLs, and proxy envelope. |
 | POST | `/agent/lease` | Claim work (job queue). |
 | POST | `/credits` | Apply authenticated credit-ledger operations through the controller. |
+| POST | `/projects/:id/git/access_token` | Mint project Git tokens. `git.delete` is a 60-second, service-auth-only, single-scope cleanup capability. |
 |  |  | Controller no longer serves `/fs/*`; clients should use project origin endpoints (`/entries`, `/files`, `/raw`). |
 | POST | `/projects/:id/origin/presence/beat` | Project-scoped presence updates from an origin. |
 

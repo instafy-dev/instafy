@@ -20,6 +20,7 @@ use futures_util::{SinkExt, StreamExt};
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map as JsonMap, Value as JsonValue};
+use subtle::ConstantTimeEq;
 use tokio::time::Duration as TokioDuration;
 use tokio_postgres::{GenericClient, Row, Transaction};
 use tokio_tungstenite::connect_async;
@@ -48,7 +49,9 @@ use crate::tokens::{
     decode_scoped_token, mint_scoped_token, mint_scoped_token_expires_no_later_than,
     mint_scoped_token_with_browser_actor, ScopedTokenRequest,
 };
-use runtime_contracts::AccessTokenClaims;
+use runtime_contracts::{
+    AccessTokenClaims, GIT_DELETE_SCOPE, GIT_DELETE_TOKEN_SUBJECT, GIT_DELETE_TOKEN_TTL_SECONDS,
+};
 
 mod browser_relay_telemetry;
 
@@ -4827,6 +4830,144 @@ mod tests {
     }
 
     #[test]
+    fn git_delete_scope_requires_unscoped_service_authentication() {
+        let requested = vec![GIT_DELETE_SCOPE.to_string()];
+        let service = RequestContext {
+            user_id: None,
+            is_service_role: true,
+            scoped_claims: None,
+        };
+        assert_eq!(
+            normalize_git_access_token_scopes(&service, &requested, true).unwrap(),
+            requested
+        );
+        assert_eq!(
+            normalize_git_access_token_scopes(&service, &requested, false)
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN,
+            "a service-shaped JWT without a direct configured secret must be denied"
+        );
+
+        let human = RequestContext {
+            user_id: Some(Uuid::new_v4()),
+            is_service_role: false,
+            scoped_claims: None,
+        };
+        assert_eq!(
+            normalize_git_access_token_scopes(&human, &requested, true)
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
+        );
+
+        for (caller, scopes, origin_id, runtime_id, run_id) in [
+            (
+                "runtime",
+                vec![RUNTIME_TOKEN_GIT_MINT_SCOPE.to_string()],
+                None,
+                Some(Uuid::new_v4()),
+                None,
+            ),
+            (
+                "job",
+                vec![JOB_GIT_TOKEN_MINT_SCOPE.to_string()],
+                None,
+                Some(Uuid::new_v4()),
+                Some(Uuid::new_v4()),
+            ),
+            (
+                "origin",
+                vec!["fs.write".to_string()],
+                Some(Uuid::new_v4()),
+                Some(Uuid::new_v4()),
+                Some(Uuid::new_v4()),
+            ),
+        ] {
+            let project_id = Uuid::new_v4();
+            let claims = AccessTokenClaims {
+                aud: project_id.to_string(),
+                sub: Uuid::new_v4().to_string(),
+                project_id: project_id.to_string(),
+                origin_id: origin_id.map(|value| value.to_string()),
+                runtime_id: runtime_id.map(|value| value.to_string()),
+                protocol: None,
+                scopes,
+                lease_id: Some(Uuid::new_v4().to_string()),
+                runtime_generation: None,
+                run_id: run_id.map(|value| value.to_string()),
+                iat: Utc::now().timestamp(),
+                exp: (Utc::now() + ChronoDuration::minutes(5)).timestamp(),
+                jti: Uuid::new_v4().to_string(),
+                prefer_runtime: None,
+                actor_label: None,
+                browser_session_id: None,
+            };
+            let scoped = RequestContext {
+                user_id: Uuid::parse_str(&claims.sub).ok(),
+                is_service_role: false,
+                scoped_claims: Some(claims),
+            };
+            assert_eq!(
+                normalize_git_access_token_scopes(&scoped, &requested, true)
+                    .unwrap_err()
+                    .0,
+                StatusCode::FORBIDDEN,
+                "{caller} capability minted git.delete"
+            );
+        }
+
+        let project_id = Uuid::new_v4();
+        let scoped_service = RequestContext {
+            user_id: None,
+            is_service_role: true,
+            scoped_claims: Some(AccessTokenClaims {
+                aud: project_id.to_string(),
+                sub: GIT_DELETE_TOKEN_SUBJECT.to_string(),
+                project_id: project_id.to_string(),
+                origin_id: None,
+                runtime_id: None,
+                protocol: Some("git".to_string()),
+                scopes: requested.clone(),
+                lease_id: None,
+                runtime_generation: None,
+                run_id: None,
+                iat: Utc::now().timestamp(),
+                exp: (Utc::now() + ChronoDuration::minutes(1)).timestamp(),
+                jti: Uuid::new_v4().to_string(),
+                prefer_runtime: None,
+                actor_label: None,
+                browser_session_id: None,
+            }),
+        };
+        assert_eq!(
+            normalize_git_access_token_scopes(&scoped_service, &requested, true)
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
+        );
+
+        assert_eq!(
+            normalize_git_access_token_scopes(
+                &service,
+                &["git.read".to_string(), GIT_DELETE_SCOPE.to_string()],
+                true,
+            )
+            .unwrap_err()
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+
+        for requested_ttl in [None, Some(1), Some(60), Some(600)] {
+            assert_eq!(
+                git_access_token_ttl_seconds(true, requested_ttl, 300, false),
+                GIT_DELETE_TOKEN_TTL_SECONDS,
+                "git.delete did not mint with the fixed lifetime"
+            );
+        }
+    }
+
+    #[test]
     fn runtime_machine_capabilities_fence_quarantined_or_stale_generations() {
         let lease_id = Uuid::new_v4();
         assert!(runtime_capability_state_is_live("ready", None, None, None));
@@ -6543,6 +6684,91 @@ struct GitAccessTokenResponse {
     scopes: Vec<String>,
 }
 
+fn normalize_git_access_token_scopes(
+    context: &RequestContext,
+    requested_scopes: &[String],
+    direct_service_authentication: bool,
+) -> Result<Vec<String>, (StatusCode, Json<ApiError>)> {
+    let mut scopes: Vec<String> = requested_scopes
+        .iter()
+        .map(|scope| scope.trim().to_lowercase())
+        .filter(|scope| !scope.is_empty())
+        .collect();
+    scopes.sort();
+    scopes.dedup();
+
+    if scopes.is_empty() {
+        return Err(bad_request("scopes are required"));
+    }
+    if scopes
+        .iter()
+        .any(|scope| !matches!(scope.as_str(), "git.read" | "git.write" | GIT_DELETE_SCOPE))
+    {
+        return Err(bad_request("unsupported scope requested"));
+    }
+
+    if scopes.iter().any(|scope| scope == GIT_DELETE_SCOPE) {
+        if scopes.as_slice() != [GIT_DELETE_SCOPE] {
+            return Err(bad_request(
+                "git.delete must be requested as the only scope",
+            ));
+        }
+        if !direct_service_authentication
+            || !context.is_service_role
+            || context.scoped_claims.is_some()
+        {
+            return Err(forbidden(
+                "git.delete requires unscoped service authentication",
+            ));
+        }
+    }
+
+    Ok(scopes)
+}
+
+fn git_access_token_ttl_seconds(
+    delete_requested: bool,
+    requested_ttl_seconds: Option<i64>,
+    default_ttl_seconds: i64,
+    lease_bounded: bool,
+) -> i64 {
+    if delete_requested {
+        return GIT_DELETE_TOKEN_TTL_SECONDS;
+    }
+
+    // Git tokens are short-lived by design (callers typically request 600s);
+    // cap the requested TTL so a leaked token cannot hold git.write for long.
+    const MAX_GIT_TOKEN_TTL_SECONDS: i64 = 3600;
+    let mut ttl_seconds = requested_ttl_seconds
+        .unwrap_or(default_ttl_seconds)
+        .min(MAX_GIT_TOKEN_TTL_SECONDS);
+    if lease_bounded {
+        ttl_seconds = ttl_seconds.min(60);
+    }
+    ttl_seconds.max(1)
+}
+
+fn has_direct_git_delete_service_authentication(
+    config: &AppConfig,
+    headers: &HeaderMap,
+    context: &RequestContext,
+) -> bool {
+    if !context.is_service_role || context.scoped_claims.is_some() {
+        return false;
+    }
+    let Some(token) = bearer_token(headers) else {
+        return false;
+    };
+
+    [
+        config.controller_internal_token.as_deref(),
+        config.supabase_service_role_key.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|expected| ConstantTimeEq::ct_eq(token.as_bytes(), expected.as_bytes()).unwrap_u8() == 1)
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GitShardRouteResponse {
@@ -6563,28 +6789,11 @@ async fn post_git_access_token(
     let project_id = parse_optional_uuid_param(Some(params.project_id), "projectId")?
         .ok_or_else(|| bad_request("projectId is required"))?;
 
-    if body.scopes.is_empty() {
-        return Err(bad_request("scopes are required"));
-    }
-
-    let mut normalized_scopes: Vec<String> = body
-        .scopes
-        .iter()
-        .map(|scope| scope.trim().to_lowercase())
-        .filter(|scope| !scope.is_empty())
-        .collect();
-    normalized_scopes.sort();
-    normalized_scopes.dedup();
-
-    if normalized_scopes.is_empty() {
-        return Err(bad_request("scopes are required"));
-    }
-
-    for scope in &normalized_scopes {
-        if scope != "git.read" && scope != "git.write" {
-            return Err(bad_request("unsupported scope requested"));
-        }
-    }
+    let direct_service_authentication =
+        has_direct_git_delete_service_authentication(&state.config, &headers, &context);
+    let normalized_scopes =
+        normalize_git_access_token_scopes(&context, &body.scopes, direct_service_authentication)?;
+    let delete_requested = normalized_scopes.as_slice() == [GIT_DELETE_SCOPE];
 
     let scoped_capability = if let Some(claims) = context.scoped_claims.as_ref() {
         let legacy_job_token = claims
@@ -6681,13 +6890,18 @@ async fn post_git_access_token(
     }
 
     let actor_user = context.user_id;
-    let service_role_subject_user =
-        if scoped_capability.is_none() && context.is_service_role && actor_user.is_none() {
-            resolve_service_role_subject_user(&state).await?
-        } else {
-            None
-        };
-    let subject = if let Some(capability) = scoped_capability.as_ref() {
+    let service_role_subject_user = if !delete_requested
+        && scoped_capability.is_none()
+        && context.is_service_role
+        && actor_user.is_none()
+    {
+        resolve_service_role_subject_user(&state).await?
+    } else {
+        None
+    };
+    let subject = if delete_requested {
+        Some(GIT_DELETE_TOKEN_SUBJECT.to_string())
+    } else if let Some(capability) = scoped_capability.as_ref() {
         Some(capability.subject.clone())
     } else if let Some(user) = actor_user {
         Some(user.to_string())
@@ -6703,20 +6917,15 @@ async fn post_git_access_token(
         ));
     };
 
-    // Git tokens are short-lived by design (callers typically request 600s);
-    // cap the requested TTL so a leaked token cannot hold git.write for long.
-    const MAX_GIT_TOKEN_TTL_SECONDS: i64 = 3600;
-    let mut ttl_seconds = body
-        .ttl_seconds
-        .unwrap_or(state.config.origin_token_ttl_seconds)
-        .min(MAX_GIT_TOKEN_TTL_SECONDS);
     let latest_expires_at = scoped_capability
         .as_ref()
         .and_then(|capability| capability.latest_expires_at);
-    if latest_expires_at.is_some() {
-        ttl_seconds = ttl_seconds.min(60);
-    }
-    let ttl_seconds = Some(ttl_seconds.max(1));
+    let ttl_seconds = Some(git_access_token_ttl_seconds(
+        delete_requested,
+        body.ttl_seconds,
+        state.config.origin_token_ttl_seconds,
+        latest_expires_at.is_some(),
+    ));
 
     let token_request = ScopedTokenRequest {
         audience: "git".to_string(),
