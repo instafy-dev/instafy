@@ -19,3 +19,10 @@ images from their dedicated Dockerfiles.
 - Fast-forward-only `main`
 - Deny common churn paths (like `node_modules/`)
 - Per-blob size caps (see `GIT_MAX_BLOB_BYTES`, `GIT_DENY_PATHS`, `GIT_POLICY_DISABLED` in `docs/Git-Service.md`)
+
+Trusted backend cleanup may mint a 60-second, service-only `git.delete` token and send exact
+`DELETE /<uuid>.git` through Git Edge. Shards must remain private; the full fail-closed contract is
+documented in `docs/Git-Service.md`. Both edge and shard validate delete credentials with the
+configured `GIT_JWKS_URL` and `GIT_AUDIENCE`.
+Git Edge also requires the new shard's status-bound `X-Instafy-Git-Delete-Result` acknowledgement,
+so an older shard cannot manufacture a successful cleanup with an ordinary Smart HTTP `404`.

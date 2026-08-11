@@ -12,6 +12,8 @@ pub enum ServiceError {
     Forbidden(String),
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("bad gateway: {0}")]
+    BadGateway(String),
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -33,6 +35,10 @@ impl ServiceError {
         Self::NotFound(message.into())
     }
 
+    pub fn bad_gateway(message: impl Into<String>) -> Self {
+        Self::BadGateway(message.into())
+    }
+
     pub fn internal(message: impl Into<String>) -> Self {
         Self::Internal(message.into())
     }
@@ -43,6 +49,7 @@ impl ServiceError {
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
+            Self::BadGateway(_) => StatusCode::BAD_GATEWAY,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }

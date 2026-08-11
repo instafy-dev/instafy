@@ -23,11 +23,15 @@ services:
       GIT_REPO_ROOT: /var/lib/instafy-git/repos
       GIT_AUTO_INIT: ${GIT_AUTO_INIT:-1}
       GIT_DEFAULT_BRANCH: ${GIT_DEFAULT_BRANCH:-main}
+      GIT_AUDIENCE: ${GIT_AUDIENCE:-git}
+      GIT_JWKS_URL: ${GIT_JWKS_URL:-http://host.docker.internal:8788/.well-known/jwks.json}
       GIT_EVENTS_WEBHOOK_URL: ${GIT_EVENTS_WEBHOOK_URL:-http://host.docker.internal:8788/git/hooks/events}
       GIT_EVENTS_WEBHOOK_TOKEN: ${GIT_EVENTS_WEBHOOK_TOKEN:-dev-internal-token}
       GIT_EVENTS_WEBHOOK_TIMEOUT_MS: ${GIT_EVENTS_WEBHOOK_TIMEOUT_MS:-3000}
     volumes:
       - ${GIT_REPO_VOLUME:-../tmp/git-repos}:/var/lib/instafy-git/repos
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   git-edge:
     image: git-services:local

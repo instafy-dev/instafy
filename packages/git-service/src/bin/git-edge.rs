@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, Method, Uri};
+use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::routing::{any, get};
 use axum::Router;
 use futures_util::StreamExt;
@@ -15,7 +15,10 @@ use tracing::info;
 use git_service::auth::{extract_token, TokenValidator};
 use git_service::config::{GitEdgeConfig, GitEdgeRoutingMode};
 use git_service::error::ServiceError;
-use git_service::routing::{parse_repo_segment, pick_shard_index, required_scope};
+use git_service::routing::{
+    parse_repo_segment, pick_shard_index, required_scope, GIT_DELETE_RESULT_ABSENT,
+    GIT_DELETE_RESULT_DELETED, GIT_DELETE_RESULT_HEADER, GIT_DELETE_SCOPE,
+};
 
 #[derive(Clone)]
 struct AppState {
@@ -85,9 +88,11 @@ async fn handle_proxy(
 
     let path = uri.path().to_string();
     let (_repo_dir, repo_name) = parse_repo_segment(&path)?;
-    let scope = required_scope(uri.path(), uri.query());
+    let scope = required_scope(&parts.method, uri.path(), uri.query())?;
 
-    if !state.config.skip_auth {
+    // GIT_EDGE_SKIP_AUTH is a local Smart HTTP convenience. Destructive
+    // requests remain authenticated even when that development switch is on.
+    if request_requires_auth(state.config.skip_auth, scope) {
         let token = extract_token(&parts.headers)?;
         let claims = state
             .validator
@@ -118,7 +123,7 @@ async fn handle_proxy(
         GitEdgeRoutingMode::Controller => resolve_shard_via_controller(&state, &repo_name).await?,
     };
 
-    proxy_request(
+    let response = proxy_request(
         &state.http,
         shard_base,
         &parts.method,
@@ -126,7 +131,43 @@ async fn handle_proxy(
         &uri,
         body,
     )
-    .await
+    .await?;
+    if scope == GIT_DELETE_SCOPE {
+        validate_delete_result(response)
+    } else {
+        Ok(response)
+    }
+}
+
+fn request_requires_auth(skip_auth: bool, required_scope: &str) -> bool {
+    !skip_auth || required_scope == GIT_DELETE_SCOPE
+}
+
+fn validate_delete_result(
+    response: axum::response::Response,
+) -> Result<axum::response::Response, ServiceError> {
+    let expected_result = match response.status() {
+        StatusCode::NO_CONTENT => GIT_DELETE_RESULT_DELETED,
+        StatusCode::NOT_FOUND => GIT_DELETE_RESULT_ABSENT,
+        _ => {
+            return Err(ServiceError::bad_gateway(
+                "git shard returned an invalid repository deletion status",
+            ));
+        }
+    };
+
+    let mut results = response.headers().get_all(GIT_DELETE_RESULT_HEADER).iter();
+    let result = results
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| *value == expected_result);
+    if result.is_none() || results.next().is_some() {
+        return Err(ServiceError::bad_gateway(
+            "git shard omitted the exact repository deletion acknowledgement",
+        ));
+    }
+
+    Ok(response)
 }
 
 async fn resolve_shard_via_controller(
@@ -212,7 +253,7 @@ async fn proxy_request(
     let mut req = client.request(reqwest_method, upstream);
 
     for (name, value) in headers.iter() {
-        if name == axum::http::header::HOST {
+        if name == axum::http::header::HOST || name.as_str() == GIT_DELETE_RESULT_HEADER {
             continue;
         }
         let Ok(value_str) = value.to_str() else {
@@ -257,4 +298,81 @@ async fn proxy_request(
         .unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
     *response.headers_mut() = out_headers;
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repository_deletion_never_inherits_skip_auth() {
+        assert!(request_requires_auth(false, "git.read"));
+        assert!(!request_requires_auth(true, "git.read"));
+        assert!(request_requires_auth(false, GIT_DELETE_SCOPE));
+        assert!(request_requires_auth(true, GIT_DELETE_SCOPE));
+    }
+
+    fn upstream_delete_response(
+        status: StatusCode,
+        result: Option<&str>,
+    ) -> axum::response::Response {
+        let mut response = axum::response::Response::new(axum::body::Body::empty());
+        *response.status_mut() = status;
+        if let Some(result) = result {
+            response.headers_mut().insert(
+                GIT_DELETE_RESULT_HEADER,
+                axum::http::HeaderValue::from_str(result).unwrap(),
+            );
+        }
+        response
+    }
+
+    #[test]
+    fn delete_proxy_requires_status_bound_new_shard_acknowledgement() {
+        for (status, result) in [
+            (StatusCode::NO_CONTENT, None),
+            (StatusCode::NOT_FOUND, None),
+            (StatusCode::NO_CONTENT, Some(GIT_DELETE_RESULT_ABSENT)),
+            (StatusCode::NOT_FOUND, Some(GIT_DELETE_RESULT_DELETED)),
+            (StatusCode::OK, Some(GIT_DELETE_RESULT_DELETED)),
+        ] {
+            let error = validate_delete_result(upstream_delete_response(status, result))
+                .expect_err("unacknowledged delete response was accepted");
+            assert_eq!(error.status_code(), StatusCode::BAD_GATEWAY);
+        }
+
+        let deleted = validate_delete_result(upstream_delete_response(
+            StatusCode::NO_CONTENT,
+            Some(GIT_DELETE_RESULT_DELETED),
+        ))
+        .expect("new shard deleted acknowledgement");
+        assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            deleted
+                .headers()
+                .get(GIT_DELETE_RESULT_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(GIT_DELETE_RESULT_DELETED)
+        );
+
+        let absent = validate_delete_result(upstream_delete_response(
+            StatusCode::NOT_FOUND,
+            Some(GIT_DELETE_RESULT_ABSENT),
+        ))
+        .expect("new shard absent acknowledgement");
+        assert_eq!(absent.status(), StatusCode::NOT_FOUND);
+
+        let mut duplicated =
+            upstream_delete_response(StatusCode::NO_CONTENT, Some(GIT_DELETE_RESULT_DELETED));
+        duplicated.headers_mut().append(
+            GIT_DELETE_RESULT_HEADER,
+            axum::http::HeaderValue::from_static(GIT_DELETE_RESULT_DELETED),
+        );
+        assert_eq!(
+            validate_delete_result(duplicated)
+                .expect_err("duplicate delete acknowledgement was accepted")
+                .status_code(),
+            StatusCode::BAD_GATEWAY
+        );
+    }
 }
