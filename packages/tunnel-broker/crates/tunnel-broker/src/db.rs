@@ -802,7 +802,10 @@ async fn allocate_rathole_binding(
     sqlx::query(
         r#"
         update tunnels
-        set status = 'revoked', updated_at = now()
+        set status = 'revoked',
+            token = '',
+            token_expires_at = null,
+            updated_at = now()
         where ingress_id = $1
           and status != 'revoked'
           and expires_at is not null
@@ -857,7 +860,10 @@ pub async fn revoke_tunnel(
     let record = sqlx::query_as::<_, TunnelRecord>(
         r#"
         UPDATE tunnels
-        SET status = 'revoked', updated_at = NOW()
+        SET status = 'revoked',
+            token = '',
+            token_expires_at = NULL,
+            updated_at = NOW()
         WHERE id = $1
         RETURNING *
         "#,
@@ -896,7 +902,10 @@ pub async fn revoke_expired_tunnels(pool: &DbPool, cfg: &BrokerConfig) -> Result
     let revoked: Vec<RevokedTunnel> = sqlx::query_as(
         r#"
         update tunnels
-        set status = 'revoked', updated_at = now()
+        set status = 'revoked',
+            token = '',
+            token_expires_at = null,
+            updated_at = now()
         where status != 'revoked'
           and expires_at is not null
           and expires_at <= now()
@@ -934,7 +943,10 @@ pub async fn revoke_expired_tunnels_for_ingress(
     let revoked: Vec<TunnelRecord> = sqlx::query_as::<_, TunnelRecord>(
         r#"
         update tunnels
-        set status = 'revoked', updated_at = now()
+        set status = 'revoked',
+            token = '',
+            token_expires_at = null,
+            updated_at = now()
         where ingress_id = $1
           and status != 'revoked'
           and expires_at is not null
@@ -1061,5 +1073,25 @@ mod tests {
             let parsed = status_from_str(as_str);
             assert_eq!(parsed as u8, status as u8);
         }
+    }
+
+    #[test]
+    fn every_revocation_query_scrubs_stored_credentials() {
+        let source = include_str!("db.rs").to_ascii_lowercase();
+        let revoke_assignment = ["set status", " = 'revoked'"].concat();
+        let token_scrub = ["token", " = ''"].concat();
+        let expiry_scrub = ["token_expires_at", " = null"].concat();
+
+        let revocation_count = source.matches(&revoke_assignment).count();
+        assert!(revocation_count > 0, "expected revocation SQL");
+        assert_eq!(source.matches(&token_scrub).count(), revocation_count);
+        assert_eq!(source.matches(&expiry_scrub).count(), revocation_count);
+
+        let migration =
+            include_str!("../migrations/0013_scrub_revoked_tunnel_tokens.sql").to_ascii_lowercase();
+        assert!(migration.contains("update tunnels"));
+        assert!(migration.contains("where status = 'revoked'"));
+        assert!(migration.contains("tunnels_revoked_token_scrubbed"));
+        assert!(migration.contains("validate constraint"));
     }
 }
