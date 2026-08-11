@@ -241,6 +241,15 @@ contextBridge.exposeInMainWorld("instafyDesktop", {
   // that suits the stock title bar; apps older than the integrated layout
   // never expose it, so the frontend keeps the stock spacing there too.
   windowChrome: process.platform === "darwin" ? "hiddenInset" : "system",
+  // Declares that this shell has vacated the title bar: its drag fallback is
+  // confined to the top-left corner beside the window buttons, so the frontend
+  // may put interactive chrome (the tab strip) at y=0 and own dragging for the
+  // rest of that row. Absent on every shell before this one -- which is the
+  // point. The frontend ships over the web and reaches installed apps
+  // immediately, so a new frontend meeting an old shell must keep the old
+  // layout: raising the tabs there would slide them under that shell's
+  // full-width drag strip and turn every tab click into a window drag.
+  titleBarFree: process.platform === "darwin",
   notify: async (payload: DesktopNotificationPayload) => {
     await ipcRenderer.invoke("instafy:notify", payload);
   },

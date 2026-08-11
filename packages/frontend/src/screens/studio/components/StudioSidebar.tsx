@@ -9,6 +9,7 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { Capacitor } from "@capacitor/core";
+import { DESKTOP_TITLE_BAR_HEIGHT_PX, desktopTitleBarFree } from "../../../lib/desktopShell";
 import { DialogTrigger } from "react-aria-components";
 import {
   Cube,
@@ -287,6 +288,9 @@ export function StudioSidebar({
   const mobileExpandedWidthClass = sidebarMobileDrillInOpen
     ? "w-[clamp(18rem,65vw,24rem)]"
     : "w-[clamp(16rem,60vw,22rem)]";
+  // Only true in the macOS shell that vacated its title bar; everywhere
+  // else the rail keeps its stock full-height surface.
+  const titleBarFree = desktopTitleBarFree();
   const widthClass = isExpanded
     ? isLargeScreen
       ? "w-56"
@@ -1181,13 +1185,39 @@ export function StudioSidebar({
         ref={navRef}
         // The rail is the full-height column at the very left edge, so on
         // macOS it -- not the workspace header -- is what sits under the
-        // traffic lights. Absorb the same safe-area inset the header uses, or
-        // the collapse toggle renders directly beneath the window buttons.
-        // The variable is 0 everywhere except the macOS desktop shell, so web
-        // and Windows/Linux are unaffected. Padding (not margin) keeps the
-        // rail's background behind the buttons.
-        className={`${widthClass} group relative flex h-full min-h-0 shrink-0 flex-col overflow-hidden border-r border-slate-200/70 bg-slate-50/80 pb-4 pt-[var(--instafy-safe-area-inset-top)] text-slate-600 transition-[width] duration-200 ease-in-out dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-rail)] dark:text-slate-300`}
+        // traffic lights, and it has to clear them.
+        //
+        // Two shapes, depending on what the shell supports. On a shell that
+        // has vacated the title bar the rail's SURFACE starts on the tab
+        // strip's baseline, so the rail's top edge and the tab underline are
+        // the same line and the buttons sit on the title bar above it; the
+        // surface moves to an inner layer because padding alone would keep
+        // painting the background up to y=0. Otherwise the rail keeps its own
+        // background and merely pads by the safe-area inset -- which is also
+        // what every non-macOS target does, since the variable is 0 there.
+        className={[
+          widthClass,
+          "group relative flex h-full min-h-0 shrink-0 flex-col pb-4 text-slate-600",
+          "transition-[width] duration-200 ease-in-out dark:text-slate-300",
+          titleBarFree
+            // Lift every child above the surface layer as a rule, rather than
+            // tagging each one: a control added to the rail later would
+            // otherwise render behind the background and simply vanish.
+            ? "overflow-visible [&>*:not([data-rail-surface])]:relative [&>*:not([data-rail-surface])]:z-[1]"
+            : "overflow-hidden border-r border-slate-200/70 bg-slate-50/80 pt-[var(--instafy-safe-area-inset-top)] dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-rail)]",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+        style={titleBarFree ? { paddingTop: `${DESKTOP_TITLE_BAR_HEIGHT_PX}px` } : undefined}
       >
+        {titleBarFree ? (
+          <div
+            aria-hidden="true"
+            data-rail-surface=""
+            className="absolute inset-x-0 bottom-0 z-0 border-r border-slate-200/70 bg-slate-50/80 dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-rail)]"
+            style={{ top: `${DESKTOP_TITLE_BAR_HEIGHT_PX}px` }}
+          />
+        ) : null}
         <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto overflow-x-hidden pb-2">
           <li className={showLabels ? "" : "flex justify-center"}>
             <Button

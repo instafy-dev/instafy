@@ -2888,6 +2888,10 @@ app.on("before-quit", (event) => {
 // undraggable window is not an acceptable failure mode for a frontend that
 // happens to be older or newer than this release.
 const MAC_WINDOW_CHROME_INSET_PX = 38;
+// The traffic lights are three 12px dots on a 20px pitch starting at x=13, so
+// they end at x=65. 80 clears them with room to spare and still stops short of
+// the integrated layout's first tab (the 64px rail plus a 24px offset = 88).
+const MAC_WINDOW_CHROME_DRAG_CORNER_WIDTH_PX = 80;
 async function applyMacWindowChromeDragRegion(webContents: Electron.WebContents): Promise<void> {
   if (process.platform !== "darwin") {
     return;
@@ -2904,7 +2908,18 @@ async function applyMacWindowChromeDragRegion(webContents: Electron.WebContents)
         // The drag strip stays regardless, and stays transparent: it is the
         // only thing guaranteeing the window can be moved, for any frontend
         // version, including one that ignores the variable entirely.
-        `#instafy-mac-drag-region { position: fixed; top: 0; left: 0; right: 0; ` +
+        //
+        // It is a CORNER, not a full-width bar. It used to span the window,
+        // which made the top row unusable for anything interactive: at
+        // z-index max, a tab raised into it receives a window drag instead of
+        // a click. Confining it beside the traffic lights lets the frontend
+        // own the rest of that row (see `titleBarFree` in the preload) while
+        // still guaranteeing a drag handle exists no matter what the frontend
+        // does. The width covers the buttons with margin to spare and stops
+        // well short of the first tab, which the integrated layout starts at
+        // the rail's edge plus its own offset.
+        `#instafy-mac-drag-region { position: fixed; top: 0; left: 0; ` +
+        `width: ${MAC_WINDOW_CHROME_DRAG_CORNER_WIDTH_PX}px; ` +
         `height: ${MAC_WINDOW_CHROME_INSET_PX}px; z-index: 2147483647; -webkit-app-region: drag; }` +
         // Anything interactive that reaches into the strip must stay
         // clickable; only the bare strip drags.

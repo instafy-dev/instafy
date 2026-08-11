@@ -44,6 +44,37 @@ export function desktopWindowChrome(
   return bridge?.windowChrome === "hiddenInset" ? "hiddenInset" : "system";
 }
 
+/**
+ * Height of the integrated title bar on macOS: exactly the tab strip's own
+ * height, so the rail's top edge lands on the same row as the tab underline
+ * and the two read as one continuous line. Deriving it from anything else
+ * (for instance the shell's 38px drag inset) puts the rail 10px shy of that
+ * line, which is visible.
+ */
+export const DESKTOP_TITLE_BAR_HEIGHT_PX = 48;
+
+/** Left offset for the first tab, clearing the traffic lights. */
+export const DESKTOP_TITLE_BAR_TAB_OFFSET_PX = 24;
+
+/**
+ * True when the shell has vacated the title bar and the frontend may place
+ * interactive chrome at y=0.
+ *
+ * Gated on a bridge property the shell only started exposing alongside its
+ * narrowed drag region. The frontend reaches installed apps the moment it is
+ * published, so it routinely runs against older shells; on those the top row
+ * is still covered by a full-width drag strip at maximum z-index, where a
+ * raised tab would swallow clicks as window drags. Absent property means old
+ * shell means stock layout.
+ */
+export function desktopTitleBarFree(
+  shellWindow: ShellWindow | undefined = defaultWindow(),
+): boolean {
+  if (!isDesktopShell(shellWindow)) return false;
+  const bridge = shellWindow?.instafyDesktop as { titleBarFree?: unknown } | undefined;
+  return bridge?.titleBarFree === true;
+}
+
 type DesktopBridge = {
   openExternalUrl?: (url: string) => Promise<boolean>;
   consumePendingAuthCallback?: () => Promise<string | null>;
