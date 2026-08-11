@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { desktopTitleBarFree } from "../../../lib/desktopShell";
 import { DialogTrigger } from "react-aria-components";
 import {
   ChatLines,
@@ -456,6 +457,9 @@ export function StudioTopBar() {
   );
 
   const useDesktopTabChrome = isLargeScreen && !controllerProjectMissing;
+  // Only the integrated macOS layout: elsewhere the header keeps the inset
+  // (a real notch on iOS) and the shell keeps owning the drag strip.
+  const titleBarFree = useDesktopTabChrome && desktopTitleBarFree();
   const hasDesktopTabs = useDesktopTabChrome && workspaceTabs.length > 0;
   const resolvedProjectName = activeProjectName || "Untitled Space";
   const projectNameText = (
@@ -565,7 +569,19 @@ export function StudioTopBar() {
       <header
         aria-label={`${resolvedProjectName} workspace navigation`}
         className={[
-          "sticky top-0 z-40 pt-[var(--instafy-safe-area-inset-top)]",
+          "sticky top-0 z-40",
+          // On a shell that has vacated the title bar the tab strip IS the
+          // title bar, so the header must not pad itself clear of the window
+          // buttons -- that padding is what produced an empty band across the
+          // full width when only the leftmost ~70px was ever obstructed. The
+          // rail absorbs the buttons instead. Everywhere else (iOS notches,
+          // older shells) the inset still applies and must: it is the same
+          // variable.
+          titleBarFree ? "" : "pt-[var(--instafy-safe-area-inset-top)]",
+          // With the shell's drag strip reduced to a corner, this row is the
+          // window's drag handle. The class also opts interactive descendants
+          // back out of dragging -- see instafy-titlebar-drag in tailwind.css.
+          titleBarFree ? "instafy-titlebar-drag" : "",
           isLargeScreen
             ? useDesktopTabChrome
               ? `bg-white ${DARK_CANVAS_CLASS}`

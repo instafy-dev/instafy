@@ -14,6 +14,7 @@ import {
   sortableKeyboardCoordinates
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+import { desktopTitleBarFree } from "../lib/desktopShell";
 import { NavArrowLeft, NavArrowRight, Trash, Xmark } from "iconoir-react";
 import { useEffect, useMemo, useCallback, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -94,6 +95,9 @@ export function WorkspaceTabs({
   tabStripActions,
   actions,
 }: WorkspaceTabsProps) {
+  // Integrated macOS title bar: the strip sits on row zero and must clear
+  // the window buttons. False on every other target and on older shells.
+  const titleBarFree = desktopTitleBarFree();
   const { tabs, activeTabId, focusTab, closeTab, moveTab, openConversationTab, requestUrlPush } = useWorkspaceTabs();
   const {
     conversations,
@@ -631,6 +635,14 @@ export function WorkspaceTabs({
         {leading ? <div className="relative z-10 flex flex-none items-end">{leading}</div> : null}
         <HorizontalTabStrip
           className="relative z-10"
+          // The integrated macOS title bar puts this strip on row zero, where
+          // the traffic lights live. Offset the content so the first tab
+          // starts clear of them; the shell's drag corner is sized to stop
+          // short of exactly this position.
+          // pl-6 is 24px: a literal, because Tailwind scans source text and
+          // would never emit a class built from a runtime value. The constant
+          // it must equal is asserted in the tests.
+          contentClassName={titleBarFree ? "flex w-max items-end pr-1 pl-6" : undefined}
           testId="workspace-tabs-strip"
           overflowActions={tabStripActions}
           inlineOverflowActionsTestId="workspace-tabs-inline-actions"
@@ -860,15 +872,24 @@ function WorkspaceSortableTab({
   const tabBaseClassName = getWorkspaceTabBaseClassName(showBaseline);
   const activeClassName = getActiveWorkspaceTabClassName(showBaseline);
   const inactiveClassName = getInactiveWorkspaceTabClassName(showBaseline);
-  // The first tab sits flush against the rail's right edge (rail is w-[4rem];
-  // the tab starts at exactly 64px), so it is attached on that side, not free.
-  // Radius belongs only on free edges: squaring the top-left lets the rail's
-  // vertical divider run straight into the tab's flat edge instead of a curve
-  // pulling away from it. Applied to every first tab, not just the active one,
-  // so the hover shape lines up too.
+  // Radius belongs only on free edges. The first tab is normally attached:
+  // it starts at exactly the rail's right edge (rail is w-[4rem]), so squaring
+  // the top-left lets the rail's vertical divider run straight into a flat
+  // edge instead of a curve pulling away from it. Applied to every first tab,
+  // not just the active one, so the hover shape lines up too.
+  //
+  // The integrated macOS title bar offsets the whole strip to clear the
+  // traffic lights, which makes that edge free -- so the same rule now
+  // demands the opposite result, and the tab keeps its radius and its left
+  // border like any other. Gate on whether the tab is actually flush rather
+  // than on being first, or this becomes a platform exception bolted onto a
+  // geometric rule.
+  const startEdgeIsFlush = isFirstTab && !desktopTitleBarFree();
   const startEdgeClassName = [
-    showBaseline && isFirstTab ? "!rounded-tl-none" : "",
-    showBaseline && isActive && isFirstTab ? "!border-l-transparent dark:!border-l-transparent" : "",
+    showBaseline && startEdgeIsFlush ? "!rounded-tl-none" : "",
+    showBaseline && isActive && startEdgeIsFlush
+      ? "!border-l-transparent dark:!border-l-transparent"
+      : "",
   ]
     .filter(Boolean)
     .join(" ");
