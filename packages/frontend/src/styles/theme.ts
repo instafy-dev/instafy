@@ -38,7 +38,13 @@ export const theme = {
     toggleInactive: "text-slate-500 hover:bg-primary-50 hover:text-primary-600",
   },
   alert: {
-    success: "rounded-2xl border border-primary-200 bg-primary-50 px-4 py-3 text-sm text-primary-700",
-    error: "rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-600",
+    success: [
+      "rounded-2xl border border-primary-200 bg-primary-50 px-4 py-3 text-sm text-primary-700",
+      "dark:border-primary-500/30 dark:bg-primary-500/10 dark:text-primary-200",
+    ].join(" "),
+    error: [
+      "rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-600",
+      "dark:border-rose-500/30 dark:bg-rose-500/10 dark:text-rose-200",
+    ].join(" "),
   },
 };
