@@ -1723,8 +1723,9 @@ pub(crate) async fn setup_origin_test_pool() -> anyhow::Result<Option<PgPool>> {
         .await?;
     connection_handle.abort();
 
-    let manager = PostgresConnectionManager::new_from_stringlike(&url, NoTls)
-        .map_err(|error| anyhow::anyhow!("failed to create test pool manager: {error}"))?;
+    let manager =
+        PostgresConnectionManager::new_from_stringlike(&url, crate::config::database_tls())
+            .map_err(|error| anyhow::anyhow!("failed to create test pool manager: {error}"))?;
     let pool = bb8::Pool::builder()
         .max_size(5)
         .build(manager)

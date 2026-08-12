@@ -1016,10 +1016,7 @@ fn normalize_system_metadata(mut metadata: JsonValue, fingerprint: Option<&str>)
 }
 
 async fn maybe_load_recent_system_issue(
-    connection: &bb8::PooledConnection<
-        '_,
-        bb8_postgres::PostgresConnectionManager<tokio_postgres::NoTls>,
-    >,
+    connection: &bb8::PooledConnection<'_, crate::config::PgConnectionManager>,
     fingerprint: Option<&str>,
     dedupe_window_seconds: Option<i64>,
 ) -> anyhow::Result<Option<Uuid>> {
@@ -1145,10 +1142,7 @@ async fn ensure_bug_report_tables(pool: &PgPool) -> Result<(), (StatusCode, Json
 }
 
 async fn load_reporter_email_snapshot(
-    connection: &bb8::PooledConnection<
-        '_,
-        bb8_postgres::PostgresConnectionManager<tokio_postgres::NoTls>,
-    >,
+    connection: &bb8::PooledConnection<'_, crate::config::PgConnectionManager>,
     user_id: &Uuid,
 ) -> Option<String> {
     match connection
