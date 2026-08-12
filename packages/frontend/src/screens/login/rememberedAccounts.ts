@@ -1,6 +1,6 @@
 import type { User } from "@supabase/supabase-js";
 
-export type RememberedAccountProvider = "email" | "github";
+export type RememberedAccountProvider = "email" | "github" | "google";
 
 export type RememberedAccount = {
   email: string;
@@ -14,9 +14,11 @@ export function normalizeEmail(value: string) {
 }
 
 function normalizeProvider(value: unknown): RememberedAccountProvider {
-  return typeof value === "string" && value.trim().toLowerCase() === "github"
-    ? "github"
-    : "email";
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (normalized === "github" || normalized === "google") {
+    return normalized;
+  }
+  return "email";
 }
 
 function toTitleCase(value: string): string {
@@ -100,24 +102,32 @@ export function removeRememberedAccount(existing: RememberedAccount[], email: st
 export function deriveRememberedAccountProviderFromUser(
   user: Pick<User, "app_metadata" | "identities">,
 ): RememberedAccountProvider {
-  const appMetadataProvider =
-    typeof user.app_metadata?.provider === "string" ? user.app_metadata.provider : null;
-  if (normalizeProvider(appMetadataProvider) === "github") {
-    return "github";
+  // app_metadata.provider is the identity the CURRENT session signed in
+  // with, so it wins outright: a user who linked both GitHub and Google gets
+  // remembered under the door they actually walked through this time. The
+  // providers array and identities list are fallbacks for older sessions
+  // where the primary field is absent.
+  const appMetadataProvider = normalizeProvider(
+    typeof user.app_metadata?.provider === "string" ? user.app_metadata.provider : null,
+  );
+  if (appMetadataProvider !== "email") {
+    return appMetadataProvider;
   }
 
   if (Array.isArray(user.app_metadata?.providers)) {
     for (const provider of user.app_metadata.providers) {
-      if (normalizeProvider(provider) === "github") {
-        return "github";
+      const normalized = normalizeProvider(provider);
+      if (normalized !== "email") {
+        return normalized;
       }
     }
   }
 
   if (Array.isArray(user.identities)) {
     for (const identity of user.identities) {
-      if (normalizeProvider(identity?.provider) === "github") {
-        return "github";
+      const normalized = normalizeProvider(identity?.provider);
+      if (normalized !== "email") {
+        return normalized;
       }
     }
   }

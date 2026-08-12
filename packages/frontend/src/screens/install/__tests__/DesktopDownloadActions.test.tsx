@@ -84,7 +84,7 @@ describe("DesktopDownloadActions", () => {
     const links = Array.from(container.querySelectorAll("a"));
 
     expect(links.map((link) => link.textContent)).toEqual([
-      "macOS Apple silicon (DMG)",
+      "Download for macOS (Apple silicon)",
       "Windows (EXE)",
     ]);
     expect(links[0]?.href).toBe(
@@ -92,11 +92,14 @@ describe("DesktopDownloadActions", () => {
     );
   });
 
-  it("offers macOS and marks the platforms we do not ship yet as coming soon", () => {
+  it("offers macOS and names the platforms we do not ship yet in one sentence", () => {
     // Windows needs a code-signing certificate no CA issues in exportable
     // form any more, and the mac build is Apple silicon only. Both absences
     // must read as deliberate rather than as a missing or dead button: a
     // windowsExe-less manifest previously rendered <a href={undefined}>.
+    // They are named in a single muted sentence, NOT as outlined chips --
+    // chips sat at the same visual weight as the real download and made the
+    // page's one action look like one option among disabled equals.
     const lookup = availableLookup();
     delete (lookup as { manifest: { artifacts: { windowsExe?: string } } })
       .manifest.artifacts.windowsExe;
@@ -113,10 +116,16 @@ describe("DesktopDownloadActions", () => {
     expect(
       container.querySelector('[data-testid="desktop-download-windows-coming-soon"]')
         ?.textContent,
-    ).toContain("Coming soon");
+    ).toBe("Windows");
     expect(
       container.querySelector('[data-testid="desktop-download-mac-intel-coming-soon"]')
         ?.textContent,
-    ).toContain("Coming soon");
+    ).toContain("macOS Intel");
+    expect(container.textContent).toContain(
+      "Windows and macOS Intel builds are coming soon.",
+    );
+    // The absent platforms must never render as anchors.
+    const linkTexts = Array.from(container.querySelectorAll("a")).map((a) => a.textContent);
+    expect(linkTexts).toEqual(["Download for macOS (Apple silicon)"]);
   });
 });
