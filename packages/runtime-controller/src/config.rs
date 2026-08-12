@@ -16,13 +16,39 @@ use bb8_postgres::PostgresConnectionManager;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use tokio::sync::RwLock;
-use tokio_postgres::NoTls;
+use tokio_postgres_rustls::MakeRustlsConnect;
 use tracing::{info, warn};
 
 use crate::jwks;
 use crate::model_defaults::{default_managed_ai_model_id, default_managed_ai_model_label};
 
-pub type PgPool = Pool<PostgresConnectionManager<NoTls>>;
+/// Supabase-managed Postgres endpoints (including the shared session pooler)
+/// present certificate chains rooted in Supabase's own authority rather than
+/// a public one, so the public web roots alone cannot verify them.
+const SUPABASE_PROD_CA_2021: &str = include_str!("../certs/supabase-prod-ca-2021.pem");
+
+pub type PgConnectionManager = PostgresConnectionManager<MakeRustlsConnect>;
+pub type PgPool = Pool<PgConnectionManager>;
+
+fn database_root_store() -> rustls::RootCertStore {
+    let mut roots = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    for certificate in rustls_pemfile::certs(&mut SUPABASE_PROD_CA_2021.as_bytes()) {
+        let certificate = certificate.expect("embedded Supabase CA certificate parses");
+        roots
+            .add(certificate)
+            .expect("embedded Supabase CA certificate is a valid trust anchor");
+    }
+    roots
+}
+
+pub(crate) fn database_tls() -> MakeRustlsConnect {
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(database_root_store())
+        .with_no_client_auth();
+    MakeRustlsConnect::new(config)
+}
 
 #[derive(Clone)]
 pub struct CredentialEncryptionKey([u8; 32]);
@@ -1096,8 +1122,9 @@ impl AppConfig {
     }
 
     pub async fn build_pool(&self) -> anyhow::Result<PgPool> {
-        let manager = PostgresConnectionManager::new_from_stringlike(&self.database_url, NoTls)
-            .map_err(|error| anyhow::anyhow!("failed to parse DATABASE_URL: {error}"))?;
+        let manager =
+            PostgresConnectionManager::new_from_stringlike(&self.database_url, database_tls())
+                .map_err(|error| anyhow::anyhow!("failed to parse DATABASE_URL: {error}"))?;
         Pool::builder()
             .max_size(self.database_pool_size)
             .connection_timeout(Duration::from_secs(10))
@@ -1201,6 +1228,24 @@ impl StripeConfig {
 mod tests {
     use super::{normalize_public_app_url, parse_browser_profile_persist_project_ids};
     use uuid::Uuid;
+
+    #[test]
+    fn database_trust_store_holds_public_roots_and_the_supabase_authority() {
+        let roots = super::database_root_store();
+        assert_eq!(
+            roots.roots.len(),
+            webpki_roots::TLS_SERVER_ROOTS.len() + 1,
+            "expected every public web root plus exactly the embedded Supabase CA",
+        );
+    }
+
+    #[test]
+    fn database_tls_builds_a_verifying_connector() {
+        // Constructing the connector proves the embedded certificate parses
+        // and forms a valid rustls client configuration at startup rather
+        // than on the first pooled connection.
+        let _connector = super::database_tls();
+    }
 
     #[test]
     fn browser_profile_project_allowlist_is_empty_by_default_shape() {
