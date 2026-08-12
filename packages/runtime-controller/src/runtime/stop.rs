@@ -1982,7 +1982,6 @@ mod tests {
     use httpmock::{Method::POST, MockServer};
     use serde_json::json;
     use tokio::time::{timeout, Duration};
-    use tokio_postgres::NoTls;
     use uuid::Uuid;
 
     fn runtime_details(status: &str, active_lease_id: Option<Uuid>) -> RuntimeDetails {
@@ -2172,7 +2171,7 @@ mod tests {
     fn test_state_with_provider(endpoint: Option<String>) -> crate::AppState {
         let manager = PostgresConnectionManager::new_from_stringlike(
             "postgres://postgres:postgres@127.0.0.1:1/postgres",
-            NoTls,
+            crate::config::database_tls(),
         )
         .expect("test postgres manager");
         let pool = Pool::builder().max_size(1).build_unchecked(manager);
@@ -2216,7 +2215,10 @@ mod tests {
         drop(setup_pool);
 
         let database_url = std::env::var("TEST_DATABASE_URL")?;
-        let manager = PostgresConnectionManager::new_from_stringlike(&database_url, NoTls)?;
+        let manager = PostgresConnectionManager::new_from_stringlike(
+            &database_url,
+            crate::config::database_tls(),
+        )?;
         let pool = Pool::builder().max_size(1).build(manager).await?;
         let project_id = Uuid::new_v4();
         let runtime_id = Uuid::new_v4();

@@ -3980,7 +3980,6 @@ mod device_auth_session_tests {
     use bb8::Pool;
     use bb8_postgres::PostgresConnectionManager;
     use chrono::{Duration as ChronoDuration, Utc};
-    use tokio_postgres::NoTls;
     use uuid::Uuid;
 
     use super::{
@@ -4140,7 +4139,10 @@ mod device_auth_session_tests {
                 return Ok(());
             }
         };
-        let manager = PostgresConnectionManager::new_from_stringlike(database_url, NoTls)?;
+        let manager = PostgresConnectionManager::new_from_stringlike(
+            database_url,
+            crate::config::database_tls(),
+        )?;
         let pool = Pool::builder().max_size(8).build(manager).await?;
         let capacity_user_id = Uuid::new_v4();
         let rate_user_id = Uuid::new_v4();
