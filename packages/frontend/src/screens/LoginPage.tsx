@@ -15,6 +15,7 @@ import { isDesktopShell, showBackToLanding as computeShowBackToLanding } from ".
 import { AppVersionLabel } from "../components/AppVersionLabel";
 import { useAuth } from "../providers/AuthProvider";
 import { OAUTH_REDIRECT_TARGET_KEY, useNativeGithubAuth } from "./login/useNativeGithubAuth";
+import { GoogleIcon } from "../components/IntegrationIcons";
 import {
   deriveRememberedAccountProviderFromUser,
   normalizeEmail,
@@ -107,6 +108,13 @@ function OrDivider() {
   );
 }
 
+// Google OAuth ships dark: the button renders only once the provider is
+// configured in the Supabase dashboard AND this flag is flipped in the build.
+// Rendering it earlier would offer a button whose click can only produce
+// "provider is not enabled".
+const GOOGLE_AUTH_ENABLED =
+  (import.meta.env.VITE_INSTAFY_ENABLE_GOOGLE_AUTH ?? "").trim() === "1";
+
 export function LoginPage() {
   const {
     loading,
@@ -179,7 +187,7 @@ export function LoginPage() {
   const passwordRef = useRef<HTMLInputElement | null>(null);
   const otpRef = useRef<HTMLInputElement | null>(null);
 
-  const { handleGithubLogin, resetNativeAuthState } = useNativeGithubAuth({
+  const { handleGithubLogin, handleGoogleLogin, resetNativeAuthState } = useNativeGithubAuth({
     redirectTarget,
     setError,
     setMessage,
@@ -535,6 +543,10 @@ export function LoginPage() {
       void handleGithubLogin();
       return;
     }
+    if (account.provider === "google") {
+      void handleGoogleLogin();
+      return;
+    }
     setStep("password");
   };
 
@@ -583,9 +595,11 @@ export function LoginPage() {
                     onClick={() => handleSelectAccount(account)}
                     className="flex min-w-0 flex-1 items-center gap-3 text-left outline-none focus-visible:ring-2 focus-visible:ring-primary-400/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-slate-950"
                     aria-label={
-                      isGithubAccount
+                      account.provider === "github"
                         ? `Continue with GitHub as ${account.email}`
-                        : `Continue with password as ${account.email}`
+                        : account.provider === "google"
+                          ? `Continue with Google as ${account.email}`
+                          : `Continue with password as ${account.email}`
                     }
                   >
                     <div className="relative shrink-0">
@@ -595,6 +609,10 @@ export function LoginPage() {
                       {isGithubAccount ? (
                         <span className="absolute -bottom-0.5 -right-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-white bg-slate-900 text-white shadow-sm dark:border-slate-950 dark:bg-white dark:text-slate-900">
                           <GitHubIcon className="h-3 w-3" />
+                        </span>
+                      ) : account.provider === "google" ? (
+                        <span className="absolute -bottom-0.5 -right-0.5 inline-flex h-5 w-5 items-center justify-center rounded-full border border-slate-200 bg-white shadow-sm dark:border-slate-950">
+                          <GoogleIcon className="h-3 w-3" />
                         </span>
                       ) : null}
                     </div>
@@ -916,6 +934,21 @@ export function LoginPage() {
               <span>Continue with GitHub</span>
             </span>
           </Button>
+          {GOOGLE_AUTH_ENABLED ? (
+            <Button
+              variant="outline"
+              radius="full"
+              size="lg"
+              fullWidth
+              onPress={handleGoogleLogin}
+              isDisabled={submitting || !hasSupabaseConfig || isExtensionEmbed}
+            >
+              <span className="inline-flex items-center gap-2">
+                <GoogleIcon className="h-4 w-4" />
+                <span>Continue with Google</span>
+              </span>
+            </Button>
+          ) : null}
         </div>
 
         <OrDivider />
