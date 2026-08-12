@@ -2163,7 +2163,6 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use bb8::Pool;
     use bb8_postgres::PostgresConnectionManager;
-    use tokio_postgres::NoTls;
     use tower::ServiceExt;
 
     fn sample_event() -> DesktopUpdateEvent {
@@ -2211,7 +2210,7 @@ mod tests {
     fn build_dummy_pool() -> anyhow::Result<crate::config::PgPool> {
         let manager = PostgresConnectionManager::new_from_stringlike(
             "postgresql://ignored:ignored@127.0.0.1:1/postgres",
-            NoTls,
+            crate::config::database_tls(),
         )?;
         Ok(Pool::builder().max_size(1).build_unchecked(manager))
     }
