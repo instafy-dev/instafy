@@ -3,26 +3,6 @@ import { Text } from "../../components/Text";
 import { theme } from "../../styles/theme";
 import type { DesktopReleaseLookup } from "../../updates/desktopReleaseManifest";
 
-const SECONDARY_BUTTON_CLASSNAME = [
-  theme.button.secondary,
-  "dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200 dark:hover:border-slate-600 dark:hover:text-slate-50",
-].join(" ");
-
-// A platform we do not ship yet, shown so the page reads as a deliberate
-// choice rather than a missing button. Not a link: there is nothing to
-// download, and a disabled-looking anchor invites clicking anyway.
-function ComingSoon({ label, testId }: { label: string; testId: string }) {
-  return (
-    <span
-      className="inline-flex items-center gap-2 rounded-full border border-dashed border-slate-300 px-4 py-2 text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400"
-      data-testid={testId}
-    >
-      {label}
-      <span className="text-xs uppercase tracking-wide">Coming soon</span>
-    </span>
-  );
-}
-
 export function DesktopDownloadActions({
   lookup,
   onRetry,
@@ -32,39 +12,57 @@ export function DesktopDownloadActions({
 }) {
   if (lookup.status === "available") {
     const downloads = lookup.manifest.artifacts;
+    // Platforms we do not ship yet, named in one quiet sentence so the page
+    // reads as a deliberate choice rather than missing buttons. They used to
+    // be dashed outlined chips sitting at the same visual weight as the real
+    // download, which made the one action on this page look like one option
+    // among disabled equals.
+    const comingSoon: { label: string; testId: string }[] = [];
+    if (!downloads.windowsExe) {
+      comingSoon.push({ label: "Windows", testId: "desktop-download-windows-coming-soon" });
+    }
+    if (downloads.macArch === "arm64") {
+      comingSoon.push({ label: "macOS Intel", testId: "desktop-download-mac-intel-coming-soon" });
+    }
     return (
       <div
-        className="mt-5 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center"
+        className="mt-5 flex flex-col gap-3"
         data-testid="desktop-downloads-available"
         aria-live="polite"
       >
-        <a
-          className={SECONDARY_BUTTON_CLASSNAME}
-          href={downloads.macDmg}
-          target="_blank"
-          rel="noreferrer"
-        >
-          {downloads.macArch === "arm64"
-            ? "macOS Apple silicon (DMG)"
-            : "macOS Intel (DMG)"}
-        </a>
-        {downloads.windowsExe ? (
+        <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+          {/* The one primary action on the page. */}
           <a
-            className={SECONDARY_BUTTON_CLASSNAME}
-            href={downloads.windowsExe}
+            className={theme.button.primary}
+            href={downloads.macDmg}
             target="_blank"
             rel="noreferrer"
           >
-            Windows (EXE)
+            {downloads.macArch === "arm64"
+              ? "Download for macOS (Apple silicon)"
+              : "Download for macOS (Intel)"}
           </a>
-        ) : (
-          <ComingSoon label="Windows" testId="desktop-download-windows-coming-soon" />
-        )}
-        {downloads.macArch === "arm64" ? (
-          <ComingSoon
-            label="macOS Intel"
-            testId="desktop-download-mac-intel-coming-soon"
-          />
+          {downloads.windowsExe ? (
+            <a
+              className={theme.button.secondary}
+              href={downloads.windowsExe}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Windows (EXE)
+            </a>
+          ) : null}
+        </div>
+        {comingSoon.length > 0 ? (
+          <Text variant="caption" tone="muted">
+            {comingSoon.map((item, index) => (
+              <span key={item.testId} data-testid={item.testId}>
+                {index > 0 ? " and " : ""}
+                {item.label}
+              </span>
+            ))}
+            {comingSoon.length > 1 ? " builds are" : " build is"} coming soon.
+          </Text>
         ) : null}
       </div>
     );

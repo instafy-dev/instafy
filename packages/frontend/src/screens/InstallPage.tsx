@@ -15,10 +15,17 @@ import { DesktopDownloadActions } from "./install/DesktopDownloadActions";
 
 const HERO_DESCRIPTION = "Pick a surface and keep building in the same repo.";
 
-const SECONDARY_BUTTON_CLASSNAME = [
-  theme.button.secondary,
-  "dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200 dark:hover:border-slate-600 dark:hover:text-slate-50",
-].join(" ");
+// One card recipe for the whole page: a single hairline border on a softly
+// raised fill, 16px radius, no shadow. Every visual boundary inside a card is
+// carried by spacing and type, not by more boxes -- the previous design
+// stacked card border + icon ring + badge border + outlined pills + dashed
+// chips and read as noise.
+const CARD_CLASSNAME =
+  "rounded-2xl border border-slate-200 bg-white/80 p-6 dark:border-white/10 dark:bg-white/[0.04]";
+
+// Icon tile: a tint, not another outlined box.
+const ICON_TILE_CLASSNAME =
+  "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-100 dark:bg-white/[0.06]";
 
 export function InstallPage() {
   const auth = useAuth();
@@ -88,13 +95,50 @@ export function InstallPage() {
         <MarketingGridSection className="flex-1">
           <div className="mx-auto flex w-full max-w-6xl flex-col px-6 pb-12 pt-8">
             <section className="w-full">
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="rounded-[28px] border border-slate-200 bg-white/90 p-6 shadow-card-lg dark:border-slate-800 dark:bg-slate-950/60 dark:shadow-modal">
-                  <div className="flex items-start gap-4">
-                    <span
-                      aria-hidden="true"
-                      className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white/90 ring-1 ring-black/5 dark:bg-slate-950/40 dark:ring-white/10"
+              {/*
+                The desktop app is the flagship install -- native shell,
+                Personal Browser, auto-update -- so it leads at full width
+                with the page's one primary button. The phone surfaces are
+                lighter companions below it, not its equals: iOS is "open the
+                web app", Android does not exist yet.
+              */}
+              <div id="desktop" className={`scroll-mt-24 ${CARD_CLASSNAME} sm:p-8`}>
+                <div className="flex items-start gap-4">
+                  <span aria-hidden="true" className={ICON_TILE_CLASSNAME}>
+                    <ComputerIcon className="h-5 w-5 text-slate-700 dark:text-slate-200" />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Heading level={2} variant="title">
+                        Desktop app
+                      </Heading>
+                      {desktopAppVersion ? (
+                        <Badge size="xs">v{desktopAppVersion}</Badge>
+                      ) : null}
+                    </div>
+                    <Text variant="body" tone="muted" className="mt-1">
+                      Install the native desktop Studio with Personal Browser and automatic updates.
+                    </Text>
+
+                    <DesktopDownloadActions
+                      lookup={desktopReleaseLookup}
+                      onRetry={retryDesktopRelease}
+                    />
+                    <a
+                      href="instafy://studio"
+                      className="mt-4 inline-flex text-sm font-medium text-slate-500 underline-offset-4 transition hover:text-slate-800 hover:underline dark:text-slate-400 dark:hover:text-slate-100"
+                      data-testid="open-desktop-app"
                     >
+                      Already installed? Open Desktop
+                    </a>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 grid gap-4 md:grid-cols-2">
+                <div className={CARD_CLASSNAME}>
+                  <div className="flex items-start gap-4">
+                    <span aria-hidden="true" className={ICON_TILE_CLASSNAME}>
                       <AppStoreIcon className="h-5 w-5 text-[#0EA5E9]" />
                     </span>
                     <div className="min-w-0 flex-1">
@@ -104,22 +148,18 @@ export function InstallPage() {
                       <Text variant="body" tone="muted" className="mt-1">
                         Open the Studio on your phone. Add to Home Screen for an app-like feel.
                       </Text>
+                      <div className="mt-4">
+                        <a className={theme.button.secondary} href={buildDestination()}>
+                          Open Studio
+                        </a>
+                      </div>
                     </div>
-                  </div>
-
-                  <div className="mt-5 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
-                    <a className={SECONDARY_BUTTON_CLASSNAME} href={buildDestination()}>
-                      Open Studio
-                    </a>
                   </div>
                 </div>
 
-                <div className="rounded-[28px] border border-slate-200 bg-white/90 p-6 shadow-card-lg dark:border-slate-800 dark:bg-slate-950/60 dark:shadow-modal">
+                <div className={CARD_CLASSNAME}>
                   <div className="flex items-start gap-4">
-                    <span
-                      aria-hidden="true"
-                      className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white/90 ring-1 ring-black/5 dark:bg-slate-950/40 dark:ring-white/10"
-                    >
+                    <span aria-hidden="true" className={ICON_TILE_CLASSNAME}>
                       <PlayIcon className="h-5 w-5 text-emerald-600" />
                     </span>
                     <div className="min-w-0 flex-1">
@@ -134,45 +174,6 @@ export function InstallPage() {
                       </Text>
                     </div>
                   </div>
-                </div>
-
-                <div
-                  id="desktop"
-                  className="scroll-mt-24 rounded-[28px] border border-slate-200 bg-white/90 p-6 shadow-card-lg dark:border-slate-800 dark:bg-slate-950/60 dark:shadow-modal"
-                >
-                  <div className="flex items-start gap-4">
-                    <span
-                      aria-hidden="true"
-                      className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white/90 ring-1 ring-black/5 dark:bg-slate-950/40 dark:ring-white/10"
-                    >
-                      <ComputerIcon className="h-5 w-5 text-slate-700 dark:text-slate-200" />
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Heading level={2} variant="title">
-                          Desktop app
-                        </Heading>
-                        {desktopAppVersion ? (
-                          <Badge size="xs">v{desktopAppVersion}</Badge>
-                        ) : null}
-                      </div>
-                      <Text variant="body" tone="muted" className="mt-1">
-                        Install the native desktop Studio with Personal Browser and automatic updates.
-                      </Text>
-                    </div>
-                  </div>
-
-                  <DesktopDownloadActions
-                    lookup={desktopReleaseLookup}
-                    onRetry={retryDesktopRelease}
-                  />
-                  <a
-                    href="instafy://studio"
-                    className="mt-4 inline-flex text-sm font-semibold text-primary-700 underline-offset-4 transition hover:text-primary-800 hover:underline dark:text-primary-300 dark:hover:text-primary-200"
-                    data-testid="open-desktop-app"
-                  >
-                    Already installed? Open Desktop
-                  </a>
                 </div>
               </div>
             </section>

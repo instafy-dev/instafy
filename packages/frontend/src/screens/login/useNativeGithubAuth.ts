@@ -28,6 +28,18 @@ import { postAuthTelemetryEvent } from "../../services/runtimeController/authTel
 
 export const OAUTH_REDIRECT_TARGET_KEY = "instafy.login.oauthRedirectTarget";
 
+// The OAuth providers the login page offers. Everything downstream of the
+// entry function -- pending attempts, deep links, telemetry metadata -- is
+// already provider-generic (attempts carry `provider: string`); only the
+// entry function and its user-facing strings need to know which provider a
+// click meant.
+export type LoginOAuthProvider = "github" | "google";
+
+const OAUTH_PROVIDER_LABELS: Record<LoginOAuthProvider, string> = {
+  github: "GitHub",
+  google: "Google",
+};
+
 interface UseNativeGithubAuthOptions {
   redirectTarget: string;
   setError: (value: string | null) => void;
@@ -124,7 +136,8 @@ export function useNativeGithubAuth({
       nextUserEmail: string | null,
     ) => {
       const pendingAttempt = readPendingNativeAuthAttempt();
-      postGithubAuthTelemetry("auth.login.github.completed", "info", null, pendingAttempt, {
+      const completedProvider = pendingAttempt?.provider ?? "github";
+      postGithubAuthTelemetry(`auth.login.${completedProvider}.completed`, "info", null, pendingAttempt, {
         completionMethod,
         userEmail: nextUserEmail,
         source: "login_page_direct_plugins",
@@ -157,9 +170,12 @@ export function useNativeGithubAuth({
       if (readNativeAuthCallbackAttemptId() === expectedAttemptId) {
         return;
       }
+      const attemptProvider = pendingAttempt.provider ?? "github";
+      const attemptLabel =
+        OAUTH_PROVIDER_LABELS[attemptProvider as LoginOAuthProvider] ?? "GitHub";
       failPendingGithubLoginAttempt(
-        "auth.login.github.browser_finished_without_completion",
-        "GitHub sign-in did not complete. Try again.",
+        `auth.login.${attemptProvider}.browser_finished_without_completion`,
+        `${attemptLabel} sign-in did not complete. Try again.`,
         { source },
       );
     }, 1500);
@@ -502,12 +518,13 @@ export function useNativeGithubAuth({
     };
   }, [completePendingGithubLoginAttempt, failPendingGithubLoginAttempt]);
 
-  const handleGithubLogin = useCallback(async () => {
+  const handleOAuthLogin = useCallback(async (provider: LoginOAuthProvider) => {
+    const providerLabel = OAUTH_PROVIDER_LABELS[provider];
     if (typeof window === "undefined") {
       return;
     }
     if (!hasSupabaseConfig || !supabase?.auth || typeof supabase.auth.signInWithOAuth !== "function") {
-      setError("GitHub login is not available.");
+      setError(`${providerLabel} login is not available.`);
       return;
     }
     resetNativeAuthState();
@@ -527,9 +544,9 @@ export function useNativeGithubAuth({
       }
       if (Capacitor.isNativePlatform()) {
         const nativePlatform = Capacitor.getPlatform();
-        nativeAttempt = createPendingNativeAuthAttempt("github");
+        nativeAttempt = createPendingNativeAuthAttempt(provider);
         const result = await supabase.auth.signInWithOAuth({
-          provider: "github",
+          provider,
           options: { redirectTo, queryParams, skipBrowserRedirect: true },
         });
         if (result.error) {
@@ -537,10 +554,10 @@ export function useNativeGithubAuth({
         }
         const url = result.data?.url;
         if (!url) {
-          throw new Error("Unable to start GitHub login.");
+          throw new Error(`Unable to start ${providerLabel} login.`);
         }
         writePendingNativeAuthAttempt(nativeAttempt);
-        postGithubAuthTelemetry("auth.login.github.started", "info", null, nativeAttempt, {
+        postGithubAuthTelemetry(`auth.login.${provider}.started`, "info", null, nativeAttempt, {
           launchMode: nativePlatform === "android" ? "custom_tab" : "custom_tab",
         });
         if (nativePlatform === "android") {
@@ -571,7 +588,7 @@ export function useNativeGithubAuth({
       // instafy://auth deep link bring the session back.
       if (isDesktopShell() && desktopCanReceiveAuthCallback()) {
         const desktopResult = await supabase.auth.signInWithOAuth({
-          provider: "github",
+          provider,
           options: { redirectTo, queryParams, skipBrowserRedirect: true },
         });
         if (desktopResult.error) {
@@ -579,29 +596,29 @@ export function useNativeGithubAuth({
         }
         const url = desktopResult.data?.url;
         if (!url) {
-          throw new Error("Unable to start GitHub login.");
+          throw new Error(`Unable to start ${providerLabel} login.`);
         }
         await openDesktopExternalUrl(url);
-        setMessage("Finish signing in with GitHub in your browser…");
+        setMessage(`Finish signing in with ${providerLabel} in your browser…`);
         setSubmitting(false);
         return;
       }
 
       const result = await supabase.auth.signInWithOAuth({
-        provider: "github",
+        provider,
         options: { redirectTo, queryParams },
       });
       if (result.error) {
         throw result.error;
       }
-      setMessage("Redirecting to GitHub…");
+      setMessage(`Redirecting to ${providerLabel}…`);
     } catch (err) {
-      const details = err instanceof Error ? err.message : "Unable to continue with GitHub.";
+      const details = err instanceof Error ? err.message : `Unable to continue with ${providerLabel}.`;
       if (nativeAttempt) {
         clearNativeAuthCallbackAttemptId();
         clearPendingNativeAuthAttempt();
         clearNativeAuthLaunchState();
-        postGithubAuthTelemetry("auth.login.github.start_failed", "error", details, nativeAttempt);
+        postGithubAuthTelemetry(`auth.login.${provider}.start_failed`, "error", details, nativeAttempt);
       }
       setError(details);
       setSubmitting(false);
@@ -609,5 +626,8 @@ export function useNativeGithubAuth({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [redirectTarget, resetNativeAuthState]);
 
-  return { handleGithubLogin, resetNativeAuthState };
+  const handleGithubLogin = useCallback(() => handleOAuthLogin("github"), [handleOAuthLogin]);
+  const handleGoogleLogin = useCallback(() => handleOAuthLogin("google"), [handleOAuthLogin]);
+
+  return { handleGithubLogin, handleGoogleLogin, resetNativeAuthState };
 }
