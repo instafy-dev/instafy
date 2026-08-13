@@ -1,7 +1,8 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { AuthChangeEvent, Session, User } from "@supabase/supabase-js";
 import { Capacitor } from "@capacitor/core";
-import { hasSupabaseConfig, supabase } from "../lib/supabaseClient";
+import { hasSupabaseConfig, supabase, supabaseAnonKey, supabaseUrl } from "../lib/supabaseClient";
+import { describeExchangeError, requestPasswordRecovery } from "../auth/pkce";
 import {
   clearNativeAuthCallbackAttemptId,
   clearPendingNativeAuthAttempt,
@@ -453,9 +454,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             return;
           }
           if (result.error) {
-            await failNativeAuthAttempt("auth.login.github.exchange_failed", "error", result.error.message, {
-              phase: "exchange_code_for_session",
-            });
+            await failNativeAuthAttempt(
+              "auth.login.github.exchange_failed",
+              "error",
+              describeExchangeError(result.error.message),
+              {
+                phase: "exchange_code_for_session",
+              },
+            );
             return;
           }
           await completeNativeAuthAttempt(
@@ -755,15 +761,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           clearDevGuestFallbackState();
           setDevGuestFallbackEnabled(false);
         }
-        const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        // Deliberately NOT resetPasswordForEmail: under PKCE that mails a
+        // ?code= link only exchangeable where the request was made, and email
+        // links routinely open in a different browser or device (desktop and
+        // mobile shells always hand them to the system browser). The direct
+        // recover call carries no code challenge, so the link stays
+        // token-shaped and works wherever it is opened. See src/auth/pkce.ts.
+        await requestPasswordRecovery({
+          supabaseUrl: supabaseUrl!,
+          anonKey: supabaseAnonKey!,
+          email,
           redirectTo:
             typeof window === "undefined"
               ? undefined
               : `${window.location.origin}/login?mode=recovery`,
         });
-        if (error) {
-          throw error;
-        }
       },
       async updatePassword(password) {
         if (baseFallback) {
