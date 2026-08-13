@@ -24,6 +24,7 @@ import {
   writeNativeAuthError,
 } from "../../auth/nativeAuth";
 import { hasSupabaseConfig, supabase, supabaseAnonKey } from "../../lib/supabaseClient";
+import { describeExchangeError } from "../../auth/pkce";
 import { postAuthTelemetryEvent } from "../../services/runtimeController/authTelemetry";
 
 export const OAUTH_REDIRECT_TARGET_KEY = "instafy.login.oauthRedirectTarget";
@@ -392,10 +393,14 @@ export function useNativeGithubAuth({
         if (code) {
           const result = await supabase.auth.exchangeCodeForSession(code);
           if (result.error) {
-            failPendingGithubLoginAttempt("auth.login.github.exchange_failed", result.error.message, {
-              phase: "exchange_code_for_session",
-              source: "login_page_direct_plugins",
-            });
+            failPendingGithubLoginAttempt(
+              "auth.login.github.exchange_failed",
+              describeExchangeError(result.error.message),
+              {
+                phase: "exchange_code_for_session",
+                source: "login_page_direct_plugins",
+              },
+            );
             return;
           }
           completePendingGithubLoginAttempt(
