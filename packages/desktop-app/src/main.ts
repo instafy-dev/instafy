@@ -2941,12 +2941,36 @@ async function applyMacWindowChromeDragRegion(webContents: Electron.WebContents)
   }
 }
 
-// macOS convention: updates are reachable from the application menu, not only
-// via background prompts. Electron's default menu has every standard role but
-// no update item, so the menu is rebuilt with one addition rather than
-// replaced wholesale. Other platforms keep the default menu untouched; this
-// release ships macOS only.
+// Updates must be reachable from the application menu, not only via
+// background prompts. Electron's default menu has every standard role but no
+// update item, so both desktop platforms rebuild it with that one addition:
+// macOS in its app-menu idiom below, Windows via a File menu -- the stock
+// default it would otherwise keep has devtools accelerators and no way to
+// check for updates.
 function installDesktopApplicationMenu() {
+  if (process.platform === "win32") {
+    Menu.setApplicationMenu(
+      Menu.buildFromTemplate([
+        {
+          label: "File",
+          submenu: [
+            {
+              label: "Check for Updates…",
+              click: () => {
+                void checkForDesktopUpdatesInteractively();
+              },
+            },
+            { type: "separator" },
+            { role: "quit" },
+          ],
+        },
+        { role: "editMenu" },
+        { role: "viewMenu" },
+        { role: "windowMenu" },
+      ]),
+    );
+    return;
+  }
   if (process.platform !== "darwin") {
     return;
   }
