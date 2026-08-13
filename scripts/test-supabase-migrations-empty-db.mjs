@@ -8,11 +8,30 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { validatePublicMigrationTrack } from "./check-supabase-migrations.mjs";
+import { cacheTagFor } from "./ensure-supabase-postgres-image.mjs";
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(MODULE_DIR, "..");
 const POSTGRES_IMAGE =
   "public.ecr.aws/supabase/postgres@sha256:21ab971149317ea9cd12a8126fe4ebb34def08c8972956b0958cba0924409dab";
+
+// A cache-loaded image cannot be addressed by name@digest (docker load does
+// not restore RepoDigests), so ensure-supabase-postgres-image.mjs tags it with
+// a digest-derived local name at pull time. Prefer the exact digest reference
+// when the daemon can resolve it; fall back to the cache tag, whose name binds
+// the same digest; otherwise hand docker the digest reference and let it pull.
+function resolveRunnableImage(dockerCommand) {
+  for (const candidate of [POSTGRES_IMAGE, cacheTagFor(POSTGRES_IMAGE)]) {
+    const inspect = spawnSync(dockerCommand, ["image", "inspect", candidate], {
+      encoding: "utf8",
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    if (inspect.status === 0) {
+      return candidate;
+    }
+  }
+  return POSTGRES_IMAGE;
+}
 const START_ATTEMPTS = 90;
 const START_RETRY_MS = 1_000;
 const REQUIRED_PUBLIC_RELATIONS = [
@@ -96,7 +115,7 @@ function runEmptyDatabaseMigrationTest({
       containerName,
       "--env",
       "POSTGRES_PASSWORD=postgres",
-      POSTGRES_IMAGE,
+      resolveRunnableImage(dockerCommand),
     ]);
     started = true;
 

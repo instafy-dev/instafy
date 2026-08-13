@@ -1,0 +1,69 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+import { cacheTagFor, resolvePinnedPostgresImage } from "./ensure-supabase-postgres-image.mjs";
+
+const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
+
+test("resolves the exact digest-pinned image from the migration script", () => {
+  const source = readFileSync(
+    path.join(MODULE_DIR, "test-supabase-migrations-empty-db.mjs"),
+    "utf8",
+  );
+  const image = resolvePinnedPostgresImage(source);
+  // The single source of truth is the migration script; this helper must read
+  // it rather than carry a second copy of the digest that can go stale.
+  assert.match(
+    image,
+    /^public\.ecr\.aws\/supabase\/postgres@sha256:[0-9a-f]{64}$/u,
+  );
+  assert.ok(source.includes(`"${image}"`));
+});
+
+test("rejects sources without a digest-pinned reference", () => {
+  assert.throws(() => resolvePinnedPostgresImage("const IMAGE = 'postgres:16';"));
+  // A tag-pinned reference must not satisfy the digest requirement either.
+  assert.throws(() =>
+    resolvePinnedPostgresImage('"public.ecr.aws/supabase/postgres:15.1"'),
+  );
+});
+
+test("the build workflow ensures the image before running migrations", () => {
+  const workflow = readFileSync(
+    path.join(MODULE_DIR, "..", ".github", "workflows", "build.yml"),
+    "utf8",
+  );
+  // The cache restore must come first, then the ensure step, then the
+  // migration test that does the implicit docker run. Out of order, the
+  // ensure step pulls from ECR every run and the flake returns.
+  const cacheIndex = workflow.indexOf("supabase-postgres-image");
+  const ensureIndex = workflow.indexOf("scripts/ensure-supabase-postgres-image.mjs");
+  const migrateIndex = workflow.indexOf(
+    "run: node scripts/test-supabase-migrations-empty-db.mjs",
+  );
+  assert.ok(cacheIndex > -1, "build.yml must restore the postgres image cache");
+  assert.ok(ensureIndex > -1, "build.yml must run the ensure script");
+  assert.ok(migrateIndex > -1, "build.yml must still run the migration test");
+  assert.ok(cacheIndex < ensureIndex, "cache restore must precede the ensure step");
+  assert.ok(ensureIndex < migrateIndex, "ensure must precede the migration test");
+  // The cache key must depend on the file that carries the digest, so a digest
+  // bump invalidates the cached tarball instead of loading the old image.
+  assert.match(
+    workflow,
+    /supabase-postgres-image-\$\{\{ hashFiles\('scripts\/test-supabase-migrations-empty-db\.mjs'\) \}\}/u,
+  );
+});
+
+test("cache tag binds the digest and rejects unpinned references", () => {
+  const tag = cacheTagFor(
+    "public.ecr.aws/supabase/postgres@sha256:" + "a".repeat(64),
+  );
+  // The tag must carry the digest hex so the cache can only ever be addressed
+  // by content identity, never by a floating name.
+  assert.equal(tag, `instafy-ci/supabase-postgres:sha256-${"a".repeat(64)}`);
+  assert.throws(() => cacheTagFor("public.ecr.aws/supabase/postgres:15.1"));
+  assert.throws(() => cacheTagFor("public.ecr.aws/supabase/postgres@sha256:short"));
+});
