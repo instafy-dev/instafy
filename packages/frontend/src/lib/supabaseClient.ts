@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { resolveSupabaseFlowType } from "../auth/pkce";
 
 export const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 export const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
@@ -29,10 +30,20 @@ const noopClient = {
   }
 };
 
+// PKCE by default; implicit ONLY for a load whose URL already carries a
+// legacy hash-token callback. auth-js wipes the stored session when a
+// PKCE-configured client meets an implicit-shaped URL, so mid-rollout URLs
+// (in-flight sign-ins, recovery emails in inboxes) must be consumed by an
+// implicit-mode client for that one load. See src/auth/pkce.ts.
+const flowType = resolveSupabaseFlowType(
+  typeof window === "undefined" ? null : window.location.hash,
+);
+
 export const supabase: SupabaseClient = hasSupabaseConfig
   ? createClient(supabaseUrl!, supabaseAnonKey!, {
       auth: {
-        persistSession: true
+        persistSession: true,
+        flowType
       }
     })
   : (noopClient as unknown as SupabaseClient);
