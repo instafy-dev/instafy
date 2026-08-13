@@ -577,9 +577,19 @@ impl AppConfig {
                     warn!(
                         %error,
                         jwks_url = %supabase_jwks_url,
-                        "initial Supabase JWKS load failed; falling back to HS256 shared secret (see https://github.com/supabase/cli/issues/4098)"
+                        "initial Supabase JWKS load failed; falling back to HS256 shared secret and RETRYING (see https://github.com/supabase/cli/issues/4098)"
                     );
-                    (jwks::SupabaseJwks::from_hmac_secret(&secret), false)
+                    // Refresh stays ENABLED. Returning false here latched the
+                    // process into HS256 for its whole lifetime: both recovery
+                    // paths (the periodic refresher in main.rs and the
+                    // retry-on-auth-failure in auth.rs) are gated on this flag
+                    // and nothing ever set it back. A transient fetch failure
+                    // at boot therefore became permanent, and stayed invisible
+                    // until the project rotated to asymmetric signing keys --
+                    // at which point every token failed and the outage was
+                    // 16 hours rather than the <=5 minutes one refresh cycle
+                    // would have cost (2026-08-11).
+                    (jwks::SupabaseJwks::from_hmac_secret(&secret), true)
                 } else {
                     return Err(error.context(
                         "failed to load Supabase JWKS and no SUPABASE_JWT_SECRET / JWT_SECRET fallback provided",
@@ -591,9 +601,11 @@ impl AppConfig {
                     warn!(
                         ?panic,
                         jwks_url = %supabase_jwks_url,
-                        "JWKS loader panicked; falling back to HS256 shared secret (see https://github.com/supabase/cli/issues/4098)"
+                        "JWKS loader panicked; falling back to HS256 shared secret and RETRYING (see https://github.com/supabase/cli/issues/4098)"
                     );
-                    (jwks::SupabaseJwks::from_hmac_secret(&secret), false)
+                    // Enabled for the same reason as the arm above: a fallback
+                    // must be temporary, never a latch.
+                    (jwks::SupabaseJwks::from_hmac_secret(&secret), true)
                 } else {
                     return Err(anyhow::anyhow!(
                         "failed to load Supabase JWKS: loader thread panicked"
@@ -1228,6 +1240,35 @@ impl StripeConfig {
 mod tests {
     use super::{normalize_public_app_url, parse_browser_profile_persist_project_ids};
     use uuid::Uuid;
+
+    /// The HS256 fallback must never disable JWKS refresh.
+    ///
+    /// This is a source invariant rather than a behavioural test because the
+    /// fallback lives inside `AppConfig::from_env`, which reads a hundred-odd
+    /// environment variables; isolating it would mean refactoring the builder.
+    /// The regression it guards is a one-character edit (`true` -> `false`)
+    /// with a 16-hour outage attached, so it is worth pinning directly.
+    #[test]
+    fn hmac_fallback_never_disables_jwks_refresh() {
+        let source = include_str!("config.rs");
+        // Needles are assembled at runtime so this test does not match its own
+        // source text -- `include_str!` includes these very assertions.
+        let call = "from_hmac_secret(&secret), ";
+        let latched = format!("{call}{}", "false)");
+        let healing = format!("{call}{}", "true)");
+        assert!(
+            !source.contains(&latched),
+            "the HS256 fallback must keep JWKS refresh enabled: disabling it latches the \
+             process into HS256 for its entire lifetime, because both recovery paths \
+             (main.rs periodic refresher, auth.rs retry-on-auth-failure) are gated on that \
+             flag and nothing ever sets it back"
+        );
+        assert_eq!(
+            source.matches(&healing).count(),
+            2,
+            "both fallback arms (load error, loader panic) must keep refresh enabled"
+        );
+    }
 
     #[test]
     fn database_trust_store_holds_public_roots_and_the_supabase_authority() {
