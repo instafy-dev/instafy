@@ -2,7 +2,13 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import type { AuthChangeEvent, Session, User } from "@supabase/supabase-js";
 import { Capacitor } from "@capacitor/core";
 import { hasSupabaseConfig, supabase, supabaseAnonKey, supabaseUrl } from "../lib/supabaseClient";
-import { describeExchangeError, requestPasswordRecovery } from "../auth/pkce";
+import {
+  describeExchangeError,
+  loginEmailRedirectTo,
+  requestEmailOtp,
+  requestEmailSignup,
+  requestPasswordRecovery,
+} from "../auth/pkce";
 import {
   clearNativeAuthCallbackAttemptId,
   clearPendingNativeAuthAttempt,
@@ -675,15 +681,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           clearDevGuestFallbackState();
           setDevGuestFallbackEnabled(false);
         }
-        const { error } = await supabase.auth.signInWithOtp({
+        // Challenge-free so a link-bearing OTP template cannot trap a user
+        // who opens the email outside the requesting browser. The typed
+        // 6-digit path (verifyEmailOtp) is context-free regardless.
+        await requestEmailOtp({
+          supabaseUrl: supabaseUrl!,
+          anonKey: supabaseAnonKey!,
           email,
-          options: {
-            shouldCreateUser: true
-          }
+          shouldCreateUser: true,
+          redirectTo: loginEmailRedirectTo(),
         });
-        if (error) {
-          throw error;
-        }
       },
       async verifyEmailOtp(email, token) {
         if (baseFallback) {
@@ -739,17 +746,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           clearDevGuestFallbackState();
           setDevGuestFallbackEnabled(false);
         }
-        const { error } = await supabase.auth.signUp({
+        // Challenge-free for the same reason as recovery: the confirmation
+        // email routinely gets opened on a different device, where a ?code=
+        // link cannot be exchanged. The redirect lands on /login carrying the
+        // caller's pending ?redirect=, so an invitee returns to their
+        // invitation instead of being stranded in the studio.
+        await requestEmailSignup({
+          supabaseUrl: supabaseUrl!,
+          anonKey: supabaseAnonKey!,
           email,
           password,
-          options: {
-            emailRedirectTo:
-              typeof window === "undefined" ? undefined : `${window.location.origin}/studio`,
-          },
+          redirectTo: loginEmailRedirectTo(),
         });
-        if (error) {
-          throw error;
-        }
       },
       async sendPasswordResetEmail(email) {
         if (baseFallback) {
