@@ -170,8 +170,23 @@ jobs:
             scripts/lib/codexMachineAuthExpiry.test.mjs \
             scripts/check-supabase-migrations.test.mjs \
             scripts/test-supabase-migrations-empty-db.test.mjs \
+            scripts/ensure-supabase-postgres-image.test.mjs \
             scripts/check-self-host-compose.test.mjs
           node scripts/check-self-host-compose.mjs
+
+      # public.ecr.aws rate-limits anonymous pulls per source IP and hosted
+      # runners share IP pools, so the migration test's implicit pull failed
+      # intermittently. The tarball is keyed on the file that carries the
+      # digest pin: bumping the digest invalidates the cache instead of
+      # loading the old image.
+      - name: Restore Supabase Postgres image cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.instafy-image-cache
+          key: supabase-postgres-image-${{ hashFiles('scripts/test-supabase-migrations-empty-db.mjs') }}
+
+      - name: Ensure Supabase Postgres image
+        run: node scripts/ensure-supabase-postgres-image.mjs
 
       - name: Apply public migrations to an empty database
         run: node scripts/test-supabase-migrations-empty-db.mjs
