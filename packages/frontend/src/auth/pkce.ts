@@ -98,3 +98,104 @@ export async function requestPasswordRecovery(options: {
     throw new Error(message);
   }
 }
+
+/**
+ * Where auth emails should land: back on /login, carrying the caller's
+ * pending ?redirect= so an invitee returns to their invitation instead of
+ * being stranded in the studio. The login page owns callback handling
+ * (exchange, shim, friendly errors), so it is the right landing surface for
+ * every emailed continuation.
+ */
+export function loginEmailRedirectTo(location?: {
+  origin: string;
+  search: string;
+}): string | undefined {
+  const loc =
+    location ?? (typeof window === "undefined" ? undefined : window.location);
+  if (!loc) {
+    return undefined;
+  }
+  const redirect = new URLSearchParams(loc.search).get("redirect");
+  const target = new URL("/login", loc.origin);
+  if (redirect && redirect.startsWith("/") && !redirect.startsWith("//")) {
+    target.searchParams.set("redirect", redirect);
+  }
+  return target.toString();
+}
+
+async function challengeFreeAuthRequest(options: {
+  supabaseUrl: string;
+  anonKey: string;
+  path: string;
+  body: Record<string, unknown>;
+  redirectTo?: string;
+  fetchImpl?: typeof fetch;
+}): Promise<void> {
+  const { supabaseUrl, anonKey, path, body, redirectTo, fetchImpl } = options;
+  const doFetch = fetchImpl ?? fetch;
+  const url = new URL(path, supabaseUrl);
+  if (redirectTo) {
+    url.searchParams.set("redirect_to", redirectTo);
+  }
+  const response = await doFetch(url.toString(), {
+    method: "POST",
+    headers: { apikey: anonKey, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    let message = `Request failed (HTTP ${response.status}).`;
+    try {
+      const payload = (await response.json()) as { msg?: string; error_description?: string };
+      message = payload.msg ?? payload.error_description ?? message;
+    } catch {
+      // keep the status-based message
+    }
+    throw new Error(message);
+  }
+}
+
+/**
+ * Password sign-up WITHOUT a PKCE challenge, for the same reason as
+ * recovery: the confirmation email routinely gets opened on a different
+ * device than the one that filled the form (sign up on the laptop, tap the
+ * email on the phone), and a ?code= link only works where the verifier
+ * lives. Challenge-free keeps the confirmation link token-shaped; the
+ * implicit-mode shim consumes it wherever it is opened.
+ */
+export async function requestEmailSignup(options: {
+  supabaseUrl: string;
+  anonKey: string;
+  email: string;
+  password: string;
+  redirectTo?: string;
+  fetchImpl?: typeof fetch;
+}): Promise<void> {
+  const { email, password, ...rest } = options;
+  await challengeFreeAuthRequest({
+    ...rest,
+    path: "/auth/v1/signup",
+    body: { email, password },
+  });
+}
+
+/**
+ * Email OTP WITHOUT a PKCE challenge. The typed 6-digit code path is
+ * context-free either way; this exists for the emailed LINK variant, which
+ * some templates include -- under PKCE that link would trap anyone opening
+ * it outside the requesting browser.
+ */
+export async function requestEmailOtp(options: {
+  supabaseUrl: string;
+  anonKey: string;
+  email: string;
+  shouldCreateUser?: boolean;
+  redirectTo?: string;
+  fetchImpl?: typeof fetch;
+}): Promise<void> {
+  const { email, shouldCreateUser, ...rest } = options;
+  await challengeFreeAuthRequest({
+    ...rest,
+    path: "/auth/v1/otp",
+    body: { email, create_user: shouldCreateUser ?? false },
+  });
+}
