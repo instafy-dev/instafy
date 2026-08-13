@@ -6,6 +6,9 @@ use jsonwebtoken::jwk::{AlgorithmParameters, JwkSet, KeyAlgorithm};
 use jsonwebtoken::{Algorithm, DecodingKey};
 use reqwest::Client;
 
+/// Upper bound on the one blocking JWKS fetch performed during startup.
+const STARTUP_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 #[derive(Clone)]
 pub struct SupabaseJwks {
     algorithm: Algorithm,
@@ -14,13 +17,35 @@ pub struct SupabaseJwks {
 }
 
 impl SupabaseJwks {
+    /// Blocking load used once at startup.
+    ///
+    /// Bounded on purpose: this runs on a thread the config builder joins
+    /// synchronously, so an unbounded fetch does not merely slow boot -- it
+    /// hangs it, with no log line and no timeout to break the wait. reqwest
+    /// applies no default timeout.
+    ///
+    /// The status check mirrors `load_async`. Without it a 5xx or an HTML
+    /// error page is fed to the JSON parser, and the operator sees "failed to
+    /// parse Supabase JWKS response" for what is really an upstream outage.
     pub fn load(jwks_url: &str) -> Result<Self> {
-        let set: JwkSet = reqwest::blocking::Client::builder()
+        let response = reqwest::blocking::Client::builder()
+            .timeout(STARTUP_FETCH_TIMEOUT)
             .build()
             .context("failed to construct blocking HTTP client for JWKS fetch")?
             .get(jwks_url)
             .send()
-            .with_context(|| format!("failed to fetch Supabase JWKS from {}", jwks_url))?
+            .with_context(|| format!("failed to fetch Supabase JWKS from {}", jwks_url))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            bail!(
+                "failed to fetch Supabase JWKS: status={} url={}",
+                status,
+                jwks_url
+            );
+        }
+
+        let set: JwkSet = response
             .json()
             .context("failed to parse Supabase JWKS response")?;
 
@@ -161,6 +186,28 @@ impl SupabaseJwks {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn startup_fetch_is_bounded() {
+        // The blocking startup load runs on a thread the config builder joins
+        // synchronously, so an unbounded fetch hangs boot rather than slowing
+        // it. reqwest applies no default timeout, so this must be explicit.
+        assert!(STARTUP_FETCH_TIMEOUT.as_secs() > 0);
+        assert!(
+            STARTUP_FETCH_TIMEOUT.as_secs() <= 30,
+            "a startup fetch bound above 30s stops being a bound in practice"
+        );
+    }
+
+    #[test]
+    fn empty_key_set_is_rejected() {
+        // Mid-rotation the endpoint can briefly serve zero keys. Accepting that
+        // would install a key set that can verify nothing; rejecting it keeps
+        // the previous good snapshot (on refresh) or trips the documented
+        // startup fallback.
+        let set = JwkSet { keys: vec![] };
+        assert!(SupabaseJwks::from_jwk_set(set).is_err());
+    }
 
     #[test]
     fn hs256_decoding_key_falls_back_when_kid_unknown() {
