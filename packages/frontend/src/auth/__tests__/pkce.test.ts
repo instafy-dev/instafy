@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   describeExchangeError,
   hasImplicitAuthHash,
+  loginEmailRedirectTo,
+  requestEmailOtp,
+  requestEmailSignup,
   requestPasswordRecovery,
   resolveSupabaseFlowType,
 } from "../pkce";
@@ -79,5 +82,54 @@ describe("password recovery request", () => {
         fetchImpl,
       }),
     ).rejects.toThrow(/60 seconds/);
+  });
+});
+
+describe("login email redirect threading", () => {
+  it("carries the pending ?redirect= back through the emailed link", () => {
+    expect(
+      loginEmailRedirectTo({ origin: "https://instafy.dev", search: "?redirect=%2Finvite%3Ftoken%3Dabc" }),
+    ).toBe("https://instafy.dev/login?redirect=%2Finvite%3Ftoken%3Dabc");
+  });
+
+  it("defaults to /login and refuses absolute or protocol-relative targets", () => {
+    expect(loginEmailRedirectTo({ origin: "https://instafy.dev", search: "" }))
+      .toBe("https://instafy.dev/login");
+    // open-redirect guard: only same-origin paths ride along
+    expect(
+      loginEmailRedirectTo({ origin: "https://instafy.dev", search: "?redirect=https%3A%2F%2Fevil.example" }),
+    ).toBe("https://instafy.dev/login");
+    expect(
+      loginEmailRedirectTo({ origin: "https://instafy.dev", search: "?redirect=%2F%2Fevil.example" }),
+    ).toBe("https://instafy.dev/login");
+  });
+});
+
+describe("challenge-free signup and OTP", () => {
+  it("signs up without a code challenge and threads the redirect", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: true } as Response);
+    await requestEmailSignup({
+      supabaseUrl: "https://proj.supabase.co", anonKey: "anon",
+      email: "user@example.com", password: "pw",
+      redirectTo: "https://instafy.dev/login?redirect=%2Finvite%3Ftoken%3Dabc",
+      fetchImpl,
+    });
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/auth/v1/signup");
+    expect(url).toContain("redirect_to=");
+    // The point: no code_challenge, so the confirmation link stays
+    // token-shaped and works on any device.
+    expect(JSON.parse(String(init.body))).toEqual({ email: "user@example.com", password: "pw" });
+  });
+
+  it("requests OTP with create_user and no challenge", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue({ ok: true } as Response);
+    await requestEmailOtp({
+      supabaseUrl: "https://proj.supabase.co", anonKey: "anon",
+      email: "user@example.com", shouldCreateUser: true, fetchImpl,
+    });
+    const [url, init] = fetchImpl.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/auth/v1/otp");
+    expect(JSON.parse(String(init.body))).toEqual({ email: "user@example.com", create_user: true });
   });
 });
