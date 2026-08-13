@@ -198,6 +198,19 @@ export const controllerClient = createControllerClient({
     bootstrapMemory: bootstrapControllerProjectMemory,
     importGithub: importGithubProject,
     deriveGithubImportTargetPath,
+    // Project-guest invites ARE org invitations carrying a project scope --
+    // one storage model, one endpoint family (see org_invitations' nullable
+    // project_id). These aliases exist because a developer inviting a guest
+    // to a PROJECT should find the verbs under `projects`, not discover by
+    // accident that `organizations.createInvitation` is the API for it. Same
+    // functions, honestly named at the call site.
+    listInvitations: listControllerOrgInvitations,
+    createInvitation: createControllerOrgInvitation,
+    createInvitationStrict: createControllerOrgInvitationStrict,
+    cancelInvitation: cancelControllerOrgInvitation,
+    listInviteLinks: listControllerOrgInviteLinks,
+    createInviteLink: createControllerOrgInviteLink,
+    revokeInviteLink: revokeControllerOrgInviteLink,
   }),
   organizations: Object.freeze({
     create: createControllerOrganization,
