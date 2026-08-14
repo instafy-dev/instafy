@@ -1203,13 +1203,31 @@ fn process_chatgpt_stream_event(
         .unwrap_or("");
 
     match kind {
-        "response.error" => {
-            let message = event
+        // A quota wall does not arrive as a transport failure: the HTTP status is
+        // 200 and the refusal is delivered as a terminal `response.failed` event
+        // carrying `response.error`. Handling only `response.error` let that fall
+        // through to the catch-all, so the stream simply ended with no assistant
+        // text and the caller reported a generic failure — turning "the account
+        // is out of credit" into a debugging hunt. Both shapes are terminal, and
+        // the machine-readable `code` (e.g. `insufficient_quota`) is what makes
+        // the difference between a limit and a bug legible at a glance.
+        "response.error" | "response.failed" => {
+            let error = event
                 .get("error")
+                .or_else(|| event.get("response").and_then(|res| res.get("error")));
+            let message = error
                 .and_then(|err| err.get("message"))
                 .and_then(Value::as_str)
                 .unwrap_or("unknown error");
-            bail!("backend stream reported error: {}", message);
+            let code = error
+                .and_then(|err| err.get("code"))
+                .and_then(Value::as_str);
+            match code {
+                Some(code) => {
+                    bail!("backend stream reported error: {} (code={})", message, code)
+                }
+                None => bail!("backend stream reported error: {}", message),
+            }
         }
         "response.output_text.delta" => {
             if let Some(delta) = event.get("delta").and_then(Value::as_str) {
@@ -1694,6 +1712,47 @@ data: [DONE]
         let completion = parse_completion(raw).expect("completion should parse");
 
         assert_eq!(completion.text.as_deref(), Some("hello from named events"));
+    }
+
+    #[test]
+    fn chatgpt_stream_surfaces_quota_exhaustion_from_response_failed() {
+        // What OpenAI actually sends when the account is out of credit: HTTP 200,
+        // then a terminal `response.failed` whose error sits under `response`.
+        // Before this was handled the event fell through to the catch-all and the
+        // stream ended with no assistant text, so a hard billing limit surfaced as
+        // a generic failure with nothing to point at.
+        let stream = r#"event: response.failed
+data: {"type":"response.failed","response":{"id":"resp-quota","status":"failed","error":{"code":"insufficient_quota","message":"You exceeded your current quota, please check your plan and billing details."}}}
+
+data: [DONE]
+
+"#;
+
+        let error = read_chatgpt_stream_text(stream).expect_err("quota refusal must fail the stream");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("insufficient_quota"),
+            "the machine-readable code must survive: {rendered}"
+        );
+        assert!(
+            rendered.contains("You exceeded your current quota"),
+            "the operator-facing message must survive: {rendered}"
+        );
+    }
+
+    #[test]
+    fn chatgpt_stream_surfaces_top_level_response_error() {
+        let stream = r#"event: response.error
+data: {"type":"response.error","error":{"code":"rate_limit_exceeded","message":"Rate limit reached."}}
+
+data: [DONE]
+
+"#;
+
+        let error = read_chatgpt_stream_text(stream).expect_err("an error event must fail the stream");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("rate_limit_exceeded"), "{rendered}");
+        assert!(rendered.contains("Rate limit reached."), "{rendered}");
     }
 
     #[test]
