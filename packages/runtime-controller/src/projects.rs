@@ -193,6 +193,7 @@ pub(crate) fn router() -> Router<AppState> {
             delete(cancel_org_invitation),
         )
         .route("/org-invitations/accept", post(accept_org_invitation))
+        .route("/org-invitations/preview", get(preview_org_invitation))
         .route(
             "/orgs/:org_id/members/:user_id",
             patch(update_org_member).delete(remove_org_member),
@@ -1128,6 +1129,29 @@ struct OrgInvitationAcceptResponse {
     role: String,
     project_id: Option<Uuid>,
     conversation_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OrgInvitationPreviewQuery {
+    token: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OrgInvitationPreviewResponse {
+    kind: String,
+    org_id: Uuid,
+    org_slug: String,
+    org_name: String,
+    role: String,
+    invited_email_masked: Option<String>,
+    inviter_name: Option<String>,
+    inviter_email: Option<String>,
+    project_id: Option<Uuid>,
+    project_name: Option<String>,
+    conversation_id: Option<Uuid>,
+    conversation_name: Option<String>,
+    expires_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3242,6 +3266,224 @@ async fn cancel_org_invitation(
     })?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Shows an invitee what a token grants BEFORE any membership is written.
+///
+/// Strictly read-only: unlike accept, expiry is computed and reported but the
+/// lazy status='expired' transition is never performed, so previewing an
+/// invitation cannot mutate it. Error strings are identical to accept's so
+/// the consent card needs no copy of its own.
+///
+/// Same auth gate as accept (signed-in, unscoped) but deliberately WITHOUT
+/// the invited-email match: a wrong-account user needs to see who invited
+/// them and to what in order to choose "Use another account". The invited
+/// address is returned masked so preview exposes no more than accept's own
+/// error message already implies.
+fn mask_invited_email(email: &str) -> String {
+    match email.split_once('@') {
+        Some((local, domain)) if !local.is_empty() => {
+            let first = local.chars().next().unwrap_or('?');
+            format!("{first}\u{2026}@{domain}")
+        }
+        _ => "\u{2026}".to_string(),
+    }
+}
+
+async fn preview_org_invitation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<OrgInvitationPreviewQuery>,
+) -> Result<Json<OrgInvitationPreviewResponse>, (StatusCode, Json<ApiError>)> {
+    let context = authenticate_request(&state.config, &headers).await?;
+    if context.scoped_claims.is_some() {
+        return Err(forbidden(
+            "Scoped access tokens cannot preview organization invitations",
+        ));
+    }
+    context.user_id.ok_or_else(|| {
+        unauthorized("authentication required to preview organization invitations")
+    })?;
+
+    let token = parse_uuid_param(query.token, "token")?;
+
+    let connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+
+    // Same lookups as accept, minus `for update` and minus every write.
+    let invite_row = connection
+        .query_opt(
+            "select org_id, project_id, conversation_id, email::text as email, role, invited_by, status, expires_at
+             from org_invitations
+             where token = $1
+             limit 1",
+            &[&token],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load org invitation: {error}")))?;
+
+    let (
+        kind,
+        org_id,
+        project_id,
+        conversation_id,
+        invited_email,
+        role,
+        inviter_id,
+        status_ok,
+        expires_at,
+    ) = if let Some(row) = invite_row {
+        let status: String = row.get("status");
+        let expires_at: Option<DateTime<Utc>> = row.get("expires_at");
+        if status != "pending" {
+            return Err(bad_request("invitation is no longer valid"));
+        }
+        if expires_at.is_some_and(|expiration| expiration < Utc::now()) {
+            return Err(bad_request("invitation has expired"));
+        }
+        (
+            "invitation",
+            row.get::<_, Uuid>("org_id"),
+            row.get::<_, Option<Uuid>>("project_id"),
+            row.get::<_, Option<Uuid>>("conversation_id"),
+            row.get::<_, Option<String>>("email"),
+            row.get::<_, String>("role"),
+            row.get::<_, Option<Uuid>>("invited_by"),
+            true,
+            expires_at,
+        )
+    } else {
+        let link_row = connection
+            .query_opt(
+                "select org_id, project_id, conversation_id, role, created_by, status, expires_at
+                     from org_invite_links
+                     where token = $1
+                     limit 1",
+                &[&token],
+            )
+            .await
+            .map_err(|error| internal_error(format!("failed to load org invite link: {error}")))?;
+        let Some(row) = link_row else {
+            return Err(not_found("invitation not found"));
+        };
+        let status: String = row.get("status");
+        let expires_at: Option<DateTime<Utc>> = row.get("expires_at");
+        if status != "active" {
+            return Err(bad_request("invite link is no longer valid"));
+        }
+        if expires_at.is_some_and(|expiration| expiration < Utc::now()) {
+            return Err(bad_request("invite link has expired"));
+        }
+        (
+            "inviteLink",
+            row.get::<_, Uuid>("org_id"),
+            row.get::<_, Option<Uuid>>("project_id"),
+            row.get::<_, Option<Uuid>>("conversation_id"),
+            None,
+            row.get::<_, String>("role"),
+            row.get::<_, Option<Uuid>>("created_by"),
+            true,
+            expires_at,
+        )
+    };
+    debug_assert!(status_ok);
+
+    let org_row = connection
+        .query_opt(
+            "select slug, name from organizations where id = $1 limit 1",
+            &[&org_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load organization: {error}")))?;
+    let Some(org_row) = org_row else {
+        return Err(not_found("organization not found"));
+    };
+
+    let (project_name, conversation_name) = {
+        let mut project_name: Option<String> = None;
+        let mut conversation_name: Option<String> = None;
+        if let Some(project_id) = project_id {
+            let project_row = connection
+                .query_opt(
+                    "select status, name from projects where id = $1 limit 1",
+                    &[&project_id],
+                )
+                .await
+                .map_err(|error| {
+                    internal_error(format!("failed to load project for invite: {error}"))
+                })?;
+            let Some(project_row) = project_row else {
+                return Err(not_found("project not found"));
+            };
+            let status: String = project_row.get("status");
+            if status == "deleted" {
+                return Err(bad_request("project is no longer available"));
+            }
+            project_name = project_row.get::<_, Option<String>>("name");
+        }
+        // Softer than accept on purpose: a vanished or now-public conversation
+        // should fail at accept time, not blank the consent card.
+        if let Some(conversation_id) = conversation_id {
+            conversation_name = connection
+                .query_opt(
+                    "select title from conversations where id = $1 limit 1",
+                    &[&conversation_id],
+                )
+                .await
+                .ok()
+                .flatten()
+                .and_then(|row| row.get::<_, Option<String>>("title"));
+        }
+        (project_name, conversation_name)
+    };
+
+    let (inviter_name, inviter_email) = if let Some(inviter_id) = inviter_id {
+        connection
+            .query_opt(
+                "select u.email::text as email,
+                        coalesce(
+                          nullif(btrim(p.full_name), ''),
+                          nullif(btrim(u.raw_user_meta_data ->> 'full_name'), ''),
+                          nullif(btrim(u.raw_user_meta_data ->> 'name'), ''),
+                          nullif(btrim(u.raw_user_meta_data ->> 'display_name'), '')
+                        ) as display_name
+                 from auth.users u
+                 left join profiles p on p.user_id = u.id
+                 where u.id = $1
+                 limit 1",
+                &[&inviter_id],
+            )
+            .await
+            .map_err(|error| internal_error(format!("failed to load inviter: {error}")))?
+            .map(|row| {
+                (
+                    row.get::<_, Option<String>>("display_name"),
+                    row.get::<_, Option<String>>("email"),
+                )
+            })
+            .unwrap_or((None, None))
+    } else {
+        (None, None)
+    };
+
+    Ok(Json(OrgInvitationPreviewResponse {
+        kind: kind.to_string(),
+        org_id,
+        org_slug: org_row.get("slug"),
+        org_name: org_row.get("name"),
+        role,
+        invited_email_masked: invited_email.as_deref().map(mask_invited_email),
+        inviter_name,
+        inviter_email,
+        project_id,
+        project_name,
+        conversation_id,
+        conversation_name,
+        expires_at: expires_at.map(|value| value.to_rfc3339()),
+    }))
 }
 
 async fn accept_org_invitation(
