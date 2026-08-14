@@ -306,7 +306,7 @@ export function ComposerInviteProjectAccessSection({
             spellCheck={false}
             placeholder="name@company.com"
             autoComplete="email"
-            enterKeyHint="send"
+            enterKeyHint="done"
             size="sm"
             radius="xl"
             disabled={!sharingTargetReady || emailInvitePending}

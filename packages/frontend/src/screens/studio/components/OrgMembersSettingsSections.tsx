@@ -110,7 +110,7 @@ export function OrgMembersSettingsSections({
     <div className="space-y-4" data-testid="org-members-layout">
       <SettingsSection
         title="Prepare email invite"
-        description="Create a secure link to send yourself; Instafy does not send the email yet. Builders can edit; viewers can read."
+        description="Prepare a secure link and deliver it yourself — Instafy never emails invites. Builders can edit; viewers can read; admins manage members; owners control billing."
       >
         {canManageOrgMembers ? (
           <SettingsSurface className="space-y-3">
@@ -251,7 +251,11 @@ export function OrgMembersSettingsSections({
                         </Text>
                         <div className="mt-0.5 flex flex-wrap items-center gap-2">
                           <Text variant="caption" tone="muted">
-                            Role: {invite.role}
+                            {invite.role === "builder"
+                              ? "Edit access"
+                              : invite.role === "viewer"
+                                ? "Read access"
+                                : `Role: ${invite.role}`}
                           </Text>
                           {sentLabel ? (
                             <Text variant="caption" tone="muted">

@@ -1759,6 +1759,11 @@ export async function acceptControllerOrgInvitation(params: {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn("[runtime-controller] acceptControllerOrgInvitation error:", message);
+    // Rethrow instead of returning null: the backend's messages are precise
+    // and human ("invitation has expired", "You must be signed in with the
+    // invited email address...") and the accept page renders err.message.
+    // Swallowing here collapsed every failure into one generic dead end --
+    // the wrong-account user got no hint email was the issue.
+    throw error instanceof Error ? error : new Error(message);
   }
-  return null;
 }
