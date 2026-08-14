@@ -1697,6 +1697,61 @@ export async function cancelControllerOrgInvitation(params: {
   return false;
 }
 
+// Throws with the server's message on failure (like the strict create):
+// role-change rejections carry reasons the inviter must actually read --
+// "Only organization owners can assign the owner role.", "This invitation
+// has expired." -- and a swallowed null would flatten them all into one
+// generic toast.
+export async function updateControllerOrgInvitationRole(params: {
+  orgId: string;
+  invitationId: string;
+  role: string;
+}): Promise<ControllerOrgInvitation> {
+  if (!runtimeControllerEnabled) {
+    throw new Error("Runtime controller is unavailable.");
+  }
+  const trimmedOrg = params.orgId.trim();
+  const trimmedInvitation = params.invitationId.trim();
+  if (!trimmedOrg || !trimmedInvitation) {
+    throw new Error("Team id and invitation id are required.");
+  }
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
+  if (!accessToken) {
+    throw new Error("You need to sign in before updating invitations.");
+  }
+  const response = await fetch(
+    `${requestContext.baseUrl}/orgs/${encodeURIComponent(trimmedOrg)}/invitations/${encodeURIComponent(
+      trimmedInvitation,
+    )}`,
+    {
+      method: "PATCH",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ role: params.role }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      await readControllerError(
+        response,
+        "Unable to update the invitation role",
+        requestContext,
+      ),
+    );
+  }
+  const body = (await response.json().catch(() => null)) as {
+    invitation?: ControllerOrgInvitation;
+  } | null;
+  const invitation = body?.invitation;
+  if (invitation && typeof invitation.id === "string") {
+    return invitation;
+  }
+  throw new Error("The server did not return the updated invitation.");
+}
+
 export async function acceptControllerOrgInvitation(params: {
   token: string;
 }): Promise<

@@ -105,6 +105,7 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
   const [preparedOrgEmailInvite, setPreparedOrgEmailInvite] =
     useState<PreparedEmailInvite | null>(null);
   const [inviteCancelPendingId, setInviteCancelPendingId] = useState<string | null>(null);
+  const [inviteRoleUpdatePendingId, setInviteRoleUpdatePendingId] = useState<string | null>(null);
   const [inviteLinkRole, setInviteLinkRole] = useState<ProjectInviteRole>("builder");
   const [inviteLinkPending, setInviteLinkPending] = useState(false);
   const [projectInviteEmail, setProjectInviteEmail] = useState("");
@@ -114,6 +115,9 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
   const [preparedProjectEmailInvite, setPreparedProjectEmailInvite] =
     useState<PreparedEmailInvite | null>(null);
   const [projectInviteCancelPendingId, setProjectInviteCancelPendingId] = useState<string | null>(null);
+  const [projectInviteRoleUpdatePendingId, setProjectInviteRoleUpdatePendingId] = useState<
+    string | null
+  >(null);
   const [memberUpdatePendingId, setMemberUpdatePendingId] = useState<string | null>(null);
   const [memberRemovePendingId, setMemberRemovePendingId] = useState<string | null>(null);
   const [projectMemberUpdatePendingId, setProjectMemberUpdatePendingId] = useState<string | null>(null);
@@ -435,6 +439,7 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
     refresh: refreshInvitations,
     prepareEmailInvite: prepareOrgEmailInvite,
     cancelPendingInvitation: cancelInvitation,
+    updatePendingInvitationRole,
   } = useScopedInvitationActions(orgInviteScope);
   const {
     invitations: projectInvitations,
@@ -443,6 +448,7 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
     refresh: refreshProjectInvitations,
     prepareEmailInvite: prepareProjectEmailInvite,
     cancelPendingInvitation: cancelProjectInvitation,
+    updatePendingInvitationRole: updatePendingProjectInvitationRole,
   } = useScopedInvitationActions(projectInviteScope);
   const {
     loading: inviteLinksLoading,
@@ -676,6 +682,27 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
     [cancelInvitation, showStatus]
   );
 
+  // No window.confirm here: unlike cancel, a role change is reversible from
+  // the same select, and the accept link the invitee holds stays valid.
+  const handlePendingInviteRoleChange = useCallback(
+    async (invitationId: string, nextRole: string, label: string) => {
+      if (!isOrganizationInviteRole(nextRole)) {
+        return;
+      }
+      setInviteRoleUpdatePendingId(invitationId);
+      const result = await updatePendingInvitationRole(invitationId, nextRole);
+      if (!result.success) {
+        showStatus(result.error ?? "Unable to update the invitation role.", "error", 4000);
+      } else {
+        showStatus(`Updated invitation for ${label} to ${nextRole}.`, "success", 3000);
+      }
+      // Clear only our own slot: a change started on another row while this
+      // one was in flight must keep that row disabled until IT finishes.
+      setInviteRoleUpdatePendingId((current) => (current === invitationId ? null : current));
+    },
+    [showStatus, updatePendingInvitationRole]
+  );
+
   const handleInviteProjectMember = useCallback(async () => {
     const trimmedEmail = projectInviteEmail.trim();
     if (!trimmedEmail) {
@@ -721,6 +748,25 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
       setProjectInviteCancelPendingId(null);
     },
     [cancelProjectInvitation, showStatus],
+  );
+
+  const handlePendingProjectInviteRoleChange = useCallback(
+    async (invitationId: string, nextRole: string, label: string) => {
+      if (!isProjectInviteRole(nextRole)) {
+        return;
+      }
+      setProjectInviteRoleUpdatePendingId(invitationId);
+      const result = await updatePendingProjectInvitationRole(invitationId, nextRole);
+      if (!result.success) {
+        showStatus(result.error ?? "Unable to update the invitation role.", "error", 4000);
+      } else {
+        showStatus(`Updated invitation for ${label} to ${nextRole}.`, "success", 3000);
+      }
+      setProjectInviteRoleUpdatePendingId((current) =>
+        current === invitationId ? null : current,
+      );
+    },
+    [showStatus, updatePendingProjectInvitationRole],
   );
 
   const handleCreateInviteLink = useCallback(async () => {
@@ -1542,6 +1588,10 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
       sortedProjectInvitations={sortedProjectInvitations}
       projectInviteCancelPendingId={projectInviteCancelPendingId}
       onCancelProjectInvite={(invitationId, label) => void handleCancelProjectInvite(invitationId, label)}
+      projectInviteRoleUpdatePendingId={projectInviteRoleUpdatePendingId}
+      onPendingProjectInviteRoleChange={(invitationId, nextRole, label) =>
+        void handlePendingProjectInviteRoleChange(invitationId, nextRole, label)
+      }
       inviteLinkRole={inviteLinkRole}
       activeInviteLinkRole={activeInviteLink?.role ?? null}
       inviteLinkPending={inviteLinkPending}
@@ -1945,6 +1995,10 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
                   sortedInvitations={sortedInvitations}
                   inviteCancelPendingId={inviteCancelPendingId}
                   onCancelInvite={(invitationId, label) => void handleCancelInvite(invitationId, label)}
+                  inviteRoleUpdatePendingId={inviteRoleUpdatePendingId}
+                  onPendingInviteRoleChange={(invitationId, nextRole, label) =>
+                    void handlePendingInviteRoleChange(invitationId, nextRole, label)
+                  }
                   membersCountLabel={membersCountLabel}
                   memberQuery={memberQuery}
                   onMemberQueryChange={setMemberQuery}

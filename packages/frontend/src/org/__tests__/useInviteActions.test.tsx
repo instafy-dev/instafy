@@ -16,6 +16,7 @@ import {
 const mocks = vi.hoisted(() => ({
   cancelInvitation: vi.fn(),
   createInvitation: vi.fn(),
+  updateInvitationRole: vi.fn(),
   createLink: vi.fn(),
   refreshInvitations: vi.fn(),
   refreshInviteLinks: vi.fn(),
@@ -57,6 +58,7 @@ vi.mock("../useOrgInvitations", () => ({
       refresh: mocks.refreshInvitations,
       createInvitation: mocks.createInvitation,
       cancelInvitation: mocks.cancelInvitation,
+      updateInvitationRole: mocks.updateInvitationRole,
     };
   },
 }));
@@ -129,6 +131,8 @@ describe("useInviteActions", () => {
     mocks.links = [];
     mocks.cancelInvitation.mockReset();
     mocks.cancelInvitation.mockResolvedValue({ success: true });
+    mocks.updateInvitationRole.mockReset();
+    mocks.updateInvitationRole.mockResolvedValue({ success: true });
     mocks.createInvitation.mockReset();
     mocks.createLink.mockReset();
     mocks.refreshInvitations.mockReset();
@@ -309,6 +313,40 @@ describe("useInviteActions", () => {
       "conversation-1",
     );
     expect(mocks.createLink).toHaveBeenCalledWith("builder");
+  });
+
+  it("updates a pending invitation's role through the scoped action", async () => {
+    await act(async () => {
+      root.render(
+        <InvitationHarness scope={{ kind: "organization", orgId: "org-1" }} />,
+      );
+    });
+
+    await expect(
+      invitationActions?.updatePendingInvitationRole("invitation-1", "admin"),
+    ).resolves.toEqual({ success: true });
+    expect(mocks.updateInvitationRole).toHaveBeenCalledWith("invitation-1", "admin");
+  });
+
+  it("relays the server's reason when a role update is rejected", async () => {
+    // The message matters: owner-gating and expiry must surface as
+    // themselves, not as a generic failure.
+    mocks.updateInvitationRole.mockResolvedValue({
+      success: false,
+      error: "Only organization owners can assign the owner role.",
+    });
+    await act(async () => {
+      root.render(
+        <InvitationHarness scope={{ kind: "organization", orgId: "org-1" }} />,
+      );
+    });
+
+    await expect(
+      invitationActions?.updatePendingInvitationRole("invitation-1", "owner"),
+    ).resolves.toEqual({
+      success: false,
+      error: "Only organization owners can assign the owner role.",
+    });
   });
 
   it("keeps conversation identity in resolved invite URLs", () => {

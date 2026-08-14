@@ -37,6 +37,8 @@ function createProps(
     projectAccessPanel: "guests",
     projectDefaultsRefreshPending: false,
     projectInviteCancelPendingId: null,
+    projectInviteRoleUpdatePendingId: null,
+    onPendingProjectInviteRoleChange: vi.fn(),
     projectInviteEmail: "",
     projectInviteEmailValid: false,
     projectInviteError: null,
