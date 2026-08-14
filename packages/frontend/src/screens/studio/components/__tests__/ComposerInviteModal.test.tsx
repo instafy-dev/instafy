@@ -68,6 +68,7 @@ vi.mock("../../../../org/useOrgInvitations", () => ({
     return {
       createInvitation: mocks.createInvitation,
       cancelInvitation: mocks.cancelInvitation,
+      updateInvitationRole: vi.fn().mockResolvedValue({ success: true }),
       invitations: mocks.invitations,
     };
   },

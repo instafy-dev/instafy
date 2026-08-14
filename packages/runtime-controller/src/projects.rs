@@ -190,7 +190,7 @@ pub(crate) fn router() -> Router<AppState> {
         )
         .route(
             "/orgs/:org_id/invitations/:invitation_id",
-            delete(cancel_org_invitation),
+            delete(cancel_org_invitation).patch(update_org_invitation),
         )
         .route("/org-invitations/accept", post(accept_org_invitation))
         .route("/org-invitations/preview", get(preview_org_invitation))
@@ -1093,6 +1093,12 @@ struct OrgInvitationCreateRequest {
     project_id: Option<String>,
     #[serde(rename = "conversationId", alias = "conversation_id")]
     conversation_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OrgInvitationUpdateRequest {
+    role: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3266,6 +3272,154 @@ async fn cancel_org_invitation(
     })?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Changes the role on a pending invitation in place.
+///
+/// Replaces the cancel-and-recreate dance the create handler's 409
+/// `invitation_role_conflict` used to force. The token is deliberately
+/// untouched: an accept link already sitting in the invitee's inbox stays
+/// valid and grants the new role, because accept resolves the role from the
+/// row at accept time. For the same reason no email_outbox entry is written
+/// here — the create-path email remains the only invitation mail.
+async fn update_org_invitation(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((org_id_raw, invitation_id_raw)): Path<(String, String)>,
+    Json(body): Json<OrgInvitationUpdateRequest>,
+) -> Result<Json<OrgInvitationResponse>, (StatusCode, Json<ApiError>)> {
+    let org_id = parse_uuid_param(org_id_raw, "org_id")?;
+    let invitation_id = parse_uuid_param(invitation_id_raw, "invitation_id")?;
+    let context = authenticate_request(&state.config, &headers).await?;
+
+    let mut connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+    let transaction = connection.transaction().await.map_err(|error| {
+        internal_error(format!(
+            "failed to start org invitation role transaction: {error}"
+        ))
+    })?;
+
+    // Read WITHOUT `for update`: create acquires the scope advisory lock
+    // before its row lock, so this handler must take them in the same order
+    // (advisory below, then the guarded UPDATE) to serialize against a
+    // concurrent create without lock inversion. The UPDATE's status guard
+    // re-checks the race window this unlocked read leaves open.
+    let invitation = transaction
+        .query_opt(
+            "select project_id, conversation_id, email::text as email, expires_at
+             from org_invitations
+             where id = $1 and org_id = $2 and status = 'pending'
+             limit 1",
+            &[&invitation_id, &org_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load org invitation: {error}")))?;
+
+    let Some(invitation) = invitation else {
+        return Err(not_found("org invitation not found"));
+    };
+    let project_id: Option<Uuid> = invitation.get("project_id");
+    let conversation_id: Option<Uuid> = invitation.get("conversation_id");
+    let invited_email: String = invitation.get("email");
+    let expires_at: Option<DateTime<Utc>> = invitation.get("expires_at");
+
+    let actor_role = if let Some(project_id) = project_id {
+        load_org_project_for_sharing(&transaction, &org_id, &project_id, &context).await?;
+        validate_invite_conversation(&transaction, Some(project_id), conversation_id, &context)
+            .await
+            .map_err(|_| not_found("org invitation not found"))?;
+        None
+    } else {
+        require_org_manager(&transaction, &org_id, &context).await?
+    };
+
+    // Same normalization split as create: the caller may only assign roles
+    // they could have granted when issuing the invite in the first place.
+    let normalized_role = if project_id.is_some() {
+        normalize_project_share_role(Some(body.role), None)?
+    } else {
+        normalize_org_role(Some(body.role), None)?
+    };
+    if project_id.is_none()
+        && normalized_role == "owner"
+        && !actor_can_manage_owner(&context, actor_role.as_deref())
+    {
+        return Err(forbidden(
+            "Only organization owners can assign the owner role.",
+        ));
+    }
+
+    // Create treats an expired pending row as replaceable, not mutable;
+    // changing its role here would resurrect an invite that the next create
+    // on this scope is entitled to expire and supersede.
+    if expires_at
+        .map(|value| value <= Utc::now())
+        .unwrap_or(false)
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ApiError::with_details(
+                "This invitation has expired. Send a new invite instead.",
+                "invitation_expired",
+                json!({ "invitationId": invitation_id }),
+            )),
+        ));
+    }
+
+    lock_org_invitation_scope(
+        &transaction,
+        &org_id,
+        project_id.as_ref(),
+        conversation_id.as_ref(),
+        &invited_email,
+    )
+    .await?;
+
+    let row = transaction
+        .query_opt(
+            "update org_invitations
+             set role = $1
+             where id = $2 and org_id = $3 and status = 'pending'
+               and (expires_at is null or expires_at > now())
+             returning id, org_id, project_id, conversation_id, email::text as email, role,
+                       token, invited_by, status, created_at, expires_at",
+            &[&normalized_role, &invitation_id, &org_id],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to update org invitation role: {error}"))
+        })?;
+
+    let Some(row) = row else {
+        // The invitation was canceled, accepted, or expired between the
+        // unlocked read and the guarded UPDATE; the expiry predicate above
+        // keeps the pre-lock expiry check from being a TOCTOU hole.
+        return Err(not_found("org invitation not found"));
+    };
+
+    let token: Uuid = row.get("token");
+    let invitation = map_org_invitation_row(row);
+    let (_, accept_url) = invitation_accept_urls(
+        &state.config.public_app_url,
+        &token,
+        project_id.as_ref(),
+        conversation_id.as_ref(),
+    );
+
+    transaction.commit().await.map_err(|error| {
+        internal_error(format!(
+            "failed to finalize org invitation role transaction: {error}"
+        ))
+    })?;
+
+    Ok(Json(OrgInvitationResponse {
+        invitation,
+        accept_url,
+    }))
 }
 
 /// Shows an invitee what a token grants BEFORE any membership is written.

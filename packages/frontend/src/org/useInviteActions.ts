@@ -130,6 +130,7 @@ export function useScopedInvitationActions<Scope extends InviteScope>(
     refresh,
     createInvitation,
     cancelInvitation,
+    updateInvitationRole,
   } = useOrgInvitations(
     normalizedScope?.orgId ?? null,
     normalizedScope?.projectId ?? null,
@@ -181,6 +182,26 @@ export function useScopedInvitationActions<Scope extends InviteScope>(
     [cancelInvitation],
   );
 
+  // InviteRoleForScope keeps the client honest about the server's role split:
+  // project/conversation invites accept viewer|builder only, org invites the
+  // full organization set.
+  const updatePendingInvitationRole = useCallback(
+    async (
+      invitationId: string,
+      role: InviteRoleForScope<Scope>,
+    ): Promise<InviteMutationResult> => {
+      const result = await updateInvitationRole(invitationId, role);
+      if (!result.success) {
+        return {
+          success: false,
+          error: result.error ?? "Unable to update the invitation role.",
+        };
+      }
+      return { success: true };
+    },
+    [updateInvitationRole],
+  );
+
   return {
     invitations,
     loading,
@@ -188,6 +209,7 @@ export function useScopedInvitationActions<Scope extends InviteScope>(
     refresh,
     prepareEmailInvite,
     cancelPendingInvitation,
+    updatePendingInvitationRole,
   };
 }
 

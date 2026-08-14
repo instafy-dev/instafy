@@ -53,6 +53,12 @@ type ProjectSettingsSectionsProps = {
   sortedProjectInvitations: ControllerOrgInvitation[];
   projectInviteCancelPendingId: string | null;
   onCancelProjectInvite: (invitationId: string, label: string) => void;
+  projectInviteRoleUpdatePendingId: string | null;
+  onPendingProjectInviteRoleChange: (
+    invitationId: string,
+    nextRole: string,
+    label: string,
+  ) => void;
   inviteLinkRole: string;
   activeInviteLinkRole: string | null;
   inviteLinkPending: boolean;
@@ -106,6 +112,8 @@ export function ProjectSettingsSections({
   sortedProjectInvitations,
   projectInviteCancelPendingId,
   onCancelProjectInvite,
+  projectInviteRoleUpdatePendingId,
+  onPendingProjectInviteRoleChange,
   inviteLinkRole,
   activeInviteLinkRole,
   inviteLinkPending,
@@ -338,8 +346,14 @@ export function ProjectSettingsSections({
             <div className="divide-y divide-slate-200/70 dark:divide-slate-800">
               {sortedProjectInvitations.map((invite) => {
                 const cancelDisabled = projectInviteCancelPendingId === invite.id;
+                const roleUpdatePending = projectInviteRoleUpdatePendingId === invite.id;
                 const sentAt = new Date(invite.createdAt);
                 const sentLabel = Number.isNaN(sentAt.valueOf()) ? null : sentAt.toLocaleDateString();
+                const expiresAt = invite.expiresAt ? new Date(invite.expiresAt) : null;
+                const expiresLabel =
+                  expiresAt && !Number.isNaN(expiresAt.valueOf())
+                    ? expiresAt.toLocaleDateString()
+                    : null;
                 return (
                   <div
                     key={invite.id}
@@ -351,26 +365,53 @@ export function ProjectSettingsSections({
                         {invite.email}
                       </Text>
                       <div className="mt-0.5 flex flex-wrap items-center gap-2">
-                        <Text variant="caption" tone="muted">
-                          Access: {invite.role === "builder" ? "Read & write" : "Read-only"}
-                        </Text>
                         {sentLabel ? (
                           <Text variant="caption" tone="muted">
                             Created {sentLabel}
                           </Text>
                         ) : null}
+                        {expiresLabel ? (
+                          <Text
+                            variant="caption"
+                            tone="muted"
+                            data-testid={`project-invite-expires-${invite.id}`}
+                          >
+                            Expires {expiresLabel}
+                          </Text>
+                        ) : null}
                       </div>
                     </div>
-                    <Button
-                      onPress={() => onCancelProjectInvite(invite.id, invite.email)}
-                      isDisabled={cancelDisabled}
-                      variant="outline"
-                      size="xs"
-                      radius="full"
-                      data-testid={`project-invite-cancel-${invite.id}`}
-                    >
-                      {cancelDisabled ? "Canceling…" : "Cancel"}
-                    </Button>
+                    <div className="flex items-center gap-2">
+                      <Select
+                        value={invite.role}
+                        disabled={roleUpdatePending || cancelDisabled}
+                        data-testid={`project-invite-role-${invite.id}`}
+                        onChange={(event) =>
+                          onPendingProjectInviteRoleChange(
+                            invite.id,
+                            event.target.value,
+                            invite.email,
+                          )
+                        }
+                        size="xs"
+                        radius="lg"
+                        fullWidth={false}
+                        className="w-32"
+                      >
+                        <option value="viewer">Viewer</option>
+                        <option value="builder">Builder</option>
+                      </Select>
+                      <Button
+                        onPress={() => onCancelProjectInvite(invite.id, invite.email)}
+                        isDisabled={cancelDisabled || roleUpdatePending}
+                        variant="outline"
+                        size="xs"
+                        radius="full"
+                        data-testid={`project-invite-cancel-${invite.id}`}
+                      >
+                        {cancelDisabled ? "Canceling…" : "Cancel"}
+                      </Button>
+                    </div>
                   </div>
                 );
               })}
