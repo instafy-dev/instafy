@@ -21,6 +21,7 @@ export function useOrgInvitations(
     cancelInvitation: cancelControllerOrgInvitation,
     createInvitation: createControllerOrgInvitation,
     listInvitations: listControllerOrgInvitations,
+    updateInvitationRole: updateControllerOrgInvitationRole,
   } = controllerClient.organizations;
   const queryClient = useQueryClient();
   const enabled = Boolean(orgId);
@@ -135,12 +136,60 @@ export function useOrgInvitations(
     [cancelInvitationMutation]
   );
 
+  const updateInvitationRoleMutation = useMutation({
+    mutationFn: async (payload: { invitationId: string; role: string }) => {
+      if (!orgId) {
+        throw new Error("Select a team before updating invitations.");
+      }
+      // Throws with the server's reason on rejection; the callback below
+      // relays it so owner-gating and expiry read as themselves, not as a
+      // generic failure.
+      return await updateControllerOrgInvitationRole({
+        orgId,
+        invitationId: payload.invitationId,
+        role: payload.role,
+      });
+    },
+    onSuccess: async (updated) => {
+      if (updated?.id) {
+        queryClient.setQueryData<ControllerOrgInvitation[]>(queryKey, (previous) => {
+          const existing = Array.isArray(previous) ? previous : [];
+          return existing.map((entry) => (entry.id === updated.id ? updated : entry));
+        });
+      }
+      await queryClient.invalidateQueries({ queryKey, exact: true });
+    },
+    // A rejected change often means the row itself is gone (accepted,
+    // canceled, expired); resync so the pending list stops showing it.
+    onError: async () => {
+      await queryClient.invalidateQueries({ queryKey, exact: true });
+    },
+  });
+
+  const updateInvitationRole = useCallback(
+    async (invitationId: string, role: string): Promise<OrgInvitationMutationResult> => {
+      try {
+        const invitation = await updateInvitationRoleMutation.mutateAsync({
+          invitationId,
+          role,
+        });
+        return { success: true, invitation };
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Unable to update the invitation role.";
+        return { success: false, error: message };
+      }
+    },
+    [updateInvitationRoleMutation]
+  );
+
   return {
     invitations: invitationsQuery.data ?? [],
     loading: invitationsQuery.isFetching,
     error: invitationsQuery.error instanceof Error ? invitationsQuery.error.message : null,
     refresh,
     createInvitation,
-    cancelInvitation
+    cancelInvitation,
+    updateInvitationRole
   };
 }
