@@ -15,6 +15,7 @@ import { InviteAcceptPage } from "../InviteAcceptPage";
 
 const mocks = vi.hoisted(() => ({
   acceptInvitation: vi.fn(),
+  previewInvitation: vi.fn(),
   showStatus: vi.fn(),
   signOut: vi.fn(),
 }));
@@ -27,6 +28,7 @@ vi.mock("../../sdk/instafy", () => ({
   controllerClient: {
     organizations: {
       acceptInvitation: mocks.acceptInvitation,
+      previewInvitation: mocks.previewInvitation,
     },
   },
 }));
@@ -99,6 +101,8 @@ describe("InviteAcceptPage", () => {
     document.body.appendChild(container);
     root = createRoot(container);
     mocks.acceptInvitation.mockReset();
+    mocks.previewInvitation.mockReset();
+    mocks.previewInvitation.mockResolvedValue(null);
     mocks.showStatus.mockReset();
     mocks.signOut.mockReset();
     mocks.signOut.mockResolvedValue(undefined);
@@ -124,6 +128,30 @@ describe("InviteAcceptPage", () => {
     await joinIfOffered();
     }
   }
+
+  it("shows who invited you, to what, and as which role before joining", async () => {
+    mocks.previewInvitation.mockResolvedValue({
+      kind: "invitation", orgId: "o", orgSlug: "acme", orgName: "Acme",
+      role: "builder", invitedEmailMasked: "m\u2026@example.com",
+      inviterName: "Taylor", inviterEmail: null,
+      projectId: "p", projectName: "Website", conversationId: null,
+      conversationName: null, expiresAt: null,
+    });
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/invite?token=rich-token"]}>
+          <TestRoutes />
+        </MemoryRouter>,
+      );
+    });
+    await flushAsyncWork();
+    expect(document.body.textContent).toContain("Taylor invited you to join Acme");
+    expect(document.body.textContent).toContain("Project: Website");
+    expect(document.body.textContent).toContain("Edit access");
+    expect(document.body.textContent).toContain("Invite sent to m\u2026@example.com");
+    // Nothing accepted yet: consent still required.
+    expect(mocks.acceptInvitation).not.toHaveBeenCalled();
+  });
 
   it("ignores a stale response when the invite token changes", async () => {
     const first = deferred<{
