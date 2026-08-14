@@ -6,6 +6,7 @@ import { Text } from "../components/Text";
 import { getOrgDisplayName } from "../org/orgNaming";
 import { useAuth } from "../providers/AuthProvider";
 import { controllerClient } from "../sdk/instafy";
+import type { ControllerOrgInvitationPreview } from "../services/runtimeController/projects";
 import { useStatus } from "../status/useStatus";
 import { theme } from "../styles/theme";
 
@@ -23,6 +24,8 @@ export function InviteAcceptPage() {
   // moment rendered as a blank spinner. A preview endpoint (org/inviter/role
   // before accepting) needs controller support and is the follow-up.
   const [consented, setConsented] = useState(false);
+  const [preview, setPreview] = useState<ControllerOrgInvitationPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [orgName, setOrgName] = useState<string | null>(null);
   const [retryNonce, setRetryNonce] = useState(0);
@@ -42,6 +45,37 @@ export function InviteAcceptPage() {
   }, [location.search]);
 
   const inviteTarget = `${location.pathname}${location.search}`;
+
+  // Load the consent-card facts. Errors route to the same error card as
+  // accept -- the endpoint's messages are identical by design.
+  useEffect(() => {
+    if (!token || consented) {
+      return;
+    }
+    let cancelled = false;
+    setPreviewLoading(true);
+    controllerClient.organizations
+      .previewInvitation({ token })
+      .then((result) => {
+        if (!cancelled) {
+          setPreview(result);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setState("error");
+          setError(err instanceof Error ? err.message : "Unable to load invite.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setPreviewLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [consented, retryNonce, token]);
 
   useEffect(() => {
     if (!consented) {
@@ -138,7 +172,11 @@ export function InviteAcceptPage() {
           : "Accepting invitation…";
   const description =
     state === "ready"
-      ? "Join this workspace on Instafy? Invites are personal links delivered by their sender."
+      ? previewLoading
+        ? "Loading invitation…"
+        : preview
+          ? `${preview.inviterName ?? preview.inviterEmail ?? "A teammate"} invited you to join ${getOrgDisplayName(preview.orgName)}.`
+          : "Join this workspace on Instafy? Invites are personal links delivered by their sender."
       : state === "loading"
         ? "Just a moment while we connect your account."
         : state === "success"
@@ -157,6 +195,33 @@ export function InviteAcceptPage() {
               {description}
             </Text>
           </header>
+
+          {state === "ready" && preview ? (
+            <dl className="mt-6 space-y-1 text-center">
+              {preview.projectName ? (
+                <Text as="dd" variant="caption" tone="muted">
+                  Project: {preview.projectName}
+                </Text>
+              ) : null}
+              {preview.conversationName ? (
+                <Text as="dd" variant="caption" tone="muted">
+                  Private chat: {preview.conversationName}
+                </Text>
+              ) : null}
+              <Text as="dd" variant="caption" tone="muted">
+                {preview.role === "builder"
+                  ? "Edit access"
+                  : preview.role === "viewer"
+                    ? "Read access"
+                    : `Role: ${preview.role}`}
+              </Text>
+              {preview.invitedEmailMasked ? (
+                <Text as="dd" variant="caption" tone="muted">
+                  Invite sent to {preview.invitedEmailMasked}
+                </Text>
+              ) : null}
+            </dl>
+          ) : null}
 
           {state === "ready" ? (
             <div className="mt-8 flex flex-col justify-center gap-3 sm:flex-row">
