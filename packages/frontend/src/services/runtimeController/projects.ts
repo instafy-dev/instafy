@@ -138,6 +138,22 @@ export interface ControllerOrgInvitation {
   expiresAt?: string | null;
 }
 
+export interface ControllerOrgInvitationPreview {
+  kind: "invitation" | "inviteLink";
+  orgId: string;
+  orgSlug: string;
+  orgName: string;
+  role: string;
+  invitedEmailMasked: string | null;
+  inviterName: string | null;
+  inviterEmail: string | null;
+  projectId: string | null;
+  projectName: string | null;
+  conversationId: string | null;
+  conversationName: string | null;
+  expiresAt: string | null;
+}
+
 export interface ControllerOrgInvitationCreation extends ControllerOrgInvitation {
   /**
    * One-time creation response value. Pending-invitation list responses never
@@ -1766,4 +1782,57 @@ export async function acceptControllerOrgInvitation(params: {
     // the wrong-account user got no hint email was the issue.
     throw error instanceof Error ? error : new Error(message);
   }
+}
+
+export async function previewControllerOrgInvitation(params: {
+  token: string;
+}): Promise<ControllerOrgInvitationPreview | null> {
+  const trimmedToken = params.token.trim();
+  if (!trimmedToken) {
+    return null;
+  }
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
+  if (!accessToken) {
+    return null;
+  }
+  const response = await fetch(
+    `${requestContext.baseUrl}/org-invitations/preview?token=${encodeURIComponent(trimmedToken)}`,
+    { headers: { authorization: `Bearer ${accessToken}` } },
+  );
+  if (!response.ok) {
+    // Same rationale as accept: the backend messages ("invitation has
+    // expired", "invitation is no longer valid") ARE the UI copy.
+    const message = await readControllerError(
+      response,
+      "preview team invitation failed",
+      requestContext,
+    );
+    throw new Error(message);
+  }
+  const body = (await response.json().catch(() => null)) as Partial<ControllerOrgInvitationPreview> | null;
+  const text = (value: unknown): string | null =>
+    typeof value === "string" && value.length > 0 ? value : null;
+  const orgId = text(body?.orgId);
+  const orgSlug = text(body?.orgSlug);
+  const orgName = text(body?.orgName);
+  const role = text(body?.role);
+  if (!orgId || !orgSlug || !orgName || !role) {
+    return null;
+  }
+  return {
+    kind: body?.kind === "inviteLink" ? "inviteLink" : "invitation",
+    orgId,
+    orgSlug,
+    orgName,
+    role,
+    invitedEmailMasked: text(body?.invitedEmailMasked),
+    inviterName: text(body?.inviterName),
+    inviterEmail: text(body?.inviterEmail),
+    projectId: text(body?.projectId),
+    projectName: text(body?.projectName),
+    conversationId: text(body?.conversationId),
+    conversationName: text(body?.conversationName),
+    expiresAt: text(body?.expiresAt),
+  };
 }
