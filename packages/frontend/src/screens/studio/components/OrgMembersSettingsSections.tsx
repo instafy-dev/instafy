@@ -49,6 +49,10 @@ type OrgMembersSettingsSectionsProps = {
   sortedInvitations: ControllerOrgInvitation[];
   inviteCancelPendingId: string | null;
   onCancelInvite: (invitationId: string, label: string) => void;
+  inviteRoleUpdatePendingId: string | null;
+  // Named apart from the invite FORM's onInviteRoleChange above: this one
+  // retargets an already-sent invitation.
+  onPendingInviteRoleChange: (invitationId: string, nextRole: string, label: string) => void;
   membersCountLabel: string;
   memberQuery: string;
   onMemberQueryChange: (value: string) => void;
@@ -84,6 +88,8 @@ export function OrgMembersSettingsSections({
   sortedInvitations,
   inviteCancelPendingId,
   onCancelInvite,
+  inviteRoleUpdatePendingId,
+  onPendingInviteRoleChange,
   membersCountLabel,
   memberQuery,
   onMemberQueryChange,
@@ -237,8 +243,20 @@ export function OrgMembersSettingsSections({
               <div className="divide-y divide-slate-200/70 dark:divide-slate-800">
                 {sortedInvitations.map((invite) => {
                   const cancelDisabled = inviteCancelPendingId === invite.id;
+                  const roleUpdatePending = inviteRoleUpdatePendingId === invite.id;
+                  // The org-scope pending list only ever receives org-level
+                  // rows today, so this branch is defensive: if a
+                  // project-scoped invitation is ever rendered here, its role
+                  // options must stay viewer|builder — the same split the
+                  // server enforces in normalize_project_share_role.
+                  const isProjectScoped = Boolean(invite.projectId);
                   const sentAt = new Date(invite.createdAt);
                   const sentLabel = Number.isNaN(sentAt.valueOf()) ? null : sentAt.toLocaleDateString();
+                  const expiresAt = invite.expiresAt ? new Date(invite.expiresAt) : null;
+                  const expiresLabel =
+                    expiresAt && !Number.isNaN(expiresAt.valueOf())
+                      ? expiresAt.toLocaleDateString()
+                      : null;
                   return (
                     <div
                       key={invite.id}
@@ -250,30 +268,57 @@ export function OrgMembersSettingsSections({
                           {invite.email}
                         </Text>
                         <div className="mt-0.5 flex flex-wrap items-center gap-2">
-                          <Text variant="caption" tone="muted">
-                            {invite.role === "builder"
-                              ? "Edit access"
-                              : invite.role === "viewer"
-                                ? "Read access"
-                                : `Role: ${invite.role}`}
-                          </Text>
                           {sentLabel ? (
                             <Text variant="caption" tone="muted">
                               Created {sentLabel}
                             </Text>
                           ) : null}
+                          {expiresLabel ? (
+                            <Text
+                              variant="caption"
+                              tone="muted"
+                              data-testid={`org-invite-expires-${invite.id}`}
+                            >
+                              Expires {expiresLabel}
+                            </Text>
+                          ) : null}
                         </div>
                       </div>
-                      <Button
-                        onPress={() => onCancelInvite(invite.id, invite.email)}
-                        isDisabled={cancelDisabled}
-                        variant="outline"
-                        size="xs"
-                        radius="full"
-                        data-testid={`org-invite-cancel-${invite.id}`}
-                      >
-                        {cancelDisabled ? "Canceling…" : "Cancel"}
-                      </Button>
+                      <div className="flex items-center gap-2">
+                        <Select
+                          value={invite.role}
+                          disabled={roleUpdatePending || cancelDisabled}
+                          data-testid={`org-invite-role-${invite.id}`}
+                          onChange={(event) =>
+                            onPendingInviteRoleChange(invite.id, event.target.value, invite.email)
+                          }
+                          size="xs"
+                          radius="lg"
+                          fullWidth={false}
+                          className="w-32"
+                        >
+                          <option value="viewer">Viewer</option>
+                          <option value="builder">Builder</option>
+                          {!isProjectScoped ? (
+                            <>
+                              <option value="admin">Admin</option>
+                              <option value="owner" disabled={!canManageOwners}>
+                                Owner
+                              </option>
+                            </>
+                          ) : null}
+                        </Select>
+                        <Button
+                          onPress={() => onCancelInvite(invite.id, invite.email)}
+                          isDisabled={cancelDisabled || roleUpdatePending}
+                          variant="outline"
+                          size="xs"
+                          radius="full"
+                          data-testid={`org-invite-cancel-${invite.id}`}
+                        >
+                          {cancelDisabled ? "Canceling…" : "Cancel"}
+                        </Button>
+                      </div>
                     </div>
                   );
                 })}
