@@ -1,8 +1,8 @@
 ## Pin the Rust image to keep CI build caches warm (avoid nightly churn).
 ARG RUST_TOOLCHAIN=1.95.0
 ARG RUST_IMAGE=rust:${RUST_TOOLCHAIN}-slim-bookworm@sha256:d7482085ff5b415f84dba5647ae71606650bdef00db7aeb69f4b3d170c3e4082
-ARG GO_VERSION=1.26.5
-ARG GO_IMAGE=golang:${GO_VERSION}-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651
+ARG GO_VERSION=1.26.6
+ARG GO_IMAGE=golang:${GO_VERSION}-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36
 ARG NODE_IMAGE=node:24-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d
 ARG CLI_NODE_IMAGE=node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3
 ARG PLAYWRIGHT_VERSION=1.61.1
@@ -28,7 +28,7 @@ ARG BUILD_PROFILE=dev
 # Cargo's dev profile outputs to target/debug.
 ARG BUILD_ARTIFACT_DIR=debug
 # Runtime base should have glibc >= the builder image; Debian trixie is newer than bookworm.
-ARG RUNTIME_BASE=debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
+ARG RUNTIME_BASE=debian:trixie-slim@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258
 ARG WEBDEV_BASE=mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
 
 ########################
