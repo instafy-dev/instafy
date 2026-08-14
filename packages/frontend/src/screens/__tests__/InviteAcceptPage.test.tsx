@@ -152,6 +152,35 @@ describe("InviteAcceptPage", () => {
     ).toBe("/studio?projectId=project-second");
   });
 
+  it("surfaces the backend's precise error instead of a generic dead end", async () => {
+    // The service used to swallow controller errors and return null, which
+    // collapsed "invitation has expired" and "wrong email address" into one
+    // unhelpful message. The rethrow makes the backend copy reach the screen:
+    // the wrong-account user now learns email is the issue, right next to the
+    // "Use another account" button that fixes it.
+    mocks.acceptInvitation.mockRejectedValueOnce(
+      new Error(
+        "You must be signed in with the invited email address to accept this invitation.",
+      ),
+    );
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/invite?token=wrong-account-token"]}>
+          <TestRoutes />
+        </MemoryRouter>,
+      );
+    });
+    await flushAsyncWork();
+
+    expect(document.body.textContent).toContain(
+      "You must be signed in with the invited email address",
+    );
+    expect(document.body.textContent).not.toContain(
+      "It may have expired or been canceled",
+    );
+  });
+
   it("retries a failed invite without reloading the page", async () => {
     mocks.acceptInvitation
       .mockRejectedValueOnce(new Error("Invite acceptance failed."))
