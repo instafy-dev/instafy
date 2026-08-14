@@ -9,14 +9,20 @@ import { controllerClient } from "../sdk/instafy";
 import { useStatus } from "../status/useStatus";
 import { theme } from "../styles/theme";
 
-type InviteAcceptState = "loading" | "success" | "error";
+type InviteAcceptState = "ready" | "loading" | "success" | "error";
 
 export function InviteAcceptPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const { showStatus } = useStatus();
   const { signOut } = useAuth();
-  const [state, setState] = useState<InviteAcceptState>("loading");
+  const [state, setState] = useState<InviteAcceptState>("ready");
+  // Consent gate: membership is only written after an explicit Join. The page
+  // used to auto-accept on mount, so an invitee never saw a decision point --
+  // for a link that arrives from a personal email address, the trust-critical
+  // moment rendered as a blank spinner. A preview endpoint (org/inviter/role
+  // before accepting) needs controller support and is the follow-up.
+  const [consented, setConsented] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [orgName, setOrgName] = useState<string | null>(null);
   const [retryNonce, setRetryNonce] = useState(0);
@@ -38,6 +44,9 @@ export function InviteAcceptPage() {
   const inviteTarget = `${location.pathname}${location.search}`;
 
   useEffect(() => {
+    if (!consented) {
+      return;
+    }
     const attemptKey = `${token}:${retryNonce}`;
     if (activeAttemptKeyRef.current === attemptKey) {
       return;
@@ -95,7 +104,7 @@ export function InviteAcceptPage() {
     };
 
     void acceptInvite();
-  }, [navigate, panel, retryNonce, showStatus, token]);
+  }, [consented, navigate, panel, retryNonce, showStatus, token]);
 
   const retryInvite = useCallback(() => {
     setRetryNonce((current) => current + 1);
@@ -120,17 +129,21 @@ export function InviteAcceptPage() {
   }, [accountSwitchPending, inviteTarget, navigate, showStatus, signOut]);
 
   const headline =
-    state === "success"
-      ? "Invitation accepted"
-      : state === "error"
-        ? "Invitation error"
-        : "Accepting invitation…";
-  const description =
-    state === "loading"
-      ? "Just a moment while we connect your account."
+    state === "ready"
+      ? "You're invited"
       : state === "success"
-        ? `You now have access to ${orgName ?? "this team"}.`
-        : error ?? "This invite link is invalid or has expired.";
+        ? "Invitation accepted"
+        : state === "error"
+          ? "Invitation error"
+          : "Accepting invitation…";
+  const description =
+    state === "ready"
+      ? "Join this workspace on Instafy? Invites are personal links delivered by their sender."
+      : state === "loading"
+        ? "Just a moment while we connect your account."
+        : state === "success"
+          ? `You now have access to ${orgName ?? "this team"}.`
+          : error ?? "This invite link is invalid or has expired.";
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900" data-testid="invite-accept-page">
@@ -144,6 +157,27 @@ export function InviteAcceptPage() {
               {description}
             </Text>
           </header>
+
+          {state === "ready" ? (
+            <div className="mt-8 flex flex-col justify-center gap-3 sm:flex-row">
+              <Button
+                variant="primary"
+                radius="full"
+                onPress={() => setConsented(true)}
+                data-testid="invite-accept-join"
+              >
+                Join workspace
+              </Button>
+              <Button
+                variant="outline"
+                radius="full"
+                onPress={() => navigate("/studio", { replace: true })}
+                data-testid="invite-accept-decline"
+              >
+                Not now
+              </Button>
+            </div>
+          ) : null}
 
           {state === "error" ? (
             <div className="mt-8 flex flex-col justify-center gap-3 sm:flex-row">

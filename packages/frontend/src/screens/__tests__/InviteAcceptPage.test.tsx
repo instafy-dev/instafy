@@ -112,6 +112,19 @@ describe("InviteAcceptPage", () => {
       .IS_REACT_ACT_ENVIRONMENT;
   });
 
+
+  async function joinIfOffered() {
+    const join = document.querySelector<HTMLElement>('[data-testid="invite-accept-join"]');
+    if (join) {
+      await act(async () => {
+        join.click();
+        await Promise.resolve();
+      });
+      await flushAsyncWork();
+    await joinIfOffered();
+    }
+  }
+
   it("ignores a stale response when the invite token changes", async () => {
     const first = deferred<{
       orgName: string;
@@ -132,6 +145,7 @@ describe("InviteAcceptPage", () => {
         </MemoryRouter>,
       );
     });
+    await joinIfOffered();
     expect(mocks.acceptInvitation).toHaveBeenCalledWith({ token: "first" });
 
     await act(async () => {
@@ -141,12 +155,14 @@ describe("InviteAcceptPage", () => {
 
     second.resolve({ orgName: "Second team", projectId: "project-second" });
     await flushAsyncWork();
+    await joinIfOffered();
     expect(
       document.querySelector('[data-testid="location-probe"]')?.textContent,
     ).toBe("/studio?projectId=project-second");
 
     first.resolve({ orgName: "First team", projectId: "project-first" });
     await flushAsyncWork();
+    await joinIfOffered();
     expect(
       document.querySelector('[data-testid="location-probe"]')?.textContent,
     ).toBe("/studio?projectId=project-second");
@@ -172,6 +188,7 @@ describe("InviteAcceptPage", () => {
       );
     });
     await flushAsyncWork();
+    await joinIfOffered();
 
     expect(document.body.textContent).toContain(
       "You must be signed in with the invited email address",
@@ -194,6 +211,7 @@ describe("InviteAcceptPage", () => {
       );
     });
     await flushAsyncWork();
+    await joinIfOffered();
 
     await act(async () => {
       document
@@ -202,6 +220,7 @@ describe("InviteAcceptPage", () => {
       await Promise.resolve();
     });
     await flushAsyncWork();
+    await joinIfOffered();
 
     expect(mocks.acceptInvitation).toHaveBeenCalledTimes(2);
     expect(
@@ -222,6 +241,7 @@ describe("InviteAcceptPage", () => {
       );
     });
     await flushAsyncWork();
+    await joinIfOffered();
 
     await act(async () => {
       document
@@ -230,6 +250,7 @@ describe("InviteAcceptPage", () => {
       await Promise.resolve();
     });
     await flushAsyncWork();
+    await joinIfOffered();
 
     expect(mocks.signOut).toHaveBeenCalledTimes(1);
     const locationText =
