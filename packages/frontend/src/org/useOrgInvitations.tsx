@@ -4,12 +4,41 @@ import {
   type ControllerOrgInvitation
 } from "../sdk/instafy";
 import { controllerClient } from "../sdk/instafy";
+import { ControllerApiError } from "../services/runtimeController/core";
+
+export interface OrgInvitationRoleConflict {
+  invitationId: string;
+  existingRole: string;
+  requestedRole: string;
+}
 
 interface OrgInvitationMutationResult {
   success: boolean;
   error?: string;
   invitation?: ControllerOrgInvitation;
   acceptUrl?: string;
+  // Present when creation was refused because a pending invitation already
+  // exists with a different role — the caller can offer an in-place update.
+  conflict?: OrgInvitationRoleConflict;
+}
+
+function extractRoleConflict(error: unknown): OrgInvitationRoleConflict | null {
+  if (
+    !(error instanceof ControllerApiError) ||
+    error.code !== "invitation_role_conflict" ||
+    !error.details ||
+    typeof error.details !== "object"
+  ) {
+    return null;
+  }
+  const details = error.details as Record<string, unknown>;
+  const invitationId = typeof details.invitationId === "string" ? details.invitationId : "";
+  const existingRole = typeof details.existingRole === "string" ? details.existingRole : "";
+  const requestedRole = typeof details.requestedRole === "string" ? details.requestedRole : "";
+  if (!invitationId || !existingRole || !requestedRole) {
+    return null;
+  }
+  return { invitationId, existingRole, requestedRole };
 }
 
 export function useOrgInvitations(
@@ -19,7 +48,9 @@ export function useOrgInvitations(
 ) {
   const {
     cancelInvitation: cancelControllerOrgInvitation,
-    createInvitation: createControllerOrgInvitation,
+    // Strict so the 409 invitation_role_conflict arrives as a typed error
+    // with the existing invitation's id and roles, not a swallowed null.
+    createInvitationStrict: createControllerOrgInvitation,
     listInvitations: listControllerOrgInvitations,
     updateInvitationRole: updateControllerOrgInvitationRole,
   } = controllerClient.organizations;
@@ -114,7 +145,10 @@ export function useOrgInvitations(
         return { success: true, invitation, acceptUrl };
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unable to create email invite.";
-        return { success: false, error: message };
+        const conflict = extractRoleConflict(error);
+        return conflict
+          ? { success: false, error: message, conflict }
+          : { success: false, error: message };
       }
     },
     [createInvitationMutation]
@@ -152,9 +186,12 @@ export function useOrgInvitations(
     },
     onSuccess: async (updated) => {
       if (updated?.id) {
+        // The accept URL is response metadata for the caller, not row state.
+        const invitation: ControllerOrgInvitation & { acceptUrl?: string } = { ...updated };
+        delete invitation.acceptUrl;
         queryClient.setQueryData<ControllerOrgInvitation[]>(queryKey, (previous) => {
           const existing = Array.isArray(previous) ? previous : [];
-          return existing.map((entry) => (entry.id === updated.id ? updated : entry));
+          return existing.map((entry) => (entry.id === invitation.id ? invitation : entry));
         });
       }
       await queryClient.invalidateQueries({ queryKey, exact: true });
@@ -169,11 +206,12 @@ export function useOrgInvitations(
   const updateInvitationRole = useCallback(
     async (invitationId: string, role: string): Promise<OrgInvitationMutationResult> => {
       try {
-        const invitation = await updateInvitationRoleMutation.mutateAsync({
+        const result = await updateInvitationRoleMutation.mutateAsync({
           invitationId,
           role,
         });
-        return { success: true, invitation };
+        const { acceptUrl, ...invitation } = result;
+        return { success: true, invitation, acceptUrl };
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "Unable to update the invitation role.";
