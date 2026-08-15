@@ -1,4 +1,5 @@
 import {
+  ControllerApiError,
   normalizeUuidParam,
   readControllerApiError,
   readControllerError,
@@ -1466,8 +1467,12 @@ export async function createControllerOrgInvitationStrict(params: {
     }
   }
   if (!response.ok) {
-    throw new Error(
-      await readControllerError(
+    // A typed error, not a flattened message: the 409
+    // invitation_role_conflict carries the existing invitation's id and
+    // roles in details, which the invite form uses to offer an in-place
+    // role update instead of forcing cancel-and-recreate.
+    throw new ControllerApiError(
+      await readControllerApiError(
         response,
         "Unable to create email invite",
         requestContext,
@@ -1706,7 +1711,7 @@ export async function updateControllerOrgInvitationRole(params: {
   orgId: string;
   invitationId: string;
   role: string;
-}): Promise<ControllerOrgInvitation> {
+}): Promise<ControllerOrgInvitation & { acceptUrl?: string }> {
   if (!runtimeControllerEnabled) {
     throw new Error("Runtime controller is unavailable.");
   }
@@ -1744,10 +1749,17 @@ export async function updateControllerOrgInvitationRole(params: {
   }
   const body = (await response.json().catch(() => null)) as {
     invitation?: ControllerOrgInvitation;
+    acceptUrl?: string;
   } | null;
   const invitation = body?.invitation;
   if (invitation && typeof invitation.id === "string") {
-    return invitation;
+    // The token survives a role change by design, so the response's accept
+    // URL lets a retargeted invite re-surface the SAME shareable link.
+    const acceptUrl =
+      typeof body?.acceptUrl === "string" && body.acceptUrl.trim()
+        ? body.acceptUrl.trim()
+        : undefined;
+    return acceptUrl ? { ...invitation, acceptUrl } : invitation;
   }
   throw new Error("The server did not return the updated invitation.");
 }

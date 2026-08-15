@@ -451,6 +451,61 @@ test.describe.serial("Org invite personas", () => {
     await context.close();
   });
 
+  test("re-inviting with a different role offers the in-place update instead of a dead end", async ({
+    page,
+  }) => {
+    page.setDefaultTimeout(60_000);
+    await prepareInviter(page);
+
+    const inviteeEmail = `persona-conflict-${Date.now()}@instafy.dev`;
+    await sendOrgInvite(page, inviteeEmail, "viewer");
+    let firstToken: string | null = null;
+    await expect
+      .poll(
+        async () => {
+          firstToken = await fetchInvitationToken(page.context().request, {
+            supabaseUrl,
+            serviceRoleKey,
+            email: inviteeEmail,
+          });
+          return firstToken;
+        },
+        { timeout: 10_000 },
+      )
+      .not.toBeNull();
+
+    // Same email, different role: the form must surface the conflict card
+    // with an in-place update, not a bare error.
+    await page.getByTestId("org-member-invite-role").selectOption("admin");
+    await page.getByTestId("org-member-invite-email").fill(inviteeEmail);
+    await page.getByTestId("org-member-invite-submit").click();
+
+    const conflictCard = page.getByTestId("org-invite-role-conflict");
+    await expect(conflictCard).toBeVisible({ timeout: 30_000 });
+    await expect(conflictCard).toContainText("already has a pending viewer invite");
+
+    await page.getByTestId("org-invite-role-conflict-apply").click();
+    await expect(conflictCard).toHaveCount(0, { timeout: 30_000 });
+
+    // The retarget re-surfaces a prepared invite exactly like a fresh
+    // prepare would (token preservation itself is proven by the
+    // retarget-at-accept scenario below).
+    const notice = page.getByTestId("org-email-invite-prepared");
+    await expect(notice).toBeVisible({ timeout: 30_000 });
+    await expect(notice).toContainText(`Invite prepared for ${inviteeEmail}`);
+    await revealPendingInvitations(page);
+    const row = page
+      .locator('[data-testid^="org-invite-row-"]')
+      .filter({ hasText: inviteeEmail })
+      .first();
+    const rowTestId = await row.getAttribute("data-testid");
+    const invitationId = rowTestId?.replace("org-invite-row-", "") ?? "";
+    await expect(page.getByTestId(`org-invite-role-${invitationId}`)).toHaveValue(
+      "admin",
+      { timeout: 30_000 },
+    );
+  });
+
   test("a pending invite's role can be retargeted and the same link grants the NEW role", async ({
     page,
     browser,
