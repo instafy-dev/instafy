@@ -30,6 +30,7 @@ mod credits;
 mod desktop_updates;
 mod dev;
 mod device_auth;
+mod diagnostics;
 mod dispatch;
 mod edge_downloads;
 mod errors;
@@ -436,6 +437,7 @@ async fn main() -> anyhow::Result<()> {
                 (StatusCode::OK, headers)
             }),
         )
+        .merge(diagnostics::router())
         .merge(runtime::router())
         .merge(billing::router())
         .merge(bug_reports::router())

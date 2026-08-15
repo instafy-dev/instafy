@@ -18,7 +18,6 @@ import { RouteErrorPage } from "./screens/RouteErrorPage";
 import { RequireAuth } from "./components/RequireAuth";
 import {
   subscribeToControllerReloadRequired,
-  syncControllerOverridesFromSearch,
 } from "./services/runtimeController/core";
 import type { FrontendFeatureComposition } from "./features/frontendFeatureModule";
 
@@ -86,7 +85,6 @@ function ScrollToHash() {
 }
 
 function AppShell() {
-  const location = useLocation();
   const controllerReloadAttemptedRef = useRef(false);
 
   useEffect(() => {
@@ -105,10 +103,6 @@ function AppShell() {
     };
     return subscribeToControllerReloadRequired(reload);
   }, []);
-
-  useEffect(() => {
-    syncControllerOverridesFromSearch(location.search);
-  }, [location.search]);
 
   return (
     <>

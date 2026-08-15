@@ -259,13 +259,13 @@ VITE_CONTROLLER_URL=https://controller.dev.your-domain.com
 ```
 
 Hosted browser builds treat that configured URL as the controller authority and ignore controller
-URL overrides from the page query, browser globals, and session storage. Localhost/development and
-native harnesses may use a custom `controllerUrl` only when they also provide an explicit
-`controllerAccessToken`; a custom controller never receives the signed-in user's ambient Supabase
-session. Studio sends that token in the `Authorization` header, including for `/events`, rather than
-putting it in a request URL. A controller URL and credential are bound together for the lifetime of
-the page; changing or rejecting an override scrubs its query parameters and reloads before any new
-controller request can start.
+overrides from browser globals and session storage. Controller credentials in page URLs and the old
+split session-storage keys are rejected and scrubbed. Localhost/development and native harnesses may
+inject one complete controller URL/token binding before application startup; a custom controller
+never receives the signed-in user's ambient Supabase session. Studio sends that token in the
+`Authorization` header, including for `/events`. A controller URL and credential stay bound together
+for the lifetime of the page; rejecting the binding clears it and reloads before another controller
+request can start.
 
 Personal Browser requires the normal ambient signed-in session and is unavailable while a fixed or
 custom controller credential is active. Desktop runtimes remember whether their launch credential

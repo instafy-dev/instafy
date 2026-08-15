@@ -13,6 +13,10 @@ import {
 } from "./config.js";
 import { formatAuthRejectedError, formatAuthRequiredError } from "./errors.js";
 import { fetchWithControllerAuth } from "./controller-fetch.js";
+import {
+  resolveRuntimeBoundControllerUrl,
+  resolveRuntimeControllerCredential,
+} from "./runtime-controller-binding.js";
 
 type TunnelResponse = {
   tunnelId: string;
@@ -255,7 +259,24 @@ function persistTunnelAliasResult(config: TunnelAliasConfig, hostname: string, u
   }
 }
 
-function resolveTunnelControllerUrl(opts: TunnelCliOptions): string {
+type ResolvedTunnelToken = {
+  token: string;
+  source: AccessTokenSource;
+  profile: string | null;
+  runtimeControllerUrl: string | null;
+};
+
+function resolveTunnelControllerUrl(
+  opts: TunnelCliOptions,
+  auth: ResolvedTunnelToken,
+): string {
+  if (auth.runtimeControllerUrl) {
+    return resolveRuntimeBoundControllerUrl(
+      { controllerUrl: auth.runtimeControllerUrl },
+      opts.controllerUrl,
+    );
+  }
+
   const explicit = opts.controllerUrl?.trim();
   if (explicit) {
     return explicit;
@@ -264,8 +285,6 @@ function resolveTunnelControllerUrl(opts: TunnelCliOptions): string {
   const envUrl =
     readEnv("INSTAFY_SERVER_URL") ||
     readEnv("INSTAFY_URL") ||
-    readEnv("CONTROLLER_URL") ||
-    readEnv("CONTROLLER_BASE_URL") ||
     null;
   if (envUrl) {
     return envUrl;
@@ -283,34 +302,36 @@ function resolveTunnelControllerUrl(opts: TunnelCliOptions): string {
 function resolveControllerToken(
   opts: TunnelCliOptions,
   retryCommand = "instafy tunnel start",
-): { token: string; source: AccessTokenSource; profile: string | null } {
+): ResolvedTunnelToken {
   const explicit = opts.controllerToken?.trim();
   if (explicit) {
-    return { token: explicit, source: "explicit", profile: null };
+    return { token: explicit, source: "explicit", profile: null, runtimeControllerUrl: null };
+  }
+
+  const runtimeCredential = resolveRuntimeControllerCredential();
+  if (runtimeCredential) {
+    return {
+      token: runtimeCredential.token,
+      source: "env",
+      profile: null,
+      runtimeControllerUrl: runtimeCredential.controllerUrl,
+    };
   }
 
   const resolved = resolveUserAccessTokenWithSource();
   if (resolved.token) {
-    return { token: resolved.token, source: resolved.source, profile: resolved.profile };
-  }
-
-  const serviceToken =
-    readEnv("INSTAFY_SERVICE_TOKEN") ||
-    readEnv("CONTROLLER_BEARER") ||
-    readEnv("CONTROLLER_TOKEN") ||
-    readEnv("SERVICE_ROLE_KEY") ||
-    readEnv("CONTROLLER_SERVICE_ROLE_KEY") ||
-    readEnv("SUPABASE_SERVICE_ROLE_KEY") ||
-    readEnv("CONTROLLER_INTERNAL_TOKEN") ||
-    null;
-  if (serviceToken) {
-    return { token: serviceToken, source: "env", profile: null };
+    return {
+      token: resolved.token,
+      source: resolved.source,
+      profile: resolved.profile,
+      runtimeControllerUrl: null,
+    };
   }
 
   throw formatAuthRequiredError({
     retryCommand,
     advancedHint:
-      "pass --access-token / --service-token, or set INSTAFY_ACCESS_TOKEN / SUPABASE_ACCESS_TOKEN / INSTAFY_SERVICE_TOKEN",
+      "pass --access-token, or set INSTAFY_ACCESS_TOKEN / SUPABASE_ACCESS_TOKEN",
   });
 }
 
@@ -532,8 +553,8 @@ type TunnelSession = {
 
 export async function startTunnelSession(opts: TunnelCliOptions): Promise<TunnelSession> {
   const projectId = resolveProject(opts);
-  const controllerUrl = resolveTunnelControllerUrl(opts);
   const controllerToken = resolveControllerToken(opts);
+  const controllerUrl = resolveTunnelControllerUrl(opts, controllerToken);
   const port = resolvePort(opts);
   const alias = resolveTunnelAlias(opts, projectId);
   let cleanedUp = false;
@@ -624,8 +645,8 @@ export async function runTunnelCommand(opts: TunnelCliOptions, options?: { timeo
 
 export async function startTunnelDetached(opts: TunnelStartOptions): Promise<TunnelStateEntry> {
   const projectId = resolveProject(opts);
-  const controllerUrl = resolveTunnelControllerUrl(opts);
   const controllerToken = resolveControllerToken(opts);
+  const controllerUrl = resolveTunnelControllerUrl(opts, controllerToken);
   const port = resolvePort(opts);
   const alias = resolveTunnelAlias(opts, projectId);
 
@@ -760,6 +781,17 @@ export async function stopTunnelSession(opts: TunnelStopOptions): Promise<{ ok: 
   }
 
   const controllerToken = resolveControllerToken(opts, `instafy tunnel stop ${tunnelId}`);
+  if (controllerToken.runtimeControllerUrl) {
+    try {
+      resolveRuntimeBoundControllerUrl(
+        { controllerUrl: controllerToken.runtimeControllerUrl },
+        entry.controllerUrl,
+      );
+    } catch (error) {
+      upsertTunnelState({ ...entry, pid: -1 });
+      throw error;
+    }
+  }
   try {
     await revokeTunnel(entry.controllerUrl, controllerToken, entry.projectId, entry.tunnelId);
   } catch (error) {

@@ -1,6 +1,5 @@
 export const INSTAFY_DESKTOP_PROTOCOL = "instafy";
 
-const TRUSTED_PRODUCTION_ORIGIN = "https://prod.instafy.dev";
 const PROTECTED_CONTROLLER_QUERY_KEYS = new Set([
   "controlleraccesstoken",
   "controllerurl",
@@ -76,10 +75,9 @@ export function resolveDesktopDeepLinkTargetUrl(rawUrl: string, startUrl: string
     return null;
   }
 
-  if (
-    target.origin === TRUSTED_PRODUCTION_ORIGIN &&
-    hasProtectedControllerOverride(parsed)
-  ) {
+  // Custom-protocol URLs cross OS/process boundaries and can be retained in
+  // launch history, so controller bindings must never be transported in them.
+  if (hasProtectedControllerOverride(parsed)) {
     return null;
   }
 
