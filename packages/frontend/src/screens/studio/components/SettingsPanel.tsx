@@ -18,6 +18,7 @@ import {
   isOrganizationInviteRole,
   isProjectInviteRole,
   type OrganizationInviteRole,
+  type OrgInvitationRoleConflict,
   type OrganizationInviteScope,
   type ProjectInviteRole,
   type ProjectInviteScope,
@@ -106,6 +107,14 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
     useState<PreparedEmailInvite | null>(null);
   const [inviteCancelPendingId, setInviteCancelPendingId] = useState<string | null>(null);
   const [inviteRoleUpdatePendingId, setInviteRoleUpdatePendingId] = useState<string | null>(null);
+  const [inviteRoleConflict, setInviteRoleConflict] = useState<
+    (OrgInvitationRoleConflict & { email: string }) | null
+  >(null);
+  const [projectInviteRoleConflict, setProjectInviteRoleConflict] = useState<
+    (OrgInvitationRoleConflict & { email: string }) | null
+  >(null);
+  const [inviteConflictPending, setInviteConflictPending] = useState(false);
+  const [projectInviteConflictPending, setProjectInviteConflictPending] = useState(false);
   const [inviteLinkRole, setInviteLinkRole] = useState<ProjectInviteRole>("builder");
   const [inviteLinkPending, setInviteLinkPending] = useState(false);
   const [projectInviteEmail, setProjectInviteEmail] = useState("");
@@ -440,6 +449,7 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
     prepareEmailInvite: prepareOrgEmailInvite,
     cancelPendingInvitation: cancelInvitation,
     updatePendingInvitationRole,
+    retargetPendingInvitation,
   } = useScopedInvitationActions(orgInviteScope);
   const {
     invitations: projectInvitations,
@@ -449,6 +459,7 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
     prepareEmailInvite: prepareProjectEmailInvite,
     cancelPendingInvitation: cancelProjectInvitation,
     updatePendingInvitationRole: updatePendingProjectInvitationRole,
+    retargetPendingInvitation: retargetPendingProjectInvitation,
   } = useScopedInvitationActions(projectInviteScope);
   const {
     loading: inviteLinksLoading,
@@ -643,11 +654,18 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
     }
     setInviteError(null);
     setPreparedOrgEmailInvite(null);
+    setInviteRoleConflict(null);
     setInvitePending(true);
     try {
       const result = await prepareOrgEmailInvite(trimmedEmail, inviteRole);
       if (!result.success) {
-        setInviteError(result.error);
+        if (result.conflict) {
+          // A pending invite already holds a different role; offer the
+          // in-place retarget instead of surfacing a dead-end error.
+          setInviteRoleConflict({ ...result.conflict, email: trimmedEmail });
+        } else {
+          setInviteError(result.error);
+        }
       } else {
         setPreparedOrgEmailInvite(result.preparedInvite);
         showStatus(
@@ -682,6 +700,57 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
     [cancelInvitation, showStatus]
   );
 
+  const handleApplyInviteRoleConflict = useCallback(async () => {
+    if (!inviteRoleConflict || !isOrganizationInviteRole(inviteRoleConflict.requestedRole)) {
+      return;
+    }
+    setInviteConflictPending(true);
+    const result = await retargetPendingInvitation(
+      inviteRoleConflict.invitationId,
+      inviteRoleConflict.requestedRole,
+    );
+    if (!result.success) {
+      setInviteError(result.error);
+    } else {
+      setPreparedOrgEmailInvite(result.preparedInvite);
+      showStatus(
+        `Updated the pending invite for ${inviteRoleConflict.email} to ${inviteRoleConflict.requestedRole}. The original link still works.`,
+        "success",
+        4500,
+      );
+      setInviteEmail("");
+    }
+    setInviteRoleConflict(null);
+    setInviteConflictPending(false);
+  }, [inviteRoleConflict, retargetPendingInvitation, showStatus]);
+
+  const handleApplyProjectInviteRoleConflict = useCallback(async () => {
+    if (
+      !projectInviteRoleConflict ||
+      !isProjectInviteRole(projectInviteRoleConflict.requestedRole)
+    ) {
+      return;
+    }
+    setProjectInviteConflictPending(true);
+    const result = await retargetPendingProjectInvitation(
+      projectInviteRoleConflict.invitationId,
+      projectInviteRoleConflict.requestedRole,
+    );
+    if (!result.success) {
+      setProjectInviteError(result.error);
+    } else {
+      setPreparedProjectEmailInvite(result.preparedInvite);
+      showStatus(
+        `Updated the pending invite for ${projectInviteRoleConflict.email} to ${projectInviteRoleConflict.requestedRole}. The original link still works.`,
+        "success",
+        4500,
+      );
+      setProjectInviteEmail("");
+    }
+    setProjectInviteRoleConflict(null);
+    setProjectInviteConflictPending(false);
+  }, [projectInviteRoleConflict, retargetPendingProjectInvitation, showStatus]);
+
   // No window.confirm here: unlike cancel, a role change is reversible from
   // the same select, and the accept link the invitee holds stays valid.
   const handlePendingInviteRoleChange = useCallback(
@@ -711,11 +780,16 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
     }
     setProjectInviteError(null);
     setPreparedProjectEmailInvite(null);
+    setProjectInviteRoleConflict(null);
     setProjectInvitePending(true);
     try {
       const result = await prepareProjectEmailInvite(trimmedEmail, projectInviteRole);
       if (!result.success) {
-        setProjectInviteError(result.error);
+        if (result.conflict) {
+          setProjectInviteRoleConflict({ ...result.conflict, email: trimmedEmail });
+        } else {
+          setProjectInviteError(result.error);
+        }
       } else {
         setPreparedProjectEmailInvite(result.preparedInvite);
         showStatus(
@@ -1592,6 +1666,10 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
       onPendingProjectInviteRoleChange={(invitationId, nextRole, label) =>
         void handlePendingProjectInviteRoleChange(invitationId, nextRole, label)
       }
+      projectInviteRoleConflict={projectInviteRoleConflict}
+      projectInviteConflictPending={projectInviteConflictPending}
+      onApplyProjectInviteRoleConflict={() => void handleApplyProjectInviteRoleConflict()}
+      onDismissProjectInviteRoleConflict={() => setProjectInviteRoleConflict(null)}
       inviteLinkRole={inviteLinkRole}
       activeInviteLinkRole={activeInviteLink?.role ?? null}
       inviteLinkPending={inviteLinkPending}
@@ -1999,6 +2077,10 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
                   onPendingInviteRoleChange={(invitationId, nextRole, label) =>
                     void handlePendingInviteRoleChange(invitationId, nextRole, label)
                   }
+                  inviteRoleConflict={inviteRoleConflict}
+                  inviteConflictPending={inviteConflictPending}
+                  onApplyInviteRoleConflict={() => void handleApplyInviteRoleConflict()}
+                  onDismissInviteRoleConflict={() => setInviteRoleConflict(null)}
                   membersCountLabel={membersCountLabel}
                   memberQuery={memberQuery}
                   onMemberQueryChange={setMemberQuery}
