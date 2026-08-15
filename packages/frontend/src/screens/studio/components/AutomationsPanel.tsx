@@ -44,6 +44,7 @@ type AutomationDraft = {
   timezone: string;
   runtimeMode: ControllerAutomationRuntimeMode;
   runtimeProvider: string;
+  silentWhenNothingToReport: boolean;
   enabled: boolean;
 };
 
@@ -155,6 +156,7 @@ function draftFromAutomation(automation: ControllerAutomation): AutomationDraft 
     timezone,
     runtimeMode: automation.runtimeMode,
     runtimeProvider: automation.runtimeProvider ?? "",
+    silentWhenNothingToReport: automation.silentWhenNothingToReport,
     enabled: automation.status === "active",
   };
 }
@@ -173,6 +175,7 @@ function emptyDraft(): AutomationDraft {
     timezone,
     runtimeMode: "auto",
     runtimeProvider: "",
+    silentWhenNothingToReport: false,
     enabled: true,
   };
 }
@@ -259,6 +262,7 @@ export function AutomationsPanel() {
           timezone,
           runtimeMode: draft.runtimeMode,
           runtimeProvider,
+          silentWhenNothingToReport: draft.silentWhenNothingToReport,
           status,
         });
       } else {
@@ -275,6 +279,7 @@ export function AutomationsPanel() {
           timezone,
           runtimeMode: draft.runtimeMode,
           runtimeProvider,
+          silentWhenNothingToReport: draft.silentWhenNothingToReport,
           status,
         });
       }
@@ -366,6 +371,7 @@ export function AutomationsPanel() {
               const mutedMetaParts = [
                 schedule,
                 automation.runtimeMode === "hosted" ? "Cloud" : automation.runtimeMode === "existing" ? "Existing" : "Auto",
+                automation.silentWhenNothingToReport ? "Findings only" : null,
                 nextRun ? `Next ${nextRun}` : null,
               ].filter(Boolean);
 
@@ -504,6 +510,7 @@ export function AutomationsPanel() {
         dialogAriaLabel="Automation editor"
         className="items-end p-0 sm:items-center sm:p-4"
         modalClassName="max-w-2xl overflow-hidden max-sm:h-[100dvh] max-sm:max-h-[100dvh] max-sm:max-w-none max-sm:rounded-none max-sm:border-x-0 max-sm:border-y-0 sm:max-h-[min(90dvh,48rem)]"
+        dialogClassName="max-h-[inherit]"
       >
         <div className="flex h-full max-h-[inherit] flex-col">
           <StudioDialogHeader
@@ -694,6 +701,16 @@ export function AutomationsPanel() {
                   />
                 </div>
               </div>
+
+              <Toggle
+                isSelected={draft.silentWhenNothingToReport}
+                onChange={(value) =>
+                  setDraft((prev) => ({ ...prev, silentWhenNothingToReport: value }))
+                }
+                label="Only notify me when there’s something to report"
+                description="Successful runs with no findings add no completion message or result notification. Errors and real results still appear."
+                data-testid="automation-silent-when-nothing-to-report-toggle"
+              />
             </div>
           </div>
 

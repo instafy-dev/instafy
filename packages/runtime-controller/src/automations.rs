@@ -58,6 +58,8 @@ struct CreateAutomationBody {
     runtime_provider: Option<String>,
     #[serde(default)]
     status: Option<String>,
+    #[serde(default)]
+    silent_when_nothing_to_report: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -89,6 +91,8 @@ struct UpdateAutomationBody {
     runtime_provider: Option<String>,
     #[serde(default)]
     status: Option<String>,
+    #[serde(default)]
+    silent_when_nothing_to_report: Option<bool>,
 }
 
 impl UpdateAutomationBody {
@@ -106,6 +110,7 @@ impl UpdateAutomationBody {
             && self.timezone.is_none()
             && self.runtime_mode.is_none()
             && self.runtime_provider.is_none()
+            && self.silent_when_nothing_to_report.is_none()
     }
 }
 
@@ -136,6 +141,7 @@ struct AutomationPayload {
     timezone: String,
     runtime_mode: String,
     runtime_provider: Option<String>,
+    silent_when_nothing_to_report: bool,
     conversation_id: Option<String>,
     status: String,
     locked_until: Option<String>,
@@ -163,6 +169,7 @@ struct AutomationRecord {
     timezone: String,
     runtime_mode: String,
     runtime_provider: Option<String>,
+    silent_when_nothing_to_report: bool,
     conversation_id: Option<Uuid>,
     status: String,
     locked_until: Option<DateTime<Utc>>,
@@ -414,6 +421,7 @@ fn row_to_record(row: &tokio_postgres::Row) -> AutomationRecord {
         timezone: row.get("timezone"),
         runtime_mode: row.get("runtime_mode"),
         runtime_provider: row.get("runtime_provider"),
+        silent_when_nothing_to_report: row.get("silent_when_nothing_to_report"),
         conversation_id: row.get("conversation_id"),
         status: row.get("status"),
         locked_until: row.get("locked_until"),
@@ -442,6 +450,7 @@ fn record_to_payload(record: AutomationRecord) -> AutomationPayload {
         timezone: record.timezone,
         runtime_mode: record.runtime_mode,
         runtime_provider: record.runtime_provider,
+        silent_when_nothing_to_report: record.silent_when_nothing_to_report,
         conversation_id: record.conversation_id.map(|value| value.to_string()),
         status: record.status,
         locked_until: record.locked_until.map(|value| value.to_rfc3339()),
@@ -481,7 +490,7 @@ pub(crate) fn spawn_automation_scheduler(state: AppState) {
     });
 }
 
-async fn automation_scheduler_tick(state: &AppState) -> anyhow::Result<()> {
+pub(crate) async fn automation_scheduler_tick(state: &AppState) -> anyhow::Result<()> {
     let claimed = claim_due_automations(state).await?;
     if claimed.is_empty() {
         return Ok(());
@@ -547,6 +556,7 @@ async fn claim_due_automations(state: &AppState) -> anyhow::Result<Vec<Automatio
                        timezone,
                        runtime_mode,
                        runtime_provider,
+                       silent_when_nothing_to_report,
                        conversation_id,
                        status,
                        locked_until,
@@ -788,6 +798,7 @@ async fn execute_automation_once(
             runtime_updated_at: runtime_id.map(|_| now),
             runtime_display_name: None,
             prefer_runtime: runtime_id.is_some(),
+            allow_silent_automation_decline: record.silent_when_nothing_to_report,
         },
     )
     .await;
@@ -1042,9 +1053,10 @@ async fn list_project_automations(
 	                    by_hour,
 	                    by_minute,
 	                    timezone,
-                    runtime_mode,
-                    runtime_provider,
-                    conversation_id,
+	                    runtime_mode,
+	                    runtime_provider,
+	                    silent_when_nothing_to_report,
+	                    conversation_id,
                     status,
                     locked_until,
                     last_run_at,
@@ -1123,6 +1135,7 @@ async fn get_automation(
                     timezone,
                     runtime_mode,
                     runtime_provider,
+                    silent_when_nothing_to_report,
                     conversation_id,
                     status,
                     locked_until,
@@ -1334,6 +1347,7 @@ async fn create_project_automation(
 	                 timezone,
 	                 runtime_mode,
 	                 runtime_provider,
+	                 silent_when_nothing_to_report,
 	                 conversation_id,
 	                 status,
 	                 run_at,
@@ -1356,7 +1370,8 @@ async fn create_project_automation(
 	                 $15,
 	                 $16,
 	                 $17,
-	                 $18
+	                 $18,
+	                 $19
 	             )
 	             returning id,
 	                       project_id,
@@ -1373,6 +1388,7 @@ async fn create_project_automation(
 	                       timezone,
                        runtime_mode,
                        runtime_provider,
+                       silent_when_nothing_to_report,
                        conversation_id,
                        status,
                        locked_until,
@@ -1396,6 +1412,7 @@ async fn create_project_automation(
                 &timezone,
                 &runtime_mode,
                 &runtime_provider,
+                &body.silent_when_nothing_to_report,
                 &conversation_id,
                 &status,
                 &run_at,
@@ -1468,9 +1485,10 @@ async fn update_automation(
 	                    by_hour,
 	                    by_minute,
 	                    timezone,
-                    runtime_mode,
-                    runtime_provider,
-                    conversation_id,
+	                    runtime_mode,
+	                    runtime_provider,
+	                    silent_when_nothing_to_report,
+	                    conversation_id,
                     status,
                     locked_until,
                     last_run_at,
@@ -1605,6 +1623,10 @@ async fn update_automation(
         .filter(|value| !value.is_empty())
         .or(existing_record.runtime_provider.clone());
 
+    let silent_when_nothing_to_report = body
+        .silent_when_nothing_to_report
+        .unwrap_or(existing_record.silent_when_nothing_to_report);
+
     let status = if body.status.is_some() {
         normalize_status(body.status).trim().to_string()
     } else {
@@ -1672,6 +1694,7 @@ async fn update_automation(
 	                 status = $13,
 	                 run_at = $14,
 	                 next_run_at = $15,
+	                 silent_when_nothing_to_report = $16,
 	                 updated_at = now()
 	             where id = $1
 	             returning id,
@@ -1689,6 +1712,7 @@ async fn update_automation(
 	                       timezone,
                        runtime_mode,
                        runtime_provider,
+                       silent_when_nothing_to_report,
                        conversation_id,
                        status,
                        locked_until,
@@ -1713,6 +1737,7 @@ async fn update_automation(
                 &status,
                 &run_at,
                 &next_run_at,
+                &silent_when_nothing_to_report,
             ],
         )
         .await
@@ -1851,9 +1876,10 @@ async fn run_automation_now(
 	                    by_hour,
 	                    by_minute,
 	                    timezone,
-                    runtime_mode,
-                    runtime_provider,
-                    conversation_id,
+	                    runtime_mode,
+	                    runtime_provider,
+	                    silent_when_nothing_to_report,
+	                    conversation_id,
                     status,
                     locked_until,
                     last_run_at,
@@ -1959,6 +1985,30 @@ mod tests {
             ..UpdateAutomationBody::default()
         }
         .is_status_only());
+        assert!(!UpdateAutomationBody {
+            status: Some("active".to_string()),
+            silent_when_nothing_to_report: Some(true),
+            ..UpdateAutomationBody::default()
+        }
+        .is_status_only());
+    }
+
+    #[test]
+    fn automation_silence_defaults_off_and_accepts_explicit_opt_in() {
+        let defaulted: super::CreateAutomationBody = serde_json::from_value(json!({
+            "name": "Daily check",
+            "scheduleKind": "hourly"
+        }))
+        .expect("deserialize default automation silence");
+        assert!(!defaulted.silent_when_nothing_to_report);
+
+        let opted_in: super::CreateAutomationBody = serde_json::from_value(json!({
+            "name": "Daily check",
+            "scheduleKind": "hourly",
+            "silentWhenNothingToReport": true
+        }))
+        .expect("deserialize automation silence opt-in");
+        assert!(opted_in.silent_when_nothing_to_report);
     }
 
     #[test]
