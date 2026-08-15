@@ -87,7 +87,6 @@ function collectRepoPinnedSeedFiles(): RepoWorkspaceSeedFile[] {
 
   pushTextFile("AGENTS.md");
   pushTextFile("AGENTS.py");
-  pushTextFile("learnings/_pinned/learning-policy.md");
 
   const skillsRoot = path.join(instafyAssetsRoot, ".agents/skills");
   const walk = (dir: string) => {
