@@ -414,8 +414,17 @@ export async function provisionElectronBrowserStudio(
       },
     );
     if (!createUserResponse.ok()) {
+      // Identify WHICH credential and host actually failed without exposing
+      // key material: the gateway's error body plus a shape fingerprint
+      // (prefix + length) distinguishes a stale legacy JWT ("eyJ…", ~200
+      // chars) from a current secret key ("sb_secret_…", ~41 chars) — the
+      // difference three release canaries died without reporting.
+      const body = (await createUserResponse.text().catch(() => "")).slice(0, 300);
+      const key = config.supabaseServiceRoleKey;
       throw new ElectronBrowserProvisioningError(
-        `Supabase user creation returned HTTP ${createUserResponse.status()}`,
+        `Supabase user creation returned HTTP ${createUserResponse.status()} ` +
+          `(host ${new URL(config.supabaseUrl).hostname}, ` +
+          `service key ${key.slice(0, 10)}… ${key.length} chars): ${body}`,
       );
     }
     const userPayload = (await createUserResponse.json()) as { id?: unknown };
