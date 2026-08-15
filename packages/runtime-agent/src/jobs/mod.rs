@@ -21740,6 +21740,30 @@ mod tests {
     }
 
     #[test]
+    fn extract_codex_messages_marks_plain_text_decline_as_agent_status() {
+        let events = vec![json!({
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "text": "NO_RESPONSE"
+            }
+        })];
+
+        let messages = extract_codex_messages(&events);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "NO_RESPONSE");
+        assert_eq!(messages[0].message_type.as_deref(), Some("status"));
+        assert_eq!(
+            messages[0]
+                .metadata
+                .as_ref()
+                .and_then(|value| value.get("kind"))
+                .and_then(JsonValue::as_str),
+            Some("agent_message")
+        );
+    }
+
+    #[test]
     fn extract_codex_messages_deduplicates_by_content() {
         let events = vec![
             json!({

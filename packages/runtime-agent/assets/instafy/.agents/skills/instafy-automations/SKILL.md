@@ -29,12 +29,17 @@ Use this skill when the user asks to:
   - `instafy automations resume`
   - `instafy automations run`
   - `instafy automations delete`
-- Always bind automation commands to the active project id from the runtime context:
-  - use `--project "<Project ID>"` on every `instafy automations ...` command
+- Bind project-scoped automation commands to the active project id from the runtime context:
+  - use `--space "<Project ID>"` with `instafy automations list` and `instafy automations create`
+  - pause, resume, run, and delete are scoped by their automation id and do not accept `--space`
   - the runtime prompt includes `Project ID` in the `Runtime context` section
-  - do not rely on implicit CLI project resolution for automation commands
+  - do not rely on implicit CLI project resolution for list or create
 - Interpret schedule requests in the user's local timezone from the provided client context unless the user explicitly names another timezone.
 - The automation `--prompt` should describe only the task itself. Do not restate schedule details inside the prompt.
+- When the user asks to be told only when something changes, only when there are findings, or
+  otherwise requests a quiet no-op run, pass `--silent-when-nothing-to-report`. Write the prompt
+  so the meaningful condition is explicit; the controller will instruct successful no-finding
+  runs to return the private `NO_RESPONSE` signal.
 - Prefer `--json` so you can parse and report the created automation cleanly.
 - Before creating a new automation, check existing automations when there is a real duplicate risk (same obvious task/name/schedule). Do not create duplicates silently.
 - If the schedule is underspecified, make one reasonable assumption and state it briefly instead of blocking. Ask a short clarification only when the missing detail would materially change the schedule.
@@ -79,7 +84,7 @@ Examples:
 
 ```bash
 instafy automations create --json \
-  --project "<Project ID>" \
+  --space "<Project ID>" \
   --name "Morning random number" \
   --prompt "Generate one random integer between 1 and 100 and report it." \
   --schedule-kind weekly \
@@ -88,9 +93,23 @@ instafy automations create --json \
   --timezone "Europe/Vienna"
 ```
 
+For a findings-only check:
+
 ```bash
 instafy automations create --json \
-  --project "<Project ID>" \
+  --space "<Project ID>" \
+  --name "Dependency change check" \
+  --prompt "Check whether dependency versions changed and report the changes." \
+  --schedule-kind weekly \
+  --days mo,tu,we,th,fr \
+  --time 08:00 \
+  --timezone "Europe/Vienna" \
+  --silent-when-nothing-to-report
+```
+
+```bash
+instafy automations create --json \
+  --space "<Project ID>" \
   --name "Laundry reminder" \
   --prompt "Remind me to take the laundry out." \
   --schedule-kind once \

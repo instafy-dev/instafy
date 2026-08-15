@@ -26,6 +26,7 @@ export interface ControllerAutomation {
   runtimeMode: ControllerAutomationRuntimeMode;
   runtimeProvider: string | null;
   conversationId: string | null;
+  silentWhenNothingToReport: boolean;
   status: ControllerAutomationStatus;
   lockedUntil: string | null;
   lastRunAt: string | null;
@@ -49,6 +50,7 @@ export interface CreateControllerAutomationParams {
   timezone?: string | null;
   runtimeMode?: ControllerAutomationRuntimeMode | null;
   runtimeProvider?: string | null;
+  silentWhenNothingToReport?: boolean | null;
   status?: ControllerAutomationStatus | null;
   accessToken?: string | null;
 }
@@ -67,6 +69,7 @@ export interface UpdateControllerAutomationParams {
   timezone?: string | null;
   runtimeMode?: ControllerAutomationRuntimeMode | null;
   runtimeProvider?: string | null;
+  silentWhenNothingToReport?: boolean | null;
   status?: ControllerAutomationStatus | null;
   accessToken?: string | null;
 }
@@ -138,6 +141,7 @@ function normalizeAutomationPayload(payload: unknown): ControllerAutomation | nu
     runtimeMode,
     runtimeProvider,
     conversationId,
+    silentWhenNothingToReport: record.silentWhenNothingToReport === true,
     status,
     lockedUntil: toMaybeString(record.lockedUntil),
     lastRunAt: toMaybeString(record.lastRunAt),
@@ -221,6 +225,7 @@ export async function createProjectAutomationInController(
     timezone: params.timezone ?? undefined,
     runtimeMode: params.runtimeMode ?? undefined,
     runtimeProvider: params.runtimeProvider ?? undefined,
+    silentWhenNothingToReport: params.silentWhenNothingToReport ?? undefined,
     status: params.status ?? undefined,
     metadata: params.metadata ?? undefined,
   };
@@ -284,6 +289,10 @@ export async function updateAutomationInController(
   writeIfDefined("timezone", params.timezone ?? undefined);
   writeIfDefined("runtimeMode", params.runtimeMode ?? undefined);
   writeIfDefined("runtimeProvider", params.runtimeProvider ?? undefined);
+  writeIfDefined(
+    "silentWhenNothingToReport",
+    params.silentWhenNothingToReport ?? undefined,
+  );
   writeIfDefined("status", params.status ?? undefined);
 
   const response = await fetch(`${requestContext.baseUrl}/automations/${automationId}`, {
