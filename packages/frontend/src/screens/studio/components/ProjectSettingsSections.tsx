@@ -3,6 +3,7 @@ import { Input } from "../../../components/Input";
 import { Select } from "../../../components/Select";
 import { Text } from "../../../components/Text";
 import { type ControllerOrgInvitation, type ControllerProjectMember } from "../../../sdk/instafy";
+import type { OrgInvitationRoleConflict } from "../../../org/useInviteActions";
 import type { PreparedEmailInvite } from "../../../sharing/preparedEmailInvite";
 import { PreparedEmailInviteNotice } from "./PreparedEmailInviteNotice";
 import { ProjectProviderBindingsCard } from "./ProjectProviderBindingsCard";
@@ -59,6 +60,10 @@ type ProjectSettingsSectionsProps = {
     nextRole: string,
     label: string,
   ) => void;
+  projectInviteRoleConflict: (OrgInvitationRoleConflict & { email: string }) | null;
+  projectInviteConflictPending: boolean;
+  onApplyProjectInviteRoleConflict: () => void;
+  onDismissProjectInviteRoleConflict: () => void;
   inviteLinkRole: string;
   activeInviteLinkRole: string | null;
   inviteLinkPending: boolean;
@@ -114,6 +119,10 @@ export function ProjectSettingsSections({
   onCancelProjectInvite,
   projectInviteRoleUpdatePendingId,
   onPendingProjectInviteRoleChange,
+  projectInviteRoleConflict,
+  projectInviteConflictPending,
+  onApplyProjectInviteRoleConflict,
+  onDismissProjectInviteRoleConflict,
   inviteLinkRole,
   activeInviteLinkRole,
   inviteLinkPending,
@@ -298,6 +307,42 @@ export function ProjectSettingsSections({
             >
               {projectInviteError}
             </Text>
+          ) : null}
+          {projectInviteRoleConflict ? (
+            <div
+              className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-300/60 bg-amber-50/80 px-3 py-2 dark:border-amber-700/50 dark:bg-amber-950/30"
+              data-testid="project-invite-role-conflict"
+            >
+              <Text variant="caption" tone="secondary">
+                {projectInviteRoleConflict.email} already has a pending{" "}
+                {projectInviteRoleConflict.existingRole} invite. Its link keeps
+                working either way.
+              </Text>
+              <div className="flex items-center gap-2">
+                <Button
+                  onPress={onApplyProjectInviteRoleConflict}
+                  isDisabled={projectInviteConflictPending}
+                  variant="primary"
+                  size="xs"
+                  radius="full"
+                  data-testid="project-invite-role-conflict-apply"
+                >
+                  {projectInviteConflictPending
+                    ? "Updating…"
+                    : `Change to ${projectInviteRoleConflict.requestedRole}`}
+                </Button>
+                <Button
+                  onPress={onDismissProjectInviteRoleConflict}
+                  isDisabled={projectInviteConflictPending}
+                  variant="ghost"
+                  size="xs"
+                  radius="full"
+                  data-testid="project-invite-role-conflict-dismiss"
+                >
+                  Keep {projectInviteRoleConflict.existingRole}
+                </Button>
+              </div>
+            </div>
           ) : null}
           <div className="flex justify-end">
             <Button
