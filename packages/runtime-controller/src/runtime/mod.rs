@@ -39,6 +39,7 @@ pub(crate) use status::{
     load_runtime_status_response, runtime_supports_agent_and_origin,
     runtime_supports_conversation_state, RuntimeStatusResponse,
 };
+pub(crate) use status::{runtime_logs, RuntimeLogEntry, RuntimeLogsQuery};
 pub(crate) use stop::runtime_mark_offline;
 pub(crate) use stop::{stop_runtime_for_project, RuntimeStopResponse};
 pub(crate) use sweeps::{
