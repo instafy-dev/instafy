@@ -502,6 +502,13 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
   test("uses the packaged runtime, exact Personal target, local Codex auth, and no managed credits", async ({
     electronBrowserLiveCleanup,
     page: provisioningPage,
+    // Admin/service-key calls must use this standalone APIRequestContext,
+    // never provisioningPage.context().request: a browser context's fetch
+    // carries browser identification headers, and Supabase rejects secret
+    // API keys presented from anything that looks like a browser
+    // ("Forbidden use of secret API key in browser" — three releases died
+    // on that 401 before the error said so). The page is only a driver.
+    request: adminRequest,
     personalBrowserFixture,
   }, testInfo) => {
     // Recovery intentionally runs before launch-only prerequisites so a broken
@@ -510,7 +517,7 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
     electronBrowserLiveCleanup.config = cleanupConfig;
     const recoveryDirectory = resolveElectronBrowserRecoveryDirectory();
     await recoverElectronBrowserStudiosBeforeProvisioning(
-      provisioningPage.context().request,
+      adminRequest,
       cleanupConfig,
       recoveryDirectory,
     );
@@ -534,7 +541,7 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
     );
     electronBrowserLiveCleanup.recoveryJournalPath = recoveryJournalPath;
     const provisioned = await provisionElectronBrowserStudio(
-      provisioningPage.context().request,
+      adminRequest,
       config,
       electronBrowserLiveCleanup.provisioning,
       (checkpoint) => {
@@ -625,7 +632,7 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
       .poll(
         async () => {
           const proof = await fetchConnectedCodexCredentialProof(
-            provisioningPage.context().request,
+            adminRequest,
             config.controllerUrl,
             provisioned.session.accessToken,
           );
@@ -637,7 +644,7 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
       )
       .toEqual({ kind: "codex_auth_json", isDefault: true });
     const credentialProof = await fetchConnectedCodexCredentialProof(
-      provisioningPage.context().request,
+      adminRequest,
       config.controllerUrl,
       provisioned.session.accessToken,
     );
@@ -649,7 +656,7 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
     electronBrowserLiveCleanup.credentialId = credentialId;
 
     const ledgerBefore = await fetchCreditLedger(
-      provisioningPage.context().request,
+      adminRequest,
       config,
       provisioned.session,
       provisioned.projectId,
@@ -781,7 +788,7 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
       .poll(
         async () => {
           const proof = await fetchPersonalBrowserJobProof(
-            provisioningPage.context().request,
+            adminRequest,
             config.supabaseUrl,
             config.supabaseServiceRoleKey,
             jobId,
@@ -806,7 +813,7 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
         targetRuntimeId: personalRuntimeId,
       });
     const jobProof = await fetchPersonalBrowserJobProof(
-      provisioningPage.context().request,
+      adminRequest,
       config.supabaseUrl,
       config.supabaseServiceRoleKey,
       jobId,
@@ -819,7 +826,7 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
       .poll(
         async () => {
           const metadata = await fetchRunMetadata(
-            provisioningPage.context().request,
+            adminRequest,
             config,
             provisioned.session,
             runId,
@@ -835,7 +842,7 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
       .poll(
         async () => {
           const proof = await fetchConnectedCodexCredentialProof(
-            provisioningPage.context().request,
+            adminRequest,
             config.controllerUrl,
             provisioned.session.accessToken,
           );
@@ -848,7 +855,7 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
       )
       .toBe(true);
     await expectNoManagedAiLedgerBurn(
-      provisioningPage.context().request,
+      adminRequest,
       config,
       provisioned.session,
       provisioned.projectId,
@@ -860,7 +867,7 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
       fixtureUrl,
       jobId,
       launched,
-      request: provisioningPage.context().request,
+      request: adminRequest,
       safeMarker,
       serviceRoleKey: config.supabaseServiceRoleKey,
       supabaseUrl: config.supabaseUrl,
@@ -880,7 +887,7 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
         async () =>
           (
             await fetchPersonalBrowserJobProof(
-              provisioningPage.context().request,
+              adminRequest,
               config.supabaseUrl,
               config.supabaseServiceRoleKey,
               jobId,
@@ -894,7 +901,7 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
       .poll(
         () =>
           fetchToolEventProof(
-            provisioningPage.context().request,
+            adminRequest,
             config.supabaseUrl,
             config.supabaseServiceRoleKey,
             conversationId,
@@ -931,7 +938,7 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
       fixtureUrl,
     );
     await expectNoManagedAiLedgerBurn(
-      provisioningPage.context().request,
+      adminRequest,
       config,
       provisioned.session,
       provisioned.projectId,
@@ -947,7 +954,7 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
     await expect
       .poll(
         async () => {
-          const response = await provisioningPage.context().request.get(
+          const response = await adminRequest.get(
             `${config.controllerUrl}/projects/${encodeURIComponent(provisioned.projectId)}/runtime/status`,
             {
               headers: {
