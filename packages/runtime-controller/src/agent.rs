@@ -1886,7 +1886,7 @@ pub(crate) async fn agent_message(
         ));
     };
 
-    // SKILL MODE: ambient evaluation runs arbitrate their own participation.
+    // CONTROLLER EVALUATION: marked runs arbitrate their own participation.
     // A decline is the bare NO_RESPONSE sentinel as the run's first
     // conversational output; the controller swallows it (never persisted or
     // broadcast), records the decline on the job/run, and the job completes
@@ -1894,7 +1894,7 @@ pub(crate) async fn agent_message(
     // the run already streamed a visible assistant message, is persisted
     // verbatim — a direct answer is never silently eaten.
     if crate::group_participation::job_payload_marks_agent_evaluation(&job_payload)
-        && agent_message_type_is_conversational(message_type.as_deref())
+        && agent_message_can_drive_evaluation(message_type.as_deref(), metadata.as_ref())
     {
         if crate::group_participation::is_group_participation_decline_sentinel(content_trimmed) {
             if !run_has_visible_assistant_message(&transaction, &project_id, run_id).await? {
@@ -1906,8 +1906,9 @@ pub(crate) async fn agent_message(
                 return Ok(Json(AgentMessageResponseBody { ok: true }));
             }
         } else {
-            // The agent chose to speak: the deferred managed-AI billing for
-            // this evaluation turn lands with its first visible message.
+            // The agent chose to speak. Ambient evaluations land deferred
+            // managed-AI billing here; normally billed automation evaluations
+            // make this helper a no-op.
             let leased_by_runtime_id: Option<Uuid> = row.get("leased_by_runtime_id");
             apply_deferred_managed_ai_billing_on_first_visible_message(
                 &state,
@@ -1999,6 +2000,77 @@ fn agent_message_type_is_conversational(message_type: Option<&str>) -> bool {
     }
 }
 
+fn agent_message_can_drive_evaluation(
+    message_type: Option<&str>,
+    metadata: Option<&JsonValue>,
+) -> bool {
+    if agent_message_type_is_conversational(message_type) {
+        return true;
+    }
+
+    // The runtime agent represents a plain-text final assistant item as a
+    // status update with `kind=agent_message`. Treat that adapter shape as the
+    // conversational result so an authenticated NO_RESPONSE is swallowed
+    // before it can be persisted or notified.
+    message_type.is_some_and(|kind| kind.trim().eq_ignore_ascii_case("status"))
+        && metadata
+            .and_then(JsonValue::as_object)
+            .and_then(|map| map.get("kind"))
+            .and_then(JsonValue::as_str)
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("agent_message"))
+}
+
+fn completion_is_successful_explicit_decline(
+    outcome: &str,
+    summary: Option<&str>,
+    error_message: Option<&str>,
+    job_marks_agent_evaluation: bool,
+    job_marks_agent_declined: bool,
+) -> bool {
+    if outcome != "succeeded" || error_message.is_some() {
+        return false;
+    }
+
+    let summary_is_decline =
+        summary.is_some_and(crate::group_participation::is_group_participation_decline_sentinel);
+    if job_marks_agent_evaluation {
+        return summary_is_decline;
+    }
+
+    job_marks_agent_declined
+        && summary.is_none_or(|value| value.trim().is_empty() || summary_is_decline)
+}
+
+fn select_completion_message_content<'a>(
+    outcome: &str,
+    summary: Option<&'a str>,
+    error_message: Option<&'a str>,
+    authenticated_evaluation: bool,
+) -> Option<&'a str> {
+    if !authenticated_evaluation {
+        // Preserve the established completion contract for ordinary jobs,
+        // including summary precedence and verbatim blank summaries.
+        return summary.or(error_message);
+    }
+
+    let meaningful_summary = summary.filter(|value| !value.trim().is_empty());
+    let meaningful_error = error_message.filter(|value| !value.trim().is_empty());
+    if error_message.is_some() {
+        return meaningful_error.or_else(|| {
+            meaningful_summary.filter(|value| {
+                !crate::group_participation::is_group_participation_decline_sentinel(value)
+            })
+        });
+    }
+    if outcome == "succeeded" {
+        meaningful_summary.or(meaningful_error)
+    } else {
+        // An authenticated evaluation must never let a decline sentinel hide
+        // the actual failure text.
+        meaningful_error.or(meaningful_summary)
+    }
+}
+
 async fn run_has_visible_assistant_message(
     transaction: &tokio_postgres::Transaction<'_>,
     project_id: &Uuid,
@@ -2019,10 +2091,16 @@ async fn run_has_visible_assistant_message(
                    and role = 'assistant'
                    and created_by is null
                    and nullif(btrim(content), '') is not null
-                   and lower(coalesce(metadata #>> '{messageType}', metadata #>> '{message_type}', ''))
-                       not in ('command_execution', 'mcp_tool_call', 'web_search', 'file_change',
-                               'status', 'runtime_alert', 'run_cancellation', 'runtime_switch',
-                               'agent_job_thread', 'token_usage', 'reasoning')
+                   and (
+                       lower(coalesce(metadata #>> '{messageType}', metadata #>> '{message_type}', ''))
+                           not in ('command_execution', 'mcp_tool_call', 'web_search', 'file_change',
+                                   'status', 'runtime_alert', 'run_cancellation', 'runtime_switch',
+                                   'agent_job_thread', 'token_usage', 'reasoning')
+                       or (
+                           lower(coalesce(metadata #>> '{messageType}', metadata #>> '{message_type}', '')) = 'status'
+                           and lower(coalesce(metadata #>> '{details,kind}', '')) = 'agent_message'
+                       )
+                   )
                    and lower(coalesce(metadata #>> '{kind}', ''))
                        not in ('runtime_alert', 'run_cancellation', 'runtime_switch',
                                'agent_job_thread')
@@ -2038,9 +2116,9 @@ async fn run_has_visible_assistant_message(
         })
 }
 
-/// Record a swallowed skill-mode decline on the job payload (and run
-/// metadata) so the transcript shows that arbitration happened even though no
-/// assistant message was persisted.
+/// Record a swallowed authenticated evaluation decline on the job payload
+/// (and run metadata) so the transcript shows that arbitration happened even
+/// though no assistant message was persisted.
 async fn record_agent_evaluation_decline(
     transaction: &tokio_postgres::Transaction<'_>,
     project_id: &Uuid,
@@ -2111,6 +2189,13 @@ async fn apply_deferred_managed_ai_billing_on_first_visible_message(
     prompt_id: Option<Uuid>,
     leased_runtime_id: Option<Uuid>,
 ) -> Result<(), (StatusCode, Json<ApiError>)> {
+    // Only ambient skill-mode evaluations are eligible for deferred managed
+    // billing. Scheduled automations reuse the authenticated evaluation
+    // protocol for NO_RESPONSE, but remain normally billed/BYOC runs even if
+    // untrusted automation metadata contains a forged deferral flag.
+    if !crate::group_participation::job_payload_marks_skill_mode_ambient_evaluation(job_payload) {
+        return Ok(());
+    }
     let job_metadata = job_payload.get("metadata").and_then(JsonValue::as_object);
     let billing_deferred = job_metadata
         .and_then(|map| map.get("managedAiBillingDeferred"))
@@ -2514,6 +2599,16 @@ pub(crate) async fn agent_complete(
     let mut token_usage_message: Option<ConversationMessageRow> = None;
     let mut assistant_message: Option<ConversationMessageRow> = None;
     if let Some(conversation_uuid) = run_conversation_id {
+        let explicit_successful_decline = completion_is_successful_explicit_decline(
+            &outcome_lower,
+            summary.as_deref(),
+            error_message.as_deref(),
+            crate::group_participation::job_payload_marks_agent_evaluation(&job_payload),
+            crate::group_participation::job_payload_marks_agent_declined(&job_payload),
+        );
+        let should_swallow_evaluation_decline = explicit_successful_decline
+            && !run_has_visible_assistant_message(&transaction, &project_id, run_id).await?;
+
         if let Some(usage) = extract_turn_usage_from_artifacts(&artifacts_value) {
             let managed_ai_metadata = job_payload.get("metadata").and_then(JsonValue::as_object);
             let managed_ai_used = managed_ai_metadata
@@ -2665,64 +2760,70 @@ pub(crate) async fn agent_complete(
                 }
             }
 
-            let usage_content = format!(
-                "Token usage — input: {}, cached: {}, output: {}",
-                usage.input_tokens, usage.cached_input_tokens, usage.output_tokens
-            );
-            let mut details = json!({
-                "kind": "codex_turn_usage",
-                "usage": {
-                    "input_tokens": usage.input_tokens,
-                    "cached_input_tokens": usage.cached_input_tokens,
-                    "output_tokens": usage.output_tokens,
+            if !should_swallow_evaluation_decline {
+                let usage_content = format!(
+                    "Token usage — input: {}, cached: {}, output: {}",
+                    usage.input_tokens, usage.cached_input_tokens, usage.output_tokens
+                );
+                let mut details = json!({
+                    "kind": "codex_turn_usage",
+                    "usage": {
+                        "input_tokens": usage.input_tokens,
+                        "cached_input_tokens": usage.cached_input_tokens,
+                        "output_tokens": usage.output_tokens,
+                    }
+                });
+                if let Some(prompt_context) =
+                    extract_prompt_context_from_artifacts(&artifacts_value)
+                {
+                    if let Some(details_map) = details.as_object_mut() {
+                        details_map.insert("context".to_string(), prompt_context);
+                    }
                 }
-            });
-            if let Some(prompt_context) = extract_prompt_context_from_artifacts(&artifacts_value) {
-                if let Some(details_map) = details.as_object_mut() {
-                    details_map.insert("context".to_string(), prompt_context);
-                }
+                let usage_metadata = attach_lease_metrics_to_metadata(
+                    merge_runtime_preference_from_job_payload(
+                        build_agent_update_metadata(&job_uuid, Some("token_usage"), Some(details)),
+                        &job_payload,
+                    ),
+                    Some(&lease_metrics),
+                );
+                let usage_metadata = sanitize_json_for_postgres(usage_metadata);
+                let message_row = record_agent_conversation_message(
+                    &transaction,
+                    &project_id,
+                    &conversation_uuid,
+                    run_session_id,
+                    run_prompt_id,
+                    run_id,
+                    usage_content,
+                    usage_metadata,
+                )
+                .await?;
+                token_usage_message = Some(message_row);
             }
-            let usage_metadata = attach_lease_metrics_to_metadata(
-                merge_runtime_preference_from_job_payload(
-                    build_agent_update_metadata(&job_uuid, Some("token_usage"), Some(details)),
-                    &job_payload,
-                ),
-                Some(&lease_metrics),
-            );
-            let usage_metadata = sanitize_json_for_postgres(usage_metadata);
-            let message_row = record_agent_conversation_message(
-                &transaction,
-                &project_id,
-                &conversation_uuid,
-                run_session_id,
-                run_prompt_id,
-                run_id,
-                usage_content,
-                usage_metadata,
-            )
-            .await?;
-            token_usage_message = Some(message_row);
         }
 
         // The codex-embedded provider delivers its final text via this
         // completion summary rather than a streamed /agent/message, so the
-        // skill-mode decline swallow must cover this path too: an evaluation
-        // run completing with the bare sentinel (and no visible answer
-        // streamed earlier) records the decline and posts nothing.
-        if crate::group_participation::job_payload_marks_agent_evaluation(&job_payload)
-            && summary
-                .as_deref()
-                .is_some_and(crate::group_participation::is_group_participation_decline_sentinel)
-            && !run_has_visible_assistant_message(&transaction, &project_id, run_id).await?
-        {
+        // authenticated evaluation decline swallow must cover this path too:
+        // a marked run completing with the bare sentinel (and no visible
+        // answer streamed earlier) records the decline and posts nothing.
+        if should_swallow_evaluation_decline {
             record_agent_evaluation_decline(&transaction, &project_id, &job_uuid, run_id).await?;
         } else {
-            let message_content = summary
-                .clone()
-                .or_else(|| error_message.clone())
-                .unwrap_or_else(|| {
-                    format!("Agent job {} finished with status {}", job_uuid, run_status)
-                });
+            let authenticated_evaluation =
+                crate::group_participation::job_payload_marks_agent_evaluation(&job_payload)
+                    || crate::group_participation::job_payload_marks_agent_declined(&job_payload);
+            let message_content = select_completion_message_content(
+                &outcome_lower,
+                summary.as_deref(),
+                error_message.as_deref(),
+                authenticated_evaluation,
+            )
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| {
+                format!("Agent job {} finished with status {}", job_uuid, run_status)
+            });
             // Apply the runtime preference to the final assistant message as well.
             let message_metadata = attach_lease_metrics_to_metadata(
                 merge_runtime_preference_from_job_payload(
@@ -3987,6 +4088,23 @@ fn build_ambient_evaluation_preamble(metadata: &JsonValue) -> String {
     preamble
 }
 
+fn build_agent_evaluation_preamble(metadata: &JsonValue) -> String {
+    let reason = metadata
+        .get("groupParticipation")
+        .and_then(|participation| participation.get("reason"))
+        .and_then(JsonValue::as_str);
+    if reason == Some(crate::group_participation::AUTOMATION_NOTHING_TO_REPORT_REASON) {
+        return concat!(
+            "[Scheduled automation run — carry out the requested task normally. ",
+            "If and only if the task succeeds and there is nothing worth reporting, ",
+            "reply with exactly NO_RESPONSE and nothing else. Never use NO_RESPONSE ",
+            "for an error or an incomplete check.]"
+        )
+        .to_string();
+    }
+    build_ambient_evaluation_preamble(metadata)
+}
+
 fn build_agent_job_payload(
     project: &ProjectRecord,
     context: &RequestContext,
@@ -4041,17 +4159,14 @@ fn build_agent_job_payload(
         "executionMode".to_string(),
         JsonValue::String(request.workspace_mode.clone()),
     );
-    // Skill-mode ambient evaluations get the participation instruction inside
-    // the delivered turn itself: the persistent-context skill alone loses to
-    // helpfulness bias (observed live: the model replied "Taylor should answer
-    // this directly" instead of declining). The persisted conversation message
-    // keeps the human's original words — this wrapper exists only in the
-    // runtime-facing payload.
+    // Controller-marked evaluations get their participation instruction inside
+    // the delivered turn itself. The persisted conversation message keeps the
+    // original prompt — this wrapper exists only in the runtime-facing payload.
     let delivered_prompt_text =
         if crate::group_participation::metadata_marks_agent_evaluation(&request.metadata) {
             format!(
                 "{}\n\n{}",
-                build_ambient_evaluation_preamble(&request.metadata),
+                build_agent_evaluation_preamble(&request.metadata),
                 request.prompt_text
             )
         } else {
@@ -4509,6 +4624,136 @@ fn extract_multi_agent_plan_details(value: &JsonValue) -> Option<&JsonValue> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn completion_silences_only_successful_explicit_declines() {
+        assert!(completion_is_successful_explicit_decline(
+            "succeeded",
+            Some("NO_RESPONSE"),
+            None,
+            true,
+            false,
+        ));
+        assert!(completion_is_successful_explicit_decline(
+            "succeeded",
+            None,
+            None,
+            false,
+            true,
+        ));
+        assert!(completion_is_successful_explicit_decline(
+            "succeeded",
+            Some("  "),
+            None,
+            false,
+            true,
+        ));
+
+        for (outcome, summary, error, evaluating, declined) in [
+            ("succeeded", None, None, true, false),
+            ("succeeded", Some("A real finding"), None, true, false),
+            ("succeeded", Some("A real finding"), None, false, true),
+            (
+                "failed",
+                Some("NO_RESPONSE"),
+                Some("scan failed"),
+                true,
+                false,
+            ),
+            ("canceled", Some("NO_RESPONSE"), None, true, false),
+            (
+                "succeeded",
+                Some("NO_RESPONSE"),
+                Some("scan failed"),
+                true,
+                false,
+            ),
+            ("succeeded", Some("NO_RESPONSE"), None, false, false),
+        ] {
+            assert!(
+                !completion_is_successful_explicit_decline(
+                    outcome, summary, error, evaluating, declined,
+                ),
+                "unexpected silence for outcome={outcome}, summary={summary:?}, error={error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn completion_content_changes_are_scoped_to_authenticated_evaluations() {
+        assert_eq!(
+            select_completion_message_content(
+                "failed",
+                Some("legacy summary"),
+                Some("failure detail"),
+                false,
+            ),
+            Some("legacy summary")
+        );
+        assert_eq!(
+            select_completion_message_content(
+                "failed",
+                Some("NO_RESPONSE"),
+                Some("failure detail"),
+                true,
+            ),
+            Some("failure detail")
+        );
+        assert_eq!(
+            select_completion_message_content("succeeded", Some("   "), None, true),
+            None
+        );
+        assert_eq!(
+            select_completion_message_content("succeeded", Some("   "), None, false),
+            Some("   ")
+        );
+        assert_eq!(
+            select_completion_message_content(
+                "succeeded",
+                Some("NO_RESPONSE"),
+                Some("failure detail"),
+                true,
+            ),
+            Some("failure detail")
+        );
+        assert_eq!(
+            select_completion_message_content("succeeded", Some("NO_RESPONSE"), Some("   "), true,),
+            None
+        );
+    }
+
+    #[test]
+    fn plain_text_final_status_can_drive_an_authenticated_evaluation() {
+        assert!(agent_message_can_drive_evaluation(
+            Some("status"),
+            Some(&json!({
+                "kind": "agent_message",
+                "event": { "type": "item.completed" }
+            })),
+        ));
+        assert!(!agent_message_can_drive_evaluation(
+            Some("status"),
+            Some(&json!({ "kind": "runtime_status" })),
+        ));
+        assert!(agent_message_can_drive_evaluation(Some("assistant"), None,));
+    }
+
+    #[test]
+    fn automation_evaluation_preamble_explains_the_success_only_protocol() {
+        let metadata = json!({
+            "groupParticipation": {
+                "decision": "agent_evaluation",
+                "reason": crate::group_participation::AUTOMATION_NOTHING_TO_REPORT_REASON,
+                "enforcedBy": "runtime-controller"
+            }
+        });
+
+        let preamble = build_agent_evaluation_preamble(&metadata);
+
+        assert!(preamble.contains("Scheduled automation run"));
+        assert!(preamble.contains("nothing worth reporting"));
+        assert!(preamble.contains("Never use NO_RESPONSE for an error"));
+    }
 
     #[test]
     fn agent_message_delivery_locks_the_exact_live_job_row() {

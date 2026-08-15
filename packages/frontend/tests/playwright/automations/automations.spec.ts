@@ -29,14 +29,26 @@ test.describe("Automations", () => {
       .getByTestId("automation-prompt-input")
       .fill("Scan recent commits (last 24h) for likely bugs and propose minimal fixes.");
 
+    const findingsOnlyToggle = page.getByTestId(
+      "automation-silent-when-nothing-to-report-toggle"
+    );
+    const findingsOnlyInput = findingsOnlyToggle.locator('input[type="checkbox"]');
+    await expect(findingsOnlyInput).not.toBeChecked();
+    await findingsOnlyToggle.click();
+    await expect(findingsOnlyInput).toBeChecked();
+
     await page.getByTestId("automation-save-button").click();
 
-    await expect(
-      page
-        .locator('[data-testid^="automation-row-"]')
-        .filter({ hasText: "Daily bug scan" })
-        .first()
-    ).toBeVisible({ timeout: 30_000 });
+    const automationRow = page
+      .locator('[data-testid^="automation-row-"]')
+      .filter({ hasText: "Daily bug scan" })
+      .first();
+    await expect(automationRow).toBeVisible({ timeout: 30_000 });
+    await expect(automationRow).toContainText("Findings only");
+
+    await automationRow.getByRole("button", { name: "Automation actions" }).click();
+    await page.getByRole("menuitem", { name: "Edit" }).click();
+    await expect(findingsOnlyInput).toBeChecked();
   });
 
   test("creates a one-shot automation", async ({ page }) => {
@@ -65,6 +77,29 @@ test.describe("Automations", () => {
         .filter({ hasText: "One time check" })
         .first()
     ).toBeVisible({ timeout: 30_000 });
+  });
+
+  test("keeps the automation editor controls reachable at laptop height", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await page.goto("/studio?panel=automations");
+    await expect(page.getByTestId("automations-panel")).toBeVisible();
+
+    await page.getByTestId("automations-create-button").click();
+
+    const saveButton = page.getByTestId("automation-save-button");
+    const findingsOnlyToggle = page.getByTestId(
+      "automation-silent-when-nothing-to-report-toggle"
+    );
+    const findingsOnlyInput = findingsOnlyToggle.locator('input[type="checkbox"]');
+
+    await expect(saveButton).toBeInViewport({ ratio: 1 });
+    await expect(saveButton).toBeEnabled();
+
+    await findingsOnlyToggle.scrollIntoViewIfNeeded();
+    await expect(findingsOnlyToggle).toBeInViewport({ ratio: 1 });
+    await findingsOnlyToggle.click();
+    await expect(findingsOnlyInput).toBeChecked();
+    await expect(saveButton).toBeInViewport({ ratio: 1 });
   });
 
   test("keeps the automation editor usable on mobile", async ({ page }) => {

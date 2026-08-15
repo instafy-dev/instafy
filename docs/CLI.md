@@ -365,6 +365,30 @@ Request bodies (JSON):
 instafy api patch "/conversations/<conversationId>" --json '{"metadata":{"title":"New name"}}' --access-token "$INSTAFY_ACCESS_TOKEN"
 ```
 
+## Scheduled automations
+
+Create and manage scheduled project prompts with `instafy automations`. When no local space
+manifest is available, pass `--space` to the project-scoped `list` and `create` commands.
+
+For checks that should report only findings, opt in at creation time:
+
+```bash
+instafy automations create --json \
+  --space "<Project ID>" \
+  --name "Dependency change check" \
+  --prompt "Check whether dependency versions changed and report the changes." \
+  --schedule-kind weekly \
+  --days mo,tu,we,th,fr \
+  --time 08:00 \
+  --timezone "Europe/Vienna" \
+  --silent-when-nothing-to-report
+```
+
+The flag is default-off. It suppresses only the completion result message and result notification
+for a successful run that explicitly finds nothing to report; results, errors, unexpected empty
+output, and execution records remain visible. See
+[Automations](Automations.md) for the controller semantics and audit behavior.
+
 ## OTA control plane
 
 Use the CLI as the rollout interface for mobile OTA and desktop promotion work. Human operators, AI agents, and GitHub Actions should all call the same commands rather than reimplementing rollout logic in ad hoc scripts.

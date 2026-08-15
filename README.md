@@ -47,6 +47,7 @@ mobile and end-to-end workflows, continue with the
 - [Developer Environment Guide](DEV_SETUP.md)
 - [Agent Handbook](AGENTS.md)
 - [Product Overview](docs/Product.md)
+- [Automations](docs/Automations.md)
 - [Runtime Architecture](docs/Architecture.md)
 - [Credits & Billing](docs/Credits-Billing.md)
 - [Local Development](docs/Local-Dev.md)
