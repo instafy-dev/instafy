@@ -1,9 +1,10 @@
-import { resolveControllerUrl } from "./config.js";
 import kleur from "kleur";
+import { resolveControllerUrl } from "./config.js";
 import {
   clearInstafyCliConfig,
   getInstafyConfigPath,
   readInstafyCliConfig,
+  writeInstafyControllerUrl,
   writeInstafyCliConfig,
   type InstafyCliConfig,
 } from "./config.js";
@@ -29,7 +30,7 @@ function getValue(config: InstafyCliConfig, key: SupportedKey): string | null {
 
 function updateConfig(key: SupportedKey, value: string): InstafyCliConfig {
   if (key === "controller-url") {
-    return writeInstafyCliConfig({ controllerUrl: value });
+    return writeInstafyControllerUrl(value);
   }
   if (key === "studio-url") {
     return writeInstafyCliConfig({ studioUrl: value });
@@ -39,7 +40,13 @@ function updateConfig(key: SupportedKey, value: string): InstafyCliConfig {
 
 function clearConfig(key: SupportedKey): void {
   if (key === "controller-url") {
-    clearInstafyCliConfig(["controllerUrl"]);
+    clearInstafyCliConfig([
+      "controllerUrl",
+      "accessToken",
+      "refreshToken",
+      "supabaseUrl",
+      "supabaseAnonKey",
+    ]);
     return;
   }
   if (key === "studio-url") {
@@ -62,9 +69,6 @@ export function configList(options?: { json?: boolean }): void {
   const payload = {
     path: getInstafyConfigPath(),
     controllerUrl: config.controllerUrl ?? null,
-    // The effective URL a command will actually reach, after env and defaults
-    // are applied. "controllerUrl: (not set)" alone misled agents into thinking
-    // nothing would work, when the localhost default was in force.
     effectiveControllerUrl: resolveControllerUrl(),
     studioUrl: config.studioUrl ?? null,
     accessTokenSet: Boolean(config.accessToken),

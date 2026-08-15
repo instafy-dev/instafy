@@ -49,17 +49,56 @@ Run Instafy spaces locally and connect them back to Instafy Studio — from any 
 - `instafy secrets get <name-or-id>` — inspect one space secret metadata entry.
 - `instafy secrets put <name> --value ...` — create/update a space secret.
 - `instafy secrets revoke <name-or-id>` — revoke a space secret.
-- `instafy api get` — query controller endpoints (conversations, messages, runs, etc).
+- `instafy support report "Runtime stops after launch"` — submit a support report as the
+  signed-in user.
+- `instafy support list` — list only your own support reports.
+- `instafy support show <reportId>` — inspect one of your own support reports.
+- `instafy diagnostics runtime-events` — emit sanitized runtime events for the linked space as
+  versioned JSON.
+- `instafy diagnostics run-result <runId>` — emit one authorized persisted run result as
+  versioned JSON.
 - `instafy providers list` — list local providers exposed by the shared provider host surface.
 - `instafy providers discover <providerId>` — run fresh discovery for one provider.
 - `instafy providers read <providerId> <uri>` — inspect one provider resource.
 - `instafy providers probe <providerId>` — run a transport probe against one provider.
-- `instafy ota releases register --file tmp/ota/ios-stable.release.json` — register a mobile OTA artifact in the control plane.
-- `instafy ota channels activate --platform ios --channel beta --release-id <id> --activated-by github-actions` — move a mobile OTA channel pointer.
-- `instafy ota channels rollback --platform ios --channel beta --activated-by ops@instafy.dev` — roll back a mobile OTA channel.
-- `instafy desktop-updates promotions request --source-channel stable --target-channel internal --requested-by github-actions` — copy a signed stable desktop release into the internal diagnostics feed.
 
-Run `instafy --help` for the full command list and options.
+Run `instafy --help` for the public command list and options.
+
+## AI-readable diagnostics
+
+`instafy diagnostics` is the machine-readable diagnostics surface for local agents such as Codex
+or Claude Code. Successful commands print the `instafy-diagnostics-v1` JSON contract; failures
+exit non-zero with empty stdout and a human-readable stderr message. They do not require a
+dashboard and do not scrape process logs.
+
+```bash
+instafy diagnostics runtime-events --space <spaceId> --limit 50
+instafy diagnostics run-result <runId>
+```
+
+These commands accept only signed-in user credentials. The controller applies normal space,
+conversation, and private-runtime authorization and sanitizes stored runtime-event data. A
+diagnostic read never creates or enriches a support report automatically; use `instafy support
+report` explicitly when information should be sent to support.
+
+For `run-result`, top-level `status: "ready"` means a persisted result is available, not that the
+run succeeded. Inspect the nested result status or outcome before making that decision.
+
+## Support and operator boundary
+
+`instafy support` is the customer-facing support surface. It requires a human user login (or an
+explicit user access token), and the controller limits list/show operations to reports owned by
+that user. Reports use the currently linked space by default; pass `--no-linked-space` to omit that
+context. Diagnostics are opt-in: details, metadata, logs, and screenshots are uploaded only when
+their corresponding flags are supplied, and file inputs must stay within the active workspace.
+Use `--preview` to inspect the upload summary without sending a report.
+Ordinary users receive a minimized owner-only report view; full triage fields and attachment bytes
+require operator/service authorization.
+
+Hosted Instafy operator access belongs in a separate, non-public `instafy-ops` distribution. It is
+not part of this open-source package. The former `ops`, raw `api`, `ota`, and `desktop-updates`
+command groups have been removed from the customer artifact. Saved login tokens are never
+forwarded or refreshed to a different controller origin.
 
 ## Docs
 

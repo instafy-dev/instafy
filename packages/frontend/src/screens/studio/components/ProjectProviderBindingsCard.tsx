@@ -30,6 +30,7 @@ import {
   ProviderBindingApprovalModal,
   type ProviderBindingApprovalDefaults,
 } from "./ProviderBindingApprovalModal";
+import { buildDesktopStudioDeepLink } from "./desktopStudioDeepLink";
 import { SettingsSection } from "./SettingsSection";
 import { SettingsSurface } from "./SettingsSurface";
 
@@ -285,30 +286,6 @@ function resolveRuntimeHostGrantScope(
     }
     return fallback;
   }
-}
-
-function buildDesktopStudioDeepLink(projectId: string | null): string {
-  const params = new URLSearchParams();
-  let hash = "";
-
-  if (typeof window !== "undefined") {
-    try {
-      const current = new URL(window.location.href);
-      current.searchParams.forEach((value, key) => {
-        params.set(key, value);
-      });
-      hash = current.hash;
-    } catch {
-      // Fall back to a plain Studio deep link below.
-    }
-  }
-
-  if (projectId && !params.has("projectId")) {
-    params.set("projectId", projectId);
-  }
-
-  const query = params.toString();
-  return `instafy://studio${query ? `?${query}` : ""}${hash}`;
 }
 
 function groupHardwareBindingsByHost(

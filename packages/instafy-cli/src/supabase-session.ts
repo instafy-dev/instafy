@@ -1,9 +1,9 @@
 import {
   readInstafyCliConfig,
   readInstafyProfileConfig,
+  replaceStoredAuthSessionIfUnchanged,
   resolveActiveProfileName,
-  writeInstafyCliConfig,
-  writeInstafyProfileConfig,
+  type StoredAuthSessionSnapshot,
 } from "./config.js";
 
 function normalizeToken(value: string | null | undefined): string | null {
@@ -21,22 +21,11 @@ function normalizeUrl(value: string | null | undefined): string | null {
 }
 
 function resolveSupabaseUrl(configured: string | null): string | null {
-  return (
-    normalizeUrl(configured) ??
-    normalizeUrl(process.env["SUPABASE_URL"]) ??
-    normalizeUrl(process.env["VITE_SUPABASE_URL"]) ??
-    normalizeUrl(process.env["SUPABASE_PROJECT_URL"]) ??
-    null
-  );
+  return normalizeUrl(configured);
 }
 
 function resolveSupabaseAnonKey(configured: string | null): string | null {
-  return (
-    normalizeToken(configured) ??
-    normalizeToken(process.env["SUPABASE_ANON_KEY"]) ??
-    normalizeToken(process.env["VITE_SUPABASE_ANON_KEY"]) ??
-    null
-  );
+  return normalizeToken(configured);
 }
 
 type RefreshedSession = {
@@ -51,7 +40,17 @@ async function refreshSupabaseSession(params: {
   supabaseAnonKey: string;
   refreshToken: string;
 }): Promise<RefreshedSession | null> {
-  const response = await fetch(`${params.supabaseUrl}/auth/v1/token?grant_type=refresh_token`, {
+  const baseUrl = new URL(`${params.supabaseUrl.replace(/\/$/, "")}/`);
+  if (
+    (baseUrl.protocol !== "http:" && baseUrl.protocol !== "https:") ||
+    baseUrl.username ||
+    baseUrl.password
+  ) {
+    return null;
+  }
+  const timeoutValue = Number(process.env["INSTAFY_HTTP_TIMEOUT_MS"] ?? 60_000);
+  const timeoutMs = Number.isFinite(timeoutValue) && timeoutValue > 0 ? timeoutValue : 60_000;
+  const response = await fetch(new URL("auth/v1/token?grant_type=refresh_token", baseUrl), {
     method: "POST",
     headers: {
       apikey: params.supabaseAnonKey,
@@ -59,6 +58,8 @@ async function refreshSupabaseSession(params: {
       "content-type": "application/json",
     },
     body: JSON.stringify({ refresh_token: params.refreshToken }),
+    redirect: "error",
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) {
     return null;
@@ -80,9 +81,27 @@ async function refreshSupabaseSession(params: {
 export async function refreshStoredSupabaseSession(params?: {
   profile?: string | null;
   cwd?: string | null;
+  expected?: StoredAuthSessionSnapshot;
 }): Promise<RefreshedSession | null> {
   const profile = resolveActiveProfileName(params);
   const config = profile ? readInstafyProfileConfig(profile) : readInstafyCliConfig();
+  const snapshot: StoredAuthSessionSnapshot = {
+    controllerUrl: config.controllerUrl ?? null,
+    accessToken: config.accessToken ?? null,
+    refreshToken: config.refreshToken ?? null,
+    supabaseUrl: config.supabaseUrl ?? null,
+    supabaseAnonKey: config.supabaseAnonKey ?? null,
+  };
+  if (
+    params?.expected &&
+    (snapshot.controllerUrl !== params.expected.controllerUrl ||
+      snapshot.accessToken !== params.expected.accessToken ||
+      snapshot.refreshToken !== params.expected.refreshToken ||
+      snapshot.supabaseUrl !== params.expected.supabaseUrl ||
+      snapshot.supabaseAnonKey !== params.expected.supabaseAnonKey)
+  ) {
+    return null;
+  }
 
   const refreshToken = normalizeToken(config.refreshToken ?? null);
   if (!refreshToken) {
@@ -104,19 +123,17 @@ export async function refreshStoredSupabaseSession(params?: {
     return null;
   }
 
-  const next = {
+  const next: StoredAuthSessionSnapshot = {
+    controllerUrl: snapshot.controllerUrl,
     accessToken: refreshed.accessToken,
     refreshToken: refreshed.refreshToken ?? refreshToken,
     supabaseUrl: refreshed.supabaseUrl,
     supabaseAnonKey: refreshed.supabaseAnonKey,
   };
-
-  if (profile) {
-    writeInstafyProfileConfig(profile, next);
-  } else {
-    writeInstafyCliConfig(next);
-  }
-
-  return refreshed;
+  const stored = replaceStoredAuthSessionIfUnchanged({
+    profile,
+    expected: snapshot,
+    update: next,
+  });
+  return stored ? refreshed : null;
 }
-

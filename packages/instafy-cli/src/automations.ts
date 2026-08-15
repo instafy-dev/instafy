@@ -120,7 +120,7 @@ function resolveControllerAuth(
     throw formatAuthRequiredError({
       retryCommand,
       advancedHint:
-        "pass --access-token, or set INSTAFY_ACCESS_TOKEN / CONTROLLER_ACCESS_TOKEN",
+        "pass --access-token, or set INSTAFY_ACCESS_TOKEN / SUPABASE_ACCESS_TOKEN",
     });
   }
 

@@ -7,8 +7,6 @@ import { Heading } from "../../../components/Heading";
 import { Text } from "../../../components/Text";
 import { StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
-import { formatInstafyBuildLabel } from "../../../config/buildInfo";
-import { buildReleaseMetadataDetailRows, type AppReleaseMetadata } from "../../../updates/releaseMetadata";
 import {
   controllerClient,
   type ControllerBugReportDetail,
@@ -16,8 +14,6 @@ import {
 } from "../../../sdk/instafy";
 import { writeClipboardText } from "../../../runtime/runtimeMenuShared";
 import { useStatus } from "../../../status/useStatus";
-import { formatBugReportFileSize } from "./bugReportDrafts";
-import { BugReportScreenshotModal } from "./BugReportScreenshotModal";
 
 const {
   get: getControllerBugReport,
@@ -45,81 +41,17 @@ function formatBugReportTimestamp(value: string | null): string {
   });
 }
 
-function buildScreenshotSrc(screenshot: { mediaType: string; dataBase64: string }): string {
-  return `data:${screenshot.mediaType};base64,${screenshot.dataBase64}`;
-}
-
-function parseBuildInfo(value: unknown): InstafyBuildInfo | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-  const record = value as Record<string, unknown>;
-  if (typeof record.packageVersion !== "string" || typeof record.builtAt !== "string" || typeof record.releaseId !== "string") {
-    return null;
-  }
-  return {
-    app: typeof record.app === "string" ? record.app : "instafy-frontend",
-    packageVersion: record.packageVersion,
-    gitCommit: typeof record.gitCommit === "string" ? record.gitCommit : null,
-    gitCommitShort: typeof record.gitCommitShort === "string" ? record.gitCommitShort : null,
-    gitBranch: typeof record.gitBranch === "string" ? record.gitBranch : null,
-    builtAt: record.builtAt,
-    releaseId: record.releaseId,
-  };
-}
-
-function formatBuildTimestamp(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return date.toLocaleString([], {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function parseReleaseMetadata(value: unknown): AppReleaseMetadata | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
-  }
-  const record = value as Record<string, unknown>;
-  const build = record.build;
-  const updates = record.updates;
-  const binary = record.binary;
-  if (!build || !updates || !binary) {
-    return null;
-  }
-  return value as AppReleaseMetadata;
-}
-
 export function BugReportInboxDialog({ isOpen, onOpenChange }: BugReportInboxDialogProps) {
   const { showStatus } = useStatus();
   const [reports, setReports] = useState<ControllerBugReportSummary[]>([]);
   const [selectedReportId, setSelectedReportId] = useState<string | null>(null);
   const [selectedReport, setSelectedReport] = useState<ControllerBugReportDetail | null>(null);
-  const [selectedScreenshotId, setSelectedScreenshotId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
 
   const selectedSummary = useMemo(
     () => reports.find((report) => report.id === selectedReportId) ?? null,
     [reports, selectedReportId],
-  );
-  const selectedBuildInfo = useMemo(
-    () => parseBuildInfo(selectedReport?.metadata?.build),
-    [selectedReport?.metadata],
-  );
-  const selectedReleaseMetadata = useMemo(
-    () => parseReleaseMetadata(selectedReport?.metadata?.release),
-    [selectedReport?.metadata],
-  );
-  const selectedScreenshot = useMemo(
-    () => selectedReport?.screenshots.find((entry) => entry.id === selectedScreenshotId) ?? null,
-    [selectedReport, selectedScreenshotId],
   );
 
   const loadReports = useCallback(async () => {
@@ -146,7 +78,6 @@ export function BugReportInboxDialog({ isOpen, onOpenChange }: BugReportInboxDia
   useEffect(() => {
     if (!isOpen || !selectedReportId) {
       setSelectedReport(null);
-      setSelectedScreenshotId(null);
       return;
     }
     let cancelled = false;
@@ -186,7 +117,7 @@ export function BugReportInboxDialog({ isOpen, onOpenChange }: BugReportInboxDia
       <div className="max-h-[min(90dvh,52rem)] overflow-hidden" data-bug-report-overlay="true">
         <StudioDialogHeader
           title="Bug reports"
-          description="Recent reports for this account, including logs and screenshots."
+          description="Recent reports for this account. Diagnostic payloads remain private to support."
           trailing={
             <Button onPress={() => void loadReports()} variant="outline" size="sm" radius="full" isDisabled={loading}>
               <Refresh className="h-4 w-4" />
@@ -226,7 +157,7 @@ export function BugReportInboxDialog({ isOpen, onOpenChange }: BugReportInboxDia
                         </Text>
                       </div>
                       <Badge size="xs" tone="neutral">
-                        {report.screenshotCount > 0 ? `${report.screenshotCount} shots` : "No shots"}
+                        {report.screenshotCount > 0 ? `${report.screenshotCount} attachments` : "No attachments"}
                       </Badge>
                     </div>
                   </Card>
@@ -285,14 +216,6 @@ export function BugReportInboxDialog({ isOpen, onOpenChange }: BugReportInboxDia
                       {selectedReport.runtimeId ?? "None"}
                     </Text>
                   </Card>
-                  {selectedBuildInfo ? (
-                    <Card tone="muted" radius="2xl" shadow="none" padding="sm">
-                      <Text variant="caption" tone="secondary">Build</Text>
-                      <Text variant="bodyStrong" className="mt-1 break-all">
-                        {formatInstafyBuildLabel(selectedBuildInfo)}
-                      </Text>
-                    </Card>
-                  ) : null}
                 </div>
 
                 {selectedReport.details ? (
@@ -309,72 +232,19 @@ export function BugReportInboxDialog({ isOpen, onOpenChange }: BugReportInboxDia
                   <div className="mt-2 space-y-1">
                     <Text variant="caption" tone="secondary">Conversation: {selectedReport.conversationId ?? "None"}</Text>
                     <Text variant="caption" tone="secondary">Run: {selectedReport.runId ?? "None"}</Text>
-                    <Text variant="caption" tone="secondary">Reporter: {selectedReport.reporterEmail ?? "Unknown"}</Text>
-                    <Text variant="caption" tone="secondary">Log entries: {selectedReport.logs.length}</Text>
-                    {selectedBuildInfo ? (
-                      <>
-                        <Text variant="caption" tone="secondary">
-                          Release: {selectedBuildInfo.releaseId}
-                        </Text>
-                        <Text variant="caption" tone="secondary">
-                          Built: {formatBuildTimestamp(selectedBuildInfo.builtAt)}
-                        </Text>
-                        <Text variant="caption" tone="secondary">
-                          Branch: {selectedBuildInfo.gitBranch ?? "Unknown"}
-                        </Text>
-                        <Text variant="caption" tone="secondary">
-                          Commit: {selectedBuildInfo.gitCommit ?? selectedBuildInfo.gitCommitShort ?? "Unknown"}
-                        </Text>
-                      </>
-                    ) : null}
-                    {selectedReleaseMetadata ? (
-                      <>
-                        {buildReleaseMetadataDetailRows(selectedReleaseMetadata).map((row) => (
-                          <Text key={row.label} variant="caption" tone="secondary">
-                            {row.label}: {row.value}
-                          </Text>
-                        ))}
-                      </>
-                    ) : null}
+                    <Text variant="caption" tone="secondary">
+                      Attachments: {selectedSummary?.screenshotCount ?? 0}
+                    </Text>
                   </div>
                 </Card>
 
-                {selectedReport.screenshots.length > 0 ? (
-                  <div className="space-y-2">
-                    <Text variant="bodyStrong">Screenshots</Text>
-                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                      {selectedReport.screenshots.map((screenshot) => (
-                        <Card key={screenshot.id} tone="default" radius="2xl" shadow="none" padding="sm" className="space-y-3">
-                          <button
-                            type="button"
-                            className="block w-full overflow-hidden rounded-xl"
-                            onClick={() => setSelectedScreenshotId(screenshot.id)}
-                            aria-label={`Open ${screenshot.fileName} fullscreen`}
-                          >
-                            <img
-                              src={buildScreenshotSrc(screenshot)}
-                              alt={screenshot.fileName}
-                              className="h-48 w-full rounded-xl object-cover transition-transform hover:scale-[1.01]"
-                            />
-                          </button>
-                          <div>
-                            <Text variant="bodyStrong" className="truncate">{screenshot.fileName}</Text>
-                            <Text variant="caption" tone="secondary" className="mt-1 block">
-                              {formatBugReportFileSize(screenshot.byteSize)}
-                            </Text>
-                          </div>
-                        </Card>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-
-                {selectedSummary && selectedSummary.logs.length > 0 ? (
+                {(selectedSummary?.screenshotCount ?? 0) > 0 ? (
                   <Card tone="default" radius="2xl" shadow="none" padding="sm">
-                    <Text variant="bodyStrong">Raw log payload</Text>
-                    <pre className="mt-2 overflow-x-auto whitespace-pre-wrap rounded-xl bg-slate-950 px-3 py-3 text-xs text-slate-100">
-                      {JSON.stringify(selectedReport.logs, null, 2)}
-                    </pre>
+                    <Text variant="bodyStrong">Attachments retained</Text>
+                    <Text variant="body" tone="secondary" className="mt-2">
+                      Attachment contents and diagnostic logs are available to authorized support
+                      operators, but are not returned in the customer report view.
+                    </Text>
                   </Card>
                 ) : null}
               </div>
@@ -383,16 +253,6 @@ export function BugReportInboxDialog({ isOpen, onOpenChange }: BugReportInboxDia
             )}
           </div>
         </div>
-        <BugReportScreenshotModal
-          isOpen={selectedScreenshot !== null}
-          onOpenChange={(open) => {
-            if (!open) {
-              setSelectedScreenshotId(null);
-            }
-          }}
-          src={selectedScreenshot ? buildScreenshotSrc(selectedScreenshot) : null}
-          alt={selectedScreenshot?.fileName ?? "Screenshot"}
-        />
       </div>
     </StudioDialogModal>
   );

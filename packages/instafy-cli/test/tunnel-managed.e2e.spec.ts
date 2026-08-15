@@ -113,7 +113,7 @@ describe("tunnel (detached + manage commands)", () => {
           "start",
           "--space",
           projectId,
-          "--controller-url",
+          "--server-url",
           controllerUrl,
           "--access-token",
           "test-token",
