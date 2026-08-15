@@ -145,20 +145,10 @@ test.describe("Learn command", () => {
     await expect
       .poll(
         async () => {
-          const skillPolicy = (
-            await readWorkspaceFileText(
-              page,
-              ".agents/skills/instafy-learning-policy/SKILL.md",
-              { projectId }
-            )
-          )?.trim();
-          if (skillPolicy) {
-            return skillPolicy;
-          }
           return (
             await readWorkspaceFileText(
               page,
-              "learnings/_pinned/learning-policy.md",
+              ".agents/skills/instafy-learning-policy/SKILL.md",
               { projectId }
             )
           )?.trim();

@@ -1476,23 +1476,21 @@ mod tests {
 
     #[test]
     fn git_sync_guidance_keeps_remote_writes_in_the_runtime_owned_sync_path() {
-        let pinned_learning = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/assets/instafy/learnings/_pinned/git-canonical-sync.md"
-        ));
-
-        for template in [GIT_CANONICAL_TEMPLATE, pinned_learning] {
-            assert!(template.contains("CONTROLLER_ACCESS_TOKEN"));
-            assert!(template.contains("git.read"));
-            assert!(template.contains("/sync"));
-            assert!(template.contains("controlled post-turn workspace checkpoint"));
-            assert!(!template.contains("git.write"));
-            assert!(!template.contains("credential.helper"));
-            assert!(!template.contains("push origin HEAD:main"));
-            assert!(!template.contains("RUNTIME_ACCESS_TOKEN"));
-            assert!(!template.contains("ORIGIN_ACCESS_TOKEN"));
-            assert!(!template.contains("ORIGIN_INTERNAL_TOKEN"));
-        }
+        // This asserted the same rules twice: against the skill that ships to
+        // workspaces, and against a near-identical copy under `learnings/_pinned`
+        // that nothing loaded. The copy is gone; the shipped artifact is still
+        // the thing under test.
+        let template = GIT_CANONICAL_TEMPLATE;
+        assert!(template.contains("CONTROLLER_ACCESS_TOKEN"));
+        assert!(template.contains("git.read"));
+        assert!(template.contains("/sync"));
+        assert!(template.contains("controlled post-turn workspace checkpoint"));
+        assert!(!template.contains("git.write"));
+        assert!(!template.contains("credential.helper"));
+        assert!(!template.contains("push origin HEAD:main"));
+        assert!(!template.contains("RUNTIME_ACCESS_TOKEN"));
+        assert!(!template.contains("ORIGIN_ACCESS_TOKEN"));
+        assert!(!template.contains("ORIGIN_INTERNAL_TOKEN"));
     }
 
     #[test]
