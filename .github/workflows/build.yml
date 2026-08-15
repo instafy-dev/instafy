@@ -203,6 +203,9 @@ jobs:
       - name: Test CLI package artifact
         run: pnpm --filter @instafy/cli test:package
 
+      - name: Test CLI automations
+        run: pnpm --filter @instafy/cli exec vitest run test/automations.e2e.spec.ts
+
       - name: Build and test desktop runtime
         run: |
           pnpm --filter @instafy/desktop-runtime-agent build

@@ -20,6 +20,7 @@ type AutomationRecord = {
   timezone: string;
   runtimeMode: string;
   runtimeProvider: string | null;
+  silentWhenNothingToReport: boolean;
   status: string;
   nextRunAt: string | null;
   lastRunAt: string | null;
@@ -45,6 +46,7 @@ export type AutomationsCreateOptions = AutomationsCommonOptions & {
   timezone?: string;
   runtimeMode?: "auto" | "hosted" | "existing";
   runtimeProvider?: string;
+  silentWhenNothingToReport?: boolean;
   paused?: boolean;
 };
 
@@ -206,6 +208,7 @@ function normalizeAutomationRecord(input: unknown): AutomationRecord | null {
     timezone: typeof record.timezone === "string" ? record.timezone : "UTC",
     runtimeMode: typeof record.runtimeMode === "string" ? record.runtimeMode : "auto",
     runtimeProvider: toMaybeString(record.runtimeProvider),
+    silentWhenNothingToReport: record.silentWhenNothingToReport === true,
     status: typeof record.status === "string" ? record.status : "active",
     nextRunAt: toMaybeString(record.nextRunAt),
     lastRunAt: toMaybeString(record.lastRunAt),
@@ -317,8 +320,11 @@ export async function automationsList(options: AutomationsCommonOptions) {
     })();
     const status = record.status === "paused" ? kleur.gray("paused") : kleur.green("active");
     const next = record.nextRunAt ? kleur.cyan(record.nextRunAt) : kleur.gray("n/a");
+    const delivery = record.silentWhenNothingToReport ? " · findings only" : "";
     console.log(`${kleur.bold(record.name)}  ${kleur.gray(record.id)}`);
-    console.log(`  ${schedule} · ${record.runtimeMode} · ${status} · next ${next}`);
+    console.log(
+      `  ${schedule} · ${record.runtimeMode}${delivery} · ${status} · next ${next}`,
+    );
     if (record.lastError) {
       console.log(`  ${kleur.red(record.lastError)}`);
     }
@@ -348,6 +354,7 @@ export async function automationsCreate(options: AutomationsCreateOptions) {
     timezone,
     runtimeMode: options.runtimeMode ?? "auto",
     runtimeProvider: options.runtimeProvider?.trim() || undefined,
+    silentWhenNothingToReport: options.silentWhenNothingToReport ?? false,
     status: options.paused ? "paused" : "active",
   };
 
