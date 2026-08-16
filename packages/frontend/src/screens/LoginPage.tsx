@@ -26,6 +26,7 @@ import {
 } from "./login/rememberedAccounts";
 import { theme } from "../styles/theme";
 import { applyPageMeta } from "../utils/seo";
+import { TentacleBackdrop } from "./landing/LandingTentacleScene";
 
 type LoginStep = "chooseAccount" | "email" | "password" | "otp" | "recovery";
 
@@ -243,7 +244,7 @@ export function LoginPage() {
     if (step === "password") {
       return null;
     }
-    return "Bring your own AI and open your repos from any device you sign in from.";
+    return "Bring the AI you already pay for and open your projects from any device.";
   }, [normalizedEmail, recoveryMode, step]);
 
   useEffect(() => {
@@ -1016,6 +1017,18 @@ export function LoginPage() {
       >
         <div className="absolute left-1/2 top-1/2 h-[560px] w-[560px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-primary-400/10 blur-3xl dark:bg-primary-500/10" />
       </div>
+
+      {!isDesktopSurface && !isExtensionEmbed ? (
+        // Quiet version of the landing scene: arms frame the edges while the
+        // form sits in the artwork's clear center. Web only, light mode only,
+        // desktop widths only, and dimmed so the form keeps the focus.
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 z-0 hidden overflow-hidden opacity-70 sm:block dark:hidden"
+        >
+          <TentacleBackdrop />
+        </div>
+      ) : null}
 
       <div
         className={[

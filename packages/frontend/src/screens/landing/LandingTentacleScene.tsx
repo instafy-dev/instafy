@@ -56,6 +56,21 @@ function isInsideScene(
   return x >= 12 && x <= box.width - marginX && y >= 12 && y <= box.height - CURSOR_MARGIN_Y;
 }
 
+// The bare artwork layer, shared with quieter surfaces (login) that want the
+// same scene without cursors or motion.
+export function TentacleBackdrop({ className }: { className?: string }) {
+  return (
+    <div
+      className={[
+        "absolute inset-0 bg-[url('/landing-tentacles.jpg')] bg-cover bg-center [mask-image:linear-gradient(to_bottom,black_84%,transparent_100%)]",
+        className ?? "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
+    />
+  );
+}
+
 export function LandingTentacleScene({ purpleAgentLabel }: { purpleAgentLabel?: string }) {
   const sceneRef = useRef<HTMLDivElement | null>(null);
   const [box, setBox] = useState<{ width: number; height: number } | null>(null);
@@ -77,7 +92,7 @@ export function LandingTentacleScene({ purpleAgentLabel }: { purpleAgentLabel?: 
       data-testid="landing-tentacle-scene"
       className="pointer-events-none absolute inset-0 z-0 overflow-hidden dark:hidden"
     >
-      <div className="absolute inset-0 bg-[url('/landing-tentacles.jpg')] bg-cover bg-center [mask-image:linear-gradient(to_bottom,black_84%,transparent_100%)]" />
+      <TentacleBackdrop />
 
       {box
         ? PRESENCE_CURSORS.map((cursor) => {
