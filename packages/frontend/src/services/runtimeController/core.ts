@@ -43,10 +43,10 @@ function normalizeControllerBaseUrl(raw: string): string {
 
 const CONTROLLER_BINDING_STORAGE_KEY = "instafy.controllerBinding";
 const CONTROLLER_BINDING_STORAGE_VERSION = 1;
-// Legacy split keys are read only for a one-time, unambiguous custom-pair
-// migration. New writes use the atomic binding record above.
-const CONTROLLER_BASE_URL_STORAGE_KEY = "instafy.controllerBaseUrl";
-const CONTROLLER_TOKEN_STORAGE_KEY = "instafy.controllerAccessToken";
+const RETIRED_CONTROLLER_STORAGE_KEYS = [
+  "instafy.controllerAccessToken",
+  "instafy.controllerBaseUrl",
+] as const;
 const canonicalControllerBaseUrl = normalizeControllerBaseUrl(controllerUrlResolvedRaw);
 export let controllerBaseUrl = canonicalControllerBaseUrl;
 
@@ -166,68 +166,6 @@ interface PersistedControllerBindingV1 {
   baseUrl: string | null;
 }
 
-function readControllerOverridesFromSearch(search: string): ControllerOverrideSource {
-  try {
-    const params = new URLSearchParams(search);
-    return {
-      token: normalizeInjectedToken(params.get("controllerAccessToken")),
-      baseUrl: normalizeInjectedControllerBaseUrl(params.get("controllerUrl")),
-      hasToken: params.has("controllerAccessToken"),
-      hasBaseUrl: params.has("controllerUrl"),
-    };
-  } catch {
-    return { token: null, baseUrl: null, hasToken: false, hasBaseUrl: false };
-  }
-}
-
-export function readControllerAccessTokenFromSearch(search: string): string | null {
-  return readControllerOverridesFromSearch(search).token;
-}
-
-export function readControllerBaseUrlFromSearch(search: string): string | null {
-  return readControllerOverridesFromSearch(search).baseUrl;
-}
-
-export function syncControllerOverridesFromSearch(search: string): boolean {
-  initializeInjectedControllerOverrides();
-  const source = readControllerOverridesFromSearch(search);
-  if (!source.hasToken && !source.hasBaseUrl) {
-    return controllerReloadPending;
-  }
-
-  const desired = resolveControllerOverrideSource(source);
-  const desiredBaseUrl = desired.baseUrl ?? canonicalControllerBaseUrl;
-  const bindingUnchanged =
-    desiredBaseUrl === controllerBaseUrl &&
-    desired.token === currentInjectedToken();
-
-  if (!bindingUnchanged) {
-    // Store the next document's complete pair without mutating this
-    // document's active binding. The reload boundary prevents prebuilt URLs
-    // and in-flight token resolutions from crossing controller origins.
-    persistInjectedControllerOverrides(desired.token, desired.baseUrl, false);
-  }
-  if (typeof window !== "undefined" && search === window.location.search) {
-    purgeControllerOverrideParamsFromLocation();
-  }
-  if (!bindingUnchanged) {
-    // Scrub credentials from the current history entry before dispatching;
-    // listeners are allowed to reload synchronously.
-    requestControllerDocumentReload("override-switch");
-  }
-  return controllerReloadPending;
-}
-
-export function syncControllerAccessTokenFromSearch(search: string): string | null {
-  syncControllerOverridesFromSearch(search);
-  return currentInjectedToken();
-}
-
-export function syncControllerBaseUrlFromSearch(search: string): string | null {
-  syncControllerOverridesFromSearch(search);
-  return currentInjectedControllerBaseUrl();
-}
-
 function currentInjectedToken(): string | null {
   return normalizeInjectedToken(injectedControllerToken ?? null);
 }
@@ -308,31 +246,7 @@ function readStoredControllerOverrideSource(storage: Storage): ControllerOverrid
     }
   }
 
-  let legacyTokenRaw: string | null;
-  let legacyBaseUrlRaw: string | null;
-  try {
-    legacyTokenRaw = storage.getItem(CONTROLLER_TOKEN_STORAGE_KEY);
-    legacyBaseUrlRaw = storage.getItem(CONTROLLER_BASE_URL_STORAGE_KEY);
-  } catch (_error) {
-    return failClosedControllerOverrideSource();
-  }
-  if (legacyTokenRaw === null && legacyBaseUrlRaw === null) {
-    return emptyControllerOverrideSource();
-  }
-
-  const legacyToken = normalizeInjectedToken(legacyTokenRaw);
-  const legacyBaseUrl = normalizeInjectedControllerBaseUrl(legacyBaseUrlRaw);
-  // A split-key token without a custom base may be the residue of an
-  // interrupted custom-pair write. Never reinterpret it as canonical.
-  if (!legacyToken || !isCustomControllerBaseUrl(legacyBaseUrl)) {
-    return failClosedControllerOverrideSource();
-  }
-  return {
-    token: legacyToken,
-    baseUrl: legacyBaseUrl,
-    hasToken: true,
-    hasBaseUrl: true,
-  };
+  return emptyControllerOverrideSource();
 }
 
 function resolveControllerOverrideSource(source: ControllerOverrideSource): {
@@ -482,13 +396,9 @@ function persistInjectedControllerOverrides(
       return;
     }
 
-    // The atomic record is authoritative once committed. Retire old split
-    // keys afterward, independently, so interrupted cleanup cannot revive
-    // them on the next reload (including after an explicit null/null clear).
-    for (const legacyKey of [
-      CONTROLLER_TOKEN_STORAGE_KEY,
-      CONTROLLER_BASE_URL_STORAGE_KEY,
-    ]) {
+    // These split-key credential inputs are no longer accepted. Remove any
+    // residue without ever reading or migrating it into the active binding.
+    for (const legacyKey of RETIRED_CONTROLLER_STORAGE_KEYS) {
       try {
         storage.removeItem(legacyKey);
       } catch (_error) {
@@ -599,7 +509,6 @@ function initializeInjectedControllerOverrides() {
     return;
   }
 
-  const searchSource = readControllerOverridesFromSearch(window.location.search);
   const globalSource: ControllerOverrideSource = {
     token: normalizeInjectedToken(window.__INSTAFY_CONTROLLER_TOKEN__),
     baseUrl: normalizeInjectedControllerBaseUrl(window.__INSTAFY_CONTROLLER_BASE_URL__),
@@ -613,13 +522,11 @@ function initializeInjectedControllerOverrides() {
     // ignore storage read failures
   }
 
-  // Select one source as a unit. A query/global base must never borrow a
-  // token from session storage or another previously initialized source.
-  const source = searchSource.hasToken || searchSource.hasBaseUrl
-    ? searchSource
-    : globalSource.hasToken || globalSource.hasBaseUrl
-      ? globalSource
-      : storedSource;
+  // Select one complete source as a unit. URL query parameters and the old
+  // split session-storage keys are deliberately ignored.
+  const source = globalSource.hasToken || globalSource.hasBaseUrl
+    ? globalSource
+    : storedSource;
   const resolvedSource = resolveControllerOverrideSource(source);
   setInjectedControllerOverrides(resolvedSource.token, resolvedSource.baseUrl);
   controllerBindingInitialized = true;

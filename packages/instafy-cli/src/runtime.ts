@@ -5,7 +5,12 @@ import kleur from "kleur";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import { ensureRatholeBinary } from "./rathole.js";
-import { resolveActiveProfileName, resolveConfiguredAccessToken, type AccessTokenSource } from "./config.js";
+import {
+  resolveActiveProfileName,
+  resolveConfiguredAccessToken,
+  resolveConfiguredControllerUrl,
+  type AccessTokenSource,
+} from "./config.js";
 import { formatAuthRejectedError } from "./errors.js";
 import { findProjectManifest, type ProjectManifest } from "./project-manifest.js";
 import { fetchWithControllerAuth } from "./controller-fetch.js";
@@ -13,7 +18,6 @@ import { fetchWithControllerAuth } from "./controller-fetch.js";
 export interface RuntimeStartOptions {
   project?: string;
   controllerUrl?: string;
-  controllerToken?: string;
   supabaseAccessToken?: string;
   supabaseAccessTokenFile?: string;
   provider?: string;
@@ -291,8 +295,7 @@ function resolveControllerAccessTokenForCliWithSource(
   }
 
   const envToken =
-    normalizeToken(env["INSTAFY_ACCESS_TOKEN"]) ??
-    normalizeToken(env["CONTROLLER_ACCESS_TOKEN"]);
+    normalizeToken(env["INSTAFY_ACCESS_TOKEN"]);
   if (envToken) {
     return { token: envToken, source: "env" };
   }
@@ -312,6 +315,67 @@ function resolveControllerAccessTokenForCliWithSource(
   }
 
   return { token: null, source: "none" };
+}
+
+const RUNTIME_CHILD_CREDENTIALS_TO_REMOVE = [
+  "CONTROLLER_ACCESS_TOKEN",
+  "INSTAFY_ACCESS_TOKEN",
+  "SUPABASE_ACCESS_TOKEN",
+  "INSTAFY_SERVICE_TOKEN",
+  "RUNTIME_TOKEN",
+  "ORIGIN_TOKEN",
+  "WORKSPACE_ACCESS_TOKEN",
+  "WORKSPACE_INTERNAL_TOKEN",
+  "WORKSPACE_TOKEN",
+  "CONTROLLER_WORKSPACE_TOKEN",
+  "INSTAFY_WORKSPACE_TOKEN",
+  "CONTROLLER_INTERNAL_TOKEN",
+  "CONTROLLER_TOKEN",
+  "CONTROLLER_BEARER",
+  "CONTROLLER_SERVICE_ROLE_KEY",
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "SUPABASE_SERVICE_KEY",
+  "SERVICE_ROLE_KEY",
+  "AGENT_LOGIN_KEY",
+  "AGENT_KEY",
+  "PROXY_SIGNING_SECRET",
+  "CONTROLLER_BROWSER_TURN_SHARED_SECRET",
+  "CREDENTIAL_ENCRYPTION_KEY",
+  "PROGRESS_CALLBACK_SECRET",
+  "SUPABASE_JWT_SECRET",
+  "USER_TOKEN_SECRET",
+  "RUNTIME_SIGNING_PRIVATE_KEY",
+  "RUNTIME_SIGNING_PRIVATE_KEY_B64",
+  "PROVIDER_AUTH_TOKEN",
+  "DEV_PROVIDER_AUTH_TOKEN",
+  "RUNTIME_PROVIDER_AUTH_TOKEN",
+  "HETZNER_PROVIDER_AUTH_TOKEN",
+  "DOCKER_POOL_AUTH_TOKEN",
+  "HCLOUD_TOKEN",
+  "HETZNER_TOKEN",
+  "PDNS_API_KEY",
+  "GIT_EDGE_CONTROLLER_TOKEN",
+  "GIT_EVENTS_WEBHOOK_TOKEN",
+  "GIT_EVENT_HOOK_SECRET",
+  "TUNNEL_BROKER_TOKEN",
+  "TUNNEL_BROKER_HOOK_SECRET",
+  "BROKER_API_TOKENS",
+  "RATHOLE_SHARED_TOKEN",
+  "TOKEN_SIGNING_KEY",
+  "ACL_HOOK_TOKEN",
+  "EVENT_HOOK_TOKEN",
+  "SUPABASE_REFRESH_TOKEN",
+  "INSTAFY_REFRESH_TOKEN",
+  "CONTROLLER_REFRESH_TOKEN",
+  "REFRESH_TOKEN",
+] as const;
+
+export function buildRuntimeChildEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const child = { ...source };
+  for (const key of RUNTIME_CHILD_CREDENTIALS_TO_REMOVE) {
+    delete child[key];
+  }
+  return child;
 }
 
 interface RatholeResolutionOptions {
@@ -588,11 +652,7 @@ export async function runtimeStart(options: RuntimeStartOptions) {
   const controllerAccessTokenSource = controllerAccessTokenResult.source;
   let runtimeAccessToken =
     normalizeToken(options.runtimeToken) ?? normalizeToken(env["RUNTIME_ACCESS_TOKEN"]);
-  const agentKey =
-    options.controllerToken ??
-    env["INSTAFY_SERVICE_TOKEN"] ??
-    env["AGENT_LOGIN_KEY"] ??
-    env["AGENT_KEY"];
+  const agentKey = env["AGENT_LOGIN_KEY"] ?? env["AGENT_KEY"];
   if (!agentKey && !controllerAccessToken && !runtimeAccessToken) {
     throw new Error(
       "Login required. Run `instafy login`, or pass --access-token / --supabase-access-token, or provide --runtime-token.",
@@ -601,14 +661,11 @@ export async function runtimeStart(options: RuntimeStartOptions) {
   if (agentKey) {
     env["AGENT_LOGIN_KEY"] = agentKey;
   }
-  if (controllerAccessToken) {
-    env["CONTROLLER_ACCESS_TOKEN"] = controllerAccessToken;
-  }
   env["CONTROLLER_BASE_URL"] =
     options.controllerUrl ??
     env["INSTAFY_SERVER_URL"] ??
-    env["CONTROLLER_BASE_URL"] ??
     manifestInfo.manifest?.controllerUrl ??
+    resolveConfiguredControllerUrl({ profile, cwd }) ??
     "http://127.0.0.1:8788";
 
   if (options.codexBin) env["CODEX_BIN"] = options.codexBin;
@@ -779,7 +836,7 @@ export async function runtimeStart(options: RuntimeStartOptions) {
 
   if (!originToken) {
     throw new Error(
-      "Runtime/origin token is required (--origin-token or ORIGIN_ACCESS_TOKEN), or provide --runtime-token/--controller-access-token to mint/use one",
+      "Runtime/origin token is required (--origin-token or ORIGIN_ACCESS_TOKEN), or provide --runtime-token/--access-token to mint/use one",
     );
   }
   env["ORIGIN_ACCESS_TOKEN"] = originToken;
@@ -830,7 +887,8 @@ export async function runtimeStart(options: RuntimeStartOptions) {
       stdio = ["ignore", out, out];
     }
 
-    const spawnOptions: SpawnOptions = { env, stdio, detached };
+    const childEnvironment = buildRuntimeChildEnvironment(env);
+    const spawnOptions: SpawnOptions = { env: childEnvironment, stdio, detached };
     const child = spawn(bin, spawnOptions);
 
     if (detached) {
@@ -868,7 +926,7 @@ export async function runtimeStart(options: RuntimeStartOptions) {
   const hostPort = String(options.bindPort ?? env["ORIGIN_BIND_PORT"] ?? 54332);
   const hostBindHost = options.bindHost ?? "127.0.0.1";
 
-  const dockerEnv = { ...env };
+  const dockerEnv = buildRuntimeChildEnvironment(env);
   dockerEnv["WORKSPACE_DIR"] = "/workspace";
   dockerEnv["CODEX_HOME"] = "/workspace/.codex";
   dockerEnv["TMPDIR"] = "/tmp";
@@ -991,17 +1049,28 @@ async function sendOfflineBeat(state: RuntimeState): Promise<void> {
 
   let bearer = directToken;
   if (!bearer) {
+    const cwd = process.cwd();
+    const profile = resolveActiveProfileName({ cwd });
+    const configuredToken = resolveConfiguredAccessToken({ profile, cwd });
     const controllerAccessToken =
-      normalizeToken(process.env["CONTROLLER_ACCESS_TOKEN"]) ??
+      normalizeToken(process.env["INSTAFY_ACCESS_TOKEN"]) ??
       normalizeToken(process.env["SUPABASE_ACCESS_TOKEN"]) ??
-      resolveConfiguredAccessToken();
+      configuredToken;
     if (controllerAccessToken) {
+      const tokenSource: AccessTokenSource =
+        normalizeToken(process.env["INSTAFY_ACCESS_TOKEN"]) ||
+        normalizeToken(process.env["SUPABASE_ACCESS_TOKEN"])
+          ? "env"
+          : "config";
       try {
         bearer = await mintRuntimeAccessToken({
           controllerUrl: state.controllerUrl,
           controllerAccessToken,
           projectId: state.projectId,
           runtimeId: state.runtimeId ?? undefined,
+          tokenSource,
+          profile,
+          cwd,
         });
       } catch (error) {
         const suffix =
@@ -1025,8 +1094,16 @@ async function sendOfflineBeat(state: RuntimeState): Promise<void> {
   };
 
   try {
+    const controllerUrl = new URL(state.controllerUrl);
+    if (
+      (controllerUrl.protocol !== "http:" && controllerUrl.protocol !== "https:") ||
+      controllerUrl.username ||
+      controllerUrl.password
+    ) {
+      return;
+    }
     await fetch(
-      `${state.controllerUrl.replace(/\/$/, "")}/projects/${encodeURIComponent(state.projectId)}/origin/presence/beat`,
+      `${controllerUrl.toString().replace(/\/$/, "")}/projects/${encodeURIComponent(state.projectId)}/origin/presence/beat`,
       {
         method: "POST",
         headers: {
@@ -1034,6 +1111,8 @@ async function sendOfflineBeat(state: RuntimeState): Promise<void> {
           "content-type": "application/json",
         },
         body: JSON.stringify(offlinePayload),
+        redirect: "error",
+        signal: AbortSignal.timeout(60_000),
       },
     );
   } catch {
@@ -1182,7 +1261,6 @@ export async function runtimeToken(options: {
   const controllerUrl =
     options.controllerUrl ??
     process.env["INSTAFY_SERVER_URL"] ??
-    process.env["CONTROLLER_BASE_URL"] ??
     "http://127.0.0.1:8788";
   const profile = resolveActiveProfileName({ cwd });
   const stored = resolveConfiguredAccessToken({ profile, cwd });
@@ -1190,7 +1268,6 @@ export async function runtimeToken(options: {
   const tokenSource: AccessTokenSource = options.controllerAccessToken
     ? "explicit"
     : process.env["INSTAFY_ACCESS_TOKEN"] ||
-        process.env["CONTROLLER_ACCESS_TOKEN"] ||
         process.env["SUPABASE_ACCESS_TOKEN"]
       ? "env"
       : stored
@@ -1200,7 +1277,6 @@ export async function runtimeToken(options: {
   const token =
     options.controllerAccessToken ??
     process.env["INSTAFY_ACCESS_TOKEN"] ??
-    process.env["CONTROLLER_ACCESS_TOKEN"] ??
     process.env["SUPABASE_ACCESS_TOKEN"] ??
     stored;
   if (!token) {

@@ -1,4 +1,5 @@
 import { once } from "node:events";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -303,6 +304,7 @@ describe("instafy git", () => {
             CONTROLLER_BASE_URL: originEndpoint,
             ORIGIN_ENDPOINT: originEndpoint,
             PROJECT_ID: "project-123",
+            RUNTIME_ID: randomUUID(),
             RUNTIME_ACCESS_TOKEN: "runtime-controller-token",
             RUNTIME_LEASE_ID: "lease-123",
           },
@@ -484,7 +486,8 @@ describe("instafy git", () => {
           cwd: tmpDir,
           env: {
             CONTROLLER_BASE_URL: originEndpoint,
-            CONTROLLER_ACCESS_TOKEN: "controller-token",
+            RUNTIME_ID: randomUUID(),
+            RUNTIME_ACCESS_TOKEN: "controller-token",
             PROJECT_ID: "project-123",
             ORIGIN_ENDPOINT: originEndpoint,
             ORIGIN_ACCESS_TOKEN: "stale-origin-token",
@@ -533,4 +536,45 @@ describe("instafy git", () => {
     },
     20_000,
   );
+
+  it("does not send an environment Origin token to an overridden endpoint", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-cli-git-sync-bound-origin-"));
+    let requests = 0;
+    const server = http.createServer((_req, res) => {
+      requests += 1;
+      res.statusCode = 500;
+      res.end("must not be reached");
+    });
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", () => resolve());
+    });
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+
+    try {
+      const { code, stderr } = await execCli(
+        [
+          "git",
+          "sync",
+          "--origin-endpoint",
+          `http://127.0.0.1:${port}`,
+        ],
+        {
+          cwd: tmpDir,
+          env: {
+            ORIGIN_ENDPOINT: "http://127.0.0.1:1",
+            ORIGIN_ACCESS_TOKEN: "provisioned-origin-token",
+          },
+        },
+      );
+      expect(code).toBe(1);
+      expect(requests).toBe(0);
+      expect(stderr).toContain(
+        "Refusing to send an environment-provided Origin credential to an endpoint other than ORIGIN_ENDPOINT",
+      );
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

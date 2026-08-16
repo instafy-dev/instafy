@@ -85,7 +85,7 @@ describe("space init", () => {
         "init",
         "--path",
         tmpDir,
-        "--controller-url",
+        "--server-url",
         controllerUrl,
         "--access-token",
         "controller-token",
