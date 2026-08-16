@@ -768,6 +768,10 @@ const AGENTS_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/AGENTS.md"
 ));
+const CLAUDE_DOC_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../runtime-agent/assets/instafy/CLAUDE.md"
+));
 const AGENTS_SCRIPT_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/AGENTS.py"
@@ -820,6 +824,14 @@ const CONVERSATION_HISTORY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/.agents/skills/instafy-conversation-history/SKILL.md"
 ));
+const DIAGNOSTICS_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../runtime-agent/assets/instafy/.agents/skills/instafy-diagnostics/SKILL.md"
+));
+const DIAGNOSTICS_OPENAI_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../runtime-agent/assets/instafy/.agents/skills/instafy-diagnostics/agents/openai.yaml"
+));
 const LOCATION_SHARING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/.agents/skills/instafy-location-sharing/SKILL.md"
@@ -856,7 +868,7 @@ const PROJECT_MEMORY_MANAGED_DEFAULTS_STATE_PATH: &str =
     ".agents/.instafy-managed-defaults-state.json";
 const PROJECT_MEMORY_ASSETS_ROOT_ENV: &str = "INSTAFY_PROJECT_MEMORY_ASSETS_ROOT";
 
-const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 23] = [
+const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 26] = [
     ProjectMemoryTemplateFile {
         path: "INSTAFY.md",
         asset_relative_path: "INSTAFY.md",
@@ -866,6 +878,11 @@ const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 23] = [
         path: "AGENTS.md",
         asset_relative_path: "AGENTS.md",
         fallback_content: AGENTS_DOC_TEMPLATE,
+    },
+    ProjectMemoryTemplateFile {
+        path: "CLAUDE.md",
+        asset_relative_path: "CLAUDE.md",
+        fallback_content: CLAUDE_DOC_TEMPLATE,
     },
     ProjectMemoryTemplateFile {
         path: "AGENTS.py",
@@ -931,6 +948,16 @@ const PROJECT_MEMORY_TEMPLATE_FILES: [ProjectMemoryTemplateFile; 23] = [
         path: ".agents/skills/instafy-conversation-history/SKILL.md",
         asset_relative_path: ".agents/skills/instafy-conversation-history/SKILL.md",
         fallback_content: CONVERSATION_HISTORY_TEMPLATE,
+    },
+    ProjectMemoryTemplateFile {
+        path: ".agents/skills/instafy-diagnostics/SKILL.md",
+        asset_relative_path: ".agents/skills/instafy-diagnostics/SKILL.md",
+        fallback_content: DIAGNOSTICS_TEMPLATE,
+    },
+    ProjectMemoryTemplateFile {
+        path: ".agents/skills/instafy-diagnostics/agents/openai.yaml",
+        asset_relative_path: ".agents/skills/instafy-diagnostics/agents/openai.yaml",
+        fallback_content: DIAGNOSTICS_OPENAI_TEMPLATE,
     },
     ProjectMemoryTemplateFile {
         path: ".agents/skills/instafy-location-sharing/SKILL.md",
@@ -5885,7 +5912,8 @@ pub(crate) async fn upsert_org(
 mod project_access_tests {
     use super::{
         invitation_accept_urls, OrgInvitationResponse, OrgInvitationSummary, ProjectAccess,
-        ProjectRole, GROUP_PARTICIPATION_TEMPLATE, PROJECT_MEMORY_TEMPLATE_FILES,
+        ProjectRole, CLAUDE_DOC_TEMPLATE, DIAGNOSTICS_OPENAI_TEMPLATE, DIAGNOSTICS_TEMPLATE,
+        GROUP_PARTICIPATION_TEMPLATE, PROJECT_MEMORY_TEMPLATE_FILES,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -5919,6 +5947,38 @@ mod project_access_tests {
         assert!(template.fallback_content.contains("always_include: true"));
         assert!(template.fallback_content.contains("targetMessageId"));
         assert!(template.fallback_content.contains("do not call tools"));
+    }
+
+    #[test]
+    fn managed_defaults_include_ai_diagnostics_for_codex_and_claude() {
+        let diagnostics = PROJECT_MEMORY_TEMPLATE_FILES
+            .iter()
+            .find(|template| template.path == ".agents/skills/instafy-diagnostics/SKILL.md")
+            .expect("diagnostics managed default");
+        let openai = PROJECT_MEMORY_TEMPLATE_FILES
+            .iter()
+            .find(|template| {
+                template.path == ".agents/skills/instafy-diagnostics/agents/openai.yaml"
+            })
+            .expect("diagnostics OpenAI metadata managed default");
+        let claude = PROJECT_MEMORY_TEMPLATE_FILES
+            .iter()
+            .find(|template| template.path == "CLAUDE.md")
+            .expect("Claude bridge managed default");
+
+        assert_eq!(diagnostics.fallback_content, DIAGNOSTICS_TEMPLATE);
+        assert_eq!(openai.fallback_content, DIAGNOSTICS_OPENAI_TEMPLATE);
+        assert_eq!(claude.fallback_content, CLAUDE_DOC_TEMPLATE);
+        assert!(diagnostics
+            .fallback_content
+            .contains("instafy-diagnostics-v1"));
+        assert!(diagnostics
+            .fallback_content
+            .contains("obtain explicit confirmation"));
+        assert!(diagnostics
+            .fallback_content
+            .contains("correlation, not proof of causation"));
+        assert_eq!(claude.fallback_content, "@AGENTS.md\n");
     }
 
     #[test]
