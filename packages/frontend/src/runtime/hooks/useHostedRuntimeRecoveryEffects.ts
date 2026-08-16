@@ -25,6 +25,7 @@ import {
 interface UseHostedRuntimeRecoveryEffectsArgs {
   activeProjectId: string | null;
   projectInitialized: boolean;
+  projectAccessResolved: boolean;
   projectReadyForRuntime: boolean;
   runtimeControllerEnabled: boolean;
   runtimeStatuses: ControllerRuntimeStatusEntry[];
@@ -58,6 +59,7 @@ interface UseHostedRuntimeRecoveryEffectsArgs {
 export function useHostedRuntimeRecoveryEffects({
   activeProjectId,
   projectInitialized,
+  projectAccessResolved,
   projectReadyForRuntime,
   runtimeControllerEnabled,
   runtimeStatuses,
@@ -320,8 +322,7 @@ export function useHostedRuntimeRecoveryEffects({
     if (
       !shouldAutoEnsureHostedForEmptyState({
         disableAutoRuntimeEnsure: suppressAutoRuntimeEnsure,
-        projectInitialized,
-        projectReadyForRuntime,
+        projectAccessResolved,
         runtimeControllerEnabled,
         activeProjectId,
         runtimeReady,
@@ -355,6 +356,7 @@ export function useHostedRuntimeRecoveryEffects({
     hasHostedRuntimeInProgress,
     hasLocalRuntime,
     hostedRuntimeEnsuring,
+    projectAccessResolved,
     projectInitialized,
     projectReadyForRuntime,
     runtimeControllerEnabled,
