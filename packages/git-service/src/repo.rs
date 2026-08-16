@@ -19,6 +19,10 @@ const AGENTS_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/AGENTS.md"
 ));
+const CLAUDE_DOC_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../runtime-agent/assets/instafy/CLAUDE.md"
+));
 const AGENTS_SCRIPT_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/AGENTS.py"
@@ -58,6 +62,14 @@ const BYOC_AI_CREDENTIALS_TEMPLATE: &str = include_str!(concat!(
 const AGENT_COLLABORATION_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../runtime-agent/assets/instafy/.agents/skills/instafy-agent-collaboration/SKILL.md"
+));
+const DIAGNOSTICS_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../runtime-agent/assets/instafy/.agents/skills/instafy-diagnostics/SKILL.md"
+));
+const DIAGNOSTICS_OPENAI_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../runtime-agent/assets/instafy/.agents/skills/instafy-diagnostics/agents/openai.yaml"
 ));
 const GROUP_PARTICIPATION_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -419,6 +431,7 @@ fn seed_initial_commit(repo_path: &Path, default_branch: &str) -> Result<()> {
 
     let instafy_blob = write_blob(repo_str, INSTAFY_TEMPLATE)?;
     let agents_doc_blob = write_blob(repo_str, AGENTS_DOC_TEMPLATE)?;
+    let claude_doc_blob = write_blob(repo_str, CLAUDE_DOC_TEMPLATE)?;
     let agents_script_blob = write_blob(repo_str, AGENTS_SCRIPT_TEMPLATE)?;
     let policy_blob = write_blob(repo_str, LEARNING_POLICY_TEMPLATE)?;
     let git_canonical_blob = write_blob(repo_str, GIT_CANONICAL_TEMPLATE)?;
@@ -429,6 +442,8 @@ fn seed_initial_commit(repo_path: &Path, default_branch: &str) -> Result<()> {
     let integration_onboarding_blob = write_blob(repo_str, INTEGRATION_ONBOARDING_TEMPLATE)?;
     let byoc_ai_credentials_blob = write_blob(repo_str, BYOC_AI_CREDENTIALS_TEMPLATE)?;
     let agent_collaboration_blob = write_blob(repo_str, AGENT_COLLABORATION_TEMPLATE)?;
+    let diagnostics_blob = write_blob(repo_str, DIAGNOSTICS_TEMPLATE)?;
+    let diagnostics_openai_blob = write_blob(repo_str, DIAGNOSTICS_OPENAI_TEMPLATE)?;
     let group_participation_blob = write_blob(repo_str, GROUP_PARTICIPATION_TEMPLATE)?;
     let automations_blob = write_blob(repo_str, AUTOMATIONS_TEMPLATE)?;
     let persistent_contexts_blob = write_blob(repo_str, PERSISTENT_CONTEXTS_TEMPLATE)?;
@@ -464,6 +479,17 @@ fn seed_initial_commit(repo_path: &Path, default_branch: &str) -> Result<()> {
     let agent_collaboration_skill_tree = write_tree(
         repo_str,
         &[("100644", "blob", &agent_collaboration_blob, "SKILL.md")],
+    )?;
+    let diagnostics_agents_tree = write_tree(
+        repo_str,
+        &[("100644", "blob", &diagnostics_openai_blob, "openai.yaml")],
+    )?;
+    let diagnostics_skill_tree = write_tree(
+        repo_str,
+        &[
+            ("100644", "blob", &diagnostics_blob, "SKILL.md"),
+            ("040000", "tree", &diagnostics_agents_tree, "agents"),
+        ],
     )?;
     let group_participation_skill_tree = write_tree(
         repo_str,
@@ -502,6 +528,12 @@ fn seed_initial_commit(repo_path: &Path, default_branch: &str) -> Result<()> {
                 "tree",
                 &byoc_ai_credentials_skill_tree,
                 "instafy-byoc-ai-credentials",
+            ),
+            (
+                "040000",
+                "tree",
+                &diagnostics_skill_tree,
+                "instafy-diagnostics",
             ),
             (
                 "040000",
@@ -569,6 +601,7 @@ fn seed_initial_commit(repo_path: &Path, default_branch: &str) -> Result<()> {
             ("040000", "tree", &agents_tree, ".agents"),
             ("100644", "blob", &agents_doc_blob, "AGENTS.md"),
             ("100644", "blob", &agents_script_blob, "AGENTS.py"),
+            ("100644", "blob", &claude_doc_blob, "CLAUDE.md"),
             ("100644", "blob", &instafy_blob, "INSTAFY.md"),
         ],
     )?;
@@ -852,6 +885,8 @@ mod tests {
             ".agents/skills/instafy-agent-collaboration/SKILL.md",
             ".agents/skills/instafy-automations/SKILL.md",
             ".agents/skills/instafy-byoc-ai-credentials/SKILL.md",
+            ".agents/skills/instafy-diagnostics/SKILL.md",
+            ".agents/skills/instafy-diagnostics/agents/openai.yaml",
             ".agents/skills/instafy-frontend-previews/SKILL.md",
             ".agents/skills/instafy-git-canonical-conflicts/SKILL.md",
             ".agents/skills/instafy-git-canonical-sync/SKILL.md",
@@ -864,6 +899,7 @@ mod tests {
             ".agents/skills/instafy-secrets/SKILL.md",
             "AGENTS.md",
             "AGENTS.py",
+            "CLAUDE.md",
             "INSTAFY.md",
         ];
 
@@ -876,6 +912,9 @@ mod tests {
 
         let agents_doc = String::from_utf8(run_git_stdout(repo_str, &["show", "HEAD:AGENTS.md"])?)?;
         assert_eq!(agents_doc, AGENTS_DOC_TEMPLATE);
+
+        let claude_doc = String::from_utf8(run_git_stdout(repo_str, &["show", "HEAD:CLAUDE.md"])?)?;
+        assert_eq!(claude_doc, CLAUDE_DOC_TEMPLATE);
 
         let instafy_doc =
             String::from_utf8(run_git_stdout(repo_str, &["show", "HEAD:INSTAFY.md"])?)?;
@@ -914,6 +953,22 @@ mod tests {
         )?)?;
         assert_eq!(group_participation, GROUP_PARTICIPATION_TEMPLATE);
         assert!(group_participation.contains("targetMessageId"));
+
+        let diagnostics = String::from_utf8(run_git_stdout(
+            repo_str,
+            &["show", "HEAD:.agents/skills/instafy-diagnostics/SKILL.md"],
+        )?)?;
+        assert_eq!(diagnostics, DIAGNOSTICS_TEMPLATE);
+        assert!(diagnostics.contains("instafy-diagnostics-v1"));
+
+        let diagnostics_openai = String::from_utf8(run_git_stdout(
+            repo_str,
+            &[
+                "show",
+                "HEAD:.agents/skills/instafy-diagnostics/agents/openai.yaml",
+            ],
+        )?)?;
+        assert_eq!(diagnostics_openai, DIAGNOSTICS_OPENAI_TEMPLATE);
 
         let _ = std::fs::remove_dir_all(&temp_root);
         Ok(())
