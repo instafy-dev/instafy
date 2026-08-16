@@ -56,28 +56,32 @@ export function LandingPage() {
       className="flex min-h-screen min-h-[100dvh] flex-col overflow-x-hidden bg-gradient-to-b from-[#ffffff] via-white to-[#efefef] text-slate-900 dark:bg-none dark:bg-[var(--color-studio-dark-canvas)] dark:text-slate-100"
       data-testid="landing-page"
     >
-      <MarketingHeader
-        items={[
-          { label: "Home", to: "/", match: "exact" },
-          { label: "Install", to: "/install", match: "exact" },
-          { label: "News", to: "/news", match: "prefix" },
-          {
-            label: user ? "Open Studio" : "Get started",
-            to: buildDestination(),
-            variant: "primary",
-            testId: "landing-launch-button",
-          },
-        ]}
-      />
-
       <main className="relative isolate flex w-full flex-1 flex-col">
         <div
           aria-hidden="true"
           className="pointer-events-none absolute inset-x-[-8%] top-4 z-0 h-[34rem] bg-[radial-gradient(52%_58%_at_72%_22%,rgba(0,122,204,0.10)_0%,rgba(0,122,204,0.04)_45%,transparent_75%)] blur-3xl dark:bg-[radial-gradient(56%_60%_at_74%_24%,rgba(55,148,255,0.12)_0%,rgba(55,148,255,0.05)_45%,transparent_75%)]"
           data-testid="landing-ambient-glow"
         />
-        <section className="relative z-10 flex min-h-[min(calc(100dvh-5rem),68rem)] w-full flex-col overflow-hidden">
+        <section className="relative z-10 flex min-h-[min(100dvh,72rem)] w-full flex-col overflow-hidden">
           <LandingTentacleScene purpleAgentLabel={`${purpleAgent} · agent`} />
+
+          {/* The artwork runs behind the header, which becomes a translucent
+              blur bar instead of a solid band sitting on the page canvas. */}
+          <div className="relative z-20 bg-white/40 backdrop-blur-md dark:bg-black/25">
+            <MarketingHeader
+              items={[
+                { label: "Home", to: "/", match: "exact" },
+                { label: "Install", to: "/install", match: "exact" },
+                { label: "News", to: "/news", match: "prefix" },
+                {
+                  label: user ? "Open Studio" : "Get started",
+                  to: buildDestination(),
+                  variant: "primary",
+                  testId: "landing-launch-button",
+                },
+              ]}
+            />
+          </div>
 
           <div className="relative z-10 mx-auto flex w-full max-w-6xl flex-1 flex-col items-center justify-center px-6 pb-10 pt-6 text-center md:pt-8">
             <Heading level={1} variant="hero" className="max-w-[16ch]" data-testid="landing-hero-heading">

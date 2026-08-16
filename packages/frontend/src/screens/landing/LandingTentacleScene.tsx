@@ -22,7 +22,7 @@ interface LandingPresenceCursor {
 const PRESENCE_CURSORS: LandingPresenceCursor[] = [
   { id: "ada", label: "Ada", color: "#e93d82", imageX: 1210, imageY: 300, floatDelay: "-1.2s" },
   { id: "purple-agent", label: "", color: "#7c4dd8", imageX: 260, imageY: 700, floatDelay: "-3.1s" },
-  { id: "octo", label: "Octo · agent", color: "#f5960a", imageX: 285, imageY: 105, floatDelay: "-4.6s", hideBelowMd: true },
+  { id: "octo", label: "Octo · agent", color: "#f5960a", imageX: 285, imageY: 150, floatDelay: "-4.6s", hideBelowMd: true },
   { id: "kim", label: "Kim", color: "#8cb93b", imageX: 1300, imageY: 880, floatDelay: "-2.2s" },
 ];
 
