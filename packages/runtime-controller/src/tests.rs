@@ -3315,29 +3315,12 @@ async fn bug_report_creation_authorizes_project_and_linked_resources() -> anyhow
             .ok_or_else(|| anyhow::anyhow!("bug report response omitted id"))?,
     )?;
 
-    let submitted_event = timeout(std::time::Duration::from_secs(1), events_rx.recv()).await??;
-    assert_eq!(submitted_event.kind, "telemetry.bug_report.submitted");
-    assert_eq!(submitted_event.project_id, Some(allowed_project_id));
-    assert_eq!(submitted_event.data["bugReportId"], json!(bug_report_id));
-    assert_eq!(submitted_event.data["status"], "open");
-    assert_eq!(submitted_event.data["screenshotCount"], 0);
-    for sensitive_key in [
-        "message",
-        "details",
-        "reporterEmail",
-        "reporter_email",
-        "metadata",
-        "logs",
-    ] {
-        assert!(
-            submitted_event.data.get(sensitive_key).is_none(),
-            "project event leaked {sensitive_key}"
-        );
-    }
-    let serialized_event = serde_json::to_string(&submitted_event)?;
-    assert!(!serialized_event.contains("Authorized project context"));
-    assert!(!serialized_event.contains("Sensitive support details"));
-    assert!(!serialized_event.contains(&format!("controller-test+{reporter_user_id}@example.com")));
+    assert!(
+        timeout(std::time::Duration::from_millis(100), events_rx.recv())
+            .await
+            .is_err(),
+        "customer bug reports must not be broadcast to project event subscribers"
+    );
 
     let stored = pool
         .get()
@@ -3384,6 +3367,508 @@ async fn bug_report_creation_authorizes_project_and_linked_resources() -> anyhow
     cleanup_org(&pool, &allowed_org_id).await?;
     cleanup_test_user(&pool, &owner_user_id).await?;
     cleanup_test_user(&pool, &reporter_user_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn support_report_routes_enforce_customer_privacy_boundary() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("support report route privacy test").await?;
+
+    fn assert_exact_json_keys(value: &serde_json::Value, expected: &[&str], label: &str) {
+        let mut actual = value
+            .as_object()
+            .unwrap_or_else(|| panic!("{label} must be a JSON object"))
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        actual.sort_unstable();
+        let mut expected = expected.to_vec();
+        expected.sort_unstable();
+        assert_eq!(actual, expected, "{label} field boundary changed");
+    }
+
+    let reporter_a_id = Uuid::new_v4();
+    let reporter_b_id = Uuid::new_v4();
+    ensure_test_user(&pool, &reporter_a_id).await?;
+    ensure_test_user(&pool, &reporter_b_id).await?;
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "support-report-privacy-boundary",
+    );
+    let reporter_a_token = crate::auth::issue_controller_token(&config, &reporter_a_id)
+        .map_err(|error| controller_error("issue support reporter A token", error))?
+        .token;
+    let reporter_b_token = crate::auth::issue_controller_token(&config, &reporter_b_id)
+        .map_err(|error| controller_error("issue support reporter B token", error))?
+        .token;
+    let runtime_id = Uuid::new_v4();
+    let scoped_token = mint_scoped_token(
+        &config,
+        ScopedTokenRequest {
+            audience: runtime_id.to_string(),
+            subject: reporter_a_id.to_string(),
+            project_id: Uuid::new_v4().to_string(),
+            origin_id: None,
+            runtime_id: Some(runtime_id.to_string()),
+            protocol: None,
+            scopes: vec!["telemetry.write".to_string()],
+            lease_id: None,
+            run_id: None,
+            prefer_runtime: None,
+            ttl_seconds: Some(300),
+        },
+    )
+    .map_err(|error| controller_error("mint scoped support rejection token", error))?
+    .token;
+    let app = crate::bug_reports::router().with_state(build_test_state(pool.clone(), config));
+
+    let png_signature = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    let create_a = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/support/reports")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_a_token}"),
+                )
+                .body(Body::from(
+                    json!({
+                        "message": "Reporter A support issue",
+                        "details": "Details submitted by reporter A",
+                        "metadata": { "customerContext": "submitted" },
+                        "logs": [{ "message": "customer diagnostic" }],
+                        "screenshots": [{
+                            "fileName": "screen.png",
+                            "mediaType": "image/png",
+                            "dataBase64": STANDARD.encode(&png_signature),
+                            "byteLength": png_signature.len()
+                        }]
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(create_a.status(), StatusCode::CREATED);
+    let create_a_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(create_a.into_body(), usize::MAX).await?)?;
+    let report_a_id = Uuid::parse_str(
+        create_a_payload["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("support create response omitted report A id"))?,
+    )?;
+
+    let create_b = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/support/reports")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_b_token}"),
+                )
+                .body(Body::from(
+                    json!({ "message": "Reporter B support issue" }).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(create_b.status(), StatusCode::CREATED);
+    let create_b_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(create_b.into_body(), usize::MAX).await?)?;
+    let report_b_id = Uuid::parse_str(
+        create_b_payload["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("support create response omitted report B id"))?,
+    )?;
+
+    pool.get()
+        .await?
+        .execute(
+            "update bug_reports
+                set priority = 'urgent',
+                    assignee = 'internal-operator',
+                    labels = '[\"security\"]'::jsonb,
+                    github_issue_url = 'https://example.invalid/internal/123',
+                    metadata = '{\"triageSecret\":\"internal-only\"}'::jsonb,
+                    logs = '[{\"secret\":\"internal-only\"}]'::jsonb,
+                    updated_at = now()
+              where id = $1",
+            &[&report_a_id],
+        )
+        .await?;
+
+    let list_a = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/support/reports?mine=false&limit=100")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_a_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(list_a.status(), StatusCode::OK);
+    let list_a_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(list_a.into_body(), usize::MAX).await?)?;
+    let reporter_a_reports = list_a_payload["reports"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("support list response omitted reports"))?;
+    assert_eq!(reporter_a_reports.len(), 1);
+    assert_eq!(reporter_a_reports[0]["id"], report_a_id.to_string());
+    assert_ne!(reporter_a_reports[0]["id"], report_b_id.to_string());
+    assert_eq!(reporter_a_reports[0]["screenshotCount"], 1);
+    assert_exact_json_keys(
+        &reporter_a_reports[0],
+        &[
+            "id",
+            "createdAt",
+            "updatedAt",
+            "message",
+            "status",
+            "projectId",
+            "screenshotCount",
+        ],
+        "customer support list item",
+    );
+
+    let show_a = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/support/reports/{report_a_id}"))
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_a_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(show_a.status(), StatusCode::OK);
+    let show_a_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(show_a.into_body(), usize::MAX).await?)?;
+    assert_eq!(show_a_payload["id"], report_a_id.to_string());
+    assert_eq!(show_a_payload["details"], "Details submitted by reporter A");
+    assert_exact_json_keys(
+        &show_a_payload,
+        &[
+            "id",
+            "createdAt",
+            "updatedAt",
+            "message",
+            "details",
+            "status",
+            "projectId",
+            "runtimeId",
+            "runId",
+            "conversationId",
+            "screenshots",
+        ],
+        "customer support detail",
+    );
+    let customer_attachments = show_a_payload["screenshots"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("support detail omitted attachment descriptors"))?;
+    assert_eq!(customer_attachments.len(), 1);
+    assert_eq!(customer_attachments[0]["fileName"], "screen.png");
+    assert_eq!(customer_attachments[0]["mediaType"], "image/png");
+    assert_eq!(customer_attachments[0]["byteSize"], png_signature.len());
+    assert_exact_json_keys(
+        &customer_attachments[0],
+        &["id", "fileName", "mediaType", "byteSize"],
+        "customer support attachment",
+    );
+
+    let cross_customer_show = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/support/reports/{report_b_id}"))
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_a_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(cross_customer_show.status(), StatusCode::NOT_FOUND);
+
+    let service_support_list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/support/reports")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    "Bearer service-role-token",
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(service_support_list.status(), StatusCode::UNAUTHORIZED);
+
+    let service_support_create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/support/reports")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    "Bearer service-role-token",
+                )
+                .body(Body::from(
+                    json!({ "message": "must not be accepted" }).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(service_support_create.status(), StatusCode::UNAUTHORIZED);
+
+    let scoped_support_list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/support/reports")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {scoped_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(scoped_support_list.status(), StatusCode::UNAUTHORIZED);
+
+    let legacy_customer_show = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/bug-reports/{report_a_id}"))
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_a_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(legacy_customer_show.status(), StatusCode::OK);
+    let legacy_customer_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(legacy_customer_show.into_body(), usize::MAX).await?)?;
+    assert_exact_json_keys(
+        &legacy_customer_payload,
+        &[
+            "id",
+            "createdAt",
+            "updatedAt",
+            "message",
+            "details",
+            "status",
+            "projectId",
+            "runtimeId",
+            "runId",
+            "conversationId",
+            "screenshots",
+        ],
+        "legacy customer bug report detail",
+    );
+    assert_exact_json_keys(
+        &legacy_customer_payload["screenshots"][0],
+        &["id", "fileName", "mediaType", "byteSize"],
+        "legacy customer bug report attachment",
+    );
+
+    let operator_show = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/bug-reports/{report_a_id}"))
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    "Bearer service-role-token",
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(operator_show.status(), StatusCode::OK);
+    let operator_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(operator_show.into_body(), usize::MAX).await?)?;
+    assert_eq!(operator_payload["priority"], "urgent");
+    assert_eq!(operator_payload["assignee"], "internal-operator");
+    assert_eq!(
+        operator_payload["metadata"]["triageSecret"],
+        "internal-only"
+    );
+    assert_eq!(operator_payload["logs"][0]["secret"], "internal-only");
+    assert_eq!(
+        operator_payload["screenshots"][0]["dataBase64"],
+        STANDARD.encode(&png_signature)
+    );
+
+    pool.get()
+        .await?
+        .execute(
+            "delete from bug_reports where id in ($1, $2)",
+            &[&report_a_id, &report_b_id],
+        )
+        .await?;
+    cleanup_test_user(&pool, &reporter_b_id).await?;
+    cleanup_test_user(&pool, &reporter_a_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn support_report_routes_enforce_request_and_daily_limits() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("support report request limit test").await?;
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "support-report-request-limits",
+    );
+    let quota_user_id = Uuid::new_v4();
+    let malformed_user_id = Uuid::new_v4();
+    let large_body_user_id = Uuid::new_v4();
+    let quota_user_token = crate::auth::issue_controller_token(&config, &quota_user_id)
+        .map_err(|error| controller_error("issue support quota token", error))?
+        .token;
+    let malformed_user_token = crate::auth::issue_controller_token(&config, &malformed_user_id)
+        .map_err(|error| controller_error("issue support malformed-body token", error))?
+        .token;
+    let large_body_user_token = crate::auth::issue_controller_token(&config, &large_body_user_id)
+        .map_err(|error| controller_error("issue support large-body token", error))?
+        .token;
+    let app = crate::bug_reports::router().with_state(build_test_state(pool.clone(), config));
+
+    let initial_quota_report = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/support/reports")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {quota_user_token}"),
+                )
+                .body(Body::from(
+                    json!({ "message": "Daily quota seed" }).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(initial_quota_report.status(), StatusCode::CREATED);
+
+    {
+        let connection = pool.get().await?;
+        for ordinal in 1..20 {
+            connection
+                .execute(
+                    "insert into bug_reports (id, user_id, message, created_at)
+                     values ($1, $2, $3, now())",
+                    &[
+                        &Uuid::new_v4(),
+                        &quota_user_id,
+                        &format!("Daily quota seed {ordinal}"),
+                    ],
+                )
+                .await?;
+        }
+    }
+
+    let daily_quota_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/support/reports")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {quota_user_token}"),
+                )
+                .body(Body::from(
+                    json!({ "message": "Must exceed daily quota" }).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(daily_quota_response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    for attempt in 1..=6 {
+        let malformed_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/support/reports")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {malformed_user_token}"),
+                    )
+                    .body(Body::from("{"))?,
+            )
+            .await?;
+        assert_eq!(
+            malformed_response.status(),
+            if attempt <= 5 {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            },
+            "unexpected status for malformed support attempt {attempt}"
+        );
+    }
+
+    let oversized_body = vec![b'x'; 20 * 1024 * 1024 + 1];
+    let oversized_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/support/reports")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {large_body_user_token}"),
+                )
+                .body(Body::from(oversized_body))?,
+        )
+        .await?;
+    assert_eq!(oversized_response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    let anonymous_oversized_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/support/reports")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(vec![b'x'; 20 * 1024 * 1024 + 1]))?,
+        )
+        .await?;
+    assert_eq!(
+        anonymous_oversized_response.status(),
+        StatusCode::UNAUTHORIZED,
+        "support route must authenticate before buffering a large request body"
+    );
+
+    pool.get()
+        .await?
+        .execute(
+            "delete from bug_reports where user_id = $1",
+            &[&quota_user_id],
+        )
+        .await?;
     Ok(())
 }
 

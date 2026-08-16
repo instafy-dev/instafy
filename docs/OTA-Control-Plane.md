@@ -81,12 +81,12 @@ Reason:
 
 ## Automation Boundary
 
-Use the Instafy CLI as the rollout interface for automation.
+Use the private `instafy-ops` CLI as the rollout interface for hosted automation.
 
 That means:
 
-- human operators can call `instafy ota ...`
-- AI agents can call `instafy ota ...`
+- human operators can call `instafy-ops ota ...`
+- authorized AI agents can call `instafy-ops ota ...`
 - GitHub Actions should call the same CLI
 
 Do not duplicate rollout behavior in one-off workflow shell scripts when a stable CLI command exists. The workflow should package artifacts, then hand off release registration and channel movement to the same command surface used everywhere else.
@@ -410,10 +410,10 @@ Public implementation primitives:
 - bundle builder: `scripts/build-ota-bundle.mjs`
 - release payload renderer: `scripts/render-ota-release-payload.mjs`
 - signing key generator: `pnpm ota:signing:keygen`
-- rollout CLI:
-  - `instafy ota releases register`
-  - `instafy ota channels activate`
-  - `instafy ota channels rollback`
+- hosted rollout CLI (private distribution):
+  - `instafy-ops ota releases register`
+  - `instafy-ops ota channels activate`
+  - `instafy-ops ota channels rollback`
 
 Signing flow:
 

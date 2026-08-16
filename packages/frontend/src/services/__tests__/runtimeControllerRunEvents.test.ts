@@ -779,10 +779,13 @@ describe("runtime controller run event streaming", () => {
 
   it("stops a rejected custom-controller stream at the reload boundary", async () => {
     const overrideToken = futureJwt();
-    window.history.replaceState(
-      null,
-      "",
-      `/studio?controllerUrl=https%3A%2F%2Foverride-controller.example.test&controllerAccessToken=${overrideToken}`,
+    window.sessionStorage.setItem(
+      "instafy.controllerBinding",
+      JSON.stringify({
+        version: 1,
+        token: overrideToken,
+        baseUrl: "https://override-controller.example.test",
+      }),
     );
     fetchMock.mockImplementationOnce((input: RequestInfo | URL) =>
       Promise.resolve({

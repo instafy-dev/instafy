@@ -33,10 +33,9 @@ describe("emitControllerAuthError with an injected override token", () => {
 
   it("drops a stale override on 401 and requires a reload without sign-out", async () => {
     const overrideToken = futureJwt();
-    window.history.replaceState(
-      null,
-      "",
-      `/studio?controllerAccessToken=${encodeURIComponent(overrideToken)}`,
+    window.sessionStorage.setItem(
+      "instafy.controllerBinding",
+      JSON.stringify({ version: 1, token: overrideToken, baseUrl: null }),
     );
     const core = await import("../core");
     const received: number[] = [];
@@ -64,10 +63,9 @@ describe("emitControllerAuthError with an injected override token", () => {
 
   it("does not consume the override for non-401 auth errors", async () => {
     const overrideToken = futureJwt();
-    window.history.replaceState(
-      null,
-      "",
-      `/studio?controllerAccessToken=${encodeURIComponent(overrideToken)}`,
+    window.sessionStorage.setItem(
+      "instafy.controllerBinding",
+      JSON.stringify({ version: 1, token: overrideToken, baseUrl: null }),
     );
     const core = await import("../core");
     const received: number[] = [];
