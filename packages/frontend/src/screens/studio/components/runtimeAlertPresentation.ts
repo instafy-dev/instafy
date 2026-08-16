@@ -57,14 +57,34 @@ export function isRecoverableRuntimeStartAlert(
   );
 }
 
+export interface AgentWaitingRuntimeLimit {
+  limitReached: boolean;
+  blockerProjectLabel: string | null;
+  blockerRuntimeLabel: string | null;
+}
+
 export function resolveAgentWaitingActivityCopy(input: {
   displayNames: readonly string[];
   workspaceStarting: boolean;
   queued: boolean;
+  runtimeLimit?: AgentWaitingRuntimeLimit | null;
 }): { label: string; ariaLabel: string } {
   const names = input.displayNames.filter((name) => name.trim().length > 0);
   const multiple = names.length > 1;
   const subject = names.join(", ") || "Octo";
+
+  // The runtime slot wall must out-rank every generic waiting phrase: a
+  // message queued behind runtime_limit_reached will not send until the
+  // blocking runtime stops, and "starting its workspace…" reads as progress
+  // where there is none.
+  if (input.runtimeLimit?.limitReached && (input.workspaceStarting || input.queued)) {
+    const blocker =
+      input.runtimeLimit.blockerProjectLabel ??
+      input.runtimeLimit.blockerRuntimeLabel;
+    const where = blocker ? `"${blocker}"` : "another project";
+    const label = `Your cloud runtime is busy in ${where}. Stop it there or wait for it to go idle — this message will send once a runtime is free.`;
+    return { label, ariaLabel: label };
+  }
 
   if (input.workspaceStarting) {
     return multiple
