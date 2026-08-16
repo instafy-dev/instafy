@@ -1020,12 +1020,12 @@ export function LoginPage() {
 
       {!isExtensionEmbed ? (
         // Quiet version of the landing scene: arms frame the edges while the
-        // form sits in the artwork's clear center. Light mode only, sm+ widths
-        // only, and dimmed so the form keeps the focus. Extension embeds stay
-        // plain; the web and desktop-shell surfaces both get the scene.
+        // form sits in the artwork's clear center. sm+ widths only, dimmed so
+        // the form keeps the focus. Extension embeds stay plain; the web and
+        // desktop-shell surfaces both get the scene in both themes.
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute inset-0 z-0 hidden overflow-hidden opacity-70 sm:block dark:hidden"
+          className="pointer-events-none absolute inset-0 z-0 hidden overflow-hidden opacity-70 sm:block"
         >
           <TentacleBackdrop fadeBottom={false} />
         </div>

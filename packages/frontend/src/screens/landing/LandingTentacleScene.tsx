@@ -57,20 +57,24 @@ function isInsideScene(
 }
 
 // The bare artwork layer, shared with quieter surfaces (login) that want the
-// same scene without cursors or motion. The bottom fade is for surfaces that
-// flow into further content below (the landing hero); single-viewport pages
-// should keep the arms at full strength to the bottom edge.
+// same scene without cursors or motion. The dark variant is the same
+// composition re-rendered on charcoal, so the image-space cursor anchors work
+// against both. The bottom fade is for surfaces that flow into further
+// content below (the landing hero); single-viewport pages should keep the
+// arms at full strength to the bottom edge.
 export function TentacleBackdrop({ className, fadeBottom = true }: { className?: string; fadeBottom?: boolean }) {
+  const shared = [
+    "absolute inset-0 bg-cover bg-center",
+    fadeBottom ? "[mask-image:linear-gradient(to_bottom,black_84%,transparent_100%)]" : "",
+    className ?? "",
+  ]
+    .filter(Boolean)
+    .join(" ");
   return (
-    <div
-      className={[
-        "absolute inset-0 bg-[url('/landing-tentacles.jpg')] bg-cover bg-center",
-        fadeBottom ? "[mask-image:linear-gradient(to_bottom,black_84%,transparent_100%)]" : "",
-        className ?? "",
-      ]
-        .filter(Boolean)
-        .join(" ")}
-    />
+    <>
+      <div className={`${shared} bg-[url('/landing-tentacles.jpg')] dark:hidden`} />
+      <div className={`${shared} hidden bg-[url('/landing-tentacles-dark.jpg')] dark:block`} />
+    </>
   );
 }
 
@@ -93,7 +97,7 @@ export function LandingTentacleScene({ purpleAgentLabel }: { purpleAgentLabel?: 
       ref={sceneRef}
       aria-hidden="true"
       data-testid="landing-tentacle-scene"
-      className="pointer-events-none absolute inset-0 z-0 overflow-hidden dark:hidden"
+      className="pointer-events-none absolute inset-0 z-0 overflow-hidden"
     >
       <TentacleBackdrop />
 
