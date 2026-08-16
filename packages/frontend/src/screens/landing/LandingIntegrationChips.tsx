@@ -68,7 +68,7 @@ const integrations: IntegrationChipDefinition[] = [
 export function LandingIntegrationChips() {
   return (
     <div className="w-full">
-      <ul className="flex flex-wrap items-center justify-center gap-2 md:justify-start" data-testid="landing-integrations">
+      <ul className="flex flex-wrap items-center justify-center gap-2" data-testid="landing-integrations">
         {integrations.map((integration) => {
           const isSoon = integration.status === "soon";
           return (
