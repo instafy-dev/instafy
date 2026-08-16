@@ -21,7 +21,7 @@
   "approvedGitlinks": {
     "codex": "e834d276eeafce2b86a86ebe926a77013b734a79"
   },
-  "binaryAssetCount": 45,
+  "binaryAssetCount": 47,
   "binarySha256": {
     "packages/desktop-app/assets/icon.png": "92c99f7d31638dfaf336ef6e54f25c916c9d714348e5b9dc8a32248b9978c25d",
     "packages/frontend/android/app/src/main/res/drawable-land-hdpi/splash.png": "66f2cf536839db08970c609ddb5dd904f8113e862e36f76d3e3a8401ed07feed",
@@ -62,7 +62,9 @@
     "packages/frontend/public/icon-maskable-192.png": "c43dd504ff0dd615cf12446eb96a63e3cdd4aaeae437bd01b71c13800add4ac6",
     "packages/frontend/public/icon-maskable-512.png": "7ce0967e6d120971b36a7bb2fc27b5562e840a55edf9e676e50458861fb6d181",
     "packages/frontend/public/icon.png": "d074dd76bb97cc0eb245cc9ffbe55521a1166603862a6d79269fb2d269a8eff0",
-    "packages/frontend/public/og-image.png": "b8e90878bdada5eb5143979a56463586a922cfece40f6e773512ca94210f32f1",
+    "packages/frontend/public/landing-tentacles-dark.jpg": "9d3b57363b7da51a865cd7ebd5cf7de08fcdb158d220bb66f080c4f2a47bebe0",
+    "packages/frontend/public/landing-tentacles.jpg": "6f4b1bccd21d359ff50266e39101b67c4d7ce4acf471f44adcd3f5b1440e6bc7",
+    "packages/frontend/public/og-image.png": "2570a6e0e2d2dd05f1941bff892eab41d17beceddeaaa560703647781b26ff4f",
     "packages/frontend/public/provider-icons/deepseek.png": "6b67dfe2437107e574d7b7471e33d00bc96f92dc401b53c0c904632fd10d91d7",
     "packages/frontend/public/provider-icons/kimi.png": "1d36750030d56c159b766ef991260c6902670ea3b2fc7b654af7090f29979b69",
     "packages/frontend/store/github-app-badge-logo.png": "987f560ee1c46fefa89277bb9780edf78e154e352f99199ea24c96ed9ebafc61",
