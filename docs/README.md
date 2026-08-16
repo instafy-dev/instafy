@@ -14,6 +14,7 @@ These docs reflect the current product scope: a chat-first filesystem workspace 
 - Chat-first onboarding + benchmarking: `docs/Onboarding-Benchmarking.md`
 - /learn and benchmark system: `docs/Learn-Benchmarking.md`
 - Multi-agent evaluation: `docs/Multi-Agent-Evaluation.md`
+- AI-driven diagnostics and support consent: `docs/Agent-Diagnostics.md`
 - Credits and billing: `docs/Credits-Billing.md`
 - Local development: `docs/Local-Dev.md`
 - Testing: `docs/Testing.md`

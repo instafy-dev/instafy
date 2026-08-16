@@ -3,7 +3,7 @@ name: instafy-skill-router
 description: Decide which Instafy skill(s) to apply for a user request (browsing vs previews vs secrets, etc).
 context_kind: meta
 context_parent: instafy-persistent-contexts
-context_children: instafy-automations, instafy-browser-automation, instafy-byoc-ai-credentials, instafy-collaboration, instafy-conversation-history, instafy-frontend-previews, instafy-git-canonical-conflicts, instafy-git-canonical-sync, instafy-integration-onboarding, instafy-learning-policy, instafy-location-sharing, instafy-runtime-flavors, instafy-secrets, instafy-skill-import-compat
+context_children: instafy-automations, instafy-browser-automation, instafy-byoc-ai-credentials, instafy-collaboration, instafy-conversation-history, instafy-diagnostics, instafy-frontend-previews, instafy-git-canonical-conflicts, instafy-git-canonical-sync, instafy-integration-onboarding, instafy-learning-policy, instafy-location-sharing, instafy-runtime-flavors, instafy-secrets, instafy-skill-import-compat
 always_include: true
 max_children: 3
 ---
@@ -80,6 +80,12 @@ Use these mappings unless a project-specific skill overrides them.
   - Use `instafy-conversation-history`.
   - Prefer normal-language lookup over teaching special composer syntax.
   - Search first with `instafy conversation search "<keywords>"`, then inspect with `instafy conversation show <id>`.
+
+- **Failed run / runtime error / diagnose / investigate / support report**
+  - Use `instafy-diagnostics`.
+  - Read signed-in-user diagnostics first; never scrape local logs or use raw/operator APIs.
+  - Keep diagnosis read-only unless the user explicitly asks to file a report, then preview and
+    obtain confirmation before submitting once.
 
 - **Reminders / schedules / recurring tasks / “in 10 minutes” / “every morning at 8” / automation management**
   - Use `instafy-automations`.
