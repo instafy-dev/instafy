@@ -1,4 +1,5 @@
 import {
+  ControllerApiError,
   normalizeUuidParam,
   readControllerApiError,
   readControllerError,
@@ -136,6 +137,22 @@ export interface ControllerOrgInvitation {
   status: string;
   createdAt: string;
   expiresAt?: string | null;
+}
+
+export interface ControllerOrgInvitationPreview {
+  kind: "invitation" | "inviteLink";
+  orgId: string;
+  orgSlug: string;
+  orgName: string;
+  role: string;
+  invitedEmailMasked: string | null;
+  inviterName: string | null;
+  inviterEmail: string | null;
+  projectId: string | null;
+  projectName: string | null;
+  conversationId: string | null;
+  conversationName: string | null;
+  expiresAt: string | null;
 }
 
 export interface ControllerOrgInvitationCreation extends ControllerOrgInvitation {
@@ -1450,8 +1467,12 @@ export async function createControllerOrgInvitationStrict(params: {
     }
   }
   if (!response.ok) {
-    throw new Error(
-      await readControllerError(
+    // A typed error, not a flattened message: the 409
+    // invitation_role_conflict carries the existing invitation's id and
+    // roles in details, which the invite form uses to offer an in-place
+    // role update instead of forcing cancel-and-recreate.
+    throw new ControllerApiError(
+      await readControllerApiError(
         response,
         "Unable to create email invite",
         requestContext,
@@ -1681,6 +1702,68 @@ export async function cancelControllerOrgInvitation(params: {
   return false;
 }
 
+// Throws with the server's message on failure (like the strict create):
+// role-change rejections carry reasons the inviter must actually read --
+// "Only organization owners can assign the owner role.", "This invitation
+// has expired." -- and a swallowed null would flatten them all into one
+// generic toast.
+export async function updateControllerOrgInvitationRole(params: {
+  orgId: string;
+  invitationId: string;
+  role: string;
+}): Promise<ControllerOrgInvitation & { acceptUrl?: string }> {
+  if (!runtimeControllerEnabled) {
+    throw new Error("Runtime controller is unavailable.");
+  }
+  const trimmedOrg = params.orgId.trim();
+  const trimmedInvitation = params.invitationId.trim();
+  if (!trimmedOrg || !trimmedInvitation) {
+    throw new Error("Team id and invitation id are required.");
+  }
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
+  if (!accessToken) {
+    throw new Error("You need to sign in before updating invitations.");
+  }
+  const response = await fetch(
+    `${requestContext.baseUrl}/orgs/${encodeURIComponent(trimmedOrg)}/invitations/${encodeURIComponent(
+      trimmedInvitation,
+    )}`,
+    {
+      method: "PATCH",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ role: params.role }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      await readControllerError(
+        response,
+        "Unable to update the invitation role",
+        requestContext,
+      ),
+    );
+  }
+  const body = (await response.json().catch(() => null)) as {
+    invitation?: ControllerOrgInvitation;
+    acceptUrl?: string;
+  } | null;
+  const invitation = body?.invitation;
+  if (invitation && typeof invitation.id === "string") {
+    // The token survives a role change by design, so the response's accept
+    // URL lets a retargeted invite re-surface the SAME shareable link.
+    const acceptUrl =
+      typeof body?.acceptUrl === "string" && body.acceptUrl.trim()
+        ? body.acceptUrl.trim()
+        : undefined;
+    return acceptUrl ? { ...invitation, acceptUrl } : invitation;
+  }
+  throw new Error("The server did not return the updated invitation.");
+}
+
 export async function acceptControllerOrgInvitation(params: {
   token: string;
 }): Promise<
@@ -1766,4 +1849,57 @@ export async function acceptControllerOrgInvitation(params: {
     // the wrong-account user got no hint email was the issue.
     throw error instanceof Error ? error : new Error(message);
   }
+}
+
+export async function previewControllerOrgInvitation(params: {
+  token: string;
+}): Promise<ControllerOrgInvitationPreview | null> {
+  const trimmedToken = params.token.trim();
+  if (!trimmedToken) {
+    return null;
+  }
+  const requestContext = await resolveControllerRequestContext(null);
+  const accessToken = requestContext.accessToken;
+  if (!accessToken) {
+    return null;
+  }
+  const response = await fetch(
+    `${requestContext.baseUrl}/org-invitations/preview?token=${encodeURIComponent(trimmedToken)}`,
+    { headers: { authorization: `Bearer ${accessToken}` } },
+  );
+  if (!response.ok) {
+    // Same rationale as accept: the backend messages ("invitation has
+    // expired", "invitation is no longer valid") ARE the UI copy.
+    const message = await readControllerError(
+      response,
+      "preview team invitation failed",
+      requestContext,
+    );
+    throw new Error(message);
+  }
+  const body = (await response.json().catch(() => null)) as Partial<ControllerOrgInvitationPreview> | null;
+  const text = (value: unknown): string | null =>
+    typeof value === "string" && value.length > 0 ? value : null;
+  const orgId = text(body?.orgId);
+  const orgSlug = text(body?.orgSlug);
+  const orgName = text(body?.orgName);
+  const role = text(body?.role);
+  if (!orgId || !orgSlug || !orgName || !role) {
+    return null;
+  }
+  return {
+    kind: body?.kind === "inviteLink" ? "inviteLink" : "invitation",
+    orgId,
+    orgSlug,
+    orgName,
+    role,
+    invitedEmailMasked: text(body?.invitedEmailMasked),
+    inviterName: text(body?.inviterName),
+    inviterEmail: text(body?.inviterEmail),
+    projectId: text(body?.projectId),
+    projectName: text(body?.projectName),
+    conversationId: text(body?.conversationId),
+    conversationName: text(body?.conversationName),
+    expiresAt: text(body?.expiresAt),
+  };
 }

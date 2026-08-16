@@ -4,12 +4,41 @@ import {
   type ControllerOrgInvitation
 } from "../sdk/instafy";
 import { controllerClient } from "../sdk/instafy";
+import { ControllerApiError } from "../services/runtimeController/core";
+
+export interface OrgInvitationRoleConflict {
+  invitationId: string;
+  existingRole: string;
+  requestedRole: string;
+}
 
 interface OrgInvitationMutationResult {
   success: boolean;
   error?: string;
   invitation?: ControllerOrgInvitation;
   acceptUrl?: string;
+  // Present when creation was refused because a pending invitation already
+  // exists with a different role — the caller can offer an in-place update.
+  conflict?: OrgInvitationRoleConflict;
+}
+
+function extractRoleConflict(error: unknown): OrgInvitationRoleConflict | null {
+  if (
+    !(error instanceof ControllerApiError) ||
+    error.code !== "invitation_role_conflict" ||
+    !error.details ||
+    typeof error.details !== "object"
+  ) {
+    return null;
+  }
+  const details = error.details as Record<string, unknown>;
+  const invitationId = typeof details.invitationId === "string" ? details.invitationId : "";
+  const existingRole = typeof details.existingRole === "string" ? details.existingRole : "";
+  const requestedRole = typeof details.requestedRole === "string" ? details.requestedRole : "";
+  if (!invitationId || !existingRole || !requestedRole) {
+    return null;
+  }
+  return { invitationId, existingRole, requestedRole };
 }
 
 export function useOrgInvitations(
@@ -19,8 +48,11 @@ export function useOrgInvitations(
 ) {
   const {
     cancelInvitation: cancelControllerOrgInvitation,
-    createInvitation: createControllerOrgInvitation,
+    // Strict so the 409 invitation_role_conflict arrives as a typed error
+    // with the existing invitation's id and roles, not a swallowed null.
+    createInvitationStrict: createControllerOrgInvitation,
     listInvitations: listControllerOrgInvitations,
+    updateInvitationRole: updateControllerOrgInvitationRole,
   } = controllerClient.organizations;
   const queryClient = useQueryClient();
   const enabled = Boolean(orgId);
@@ -113,7 +145,10 @@ export function useOrgInvitations(
         return { success: true, invitation, acceptUrl };
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unable to create email invite.";
-        return { success: false, error: message };
+        const conflict = extractRoleConflict(error);
+        return conflict
+          ? { success: false, error: message, conflict }
+          : { success: false, error: message };
       }
     },
     [createInvitationMutation]
@@ -135,12 +170,64 @@ export function useOrgInvitations(
     [cancelInvitationMutation]
   );
 
+  const updateInvitationRoleMutation = useMutation({
+    mutationFn: async (payload: { invitationId: string; role: string }) => {
+      if (!orgId) {
+        throw new Error("Select a team before updating invitations.");
+      }
+      // Throws with the server's reason on rejection; the callback below
+      // relays it so owner-gating and expiry read as themselves, not as a
+      // generic failure.
+      return await updateControllerOrgInvitationRole({
+        orgId,
+        invitationId: payload.invitationId,
+        role: payload.role,
+      });
+    },
+    onSuccess: async (updated) => {
+      if (updated?.id) {
+        // The accept URL is response metadata for the caller, not row state.
+        const invitation: ControllerOrgInvitation & { acceptUrl?: string } = { ...updated };
+        delete invitation.acceptUrl;
+        queryClient.setQueryData<ControllerOrgInvitation[]>(queryKey, (previous) => {
+          const existing = Array.isArray(previous) ? previous : [];
+          return existing.map((entry) => (entry.id === invitation.id ? invitation : entry));
+        });
+      }
+      await queryClient.invalidateQueries({ queryKey, exact: true });
+    },
+    // A rejected change often means the row itself is gone (accepted,
+    // canceled, expired); resync so the pending list stops showing it.
+    onError: async () => {
+      await queryClient.invalidateQueries({ queryKey, exact: true });
+    },
+  });
+
+  const updateInvitationRole = useCallback(
+    async (invitationId: string, role: string): Promise<OrgInvitationMutationResult> => {
+      try {
+        const result = await updateInvitationRoleMutation.mutateAsync({
+          invitationId,
+          role,
+        });
+        const { acceptUrl, ...invitation } = result;
+        return { success: true, invitation, acceptUrl };
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Unable to update the invitation role.";
+        return { success: false, error: message };
+      }
+    },
+    [updateInvitationRoleMutation]
+  );
+
   return {
     invitations: invitationsQuery.data ?? [],
     loading: invitationsQuery.isFetching,
     error: invitationsQuery.error instanceof Error ? invitationsQuery.error.message : null,
     refresh,
     createInvitation,
-    cancelInvitation
+    cancelInvitation,
+    updateInvitationRole
   };
 }

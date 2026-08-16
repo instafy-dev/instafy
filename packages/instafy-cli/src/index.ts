@@ -1211,6 +1211,10 @@ const automationsCreateCommand = automationsCommand
   .option("--timezone <tz>", "IANA timezone (e.g. America/New_York)")
   .option("--runtime-mode <mode>", "auto|hosted|existing (default: auto)")
   .option("--runtime-provider <id>", "Runtime provider id (optional)")
+  .option(
+    "--silent-when-nothing-to-report",
+    "Do not post a completion result or send a result notification when a successful run has no findings",
+  )
   .option("--paused", "Create paused");
 
 addSpaceOption(
@@ -1236,6 +1240,7 @@ automationsCreateCommand
         timezone: opts.timezone,
         runtimeMode: opts.runtimeMode,
         runtimeProvider: opts.runtimeProvider,
+        silentWhenNothingToReport: Boolean(opts.silentWhenNothingToReport),
         paused: Boolean(opts.paused),
         project: resolveSpaceIdOption(opts),
         controllerUrl: opts.serverUrl ?? opts.controllerUrl,

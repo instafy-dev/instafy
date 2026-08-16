@@ -16,6 +16,7 @@ import {
 const mocks = vi.hoisted(() => ({
   cancelInvitation: vi.fn(),
   createInvitation: vi.fn(),
+  updateInvitationRole: vi.fn(),
   createLink: vi.fn(),
   refreshInvitations: vi.fn(),
   refreshInviteLinks: vi.fn(),
@@ -57,6 +58,7 @@ vi.mock("../useOrgInvitations", () => ({
       refresh: mocks.refreshInvitations,
       createInvitation: mocks.createInvitation,
       cancelInvitation: mocks.cancelInvitation,
+      updateInvitationRole: mocks.updateInvitationRole,
     };
   },
 }));
@@ -129,6 +131,8 @@ describe("useInviteActions", () => {
     mocks.links = [];
     mocks.cancelInvitation.mockReset();
     mocks.cancelInvitation.mockResolvedValue({ success: true });
+    mocks.updateInvitationRole.mockReset();
+    mocks.updateInvitationRole.mockResolvedValue({ success: true });
     mocks.createInvitation.mockReset();
     mocks.createLink.mockReset();
     mocks.refreshInvitations.mockReset();
@@ -309,6 +313,128 @@ describe("useInviteActions", () => {
       "conversation-1",
     );
     expect(mocks.createLink).toHaveBeenCalledWith("builder");
+  });
+
+  it("updates a pending invitation's role through the scoped action", async () => {
+    await act(async () => {
+      root.render(
+        <InvitationHarness scope={{ kind: "organization", orgId: "org-1" }} />,
+      );
+    });
+
+    await expect(
+      invitationActions?.updatePendingInvitationRole("invitation-1", "admin"),
+    ).resolves.toEqual({ success: true });
+    expect(mocks.updateInvitationRole).toHaveBeenCalledWith("invitation-1", "admin");
+  });
+
+  it("relays the server's reason when a role update is rejected", async () => {
+    // The message matters: owner-gating and expiry must surface as
+    // themselves, not as a generic failure.
+    mocks.updateInvitationRole.mockResolvedValue({
+      success: false,
+      error: "Only organization owners can assign the owner role.",
+    });
+    await act(async () => {
+      root.render(
+        <InvitationHarness scope={{ kind: "organization", orgId: "org-1" }} />,
+      );
+    });
+
+    await expect(
+      invitationActions?.updatePendingInvitationRole("invitation-1", "owner"),
+    ).resolves.toEqual({
+      success: false,
+      error: "Only organization owners can assign the owner role.",
+    });
+  });
+
+  it("passes a role conflict through so forms can offer the in-place update", async () => {
+    mocks.createInvitation.mockResolvedValue({
+      success: false,
+      error: "A pending invitation already exists with a different role.",
+      conflict: {
+        invitationId: "invitation-1",
+        existingRole: "viewer",
+        requestedRole: "admin",
+      },
+    });
+    await act(async () => {
+      root.render(
+        <InvitationHarness scope={{ kind: "organization", orgId: "org-1" }} />,
+      );
+    });
+
+    await expect(
+      invitationActions?.prepareEmailInvite("person@example.com", "admin"),
+    ).resolves.toEqual({
+      success: false,
+      error: "A pending invitation already exists with a different role.",
+      conflict: {
+        invitationId: "invitation-1",
+        existingRole: "viewer",
+        requestedRole: "admin",
+      },
+    });
+  });
+
+  it("retargets a conflicting invitation and re-surfaces its unchanged link", async () => {
+    mocks.updateInvitationRole.mockResolvedValue({
+      success: true,
+      invitation: {
+        createdAt: "2026-07-16T08:00:00.000Z",
+        email: "person@example.com",
+        id: "invitation-1",
+        orgId: "org-1",
+        role: "admin",
+        status: "pending",
+      },
+      acceptUrl: "https://instafy.dev/invite?token=same-token",
+    });
+    await act(async () => {
+      root.render(
+        <InvitationHarness scope={{ kind: "organization", orgId: "org-1" }} />,
+      );
+    });
+
+    await expect(
+      invitationActions?.retargetPendingInvitation("invitation-1", "admin"),
+    ).resolves.toEqual({
+      success: true,
+      invitation: expect.objectContaining({ id: "invitation-1", role: "admin" }),
+      preparedInvite: {
+        acceptUrl: "https://instafy.dev/invite?token=same-token",
+        email: "person@example.com",
+        role: "admin",
+      },
+    });
+    expect(mocks.updateInvitationRole).toHaveBeenCalledWith("invitation-1", "admin");
+  });
+
+  it("refuses to report a retarget as prepared without its secure link", async () => {
+    mocks.updateInvitationRole.mockResolvedValue({
+      success: true,
+      invitation: {
+        createdAt: "2026-07-16T08:00:00.000Z",
+        email: "person@example.com",
+        id: "invitation-1",
+        orgId: "org-1",
+        role: "admin",
+        status: "pending",
+      },
+    });
+    await act(async () => {
+      root.render(
+        <InvitationHarness scope={{ kind: "organization", orgId: "org-1" }} />,
+      );
+    });
+
+    await expect(
+      invitationActions?.retargetPendingInvitation("invitation-1", "admin"),
+    ).resolves.toEqual({
+      success: false,
+      error: "The server did not return a secure invite link. Try again.",
+    });
   });
 
   it("keeps conversation identity in resolved invite URLs", () => {

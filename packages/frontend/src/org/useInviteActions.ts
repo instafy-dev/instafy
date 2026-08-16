@@ -6,7 +6,9 @@ import type {
 import type { PreparedEmailInvite } from "../sharing/preparedEmailInvite";
 import { resolvePublicAppUrl } from "../utils/publicAppUrl";
 import { useOrgInviteLinks } from "./useOrgInviteLinks";
-import { useOrgInvitations } from "./useOrgInvitations";
+import { useOrgInvitations, type OrgInvitationRoleConflict } from "./useOrgInvitations";
+
+export type { OrgInvitationRoleConflict } from "./useOrgInvitations";
 
 export const PROJECT_INVITE_ROLES = ["viewer", "builder"] as const;
 export type ProjectInviteRole = (typeof PROJECT_INVITE_ROLES)[number];
@@ -49,6 +51,10 @@ export type InviteRoleForScope<Scope extends InviteScope> =
 type InviteActionFailure = {
   success: false;
   error: string;
+  // Set when the failure is a pending invitation already holding a
+  // different role: the form can offer retargetPendingInvitation instead
+  // of the historical cancel-and-recreate dance.
+  conflict?: OrgInvitationRoleConflict;
 };
 
 export type PrepareEmailInviteResult =
@@ -130,6 +136,7 @@ export function useScopedInvitationActions<Scope extends InviteScope>(
     refresh,
     createInvitation,
     cancelInvitation,
+    updateInvitationRole,
   } = useOrgInvitations(
     normalizedScope?.orgId ?? null,
     normalizedScope?.projectId ?? null,
@@ -146,6 +153,7 @@ export function useScopedInvitationActions<Scope extends InviteScope>(
         return {
           success: false,
           error: result.error ?? "Unable to create email invite.",
+          conflict: result.conflict,
         };
       }
       if (!result.acceptUrl || !result.invitation) {
@@ -181,6 +189,61 @@ export function useScopedInvitationActions<Scope extends InviteScope>(
     [cancelInvitation],
   );
 
+  // InviteRoleForScope keeps the client honest about the server's role split:
+  // project/conversation invites accept viewer|builder only, org invites the
+  // full organization set.
+  const updatePendingInvitationRole = useCallback(
+    async (
+      invitationId: string,
+      role: InviteRoleForScope<Scope>,
+    ): Promise<InviteMutationResult> => {
+      const result = await updateInvitationRole(invitationId, role);
+      if (!result.success) {
+        return {
+          success: false,
+          error: result.error ?? "Unable to update the invitation role.",
+        };
+      }
+      return { success: true };
+    },
+    [updateInvitationRole],
+  );
+
+  // Resolves a role conflict by retargeting the EXISTING pending invitation
+  // and re-surfacing its unchanged accept link as a prepared invite — the
+  // same shape prepareEmailInvite returns, so the form treats both paths
+  // identically.
+  const retargetPendingInvitation = useCallback(
+    async (
+      invitationId: string,
+      role: InviteRoleForScope<Scope>,
+    ): Promise<PrepareEmailInviteResult> => {
+      const result = await updateInvitationRole(invitationId, role);
+      if (!result.success || !result.invitation) {
+        return {
+          success: false,
+          error: result.error ?? "Unable to update the invitation role.",
+        };
+      }
+      if (!result.acceptUrl) {
+        return {
+          success: false,
+          error: "The server did not return a secure invite link. Try again.",
+        };
+      }
+      return {
+        success: true,
+        invitation: result.invitation,
+        preparedInvite: {
+          acceptUrl: result.acceptUrl,
+          email: result.invitation.email,
+          role: result.invitation.role,
+        },
+      };
+    },
+    [updateInvitationRole],
+  );
+
   return {
     invitations,
     loading,
@@ -188,6 +251,8 @@ export function useScopedInvitationActions<Scope extends InviteScope>(
     refresh,
     prepareEmailInvite,
     cancelPendingInvitation,
+    updatePendingInvitationRole,
+    retargetPendingInvitation,
   };
 }
 
