@@ -21,9 +21,9 @@ export function LandingPage() {
 
   useEffect(() => {
     applyPageMeta({
-      title: "Instafy · Your coding agent, your repo, any device",
+      title: "Instafy · The shared studio for your team and its AI agents",
       description:
-        "Bring your own ChatGPT or Codex subscription. An AI agent edits real files in a local or hosted git repo you own that you can open from any device, including your phone.",
+        "Ship code, close the books, launch the site: your team and its AI agents work side by side in one live session. Bring the AI you already pay for; every change lands as a real, revertible commit in files you own.",
       image: "/og-image.png",
     });
   }, []);
