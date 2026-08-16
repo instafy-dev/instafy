@@ -1018,10 +1018,11 @@ export function LoginPage() {
         <div className="absolute left-1/2 top-1/2 h-[560px] w-[560px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-primary-400/10 blur-3xl dark:bg-primary-500/10" />
       </div>
 
-      {!isDesktopSurface && !isExtensionEmbed ? (
+      {!isExtensionEmbed ? (
         // Quiet version of the landing scene: arms frame the edges while the
-        // form sits in the artwork's clear center. Web only, light mode only,
-        // desktop widths only, and dimmed so the form keeps the focus.
+        // form sits in the artwork's clear center. Light mode only, sm+ widths
+        // only, and dimmed so the form keeps the focus. Extension embeds stay
+        // plain; the web and desktop-shell surfaces both get the scene.
         <div
           aria-hidden="true"
           className="pointer-events-none absolute inset-0 z-0 hidden overflow-hidden opacity-70 sm:block dark:hidden"
