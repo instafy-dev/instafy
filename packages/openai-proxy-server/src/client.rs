@@ -1203,13 +1203,31 @@ fn process_chatgpt_stream_event(
         .unwrap_or("");
 
     match kind {
-        "response.error" => {
-            let message = event
+        // The backend reports a terminal stream failure as `response.failed`
+        // carrying `response.error`, and answers HTTP 200 while doing it: a
+        // quota exhaustion arrives here, not as a 429. `response.error` is
+        // kept because older captures use it, but it is not what the backend
+        // sends today, so handling only that name dropped the payload and let
+        // the stream end without `response.completed` -- surfacing as "stream
+        // ended without a response.completed event", which is indistinguishable
+        // from a truncated stream or a parser regression.
+        "response.failed" | "response.error" => {
+            let error = event
                 .get("error")
+                .or_else(|| event.get("response").and_then(|r| r.get("error")));
+            let message = error
                 .and_then(|err| err.get("message"))
                 .and_then(Value::as_str)
                 .unwrap_or("unknown error");
-            bail!("backend stream reported error: {}", message);
+            let code = error
+                .and_then(|err| err.get("code"))
+                .and_then(Value::as_str);
+            match code {
+                Some(code) => {
+                    bail!("backend stream reported error: {} (code={})", message, code)
+                }
+                None => bail!("backend stream reported error: {}", message),
+            }
         }
         "response.output_text.delta" => {
             if let Some(delta) = event.get("delta").and_then(Value::as_str) {
@@ -1460,6 +1478,44 @@ fn parse_completion(raw: Value) -> Result<CodexCompletion> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn drive_event(payload: &str) -> anyhow::Result<bool> {
+        let mut completed = None;
+        let mut items = Vec::new();
+        let mut delta = String::new();
+        process_chatgpt_stream_event(
+            None,
+            &[payload.to_string()],
+            &mut completed,
+            &mut items,
+            &mut delta,
+        )
+    }
+
+    #[test]
+    fn quota_exhaustion_names_its_cause() {
+        // The backend answers HTTP 200 and reports quota exhaustion inside the
+        // stream, so this frame is the only place the cause is stated.
+        let err = drive_event(
+            r#"{"type":"response.failed","response":{"error":{"code":"insufficient_quota","message":"You exceeded your current quota"}}}"#,
+        )
+        .expect_err("a terminal failure frame must not be swallowed");
+        let text = format!("{err}");
+        assert!(text.contains("insufficient_quota"), "{text}");
+        assert!(text.contains("You exceeded your current quota"), "{text}");
+    }
+
+    #[test]
+    fn terminal_failure_reported_at_the_top_level_is_still_named() {
+        let err = drive_event(
+            r#"{"type":"response.failed","error":{"code":"rate_limit_exceeded","message":"slow down"}}"#,
+        )
+        .expect_err("a terminal failure frame must not be swallowed");
+        let text = format!("{err}");
+        assert!(text.contains("rate_limit_exceeded"), "{text}");
+    }
+
     use serde_json::json;
 
     use super::{
