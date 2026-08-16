@@ -1026,7 +1026,7 @@ export function LoginPage() {
           aria-hidden="true"
           className="pointer-events-none absolute inset-0 z-0 hidden overflow-hidden opacity-70 sm:block dark:hidden"
         >
-          <TentacleBackdrop />
+          <TentacleBackdrop fadeBottom={false} />
         </div>
       ) : null}
 

@@ -57,12 +57,15 @@ function isInsideScene(
 }
 
 // The bare artwork layer, shared with quieter surfaces (login) that want the
-// same scene without cursors or motion.
-export function TentacleBackdrop({ className }: { className?: string }) {
+// same scene without cursors or motion. The bottom fade is for surfaces that
+// flow into further content below (the landing hero); single-viewport pages
+// should keep the arms at full strength to the bottom edge.
+export function TentacleBackdrop({ className, fadeBottom = true }: { className?: string; fadeBottom?: boolean }) {
   return (
     <div
       className={[
-        "absolute inset-0 bg-[url('/landing-tentacles.jpg')] bg-cover bg-center [mask-image:linear-gradient(to_bottom,black_84%,transparent_100%)]",
+        "absolute inset-0 bg-[url('/landing-tentacles.jpg')] bg-cover bg-center",
+        fadeBottom ? "[mask-image:linear-gradient(to_bottom,black_84%,transparent_100%)]" : "",
         className ?? "",
       ]
         .filter(Boolean)
