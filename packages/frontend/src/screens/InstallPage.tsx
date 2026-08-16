@@ -23,10 +23,6 @@ const HERO_DESCRIPTION = "Pick a surface and keep building in the same repo.";
 const CARD_CLASSNAME =
   "rounded-2xl border border-slate-200 bg-white/80 p-6 dark:border-white/10 dark:bg-white/[0.04]";
 
-// Icon tile: a tint, not another outlined box.
-const ICON_TILE_CLASSNAME =
-  "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-100 dark:bg-white/[0.06]";
-
 export function InstallPage() {
   const auth = useAuth();
   const user = auth.user;
@@ -61,7 +57,7 @@ export function InstallPage() {
   };
 
   return (
-    <div className="flex min-h-screen flex-col bg-gradient-to-b from-[#ffffff] via-white to-[#efefef] text-slate-900 dark:bg-none dark:bg-slate-950 dark:text-slate-100">
+    <div className="flex min-h-screen flex-col bg-gradient-to-b from-[#ffffff] via-white to-[#efefef] text-slate-900 dark:bg-none dark:bg-[var(--color-studio-dark-canvas)] dark:text-slate-100">
       <MarketingHeader
         items={[
           { label: "Home", to: "/", match: "exact" },
@@ -104,11 +100,9 @@ export function InstallPage() {
               */}
               <div id="desktop" className={`scroll-mt-24 ${CARD_CLASSNAME} sm:p-8`}>
                 <div className="flex items-start gap-4">
-                  <span aria-hidden="true" className={ICON_TILE_CLASSNAME}>
-                    <ComputerIcon className="h-5 w-5 text-slate-700 dark:text-slate-200" />
-                  </span>
                   <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2.5">
+                      <ComputerIcon aria-hidden="true" className="h-5 w-5 shrink-0 text-slate-700 dark:text-slate-200" />
                       <Heading level={2} variant="title">
                         Desktop app
                       </Heading>
@@ -138,13 +132,13 @@ export function InstallPage() {
               <div className="mt-4 grid gap-4 md:grid-cols-2">
                 <div className={CARD_CLASSNAME}>
                   <div className="flex items-start gap-4">
-                    <span aria-hidden="true" className={ICON_TILE_CLASSNAME}>
-                      <AppStoreIcon className="h-5 w-5 text-[#0EA5E9]" />
-                    </span>
                     <div className="min-w-0 flex-1">
-                      <Heading level={2} variant="title">
-                        iOS
-                      </Heading>
+                      <div className="flex flex-wrap items-center gap-2.5">
+                        <AppStoreIcon aria-hidden="true" className="h-5 w-5 shrink-0 text-[#0EA5E9]" />
+                        <Heading level={2} variant="title">
+                          iOS
+                        </Heading>
+                      </div>
                       <Text variant="body" tone="muted" className="mt-1">
                         Open the Studio on your phone. Add to Home Screen for an app-like feel.
                       </Text>
@@ -159,11 +153,9 @@ export function InstallPage() {
 
                 <div className={CARD_CLASSNAME}>
                   <div className="flex items-start gap-4">
-                    <span aria-hidden="true" className={ICON_TILE_CLASSNAME}>
-                      <PlayIcon className="h-5 w-5 text-emerald-600" />
-                    </span>
                     <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2.5">
+                        <PlayIcon aria-hidden="true" className="h-5 w-5 shrink-0 text-emerald-600" />
                         <Heading level={2} variant="title">
                           Android
                         </Heading>
@@ -178,7 +170,7 @@ export function InstallPage() {
               </div>
             </section>
 
-            <MarketingFooter productName="Instafy" />
+            <MarketingFooter />
           </div>
         </MarketingGridSection>
       </main>

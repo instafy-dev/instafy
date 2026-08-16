@@ -11,7 +11,7 @@ import { Text } from "../components/Text";
 import { TextLink } from "../components/TextLink";
 import { ToggleIconButton } from "../components/ToggleIconButton";
 import { hasSupabaseConfig } from "../lib/supabaseClient";
-import { isDesktopShell, showBackToLanding as computeShowBackToLanding } from "../lib/desktopShell";
+import { showBackToLanding as computeShowBackToLanding } from "../lib/desktopShell";
 import { AppVersionLabel } from "../components/AppVersionLabel";
 import { useAuth } from "../providers/AuthProvider";
 import { OAUTH_REDIRECT_TARGET_KEY, useNativeGithubAuth } from "./login/useNativeGithubAuth";
@@ -26,6 +26,7 @@ import {
 } from "./login/rememberedAccounts";
 import { theme } from "../styles/theme";
 import { applyPageMeta } from "../utils/seo";
+import { TentacleBackdrop } from "./landing/LandingTentacleScene";
 
 type LoginStep = "chooseAccount" | "email" | "password" | "otp" | "recovery";
 
@@ -139,7 +140,6 @@ export function LoginPage() {
   const isExtensionEmbed = embedMode.startsWith("extension");
   const isNativeApp = Capacitor.isNativePlatform();
   const showBackToLanding = computeShowBackToLanding({ isNativeApp, isExtensionEmbed });
-  const isDesktopSurface = isDesktopShell();
   const recoveryMode = useMemo(
     () => parseRecoveryMode(location.hash ?? "", location.search ?? ""),
     [location.hash, location.search],
@@ -243,7 +243,7 @@ export function LoginPage() {
     if (step === "password") {
       return null;
     }
-    return "Bring your own AI and open your repos from any device you sign in from.";
+    return "Bring the AI you already pay for and open your projects from any device.";
   }, [normalizedEmail, recoveryMode, step]);
 
   useEffect(() => {
@@ -1017,6 +1017,19 @@ export function LoginPage() {
         <div className="absolute left-1/2 top-1/2 h-[560px] w-[560px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-primary-400/10 blur-3xl dark:bg-primary-500/10" />
       </div>
 
+      {!isExtensionEmbed ? (
+        // Quiet version of the landing scene: arms frame the edges while the
+        // form sits in the artwork's clear center. sm+ widths only, dimmed so
+        // the form keeps the focus. Extension embeds stay plain; the web and
+        // desktop-shell surfaces both get the scene in both themes.
+        <div
+          aria-hidden="true"
+          className="pointer-events-none absolute inset-0 z-0 hidden overflow-hidden opacity-70 sm:block"
+        >
+          <TentacleBackdrop fadeBottom={false} />
+        </div>
+      ) : null}
+
       <div
         className={[
           "relative z-10 mx-auto flex min-h-screen min-h-[100dvh] w-full max-w-2xl flex-col items-center px-4 sm:px-6",
@@ -1029,15 +1042,13 @@ export function LoginPage() {
           <section
             className={[
               "w-full p-0",
-              // The card exists because a web page has to carve a bounded
-              // region out of an unbounded canvas. A desktop window already is
-              // that region, so the border, fill and shadow read as a box
-              // inside a box. Drop the frame there and let the content sit in
-              // the window, the way native apps do; keep the padding so the
-              // layout is unchanged.
-              isDesktopSurface
-                ? ""
-                : "sm:rounded-[32px] sm:border sm:border-white/70 sm:bg-white/90 sm:shadow-[0_18px_60px_rgba(15,23,42,0.12)] sm:dark:border-slate-800/80 sm:dark:bg-slate-950/70 sm:dark:shadow-[0_18px_60px_rgba(0,0,0,0.5)]",
+              // The card carves a bounded region out of an unbounded canvas.
+              // The desktop shell used to skip it because a plain window was
+              // already that region, but the tentacle backdrop reintroduced
+              // the unbounded canvas there, so every backdrop surface gets
+              // the card again. Extension embeds are narrow, plain panels and
+              // never reach the sm: card styles.
+              "sm:rounded-[32px] sm:border sm:border-white/70 sm:bg-white/90 sm:shadow-[0_18px_60px_rgba(15,23,42,0.12)] sm:dark:border-slate-800/80 sm:dark:bg-slate-950/70 sm:dark:shadow-[0_18px_60px_rgba(0,0,0,0.5)]",
               isExtensionEmbed ? "sm:p-6" : "sm:p-8 sm:[@media(max-height:740px)]:p-6",
             ].join(" ")}
           >
