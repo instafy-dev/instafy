@@ -116,7 +116,7 @@ export function NewsPage() {
       if (error) {
         if (error.code === "23505") {
           setSubscribeStatus("success");
-          setSubscribeMessage("You’re already subscribed — we’ll keep you posted.");
+          setSubscribeMessage("You’re already subscribed, we’ll keep you posted.");
           return;
         }
         throw error;
@@ -132,7 +132,7 @@ export function NewsPage() {
   };
 
   return (
-    <div className="flex min-h-screen flex-col bg-gradient-to-b from-[#ffffff] via-white to-[#efefef] text-slate-900 dark:bg-none dark:bg-slate-950 dark:text-slate-100">
+    <div className="flex min-h-screen flex-col bg-gradient-to-b from-[#ffffff] via-white to-[#efefef] text-slate-900 dark:bg-none dark:bg-[var(--color-studio-dark-canvas)] dark:text-slate-100">
       <MarketingHeader
         items={[
           { label: "Home", to: "/", match: "exact" },
@@ -148,20 +148,20 @@ export function NewsPage() {
 
       <main className="flex w-full flex-1 flex-col">
         <div className="mx-auto w-full max-w-6xl px-6">
-          <section className="w-full pt-10">
+          <section className="w-full pt-8">
             <div className="max-w-3xl text-center md:text-left">
-              <Heading level={1} variant="hero" className="mt-6">
+              <Heading level={1} variant="section">
                 News &{" "}
                 <span className="text-primary-600 dark:text-primary-400">
                   updates
                 </span>
               </Heading>
 
-              <Text variant="lead" tone="secondary" className="mx-auto mt-6 max-w-3xl md:mx-0">
+              <Text variant="bodyLg" tone="secondary" className="mx-auto mt-4 max-w-3xl md:mx-0">
                 {heroDescription}
               </Text>
 
-              <div id="subscribe" className="mx-auto mt-10 max-w-3xl md:mx-0">
+              <div id="subscribe" className="mx-auto mt-8 max-w-3xl md:mx-0">
                 <form onSubmit={handleSubscribe} className="w-full">
                   <label className="sr-only" htmlFor="newsletter-email">
                     Email address
@@ -178,7 +178,7 @@ export function NewsPage() {
                         inputMode="email"
                         autoComplete="email"
                         placeholder="Email for updates"
-                        className="w-full rounded-full border border-slate-200 bg-white/80 py-3 pl-12 pr-4 text-base font-semibold text-slate-800 shadow-sm outline-none transition focus:border-indigo-300 focus:ring-2 focus:ring-indigo-200 sm:text-sm dark:border-slate-700 dark:bg-slate-950/50 dark:text-slate-100 dark:focus:border-indigo-400 dark:focus:ring-indigo-500/30"
+                        className="w-full rounded-full border border-slate-200 bg-white/80 py-3 pl-12 pr-4 text-base font-semibold text-slate-800 shadow-sm outline-none transition focus:border-primary-300 focus:ring-2 focus:ring-primary-200 sm:text-sm dark:border-slate-700 dark:bg-slate-950/50 dark:text-slate-100 dark:focus:border-primary-400 dark:focus:ring-primary-500/30"
                         value={email}
                         onChange={(event) => setEmail(event.target.value)}
                         disabled={subscribeStatus === "loading"}
@@ -232,19 +232,33 @@ export function NewsPage() {
           <div className="mx-auto flex w-full max-w-6xl flex-col items-center px-6 pb-24 pt-24">
             <section id="latest" className="w-full">
               <div className="max-w-3xl">
-                <Heading level={2} variant="section">
-                  Latest posts
-                </Heading>
+                <div className="flex items-center gap-2.5">
+                  <svg aria-hidden="true" className="h-4 w-4 shrink-0" viewBox="0 0 18 20">
+                    <path d="M2 1 L16 10 L9 11.5 L7 19 Z" fill="#f5960a" stroke="#ffffff" strokeWidth="1.5" />
+                  </svg>
+                  <Heading level={2} variant="section">
+                    Latest posts
+                  </Heading>
+                </div>
                 <Text variant="bodyLg" tone="muted" className="mt-2">
                   Shipping notes and progress updates from the Instafy team.
                 </Text>
               </div>
 
+              {sortedPosts.length === 0 ? (
+                <div className="mt-10 rounded-2xl border border-slate-200 bg-white/70 p-6 text-center dark:border-slate-800 dark:bg-slate-950/60">
+                  <Text variant="body" tone="secondary">
+                    No posts yet. The first shipping note lands soon; subscribe above and we will
+                    send it to you.
+                  </Text>
+                </div>
+              ) : null}
+
               <div className="mt-10 grid gap-6 md:grid-cols-2">
                 {sortedPosts.map((post) => (
                   <article
                     key={post.slug}
-                    className="flex flex-col justify-between rounded-3xl border border-slate-200 bg-white/80 p-6 shadow-sm transition hover:border-indigo-200 hover:bg-white dark:border-slate-800 dark:bg-slate-950/70 dark:hover:border-indigo-500/40"
+                    className="flex flex-col justify-between rounded-3xl border border-slate-200 bg-white/80 p-6 shadow-sm transition hover:border-primary-200 hover:bg-white dark:border-slate-800 dark:bg-slate-950/70 dark:hover:border-primary-500/40"
                   >
                     <div>
                       <Text variant="caption" tone="muted">
@@ -271,14 +285,14 @@ export function NewsPage() {
               </div>
             </section>
 
-            <section className="mt-24 flex w-full flex-col items-center rounded-[32px] bg-white/80 px-8 py-12 text-center text-slate-900 dark:bg-slate-950/70 dark:text-white">
+            <section className="mt-20 flex w-full flex-col items-center text-center">
               <Heading level={2} variant="section" className="text-slate-900 dark:text-white">
                 Want to try Instafy now?
               </Heading>
-              <Text variant="bodyLg" tone="muted" className="mt-2 max-w-2xl">
-                Install the extension, open Studio, and start shipping.
+              <Text variant="body" tone="secondary" className="mt-2 max-w-2xl">
+                Install the desktop app, or open Studio right in your browser.
               </Text>
-              <div className="mt-8 flex flex-row flex-wrap justify-center gap-4">
+              <div className="mt-6 flex flex-row flex-wrap justify-center gap-4">
                 <Link to="/install" className={theme.button.secondary}>
                   Install
                 </Link>
