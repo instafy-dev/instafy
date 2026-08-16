@@ -422,6 +422,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     ensureHostedRuntime,
     hostedRuntimeEnsuring,
     runtimeEnsureError,
+    runtimeEnsureLimit,
     runs,
   } = runtimeContext;
   const {
@@ -2680,6 +2681,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       hostedRuntimeEnsuring ||
       (!runtimeReady && activeConversationRun?.status === "queued"),
     queued: activeConversationRun?.status === "queued",
+    runtimeLimit:
+      !runtimeReady && runtimeEnsureLimit?.limitReached
+        ? {
+            limitReached: true,
+            blockerProjectLabel: runtimeEnsureLimit.blockerProjectLabel,
+            blockerRuntimeLabel: runtimeEnsureLimit.blockerRuntimeLabel,
+          }
+        : null,
   });
   const typingStatusLabel = hasMultipleTypingAgents
     ? (multiTypingPhase === "waiting" ? waitingActivityCopy.label : "Thinking…")
