@@ -25,6 +25,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 FROM ${RUNTIME_BASE} AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
+      util-linux \
     && rm -rf /var/lib/apt/lists/*
 ARG BUILD_ARTIFACT_DIR=release
 COPY --from=builder /src/packages/git-service/target/${BUILD_ARTIFACT_DIR}/git-edge /usr/local/bin/git-edge

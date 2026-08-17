@@ -211,8 +211,9 @@ RUN apt-get update && \
       openssh-client \
       python-is-python3 \
       python3 \
-      python3-pip && \
-    rm -rf /var/lib/apt/lists/*
+      python3-pip \
+      util-linux \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g "npm@${NPM_VERSION}" && \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g "playwright@${PLAYWRIGHT_VERSION}" "@playwright/test@${PLAYWRIGHT_VERSION}" && \
@@ -347,8 +348,9 @@ RUN apt-get update && \
       openssh-client \
       python-is-python3 \
       python3 \
-      python3-pip && \
-    rm -rf /var/lib/apt/lists/*
+      python3-pip \
+      util-linux \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g "npm@${NPM_VERSION}" && \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g "playwright@${PLAYWRIGHT_VERSION}" "@playwright/test@${PLAYWRIGHT_VERSION}" && \
