@@ -3,36 +3,34 @@ import { Heading } from "../../components/Heading";
 import { Text } from "../../components/Text";
 
 const CARD_CLASS =
-  "flex flex-col gap-4 rounded-3xl border border-slate-200 bg-white/70 p-7 shadow-[0_18px_45px_rgba(15,23,42,0.08)] backdrop-blur-md dark:border-slate-800 dark:bg-slate-950/60 dark:shadow-[0_18px_45px_rgba(0,0,0,0.35)]";
+  "flex flex-col gap-2.5 rounded-3xl border border-slate-200 bg-white/70 p-6 shadow-[0_18px_45px_rgba(15,23,42,0.08)] backdrop-blur-md dark:border-slate-800 dark:bg-slate-950/60 dark:shadow-[0_18px_45px_rgba(0,0,0,0.35)]";
 
-const ICON_WRAP =
-  "inline-flex h-11 w-11 items-center justify-center rounded-2xl bg-primary-500/10 text-slate-900 ring-1 ring-slate-200 dark:text-slate-100 dark:ring-slate-800";
+// No icon tiles: each card is marked by the hero's presence-cursor glyph in
+// its crew color, inline with the title, so the section speaks the page's own
+// visual language instead of a component library's.
+function CursorGlyph({ color }: { color: string }) {
+  return (
+    <svg aria-hidden="true" className="h-4 w-4 shrink-0" viewBox="0 0 18 20">
+      <path d="M2 1 L16 10 L9 11.5 L7 19 Z" fill={color} stroke="#ffffff" strokeWidth="1.5" />
+    </svg>
+  );
+}
 
-function Feature(props: { icon: ReactNode; title: string; children: ReactNode }) {
+function Feature(props: { accent: string; title: string; children: ReactNode }) {
   return (
     <div className={CARD_CLASS}>
-      <span aria-hidden="true" className={ICON_WRAP}>
-        {props.icon}
-      </span>
-      <Heading level={3} variant="display" className="text-slate-900 dark:text-white">
-        {props.title}
-      </Heading>
+      <div className="flex items-center gap-2.5">
+        <CursorGlyph color={props.accent} />
+        <Heading level={3} variant="display" className="text-slate-900 dark:text-white">
+          {props.title}
+        </Heading>
+      </div>
       <Text variant="body" tone="secondary">
         {props.children}
       </Text>
     </div>
   );
 }
-
-const iconProps = {
-  className: "h-5 w-5",
-  fill: "none",
-  stroke: "currentColor",
-  strokeWidth: 1.7,
-  strokeLinecap: "round" as const,
-  strokeLinejoin: "round" as const,
-  viewBox: "0 0 24 24",
-};
 
 export function LandingFeatures() {
   return (
@@ -42,55 +40,33 @@ export function LandingFeatures() {
           How it works
         </Text>
         <Heading level={2} variant="section" className="mt-3 text-slate-900 dark:text-white">
-          Your agent, in a repo you own.
+          One session, the whole crew.
         </Heading>
         <Text variant="lead" tone="secondary" className="mx-auto mt-4 max-w-xl">
-          Bring the AI you already pay for. Every change lands as a real, reversible commit,
-          whether you work on your machine or in a hosted workspace you can open from anywhere.
+          Invite people and agents into the same live session. Everyone sees the same files, the
+          same preview, and every change that lands.
         </Text>
       </div>
 
-      <div className="mt-12 grid w-full grid-cols-1 gap-6 md:grid-cols-3">
-        <Feature
-          title="Bring your own AI"
-          icon={
-            <svg {...iconProps}>
-              <path d="M13 2 4.5 13.5H12l-1 8.5 8.5-11.5H12l1-8.5Z" />
-            </svg>
-          }
-        >
-          Connect a ChatGPT or Codex plan, use an OpenAI API key, or choose DeepSeek, z.ai, or
-          Gemini. Instafy drives your model while your provider handles usage and billing. No
-          lock-in.
+      <div className="mt-12 grid w-full grid-cols-1 gap-6 sm:grid-cols-2">
+        <Feature accent="#e93d82" title="Real seats for people and agents">
+          Invite your cofounder as owner and your accountant as editor, and give each agent its
+          own seat. Roles decide who can change what.
         </Feature>
 
-        <Feature
-          title="Every change is a real commit"
-          icon={
-            <svg {...iconProps}>
-              <circle cx="6" cy="6" r="2.5" />
-              <circle cx="6" cy="18" r="2.5" />
-              <circle cx="18" cy="16" r="2.5" />
-              <path d="M6 8.5v7M8.4 6.4h4.6a3 3 0 0 1 3 3v4.1" />
-            </svg>
-          }
-        >
-          The agent edits real files in a real git repo. Review each change as a diff, revert any
-          of it in one click, and clone it anywhere. Nothing is trapped in a chat log.
+        <Feature accent="#f5960a" title="Bring the AI you already pay for">
+          Connect a ChatGPT or Codex plan, an API key, or DeepSeek, z.ai, and Gemini. Your
+          provider handles billing, and nothing locks you in.
         </Feature>
 
-        <Feature
-          title="Local or hosted, on any device"
-          icon={
-            <svg {...iconProps}>
-              <rect x="2.5" y="4.5" width="14" height="10" rx="1.5" />
-              <path d="M2.5 18h14" />
-              <rect x="17.5" y="9.5" width="4.5" height="9" rx="1.2" />
-            </svg>
-          }
-        >
-          Point it at a folder on your machine, or spin up a hosted workspace. Then open either from
-          your laptop, browser, or phone.
+        <Feature accent="#7c4dd8" title="Every change is a real commit">
+          Agents edit real files in a git repo you own. Review diffs, revert in a click, and keep
+          an audit trail that works for code and books alike.
+        </Feature>
+
+        <Feature accent="#8cb93b" title="The studio runs anywhere">
+          Open a session from your laptop or phone, no install. The built-in shared browser lets
+          the whole crew click through the same preview together.
         </Feature>
       </div>
     </div>

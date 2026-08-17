@@ -4,6 +4,7 @@ import { Input } from "../../../components/Input";
 import { Select } from "../../../components/Select";
 import { Text } from "../../../components/Text";
 import { type ControllerOrgInvitation, type ControllerOrgMember } from "../../../sdk/instafy";
+import type { OrgInvitationRoleConflict } from "../../../org/useInviteActions";
 import type { PreparedEmailInvite } from "../../../sharing/preparedEmailInvite";
 import { PreparedEmailInviteNotice } from "./PreparedEmailInviteNotice";
 import { SettingsSection } from "./SettingsSection";
@@ -53,6 +54,10 @@ type OrgMembersSettingsSectionsProps = {
   // Named apart from the invite FORM's onInviteRoleChange above: this one
   // retargets an already-sent invitation.
   onPendingInviteRoleChange: (invitationId: string, nextRole: string, label: string) => void;
+  inviteRoleConflict: (OrgInvitationRoleConflict & { email: string }) | null;
+  inviteConflictPending: boolean;
+  onApplyInviteRoleConflict: () => void;
+  onDismissInviteRoleConflict: () => void;
   membersCountLabel: string;
   memberQuery: string;
   onMemberQueryChange: (value: string) => void;
@@ -90,6 +95,10 @@ export function OrgMembersSettingsSections({
   onCancelInvite,
   inviteRoleUpdatePendingId,
   onPendingInviteRoleChange,
+  inviteRoleConflict,
+  inviteConflictPending,
+  onApplyInviteRoleConflict,
+  onDismissInviteRoleConflict,
   membersCountLabel,
   memberQuery,
   onMemberQueryChange,
@@ -165,6 +174,42 @@ export function OrgMembersSettingsSections({
               >
                 {inviteError}
               </Text>
+            ) : null}
+            {inviteRoleConflict ? (
+              <div
+                className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-300/60 bg-amber-50/80 px-3 py-2 dark:border-amber-700/50 dark:bg-amber-950/30"
+                data-testid="org-invite-role-conflict"
+              >
+                <Text variant="caption" tone="secondary">
+                  {inviteRoleConflict.email} already has a pending{" "}
+                  {inviteRoleConflict.existingRole} invite. Its link keeps working
+                  either way.
+                </Text>
+                <div className="flex items-center gap-2">
+                  <Button
+                    onPress={onApplyInviteRoleConflict}
+                    isDisabled={inviteConflictPending}
+                    variant="primary"
+                    size="xs"
+                    radius="full"
+                    data-testid="org-invite-role-conflict-apply"
+                  >
+                    {inviteConflictPending
+                      ? "Updating…"
+                      : `Change to ${inviteRoleConflict.requestedRole}`}
+                  </Button>
+                  <Button
+                    onPress={onDismissInviteRoleConflict}
+                    isDisabled={inviteConflictPending}
+                    variant="ghost"
+                    size="xs"
+                    radius="full"
+                    data-testid="org-invite-role-conflict-dismiss"
+                  >
+                    Keep {inviteRoleConflict.existingRole}
+                  </Button>
+                </div>
+              </div>
             ) : null}
             <div className="flex justify-end">
               <Button

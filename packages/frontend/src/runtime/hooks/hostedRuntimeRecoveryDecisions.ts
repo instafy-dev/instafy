@@ -77,10 +77,15 @@ export function shouldAutoEnsureHostedForFallback(args: {
   return readyRuntimeCount === 0 || !runtimeStatusesResolved;
 }
 
+// Deliberately does NOT wait for projectInitialized: a brand-new project
+// spends its first several seconds materializing its workspace, while the
+// hosted runtime's own workspace preparation happens per-job after the
+// runtime registers. Serializing boot behind workspace init added ~10s to
+// every first reply. Access must be resolved (not pending, not blocked) so
+// read-only members and unauthorized visitors still never trigger a launch.
 export function shouldAutoEnsureHostedForEmptyState(args: {
   disableAutoRuntimeEnsure: boolean;
-  projectInitialized: boolean;
-  projectReadyForRuntime: boolean;
+  projectAccessResolved: boolean;
   runtimeControllerEnabled: boolean;
   activeProjectId: string | null;
   runtimeReady: boolean;
@@ -92,8 +97,7 @@ export function shouldAutoEnsureHostedForEmptyState(args: {
 }) {
   const {
     disableAutoRuntimeEnsure,
-    projectInitialized,
-    projectReadyForRuntime,
+    projectAccessResolved,
     runtimeControllerEnabled,
     activeProjectId,
     runtimeReady,
@@ -107,8 +111,7 @@ export function shouldAutoEnsureHostedForEmptyState(args: {
     return false;
   }
   if (
-    !projectInitialized ||
-    !projectReadyForRuntime ||
+    !projectAccessResolved ||
     !runtimeControllerEnabled ||
     !activeProjectId ||
     runtimeReady ||

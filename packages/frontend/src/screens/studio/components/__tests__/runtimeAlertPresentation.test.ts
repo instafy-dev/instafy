@@ -53,3 +53,45 @@ describe("resolveAgentWaitingActivityCopy", () => {
     ).toBe("Octo is getting ready…");
   });
 });
+
+describe("resolveAgentWaitingActivityCopy runtime slot wall", () => {
+  it("names the blocking project instead of pretending to start", () => {
+    const copy = resolveAgentWaitingActivityCopy({
+      displayNames: ["Octo"],
+      workspaceStarting: true,
+      queued: true,
+      runtimeLimit: {
+        limitReached: true,
+        blockerProjectLabel: "My other app",
+        blockerRuntimeLabel: null,
+      },
+    });
+    expect(copy.label).toContain('"My other app"');
+    expect(copy.label).toContain("Stop it there");
+    expect(copy.label).not.toContain("starting its workspace");
+  });
+
+  it("falls back to a generic location when the blocker is unnamed", () => {
+    const copy = resolveAgentWaitingActivityCopy({
+      displayNames: ["Octo"],
+      workspaceStarting: false,
+      queued: true,
+      runtimeLimit: {
+        limitReached: true,
+        blockerProjectLabel: null,
+        blockerRuntimeLabel: null,
+      },
+    });
+    expect(copy.label).toContain("another project");
+  });
+
+  it("keeps the ordinary copy when no limit is reached", () => {
+    const copy = resolveAgentWaitingActivityCopy({
+      displayNames: ["Octo"],
+      workspaceStarting: true,
+      queued: false,
+      runtimeLimit: null,
+    });
+    expect(copy.label).toContain("starting its workspace");
+  });
+});

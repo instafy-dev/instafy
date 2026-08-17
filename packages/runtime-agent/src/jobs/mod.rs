@@ -690,6 +690,7 @@ fn default_skill_metadata_for_dir(dir_name: &str) -> SkillMetadata {
                 "instafy-automations".to_string(),
                 "instafy-browser-automation".to_string(),
                 "instafy-byoc-ai-credentials".to_string(),
+                "instafy-diagnostics".to_string(),
                 "instafy-frontend-previews".to_string(),
                 "instafy-git-canonical-conflicts".to_string(),
                 "instafy-git-canonical-sync".to_string(),
@@ -21737,6 +21738,30 @@ mod tests {
         assert_eq!(messages[0].message_type.as_deref(), Some("status"));
         assert_eq!(messages[1].content, "Temporary network issue");
         assert_eq!(messages[1].message_type.as_deref(), Some("error"));
+    }
+
+    #[test]
+    fn extract_codex_messages_marks_plain_text_decline_as_agent_status() {
+        let events = vec![json!({
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "text": "NO_RESPONSE"
+            }
+        })];
+
+        let messages = extract_codex_messages(&events);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "NO_RESPONSE");
+        assert_eq!(messages[0].message_type.as_deref(), Some("status"));
+        assert_eq!(
+            messages[0]
+                .metadata
+                .as_ref()
+                .and_then(|value| value.get("kind"))
+                .and_then(JsonValue::as_str),
+            Some("agent_message")
+        );
     }
 
     #[test]

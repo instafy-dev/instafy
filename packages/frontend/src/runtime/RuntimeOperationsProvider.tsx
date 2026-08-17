@@ -102,8 +102,8 @@ export function RuntimeOperationsProvider({
   const [runtimeEnsureLimit, setRuntimeEnsureLimit] =
     useState<HostedRuntimeLimitErrorDetails | null>(null);
   const [controllerSyncEpoch, setControllerSyncEpoch] = useState(0);
-  const projectReadyForRuntime =
-    projectInitialized && !projectAccessPending && !projectAccessBlocked;
+  const projectAccessResolved = !projectAccessPending && !projectAccessBlocked;
+  const projectReadyForRuntime = projectInitialized && projectAccessResolved;
   useEffect(() => {
     if (typeof window !== "undefined") {
       if (!Array.isArray(window.__INSTAFY_RUNTIME_DEBUG__)) {
@@ -287,6 +287,7 @@ export function RuntimeOperationsProvider({
   } = useHostedRuntimePolicy({
     activeProjectId,
     projectInitialized,
+    projectAccessResolved,
     projectReadyForRuntime,
     state,
     dispatch,

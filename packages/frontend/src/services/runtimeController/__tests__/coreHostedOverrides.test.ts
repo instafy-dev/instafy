@@ -39,7 +39,7 @@ describe("hosted production controller overrides", () => {
     vi.restoreAllMocks();
   });
 
-  it("ignores and purges query, global, and stored custom controller pairs", async () => {
+  it("ignores and purges URL, global, and stored custom controller pairs", async () => {
     window.history.replaceState(
       null,
       "",

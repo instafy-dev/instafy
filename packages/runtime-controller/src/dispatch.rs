@@ -176,6 +176,9 @@ pub(crate) struct DispatchPromptNormalized {
     pub(crate) runtime_updated_at: Option<DateTime<Utc>>,
     pub(crate) runtime_display_name: Option<String>,
     pub(crate) prefer_runtime: bool,
+    /// Trusted internal opt-in set only by the automation scheduler. This is
+    /// deliberately absent from the public dispatch request shape.
+    pub(crate) allow_silent_automation_decline: bool,
 }
 
 fn normalize_agent_handle(raw: &str) -> Option<String> {
@@ -1099,6 +1102,20 @@ pub(crate) async fn process_dispatch_prompt(
         }
     }
 
+    // Scheduled automations can explicitly opt in to the same authenticated
+    // NO_RESPONSE decline protocol as ambient evaluations. Keep this outside
+    // the ambient gate: automations are ordinary billed runs and must not gain
+    // ambient roster or deferred-billing semantics.
+    if should_mark_silent_automation_decline(
+        request.allow_silent_automation_decline,
+        request.thread_kind.as_deref(),
+        conversation.thread_kind.as_deref(),
+    ) {
+        crate::group_participation::inject_automation_agent_evaluation_metadata(
+            &mut request.metadata,
+        );
+    }
+
     let default_credential_id =
         credentials::load_default_credential_id(&transaction, context.user_id).await?;
     let agent_handles = extract_agent_selection_handles(&request.metadata);
@@ -1143,7 +1160,7 @@ pub(crate) async fn process_dispatch_prompt(
         }
     }
 
-    ensure_runtime_target_owner(
+    let selected_runtime_provider = ensure_runtime_target_owner(
         &state,
         &transaction,
         &project.id,
@@ -1271,6 +1288,7 @@ pub(crate) async fn process_dispatch_prompt(
     let runtime_type = request
         .runtime_type
         .as_deref()
+        .or(selected_runtime_provider.as_deref())
         .unwrap_or(default_provider_id.as_str());
 
     let runtime_record = if let Some(record) = strict_browser_runtime_record {
@@ -2382,6 +2400,7 @@ pub(crate) fn normalize_dispatch_request(
         runtime_updated_at,
         runtime_display_name,
         prefer_runtime,
+        allow_silent_automation_decline: false,
     })
 }
 
@@ -2738,6 +2757,16 @@ fn should_enforce_ambient_group_participation(input: AmbientDispatchGateInput<'_
     // falls back to the default agent when the selection is empty, so every
     // remaining selection qualifies.
     true
+}
+
+fn should_mark_silent_automation_decline(
+    opted_in: bool,
+    request_thread_kind: Option<&str>,
+    conversation_thread_kind: Option<&str>,
+) -> bool {
+    opted_in
+        && request_thread_kind.is_some_and(|kind| kind.eq_ignore_ascii_case("automation"))
+        && conversation_thread_kind.is_some_and(|kind| kind.eq_ignore_ascii_case("automation"))
 }
 
 fn extract_explicit_agent_mention_handles(metadata: &JsonValue) -> Vec<String> {
@@ -3671,9 +3700,9 @@ pub(crate) async fn ensure_runtime_target_owner(
     requesting_user_id: Option<Uuid>,
     is_service_role: bool,
     personal_browser_job: bool,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
+) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
     let Some(runtime_id) = runtime_id else {
-        return Ok(());
+        return Ok(None);
     };
     let row = transaction
         .query_opt(
@@ -3690,7 +3719,7 @@ pub(crate) async fn ensure_runtime_target_owner(
             ))
         })?;
     let Some(row) = row else {
-        return Ok(());
+        return Ok(None);
     };
     let provider: String = row.get("provider");
     let capabilities: JsonValue = row.get("capabilities");
@@ -3710,7 +3739,7 @@ pub(crate) async fn ensure_runtime_target_owner(
             "Personal Browser runtime is not available to the current user",
         ));
     }
-    Ok(())
+    Ok(Some(provider))
 }
 
 fn target_runtime_for_agent_job(
@@ -4586,6 +4615,7 @@ mod tests {
         assert!(normalized.runtime_id.is_none());
         assert!(normalized.runtime_source.is_none());
         assert!(!normalized.prefer_runtime);
+        assert!(!normalized.allow_silent_automation_decline);
         let metadata_map = normalized.metadata.as_object().expect("metadata object");
         assert_eq!(
             metadata_map
@@ -5685,5 +5715,29 @@ mod tests {
 
         assert_eq!(merged["aiAccessMode"], json!("managed"));
         assert_eq!(merged["managedAiUsed"], json!(true));
+    }
+
+    #[test]
+    fn silent_decline_opt_in_is_restricted_to_automation_threads() {
+        assert!(should_mark_silent_automation_decline(
+            true,
+            Some("automation"),
+            Some("automation"),
+        ));
+        assert!(!should_mark_silent_automation_decline(
+            false,
+            Some("automation"),
+            Some("automation"),
+        ));
+        assert!(!should_mark_silent_automation_decline(
+            true,
+            None,
+            Some("automation"),
+        ));
+        assert!(!should_mark_silent_automation_decline(
+            true,
+            Some("automation"),
+            Some("standard"),
+        ));
     }
 }

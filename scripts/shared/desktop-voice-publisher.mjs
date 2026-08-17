@@ -98,10 +98,32 @@ function buildFixtureHtml(timeoutMs, requireTunnel) {
       }
 
       async function main() {
-        const params = new URL(window.location.href).searchParams;
-        const projectId = params.get("projectId") || "";
-        const controllerUrl = params.get("controllerUrl") || "";
-        const controllerAccessToken = params.get("controllerAccessToken") || "";
+        let config = null;
+        try {
+          const configResponse = await fetch("/config", {
+            method: "GET",
+            cache: "no-store",
+            credentials: "same-origin",
+            headers: { accept: "application/json" },
+          });
+          if (!configResponse.ok) {
+            throw new Error(\`Config request failed with status \${configResponse.status}.\`);
+          }
+          config = await configResponse.json();
+        } catch (error) {
+          await postReport({
+            ok: false,
+            error: \`Desktop voice tunnel harness could not load its config: \${
+              error instanceof Error ? error.message : String(error)
+            }\`,
+          });
+          return;
+        }
+
+        const projectId = typeof config?.projectId === "string" ? config.projectId.trim() : "";
+        const controllerUrl = typeof config?.controllerUrl === "string" ? config.controllerUrl.trim() : "";
+        const controllerAccessToken =
+          typeof config?.controllerAccessToken === "string" ? config.controllerAccessToken.trim() : "";
         if (!projectId || !controllerUrl || !controllerAccessToken) {
           await postReport({
             ok: false,
@@ -292,7 +314,7 @@ async function revokeProjectTunnelGrants(input) {
   }
 }
 
-async function startHarnessServer(input) {
+export async function startDesktopVoiceHarnessServer(input) {
   let resolveReport = null;
   let rejectReport = null;
   const reportPromise = new Promise((resolve, reject) => {
@@ -305,25 +327,55 @@ async function startHarnessServer(input) {
     input.requireTunnel !== false,
   );
   const port = await getFreePort();
+  const origin = `http://127.0.0.1:${port}`;
+  const expectedHost = `127.0.0.1:${port}`;
+  const noStoreHeaders = {
+    "cache-control": "no-store, max-age=0",
+    pragma: "no-cache",
+  };
   const server = http.createServer(async (request, response) => {
     try {
-      if (request.method === "GET" && (request.url === "/" || request.url?.startsWith("/studio"))) {
-        const url = new URL(request.url ?? "/", `http://127.0.0.1:${port}`);
-        const targetUrl = new URL(`http://127.0.0.1:${port}/studio`);
-        targetUrl.searchParams.set("projectId", input.projectId);
-        targetUrl.searchParams.set("controllerUrl", input.controllerUrl);
-        targetUrl.searchParams.set("controllerAccessToken", input.controllerAccessToken);
+      if (request.headers.host !== expectedHost) {
+        response.writeHead(421, noStoreHeaders);
+        response.end("misdirected request");
+        return;
+      }
+
+      const url = new URL(request.url ?? "/", origin);
+      if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/studio")) {
         if (url.pathname !== "/studio") {
-          response.writeHead(302, { location: `${targetUrl.pathname}?${targetUrl.searchParams.toString()}` });
+          response.writeHead(302, { ...noStoreHeaders, location: "/studio" });
           response.end();
           return;
         }
-        response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        response.writeHead(200, {
+          ...noStoreHeaders,
+          "content-type": "text/html; charset=utf-8",
+          "referrer-policy": "no-referrer",
+        });
         response.end(html);
         return;
       }
 
-      if (request.method === "POST" && request.url === "/report") {
+      if (request.method === "GET" && url.pathname === "/config") {
+        response.writeHead(200, {
+          ...noStoreHeaders,
+          "content-type": "application/json; charset=utf-8",
+          "cross-origin-resource-policy": "same-origin",
+          "referrer-policy": "no-referrer",
+          "x-content-type-options": "nosniff",
+        });
+        response.end(
+          JSON.stringify({
+            projectId: input.projectId,
+            controllerUrl: input.controllerUrl,
+            controllerAccessToken: input.controllerAccessToken,
+          }),
+        );
+        return;
+      }
+
+      if (request.method === "POST" && url.pathname === "/report") {
         const chunks = [];
         for await (const chunk of request) {
           chunks.push(Buffer.from(chunk));
@@ -350,8 +402,7 @@ async function startHarnessServer(input) {
   });
 
   return {
-    appUrl:
-      `http://127.0.0.1:${port}/studio?projectId=${encodeURIComponent(input.projectId)}&controllerUrl=${encodeURIComponent(input.controllerUrl)}&controllerAccessToken=${encodeURIComponent(input.controllerAccessToken)}`,
+    appUrl: `${origin}/studio`,
     reportPromise,
     close: async () => {
       await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
@@ -465,7 +516,7 @@ export async function launchDesktopVoicePublisher(input) {
   } catch {
     bundledUvInstallerPath = null;
   }
-  const harnessServer = await startHarnessServer({
+  const harnessServer = await startDesktopVoiceHarnessServer({
     ...input,
     publishTimeoutMs,
     requireTunnel,
