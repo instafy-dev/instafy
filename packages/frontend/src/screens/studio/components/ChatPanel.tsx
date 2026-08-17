@@ -4774,10 +4774,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         accessNotice={
           projectReadOnly
             ? "Read-only access — you can review this space, but you can’t send messages or change files."
-            : projectCapabilitiesResolved === false
-              ? "Checking your access…"
-              : null
+            : null
         }
+        accessChecking={!projectReadOnly && projectCapabilitiesResolved === false}
         browserDockProps={{
           browserModalBottomInset,
           browserSessionOpen,
