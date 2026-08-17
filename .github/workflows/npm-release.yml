@@ -2,27 +2,11 @@ name: npm Package Releases
 
 on:
   pull_request:
-    paths:
-      - ".changeset/**"
-      - ".github/workflows/npm-release.yml"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - "packages/instafy-cli/**"
-      - "packages/provider-contract/**"
-      - "scripts/check-changeset-pr.mjs"
-      - "scripts/verify-changeset-pack.mjs"
+    branches:
+      - main
   push:
     branches:
       - main
-    paths:
-      - ".changeset/**"
-      - ".github/workflows/npm-release.yml"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - "packages/instafy-cli/**"
-      - "packages/provider-contract/**"
-      - "scripts/check-changeset-pr.mjs"
-      - "scripts/verify-changeset-pack.mjs"
   workflow_dispatch:
 
 concurrency:
@@ -285,6 +269,22 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Seal publication to the canonical npm registry
+        run: |
+          set -euo pipefail
+          test ! -e .npmrc
+          test ! -e packages/.npmrc
+          test ! -e packages/instafy-cli/.npmrc
+          test ! -e packages/provider-contract/.npmrc
+          npm_userconfig="$RUNNER_TEMP/instafy-empty-npmrc"
+          install -m 0600 /dev/null "$npm_userconfig"
+          export NPM_CONFIG_USERCONFIG="$npm_userconfig"
+          export NPM_CONFIG_REGISTRY="https://registry.npmjs.org/"
+          test "$(pnpm config get registry)" = "https://registry.npmjs.org/"
+          test "$(pnpm config get '@instafy:registry')" = "undefined"
+          echo "NPM_CONFIG_USERCONFIG=$npm_userconfig" >> "$GITHUB_ENV"
+          echo "NPM_CONFIG_REGISTRY=https://registry.npmjs.org/" >> "$GITHUB_ENV"
+
       - name: Install the exact release toolchain without lifecycle scripts
         run: pnpm install --frozen-lockfile --ignore-scripts
 
@@ -315,7 +315,6 @@ jobs:
           NPM_CONFIG_AUDIT: "false"
           NPM_CONFIG_FUND: "false"
           NPM_CONFIG_IGNORE_SCRIPTS: "true"
-          NPM_CONFIG_REGISTRY: "https://registry.npmjs.org/"
         run: >-
           pnpm changeset publish
           --from-pack-dir "$RUNNER_TEMP/changeset-pack"

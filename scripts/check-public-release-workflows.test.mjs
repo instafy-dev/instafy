@@ -58,6 +58,13 @@ test("Changesets separates pull-request, version, pack, and npm publish authorit
   const publish = jobSection(source, "publish");
 
   assert.doesNotMatch(source, /pull_request_target/u);
+  const pullRequestTrigger = source.slice(
+    source.indexOf("  pull_request:\n"),
+    source.indexOf("  push:\n"),
+  );
+  assert.doesNotMatch(pullRequestTrigger, /paths:/u);
+  const pushTrigger = source.slice(source.indexOf("  push:\n"), source.indexOf("  workflow_dispatch:\n"));
+  assert.doesNotMatch(pushTrigger, /paths:/u);
   assert.match(source, /permissions: \{\}/u);
   assert.match(source, /cancel-in-progress: false/u);
   assert.match(source, /queue: max/u);
@@ -101,6 +108,9 @@ test("Changesets separates pull-request, version, pack, and npm publish authorit
   assert.doesNotMatch(publish, /contents: write/u);
   assert.match(publish, /needs\.pack\.outputs\.artifact-id/u);
   assert.match(publish, /pnpm exec npm --version/u);
+  assert.match(publish, /Seal publication to the canonical npm registry/u);
+  assert.match(publish, /test ! -e packages\/instafy-cli\/\.npmrc/u);
+  assert.match(publish, /pnpm config get '@instafy:registry'/u);
   assert.match(publish, /--registry before/u);
   assert.match(publish, /pnpm changeset publish/u);
   assert.match(publish, /--from-pack-dir/u);
@@ -118,6 +128,8 @@ test("Changesets separates pull-request, version, pack, and npm publish authorit
   assertOrdered(
     publish,
     "Require the approved commit to remain current protected main",
+    "Seal publication to the canonical npm registry",
+    "Install the exact release toolchain without lifecycle scripts",
     "Download the exact tested pack by immutable artifact id",
     "Refuse registry collisions before publishing",
     "Publish the unchanged tarballs with npm trusted publishing",

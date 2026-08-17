@@ -29,14 +29,16 @@ that directory is not part of the npm artifact.
 
 The release workflow uses four isolated stages:
 
-1. **Select** reads protected-main Changesets state without credentials.
+1. **Select** reevaluates Changesets state on every protected-main commit without credentials, so
+   an unrelated commit cannot strand a release waiting for approval.
 2. **Version** uses the Instafy bot's repository-only credential to open or update the version
    pull request. It has no npm authority.
 3. **Pack** builds and tests publishable packages without npm or repository-write credentials and
    uploads immutable tarballs.
 4. **Publish** runs only after the protected `npm-release` environment is approved. It receives
-   npm OIDC authority, verifies the downloaded pack, and publishes the same tarballs without
-   rebuilding them.
+   npm OIDC authority, seals package-manager configuration to the canonical npm registry, verifies
+   the downloaded pack, and publishes the same tarballs without rebuilding them. The final receipt
+   proves both exact registry bytes and that `latest` points at the planned version.
 
 Pull-request checks run on hosted runners with read-only repository access and no secrets.
 Publishing never runs from `pull_request` or `pull_request_target`. Every external Action is pinned
