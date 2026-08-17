@@ -1,12 +1,17 @@
 {
   "name": "@instafy/provider-contract",
   "private": false,
-  "version": "0.1.2",
+  "version": "0.1.1",
   "license": "AGPL-3.0-only",
   "type": "module",
   "main": "./index.js",
   "types": "./index.d.ts",
   "description": "Neutral provider discovery and invocation contract shared between Instafy and external providers.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/instafy-dev/instafy.git",
+    "directory": "packages/provider-contract"
+  },
   "publishConfig": {
     "access": "public"
   },
