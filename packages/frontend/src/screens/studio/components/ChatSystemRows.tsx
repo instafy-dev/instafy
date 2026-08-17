@@ -73,7 +73,7 @@ function OutOfCreditsChatBubble({
               variant="outline"
               size="xs"
               radius="full"
-              className="border-amber-300/80 text-amber-900 hover:bg-amber-50 data-[hovered]:bg-amber-50 dark:border-amber-400/40 dark:text-amber-100 dark:hover:bg-amber-500/10 dark:data-[hovered]:bg-amber-500/10"
+              className="border-secondary-300/80 text-secondary-900 hover:bg-secondary-50 data-[hovered]:bg-secondary-50 dark:border-secondary-400/40 dark:text-secondary-100 dark:hover:bg-secondary-500/10 dark:data-[hovered]:bg-secondary-500/10"
             >
               Refill credits
             </Button>
