@@ -3,14 +3,15 @@ import {
   type MouseEvent,
   type PointerEvent,
   type ReactNode,
+  createContext,
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
-import { MoreHoriz } from "iconoir-react";
-import { Badge } from "../../../components/Badge";
+import { MoreHoriz, WarningTriangle } from "iconoir-react";
 import { Button } from "../../../components/Button";
 import { Surface } from "../../../components/Surface";
 import { useConversations } from "../../../conversations/ConversationsProvider";
@@ -396,6 +397,14 @@ function AgentJobThreadPreviewEntry({
   );
 }
 
+// Live runtime activity, provided by ChatPanel, so persisted runtime alerts
+// can tell when a newer workspace start supersedes them: a 45-minute-old
+// "startup failed" card above a live "starting its workspace…" row reads as a
+// contradiction, not as history.
+export const ChatRuntimeActivityContext = createContext<{ workspaceStarting: boolean }>({
+  workspaceStarting: false,
+});
+
 function ControllerConversationNoticeEntry({
   message,
   messageType,
@@ -422,6 +431,11 @@ function ControllerConversationNoticeEntry({
   onClickCapture?: (event: MouseEvent<HTMLDivElement>) => void;
 }) {
   const isRuntimeAlert = messageType === "runtime_alert";
+  const { workspaceStarting } = useContext(ChatRuntimeActivityContext);
+  // While a workspace start is live, the activity row by the composer is the
+  // source of truth; older runtime alerts demote to a quiet history line so
+  // the transcript never says "failed" and "starting" at full volume at once.
+  const superseded = isRuntimeAlert && workspaceStarting;
   const spineTone: ThreadSpineTone = isRuntimeAlert ? "warning" : "danger";
   const label = resolveControllerConversationNoticeLabel(message);
   const noticeClassName = isRuntimeAlert
@@ -449,21 +463,33 @@ function ControllerConversationNoticeEntry({
         className={`pointer-events-none absolute top-0 h-full ${CHAT_LEFT_SPINE_OFFSET_CLASS}`}
         notches={[{ maskLine: true }]}
       />
-      <div className={`max-w-[min(100%,42rem)] rounded-2xl border px-3 py-2.5 text-sm ${noticeClassName}`}>
-        <Badge tone={isRuntimeAlert ? "warning" : "danger"} size="xs" className="mb-1.5">
-          {label}
-        </Badge>
-        <MessageContent
-          content={displayContent}
-          metadata={
-            message.metadata && isRecord(message.metadata)
-              ? (message.metadata as Record<string, unknown>)
-              : null
-          }
-          projectId={projectId ?? null}
-          mentionableAgentHandles={mentionableAgentHandles}
-        />
-      </div>
+      {superseded ? (
+        <div
+          className="max-w-[min(100%,42rem)] px-1 py-0.5 text-xs text-slate-500 dark:text-slate-400"
+          data-runtime-alert-superseded="true"
+        >
+          Earlier: {label.toLowerCase()}. A new workspace start is in progress below.
+        </div>
+      ) : (
+        <div className={`max-w-[min(100%,42rem)] rounded-xl border px-3 py-2 text-sm ${noticeClassName}`}>
+          <div className="flex items-center gap-1.5 text-xs font-semibold">
+            <WarningTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            {label}
+          </div>
+          <div className="mt-0.5">
+            <MessageContent
+              content={displayContent}
+              metadata={
+                message.metadata && isRecord(message.metadata)
+                  ? (message.metadata as Record<string, unknown>)
+                  : null
+              }
+              projectId={projectId ?? null}
+              mentionableAgentHandles={mentionableAgentHandles}
+            />
+          </div>
+        </div>
+      )}
     </NotchedMessageShell>
   );
 }

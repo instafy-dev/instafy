@@ -121,6 +121,7 @@ import {
   AssistantMessageEntry,
   extractImageAttachments,
   UserMessageBubble,
+  ChatRuntimeActivityContext,
 } from "./ChatMessageEntries";
 import { RunFailureRetryProvider, type RunFailureRetryContextValue } from "./RunFailureNotice";
 import { useRunFailureAutoRetry } from "./useRunFailureAutoRetry";
@@ -2672,6 +2673,15 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     return "thinking";
   }, [activeConversationRuns, hasMultipleTypingAgents, typingIndicatorState?.phase]);
+  const chatRuntimeActivityValue = useMemo(
+    () => ({
+      workspaceStarting:
+        waitingForPreferredRuntime ||
+        hostedRuntimeEnsuring ||
+        (!runtimeReady && activeConversationRun?.status === "queued"),
+    }),
+    [activeConversationRun?.status, hostedRuntimeEnsuring, runtimeReady, waitingForPreferredRuntime],
+  );
   const waitingActivityCopy = resolveAgentWaitingActivityCopy({
     displayNames: hasMultipleTypingAgents
       ? typingAgents.map((agent) => agent.displayName)
@@ -4442,6 +4452,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   return (
     <RunFailureRetryProvider value={runFailureRetryContextValue}>
+    <ChatRuntimeActivityContext.Provider value={chatRuntimeActivityValue}>
     <div
       ref={rootRef}
       className="relative flex h-full min-h-0 flex-col overflow-hidden"
@@ -4977,6 +4988,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         }}
       />
         </div>
+    </ChatRuntimeActivityContext.Provider>
     </RunFailureRetryProvider>
       );
   }
