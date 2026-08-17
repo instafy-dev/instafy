@@ -36,6 +36,7 @@ import { ComposerInviteModal } from "./ComposerInviteModal";
 import { ChatBrowserDock } from "./ChatBrowserDock";
 import { ChatInput, type ChatInputHandle } from "./chat-input/ChatInput";
 import { ChatSendQueueSurface } from "./ChatSendQueueSurface";
+import { ChatMessageStashTray } from "./ChatMessageStashTray";
 import { OctoAgentChip } from "./OctoAgentChip";
 import { OctoSilenceHint } from "./OctoSilenceHint";
 import { StatusPill, StatusPillButton, type StatusPillTone } from "./StatusPill";
@@ -57,6 +58,7 @@ type ChatComposerSurfaceProps = {
   compactBrowserViewport: boolean;
   onSubmit: FormEventHandler<HTMLFormElement>;
   queueSurfaceProps: ComponentProps<typeof ChatSendQueueSurface>;
+  stashTrayProps?: ComponentProps<typeof ChatMessageStashTray> | null;
   activeGoal: ConversationGoal | null;
   activeGoalHealth: ConversationGoalHealth | null;
   onPauseGoal: () => void;
@@ -92,6 +94,7 @@ type ChatComposerSurfaceProps = {
   voiceConversationActionStripProps: ComponentProps<typeof VoiceConversationActionStrip>;
   sendButtonDisabled: boolean;
   sendButtonVariant: ComponentProps<typeof IconButton>["variant"];
+  primaryActionMode?: "send" | "steer";
   onSendButtonPointerDown: PointerEventHandler<HTMLButtonElement>;
   onSendButtonPointerUp: PointerEventHandler<HTMLButtonElement>;
   onSendButtonPointerCancel: PointerEventHandler<HTMLButtonElement>;
@@ -158,6 +161,7 @@ export function ChatComposerSurface({
   compactBrowserViewport,
   onSubmit,
   queueSurfaceProps,
+  stashTrayProps = null,
   activeGoal,
   activeGoalHealth,
   onPauseGoal,
@@ -193,6 +197,7 @@ export function ChatComposerSurface({
   voiceConversationActionStripProps,
   sendButtonDisabled,
   sendButtonVariant,
+  primaryActionMode = "send",
   onSendButtonPointerDown,
   onSendButtonPointerUp,
   onSendButtonPointerCancel,
@@ -229,6 +234,12 @@ export function ChatComposerSurface({
     [],
   );
   const showVoiceSecondaryStatus = showVoicePrimaryAction && showVoiceStatus;
+  const primaryActionLabel =
+    primaryActionMode === "steer" ? "Steer current reply (Enter)" : "Send message";
+  const primaryActionStatus =
+    primaryActionMode === "steer"
+      ? "Enter steers the current reply."
+      : "Enter sends the message.";
   const showVoiceActiveStrip = showVoicePrimaryAction && showVoiceSecondaryStatus;
   const showActiveGoal =
     activeGoal !== null &&
@@ -265,7 +276,8 @@ export function ChatComposerSurface({
     !showVoiceActiveStrip &&
     !providerTriggerNoticeProps &&
     queueSurfaceProps.totalQueuedCount === 0 &&
-    !queueSurfaceProps.editingQueuedItem;
+    !queueSurfaceProps.editingQueuedItem &&
+    !stashTrayProps?.stashes.length;
 
   useEffect(() => {
     setGoalDetailsExpanded(false);
@@ -544,6 +556,7 @@ export function ChatComposerSurface({
               <AccessCheckingNotice flash={blockedInputFlash} />
             ) : null}
             {silenceHintProps ? <OctoSilenceHint {...silenceHintProps} /> : null}
+            {stashTrayProps ? <ChatMessageStashTray {...stashTrayProps} /> : null}
             <ChatSendQueueSurface {...queueSurfaceProps} mutationDisabled={mutationDisabled} />
             <Surface
               tone="default"
@@ -750,6 +763,15 @@ export function ChatComposerSurface({
                             <MagicWand className={composerActionIconClass} aria-hidden="true" />
                           </IconButton>
                         ) : null}
+                        <span
+                          role="status"
+                          aria-atomic="true"
+                          aria-live="polite"
+                          className="sr-only"
+                          data-testid="chat-primary-action-status"
+                        >
+                          {primaryActionStatus}
+                        </span>
                         {showVoicePrimaryAction ? (
                           <VoiceConversationActionStrip {...voiceConversationActionStripProps} />
                         ) : (
@@ -763,7 +785,8 @@ export function ChatComposerSurface({
                             onPress={handleSendPress}
                             onClick={handleSendClick}
                             isDisabled={mutationDisabled || sendButtonDisabled}
-                            aria-label="Send message"
+                            aria-label={primaryActionLabel}
+                            title={primaryActionLabel}
                             variant={sendButtonVariant}
                             size="md"
                             radius="xl"
@@ -772,14 +795,28 @@ export function ChatComposerSurface({
                               sendButtonVariant === "primary"
                                 ? composerPrimaryActionClass
                                 : "border-slate-200/70 bg-transparent shadow-none dark:border-[color:var(--color-studio-dark-panel-border)]",
+                              primaryActionMode === "steer"
+                                ? "!w-auto min-w-[2.75rem] gap-1.5 px-3"
+                                : "",
                               sendingAttachment ? "opacity-70" : "",
                             ]
                               .filter(Boolean)
                               .join(" ")}
                             data-testid="chat-send-button"
+                            data-send-mode={primaryActionMode}
                           >
-                            <span className="sr-only">Send message</span>
+                            <span className="sr-only">{primaryActionLabel}</span>
                             <Send className={composerActionIconClass} aria-hidden="true" />
+                            {primaryActionMode === "steer" ? (
+                              <span
+                                aria-hidden="true"
+                                className="inline-flex items-center gap-1 text-sm font-semibold"
+                                data-testid="chat-steer-action-label"
+                              >
+                                <span>Steer</span>
+                                <kbd className="font-sans text-xs font-medium opacity-75">↵</kbd>
+                              </span>
+                            ) : null}
                           </IconButton>
                         )}
                       </div>

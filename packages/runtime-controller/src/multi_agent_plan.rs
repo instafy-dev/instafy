@@ -239,6 +239,9 @@ async fn mark_parent_plan_job_dispatched(
                  summary = coalesce($3, summary),
                  completed_at = coalesce(completed_at, now()),
                  lease_expires_at = null,
+                 active_input_ready_runtime_id = null,
+                 active_input_ready_expires_at = null,
+                 active_input_ready_turn_id = null,
                  heartbeat_at = now(),
                  updated_at = now()
              where id = $1
@@ -258,6 +261,17 @@ async fn mark_parent_plan_job_dispatched(
                 "failed to mark multi-agent planning job completed: {error}"
             ))
         })?;
+
+    let job_input_state_updates = if completed_row.is_some() {
+        crate::send_intents::reject_unacknowledged_inputs_for_job(
+            &transaction,
+            &job_id,
+            "multi-agent planning turn completed before input acknowledgement",
+        )
+        .await?
+    } else {
+        Vec::new()
+    };
 
     let run_id = completed_row
         .as_ref()
@@ -289,6 +303,7 @@ async fn mark_parent_plan_job_dispatched(
     transaction.commit().await.map_err(|error| {
         internal_error(format!("failed to commit planning job completion: {error}"))
     })?;
+    crate::send_intents::publish_job_input_state_updates(state, &job_input_state_updates);
 
     let Some(completed_row) = completed_row else {
         return Ok(());

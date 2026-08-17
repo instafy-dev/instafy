@@ -24,7 +24,7 @@ describe("ChatSendQueue", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it("shows a steer action for queued messages", async () => {
+  it("labels the queued-message affordance as editing", async () => {
     const onEdit = vi.fn();
 
     await act(async () => {
@@ -44,14 +44,14 @@ describe("ChatSendQueue", () => {
       );
     });
 
-    const steerButton = container.querySelector('[data-testid="chat-send-queue-steer"]') as HTMLButtonElement | null;
-    expect(steerButton).not.toBeNull();
-    expect(steerButton?.textContent?.trim()).toBe("Steer");
-    expect(steerButton?.getAttribute("aria-label")).toBe("Steer queued message");
+    const editButton = container.querySelector('[data-testid="chat-send-queue-steer"]') as HTMLButtonElement | null;
+    expect(editButton).not.toBeNull();
+    expect(editButton?.textContent?.trim()).toBe("Edit");
+    expect(editButton?.getAttribute("aria-label")).toBe("Edit queued message");
     expect(container.textContent).not.toContain("@octo");
 
     await act(async () => {
-      steerButton?.click();
+      editButton?.click();
     });
 
     expect(onEdit).toHaveBeenCalledWith("queued-1");
@@ -80,7 +80,7 @@ describe("ChatSendQueue", () => {
     expect(messageSpan?.textContent).toContain("Follow up on the codec lane");
   });
 
-  it("disables steering while queued message editing is unavailable", async () => {
+  it("disables editing while queued message editing is unavailable", async () => {
     await act(async () => {
       root.render(
         <ChatSendQueue

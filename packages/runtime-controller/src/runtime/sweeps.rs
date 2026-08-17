@@ -168,21 +168,28 @@ pub(crate) async fn prune_expired_runtime_events(state: &AppState) -> AnyResult<
 /// whenever a runtime next appears — even days later — duplicating side
 /// effects and burning fresh credits unprompted.
 async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()> {
-    let connection = state
+    let mut connection = state
         .pool
         .get()
         .await
         .context("failed to acquire connection for requeued job expiry")?;
+    let transaction = connection
+        .transaction()
+        .await
+        .context("failed to start requeued job expiry transaction")?;
 
     // Only expire jobs with no live runtime to run them: a stamped job merely
     // waiting behind a busy, healthy runtime will be leased normally.
-    let rows = connection
+    let rows = transaction
         .query(
             "update agent_jobs
              set status = 'failed',
                  outcome = 'expired',
                  error_message = 'This run was interrupted when its runtime stopped and was not resumed within 15 minutes. Send it again if you still need it.',
                  completed_at = now(),
+                 active_input_ready_runtime_id = null,
+                 active_input_ready_expires_at = null,
+                 active_input_ready_turn_id = null,
                  updated_at = now()
              where status = 'queued'
                and payload ? 'requeuedAt'
@@ -198,6 +205,30 @@ async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()> {
         )
         .await
         .context("failed to expire stale requeued jobs")?;
+
+    let mut job_input_state_updates = Vec::new();
+    for row in &rows {
+        let job_id: Uuid = row.get("id");
+        let updates = crate::send_intents::reject_unacknowledged_inputs_for_job(
+            &transaction,
+            &job_id,
+            "requeued agent job expired before input acknowledgement",
+        )
+        .await
+        .map_err(|(status, Json(error))| {
+            anyhow::anyhow!(
+                "failed to reject inputs for expired requeued job ({status}): {}",
+                error.message
+            )
+        })?;
+        job_input_state_updates.extend(updates);
+    }
+
+    transaction
+        .commit()
+        .await
+        .context("failed to commit requeued job expiry")?;
+    crate::send_intents::publish_job_input_state_updates(state, &job_input_state_updates);
 
     for row in rows {
         let job_id: Uuid = row.get("id");

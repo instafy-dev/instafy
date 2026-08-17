@@ -72,9 +72,9 @@ export function ChatSendQueueSurface({
   }
 
   const canSaveEditedMessage = !mutationDisabled && !sendingAttachment && inputValue.trim().length > 0;
-  const canSteerCollapsedQueue = !mutationDisabled && !sendingAttachment && totalQueuedCount > 0;
-  const handleSteerCollapsedQueue = () => {
-    if (!canSteerCollapsedQueue) {
+  const canEditCollapsedQueue = !mutationDisabled && !sendingAttachment && totalQueuedCount > 0;
+  const handleEditCollapsedQueue = () => {
+    if (!canEditCollapsedQueue) {
       return;
     }
     if (totalQueuedCount === 1 && queueQuickSendItemId) {
@@ -117,15 +117,15 @@ export function ChatSendQueueSurface({
           {!chatSendQueueExpanded ? (
             <Button
               type="button"
-              onPress={handleSteerCollapsedQueue}
+              onPress={handleEditCollapsedQueue}
               variant="outline"
               size="xs"
               radius="full"
-              isDisabled={!canSteerCollapsedQueue}
+              isDisabled={!canEditCollapsedQueue}
               className="border-slate-200/70 px-2.5 text-slate-600 hover:bg-slate-50 data-[hovered]:bg-slate-50 dark:border-slate-800 dark:text-slate-300 dark:hover:bg-slate-900 dark:data-[hovered]:bg-slate-900"
               data-testid="chat-send-queue-steer-collapsed"
             >
-              Steer
+              Edit
             </Button>
           ) : null}
           {!mutationDisabled && !chatSendQueueExpanded && queueQuickSendItemId && queueCanSendNow ? (

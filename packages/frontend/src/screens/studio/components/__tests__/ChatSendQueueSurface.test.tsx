@@ -60,7 +60,7 @@ describe("ChatSendQueueSurface", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it("keeps the collapsed queue focused on the message and steering action", async () => {
+  it("keeps the collapsed queue focused on the message and edit action", async () => {
     const onEditQueuedMessage = vi.fn();
 
     await act(async () => {
@@ -73,20 +73,20 @@ describe("ChatSendQueueSurface", () => {
     expect(container.textContent).not.toContain("@octo");
     expect(container.querySelector('[data-testid="chat-send-queue-agent-summary"]')?.textContent).toBe("two");
 
-    const steerButton = container.querySelector(
+    const editButton = container.querySelector(
       '[data-testid="chat-send-queue-steer-collapsed"]',
     ) as HTMLButtonElement | null;
-    expect(steerButton).not.toBeNull();
-    expect(steerButton?.textContent?.trim()).toBe("Steer");
+    expect(editButton).not.toBeNull();
+    expect(editButton?.textContent?.trim()).toBe("Edit");
 
     await act(async () => {
-      steerButton?.click();
+      editButton?.click();
     });
 
     expect(onEditQueuedMessage).toHaveBeenCalledWith("queued-1");
   });
 
-  it("opens the queued list when steering a collapsed multi-message queue", async () => {
+  it("opens the queued list when editing a collapsed multi-message queue", async () => {
     const onToggleExpanded = vi.fn();
     const onEditQueuedMessage = vi.fn();
 
@@ -116,12 +116,12 @@ describe("ChatSendQueueSurface", () => {
       );
     });
 
-    const steerButton = container.querySelector(
+    const editButton = container.querySelector(
       '[data-testid="chat-send-queue-steer-collapsed"]',
     ) as HTMLButtonElement | null;
 
     await act(async () => {
-      steerButton?.click();
+      editButton?.click();
     });
 
     expect(onEditQueuedMessage).not.toHaveBeenCalled();

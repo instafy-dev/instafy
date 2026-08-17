@@ -3383,10 +3383,7 @@ async fn update_org_invitation(
     // Create treats an expired pending row as replaceable, not mutable;
     // changing its role here would resurrect an invite that the next create
     // on this scope is entitled to expire and supersede.
-    if expires_at
-        .map(|value| value <= Utc::now())
-        .unwrap_or(false)
-    {
+    if expires_at.map(|value| value <= Utc::now()).unwrap_or(false) {
         return Err((
             StatusCode::CONFLICT,
             Json(ApiError::with_details(

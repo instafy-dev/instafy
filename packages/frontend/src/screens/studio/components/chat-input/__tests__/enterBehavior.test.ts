@@ -1,23 +1,57 @@
 import { describe, expect, it } from "vitest";
-import { shouldSendMessageOnEnter } from "../enterBehavior";
+import { resolveComposerEnterAction } from "../enterBehavior";
 
-describe("shouldSendMessageOnEnter", () => {
-  it("returns true for single-line input", () => {
-    expect(shouldSendMessageOnEnter("hello")).toBe(true);
-    expect(shouldSendMessageOnEnter("/terminal pwd")).toBe(true);
+function resolve(
+  overrides: Partial<Parameters<typeof resolveComposerEnterAction>[0]> = {},
+) {
+  return resolveComposerEnterAction({
+    key: "Enter",
+    shiftKey: false,
+    metaKey: false,
+    ctrlKey: false,
+    altKey: false,
+    isComposing: false,
+    hasOpenMenu: false,
+    hasActiveMatchingAgent: false,
+    ...overrides,
+  });
+}
+
+describe("resolveComposerEnterAction", () => {
+  it("sends with Enter while the matching agent is idle", () => {
+    expect(resolve()).toBe("send");
   });
 
-  it("returns true for a trailing newline artifact", () => {
-    expect(shouldSendMessageOnEnter("/terminal pwd\n")).toBe(true);
-    expect(shouldSendMessageOnEnter("/terminal pwd\r\n")).toBe(true);
-    expect(shouldSendMessageOnEnter("/terminal pwd\n   ")).toBe(true);
-    expect(shouldSendMessageOnEnter("/terminal pwd\n\t")).toBe(true);
-    expect(shouldSendMessageOnEnter("\n/terminal pwd")).toBe(true);
-    expect(shouldSendMessageOnEnter("\n\n/terminal pwd\n")).toBe(true);
+  it("steers with Enter while a matching agent is active", () => {
+    expect(resolve({ hasActiveMatchingAgent: true })).toBe("steer");
   });
 
-  it("returns false for multi-line input", () => {
-    expect(shouldSendMessageOnEnter("line one\nline two")).toBe(false);
-    expect(shouldSendMessageOnEnter("line one\r\nline two")).toBe(false);
+  it("queues explicitly with Command+Enter or Ctrl+Enter", () => {
+    expect(resolve({ metaKey: true, hasActiveMatchingAgent: true })).toBe("queue");
+    expect(resolve({ ctrlKey: true, hasActiveMatchingAgent: false })).toBe("queue");
+  });
+
+  it("stashes with Command/Ctrl+Shift+Enter", () => {
+    expect(resolve({ metaKey: true, shiftKey: true })).toBe("stash");
+    expect(resolve({ ctrlKey: true, shiftKey: true })).toBe("stash");
+  });
+
+  it("leaves Shift+Enter and Alt+Enter to the editor as newlines", () => {
+    expect(resolve({ shiftKey: true })).toBe("newline");
+    expect(resolve({ altKey: true })).toBe("newline");
+  });
+
+  it("preserves IME composition and open-menu selection behavior", () => {
+    expect(resolve({ isComposing: true, hasActiveMatchingAgent: true })).toBe("ignore");
+    expect(resolve({ hasOpenMenu: true, hasActiveMatchingAgent: true })).toBe("menu");
+  });
+
+  it("ignores non-Enter keys", () => {
+    expect(resolve({ key: "Tab" })).toBe("ignore");
+  });
+
+  it("does not depend on whether a draft is single-line or multiline", () => {
+    expect(resolve({ hasActiveMatchingAgent: true })).toBe("steer");
+    expect(resolve({ hasActiveMatchingAgent: false })).toBe("send");
   });
 });
