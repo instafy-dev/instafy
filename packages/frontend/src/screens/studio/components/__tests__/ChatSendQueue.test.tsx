@@ -21,6 +21,7 @@ describe("ChatSendQueue", () => {
       root.unmount();
     });
     container.remove();
+    vi.restoreAllMocks();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -38,7 +39,7 @@ describe("ChatSendQueue", () => {
             },
           ]}
           onRemove={() => undefined}
-          onMove={() => undefined}
+          onReorder={() => undefined}
           onEdit={onEdit}
         />,
       );
@@ -72,7 +73,7 @@ describe("ChatSendQueue", () => {
             },
           ]}
           onRemove={() => undefined}
-          onMove={() => undefined}
+          onReorder={() => undefined}
         />,
       );
     });
@@ -95,7 +96,7 @@ describe("ChatSendQueue", () => {
             },
           ]}
           onRemove={() => undefined}
-          onMove={() => undefined}
+          onReorder={() => undefined}
           onEdit={() => undefined}
           editDisabled
         />,
@@ -113,7 +114,7 @@ describe("ChatSendQueue", () => {
         <ChatSendQueue
           items={[{ id: "queued-1", message, targetHandles: ["octo"] }]}
           onRemove={() => undefined}
-          onMove={() => undefined}
+          onReorder={() => undefined}
           onEdit={() => undefined}
           onSendNow={() => undefined}
         />,
@@ -130,5 +131,104 @@ describe("ChatSendQueue", () => {
     expect(
       container.querySelector('[data-testid="chat-send-queue-remove"]')?.getAttribute("aria-label"),
     ).toBe(`Remove queued message 1: ${preview}`);
+  });
+
+  it("shows a dedicated, bounded drag handle only when reordering is useful", async () => {
+    const longMessage = "a".repeat(400);
+    await act(async () => {
+      root.render(
+        <ChatSendQueue
+          items={[
+            { id: "queued-1", message: longMessage, targetHandles: ["octo"] },
+            { id: "queued-2", message: "Second message", targetHandles: ["octo"] },
+          ]}
+          onRemove={() => undefined}
+          onReorder={() => undefined}
+        />,
+      );
+    });
+
+    const handles = container.querySelectorAll('[data-testid="chat-send-queue-reorder"]');
+    expect(handles).toHaveLength(2);
+    expect(handles[0]?.getAttribute("aria-label")).toBe(
+      `Reorder queued message 1 of 2: ${"a".repeat(119)}…`,
+    );
+    expect(handles[0]?.className).toContain("touch-none");
+
+    await act(async () => {
+      root.render(
+        <ChatSendQueue
+          items={[{ id: "queued-1", message: longMessage, targetHandles: ["octo"] }]}
+          onRemove={() => undefined}
+          onReorder={() => undefined}
+        />,
+      );
+    });
+    expect(container.querySelector('[data-testid="chat-send-queue-reorder"]')).toBeNull();
+  });
+
+  it("moves the focused row once with the keyboard drag contract", async () => {
+    const onReorder = vi.fn();
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      const rows = Array.from(
+        document.querySelectorAll<HTMLElement>('[data-testid="chat-send-queue-item"]'),
+      );
+      const row = this.matches('[data-testid="chat-send-queue-item"]')
+        ? this
+        : this.closest<HTMLElement>('[data-testid="chat-send-queue-item"]');
+      const index = row ? Math.max(0, rows.indexOf(row)) : 0;
+      return {
+        x: 0,
+        y: index * 48,
+        top: index * 48,
+        left: 0,
+        right: 320,
+        bottom: index * 48 + 40,
+        width: 320,
+        height: 40,
+        toJSON: () => ({}),
+      } as DOMRect;
+    });
+    await act(async () => {
+      root.render(
+        <ChatSendQueue
+          items={[
+            { id: "queued-1", message: "First message", targetHandles: ["octo"] },
+            { id: "queued-2", message: "Second message", targetHandles: ["octo"] },
+          ]}
+          onRemove={() => undefined}
+          onReorder={onReorder}
+        />,
+      );
+    });
+
+    const handles = container.querySelectorAll<HTMLButtonElement>(
+      '[data-testid="chat-send-queue-reorder"]',
+    );
+    const secondHandle = handles[1];
+    await act(async () => {
+      secondHandle.focus();
+    });
+
+    const press = async (key: string, code: string) => {
+      await act(async () => {
+        secondHandle.dispatchEvent(
+          new KeyboardEvent("keydown", { key, code, bubbles: true, cancelable: true }),
+        );
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
+      });
+    };
+    await press("Enter", "Enter");
+    expect(secondHandle.getAttribute("aria-pressed")).toBe("true");
+    await press("ArrowUp", "ArrowUp");
+    expect(document.body.textContent).toContain("position 1 of 2");
+    await press("Enter", "Enter");
+    expect(document.body.textContent).toContain("moved to position 1 of 2");
+
+    expect(onReorder).toHaveBeenCalledTimes(1);
+    expect(onReorder).toHaveBeenCalledWith("queued-2", 0);
+    expect(document.activeElement).toBe(secondHandle);
   });
 });

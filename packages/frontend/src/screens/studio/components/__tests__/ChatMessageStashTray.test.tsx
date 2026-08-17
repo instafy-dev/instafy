@@ -64,6 +64,9 @@ describe("ChatMessageStashTray", () => {
     const panel = container.querySelector('[aria-label="Stashed drafts"][role="region"]');
     expect(panel?.className).toContain("basis-full");
     expect(panel?.firstElementChild?.className).toContain("sm:w-[min(24rem,100%)]");
+    expect(
+      container.querySelector('[data-testid="chat-message-stashes-panel-header"]')?.textContent?.trim(),
+    ).toBe("Stashed drafts");
     await act(async () => {
       (container.querySelector('[data-testid="chat-message-stash-restore"]') as HTMLButtonElement).click();
     });

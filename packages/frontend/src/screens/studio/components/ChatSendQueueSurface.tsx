@@ -1,7 +1,6 @@
 import type { Ref } from "react";
 import { TaskList } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
-import { Spinner } from "../../../components/Spinner";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
 import {
@@ -18,12 +17,6 @@ import type { CollapsedQueuedMessageSummary } from "./chatSendQueueSummary";
 
 export const CHAT_SEND_QUEUE_ITEMS_ID = "chat-send-queue-items";
 
-type QueueStatusAction = {
-  label: string;
-  disabled: boolean;
-  pending: boolean;
-};
-
 type EditingQueuedChatItemLike = {
   targetAgentHandles: string[];
 };
@@ -34,22 +27,21 @@ export type ChatSendQueueSurfaceProps = {
   chatSendQueueExpanded: boolean;
   collapsedQueuedMessageSummary: CollapsedQueuedMessageSummary | null;
   queueCanSendNow: boolean;
-  queueStatusLabel: string | null;
-  queueStatusAction: QueueStatusAction | null;
   chatSendQueueDisplay: QueuedChatPrompt[];
   sendingAttachment: boolean;
   inputValue: string;
   triggerRef?: Ref<HTMLButtonElement>;
   onToggleExpanded: () => void;
   onSendQueuedMessageNow: (queuedId: string) => void | Promise<void>;
-  onRequestRuntimeRecovery: () => void;
   onRemoveQueuedItem: (id: string) => void;
-  onMoveQueuedItem: (id: string, direction: -1 | 1) => void;
+  onReorderQueuedItem: (id: string, targetIndex: number) => void;
   onEditQueuedMessage: (id: string) => void;
   onCancelQueuedEdit: () => void;
   onRequeueEditedMessage: () => void;
   onSendEditedMessageNow: () => void | Promise<void>;
   mutationDisabled?: boolean;
+  reorderDisabled?: boolean;
+  onDraggingChange?: (dragging: boolean) => void;
 };
 
 export function ChatSendQueueTrigger({
@@ -106,20 +98,19 @@ export function ChatSendQueuePanel({
   editingQueuedItem,
   chatSendQueueExpanded,
   queueCanSendNow,
-  queueStatusLabel,
-  queueStatusAction,
   chatSendQueueDisplay,
   sendingAttachment,
   inputValue,
   onSendQueuedMessageNow,
-  onRequestRuntimeRecovery,
   onRemoveQueuedItem,
-  onMoveQueuedItem,
+  onReorderQueuedItem,
   onEditQueuedMessage,
   onCancelQueuedEdit,
   onRequeueEditedMessage,
   onSendEditedMessageNow,
   mutationDisabled = false,
+  reorderDisabled = false,
+  onDraggingChange,
 }: ChatSendQueueSurfaceProps) {
   if (!chatSendQueueExpanded && !editingQueuedItem) {
     return null;
@@ -141,14 +132,14 @@ export function ChatSendQueuePanel({
         shadow="none"
         className={`ml-auto w-full overflow-hidden border border-slate-200/70 bg-white/95 sm:w-[min(24rem,100%)] ${DARK_PANEL_STRONG_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`}
       >
-        {totalQueuedCount > 0 ? (
-          <div className="flex min-h-10 items-center gap-2 px-3 py-1.5">
+        {totalQueuedCount > 0 && chatSendQueueExpanded ? (
+          <div
+            className="flex min-h-10 items-center gap-2 px-3 py-1.5"
+            data-testid="chat-send-queue-panel-header"
+          >
             <TaskList aria-hidden="true" className="h-4 w-4 flex-none text-slate-500 dark:text-slate-400" />
             <span className="min-w-0 flex-1 text-sm font-medium text-slate-800 dark:text-slate-100">
               Queue
-            </span>
-            <span className="text-xs tabular-nums text-slate-500 dark:text-slate-400">
-              {totalQueuedCount}
             </span>
           </div>
         ) : null}
@@ -160,39 +151,17 @@ export function ChatSendQueuePanel({
                 : "max-h-[min(16rem,35dvh)] overflow-y-auto overscroll-contain"
             }
           >
-            {!mutationDisabled && queueStatusAction ? (
-              <div className="flex items-center justify-between gap-2 px-3 py-2 text-xs text-slate-500 dark:text-slate-400">
-                <span className="truncate">{queueStatusLabel ?? "Runtime attention needed"}</span>
-                <Button
-                  type="button"
-                  onPress={() => {
-                    if (!queueStatusAction.disabled) {
-                      onRequestRuntimeRecovery();
-                    }
-                  }}
-                  variant="outline"
-                  size="xs"
-                  radius="full"
-                  isDisabled={queueStatusAction.disabled}
-                  className="border-slate-200/70 px-2.5 text-slate-600 hover:bg-slate-50 data-[hovered]:bg-slate-50 dark:border-slate-800 dark:text-slate-300 dark:hover:bg-slate-900 dark:data-[hovered]:bg-slate-900"
-                  data-testid="chat-send-queue-runtime-action-expanded"
-                >
-                  {queueStatusAction.pending ? (
-                    <Spinner aria-hidden="true" tone="slate" size="xs" className="mr-1.5 h-3.5 w-3.5" />
-                  ) : null}
-                  {queueStatusAction.label}
-                </Button>
-              </div>
-            ) : null}
             <ChatSendQueue
               items={chatSendQueueDisplay}
               onRemove={onRemoveQueuedItem}
-              onMove={onMoveQueuedItem}
+              onReorder={onReorderQueuedItem}
               onEdit={onEditQueuedMessage}
               onSendNow={queueCanSendNow ? onSendQueuedMessageNow : undefined}
               editDisabled={sendingAttachment || mutationDisabled}
               sendNowDisabled={!queueCanSendNow || mutationDisabled}
               removeDisabled={mutationDisabled}
+              reorderDisabled={mutationDisabled || reorderDisabled}
+              onDraggingChange={onDraggingChange}
             />
           </div>
         ) : null}

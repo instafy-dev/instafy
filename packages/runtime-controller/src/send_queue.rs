@@ -53,6 +53,10 @@ pub(crate) fn router() -> Router<AppState> {
             "/conversations/:conversation_id/send-queue/:entry_id/dispatch",
             post(dispatch_send_queue_entry_now),
         )
+        .route(
+            "/conversations/:conversation_id/send-queue/:entry_id/reorder",
+            post(reorder_send_queue_entry),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -63,6 +67,13 @@ pub(crate) struct SendQueueEnqueueBody {
     pub(crate) client_send_id: Option<String>,
     #[serde(default)]
     pub(crate) target_agent_handles: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SendQueueReorderBody {
+    #[serde(default)]
+    before_entry_id: Option<String>,
 }
 
 fn normalize_agent_handle(raw: &str) -> Option<String> {
@@ -163,6 +174,7 @@ fn entry_row_to_json(row: &tokio_postgres::Row) -> JsonValue {
         "targetAgentHandles": target_agent_handles,
         "message": request,
         "errorMessage": row.get::<_, Option<String>>("error_message"),
+        "queuePosition": row.get::<_, i64>("queue_position"),
         "createdAt": row.get::<_, chrono::DateTime<chrono::Utc>>("created_at"),
         "dispatchedAt": row.get::<_, Option<chrono::DateTime<chrono::Utc>>>("dispatched_at"),
     })
@@ -170,7 +182,7 @@ fn entry_row_to_json(row: &tokio_postgres::Row) -> JsonValue {
 
 const ENTRY_COLUMNS: &str = "id, conversation_id, user_id, client_send_id, status, \
                              target_agent_handles, request, error_message, created_at, \
-                             dispatched_at";
+                             dispatched_at, queue_position";
 
 fn publish_send_queue_event(
     state: &AppState,
@@ -489,7 +501,7 @@ pub(crate) async fn list_send_queue(
                  where conversation_id = $1
                    and user_id = $2
                    and status in ('queued','failed')
-                 order by created_at asc, id asc"
+                 order by queue_position asc, id asc"
             ),
             &[&conversation_id, &owner_user_id],
         )
@@ -497,6 +509,212 @@ pub(crate) async fn list_send_queue(
         .map_err(|error| internal_error(format!("failed to list send queue: {error}")))?;
 
     Ok(Json(rows.iter().map(entry_row_to_json).collect()))
+}
+
+fn move_queue_entry_before(
+    current_ids: &[Uuid],
+    entry_id: Uuid,
+    before_entry_id: Option<Uuid>,
+) -> Option<Vec<Uuid>> {
+    let entry_index = current_ids
+        .iter()
+        .position(|candidate| *candidate == entry_id)?;
+    if before_entry_id == Some(entry_id) {
+        return Some(current_ids.to_vec());
+    }
+
+    let mut reordered = current_ids.to_vec();
+    reordered.remove(entry_index);
+    let insert_at = match before_entry_id {
+        Some(before_entry_id) => reordered
+            .iter()
+            .position(|candidate| *candidate == before_entry_id)?,
+        None => reordered.len(),
+    };
+    reordered.insert(insert_at, entry_id);
+    Some(reordered)
+}
+
+#[derive(Debug)]
+struct SendQueueReorderOutcome {
+    changed: bool,
+    entry: JsonValue,
+    entries: Vec<JsonValue>,
+}
+
+async fn reorder_owned_send_queue_entry(
+    state: &AppState,
+    conversation_id: Uuid,
+    owner_user_id: Uuid,
+    entry_id: Uuid,
+    before_entry_id: Option<Uuid>,
+) -> Result<SendQueueReorderOutcome, (StatusCode, Json<ApiError>)> {
+    let mut connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|error| internal_error(format!("failed to start queue reorder: {error}")))?;
+
+    // Serialize with the drain's claim transaction. Enqueues intentionally do
+    // not take this lock: their sequence-backed positions append after every
+    // existing slot and therefore cannot invalidate the permutation below.
+    let lock_key = format!("send-queue-drain:{conversation_id}");
+    transaction
+        .query_one(
+            "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&lock_key],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to acquire queue reorder lock: {error}"))
+        })?;
+
+    // Lock only this owner's mutable entries. Reordering permutes their
+    // existing global slots, preserving every other owner's relative place
+    // and any slot already held by a claimed entry.
+    let rows = transaction
+        .query(
+            "select id, queue_position
+             from conversation_send_queue
+             where conversation_id = $1
+               and user_id = $2
+               and status in ('queued','failed')
+             order by queue_position asc, id asc
+             for update",
+            &[&conversation_id, &owner_user_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to lock send queue: {error}")))?;
+    let current_ids = rows
+        .iter()
+        .map(|row| row.get::<_, Uuid>("id"))
+        .collect::<Vec<_>>();
+    let Some(reordered_ids) = move_queue_entry_before(&current_ids, entry_id, before_entry_id)
+    else {
+        // Use the same response for an absent target, a different owner's
+        // entry, an immutable entry, and an inaccessible anchor.
+        return Err(not_found("queued message not found"));
+    };
+    let changed = reordered_ids != current_ids;
+
+    if changed {
+        let queue_positions = rows
+            .iter()
+            .map(|row| row.get::<_, i64>("queue_position"))
+            .collect::<Vec<_>>();
+        let updated = transaction
+            .execute(
+                "update conversation_send_queue as queue
+                 set queue_position = ordering.queue_position,
+                     updated_at = now()
+                 from unnest($1::uuid[], $2::bigint[])
+                      as ordering(id, queue_position)
+                 where queue.id = ordering.id
+                   and queue.conversation_id = $3
+                   and queue.user_id = $4
+                   and queue.status in ('queued','failed')",
+                &[
+                    &reordered_ids,
+                    &queue_positions,
+                    &conversation_id,
+                    &owner_user_id,
+                ],
+            )
+            .await
+            .map_err(|error| internal_error(format!("failed to reorder send queue: {error}")))?;
+        if updated != rows.len() as u64 {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ApiError::new("send queue changed during reorder")),
+            ));
+        }
+    }
+
+    let rows = transaction
+        .query(
+            &format!(
+                "select {ENTRY_COLUMNS}
+                 from conversation_send_queue
+                 where conversation_id = $1
+                   and user_id = $2
+                   and status in ('queued','failed')
+                 order by queue_position asc, id asc"
+            ),
+            &[&conversation_id, &owner_user_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load reordered send queue: {error}")))?;
+    let entry = rows
+        .iter()
+        .find(|row| row.get::<_, Uuid>("id") == entry_id)
+        .map(entry_row_to_json)
+        .ok_or_else(|| internal_error("reordered queued message disappeared"))?;
+    let entries = rows.iter().map(entry_row_to_json).collect();
+
+    transaction
+        .commit()
+        .await
+        .map_err(|error| internal_error(format!("failed to commit queue reorder: {error}")))?;
+    Ok(SendQueueReorderOutcome {
+        changed,
+        entry,
+        entries,
+    })
+}
+
+async fn reorder_send_queue_entry(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
+    AxumPath((conversation_id_raw, entry_id_raw)): AxumPath<(String, String)>,
+    axum::Json(body): axum::Json<SendQueueReorderBody>,
+) -> Result<Json<JsonValue>, (StatusCode, Json<ApiError>)> {
+    let (context, conversation_id, access) =
+        authorize_conversation(&state, &headers, conversation_id_raw.as_str(), true).await?;
+    let entry_id = Uuid::from_str(entry_id_raw.trim())
+        .map_err(|_| bad_request("entryId must be a valid UUID"))?;
+    let before_entry_id = body
+        .before_entry_id
+        .as_deref()
+        .map(str::trim)
+        .map(Uuid::from_str)
+        .transpose()
+        .map_err(|_| bad_request("beforeEntryId must be a valid UUID or null"))?;
+    let owner_user_id = require_user_session(&context)?;
+    let SendQueueReorderOutcome {
+        changed,
+        entry,
+        entries,
+    } = reorder_owned_send_queue_entry(
+        &state,
+        conversation_id,
+        owner_user_id,
+        entry_id,
+        before_entry_id,
+    )
+    .await?;
+
+    if changed {
+        publish_send_queue_event(
+            &state,
+            access.project_id,
+            access.session_id,
+            conversation_id,
+            Some(owner_user_id),
+            "reordered",
+            entry,
+        );
+        spawn_send_queue_drain(state.clone(), conversation_id);
+    }
+
+    Ok(Json(json!({
+        "ok": true,
+        "changed": changed,
+        "entries": entries,
+    })))
 }
 
 pub(crate) async fn cancel_send_queue_entry(
@@ -1186,7 +1404,7 @@ async fn claim_next_send_queue_entry_with_reclaim_after(
                      from conversation_send_queue
                      where conversation_id = $1
                        and status = 'queued'
-                     order by created_at asc, id asc"
+                     order by queue_position asc, id asc"
                 ),
                 &[&conversation_id],
             )
@@ -1407,6 +1625,35 @@ mod tests {
     }
 
     #[test]
+    fn queue_reorder_moves_before_or_to_end_and_is_state_idempotent() {
+        let first = Uuid::from_u128(1);
+        let second = Uuid::from_u128(2);
+        let third = Uuid::from_u128(3);
+        let current = vec![first, second, third];
+
+        let moved = move_queue_entry_before(&current, third, Some(first)).expect("valid move");
+        assert_eq!(moved, vec![third, first, second]);
+        assert_eq!(
+            move_queue_entry_before(&moved, third, Some(first)),
+            Some(moved.clone()),
+            "replaying the same semantic move must be a no-op"
+        );
+        assert_eq!(
+            move_queue_entry_before(&moved, third, None),
+            Some(vec![first, second, third])
+        );
+        assert_eq!(
+            move_queue_entry_before(&current, second, Some(second)),
+            Some(current.clone())
+        );
+        assert_eq!(move_queue_entry_before(&current, Uuid::nil(), None), None);
+        assert_eq!(
+            move_queue_entry_before(&current, first, Some(Uuid::nil())),
+            None
+        );
+    }
+
+    #[test]
     fn queue_dispatch_retry_preserves_a_stable_client_message_id() {
         let mut body: ConversationPromptBody = serde_json::from_value(prompt_with_metadata(
             json!({ "clientMessageId": "interactive-send-1", "custom": true }),
@@ -1514,6 +1761,37 @@ mod tests {
         Ok(())
     }
 
+    async fn insert_queue_test_user(
+        pool: &crate::config::PgPool,
+        user_id: Uuid,
+    ) -> anyhow::Result<()> {
+        pool.get()
+            .await?
+            .execute(
+                "insert into auth.users (id) values ($1) on conflict (id) do nothing",
+                &[&user_id],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn cleanup_owned_queue_fixture(
+        pool: &crate::config::PgPool,
+        project_id: Uuid,
+        user_ids: &[Uuid],
+    ) -> anyhow::Result<()> {
+        let connection = pool.get().await?;
+        connection
+            .execute("delete from projects where id = $1", &[&project_id])
+            .await?;
+        for user_id in user_ids {
+            connection
+                .execute("delete from auth.users where id = $1", &[user_id])
+                .await?;
+        }
+        Ok(())
+    }
+
     async fn claim_for_test(
         state: &AppState,
         conversation_id: Uuid,
@@ -1523,6 +1801,201 @@ mod tests {
             .map_err(|(status, Json(error))| {
                 anyhow::anyhow!("queue claim failed ({status}): {}", error.message)
             })
+    }
+
+    #[tokio::test]
+    async fn owner_reorder_preserves_foreign_slots_and_controls_claim_order() -> anyhow::Result<()>
+    {
+        let Some(pool) = crate::tests::setup_origin_test_pool().await? else {
+            eprintln!("skipping queue reorder test: TEST_DATABASE_URL not set");
+            return Ok(());
+        };
+        let project_id = Uuid::new_v4();
+        let conversation_id = Uuid::new_v4();
+        let owner_user_id = Uuid::new_v4();
+        let other_user_id = Uuid::new_v4();
+        let owner_first_id = Uuid::new_v4();
+        let other_id = Uuid::new_v4();
+        let owner_last_id = Uuid::new_v4();
+        insert_queue_test_user(&pool, owner_user_id).await?;
+        insert_queue_test_user(&pool, other_user_id).await?;
+        insert_service_queue_fixture(&pool, project_id, conversation_id).await?;
+        let message = prompt_with_metadata(json!({
+            "agentSelection": { "active": ["octo"], "mentions": [] }
+        }));
+        let connection = pool.get().await?;
+        for (entry_id, user_id, client_send_id) in [
+            (owner_first_id, owner_user_id, "owner-first"),
+            (other_id, other_user_id, "other"),
+            (owner_last_id, owner_user_id, "owner-last"),
+        ] {
+            connection
+                .execute(
+                    "insert into conversation_send_queue (
+                         id, project_id, conversation_id, user_id,
+                         client_send_id, status, request
+                     ) values ($1, $2, $3, $4, $5, 'queued', $6)",
+                    &[
+                        &entry_id,
+                        &project_id,
+                        &conversation_id,
+                        &user_id,
+                        &client_send_id,
+                        &PgJson(message.clone()),
+                    ],
+                )
+                .await?;
+        }
+        let original_rows = connection
+            .query(
+                "select id, queue_position
+                 from conversation_send_queue
+                 where conversation_id = $1
+                 order by queue_position asc, id asc",
+                &[&conversation_id],
+            )
+            .await?;
+        let original = original_rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get::<_, Uuid>("id"),
+                    row.get::<_, i64>("queue_position"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            original.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![owner_first_id, other_id, owner_last_id],
+            "sequence defaults must append new queue entries"
+        );
+        drop(connection);
+
+        let state = crate::tests::build_test_state(
+            pool.clone(),
+            crate::tests::build_app_config(
+                crate::tests::test_origin_private_key(),
+                crate::tests::test_origin_public_key(),
+                "queue-reorder",
+            ),
+        );
+
+        let (status, _) = reorder_owned_send_queue_entry(
+            &state,
+            conversation_id,
+            owner_user_id,
+            owner_last_id,
+            Some(other_id),
+        )
+        .await
+        .expect_err("another owner's entry cannot be used as an anchor");
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let outcome = reorder_owned_send_queue_entry(
+            &state,
+            conversation_id,
+            owner_user_id,
+            owner_last_id,
+            Some(owner_first_id),
+        )
+        .await
+        .map_err(|(status, Json(error))| {
+            anyhow::anyhow!("queue reorder failed ({status}): {}", error.message)
+        })?;
+        assert!(outcome.changed);
+        assert_eq!(
+            outcome
+                .entries
+                .iter()
+                .map(|entry| entry["id"].as_str().expect("entry id"))
+                .collect::<Vec<_>>(),
+            vec![owner_last_id.to_string(), owner_first_id.to_string()]
+        );
+        assert!(
+            outcome
+                .entries
+                .iter()
+                .all(|entry| entry["queuePosition"].as_i64().is_some()),
+            "reorder responses must expose persisted positions"
+        );
+
+        let reordered_rows = pool
+            .get()
+            .await?
+            .query(
+                "select id, queue_position
+                 from conversation_send_queue
+                 where conversation_id = $1
+                 order by queue_position asc, id asc",
+                &[&conversation_id],
+            )
+            .await?;
+        let reordered = reordered_rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get::<_, Uuid>("id"),
+                    row.get::<_, i64>("queue_position"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reordered.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![owner_last_id, other_id, owner_first_id]
+        );
+        assert_eq!(
+            reordered
+                .iter()
+                .find(|(id, _)| *id == other_id)
+                .map(|(_, position)| *position),
+            original
+                .iter()
+                .find(|(id, _)| *id == other_id)
+                .map(|(_, position)| *position),
+            "a reorder must not borrow or change another owner's slot"
+        );
+
+        let replay = reorder_owned_send_queue_entry(
+            &state,
+            conversation_id,
+            owner_user_id,
+            owner_last_id,
+            Some(owner_first_id),
+        )
+        .await
+        .map_err(|(status, Json(error))| {
+            anyhow::anyhow!("queue reorder replay failed ({status}): {}", error.message)
+        })?;
+        assert!(!replay.changed);
+        let replay_positions = replay
+            .entries
+            .iter()
+            .map(|entry| entry["queuePosition"].as_i64().expect("queue position"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            replay_positions,
+            vec![reordered[0].1, reordered[2].1],
+            "idempotent replay must retain the existing positions"
+        );
+
+        let claim = match claim_for_test(&state, conversation_id).await? {
+            QueueClaimAttempt::Claimed(claim) => claim,
+            _ => panic!("reordered first entry should be claimed first"),
+        };
+        assert_eq!(claim.entry_id, owner_last_id);
+        let (status, _) = reorder_owned_send_queue_entry(
+            &state,
+            conversation_id,
+            owner_user_id,
+            owner_last_id,
+            Some(owner_first_id),
+        )
+        .await
+        .expect_err("a claimed entry is no longer mutable");
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        cleanup_owned_queue_fixture(&pool, project_id, &[other_user_id, owner_user_id]).await?;
+        Ok(())
     }
 
     #[tokio::test]
