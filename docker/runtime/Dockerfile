@@ -200,11 +200,14 @@ COPY --from=node-runtime /usr/local/ /usr/local/
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       bash \
+      bsdutils \
       ca-certificates \
       chromium \
       curl \
       git \
       less \
+      login \
+      mount \
       procps \
       ripgrep \
       unzip \
@@ -333,10 +336,13 @@ ARG UBOLITE_SHA256_ARM64
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       bash \
+      bsdutils \
       ca-certificates \
       curl \
       git \
       less \
+      login \
+      mount \
       procps \
       ripgrep \
       fluxbox \

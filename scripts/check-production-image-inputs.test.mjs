@@ -105,7 +105,7 @@ test("every repository Dockerfile pins external base images by digest", () => {
   }
 });
 
-test("affected runtime images refresh the util-linux security family", () => {
+test("affected runtime images refresh every util-linux security binary", () => {
   const expectedInstalls = new Map([
     ["docker/git-edge/Dockerfile", 1],
     ["docker/git-shard/Dockerfile", 1],
@@ -113,18 +113,21 @@ test("affected runtime images refresh the util-linux security family", () => {
     ["docker/runtime/Dockerfile", 2],
     ["docker/git-services-dev/Dockerfile", 1],
   ]);
+  const securityPackages = ["bsdutils", "login", "mount", "util-linux"];
 
   for (const [relativePath, expectedCount] of expectedInstalls) {
     const source = read(relativePath);
-    const actualCount = source
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line === "util-linux" || line === "util-linux \\").length;
-    assert.equal(
-      actualCount,
-      expectedCount,
-      `${relativePath} must install util-linux in every final runtime stage`,
-    );
+    const installLines = source.split("\n").map((line) => line.trim());
+    for (const packageName of securityPackages) {
+      const actualCount = installLines.filter(
+        (line) => line === packageName || line === `${packageName} \\`,
+      ).length;
+      assert.equal(
+        actualCount,
+        expectedCount,
+        `${relativePath} must install ${packageName} in every final runtime stage`,
+      );
+    }
   }
 });
 
