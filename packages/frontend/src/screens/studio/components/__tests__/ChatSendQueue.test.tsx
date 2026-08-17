@@ -105,4 +105,30 @@ describe("ChatSendQueue", () => {
     const steerButton = container.querySelector('[data-testid="chat-send-queue-steer"]') as HTMLButtonElement | null;
     expect(steerButton?.disabled).toBe(true);
   });
+
+  it("bounds long messages in every row action name", async () => {
+    const message = "a".repeat(400);
+    await act(async () => {
+      root.render(
+        <ChatSendQueue
+          items={[{ id: "queued-1", message, targetHandles: ["octo"] }]}
+          onRemove={() => undefined}
+          onMove={() => undefined}
+          onEdit={() => undefined}
+          onSendNow={() => undefined}
+        />,
+      );
+    });
+
+    const preview = `${"a".repeat(119)}…`;
+    expect(
+      container.querySelector('[data-testid="chat-send-queue-send-now"]')?.getAttribute("aria-label"),
+    ).toBe(`Send queued message 1 now: ${preview}`);
+    expect(
+      container.querySelector('[data-testid="chat-send-queue-steer"]')?.getAttribute("aria-label"),
+    ).toBe(`Edit queued message 1: ${preview}`);
+    expect(
+      container.querySelector('[data-testid="chat-send-queue-remove"]')?.getAttribute("aria-label"),
+    ).toBe(`Remove queued message 1: ${preview}`);
+  });
 });
