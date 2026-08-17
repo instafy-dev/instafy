@@ -52,6 +52,7 @@ mobile and end-to-end workflows, continue with the
 - [Credits & Billing](docs/Credits-Billing.md)
 - [Local Development](docs/Local-Dev.md)
 - [Testing](docs/Testing.md)
+- [Package Releases](docs/Package-Releases.md)
 - [Documentation Hub](docs/README.md)
 
 Keep the documentation hub open while you work; it links to every playbook and should be updated alongside your code changes.
