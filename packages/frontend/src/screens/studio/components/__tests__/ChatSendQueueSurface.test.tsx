@@ -16,8 +16,6 @@ function buildProps(overrides: Partial<SurfaceProps> = {}): SurfaceProps {
       message: "two",
     },
     queueCanSendNow: false,
-    queueStatusLabel: "Reply in progress",
-    queueStatusAction: null,
     chatSendQueueDisplay: [
       {
         id: "queued-1",
@@ -29,9 +27,8 @@ function buildProps(overrides: Partial<SurfaceProps> = {}): SurfaceProps {
     inputValue: "",
     onToggleExpanded: vi.fn(),
     onSendQueuedMessageNow: vi.fn(),
-    onRequestRuntimeRecovery: vi.fn(),
     onRemoveQueuedItem: vi.fn(),
-    onMoveQueuedItem: vi.fn(),
+    onReorderQueuedItem: vi.fn(),
     onEditQueuedMessage: vi.fn(),
     onCancelQueuedEdit: vi.fn(),
     onRequeueEditedMessage: vi.fn(),
@@ -127,7 +124,7 @@ describe("ChatSendQueueSurface", () => {
     expect(onToggleExpanded).toHaveBeenCalledTimes(1);
   });
 
-  it("hides passive queue status text in the expanded list", async () => {
+  it("omits runtime status and duplicate count from the expanded list", async () => {
     await act(async () => {
       root.render(
         <ChatSendQueueSurface
@@ -135,8 +132,6 @@ describe("ChatSendQueueSurface", () => {
             totalQueuedCount: 2,
             chatSendQueueExpanded: true,
             collapsedQueuedMessageSummary: null,
-            queueStatusLabel: "Reply in progress",
-            queueStatusAction: null,
             chatSendQueueDisplay: [
               {
                 id: "queued-1",
@@ -159,8 +154,13 @@ describe("ChatSendQueueSurface", () => {
     expect(
       container.querySelector('[data-testid="chat-send-queue-agent-summary"]')?.getAttribute("aria-expanded"),
     ).toBe("true");
-    expect(container.textContent).not.toContain("Reply in progress");
+    expect(container.textContent).not.toContain("Runtime offline");
+    expect(container.textContent).not.toContain("Reconnect");
+    expect(container.querySelector('[data-testid="chat-send-queue-runtime-action-expanded"]')).toBeNull();
     expect(container.textContent).not.toContain("@octo");
+    expect(container.querySelector('[data-testid="chat-send-queue-panel-header"]')?.textContent?.trim()).toBe(
+      "Queue",
+    );
     const panel = container.querySelector('[aria-label="Queued messages"][role="region"]');
     expect(panel?.className).toContain("basis-full");
     expect(panel?.firstElementChild?.className).toContain("sm:w-[min(24rem,100%)]");

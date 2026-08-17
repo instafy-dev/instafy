@@ -207,7 +207,10 @@ import { useChatInvitePromptHandlers } from "./useChatInvitePromptHandlers";
 import { useChatComposerAttachments } from "./useChatComposerAttachments";
 import { useChatSendQueueActions } from "./useChatSendQueueActions";
 import { useChatSendQueuePresentation } from "./useChatSendQueuePresentation";
-import { useChatServerSendQueue } from "./useChatServerSendQueue";
+import {
+  isServerQueuedChatSendItem,
+  useChatServerSendQueue,
+} from "./useChatServerSendQueue";
 import { useChatMessageStashes } from "./useChatMessageStashes";
 import { useChatSubmitDispatch } from "./useChatSubmitDispatch";
 import { useChatSubmitFlow, type SubmitMessageFn } from "./useChatSubmitFlow";
@@ -705,6 +708,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     enqueueServerSendQueueItem,
     refreshServerSendQueue,
     removeServerSendQueueEntry,
+    reorderServerSendQueueEntry,
+    serverQueueReordering,
+    serverQueueHydrated,
     serverSendQueueItems,
   } = useChatServerSendQueue({
     conversationControllerId: activeConversationEntry?.controllerId ?? null,
@@ -3766,22 +3772,41 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     [removeServerSendQueueEntry, serverSendQueueItems],
   );
 
-  const moveChatSendQueueItem = useCallback((id: string, direction: -1 | 1) => {
-    setChatSendQueue((previous) => {
-      const index = previous.findIndex((item) => item.id === id);
-      if (index === -1) {
-        return previous;
+  const reorderChatSendQueueItem = useCallback(
+    (id: string, targetIndex: number) => {
+      const currentIndex = combinedChatSendQueue.findIndex((item) => item.id === id);
+      const boundedTargetIndex = Math.max(
+        0,
+        Math.min(targetIndex, combinedChatSendQueue.length - 1),
+      );
+      if (currentIndex < 0 || currentIndex === boundedTargetIndex) {
+        return;
       }
-      const nextIndex = index + direction;
-      if (nextIndex < 0 || nextIndex >= previous.length) {
-        return previous;
+      const desiredOrder = [...combinedChatSendQueue];
+      const [movingItem] = desiredOrder.splice(currentIndex, 1);
+      if (!movingItem) {
+        return;
       }
-      const copy = [...previous];
-      const [removed] = copy.splice(index, 1);
-      copy.splice(nextIndex, 0, removed);
-      return copy;
-    });
-  }, []);
+      desiredOrder.splice(boundedTargetIndex, 0, movingItem);
+
+      if (isServerQueuedChatSendItem(movingItem)) {
+        const desiredServerOrder = desiredOrder.filter(isServerQueuedChatSendItem);
+        const serverIndex = desiredServerOrder.findIndex((item) => item.id === id);
+        const beforeEntryId = desiredServerOrder[serverIndex + 1]?.id ?? null;
+        void reorderServerSendQueueEntry(id, beforeEntryId).then((reordered) => {
+          if (!reordered) {
+            showStatus("Couldn’t reorder the queue. The saved order was restored.");
+          }
+        });
+        return;
+      }
+
+      setChatSendQueue(
+        desiredOrder.filter((item) => !isServerQueuedChatSendItem(item)),
+      );
+    },
+    [combinedChatSendQueue, reorderServerSendQueueEntry, showStatus],
+  );
 
   const targetsOverlapActiveRuns = useCallback(
     (targetAgentHandles: string[]) => {
@@ -4177,7 +4202,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     queuedByAgentHandle,
     queuedSummaryItems,
     queuedTargetHandlesByItemId,
-    queueStatusAction,
     queueStatusLabel,
     resolveQueuedItemTargets,
     totalQueuedCount,
@@ -4321,6 +4345,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     resolveQueuedItemTargets,
     runtimeReady,
     sendingAttachment,
+    serverQueueHydrated,
     serverSendQueueItems,
     setChatSendQueue,
     setChatSendQueueExpanded,
@@ -5268,16 +5293,16 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           chatSendQueueExpanded,
           collapsedQueuedMessageSummary,
           queueCanSendNow,
-          queueStatusLabel,
-          queueStatusAction,
           chatSendQueueDisplay,
           sendingAttachment,
           inputValue,
           onToggleExpanded: () => setChatSendQueueExpanded((current) => !current),
           onSendQueuedMessageNow: handleSendQueuedMessageNow,
-          onRequestRuntimeRecovery: requestRuntimeRecovery,
           onRemoveQueuedItem: removeChatSendQueueItem,
-          onMoveQueuedItem: moveChatSendQueueItem,
+          onReorderQueuedItem: reorderChatSendQueueItem,
+          reorderDisabled:
+            serverQueueReordering ||
+            (serverSendQueueItems.length > 0 && chatSendQueue.length > 0),
           onEditQueuedMessage: handleEditQueuedMessage,
           onCancelQueuedEdit: handleCancelQueuedEdit,
           onRequeueEditedMessage: handleRequeueEditedMessage,

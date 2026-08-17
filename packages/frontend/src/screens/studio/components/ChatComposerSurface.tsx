@@ -25,6 +25,7 @@ import { HomeIcon } from "../../../components/AppIcons";
 import { IconButton } from "../../../components/Button";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
+import { StudioPopover } from "../../../components/aria/StudioPopover";
 import {
   DARK_PANEL_BORDER_CLASS,
   DARK_PANEL_SHADOW_CLASS,
@@ -278,8 +279,12 @@ export function ChatComposerSurface({
   const [openSavedMessagePanel, setOpenSavedMessagePanel] = useState<OpenSavedMessagePanel>(
     queueExpandedFromParent ? "queue" : null,
   );
+  const [queueDragActive, setQueueDragActive] = useState(false);
   const stashTrayTriggerRef = useRef<HTMLButtonElement | null>(null);
   const queueTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const savedMessageDialogRef = useRef<HTMLDivElement | null>(null);
+  const savedMessagePopoverContentRef = useRef<HTMLDivElement | null>(null);
+  const savedMessagePopoverHadFocusRef = useRef(false);
   const goalDetail =
     normalizeConversationGoalProgressSummaryForDisplay(activeGoalHealth?.detail) ?? "";
   const hasGoalDetails = goalDetail.length > 0;
@@ -323,19 +328,36 @@ export function ChatComposerSurface({
 
   useEffect(() => {
     if (openSavedMessagePanel === "stash" && !stashTrayProps?.stashes.length) {
+      const shouldFocusComposer =
+        savedMessagePopoverHadFocusRef.current ||
+        (typeof document !== "undefined" &&
+          savedMessagePopoverContentRef.current?.contains(document.activeElement));
+      savedMessagePopoverHadFocusRef.current = false;
       setOpenSavedMessagePanel(null);
+      if (shouldFocusComposer && typeof window !== "undefined") {
+        window.setTimeout(() => chatInputRef.current?.focus(), 0);
+      }
     }
-  }, [openSavedMessagePanel, stashTrayProps?.stashes.length]);
+  }, [chatInputRef, openSavedMessagePanel, stashTrayProps?.stashes.length]);
 
   useEffect(() => {
     if (openSavedMessagePanel !== "queue" || queuedMessageCount > 0) {
       return;
     }
+    const shouldFocusComposer =
+      savedMessagePopoverHadFocusRef.current ||
+      (typeof document !== "undefined" &&
+        savedMessagePopoverContentRef.current?.contains(document.activeElement));
+    savedMessagePopoverHadFocusRef.current = false;
     setOpenSavedMessagePanel(null);
     if (queueExpandedFromParent) {
       onToggleQueueExpanded?.();
     }
+    if (shouldFocusComposer && typeof window !== "undefined") {
+      window.setTimeout(() => chatInputRef.current?.focus(), 0);
+    }
   }, [
+    chatInputRef,
     onToggleQueueExpanded,
     openSavedMessagePanel,
     queuedMessageCount,
@@ -369,9 +391,26 @@ export function ChatComposerSurface({
     setOpenSavedMessagePanel(nextExpanded ? "queue" : null);
   }, [openSavedMessagePanel, setExternalQueueExpanded]);
 
-  const handleSavedMessageControlsKeyDown = useCallback<KeyboardEventHandler<HTMLDivElement>>(
+  const handleSavedMessagePopoverOpenChange = useCallback(
+    (nextOpen: boolean) => {
+      if (nextOpen || openSavedMessagePanel === null) {
+        return;
+      }
+      if (openSavedMessagePanel === "queue") {
+        setExternalQueueExpanded(false);
+      }
+      setOpenSavedMessagePanel(null);
+    },
+    [openSavedMessagePanel, setExternalQueueExpanded],
+  );
+
+  const handleSavedMessagePopoverKeyDown = useCallback<KeyboardEventHandler<HTMLDivElement>>(
     (event) => {
-      if (event.key !== "Escape" || openSavedMessagePanel === null) {
+      if (
+        event.key !== "Escape" ||
+        openSavedMessagePanel === null ||
+        queueDragActive
+      ) {
         return;
       }
       event.preventDefault();
@@ -380,16 +419,70 @@ export function ChatComposerSurface({
         openSavedMessagePanel === "stash"
           ? stashTrayTriggerRef.current
           : queueTriggerRef.current;
-      if (openSavedMessagePanel === "queue") {
-        setExternalQueueExpanded(false);
-      }
-      setOpenSavedMessagePanel(null);
+      handleSavedMessagePopoverOpenChange(false);
       if (typeof window !== "undefined") {
         window.setTimeout(() => trigger?.focus(), 0);
       }
     },
-    [openSavedMessagePanel, setExternalQueueExpanded],
+    [handleSavedMessagePopoverOpenChange, openSavedMessagePanel, queueDragActive],
   );
+
+  const handleEditQueuedMessageFromPopover = useCallback(
+    (id: string) => {
+      setExternalQueueExpanded(false);
+      setOpenSavedMessagePanel(null);
+      queueSurfaceProps.onEditQueuedMessage(id);
+    },
+    [queueSurfaceProps, setExternalQueueExpanded],
+  );
+
+  const savedMessagePopoverTriggerRef =
+    openSavedMessagePanel === "stash" ? stashTrayTriggerRef : queueTriggerRef;
+
+  useEffect(() => {
+    if (openSavedMessagePanel === null || typeof document === "undefined") {
+      return;
+    }
+    const ownerDocument =
+      savedMessagePopoverTriggerRef.current?.ownerDocument ?? document;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (queueDragActive) {
+        return;
+      }
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+      if (
+        stashTrayTriggerRef.current?.contains(target) ||
+        queueTriggerRef.current?.contains(target) ||
+        savedMessagePopoverContentRef.current?.contains(target)
+      ) {
+        return;
+      }
+      handleSavedMessagePopoverOpenChange(false);
+    };
+    ownerDocument.addEventListener("pointerdown", handlePointerDown, true);
+    return () => ownerDocument.removeEventListener("pointerdown", handlePointerDown, true);
+  }, [
+    handleSavedMessagePopoverOpenChange,
+    openSavedMessagePanel,
+    queueDragActive,
+    savedMessagePopoverTriggerRef,
+  ]);
+
+  useEffect(() => {
+    if (openSavedMessagePanel === null || typeof window === "undefined") {
+      return;
+    }
+    const focusTimer = window.setTimeout(() => {
+      const firstAction = savedMessagePopoverContentRef.current?.querySelector<HTMLElement>(
+        '[data-testid="chat-send-queue-reorder"]:not([disabled]), [data-testid="chat-send-queue-send-now"]:not([disabled]), [data-testid="chat-send-queue-steer"]:not([disabled]), [data-testid="chat-message-stash-restore"]:not([disabled]), button:not([disabled])',
+      );
+      (firstAction ?? savedMessageDialogRef.current)?.focus();
+    }, 0);
+    return () => window.clearTimeout(focusTimer);
+  }, [openSavedMessagePanel]);
 
   const markSendPressHandled = useCallback(() => {
     sendPressHandledRef.current = true;
@@ -666,7 +759,6 @@ export function ChatComposerSurface({
                 aria-label="Saved messages"
                 className="mx-1 flex flex-wrap items-start justify-end gap-2 sm:mx-2"
                 data-testid="chat-saved-message-controls"
-                onKeyDown={handleSavedMessageControlsKeyDown}
               >
                 {stashTrayProps && !queueEditingItem ? (
                   <div className="contents" data-testid="chat-message-stashes">
@@ -689,32 +781,83 @@ export function ChatComposerSurface({
                     />
                   </div>
                 ) : null}
-                {openSavedMessagePanel === "stash" && stashTrayProps ? (
-                  <ChatMessageStashPanel
-                    stashes={stashTrayProps.stashes}
-                    restoredStashId={stashTrayProps.restoredStashId}
-                    busy={stashTrayProps.busy}
-                    onRestore={stashTrayProps.onRestore}
-                    onDelete={stashTrayProps.onDelete}
-                  />
-                ) : stashTrayProps?.stashes.length && !queueEditingItem ? (
+                {openSavedMessagePanel !== "stash" && stashTrayProps?.stashes.length && !queueEditingItem ? (
                   <span id={CHAT_MESSAGE_STASH_PANEL_ID} hidden />
                 ) : null}
-                {openSavedMessagePanel === "queue" || queueEditingItem ? (
+                {queueEditingItem ? (
                   <div
                     className="contents"
-                    data-testid={queueEditingItem ? "chat-send-queue" : undefined}
+                    data-testid="chat-send-queue"
                   >
                     <ChatSendQueuePanel
                       {...queueSurfaceProps}
-                      chatSendQueueExpanded={openSavedMessagePanel === "queue"}
+                      chatSendQueueExpanded={false}
                       mutationDisabled={mutationDisabled}
                       onToggleExpanded={handleQueuePanelToggle}
                       triggerRef={queueTriggerRef}
                     />
                   </div>
-                ) : queuedMessageCount > 0 ? (
+                ) : queuedMessageCount > 0 && openSavedMessagePanel !== "queue" ? (
                   <span id={CHAT_SEND_QUEUE_ITEMS_ID} hidden />
+                ) : null}
+                {openSavedMessagePanel !== null && !queueEditingItem ? (
+                  <StudioPopover
+                    key={openSavedMessagePanel}
+                    triggerRef={savedMessagePopoverTriggerRef}
+                    isOpen
+                    onOpenChange={handleSavedMessagePopoverOpenChange}
+                    isNonModal
+                    isKeyboardDismissDisabled={queueDragActive}
+                    placement="top end"
+                    offset={8}
+                    containerPadding={8}
+                    className="max-h-[calc(100dvh-1rem)] w-[min(24rem,calc(100dvw-1rem))] overflow-hidden p-0 [&>div:first-child]:hidden"
+                    data-testid="chat-saved-message-popover"
+                  >
+                    <div
+                      ref={savedMessageDialogRef}
+                      role="dialog"
+                      aria-label={
+                        openSavedMessagePanel === "stash" ? "Stashed drafts" : "Queued messages"
+                      }
+                      tabIndex={-1}
+                      className="outline-none"
+                      onFocusCapture={() => {
+                        savedMessagePopoverHadFocusRef.current = true;
+                      }}
+                    >
+                      <div
+                        ref={savedMessagePopoverContentRef}
+                        onKeyDown={handleSavedMessagePopoverKeyDown}
+                      >
+                        {openSavedMessagePanel === "stash" && stashTrayProps ? (
+                          <ChatMessageStashPanel
+                            stashes={stashTrayProps.stashes}
+                            restoredStashId={stashTrayProps.restoredStashId}
+                            busy={stashTrayProps.busy}
+                            onRestore={(stash) => {
+                              stashTrayProps.onRestore(stash);
+                              handleStashTrayExpandedChange(false);
+                            }}
+                            onDelete={stashTrayProps.onDelete}
+                          />
+                        ) : (
+                          <ChatSendQueuePanel
+                            {...queueSurfaceProps}
+                            chatSendQueueExpanded
+                            mutationDisabled={mutationDisabled}
+                            reorderDisabled={
+                              mutationDisabled || queueSurfaceProps.reorderDisabled
+                            }
+                            onDraggingChange={setQueueDragActive}
+                            onToggleExpanded={handleQueuePanelToggle}
+                            onEditQueuedMessage={handleEditQueuedMessageFromPopover}
+                            triggerRef={queueTriggerRef}
+                          />
+                        )}
+                      </div>
+                    </div>
+                  </StudioPopover>
                 ) : null}
               </div>
             ) : null}

@@ -96,12 +96,14 @@ export function ChatMessageStashPanel({
         shadow="none"
         className={`ml-auto w-full overflow-hidden border border-slate-200/70 bg-white/95 sm:w-[min(24rem,100%)] ${DARK_PANEL_STRONG_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`}
       >
-        <div className="flex min-h-10 items-center gap-2 px-3 py-1.5">
+        <div
+          className="flex min-h-10 items-center gap-2 px-3 py-1.5"
+          data-testid="chat-message-stashes-panel-header"
+        >
           <Bookmark aria-hidden="true" className="h-4 w-4 flex-none text-slate-500 dark:text-slate-400" />
           <span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-800 dark:text-slate-100">
             Stashed drafts
           </span>
-          <span className="text-xs tabular-nums text-slate-500 dark:text-slate-400">{stashes.length}</span>
         </div>
         <div
           className={`max-h-[min(16rem,35dvh)] divide-y divide-slate-200/70 overflow-y-auto overscroll-contain border-t border-slate-200/70 dark:divide-slate-800/80 ${DARK_DIVIDER_BORDER_CLASS}`}
