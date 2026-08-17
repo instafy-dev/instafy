@@ -1,9 +1,14 @@
 {
   "name": "@instafy/cli",
-  "version": "0.1.12",
+  "version": "0.1.11",
   "license": "AGPL-3.0-only",
   "description": "Run Instafy spaces locally, link folders to Studio, and share previews/webhooks via tunnels.",
   "private": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/instafy-dev/instafy.git",
+    "directory": "packages/instafy-cli"
+  },
   "publishConfig": {
     "access": "public"
   },

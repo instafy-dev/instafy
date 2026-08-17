@@ -167,6 +167,8 @@ jobs:
             scripts/check-production-image-inputs.test.mjs \
             scripts/check-production-services-workflow.test.mjs \
             scripts/check-public-release-workflows.test.mjs \
+            scripts/check-changesets.test.mjs \
+            scripts/verify-changeset-pack.test.mjs \
             scripts/lib/codexMachineAuthExpiry.test.mjs \
             scripts/check-supabase-migrations.test.mjs \
             scripts/test-supabase-migrations-empty-db.test.mjs \
@@ -202,6 +204,10 @@ jobs:
 
       - name: Test CLI package artifact
         run: pnpm --filter @instafy/cli test:package
+
+      - name: Validate provider contract package artifact
+        working-directory: packages/provider-contract
+        run: npm pack --dry-run --ignore-scripts
 
       - name: Test CLI automations
         run: pnpm --filter @instafy/cli exec vitest run test/automations.e2e.spec.ts

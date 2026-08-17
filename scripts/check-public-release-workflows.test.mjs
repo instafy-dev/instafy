@@ -49,38 +49,91 @@ test("every external public workflow action is pinned to an exact commit", () =>
   }
 });
 
-test("npm publication is bound to exact protected main and a release environment", () => {
-  const source = readWorkflow("publish-provider-contract.yml");
-  const authorize = jobSection(source, "authorize", "validate");
-  const validate = jobSection(source, "validate", "publish-provider-contract");
-  const publish = jobSection(source, "publish-provider-contract");
+test("Changesets separates pull-request, version, pack, and npm publish authority", () => {
+  const source = readWorkflow("npm-release.yml");
+  const pullRequest = jobSection(source, "pull-request-policy", "select");
+  const select = jobSection(source, "select", "version");
+  const version = jobSection(source, "version", "pack");
+  const pack = jobSection(source, "pack", "publish");
+  const publish = jobSection(source, "publish");
 
-  assert.match(source, /\n      commit_sha:\n/u);
-  assert.match(source, /commit_sha:[\s\S]*required: true/u);
-  assert.doesNotMatch(source, /\n      ref:\n/u);
-  assert.match(authorize, /GITHUB_REF" != "refs\/heads\/main"/u);
-  assert.match(authorize, /\^\[0-9a-f\]\{40\}\$/u);
-  assert.match(authorize, /REQUESTED_COMMIT" != "\$GITHUB_SHA"/u);
-  assert.match(validate, /npm pack --dry-run --ignore-scripts/u);
-  assert.match(validate, /persist-credentials: false/u);
-  assert.doesNotMatch(validate, /\bsecrets\./u);
-  assert.match(publish, /environment: npm-release/u);
-  assert.match(publish, /persist-credentials: false/u);
-  assert.match(publish, /npm publish --ignore-scripts/u);
+  assert.doesNotMatch(source, /pull_request_target/u);
+  const pullRequestTrigger = source.slice(
+    source.indexOf("  pull_request:\n"),
+    source.indexOf("  push:\n"),
+  );
+  assert.doesNotMatch(pullRequestTrigger, /paths:/u);
+  const pushTrigger = source.slice(source.indexOf("  push:\n"), source.indexOf("  workflow_dispatch:\n"));
+  assert.doesNotMatch(pushTrigger, /paths:/u);
+  assert.match(source, /permissions: \{\}/u);
+  assert.match(source, /cancel-in-progress: false/u);
+  assert.match(source, /queue: max/u);
+  assert.match(pullRequest, /permissions:\n      contents: read/u);
+  assert.doesNotMatch(pullRequest, /\bsecrets\./u);
+  assert.match(pullRequest, /check-changeset-pr\.mjs/u);
+  assert.match(pullRequest, /changeset-release\/main/u);
+  assert.match(pullRequest, /PULL_REQUEST_AUTHOR" == "instafy-bot"/u);
+
   assert.match(
-    publish,
-    /ref: \$\{\{ needs\.authorize\.outputs\.commit_sha \}\}/u,
+    select,
+    /changesets\/action\/select-mode@198f833dd7d863100ea6e28967bc9a9fdefadb0a/u,
   );
+  assert.match(select, /current_sha[\s\S]*GITHUB_SHA/u);
+  assert.doesNotMatch(select, /\bsecrets\./u);
+  assert.doesNotMatch(select, /cache:/u);
+
+  assert.match(
+    version,
+    /changesets\/action\/version@198f833dd7d863100ea6e28967bc9a9fdefadb0a/u,
+  );
+  assert.match(version, /github-token: \$\{\{ secrets\.INSTAFY_BOT_TOKEN \}\}/u);
+  assert.match(version, /pr-draft: create/u);
+  assert.match(version, /push-with-git-cli: false/u);
+  assert.doesNotMatch(version, /id-token: write/u);
+  assert.doesNotMatch(version, /NPM_TOKEN|NODE_AUTH_TOKEN/u);
+  assert.doesNotMatch(version, /cache:/u);
+
+  assert.match(pack, /needs\.select\.outputs\.publish-plan-artifact-id/u);
+  assert.match(pack, /pnpm --filter @instafy\/cli test:package/u);
+  assert.match(pack, /npm pack --dry-run --ignore-scripts/u);
+  assert.match(pack, /pnpm changeset pack/u);
+  assert.match(pack, /verify-changeset-pack\.mjs/u);
+  assert.match(pack, /actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02/u);
+  assert.doesNotMatch(pack, /\bsecrets\.|id-token: write|npm publish/u);
+  assert.doesNotMatch(pack, /cache:/u);
+
+  assert.match(publish, /environment: npm-release/u);
+  assert.match(publish, /id-token: write/u);
+  assert.match(publish, /contents: read/u);
+  assert.doesNotMatch(publish, /contents: write/u);
+  assert.match(publish, /needs\.pack\.outputs\.artifact-id/u);
+  assert.match(publish, /pnpm exec npm --version/u);
+  assert.match(publish, /Seal publication to the canonical npm registry/u);
+  assert.match(publish, /test ! -e packages\/instafy-cli\/\.npmrc/u);
+  assert.match(publish, /pnpm config get '@instafy:registry'/u);
+  assert.match(publish, /--registry before/u);
+  assert.match(publish, /pnpm changeset publish/u);
+  assert.match(publish, /--from-pack-dir/u);
+  assert.match(publish, /--no-git-tag/u);
+  assert.match(publish, /--registry after/u);
+  assert.match(publish, /test -z "\$\{NPM_TOKEN:-\}"/u);
+  assert.match(publish, /test -z "\$\{NODE_AUTH_TOKEN:-\}"/u);
+  assert.doesNotMatch(publish, /\bsecrets\.NPM_TOKEN\b|pnpm .*build|test:package|cache:/u);
   assert.equal(
-    [...source.matchAll(/\bsecrets\.NPM_TOKEN\b/gu)].length,
-    1,
-    "NPM_TOKEN must appear only in the protected publish job",
+    [...source.matchAll(/\bsecrets\.INSTAFY_BOT_TOKEN\b/gu)].length,
+    2,
+    "the bot credential is limited to the version job preflight and action",
   );
+  assert.doesNotMatch(source, /\bsecrets\.NPM_TOKEN\b/u);
   assertOrdered(
     publish,
-    "environment: npm-release",
-    "NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}",
-    "npm publish",
+    "Require the approved commit to remain current protected main",
+    "Seal publication to the canonical npm registry",
+    "Install the exact release toolchain without lifecycle scripts",
+    "Download the exact tested pack by immutable artifact id",
+    "Refuse registry collisions before publishing",
+    "Publish the unchanged tarballs with npm trusted publishing",
+    "Verify npm exposes the exact published bytes",
   );
 });
 
