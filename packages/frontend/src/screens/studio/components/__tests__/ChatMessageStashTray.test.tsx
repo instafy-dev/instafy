@@ -54,12 +54,16 @@ describe("ChatMessageStashTray", () => {
     expect(summary?.getAttribute("aria-expanded")).toBe("false");
     expect(container.querySelector(`#${summary?.getAttribute("aria-controls")}`)).not.toBeNull();
     expect(container.querySelector('[data-testid="chat-message-stashes-icon"]')).not.toBeNull();
+    expect(summary?.querySelector('span[aria-hidden="true"]')?.className).toContain("bg-slate-600");
     expect(container.textContent).toBe("2");
     await act(async () => {
       (summary as HTMLButtonElement).click();
     });
     expect(container.querySelector('[data-testid="chat-message-stashes-summary"]')).toBe(summary);
     expect(summary?.getAttribute("aria-expanded")).toBe("true");
+    const panel = container.querySelector('[aria-label="Stashed drafts"][role="region"]');
+    expect(panel?.className).toContain("basis-full");
+    expect(panel?.firstElementChild?.className).toContain("sm:w-[min(24rem,100%)]");
     await act(async () => {
       (container.querySelector('[data-testid="chat-message-stash-restore"]') as HTMLButtonElement).click();
     });
@@ -93,5 +97,34 @@ describe("ChatMessageStashTray", () => {
       (container.querySelector('[data-testid="chat-message-stash-delete"]') as HTMLButtonElement).click();
     });
     expect(onDelete).toHaveBeenCalledWith("stash-1");
+    expect(
+      container.querySelector('[data-testid="chat-message-stashes-summary"]')?.getAttribute("aria-expanded"),
+    ).toBe("true");
+  });
+
+  it("bounds long draft previews in restore and delete names", async () => {
+    const text = "a".repeat(400);
+    await act(async () => {
+      root.render(
+        <ChatMessageStashTray
+          stashes={[{ ...stash, text }]}
+          restoredStashId={null}
+          expanded
+          onRestore={vi.fn()}
+          onDelete={vi.fn()}
+        />,
+      );
+    });
+
+    const restoreName = container
+      .querySelector('[data-testid="chat-message-stash-restore"]')
+      ?.getAttribute("aria-label");
+    const deleteName = container
+      .querySelector('[data-testid="chat-message-stash-delete"]')
+      ?.getAttribute("aria-label");
+    expect(restoreName).toBe(`Restore stashed draft 1: ${"a".repeat(119)}…`);
+    expect(deleteName).toBe(`Delete stashed draft 1: ${"a".repeat(119)}…`);
+    expect(restoreName).not.toContain(text);
+    expect(deleteName).not.toContain(text);
   });
 });

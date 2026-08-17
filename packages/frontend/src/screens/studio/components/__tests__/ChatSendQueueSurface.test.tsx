@@ -75,6 +75,7 @@ describe("ChatSendQueueSurface", () => {
     expect(summary?.getAttribute("aria-expanded")).toBe("false");
     expect(container.querySelector(`#${summary?.getAttribute("aria-controls")}`)).not.toBeNull();
     expect(container.querySelector('[data-testid="chat-send-queue-icon"]')).not.toBeNull();
+    expect(summary?.querySelector('span[aria-hidden="true"]')?.className).toContain("bg-primary-600");
     expect(container.textContent).toBe("1");
 
     await act(async () => {
@@ -160,16 +161,30 @@ describe("ChatSendQueueSurface", () => {
     ).toBe("true");
     expect(container.textContent).not.toContain("Reply in progress");
     expect(container.textContent).not.toContain("@octo");
+    const panel = container.querySelector('[aria-label="Queued messages"][role="region"]');
+    expect(panel?.className).toContain("basis-full");
+    expect(panel?.firstElementChild?.className).toContain("sm:w-[min(24rem,100%)]");
   });
 
-  it("shows queue editing without a misleading zero-count queue toggle", async () => {
+  it("shows queue editing without a misleading queue toggle", async () => {
     await act(async () => {
       root.render(
         <ChatSendQueueSurface
           {...buildProps({
-            totalQueuedCount: 0,
+            totalQueuedCount: 2,
             editingQueuedItem: { targetAgentHandles: ["octo"] },
-            chatSendQueueDisplay: [],
+            chatSendQueueDisplay: [
+              {
+                id: "queued-1",
+                message: "one",
+                targetHandles: ["octo"],
+              },
+              {
+                id: "queued-2",
+                message: "two",
+                targetHandles: ["octo"],
+              },
+            ],
             collapsedQueuedMessageSummary: null,
           })}
         />,
@@ -179,5 +194,32 @@ describe("ChatSendQueueSurface", () => {
     expect(container.textContent).toContain("Editing queued message");
     expect(container.querySelector('[data-testid="chat-send-queue-agent-summary"]')).toBeNull();
     expect(container.querySelector('[data-testid="chat-send-queue-icon"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Queued messages"][role="region"]')).not.toBeNull();
+  });
+
+  it("bounds long queued-message previews in the trigger name", async () => {
+    const message = "a".repeat(400);
+    await act(async () => {
+      root.render(
+        <ChatSendQueueSurface
+          {...buildProps({
+            collapsedQueuedMessageSummary: { message },
+            chatSendQueueDisplay: [
+              {
+                id: "queued-1",
+                message,
+                targetHandles: ["octo"],
+              },
+            ],
+          })}
+        />,
+      );
+    });
+
+    const name = container
+      .querySelector('[data-testid="chat-send-queue-agent-summary"]')
+      ?.getAttribute("aria-label");
+    expect(name).toBe(`Queued messages (1): ${"a".repeat(119)}…`);
+    expect(name).not.toContain(message);
   });
 });

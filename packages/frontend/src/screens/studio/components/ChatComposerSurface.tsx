@@ -3,6 +3,7 @@ import type {
   ComponentProps,
   DragEventHandler,
   FormEventHandler,
+  KeyboardEventHandler,
   PointerEventHandler,
   RefObject,
 } from "react";
@@ -35,8 +36,18 @@ import { ComposerActionMenu } from "./ComposerActionMenu";
 import { ComposerInviteModal } from "./ComposerInviteModal";
 import { ChatBrowserDock } from "./ChatBrowserDock";
 import { ChatInput, type ChatInputHandle } from "./chat-input/ChatInput";
-import { ChatSendQueueSurface } from "./ChatSendQueueSurface";
-import { ChatMessageStashTray } from "./ChatMessageStashTray";
+import {
+  CHAT_SEND_QUEUE_ITEMS_ID,
+  ChatSendQueuePanel,
+  ChatSendQueueSurface,
+  ChatSendQueueTrigger,
+} from "./ChatSendQueueSurface";
+import {
+  CHAT_MESSAGE_STASH_PANEL_ID,
+  ChatMessageStashPanel,
+  ChatMessageStashTray,
+  ChatMessageStashTrigger,
+} from "./ChatMessageStashTray";
 import { OctoAgentChip } from "./OctoAgentChip";
 import { OctoSilenceHint } from "./OctoSilenceHint";
 import { StatusPill, StatusPillButton, type StatusPillTone } from "./StatusPill";
@@ -140,6 +151,8 @@ function AccessCheckingNotice({ flash }: { flash: boolean }) {
   );
 }
 
+type OpenSavedMessagePanel = "stash" | "queue" | null;
+
 function resolveGoalStatusPillTone(tone: ConversationGoalHealth["tone"]): StatusPillTone {
   if (tone === "blocked") {
     return "danger";
@@ -233,6 +246,10 @@ export function ChatComposerSurface({
     },
     [],
   );
+  const queueExpandedFromParent = Boolean(queueSurfaceProps.chatSendQueueExpanded);
+  const queueEditingItem = queueSurfaceProps.editingQueuedItem;
+  const queuedMessageCount = queueSurfaceProps.totalQueuedCount;
+  const onToggleQueueExpanded = queueSurfaceProps.onToggleExpanded;
   const showVoiceSecondaryStatus = showVoicePrimaryAction && showVoiceStatus;
   const primaryActionLabel =
     primaryActionMode === "steer" ? "Steer current reply (Enter)" : "Send message";
@@ -258,7 +275,11 @@ export function ChatComposerSurface({
           : "bg-primary-50 text-primary-700 dark:bg-primary-400/10 dark:text-primary-200";
   const sendPressHandledRef = useRef(false);
   const [goalDetailsExpanded, setGoalDetailsExpanded] = useState(false);
-  const [stashTrayExpanded, setStashTrayExpanded] = useState(false);
+  const [openSavedMessagePanel, setOpenSavedMessagePanel] = useState<OpenSavedMessagePanel>(
+    queueExpandedFromParent ? "queue" : null,
+  );
+  const stashTrayTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const queueTriggerRef = useRef<HTMLButtonElement | null>(null);
   const goalDetail =
     normalizeConversationGoalProgressSummaryForDisplay(activeGoalHealth?.detail) ?? "";
   const hasGoalDetails = goalDetail.length > 0;
@@ -289,16 +310,86 @@ export function ChatComposerSurface({
   }, [goalDetailsCollapseToken]);
 
   useEffect(() => {
-    if (!stashTrayProps?.stashes.length) {
-      setStashTrayExpanded(false);
+    if (queueEditingItem) {
+      setOpenSavedMessagePanel(null);
+      return;
     }
-  }, [stashTrayProps?.stashes.length]);
+    if (queueExpandedFromParent) {
+      setOpenSavedMessagePanel("queue");
+      return;
+    }
+    setOpenSavedMessagePanel((current) => (current === "queue" ? null : current));
+  }, [queueEditingItem, queueExpandedFromParent]);
 
   useEffect(() => {
-    if (queueSurfaceProps.editingQueuedItem) {
-      setStashTrayExpanded(false);
+    if (openSavedMessagePanel === "stash" && !stashTrayProps?.stashes.length) {
+      setOpenSavedMessagePanel(null);
     }
-  }, [queueSurfaceProps.editingQueuedItem]);
+  }, [openSavedMessagePanel, stashTrayProps?.stashes.length]);
+
+  useEffect(() => {
+    if (openSavedMessagePanel !== "queue" || queuedMessageCount > 0) {
+      return;
+    }
+    setOpenSavedMessagePanel(null);
+    if (queueExpandedFromParent) {
+      onToggleQueueExpanded?.();
+    }
+  }, [
+    onToggleQueueExpanded,
+    openSavedMessagePanel,
+    queuedMessageCount,
+    queueExpandedFromParent,
+  ]);
+
+  const setExternalQueueExpanded = useCallback(
+    (nextExpanded: boolean) => {
+      if (queueExpandedFromParent !== nextExpanded) {
+        onToggleQueueExpanded?.();
+      }
+    },
+    [onToggleQueueExpanded, queueExpandedFromParent],
+  );
+
+  const handleStashTrayExpandedChange = useCallback(
+    (nextExpanded: boolean) => {
+      if (nextExpanded) {
+        setExternalQueueExpanded(false);
+        setOpenSavedMessagePanel("stash");
+        return;
+      }
+      setOpenSavedMessagePanel((current) => (current === "stash" ? null : current));
+    },
+    [setExternalQueueExpanded],
+  );
+
+  const handleQueuePanelToggle = useCallback(() => {
+    const nextExpanded = openSavedMessagePanel !== "queue";
+    setExternalQueueExpanded(nextExpanded);
+    setOpenSavedMessagePanel(nextExpanded ? "queue" : null);
+  }, [openSavedMessagePanel, setExternalQueueExpanded]);
+
+  const handleSavedMessageControlsKeyDown = useCallback<KeyboardEventHandler<HTMLDivElement>>(
+    (event) => {
+      if (event.key !== "Escape" || openSavedMessagePanel === null) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      const trigger =
+        openSavedMessagePanel === "stash"
+          ? stashTrayTriggerRef.current
+          : queueTriggerRef.current;
+      if (openSavedMessagePanel === "queue") {
+        setExternalQueueExpanded(false);
+      }
+      setOpenSavedMessagePanel(null);
+      if (typeof window !== "undefined") {
+        window.setTimeout(() => trigger?.focus(), 0);
+      }
+    },
+    [openSavedMessagePanel, setExternalQueueExpanded],
+  );
 
   const markSendPressHandled = useCallback(() => {
     sendPressHandledRef.current = true;
@@ -569,35 +660,62 @@ export function ChatComposerSurface({
               <AccessCheckingNotice flash={blockedInputFlash} />
             ) : null}
             {silenceHintProps ? <OctoSilenceHint {...silenceHintProps} /> : null}
-            {stashTrayProps?.stashes.length || queueSurfaceProps.totalQueuedCount > 0 || queueSurfaceProps.editingQueuedItem ? (
+            {stashTrayProps?.stashes.length || queuedMessageCount > 0 || queueEditingItem ? (
               <div
                 role="group"
                 aria-label="Saved messages"
-                className="mx-1 flex flex-wrap items-start gap-2 sm:mx-2"
+                className="mx-1 flex flex-wrap items-start justify-end gap-2 sm:mx-2"
                 data-testid="chat-saved-message-controls"
+                onKeyDown={handleSavedMessageControlsKeyDown}
               >
-                {stashTrayProps && !queueSurfaceProps.editingQueuedItem ? (
-                  <ChatMessageStashTray
-                    {...stashTrayProps}
-                    expanded={stashTrayExpanded}
-                    onExpandedChange={(nextExpanded) => {
-                      setStashTrayExpanded(nextExpanded);
-                      if (nextExpanded && queueSurfaceProps.chatSendQueueExpanded) {
-                        queueSurfaceProps.onToggleExpanded();
-                      }
-                    }}
-                  />
+                {stashTrayProps && !queueEditingItem ? (
+                  <div className="contents" data-testid="chat-message-stashes">
+                    <ChatMessageStashTrigger
+                      count={stashTrayProps.stashes.length}
+                      expanded={openSavedMessagePanel === "stash"}
+                      onExpandedChange={handleStashTrayExpandedChange}
+                      triggerRef={stashTrayTriggerRef}
+                    />
+                  </div>
                 ) : null}
-                <ChatSendQueueSurface
-                  {...queueSurfaceProps}
-                  mutationDisabled={mutationDisabled}
-                  onToggleExpanded={() => {
-                    if (!queueSurfaceProps.chatSendQueueExpanded) {
-                      setStashTrayExpanded(false);
-                    }
-                    queueSurfaceProps.onToggleExpanded();
-                  }}
-                />
+                {queuedMessageCount > 0 && !queueEditingItem ? (
+                  <div className="contents" data-testid="chat-send-queue">
+                    <ChatSendQueueTrigger
+                      totalQueuedCount={queuedMessageCount}
+                      collapsedQueuedMessageSummary={queueSurfaceProps.collapsedQueuedMessageSummary}
+                      expanded={openSavedMessagePanel === "queue"}
+                      onToggleExpanded={handleQueuePanelToggle}
+                      triggerRef={queueTriggerRef}
+                    />
+                  </div>
+                ) : null}
+                {openSavedMessagePanel === "stash" && stashTrayProps ? (
+                  <ChatMessageStashPanel
+                    stashes={stashTrayProps.stashes}
+                    restoredStashId={stashTrayProps.restoredStashId}
+                    busy={stashTrayProps.busy}
+                    onRestore={stashTrayProps.onRestore}
+                    onDelete={stashTrayProps.onDelete}
+                  />
+                ) : stashTrayProps?.stashes.length && !queueEditingItem ? (
+                  <span id={CHAT_MESSAGE_STASH_PANEL_ID} hidden />
+                ) : null}
+                {openSavedMessagePanel === "queue" || queueEditingItem ? (
+                  <div
+                    className="contents"
+                    data-testid={queueEditingItem ? "chat-send-queue" : undefined}
+                  >
+                    <ChatSendQueuePanel
+                      {...queueSurfaceProps}
+                      chatSendQueueExpanded={openSavedMessagePanel === "queue"}
+                      mutationDisabled={mutationDisabled}
+                      onToggleExpanded={handleQueuePanelToggle}
+                      triggerRef={queueTriggerRef}
+                    />
+                  </div>
+                ) : queuedMessageCount > 0 ? (
+                  <span id={CHAT_SEND_QUEUE_ITEMS_ID} hidden />
+                ) : null}
               </div>
             ) : null}
             <Surface

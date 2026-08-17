@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { forwardRef, type ComponentProps } from "react";
+import { forwardRef, useState, type ComponentProps } from "react";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,10 +9,6 @@ import { CHAT_COMPOSER_COLUMN_CLASS_NAME } from "../ChatColumn";
 
 vi.mock("../ChatBrowserDock", () => ({
   ChatBrowserDock: () => null,
-}));
-
-vi.mock("../ChatSendQueueSurface", () => ({
-  ChatSendQueueSurface: () => null,
 }));
 
 vi.mock("../ComposerActionMenu", () => ({
@@ -54,6 +50,80 @@ vi.mock("../chat-input/ChatInput", () => ({
   }),
 }));
 
+type ComposerQueueSurfaceProps = ComponentProps<
+  typeof ChatComposerSurface
+>["queueSurfaceProps"];
+
+function createQueueSurfaceProps(
+  overrides: Partial<ComposerQueueSurfaceProps> = {},
+): ComposerQueueSurfaceProps {
+  return {
+    totalQueuedCount: 0,
+    editingQueuedItem: null,
+    chatSendQueueExpanded: false,
+    collapsedQueuedMessageSummary: null,
+    queueCanSendNow: false,
+    queueStatusLabel: null,
+    queueStatusAction: null,
+    chatSendQueueDisplay: [],
+    sendingAttachment: false,
+    inputValue: "",
+    onToggleExpanded: () => undefined,
+    onSendQueuedMessageNow: () => undefined,
+    onRequestRuntimeRecovery: () => undefined,
+    onRemoveQueuedItem: () => undefined,
+    onMoveQueuedItem: () => undefined,
+    onEditQueuedMessage: () => undefined,
+    onCancelQueuedEdit: () => undefined,
+    onRequeueEditedMessage: () => undefined,
+    onSendEditedMessageNow: () => undefined,
+    ...overrides,
+  };
+}
+
+function SavedMessagesHarness({
+  queueCount = 2,
+  initialQueueExpanded = false,
+  onQueueExpandedChange,
+}: {
+  queueCount?: number;
+  initialQueueExpanded?: boolean;
+  onQueueExpandedChange?: (expanded: boolean) => void;
+}) {
+  const [queueExpanded, setQueueExpanded] = useState(initialQueueExpanded);
+  const queueItems = Array.from({ length: queueCount }, (_, index) => ({
+    id: `queued-${index + 1}`,
+    message: `Queued message ${index + 1}`,
+    targetHandles: ["octo"],
+  }));
+  return (
+    <ChatComposerSurface
+      {...createProps({
+        queueSurfaceProps: createQueueSurfaceProps({
+          totalQueuedCount: queueCount,
+          chatSendQueueExpanded: queueExpanded,
+          collapsedQueuedMessageSummary:
+            queueCount === 1 ? { message: queueItems[0]?.message ?? "Queued message" } : null,
+          chatSendQueueDisplay: queueItems,
+          onToggleExpanded: () => {
+            setQueueExpanded((current) => {
+              const next = !current;
+              onQueueExpandedChange?.(next);
+              return next;
+            });
+          },
+        }),
+        stashTrayProps: {
+          stashes: [{ id: "stash-1", text: "Saved draft" }],
+          restoredStashId: null,
+          onRestore: () => undefined,
+          onDelete: () => undefined,
+        } as never,
+      })}
+    />
+  );
+}
+
 function createProps(
   overrides: Partial<ComponentProps<typeof ChatComposerSurface>> = {},
 ): ComponentProps<typeof ChatComposerSurface> {
@@ -63,10 +133,7 @@ function createProps(
     composerAutoHidden: false,
     compactBrowserViewport: false,
     onSubmit: (event) => event.preventDefault(),
-    queueSurfaceProps: {
-      editingQueuedItem: null,
-      totalQueuedCount: 0,
-    } as never,
+    queueSurfaceProps: createQueueSurfaceProps(),
     activeGoal: null,
     activeGoalHealth: null,
     onPauseGoal: () => undefined,
@@ -654,9 +721,9 @@ describe("ChatComposerSurface", () => {
         <ChatComposerSurface
           {...createProps({
             queueSurfaceProps: {
-              totalQueuedCount: 0,
+              ...createQueueSurfaceProps(),
               editingQueuedItem: { targetAgentHandles: ["octo"] },
-            } as never,
+            },
             stashTrayProps: {
               stashes: [{ id: "stash-1", text: "Saved draft" }],
               restoredStashId: null,
@@ -669,6 +736,149 @@ describe("ChatComposerSurface", () => {
     });
 
     expect(container.querySelector('[data-testid="chat-message-stashes"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-send-queue-agent-summary"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Queued messages"][role="region"]')).not.toBeNull();
+    const queueSurfaces = container.querySelectorAll('[data-testid="chat-send-queue"]');
+    expect(queueSurfaces).toHaveLength(1);
+    expect(queueSurfaces[0]?.querySelector('[aria-label="Queued messages"][role="region"]')).not.toBeNull();
+  });
+
+  it("keeps both triggers before the active stash and queue actions in DOM order", async () => {
+    await act(async () => {
+      root.render(<SavedMessagesHarness />);
+    });
+
+    const controls = container.querySelector('[data-testid="chat-saved-message-controls"]');
+    const stashTrigger = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-message-stashes-summary"]',
+    );
+    const queueTrigger = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-send-queue-agent-summary"]',
+    );
+
+    expect(controls?.className).toContain("justify-end");
+    expect(stashTrigger).not.toBeNull();
+    expect(queueTrigger).not.toBeNull();
+
+    await act(async () => {
+      stashTrigger?.click();
+    });
+    expect(stashTrigger?.getAttribute("aria-expanded")).toBe("true");
+    expect(queueTrigger?.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelector('[aria-label="Stashed drafts"][role="region"]')).not.toBeNull();
+    expect(
+      Array.from(controls?.querySelectorAll("button") ?? []).map((button) =>
+        button.getAttribute("data-testid"),
+      ),
+    ).toEqual([
+      "chat-message-stashes-summary",
+      "chat-send-queue-agent-summary",
+      "chat-message-stash-restore",
+      "chat-message-stash-delete",
+    ]);
+
+    await act(async () => {
+      queueTrigger?.click();
+    });
+    expect(stashTrigger?.getAttribute("aria-expanded")).toBe("false");
+    expect(queueTrigger?.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector('[aria-label="Stashed drafts"][role="region"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Queued messages"][role="region"]')).not.toBeNull();
+    expect(
+      Array.from(controls?.querySelectorAll("button") ?? []).map((button) =>
+        button.getAttribute("data-testid"),
+      ),
+    ).toEqual([
+      "chat-message-stashes-summary",
+      "chat-send-queue-agent-summary",
+      "chat-send-queue-steer",
+      "chat-send-queue-remove",
+      "chat-send-queue-steer",
+      "chat-send-queue-remove",
+    ]);
+  });
+
+  it("switches directly from the queue panel to the stash panel", async () => {
+    await act(async () => {
+      root.render(<SavedMessagesHarness />);
+    });
+
+    const stashTrigger = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-message-stashes-summary"]',
+    );
+    const queueTrigger = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-send-queue-agent-summary"]',
+    );
+
+    await act(async () => {
+      queueTrigger?.click();
+    });
+    expect(queueTrigger?.getAttribute("aria-expanded")).toBe("true");
+
+    await act(async () => {
+      stashTrigger?.click();
+    });
+    expect(queueTrigger?.getAttribute("aria-expanded")).toBe("false");
+    expect(stashTrigger?.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector('[aria-label="Queued messages"][role="region"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Stashed drafts"][role="region"]')).not.toBeNull();
+  });
+
+  it("closes the stash panel with Escape and returns focus to its trigger", async () => {
+    await act(async () => {
+      root.render(<SavedMessagesHarness />);
+    });
+
+    const stashTrigger = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-message-stashes-summary"]',
+    );
+    await act(async () => {
+      stashTrigger?.click();
+    });
+    const restoreButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-message-stash-restore"]',
+    );
+
+    await act(async () => {
+      restoreButton?.focus();
+      restoreButton?.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Escape" }));
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+    expect(stashTrigger?.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelector('[aria-label="Stashed drafts"][role="region"]')).toBeNull();
+    expect(document.activeElement).toBe(stashTrigger);
+  });
+
+  it("closes an open queue panel when its final item drains", async () => {
+    const onQueueExpandedChange = vi.fn();
+    await act(async () => {
+      root.render(
+        <SavedMessagesHarness
+          queueCount={1}
+          initialQueueExpanded
+          onQueueExpandedChange={onQueueExpandedChange}
+        />,
+      );
+    });
+    expect(
+      container.querySelector('[data-testid="chat-send-queue-agent-summary"]')?.getAttribute(
+        "aria-expanded",
+      ),
+    ).toBe("true");
+
+    await act(async () => {
+      root.render(
+        <SavedMessagesHarness
+          queueCount={0}
+          initialQueueExpanded
+          onQueueExpandedChange={onQueueExpandedChange}
+        />,
+      );
+    });
+
+    expect(onQueueExpandedChange).toHaveBeenCalledWith(false);
+    expect(container.querySelector('[data-testid="chat-send-queue-agent-summary"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Queued messages"][role="region"]')).toBeNull();
   });
 
   it("submits from a native click fallback when press events are unavailable", async () => {
