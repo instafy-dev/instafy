@@ -4174,7 +4174,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const {
     chatSendQueueDisplay,
     collapsedQueuedMessageSummary,
-    queueQuickSendItem,
     queuedByAgentHandle,
     queuedSummaryItems,
     queuedTargetHandlesByItemId,
@@ -5268,7 +5267,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           editingQueuedItem,
           chatSendQueueExpanded,
           collapsedQueuedMessageSummary,
-          queueQuickSendItemId: queueQuickSendItem?.id ?? null,
           queueCanSendNow,
           queueStatusLabel,
           queueStatusAction,

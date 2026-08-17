@@ -258,6 +258,7 @@ export function ChatComposerSurface({
           : "bg-primary-50 text-primary-700 dark:bg-primary-400/10 dark:text-primary-200";
   const sendPressHandledRef = useRef(false);
   const [goalDetailsExpanded, setGoalDetailsExpanded] = useState(false);
+  const [stashTrayExpanded, setStashTrayExpanded] = useState(false);
   const goalDetail =
     normalizeConversationGoalProgressSummaryForDisplay(activeGoalHealth?.detail) ?? "";
   const hasGoalDetails = goalDetail.length > 0;
@@ -286,6 +287,18 @@ export function ChatComposerSurface({
   useEffect(() => {
     setGoalDetailsExpanded(false);
   }, [goalDetailsCollapseToken]);
+
+  useEffect(() => {
+    if (!stashTrayProps?.stashes.length) {
+      setStashTrayExpanded(false);
+    }
+  }, [stashTrayProps?.stashes.length]);
+
+  useEffect(() => {
+    if (queueSurfaceProps.editingQueuedItem) {
+      setStashTrayExpanded(false);
+    }
+  }, [queueSurfaceProps.editingQueuedItem]);
 
   const markSendPressHandled = useCallback(() => {
     sendPressHandledRef.current = true;
@@ -556,8 +569,37 @@ export function ChatComposerSurface({
               <AccessCheckingNotice flash={blockedInputFlash} />
             ) : null}
             {silenceHintProps ? <OctoSilenceHint {...silenceHintProps} /> : null}
-            {stashTrayProps ? <ChatMessageStashTray {...stashTrayProps} /> : null}
-            <ChatSendQueueSurface {...queueSurfaceProps} mutationDisabled={mutationDisabled} />
+            {stashTrayProps?.stashes.length || queueSurfaceProps.totalQueuedCount > 0 || queueSurfaceProps.editingQueuedItem ? (
+              <div
+                role="group"
+                aria-label="Saved messages"
+                className="mx-1 flex flex-wrap items-start gap-2 sm:mx-2"
+                data-testid="chat-saved-message-controls"
+              >
+                {stashTrayProps && !queueSurfaceProps.editingQueuedItem ? (
+                  <ChatMessageStashTray
+                    {...stashTrayProps}
+                    expanded={stashTrayExpanded}
+                    onExpandedChange={(nextExpanded) => {
+                      setStashTrayExpanded(nextExpanded);
+                      if (nextExpanded && queueSurfaceProps.chatSendQueueExpanded) {
+                        queueSurfaceProps.onToggleExpanded();
+                      }
+                    }}
+                  />
+                ) : null}
+                <ChatSendQueueSurface
+                  {...queueSurfaceProps}
+                  mutationDisabled={mutationDisabled}
+                  onToggleExpanded={() => {
+                    if (!queueSurfaceProps.chatSendQueueExpanded) {
+                      setStashTrayExpanded(false);
+                    }
+                    queueSurfaceProps.onToggleExpanded();
+                  }}
+                />
+              </div>
+            ) : null}
             <Surface
               tone="default"
               radius="2xl"
@@ -763,61 +805,54 @@ export function ChatComposerSurface({
                             <MagicWand className={composerActionIconClass} aria-hidden="true" />
                           </IconButton>
                         ) : null}
-                        <span
-                          role="status"
-                          aria-atomic="true"
-                          aria-live="polite"
-                          className="sr-only"
-                          data-testid="chat-primary-action-status"
-                        >
-                          {primaryActionStatus}
-                        </span>
                         {showVoicePrimaryAction ? (
                           <VoiceConversationActionStrip {...voiceConversationActionStripProps} />
                         ) : (
-                          <IconButton
-                            type="button"
-                            onPointerDown={onSendButtonPointerDown}
-                            onPointerUp={onSendButtonPointerUp}
-                            onPointerCancel={onSendButtonPointerCancel}
-                            onPressStart={onSendButtonPressStart}
-                            onPressEnd={onSendButtonPressEnd}
-                            onPress={handleSendPress}
-                            onClick={handleSendClick}
-                            isDisabled={mutationDisabled || sendButtonDisabled}
-                            aria-label={primaryActionLabel}
-                            title={primaryActionLabel}
-                            variant={sendButtonVariant}
-                            size="md"
-                            radius="xl"
-                            className={[
-                              composerActionButtonClass,
-                              sendButtonVariant === "primary"
-                                ? composerPrimaryActionClass
-                                : "border-slate-200/70 bg-transparent shadow-none dark:border-[color:var(--color-studio-dark-panel-border)]",
-                              primaryActionMode === "steer"
-                                ? "!w-auto min-w-[2.75rem] gap-1.5 px-3"
-                                : "",
-                              sendingAttachment ? "opacity-70" : "",
-                            ]
-                              .filter(Boolean)
-                              .join(" ")}
-                            data-testid="chat-send-button"
-                            data-send-mode={primaryActionMode}
-                          >
-                            <span className="sr-only">{primaryActionLabel}</span>
-                            <Send className={composerActionIconClass} aria-hidden="true" />
-                            {primaryActionMode === "steer" ? (
-                              <span
+                          <>
+                            <span
+                              role="status"
+                              aria-atomic="true"
+                              aria-live="polite"
+                              className="sr-only"
+                              data-testid="chat-primary-action-status"
+                            >
+                              {primaryActionStatus}
+                            </span>
+                            <IconButton
+                              type="button"
+                              onPointerDown={onSendButtonPointerDown}
+                              onPointerUp={onSendButtonPointerUp}
+                              onPointerCancel={onSendButtonPointerCancel}
+                              onPressStart={onSendButtonPressStart}
+                              onPressEnd={onSendButtonPressEnd}
+                              onPress={handleSendPress}
+                              onClick={handleSendClick}
+                              isDisabled={mutationDisabled || sendButtonDisabled}
+                              aria-label={primaryActionLabel}
+                              title={primaryActionLabel}
+                              variant={sendButtonVariant}
+                              size="md"
+                              radius="xl"
+                              className={[
+                                composerActionButtonClass,
+                                sendButtonVariant === "primary"
+                                  ? composerPrimaryActionClass
+                                  : "border-slate-200/70 bg-transparent shadow-none dark:border-[color:var(--color-studio-dark-panel-border)]",
+                                sendingAttachment ? "opacity-70" : "",
+                              ]
+                                .filter(Boolean)
+                                .join(" ")}
+                              data-testid="chat-send-button"
+                              data-send-mode={primaryActionMode}
+                            >
+                              <span className="sr-only">{primaryActionLabel}</span>
+                              <Send
+                                className={composerActionIconClass}
                                 aria-hidden="true"
-                                className="inline-flex items-center gap-1 text-sm font-semibold"
-                                data-testid="chat-steer-action-label"
-                              >
-                                <span>Steer</span>
-                                <kbd className="font-sans text-xs font-medium opacity-75">↵</kbd>
-                              </span>
-                            ) : null}
-                          </IconButton>
+                                data-testid="chat-send-action-icon"
+                              />
+                            </IconButton>
+                          </>
                         )}
                       </div>
                     </div>

@@ -210,6 +210,20 @@ export function ComposerActionMenu({
                 testId="composer-action-menu-stash"
               />
             ) : null}
+            {!mutationDisabled && (onQueueMessage || onStashDraft) ? (
+              <>
+                <p
+                  className="px-3 pb-1 pt-0.5 text-xxs text-slate-400 dark:text-slate-500"
+                  data-testid="composer-action-menu-enter-hint"
+                >
+                  Enter sends or steers · ⇧Enter adds a line
+                </p>
+                <div
+                  role="separator"
+                  className="mx-2 my-1 border-t border-slate-200/70 dark:border-[color:var(--color-studio-dark-panel-border)]"
+                />
+              </>
+            ) : null}
             {!mutationDisabled ? (
               <ActionRow
                 icon={<Github className="h-4 w-4" aria-hidden="true" />}

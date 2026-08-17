@@ -92,6 +92,10 @@ describe("ComposerActionMenu", () => {
     expect(stash.textContent).toContain("Stash draft");
     expect(queue.querySelector("kbd")?.getAttribute("aria-label")).toMatch(/plus Enter/);
     expect(stash.querySelector("kbd")?.getAttribute("aria-label")).toMatch(/Shift plus Enter/);
+    expect(container.querySelector('[data-testid="composer-action-menu-enter-hint"]')?.textContent).toBe(
+      "Enter sends or steers · ⇧Enter adds a line",
+    );
+    expect(container.querySelector('[role="separator"]')).not.toBeNull();
 
     await act(async () => queue.click());
     await act(async () => stash.click());

@@ -35,7 +35,7 @@ describe("ChatMessageStashTray", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it("restores the latest private draft from the collapsed tray", async () => {
+  it("keeps stashed drafts behind a counted icon and restores the latest after expanding", async () => {
     const onRestore = vi.fn();
     const older = { ...stash, id: "stash-older", text: "Older draft" };
     await act(async () => {
@@ -49,9 +49,19 @@ describe("ChatMessageStashTray", () => {
       );
     });
 
-    expect(container.textContent).toContain("Drafts (2)");
+    const summary = container.querySelector('[data-testid="chat-message-stashes-summary"]');
+    expect(summary?.getAttribute("aria-label")).toBe("Stashed drafts (2)");
+    expect(summary?.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelector(`#${summary?.getAttribute("aria-controls")}`)).not.toBeNull();
+    expect(container.querySelector('[data-testid="chat-message-stashes-icon"]')).not.toBeNull();
+    expect(container.textContent).toBe("2");
     await act(async () => {
-      (container.querySelector('[data-testid="chat-message-stash-restore-latest"]') as HTMLButtonElement).click();
+      (summary as HTMLButtonElement).click();
+    });
+    expect(container.querySelector('[data-testid="chat-message-stashes-summary"]')).toBe(summary);
+    expect(summary?.getAttribute("aria-expanded")).toBe("true");
+    await act(async () => {
+      (container.querySelector('[data-testid="chat-message-stash-restore"]') as HTMLButtonElement).click();
     });
     expect(onRestore).toHaveBeenCalledWith(stash);
   });
@@ -69,10 +79,16 @@ describe("ChatMessageStashTray", () => {
       );
     });
     await act(async () => {
-      (container.querySelector('[data-testid="chat-message-stashes-toggle"]') as HTMLButtonElement).click();
+      (container.querySelector('[data-testid="chat-message-stashes-summary"]') as HTMLButtonElement).click();
     });
 
     expect(container.textContent).toContain("Restored in composer");
+    expect(
+      container.querySelector('[data-testid="chat-message-stashes-summary"]')?.getAttribute("aria-expanded"),
+    ).toBe("true");
+    expect(
+      container.querySelector('[data-testid="chat-message-stash-delete"]')?.getAttribute("aria-label"),
+    ).toContain("Try the smaller type scale");
     await act(async () => {
       (container.querySelector('[data-testid="chat-message-stash-delete"]') as HTMLButtonElement).click();
     });
