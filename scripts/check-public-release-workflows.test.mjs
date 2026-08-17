@@ -99,6 +99,15 @@ test("Changesets separates pull-request, version, pack, and npm publish authorit
   assert.match(pack, /pnpm changeset pack/u);
   assert.match(pack, /verify-changeset-pack\.mjs/u);
   assert.match(pack, /actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02/u);
+  assert.equal(
+    [
+      ...source.matchAll(
+        /actions\/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c/gu,
+      ),
+    ].length,
+    2,
+    "both release artifact downloads must use the raw-artifact-aware v8 action",
+  );
   assert.doesNotMatch(pack, /\bsecrets\.|id-token: write|npm publish/u);
   assert.doesNotMatch(pack, /cache:/u);
 
