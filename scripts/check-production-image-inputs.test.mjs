@@ -59,6 +59,15 @@ function dockerfileFromReferences(source) {
   );
 }
 
+function dockerfileStage(source, stageName) {
+  const stages = [...source.matchAll(/^FROM(?: --platform=\S+)? \S+ AS (\S+)$/gmu)];
+  const index = stages.findIndex((match) => match[1] === stageName);
+  assert.notEqual(index, -1, `Dockerfile is missing stage ${stageName}`);
+  const start = stages[index].index;
+  const end = stages[index + 1]?.index ?? source.length;
+  return source.slice(start, end);
+}
+
 function assertPinnedChecksumArgument(source, name, expected, relativePath) {
   const actual = argumentDefaults(source).get(name);
   assert.match(
@@ -101,6 +110,36 @@ test("every repository Dockerfile pins external base images by digest", () => {
         pinnedImage,
         `${relativePath} must pin ${resolved} as tag@sha256:<64 hex>`,
       );
+    }
+  }
+});
+
+test("affected runtime images refresh every util-linux security binary", () => {
+  const expectedStages = new Map([
+    ["docker/git-edge/Dockerfile", ["runtime"]],
+    ["docker/git-shard/Dockerfile", ["runtime"]],
+    ["docker/origin-gateway/Dockerfile", ["runtime"]],
+    ["docker/runtime/Dockerfile", ["runtime", "runtime-webdev"]],
+    ["docker/git-services-dev/Dockerfile", ["runtime"]],
+  ]);
+  const securityPackages = ["bsdutils", "login", "mount", "util-linux"];
+
+  for (const [relativePath, stageNames] of expectedStages) {
+    const source = read(relativePath);
+    for (const stageName of stageNames) {
+      const installLines = dockerfileStage(source, stageName)
+        .split("\n")
+        .map((line) => line.trim());
+      for (const packageName of securityPackages) {
+        const actualCount = installLines.filter(
+          (line) => line === packageName || line === `${packageName} \\`,
+        ).length;
+        assert.equal(
+          actualCount,
+          1,
+          `${relativePath} stage ${stageName} must install ${packageName} exactly once`,
+        );
+      }
     }
   }
 });
