@@ -4,7 +4,6 @@ import type {
   DragEventHandler,
   FormEventHandler,
   KeyboardEventHandler,
-  PointerEventHandler,
   RefObject,
 } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -61,6 +60,8 @@ import {
 } from "../../../conversations/conversationGoals";
 import type { PendingChatImageAttachment } from "./useChatComposerAttachments";
 import { CHAT_COMPOSER_COLUMN_CLASS_NAME } from "./ChatColumn";
+import { useTouchSendModePicker } from "./useTouchSendModePicker";
+import type { TouchSendModePickerOutcome } from "./touchSendModePicker";
 
 type ChatComposerSurfaceProps = {
   browserDockProps: ComponentProps<typeof ChatBrowserDock>;
@@ -103,15 +104,11 @@ type ChatComposerSurfaceProps = {
   showMobileGhostSuggestionAcceptButton: boolean;
   onAcceptGhostSuggestion: () => void;
   showVoicePrimaryAction: boolean;
+  showVoiceSecondaryAction: boolean;
   voiceConversationActionStripProps: ComponentProps<typeof VoiceConversationActionStrip>;
   sendButtonDisabled: boolean;
   sendButtonVariant: ComponentProps<typeof IconButton>["variant"];
   primaryActionMode?: "send" | "steer";
-  onSendButtonPointerDown: PointerEventHandler<HTMLButtonElement>;
-  onSendButtonPointerUp: PointerEventHandler<HTMLButtonElement>;
-  onSendButtonPointerCancel: PointerEventHandler<HTMLButtonElement>;
-  onSendButtonPressStart: ComponentProps<typeof IconButton>["onPressStart"];
-  onSendButtonPressEnd: ComponentProps<typeof IconButton>["onPressEnd"];
   onSendButtonPress: ComponentProps<typeof IconButton>["onPress"];
   composerOutlinedActionClass: string;
   composerPrimaryActionClass: string;
@@ -208,15 +205,11 @@ export function ChatComposerSurface({
   showMobileGhostSuggestionAcceptButton,
   onAcceptGhostSuggestion,
   showVoicePrimaryAction,
+  showVoiceSecondaryAction,
   voiceConversationActionStripProps,
   sendButtonDisabled,
   sendButtonVariant,
   primaryActionMode = "send",
-  onSendButtonPointerDown,
-  onSendButtonPointerUp,
-  onSendButtonPointerCancel,
-  onSendButtonPressStart,
-  onSendButtonPressEnd,
   onSendButtonPress,
   composerOutlinedActionClass,
   composerPrimaryActionClass,
@@ -251,6 +244,12 @@ export function ChatComposerSurface({
   const queueEditingItem = queueSurfaceProps.editingQueuedItem;
   const queuedMessageCount = queueSurfaceProps.totalQueuedCount;
   const onToggleQueueExpanded = queueSurfaceProps.onToggleExpanded;
+  const {
+    onQueueMessage: onQueueMessageFromComposer,
+    onStashDraft: onStashDraftFromComposer,
+    queueDisabled: queueMessageDisabled,
+    stashDisabled: stashDraftDisabled,
+  } = composerActionMenuProps;
   const showVoiceSecondaryStatus = showVoicePrimaryAction && showVoiceStatus;
   const primaryActionLabel =
     primaryActionMode === "steer" ? "Steer current reply (Enter)" : "Send message";
@@ -258,7 +257,13 @@ export function ChatComposerSurface({
     primaryActionMode === "steer"
       ? "Enter steers the current reply."
       : "Enter sends the message.";
-  const showVoiceActiveStrip = showVoicePrimaryAction && showVoiceSecondaryStatus;
+  // Hold-to-talk must keep the same microphone DOM node from press through
+  // release. The richer active strip is reserved for tap/continuous modes;
+  // hold mode communicates activity on the stable button itself.
+  const showVoiceActiveStrip =
+    showVoicePrimaryAction &&
+    showVoiceSecondaryStatus &&
+    voiceConversationActionStripProps.voiceInteractionMode !== "hold";
   const showActiveGoal =
     activeGoal !== null &&
     (activeGoal.status === "active" ||
@@ -495,8 +500,55 @@ export function ChatComposerSurface({
     }, 0);
   }, []);
 
+  const handleTouchSendModeOutcome = useCallback(
+    (outcome: TouchSendModePickerOutcome) => {
+      if (outcome.type === "none" || outcome.type === "tap") {
+        return;
+      }
+      // The pointer-up and its synthetic click share one browser task. Reuse
+      // the normal one-task duplicate guard so this hold consumes only that
+      // activation, never a legitimate follow-up tap.
+      markSendPressHandled();
+      if (outcome.type !== "commit") {
+        return;
+      }
+      if (outcome.mode === "queue") {
+        onQueueMessageFromComposer?.();
+        return;
+      }
+      if (outcome.mode === "stash") {
+        onStashDraftFromComposer?.();
+        return;
+      }
+      onSendButtonPress?.({ pointerType: "touch" } as never);
+    },
+    [
+      markSendPressHandled,
+      onQueueMessageFromComposer,
+      onSendButtonPress,
+      onStashDraftFromComposer,
+    ],
+  );
+
+  const touchSendModePicker = useTouchSendModePicker({
+    primaryMode: primaryActionMode,
+    primaryDisabled: mutationDisabled || sendButtonDisabled,
+    queueDisabled:
+      mutationDisabled ||
+      queueMessageDisabled === true ||
+      !onQueueMessageFromComposer,
+    stashDisabled:
+      mutationDisabled ||
+      stashDraftDisabled === true ||
+      !onStashDraftFromComposer,
+    onOutcome: handleTouchSendModeOutcome,
+  });
+
   const handleSendPress = useCallback<NonNullable<ComponentProps<typeof IconButton>["onPress"]>>(
     (event) => {
+      if (sendPressHandledRef.current) {
+        return;
+      }
       markSendPressHandled();
       onSendButtonPress?.(event);
     },
@@ -1066,9 +1118,22 @@ export function ChatComposerSurface({
                             <MagicWand className={composerActionIconClass} aria-hidden="true" />
                           </IconButton>
                         ) : null}
-                        {showVoicePrimaryAction ? (
-                          <VoiceConversationActionStrip {...voiceConversationActionStripProps} />
-                        ) : (
+                        {showVoicePrimaryAction || showVoiceSecondaryAction ? (
+                          <VoiceConversationActionStrip
+                            {...voiceConversationActionStripProps}
+                            showVoiceRepliesToggle={
+                              showVoicePrimaryAction
+                                ? voiceConversationActionStripProps.showVoiceRepliesToggle
+                                : false
+                            }
+                            voiceInputTestId={
+                              showVoicePrimaryAction
+                                ? voiceConversationActionStripProps.voiceInputTestId
+                                : "chat-voice-secondary-input-button"
+                            }
+                          />
+                        ) : null}
+                        {!showVoicePrimaryAction ? (
                           <>
                             <span
                               role="status"
@@ -1081,16 +1146,13 @@ export function ChatComposerSurface({
                             </span>
                             <IconButton
                               type="button"
-                              onPointerDown={onSendButtonPointerDown}
-                              onPointerUp={onSendButtonPointerUp}
-                              onPointerCancel={onSendButtonPointerCancel}
-                              onPressStart={onSendButtonPressStart}
-                              onPressEnd={onSendButtonPressEnd}
+                              {...touchSendModePicker.triggerProps}
                               onPress={handleSendPress}
                               onClick={handleSendClick}
                               isDisabled={mutationDisabled || sendButtonDisabled}
                               aria-label={primaryActionLabel}
                               title={primaryActionLabel}
+                              style={{ touchAction: "none" }}
                               variant={sendButtonVariant}
                               size="md"
                               radius="xl"
@@ -1105,6 +1167,7 @@ export function ChatComposerSurface({
                                 .join(" ")}
                               data-testid="chat-send-button"
                               data-send-mode={primaryActionMode}
+                              data-send-options-open={touchSendModePicker.isOpen ? "true" : "false"}
                             >
                               <span className="sr-only">{primaryActionLabel}</span>
                               <Send
@@ -1114,7 +1177,7 @@ export function ChatComposerSurface({
                               />
                             </IconButton>
                           </>
-                        )}
+                        ) : null}
                       </div>
                     </div>
                   )}
@@ -1124,6 +1187,7 @@ export function ChatComposerSurface({
           </div>
         </form>
         <ComposerInviteModal {...inviteModalProps} />
+        {touchSendModePicker.overlay}
       </div>
     </>
   );

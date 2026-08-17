@@ -2106,18 +2106,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     void invokeComposerPrimaryAction();
   };
   const {
-    captureTouchLikePressTarget,
     handleChatVoiceTap,
-    handleSendButtonPointerDown,
     handleSendButtonPress,
-    handleSendButtonPressEnd,
-    handleSendButtonPressStart,
     handleStartVoiceInputHold,
     handleStopVoiceInputHold,
     providerTriggerNoticeProps,
     recordingIndicatorLabel,
-    releaseCapturedPressTarget,
     showVoicePrimaryAction,
+    showVoiceSecondaryAction,
     showVoiceStatus,
     voiceActionActive,
     voiceDebugState,
@@ -2130,7 +2126,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     activeConversationId,
     activeProjectId,
     chatInputRef,
-    focusInput,
     imageAttachmentCount: imageAttachments.length,
     inputValue,
     invokeSubmitMessage: invokeComposerPrimaryAction,
@@ -5414,9 +5409,19 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           onStashDraft: () => {
             void handleStashDraft();
           },
-          queueDisabled: submissionPending || !inputValue.trim(),
+          queueDisabled:
+            submissionPending ||
+            !inputValue.trim() ||
+            imageAttachments.length > 0 ||
+            !activeConversationId ||
+            !activeConversationEntry?.controllerId,
           stashDisabled:
-            messageStashMutating || submissionPending || !inputValue.trim(),
+            messageStashMutating ||
+            submissionPending ||
+            !inputValue.trim() ||
+            imageAttachments.length > 0 ||
+            !activeConversationId ||
+            !activeConversationEntry?.controllerId,
           triggerClassName: composerOutlinedActionClass,
         }}
         onOpenImagePicker={openImagePicker}
@@ -5424,6 +5429,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         showMobileGhostSuggestionAcceptButton={showMobileGhostSuggestionAcceptButton}
         onAcceptGhostSuggestion={handleAcceptGhostSuggestion}
         showVoicePrimaryAction={showVoicePrimaryAction}
+        showVoiceSecondaryAction={showVoiceSecondaryAction}
         voiceConversationActionStripProps={{
           showVoiceRepliesToggle: false,
           voiceActionActive,
@@ -5440,8 +5446,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           onVoicePressStart: handleStartVoiceInputHold,
           onVoicePressEnd: handleStopVoiceInputHold,
           onVoiceTap: handleChatVoiceTap,
-          onPointerCaptureStart: captureTouchLikePressTarget,
-          onPointerCaptureEnd: releaseCapturedPressTarget,
           primaryActionClassName: composerPrimaryActionClass,
           outlinedActionClassName: composerOutlinedActionClass,
           actionIconClassName: composerActionIconClass,
@@ -5449,11 +5453,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         sendButtonDisabled={projectWriteDisabled || sendButtonDisabled}
         sendButtonVariant={sendButtonVariant}
         primaryActionMode={composerPrimaryActionMode}
-        onSendButtonPointerDown={handleSendButtonPointerDown}
-        onSendButtonPointerUp={releaseCapturedPressTarget}
-        onSendButtonPointerCancel={releaseCapturedPressTarget}
-        onSendButtonPressStart={handleSendButtonPressStart}
-        onSendButtonPressEnd={handleSendButtonPressEnd}
         onSendButtonPress={handleSendButtonPress}
         composerOutlinedActionClass={composerOutlinedActionClass}
         composerPrimaryActionClass={composerPrimaryActionClass}
