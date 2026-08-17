@@ -13,29 +13,6 @@ const BUMP_RANK = new Map([
   ["minor", 2],
   ["major", 3],
 ]);
-const REGISTRY_BOOTSTRAP = new Map([
-  [
-    "packages/instafy-cli/package.json",
-    {
-      packageName: "@instafy/cli",
-      from: "0.1.12",
-      to: "0.1.11",
-      changeset: ".changeset/strong-customer-cli.md",
-      bump: "minor",
-    },
-  ],
-  [
-    "packages/provider-contract/package.json",
-    {
-      packageName: "@instafy/provider-contract",
-      from: "0.1.2",
-      to: "0.1.1",
-      changeset: ".changeset/neutral-provider-surfaces.md",
-      bump: "patch",
-    },
-  ],
-]);
-
 function fail(message) {
   throw new Error(`[changeset-policy] ${message}`);
 }
@@ -66,11 +43,6 @@ function parseDiff(base, head) {
 
 function packageManifest(ref, directory) {
   return JSON.parse(readAt(ref, `${directory}/package.json`));
-}
-
-export function isRegistryBootstrapTransition(manifestPath, fromVersion, toVersion) {
-  const bootstrap = REGISTRY_BOOTSTRAP.get(manifestPath);
-  return bootstrap?.from === fromVersion && bootstrap?.to === toVersion;
 }
 
 export function isReleaseRelevantPath(filePath) {
@@ -173,7 +145,6 @@ function verifyGeneratedVersionPullRequest(base, head) {
 
 function verifyOrdinaryPullRequest(base, head) {
   const changes = parseDiff(base, head);
-  const bootstrapTransitions = [];
   for (const [, directory] of PACKAGES) {
     const manifestPath = `${directory}/package.json`;
     const changelogPath = `${directory}/CHANGELOG.md`;
@@ -190,29 +161,7 @@ function verifyOrdinaryPullRequest(base, head) {
         continue;
       }
       if (baseManifest.version !== headManifest.version) {
-        const bootstrap = REGISTRY_BOOTSTRAP.get(manifestPath);
-        if (!isRegistryBootstrapTransition(manifestPath, baseManifest.version, headManifest.version)) {
-          fail(`${manifestPath} version may change only in the generated version pull request`);
-        }
-        bootstrapTransitions.push({ manifestPath, ...bootstrap });
-      }
-    }
-  }
-
-  if (bootstrapTransitions.length > 0) {
-    if (bootstrapTransitions.length !== REGISTRY_BOOTSTRAP.size) {
-      fail("the one-time registry bootstrap must reset every recorded package together");
-    }
-    const headChangesets = new Map(pendingChangesets(head).map((changeset) => [changeset.file, changeset]));
-    for (const transition of bootstrapTransitions) {
-      const changeset = headChangesets.get(transition.changeset);
-      if (
-        !changeset ||
-        changeset.releases.length !== 1 ||
-        changeset.releases[0].name !== transition.packageName ||
-        changeset.releases[0].bump !== transition.bump
-      ) {
-        fail(`${transition.changeset} does not match the recorded one-time registry bootstrap`);
+        fail(`${manifestPath} version may change only in the generated version pull request`);
       }
     }
   }
