@@ -105,6 +105,29 @@ test("every repository Dockerfile pins external base images by digest", () => {
   }
 });
 
+test("affected runtime images refresh the util-linux security family", () => {
+  const expectedInstalls = new Map([
+    ["docker/git-edge/Dockerfile", 1],
+    ["docker/git-shard/Dockerfile", 1],
+    ["docker/origin-gateway/Dockerfile", 1],
+    ["docker/runtime/Dockerfile", 2],
+    ["docker/git-services-dev/Dockerfile", 1],
+  ]);
+
+  for (const [relativePath, expectedCount] of expectedInstalls) {
+    const source = read(relativePath);
+    const actualCount = source
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line === "util-linux" || line === "util-linux \\").length;
+    assert.equal(
+      actualCount,
+      expectedCount,
+      `${relativePath} must install util-linux in every final runtime stage`,
+    );
+  }
+});
+
 test("provider service pins the complete Docker CLI toolchain", () => {
   const relativePath = "docker/provider-service/Dockerfile";
   const source = read(relativePath);

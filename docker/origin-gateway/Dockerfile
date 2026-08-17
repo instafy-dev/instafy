@@ -23,6 +23,7 @@ FROM ${RUNTIME_BASE} AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       git \
+      util-linux \
     && rm -rf /var/lib/apt/lists/*
 ARG BUILD_ARTIFACT_DIR=release
 COPY --from=builder /src/packages/origin-http-server/target/${BUILD_ARTIFACT_DIR}/origin-http-server /usr/local/bin/origin-http-server
