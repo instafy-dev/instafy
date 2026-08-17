@@ -6,6 +6,11 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatComposerSurface } from "../ChatComposerSurface";
 import { CHAT_COMPOSER_COLUMN_CLASS_NAME } from "../ChatColumn";
+import {
+  TOUCH_SEND_MODE_HOLD_DELAY_MS,
+  createTouchSendModePickerLayout,
+  type TouchSendMode,
+} from "../touchSendModePicker";
 
 vi.mock("../ChatBrowserDock", () => ({
   ChatBrowserDock: () => null,
@@ -195,14 +200,10 @@ function createProps(
     showMobileGhostSuggestionAcceptButton: false,
     onAcceptGhostSuggestion: () => undefined,
     showVoicePrimaryAction: true,
+    showVoiceSecondaryAction: false,
     voiceConversationActionStripProps: {} as never,
     sendButtonDisabled: false,
     sendButtonVariant: "primary",
-    onSendButtonPointerDown: () => undefined,
-    onSendButtonPointerUp: () => undefined,
-    onSendButtonPointerCancel: () => undefined,
-    onSendButtonPressStart: () => undefined,
-    onSendButtonPressEnd: () => undefined,
     onSendButtonPress: () => undefined,
     composerOutlinedActionClass: "outline",
     composerPrimaryActionClass: "primary",
@@ -244,6 +245,54 @@ function createBlockedGoalProps(): Partial<ComponentProps<typeof ChatComposerSur
   };
 }
 
+const touchSendAnchor = {
+  left: 268,
+  top: 568,
+  right: 312,
+  bottom: 612,
+};
+
+function touchSendTargetCenter(mode: TouchSendMode) {
+  const layout = createTouchSendModePickerLayout({
+    anchor: touchSendAnchor,
+    viewport: { left: 0, top: 0, right: 1024, bottom: 768 },
+    primaryMode: mode === "steer" ? "steer" : "send",
+    targetSize: 64,
+    targetGap: 6,
+  });
+  const target = layout.targets.find((candidate) => candidate.mode === mode);
+  if (!target) {
+    throw new Error(`Missing ${mode} touch target`);
+  }
+  return {
+    x: (target.rect.left + target.rect.right) / 2,
+    y: (target.rect.top + target.rect.bottom) / 2,
+  };
+}
+
+function touchPointerEvent(
+  type: string,
+  {
+    pointerId = 7,
+    x = 290,
+    y = 590,
+  }: { pointerId?: number; x?: number; y?: number } = {},
+) {
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    button: 0,
+    clientX: x,
+    clientY: y,
+  });
+  Object.defineProperties(event, {
+    pointerId: { configurable: true, value: pointerId },
+    pointerType: { configurable: true, value: "touch" },
+    isPrimary: { configurable: true, value: true },
+  });
+  return event;
+}
+
 describe("ChatComposerSurface", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -260,6 +309,7 @@ describe("ChatComposerSurface", () => {
       root.unmount();
     });
     container.remove();
+    vi.useRealTimers();
     vi.restoreAllMocks();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
@@ -375,6 +425,57 @@ describe("ChatComposerSurface", () => {
     expect(container.textContent).not.toContain("Continuous");
     expect(container.textContent).not.toContain("Tap");
     expect(container.textContent).not.toContain("Hold");
+  });
+
+  it("keeps the hold-to-talk microphone mounted when a transcript creates a draft", async () => {
+    const renderHoldState = ({
+      showVoicePrimaryAction,
+      showVoiceSecondaryAction,
+      showVoiceStatus,
+    }: {
+      showVoicePrimaryAction: boolean;
+      showVoiceSecondaryAction: boolean;
+      showVoiceStatus: boolean;
+    }) =>
+      root.render(
+        <ChatComposerSurface
+          {...createProps({
+            showVoicePrimaryAction,
+            showVoiceSecondaryAction,
+            showVoiceStatus,
+            voiceStatusMessage: showVoiceStatus
+              ? "Listening. Speak now and release to stop."
+              : "",
+            voiceConversationActionStripProps: {
+              voiceInteractionMode: "hold",
+            } as never,
+          })}
+        />,
+      );
+
+    await act(async () =>
+      renderHoldState({
+        showVoicePrimaryAction: true,
+        showVoiceSecondaryAction: false,
+        showVoiceStatus: false,
+      }),
+    );
+    const holdButtonOwner = container.querySelector(
+      '[data-testid="mock-voice-action-strip"]',
+    );
+
+    await act(async () =>
+      renderHoldState({
+        showVoicePrimaryAction: false,
+        showVoiceSecondaryAction: true,
+        showVoiceStatus: true,
+      }),
+    );
+
+    expect(container.querySelector('[data-testid="mock-voice-action-strip"]')).toBe(
+      holdButtonOwner,
+    );
+    expect(container.querySelector('[data-testid="chat-voice-active-strip"]')).toBeNull();
   });
 
   it("keeps voice capture inline on mobile instead of opening a separate voice mode", async () => {
@@ -1013,6 +1114,258 @@ describe("ChatComposerSurface", () => {
     expect(container.querySelector('[data-testid="chat-send-queue-agent-summary"]')).toBeNull();
     expect(container.querySelector('[aria-label="Queued messages"][role="region"]')).toBeNull();
     expect(focusComposer).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps hold-to-talk on a dedicated microphone beside Send", async () => {
+    await act(async () => {
+      root.render(
+        <ChatComposerSurface
+          {...createProps({
+            showVoicePrimaryAction: false,
+            showVoiceSecondaryAction: true,
+          })}
+        />,
+      );
+    });
+
+    expect(container.querySelector('[data-testid="mock-voice-action-strip"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="chat-send-button"]')).not.toBeNull();
+  });
+
+  it("keeps a short touch press as one ordinary Send", async () => {
+    vi.useFakeTimers();
+    const onSendButtonPress = vi.fn();
+    await act(async () => {
+      root.render(
+        <ChatComposerSurface
+          {...createProps({
+            onSendButtonPress,
+            showVoicePrimaryAction: false,
+          })}
+        />,
+      );
+    });
+    const sendButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-send-button"]',
+    );
+    vi.spyOn(sendButton!, "getBoundingClientRect").mockReturnValue({
+      ...touchSendAnchor,
+      x: touchSendAnchor.left,
+      y: touchSendAnchor.top,
+      width: touchSendAnchor.right - touchSendAnchor.left,
+      height: touchSendAnchor.bottom - touchSendAnchor.top,
+      toJSON: () => ({}),
+    } as DOMRect);
+
+    await act(async () => {
+      sendButton?.dispatchEvent(touchPointerEvent("pointerdown"));
+      sendButton?.dispatchEvent(touchPointerEvent("pointerup"));
+      sendButton?.click();
+    });
+
+    expect(onSendButtonPress).toHaveBeenCalledTimes(1);
+    expect(document.body.querySelector('[data-testid="touch-send-mode-picker"]')).toBeNull();
+  });
+
+  it("opens touch send options without selecting or accidentally sending", async () => {
+    vi.useFakeTimers();
+    const onSendButtonPress = vi.fn();
+    const onQueueMessage = vi.fn();
+    const onStashDraft = vi.fn();
+    await act(async () => {
+      root.render(
+        <ChatComposerSurface
+          {...createProps({
+            onSendButtonPress,
+            showVoicePrimaryAction: false,
+            composerActionMenuProps: {
+              onQueueMessage,
+              onStashDraft,
+              queueDisabled: false,
+              stashDisabled: false,
+            } as never,
+          })}
+        />,
+      );
+    });
+    const sendButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-send-button"]',
+    );
+    vi.spyOn(sendButton!, "getBoundingClientRect").mockReturnValue({
+      ...touchSendAnchor,
+      x: touchSendAnchor.left,
+      y: touchSendAnchor.top,
+      width: touchSendAnchor.right - touchSendAnchor.left,
+      height: touchSendAnchor.bottom - touchSendAnchor.top,
+      toJSON: () => ({}),
+    } as DOMRect);
+
+    await act(async () => {
+      sendButton?.dispatchEvent(touchPointerEvent("pointerdown"));
+      vi.advanceTimersByTime(TOUCH_SEND_MODE_HOLD_DELAY_MS);
+    });
+    expect(document.body.querySelector('[data-testid="touch-send-mode-picker"]')).not.toBeNull();
+    expect(sendButton?.getAttribute("data-send-options-open")).toBe("true");
+
+    await act(async () => {
+      window.dispatchEvent(touchPointerEvent("pointerup"));
+      // Some touch browsers synthesize a click after pointer-up. It belongs to
+      // this held gesture and must not become an ordinary Send.
+      sendButton?.click();
+    });
+
+    expect(onSendButtonPress).not.toHaveBeenCalled();
+    expect(onQueueMessage).not.toHaveBeenCalled();
+    expect(onStashDraft).not.toHaveBeenCalled();
+    expect(document.body.querySelector('[data-testid="touch-send-mode-picker"]')).toBeNull();
+  });
+
+  it.each([
+    ["queue", "Queue"],
+    ["stash", "Stash"],
+  ] as const)("commits only the dragged %s action", async (mode, label) => {
+    vi.useFakeTimers();
+    const onSendButtonPress = vi.fn();
+    const onQueueMessage = vi.fn();
+    const onStashDraft = vi.fn();
+    await act(async () => {
+      root.render(
+        <ChatComposerSurface
+          {...createProps({
+            onSendButtonPress,
+            showVoicePrimaryAction: false,
+            composerActionMenuProps: {
+              onQueueMessage,
+              onStashDraft,
+              queueDisabled: false,
+              stashDisabled: false,
+            } as never,
+          })}
+        />,
+      );
+    });
+    const sendButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-send-button"]',
+    );
+    vi.spyOn(sendButton!, "getBoundingClientRect").mockReturnValue({
+      ...touchSendAnchor,
+      x: touchSendAnchor.left,
+      y: touchSendAnchor.top,
+      width: touchSendAnchor.right - touchSendAnchor.left,
+      height: touchSendAnchor.bottom - touchSendAnchor.top,
+      toJSON: () => ({}),
+    } as DOMRect);
+    const target = touchSendTargetCenter(mode);
+
+    await act(async () => {
+      sendButton?.dispatchEvent(touchPointerEvent("pointerdown"));
+      vi.advanceTimersByTime(TOUCH_SEND_MODE_HOLD_DELAY_MS);
+      window.dispatchEvent(touchPointerEvent("pointermove", target));
+    });
+    expect(
+      document.body.querySelector(`[data-mode="${mode}"]`)?.getAttribute("data-selected"),
+    ).toBe("true");
+    expect(document.body.textContent).toContain(`${label} selected. Release to use it.`);
+
+    await act(async () => {
+      window.dispatchEvent(touchPointerEvent("pointerup", target));
+    });
+
+    expect(onSendButtonPress).not.toHaveBeenCalled();
+    expect(onQueueMessage).toHaveBeenCalledTimes(mode === "queue" ? 1 : 0);
+    expect(onStashDraft).toHaveBeenCalledTimes(mode === "stash" ? 1 : 0);
+  });
+
+  it("uses the contextual Steer action when dragged to the primary target", async () => {
+    vi.useFakeTimers();
+    const onSendButtonPress = vi.fn();
+    await act(async () => {
+      root.render(
+        <ChatComposerSurface
+          {...createProps({
+            onSendButtonPress,
+            primaryActionMode: "steer",
+            showVoicePrimaryAction: false,
+            composerActionMenuProps: {
+              onQueueMessage: vi.fn(),
+              onStashDraft: vi.fn(),
+            } as never,
+          })}
+        />,
+      );
+    });
+    const sendButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-send-button"]',
+    );
+    vi.spyOn(sendButton!, "getBoundingClientRect").mockReturnValue({
+      ...touchSendAnchor,
+      x: touchSendAnchor.left,
+      y: touchSendAnchor.top,
+      width: touchSendAnchor.right - touchSendAnchor.left,
+      height: touchSendAnchor.bottom - touchSendAnchor.top,
+      toJSON: () => ({}),
+    } as DOMRect);
+    const target = touchSendTargetCenter("steer");
+
+    await act(async () => {
+      sendButton?.dispatchEvent(touchPointerEvent("pointerdown"));
+      vi.advanceTimersByTime(TOUCH_SEND_MODE_HOLD_DELAY_MS);
+    });
+    expect(document.body.textContent).toContain(
+      "Send options open. Slide to Steer, Queue, or Stash, then release.",
+    );
+
+    await act(async () => {
+      window.dispatchEvent(touchPointerEvent("pointermove", target));
+      window.dispatchEvent(touchPointerEvent("pointerup", target));
+    });
+
+    expect(onSendButtonPress).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not swallow a new tap after a held option finishes", async () => {
+    vi.useFakeTimers();
+    const onSendButtonPress = vi.fn();
+    await act(async () => {
+      root.render(
+        <ChatComposerSurface
+          {...createProps({
+            onSendButtonPress,
+            showVoicePrimaryAction: false,
+            composerActionMenuProps: {
+              onQueueMessage: vi.fn(),
+              onStashDraft: vi.fn(),
+            } as never,
+          })}
+        />,
+      );
+    });
+    const sendButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-send-button"]',
+    );
+    vi.spyOn(sendButton!, "getBoundingClientRect").mockReturnValue({
+      ...touchSendAnchor,
+      x: touchSendAnchor.left,
+      y: touchSendAnchor.top,
+      width: touchSendAnchor.right - touchSendAnchor.left,
+      height: touchSendAnchor.bottom - touchSendAnchor.top,
+      toJSON: () => ({}),
+    } as DOMRect);
+
+    await act(async () => {
+      sendButton?.dispatchEvent(touchPointerEvent("pointerdown"));
+      vi.advanceTimersByTime(TOUCH_SEND_MODE_HOLD_DELAY_MS);
+      window.dispatchEvent(touchPointerEvent("pointerup"));
+      vi.runOnlyPendingTimers();
+    });
+
+    await act(async () => {
+      sendButton?.dispatchEvent(touchPointerEvent("pointerdown", { pointerId: 18 }));
+      sendButton?.dispatchEvent(touchPointerEvent("pointerup", { pointerId: 18 }));
+      sendButton?.click();
+    });
+
+    expect(onSendButtonPress).toHaveBeenCalledTimes(1);
   });
 
   it("submits from a native click fallback when press events are unavailable", async () => {
