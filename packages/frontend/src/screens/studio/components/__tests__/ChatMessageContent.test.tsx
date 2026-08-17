@@ -4,7 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MessageContent } from "../ChatMessageContent";
-import { AssistantMessageEntry, UserMessageBubble } from "../ChatMessageEntries";
+import { AssistantMessageEntry, ChatRuntimeActivityContext, UserMessageBubble } from "../ChatMessageEntries";
 import type { ChatMessage } from "../../types";
 
 const { getWorkspaceFileRawUrl, readWorkspaceFile } = vi.hoisted(() => ({
@@ -1413,6 +1413,38 @@ describe("ChatMessageContent", () => {
     expect(notice?.textContent).not.toContain("try again");
     expect(notice?.textContent).not.toContain("pnpm stack:up");
     expect(container.querySelector('[data-testid="chat-bubble-assistant"]')).toBeNull();
+  });
+
+  it("demotes a runtime alert to a quiet history line while a workspace start is live", async () => {
+    const message: ChatMessage = {
+      id: "runtime-alert-superseded",
+      role: "assistant",
+      content:
+        "Runtime agent has not connected yet. Start the runtime (e.g. run `pnpm stack:up`) so queued jobs can proceed.",
+      timestamp: Date.now(),
+      metadata: {
+        source: "controller",
+        kind: "runtime_alert",
+        runId: "run-1",
+        details: {
+          reason: "runtime_not_ready",
+        },
+      },
+    };
+
+    await act(async () => {
+      root.render(
+        <ChatRuntimeActivityContext.Provider value={{ workspaceStarting: true }}>
+          <AssistantMessageEntry message={message} conversationMessages={[message]} />
+        </ChatRuntimeActivityContext.Provider>,
+      );
+    });
+
+    const notice = container.querySelector('[data-testid="chat-controller-notice"]');
+    expect(notice).not.toBeNull();
+    expect(notice?.querySelector('[data-runtime-alert-superseded="true"]')).not.toBeNull();
+    expect(notice?.textContent).toContain("A new workspace start is in progress");
+    expect(notice?.textContent).not.toContain("queued request will continue automatically");
   });
 
   it("does not render a human-authored nested runtime-alert claim as a controller notice", async () => {
