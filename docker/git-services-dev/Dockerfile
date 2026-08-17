@@ -36,8 +36,11 @@ FROM ${RUNTIME_BASE} AS runtime
 ARG INSTAFY_GIT_SERVICES_SOURCE_SHA=unknown
 LABEL dev.instafy.git-services.source-sha=${INSTAFY_GIT_SERVICES_SOURCE_SHA}
 RUN apt-get update && apt-get install -y --no-install-recommends \
+      bsdutils \
       ca-certificates \
       git \
+      login \
+      mount \
       util-linux \
     && mkdir -p /var/lib/instafy-git \
     && rm -rf /var/lib/apt/lists/*

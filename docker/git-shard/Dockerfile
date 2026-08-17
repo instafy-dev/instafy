@@ -24,8 +24,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 
 FROM ${RUNTIME_BASE} AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
+      bsdutils \
       ca-certificates \
       git \
+      login \
+      mount \
       util-linux \
     && rm -rf /var/lib/apt/lists/*
 ARG BUILD_ARTIFACT_DIR=release
