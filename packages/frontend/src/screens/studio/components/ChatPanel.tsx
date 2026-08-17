@@ -31,7 +31,7 @@ import {
   resolveChatInputRequiresAi,
 } from "./chatInputAiIntent";
 import { resolveGettingStartedAiChoices } from "./gettingStartedAiChoices";
-import { shouldSendMessageOnEnter } from "./chat-input/enterBehavior";
+import { resolveComposerEnterAction } from "./chat-input/enterBehavior";
 import {
   useConversation,
   type SubmitConversationRuntimeOverride,
@@ -198,6 +198,7 @@ import {
 } from "./chatAssistantIdentity";
 import { useStudioNavigationPosture } from "../useStudioNavigationPosture";
 import {
+  toBrowserSessionPageTarget,
   type BrowserSessionPageTarget,
 } from "./browserSessionPages";
 import { truncate } from "./chatContentHelpers";
@@ -207,6 +208,7 @@ import { useChatComposerAttachments } from "./useChatComposerAttachments";
 import { useChatSendQueueActions } from "./useChatSendQueueActions";
 import { useChatSendQueuePresentation } from "./useChatSendQueuePresentation";
 import { useChatServerSendQueue } from "./useChatServerSendQueue";
+import { useChatMessageStashes } from "./useChatMessageStashes";
 import { useChatSubmitDispatch } from "./useChatSubmitDispatch";
 import { useChatSubmitFlow, type SubmitMessageFn } from "./useChatSubmitFlow";
 import { useChatVoiceComposerController } from "./useChatVoiceComposerController";
@@ -255,6 +257,24 @@ import {
   resolveHumanChatIdentity,
 } from "./chatHumanIdentity";
 import { ChatComposerSurface } from "./ChatComposerSurface";
+import type { ControllerMessageStash } from "../../../services/runtimeController/messageStashes";
+import {
+  createConversationClientSendId,
+  createConversationSendIntentAttemptKey,
+  sendConversationIntent,
+} from "../../../services/runtimeController/sendIntents";
+import { ControllerApiError } from "../../../services/runtimeController/core";
+import { normalizeChatMessageStashEnvelope } from "./chatMessageStashEnvelope";
+import {
+  requireExpectedJobForSteer,
+  resolveComposerPrimaryActionMode,
+  resolveExpectedSteerJobId,
+  resolveSteerableComposerRuns,
+} from "./composerSendMode";
+import {
+  resolveMessageStashRestoreBlock,
+  shouldDeleteRestoredMessageStashAfterAction,
+} from "./messageStashLifecycle";
 import { BrowserSessionModal } from "./BrowserSessionModal";
 import type { SharedBrowserChromeProps } from "./SharedBrowserChrome";
 import { resolveSharedBrowserViewerKind } from "./sharedBrowserViewer";
@@ -690,6 +710,20 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     conversationControllerId: activeConversationEntry?.controllerId ?? null,
     runtimeControllerEnabled,
   });
+  const {
+    createStash: createServerMessageStash,
+    mutating: messageStashMutating,
+    removeStash: removeServerMessageStash,
+    stashes: messageStashes,
+  } = useChatMessageStashes({
+    conversationControllerId: activeConversationEntry?.controllerId ?? null,
+    enabled: runtimeControllerEnabled,
+  });
+  const [restoredMessageStash, setRestoredMessageStash] =
+    useState<ControllerMessageStash | null>(null);
+  useEffect(() => {
+    setRestoredMessageStash(null);
+  }, [activeConversationEntry?.controllerId]);
   const combinedChatSendQueue = useMemo<QueuedChatSendItem[]>(
     () =>
       serverSendQueueItems.length > 0
@@ -1863,23 +1897,45 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const [goalDetailsCollapseToken, setGoalDetailsCollapseToken] = useState(0);
 
   const submitMessageRef = useRef<SubmitMessageFn>(async () => false);
+  const composerPrimaryActionRef = useRef<{
+    mode: "send" | "steer";
+    expectedActiveJobId: string | null;
+  }>({ mode: "send", expectedActiveJobId: null });
+  const sendIntentAttemptRef = useRef<{ key: string; clientSendId: string } | null>(null);
   const invokeSubmitMessage = useCallback<SubmitMessageFn>(async (override, options) => {
     if (!ensureProjectWriteAccess()) {
       return false;
     }
+    const restoredStash = override ? null : restoredMessageStash;
+    const restoredEnvelope = restoredStash
+      ? normalizeChatMessageStashEnvelope(restoredStash.composerEnvelope)
+      : null;
+    const baseOverride =
+      override ??
+      (restoredStash && restoredEnvelope
+        ? {
+            message: latestInputValueRef.current ?? restoredStash.text,
+            editorState: latestInputEditorStateRef.current,
+            targetAgentHandles: restoredEnvelope.targetAgentHandles,
+            browserPageTarget: restoredEnvelope.browserPageTarget,
+            browserLaunchMode: restoredEnvelope.browserLaunchMode,
+            metadata: restoredEnvelope.metadata,
+            runtimeOverride: restoredEnvelope.runtimeOverride,
+          }
+        : undefined);
     const overrideHasMetadata = Boolean(
-      override && Object.prototype.hasOwnProperty.call(override, "metadata"),
+      baseOverride && Object.prototype.hasOwnProperty.call(baseOverride, "metadata"),
     );
     const optionsHasMetadata = Boolean(
       options && Object.prototype.hasOwnProperty.call(options, "metadata"),
     );
     const explicitMetadata = overrideHasMetadata
-      ? (override?.metadata ?? null)
+      ? (baseOverride?.metadata ?? null)
       : optionsHasMetadata
         ? (options?.metadata ?? null)
         : undefined;
     const pendingReplyContext = pendingReplyContextRef.current;
-    const candidateMessage = override?.message ?? latestInputValueRef.current ?? "";
+    const candidateMessage = baseOverride?.message ?? latestInputValueRef.current ?? "";
     const metadata =
       explicitMetadata !== undefined
         ? explicitMetadata
@@ -1887,12 +1943,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           ? { replyContext: pendingReplyContext }
           : undefined;
     const nextOverride =
-      override && metadata !== undefined
+      baseOverride && metadata !== undefined
         ? {
-            ...override,
+            ...baseOverride,
             metadata,
           }
-        : override;
+        : baseOverride;
     const nextOptions =
       metadata !== undefined
         ? {
@@ -1904,8 +1960,38 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     if (submitted && pendingReplyContextRef.current === pendingReplyContext) {
       pendingReplyContextRef.current = null;
     }
+    if (
+      restoredStash &&
+      shouldDeleteRestoredMessageStashAfterAction({
+        submitted,
+        action: options?.intent ?? "send",
+      })
+    ) {
+      try {
+        const removed = await removeServerMessageStash(restoredStash.id);
+        if (removed) {
+          setRestoredMessageStash((current) =>
+            current?.id === restoredStash.id ? null : current,
+          );
+        }
+      } catch (error) {
+        console.warn("[chat] sent restored stash but could not delete it:", error);
+      }
+    }
     return submitted;
-  }, [ensureProjectWriteAccess]);
+  }, [ensureProjectWriteAccess, removeServerMessageStash, restoredMessageStash]);
+
+  const invokeComposerPrimaryAction = useCallback<SubmitMessageFn>(
+    async (override, options) => {
+      const primaryAction = composerPrimaryActionRef.current;
+      return await invokeSubmitMessage(override, {
+        ...options,
+        intent: primaryAction.mode,
+        expectedActiveJobId: primaryAction.expectedActiveJobId,
+      });
+    },
+    [invokeSubmitMessage],
+  );
 
   const submitGoalCommand = useCallback(
     (command: "/goal pause" | "/goal resume" | "/goal clear") => {
@@ -2004,6 +2090,15 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     void invokeSubmitMessage();
   };
+  const scheduleComposerPrimaryAction = () => {
+    if (typeof window !== "undefined" && typeof window.setTimeout === "function") {
+      window.setTimeout(() => {
+        void invokeComposerPrimaryAction();
+      }, 0);
+      return;
+    }
+    void invokeComposerPrimaryAction();
+  };
   const {
     captureTouchLikePressTarget,
     handleChatVoiceTap,
@@ -2032,12 +2127,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     focusInput,
     imageAttachmentCount: imageAttachments.length,
     inputValue,
-    invokeSubmitMessage,
+    invokeSubmitMessage: invokeComposerPrimaryAction,
     isAssistantTyping,
     latestInputValueRef,
     messages,
     onInputChange,
-    scheduleSubmitMessage,
+    scheduleSubmitMessage: scheduleComposerPrimaryAction,
     sendingAttachment,
     showStatus,
     touchLikeInput,
@@ -2118,27 +2213,51 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         return;
       }
     }
-    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-      if (hasOpenComposerMenu) {
-        if (acceptOpenComposerMenuSelection()) {
-          event.preventDefault();
-          event.stopPropagation();
-          event.nativeEvent.stopImmediatePropagation?.();
-        }
-        return;
+    const enterAction = resolveComposerEnterAction({
+      key: event.key,
+      shiftKey: event.shiftKey,
+      metaKey: event.metaKey,
+      ctrlKey: event.ctrlKey,
+      altKey: event.altKey,
+      isComposing: event.nativeEvent.isComposing,
+      hasOpenMenu: hasOpenComposerMenu,
+      hasActiveMatchingAgent: composerPrimaryActionRef.current.mode === "steer",
+    });
+    if (enterAction === "menu") {
+      if (acceptOpenComposerMenuSelection()) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.nativeEvent.stopImmediatePropagation?.();
       }
-      if (!shouldSendMessageOnEnter(inputValue)) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      event.nativeEvent.stopImmediatePropagation?.();
-      if (parseInviteCommandRequest(inputValue.trim())) {
-        scheduleSubmitMessage();
-        return;
-      }
-      void invokeSubmitMessage();
+      return;
     }
+    if (
+      enterAction === "ignore" ||
+      enterAction === "newline"
+    ) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    event.nativeEvent.stopImmediatePropagation?.();
+    if (enterAction === "stash") {
+      void handleStashDraft();
+      return;
+    }
+    if (
+      (enterAction === "send" || enterAction === "steer") &&
+      parseInviteCommandRequest(inputValue.trim())
+    ) {
+      scheduleSubmitMessage();
+      return;
+    }
+    void invokeSubmitMessage(undefined, {
+      intent: enterAction,
+      expectedActiveJobId:
+        enterAction === "steer"
+          ? composerPrimaryActionRef.current.expectedActiveJobId
+          : null,
+    });
   };
 
   useEffect(() => {
@@ -2524,6 +2643,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   }, [activeConversationEntry?.controllerId, activeConversationEntry?.pendingRunIds, messages, runs]);
   const activeConversationRun = activeConversationRuns[0] ?? null;
   const showOutOfCreditsNotice = outOfCredits && activeConversationRuns.length === 0;
+  // Keep the complete active-handle set for existing busy/queue overlap
+  // behavior. Steer discovery applies the narrower silent-evaluation guard
+  // below without changing dispatch concurrency semantics.
   const activeConversationRunAgentHandles = useMemo(() => {
     const handles = new Set<string>();
     for (const run of activeConversationRuns) {
@@ -2535,6 +2657,72 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     return handles;
   }, [activeConversationRuns]);
+  const steerableActiveConversationRuns = useMemo(
+    () => resolveSteerableComposerRuns(activeConversationRuns, messages),
+    [activeConversationRuns, messages],
+  );
+  const steerableActiveConversationRunAgentHandles = useMemo(() => {
+    const handles = new Set<string>();
+    for (const run of steerableActiveConversationRuns) {
+      const metadata = run.metadata && isRecord(run.metadata) ? run.metadata : null;
+      const identity = extractAgentIdentityFromMetadata(metadata);
+      if (identity) {
+        handles.add(identity.handle);
+      }
+    }
+    return handles;
+  }, [steerableActiveConversationRuns]);
+  const composerTargetAgentHandles = useMemo(() => {
+    const prompt = inputValue.trim().length > 0
+      ? inputValue
+      : (softPrefillSuggestion ?? "");
+    return resolvePromptAgentTargets(prompt, {
+      useSticky: true,
+      updateSticky: false,
+    }).targetHandles;
+  }, [inputValue, resolvePromptAgentTargets, softPrefillSuggestion]);
+  const candidateComposerPrimaryActionMode = resolveComposerPrimaryActionMode({
+    // Queue-dispatched and cross-device runs can become active without going
+    // through this tab's optimistic typing state. The reconciled controller
+    // run set is already conversation-scoped, terminal-filtered, and bounded
+    // by the active-run freshness policy, so it is the authoritative fallback
+    // for exposing Steer in those cases.
+    isAssistantActive: isAssistantTyping || steerableActiveConversationRuns.length > 0,
+    targetAgentHandles: composerTargetAgentHandles,
+    activeAgentHandles: steerableActiveConversationRunAgentHandles,
+  });
+  const composerHasActiveMatchingAgent = candidateComposerPrimaryActionMode === "steer";
+  const expectedSteerRun = useMemo(() => {
+    if (!composerHasActiveMatchingAgent) {
+      return null;
+    }
+    const matchingRuns = steerableActiveConversationRuns.filter((run) => {
+      if (steerableActiveConversationRunAgentHandles.size === 0) {
+        return true;
+      }
+      const metadata = run.metadata && isRecord(run.metadata) ? run.metadata : null;
+      const identity = extractAgentIdentityFromMetadata(metadata);
+      return Boolean(identity && composerTargetAgentHandles.includes(identity.handle));
+    });
+    return matchingRuns.length === 1 ? matchingRuns[0] : null;
+  }, [
+    composerHasActiveMatchingAgent,
+    composerTargetAgentHandles,
+    steerableActiveConversationRunAgentHandles,
+    steerableActiveConversationRuns,
+  ]);
+  const expectedActiveJobId = resolveExpectedSteerJobId(expectedSteerRun, messages);
+  // True steering is an exact-job CAS. If older run metadata cannot identify
+  // that job unambiguously, fall back to ordinary Send/Queue behavior rather
+  // than risk steering a replacement run on the same agent lane.
+  const composerPrimaryActionMode = requireExpectedJobForSteer(
+    candidateComposerPrimaryActionMode,
+    expectedActiveJobId,
+  );
+  composerPrimaryActionRef.current = {
+    mode: composerPrimaryActionMode,
+    expectedActiveJobId,
+  };
 
   const typingIndicatorFallback = useMemo<{ phase: TypingIndicatorPhase; label: string | null } | null>(() => {
     if (!isAssistantTyping) {
@@ -3616,6 +3804,89 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     [activeConversationRunAgentHandles, isAssistantTyping],
   );
 
+  const submitSendIntent = useCallback(
+    async ({
+      mode,
+      request,
+      targetAgentHandles,
+      expectedActiveJobId,
+    }: {
+      mode: "queue" | "steer";
+      request: Record<string, unknown>;
+      targetAgentHandles: string[];
+      expectedActiveJobId: string | null;
+    }): Promise<boolean> => {
+      const conversationId = activeConversationEntry?.controllerId ?? null;
+      if (!conversationId) {
+        return false;
+      }
+      const attemptKey = createConversationSendIntentAttemptKey({
+        conversationId,
+        mode,
+        request,
+        expectedActiveJobId,
+        targetAgentHandles,
+      });
+      const clientSendId =
+        sendIntentAttemptRef.current?.key === attemptKey
+          ? sendIntentAttemptRef.current.clientSendId
+          : createConversationClientSendId();
+      sendIntentAttemptRef.current = { key: attemptKey, clientSendId };
+      try {
+        const result = await sendConversationIntent({
+          conversationId,
+          clientSendId,
+          mode,
+          request,
+          expectedActiveJobId,
+          targetAgentHandles,
+        });
+        if (!result) {
+          showStatus("Unable to reach the message controller right now.", "warning", 4500);
+          return false;
+        }
+        if (sendIntentAttemptRef.current?.key === attemptKey) {
+          sendIntentAttemptRef.current = null;
+        }
+        if (mode === "queue") {
+          void refreshServerSendQueue();
+          showStatus("Message queued.", "success", 2500);
+        } else {
+          showStatus("Steer added to the current reply.", "success", 3000);
+        }
+        return true;
+      } catch (error) {
+        if (error instanceof ControllerApiError) {
+          if (sendIntentAttemptRef.current?.key === attemptKey) {
+            sendIntentAttemptRef.current = null;
+          }
+          const message = (() => {
+            switch (error.code) {
+              case "no_active_job":
+                return "That reply finished before the steer arrived. Your message is still in the composer.";
+              case "ambiguous_active_job":
+                return "More than one matching reply is active. Mention one agent, then try Steer again.";
+              case "active_job_conflict":
+                return "The active reply changed before the steer arrived. Review the current reply and try again.";
+              case "active_turn_input_unavailable":
+                return "This agent cannot accept Steer during its current turn. Queue the message instead.";
+              case "send_intent_idempotency_conflict":
+                return "This message conflicts with an earlier send attempt. Edit it slightly and try again.";
+              default:
+                return error.message;
+            }
+          })();
+          showStatus(message, "warning", 5500);
+          return false;
+        }
+        const message = error instanceof Error ? error.message : "Unable to apply this message action.";
+        showStatus(message, "error", 5000);
+        return false;
+      }
+    },
+    [activeConversationEntry?.controllerId, refreshServerSendQueue, showStatus],
+  );
+
   const requestRuntimeRecovery = useCallback(() => {
     if (!runtimeControllerEnabled) {
       return;
@@ -3708,9 +3979,187 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     showStatus,
     shouldAutoScrollRef,
     softPrefillSuggestion,
+    submitSendIntent,
     targetsOverlapActiveRuns,
   });
   submitMessageRef.current = submitMessage;
+
+  const handleStashDraft = useCallback(async (): Promise<boolean> => {
+    if (!ensureProjectWriteAccess()) {
+      return false;
+    }
+    if (imageAttachments.length > 0) {
+      showStatus(
+        "Stash currently supports text only. Remove image attachments first.",
+        "info",
+        4500,
+      );
+      focusInput();
+      return false;
+    }
+    const conversationId = activeConversationEntry?.controllerId ?? null;
+    if (!conversationId || !activeConversationId) {
+      showStatus(
+        "Send the first message normally before stashing drafts in this conversation.",
+        "info",
+        4500,
+      );
+      return false;
+    }
+    const text = latestInputValueRef.current ?? "";
+    if (!text.trim()) {
+      showStatus("Write something before stashing this draft.", "info", 3000);
+      focusInput();
+      return false;
+    }
+
+    const restoredEnvelope = restoredMessageStash
+      ? normalizeChatMessageStashEnvelope(restoredMessageStash.composerEnvelope)
+      : null;
+    const pendingReplyContext = pendingReplyContextRef.current;
+    const metadata = restoredEnvelope?.metadata ??
+      (shouldAttachPendingReplyContext(pendingReplyContext, text)
+        ? { replyContext: pendingReplyContext }
+        : null);
+    const targetAgentHandles = restoredEnvelope?.targetAgentHandles ??
+      resolvePromptAgentTargets(text, {
+        useSticky: true,
+        updateSticky: false,
+      }).targetHandles;
+    const browserPageTarget = restoredEnvelope?.browserPageTarget ??
+      (preferredBrowserPage ? toBrowserSessionPageTarget(preferredBrowserPage) : null);
+    const browserLaunchMode = restoredEnvelope?.browserLaunchMode ?? pendingBrowserLaunchMode;
+    const runtimeOverride = restoredEnvelope?.runtimeOverride ??
+      (browserTransport === "personal" && personalBrowser.runtimeOverride?.runtimeId
+        ? personalBrowser.runtimeOverride
+        : browserTransport === "shared" && browserModeActive && resolvedBrowserRuntimeId
+          ? {
+              runtimeId: resolvedBrowserRuntimeId,
+              runtimeDisplayName: null,
+              preferRuntime: true,
+            }
+          : null);
+
+    try {
+      const stash = await createServerMessageStash({
+        text,
+        editorState: latestInputEditorStateRef.current,
+        composerEnvelope: {
+          targetAgentHandles,
+          browserPageTarget,
+          browserLaunchMode,
+          metadata,
+          runtimeOverride,
+        },
+      });
+      if (!stash) {
+        showStatus("Unable to stash this draft right now.", "warning", 4000);
+        return false;
+      }
+      latestInputValueRef.current = "";
+      latestInputEditorStateRef.current = null;
+      onInputChange(activeConversationId, "", null);
+      clearInputEditor?.();
+      pendingReplyContextRef.current = null;
+      setPendingBrowserLaunchMode(null);
+      setRestoredMessageStash(null);
+      showStatus("Draft stashed privately.", "success", 2500);
+      focusInput();
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to stash this draft.";
+      showStatus(message, "error", 4500);
+      return false;
+    }
+  }, [
+    activeConversationEntry?.controllerId,
+    activeConversationId,
+    browserModeActive,
+    browserTransport,
+    clearInputEditor,
+    createServerMessageStash,
+    ensureProjectWriteAccess,
+    focusInput,
+    imageAttachments.length,
+    onInputChange,
+    pendingBrowserLaunchMode,
+    personalBrowser.runtimeOverride,
+    preferredBrowserPage,
+    resolvePromptAgentTargets,
+    resolvedBrowserRuntimeId,
+    restoredMessageStash,
+    setPendingBrowserLaunchMode,
+    showStatus,
+  ]);
+
+  const handleRestoreMessageStash = useCallback(
+    (stash: ControllerMessageStash) => {
+      const restoreBlock = resolveMessageStashRestoreBlock({
+        composerText: latestInputValueRef.current ?? "",
+        attachmentCount: imageAttachments.length,
+      });
+      if (restoreBlock === "attachments") {
+        showStatus(
+          "Remove image attachments before restoring a stashed draft.",
+          "info",
+          4000,
+        );
+        return;
+      }
+      if (restoreBlock === "composer_text") {
+        showStatus(
+          "Stash or clear the current draft before restoring another one.",
+          "info",
+          4500,
+        );
+        focusInput();
+        return;
+      }
+      if (!activeConversationId) {
+        return;
+      }
+      const envelope = normalizeChatMessageStashEnvelope(stash.composerEnvelope);
+      const editorState =
+        typeof stash.editorState === "string"
+          ? stash.editorState
+          : stash.editorState
+            ? JSON.stringify(stash.editorState)
+            : null;
+      latestInputValueRef.current = stash.text;
+      latestInputEditorStateRef.current = editorState;
+      onInputChange(activeConversationId, stash.text, editorState);
+      setPendingBrowserLaunchMode(envelope.browserLaunchMode);
+      setRestoredMessageStash(stash);
+      chatInputRef.current?.focusAfterValueSync();
+      focusInput();
+      showStatus("Draft restored. It stays stashed until you send or delete it.", "info", 3500);
+    },
+    [
+      activeConversationId,
+      focusInput,
+      imageAttachments.length,
+      onInputChange,
+      setPendingBrowserLaunchMode,
+      showStatus,
+    ],
+  );
+
+  const handleDeleteMessageStash = useCallback(
+    async (stashId: string) => {
+      try {
+        const removed = await removeServerMessageStash(stashId);
+        if (!removed) {
+          showStatus("Unable to delete this stashed draft.", "warning", 3500);
+          return;
+        }
+        setRestoredMessageStash((current) => current?.id === stashId ? null : current);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unable to delete this stashed draft.";
+        showStatus(message, "error", 4000);
+      }
+    },
+    [removeServerMessageStash, showStatus],
+  );
 
   const handleAcceptGhostSuggestion = useCallback(() => {
     const remainder = composerGhostSuggestion?.remainder ?? "";
@@ -4836,6 +5285,17 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           onRequeueEditedMessage: handleRequeueEditedMessage,
           onSendEditedMessageNow: handleSendEditedMessageNow,
         }}
+        stashTrayProps={{
+          stashes: messageStashes,
+          restoredStashId: restoredMessageStash?.id ?? null,
+          busy: messageStashMutating,
+          onRestore: handleRestoreMessageStash,
+          onDelete: (stashId) => {
+            if (ensureProjectWriteAccess()) {
+              void handleDeleteMessageStash(stashId);
+            }
+          },
+        }}
         activeGoal={activeConversationEntry?.activeGoal ?? null}
         activeGoalHealth={activeGoalHealth}
         onPauseGoal={() => submitGoalCommand("/goal pause")}
@@ -4925,6 +5385,15 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           onOpenInvite: () => setAddMenuOpen(true),
           onImportGithubRepo: beginGithubImport,
           onInsertCommand: handleInsertSlashCommand,
+          onQueueMessage: () => {
+            void invokeSubmitMessage(undefined, { intent: "queue" });
+          },
+          onStashDraft: () => {
+            void handleStashDraft();
+          },
+          queueDisabled: submissionPending || !inputValue.trim(),
+          stashDisabled:
+            messageStashMutating || submissionPending || !inputValue.trim(),
           triggerClassName: composerOutlinedActionClass,
         }}
         onOpenImagePicker={openImagePicker}
@@ -4956,6 +5425,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         }}
         sendButtonDisabled={projectWriteDisabled || sendButtonDisabled}
         sendButtonVariant={sendButtonVariant}
+        primaryActionMode={composerPrimaryActionMode}
         onSendButtonPointerDown={handleSendButtonPointerDown}
         onSendButtonPointerUp={releaseCapturedPressTarget}
         onSendButtonPointerCancel={releaseCapturedPressTarget}

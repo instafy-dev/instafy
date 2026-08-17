@@ -37,7 +37,11 @@ describe("ComposerActionMenu", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  async function renderMenu(showNewBrowserAction: boolean, showInviteAction = true) {
+  async function renderMenu(
+    showNewBrowserAction: boolean,
+    showInviteAction = true,
+    sendActions: { onQueueMessage?: () => void; onStashDraft?: () => void } = {},
+  ) {
     await act(async () => {
       root.render(
         <ComposerActionMenu
@@ -49,6 +53,7 @@ describe("ComposerActionMenu", () => {
           onOpenInvite={vi.fn()}
           onImportGithubRepo={vi.fn()}
           onInsertCommand={vi.fn()}
+          {...sendActions}
         />,
       );
     });
@@ -74,5 +79,23 @@ describe("ComposerActionMenu", () => {
 
     expect(container.querySelector('[data-testid="composer-action-menu-invite"]')).toBeNull();
     expect(container.textContent).not.toContain("Invite teammates");
+  });
+
+  it("offers accessible one-shot Queue and Stash actions with shortcuts", async () => {
+    const onQueueMessage = vi.fn();
+    const onStashDraft = vi.fn();
+    await renderMenu(true, true, { onQueueMessage, onStashDraft });
+
+    const queue = container.querySelector('[data-testid="composer-action-menu-queue"]') as HTMLButtonElement;
+    const stash = container.querySelector('[data-testid="composer-action-menu-stash"]') as HTMLButtonElement;
+    expect(queue.textContent).toContain("Queue message");
+    expect(stash.textContent).toContain("Stash draft");
+    expect(queue.querySelector("kbd")?.getAttribute("aria-label")).toMatch(/plus Enter/);
+    expect(stash.querySelector("kbd")?.getAttribute("aria-label")).toMatch(/Shift plus Enter/);
+
+    await act(async () => queue.click());
+    await act(async () => stash.click());
+    expect(onQueueMessage).toHaveBeenCalledTimes(1);
+    expect(onStashDraft).toHaveBeenCalledTimes(1);
   });
 });

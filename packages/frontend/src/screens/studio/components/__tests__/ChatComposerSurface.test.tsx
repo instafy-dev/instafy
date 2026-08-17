@@ -669,4 +669,49 @@ describe("ChatComposerSurface", () => {
 
     expect(onSendButtonPress).toHaveBeenCalledTimes(1);
   });
+
+  it("makes active Steer mode visible and announces the Enter behavior", async () => {
+    const renderSurface = (primaryActionMode: "send" | "steer") =>
+      root.render(
+        <ChatComposerSurface
+          {...createProps({
+            primaryActionMode,
+            showVoicePrimaryAction: false,
+          })}
+        />,
+      );
+
+    await act(async () => renderSurface("send"));
+
+    const sendButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-send-button"]',
+    );
+    const actionStatus = container.querySelector('[data-testid="chat-primary-action-status"]');
+
+    expect(sendButton?.getAttribute("aria-label")).toBe("Send message");
+    expect(sendButton?.getAttribute("title")).toBe("Send message");
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("send");
+    expect(container.querySelector('[data-testid="chat-steer-action-label"]')).toBeNull();
+    expect(actionStatus?.getAttribute("role")).toBe("status");
+    expect(actionStatus?.getAttribute("aria-live")).toBe("polite");
+    expect(actionStatus?.getAttribute("aria-atomic")).toBe("true");
+    expect(actionStatus?.textContent).toBe("Enter sends the message.");
+
+    await act(async () => renderSurface("steer"));
+
+    expect(container.querySelector('[data-testid="chat-send-button"]')).toBe(sendButton);
+    expect(sendButton?.getAttribute("aria-label")).toBe("Steer current reply (Enter)");
+    expect(sendButton?.getAttribute("title")).toBe("Steer current reply (Enter)");
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("steer");
+    expect(sendButton?.className).toContain("!w-auto");
+    expect(container.querySelector('[data-testid="chat-steer-action-label"]')?.textContent).toBe(
+      "Steer↵",
+    );
+    expect(actionStatus?.textContent).toBe("Enter steers the current reply.");
+
+    await act(async () => renderSurface("send"));
+
+    expect(container.querySelector('[data-testid="chat-steer-action-label"]')).toBeNull();
+    expect(actionStatus?.textContent).toBe("Enter sends the message.");
+  });
 });

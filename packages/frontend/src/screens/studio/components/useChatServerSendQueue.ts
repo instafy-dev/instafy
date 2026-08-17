@@ -290,6 +290,11 @@ export function useChatServerSendQueue({
       if (!result) {
         return false;
       }
+      if (result.outcome === "queued") {
+        mutation.commit((previous) => previous);
+        void refreshServerSendQueue();
+        return false;
+      }
       mutation.commit((previous) => previous.filter((entry) => entry.id !== entryId));
       if (result.outcome !== "dispatched") {
         // The server drain already dispatched the entry, or it was removed

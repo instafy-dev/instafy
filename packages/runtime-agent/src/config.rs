@@ -181,8 +181,10 @@ impl Config {
                     "runs": true,
                     "agent": true,
                     "origin": true,
+                    "activeTurnInput": true,
                     "conversations": {
-                        "stateful": true
+                        "stateful": true,
+                        "activeTurnInput": true
                     },
                     "supportsStatefulConversations": true
                 })
@@ -194,6 +196,7 @@ impl Config {
         if let Some(map) = capabilities.as_object_mut() {
             map.insert("agent".to_string(), serde_json::json!(true));
             map.insert("origin".to_string(), serde_json::json!(true));
+            map.insert("activeTurnInput".to_string(), serde_json::json!(true));
             map.insert(
                 "supportsStatefulConversations".to_string(),
                 serde_json::json!(true),
@@ -206,6 +209,7 @@ impl Config {
             }
             if let Some(conversation_map) = conversations.as_object_mut() {
                 conversation_map.insert("stateful".to_string(), serde_json::json!(true));
+                conversation_map.insert("activeTurnInput".to_string(), serde_json::json!(true));
             }
         }
 

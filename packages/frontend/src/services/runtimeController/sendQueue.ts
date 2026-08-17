@@ -35,6 +35,7 @@ export interface ControllerSendQueueCancelResult {
 export type ControllerSendQueueDispatchOutcome =
   | "dispatched"
   | "alreadyDispatched"
+  | "queued"
   | "notFound";
 
 export interface ControllerSendQueueDispatchResult {
@@ -258,10 +259,14 @@ export async function dispatchSendQueueEntryNow(params: {
 
   const data = (await response.json()) as DispatchControllerPromptResponse & {
     alreadyDispatched?: unknown;
+    queued?: unknown;
   };
   if (data.alreadyDispatched === true) {
     // The server drain claimed and dispatched the entry before this request.
     return { outcome: "alreadyDispatched", response: null };
+  }
+  if (data.queued === true) {
+    return { outcome: "queued", response: null };
   }
   return {
     outcome: "dispatched",

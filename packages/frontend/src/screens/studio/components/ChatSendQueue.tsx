@@ -80,7 +80,7 @@ export function ChatSendQueue({
             ) : null}
             {onEdit ? (
               <Button
-                aria-label="Steer queued message"
+                aria-label="Edit queued message"
                 variant="outline"
                 size="xs"
                 radius="full"
@@ -89,7 +89,7 @@ export function ChatSendQueue({
                 className="h-7 px-2 text-xs"
                 data-testid="chat-send-queue-steer"
               >
-                Steer
+                Edit
               </Button>
             ) : null}
             <IconButton

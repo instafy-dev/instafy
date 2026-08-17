@@ -208,6 +208,18 @@ describe("sendQueue controller client", () => {
     ).resolves.toEqual({ outcome: "alreadyDispatched", response: null });
   });
 
+  it("keeps send-now entries queued when their lane became busy", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({ ok: false, queued: true }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      dispatchSendQueueEntryNow({ conversationId: CONVERSATION_ID, entryId: ENTRY_ID }),
+    ).resolves.toEqual({ outcome: "queued", response: null });
+  });
+
   it("reports unknown or canceled entries instead of throwing on 404", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,
