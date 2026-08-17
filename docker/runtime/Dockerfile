@@ -200,19 +200,23 @@ COPY --from=node-runtime /usr/local/ /usr/local/
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       bash \
+      bsdutils \
       ca-certificates \
       chromium \
       curl \
       git \
       less \
+      login \
+      mount \
       procps \
       ripgrep \
       unzip \
       openssh-client \
       python-is-python3 \
       python3 \
-      python3-pip && \
-    rm -rf /var/lib/apt/lists/*
+      python3-pip \
+      util-linux \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g "npm@${NPM_VERSION}" && \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g "playwright@${PLAYWRIGHT_VERSION}" "@playwright/test@${PLAYWRIGHT_VERSION}" && \
@@ -332,10 +336,13 @@ ARG UBOLITE_SHA256_ARM64
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       bash \
+      bsdutils \
       ca-certificates \
       curl \
       git \
       less \
+      login \
+      mount \
       procps \
       ripgrep \
       fluxbox \
@@ -347,8 +354,9 @@ RUN apt-get update && \
       openssh-client \
       python-is-python3 \
       python3 \
-      python3-pip && \
-    rm -rf /var/lib/apt/lists/*
+      python3-pip \
+      util-linux \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g "npm@${NPM_VERSION}" && \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g "playwright@${PLAYWRIGHT_VERSION}" "@playwright/test@${PLAYWRIGHT_VERSION}" && \
