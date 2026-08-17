@@ -1,4 +1,8 @@
+#[cfg(test)]
+use std::collections::HashMap;
 use std::collections::HashSet;
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{Aes128Gcm, Nonce};
@@ -11,6 +15,8 @@ use base64::Engine;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use hmac::{Hmac, Mac};
 use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+#[cfg(test)]
+use once_cell::sync::Lazy;
 use p256::ecdh::EphemeralSecret;
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::Signature;
@@ -29,6 +35,19 @@ use crate::conversations::{load_conversation_record, ConversationMessageRow};
 use crate::load_project_record;
 use crate::projects::ensure_project_access;
 use crate::{bad_request, internal_error, not_found, ApiError, AppState};
+
+#[cfg(test)]
+static TEST_PUSH_ENQUEUE_COUNTS: Lazy<StdMutex<HashMap<Uuid, usize>>> =
+    Lazy::new(|| StdMutex::new(HashMap::new()));
+
+#[cfg(test)]
+pub(crate) fn take_test_push_enqueue_count(conversation_id: Uuid) -> usize {
+    TEST_PUSH_ENQUEUE_COUNTS
+        .lock()
+        .expect("test push enqueue counter lock")
+        .remove(&conversation_id)
+        .unwrap_or(0)
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -534,6 +553,15 @@ fn build_message_notification_url(project_id: &Uuid, conversation_id: &Uuid) -> 
 }
 
 pub(crate) fn enqueue_message_push_notifications(state: AppState, message: ConversationMessageRow) {
+    #[cfg(test)]
+    {
+        *TEST_PUSH_ENQUEUE_COUNTS
+            .lock()
+            .expect("test push enqueue counter lock")
+            .entry(message.conversation_id)
+            .or_default() += 1;
+    }
+
     let debug_enabled = push_debug_enabled();
     if let Some(reason) = push_skip_reason_for_message(&message) {
         if debug_enabled {

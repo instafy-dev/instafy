@@ -1,7 +1,16 @@
 import fs from "node:fs";
-import { resolveActiveProfileName, resolveConfiguredAccessToken, resolveControllerUrl, type AccessTokenSource } from "./config.js";
+import {
+  resolveActiveProfileName,
+  resolveConfiguredAccessToken,
+  resolveControllerUrl,
+  type AccessTokenSource,
+} from "./config.js";
 import { formatAuthRejectedError } from "./errors.js";
 import { fetchWithControllerAuth } from "./controller-fetch.js";
+import {
+  resolveRuntimeBoundControllerUrl,
+  resolveRuntimeControllerCredential,
+} from "./runtime-controller-binding.js";
 
 export type ControllerApiRequestOptions = {
   method: string;
@@ -14,6 +23,7 @@ export type ControllerApiRequestOptions = {
   json?: string;
   jsonFile?: string;
   pretty?: boolean;
+  allowCrossOrigin?: boolean;
 };
 
 export type ControllerApiJsonRequestOptions = {
@@ -25,6 +35,7 @@ export type ControllerApiJsonRequestOptions = {
   query?: string[];
   headers?: string[];
   jsonBody?: unknown;
+  allowCrossOrigin?: boolean;
 };
 
 function normalizeUrl(raw: string | undefined | null): string {
@@ -43,34 +54,45 @@ function resolveBearerTokenWithSource(options: ControllerApiRequestOptions): {
   token: string | null;
   source: AccessTokenSource;
   profile: string | null;
+  runtimeControllerUrl: string | null;
 } {
   const cwd = process.cwd();
   const profile = resolveActiveProfileName({ cwd });
   const stored = resolveConfiguredAccessToken({ profile, cwd });
 
-  const explicit = normalizeToken(options.accessToken) ?? normalizeToken(options.serviceToken);
+  const explicit = normalizeToken(options.accessToken);
   if (explicit) {
-    return { token: explicit, source: "explicit", profile };
+    return { token: explicit, source: "explicit", profile, runtimeControllerUrl: null };
+  }
+
+  // Runtime-launched AI tools receive a scoped child-process credential.
+  // Do not treat the same legacy-looking environment names as public shell
+  // inputs unless the runtime job context is present as well.
+  const runtimeCredential = resolveRuntimeControllerCredential();
+  if (runtimeCredential) {
+    return {
+      token: runtimeCredential.token,
+      source: "env",
+      profile: null,
+      runtimeControllerUrl: runtimeCredential.controllerUrl,
+    };
   }
 
   const envKeys = [
-    "CONTROLLER_ACCESS_TOKEN",
     "INSTAFY_ACCESS_TOKEN",
-    "INSTAFY_SERVICE_TOKEN",
-    "CONTROLLER_TOKEN",
     "SUPABASE_ACCESS_TOKEN",
   ] as const;
   for (const key of envKeys) {
     const value = normalizeToken(process.env[key]);
     if (value) {
-      return { token: value, source: "env", profile };
+      return { token: value, source: "env", profile, runtimeControllerUrl: null };
     }
   }
 
   if (stored) {
-    return { token: stored, source: "config", profile };
+    return { token: stored, source: "config", profile, runtimeControllerUrl: null };
   }
-  return { token: null, source: "none", profile };
+  return { token: null, source: "none", profile, runtimeControllerUrl: null };
 }
 
 function parseKeyValue(raw: string): { key: string; value: string } {
@@ -120,31 +142,56 @@ function parseJsonBody(options: ControllerApiRequestOptions): string | undefined
   return undefined;
 }
 
-function buildRequestUrl(options: ControllerApiRequestOptions): URL {
-  // The one shared resolver, not a private fallback chain: this path used to
-  // skip the controller URL that `instafy login` saved, so chat, history,
-  // conversation, agents and api silently talked to localhost while every
-  // other command honored the login. Same resolver everywhere, same answer
-  // everywhere.
-  const base = normalizeUrl(
-    resolveControllerUrl({ controllerUrl: options.controllerUrl ?? null }),
+function buildRequestUrl(
+  options: ControllerApiRequestOptions,
+  runtimeControllerUrl: string | null,
+): { url: URL; crossOrigin: boolean } {
+  const selectedControllerUrl = options.controllerUrl ?? runtimeControllerUrl;
+  const base = new URL(
+    `${normalizeUrl(resolveControllerUrl({ controllerUrl: selectedControllerUrl ?? null }))}/`,
   );
+  if (base.protocol !== "http:" && base.protocol !== "https:") {
+    throw new Error("The configured controller URL must use http or https.");
+  }
+  if (base.username || base.password) {
+    throw new Error("The configured controller URL must not contain embedded credentials.");
+  }
+  if (runtimeControllerUrl) {
+    resolveRuntimeBoundControllerUrl(
+      { controllerUrl: runtimeControllerUrl },
+      base.toString(),
+    );
+  }
 
   const rawPath = options.path.trim();
   if (!rawPath) {
     throw new Error("Path is required");
   }
 
-  const url = rawPath.startsWith("http://") || rawPath.startsWith("https://")
-    ? new URL(rawPath)
-    : new URL(rawPath.startsWith("/") ? rawPath : `/${rawPath}`, `${base}/`);
+  const isAbsoluteReference = /^[a-z][a-z\d+.-]*:/i.test(rawPath) || rawPath.startsWith("//");
+  const url = new URL(
+    isAbsoluteReference ? rawPath : rawPath.startsWith("/") ? rawPath : `/${rawPath}`,
+    base,
+  );
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("Controller API URLs must use http or https.");
+  }
+  if (url.username || url.password) {
+    throw new Error("Controller API URLs must not contain embedded credentials.");
+  }
+  const crossOrigin = url.origin !== base.origin;
+  if (crossOrigin && !options.allowCrossOrigin) {
+    throw new Error(
+      "Refusing a cross-origin controller API request. Set --server-url to that origin and use a relative path, or pass --allow-cross-origin only when you explicitly intend to send credentials and request data there.",
+    );
+  }
 
   for (const pair of options.query ?? []) {
     const { key, value } = parseKeyValue(pair);
     url.searchParams.set(key, value);
   }
 
-  return url;
+  return { url, crossOrigin };
 }
 
 function maybePrettyPrintJson(text: string, pretty: boolean): string {
@@ -161,9 +208,14 @@ async function executeControllerApiRequest(
   options: ControllerApiRequestOptions,
   bodyOverride?: string | undefined,
 ): Promise<{ response: Response; responseText: string; isJson: boolean }> {
-  const url = buildRequestUrl(options);
   const resolved = resolveBearerTokenWithSource(options);
+  const { url, crossOrigin } = buildRequestUrl(options, resolved.runtimeControllerUrl);
   const bearer = resolved.token;
+  if (crossOrigin && (!bearer || resolved.source !== "explicit")) {
+    throw new Error(
+      "Cross-origin controller API requests require --allow-cross-origin and an explicit --access-token.",
+    );
+  }
 
   const headers = new Headers();
   headers.set("accept", "application/json");
@@ -182,6 +234,7 @@ async function executeControllerApiRequest(
     method: options.method,
     headers,
     body,
+    redirect: "error",
   };
   const response = bearer
     ? (
@@ -206,7 +259,7 @@ async function executeControllerApiRequest(
         status: response.status,
         responseBody: responseText,
         retryCommand: "instafy login",
-        advancedHint: "pass --access-token / --service-token, or set INSTAFY_ACCESS_TOKEN / INSTAFY_SERVICE_TOKEN",
+        advancedHint: "pass --access-token, or set INSTAFY_ACCESS_TOKEN / SUPABASE_ACCESS_TOKEN",
       });
     }
     const formattedBody = isJson ? maybePrettyPrintJson(responseText, true) : responseText;
@@ -232,6 +285,7 @@ export async function requestControllerApiJson<T = unknown>(
       serviceToken: options.serviceToken,
       query: options.query,
       headers: options.headers,
+      allowCrossOrigin: options.allowCrossOrigin,
     },
     body,
   );

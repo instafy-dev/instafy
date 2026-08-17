@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { findProjectManifest } from "./project-manifest.js";
 
@@ -31,6 +32,8 @@ const PROFILES_DIR = path.join(INSTAFY_DIR, "profiles");
 const DEFAULT_LOCAL_CONTROLLER_URL = "http://127.0.0.1:8788";
 const DEFAULT_HOSTED_CONTROLLER_URL = "https://controller.instafy.dev";
 const DEFAULT_CONTROLLER_URL = isStagingCli ? DEFAULT_HOSTED_CONTROLLER_URL : DEFAULT_LOCAL_CONTROLLER_URL;
+const CONFIG_LOCK_STALE_MS = 30_000;
+const CONFIG_LOCK_WAIT_MS = 5_000;
 
 function normalizeToken(value: string | null | undefined): string | null {
   if (typeof value !== "string") {
@@ -69,6 +72,105 @@ function normalizeProfileName(value: string | null | undefined): string | null {
     throw new Error(`Invalid profile name "${value}".`);
   }
   return trimmed;
+}
+
+function hasOwn<T extends object>(value: T, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function mergeConfig(
+  existing: InstafyCliConfig,
+  update: Partial<InstafyCliConfig>,
+): InstafyCliConfig {
+  const value = <K extends keyof InstafyCliConfig>(key: K): InstafyCliConfig[K] =>
+    hasOwn(update, key) ? update[key] : existing[key];
+  return {
+    controllerUrl: normalizeUrl(value("controllerUrl") ?? null),
+    studioUrl: normalizeUrl(value("studioUrl") ?? null),
+    accessToken: normalizeToken(value("accessToken") ?? null),
+    refreshToken: normalizeToken(value("refreshToken") ?? null),
+    supabaseUrl: normalizeUrl(value("supabaseUrl") ?? null),
+    supabaseAnonKey: normalizeToken(value("supabaseAnonKey") ?? null),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function sleepSync(milliseconds: number): void {
+  const signal = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(signal, 0, 0, milliseconds);
+}
+
+function withConfigWriteLock<T>(filePath: string, action: () => T): T {
+  const directory = path.dirname(filePath);
+  fs.mkdirSync(directory, { recursive: true });
+  const lockPath = `${filePath}.lock`;
+  const deadline = Date.now() + CONFIG_LOCK_WAIT_MS;
+  let descriptor: number | null = null;
+  while (descriptor === null) {
+    try {
+      descriptor = fs.openSync(lockPath, "wx", 0o600);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST") throw error;
+      try {
+        const lockStat = fs.statSync(lockPath);
+        if (Date.now() - lockStat.mtimeMs > CONFIG_LOCK_STALE_MS) {
+          fs.unlinkSync(lockPath);
+          continue;
+        }
+      } catch (statError) {
+        if ((statError as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw statError;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting to update Instafy CLI config: ${filePath}`);
+      }
+      sleepSync(20);
+    }
+  }
+
+  try {
+    return action();
+  } finally {
+    try {
+      fs.closeSync(descriptor);
+    } finally {
+      try {
+        fs.unlinkSync(lockPath);
+      } catch {
+        // A stale-lock recovery may already have removed it.
+      }
+    }
+  }
+}
+
+function writeConfigAtomically(filePath: string, config: InstafyCliConfig): void {
+  const tempPath = `${filePath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+  try {
+    fs.writeFileSync(tempPath, JSON.stringify(config, null, 2), {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600,
+    });
+    try {
+      fs.renameSync(tempPath, filePath);
+    } catch (error) {
+      if (process.platform !== "win32") throw error;
+      fs.rmSync(filePath, { force: true });
+      fs.renameSync(tempPath, filePath);
+    }
+    try {
+      fs.chmodSync(filePath, 0o600);
+    } catch {
+      // ignore chmod failures (windows / unusual fs)
+    }
+  } finally {
+    try {
+      fs.rmSync(tempPath, { force: true });
+    } catch {
+      // ignore best-effort temp cleanup
+    }
+  }
 }
 
 export function getInstafyConfigPath(): string {
@@ -146,26 +248,47 @@ export function readInstafyProfileConfig(profile: string): InstafyCliConfig {
 }
 
 export function writeInstafyCliConfig(update: Partial<InstafyCliConfig>): InstafyCliConfig {
-  const existing = readInstafyCliConfig();
-  const next: InstafyCliConfig = {
-    controllerUrl: normalizeUrl(update.controllerUrl ?? existing.controllerUrl ?? null),
-    studioUrl: normalizeUrl(update.studioUrl ?? existing.studioUrl ?? null),
-    accessToken: normalizeToken(update.accessToken ?? existing.accessToken ?? null),
-    refreshToken: normalizeToken(update.refreshToken ?? existing.refreshToken ?? null),
-    supabaseUrl: normalizeUrl(update.supabaseUrl ?? existing.supabaseUrl ?? null),
-    supabaseAnonKey: normalizeToken(update.supabaseAnonKey ?? existing.supabaseAnonKey ?? null),
-    updatedAt: new Date().toISOString(),
-  };
+  return withConfigWriteLock(CONFIG_PATH, () => {
+    const next = mergeConfig(readInstafyCliConfig(), update);
+    writeConfigAtomically(CONFIG_PATH, next);
+    return next;
+  });
+}
 
-  fs.mkdirSync(INSTAFY_DIR, { recursive: true });
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(next, null, 2), { encoding: "utf8" });
-  try {
-    fs.chmodSync(CONFIG_PATH, 0o600);
-  } catch {
-    // ignore chmod failures (windows / unusual fs)
+export function writeInstafyControllerUrl(controllerUrl: string): InstafyCliConfig {
+  const parsed = new URL(controllerUrl);
+  if (
+    (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+    parsed.username ||
+    parsed.password
+  ) {
+    throw new Error("controller-url must be an HTTP(S) URL without embedded credentials");
   }
-
-  return next;
+  const normalizedControllerUrl = parsed.toString().replace(/\/$/, "");
+  return withConfigWriteLock(CONFIG_PATH, () => {
+    const existing = readInstafyCliConfig();
+    let existingOrigin: string | null = null;
+    try {
+      existingOrigin = existing.controllerUrl ? new URL(existing.controllerUrl).origin : null;
+    } catch {
+      existingOrigin = null;
+    }
+    const originChanged =
+      Boolean(existing.accessToken || existing.refreshToken) && existingOrigin !== parsed.origin;
+    const next = mergeConfig(existing, {
+      controllerUrl: normalizedControllerUrl,
+      ...(originChanged
+        ? {
+            accessToken: null,
+            refreshToken: null,
+            supabaseUrl: null,
+            supabaseAnonKey: null,
+          }
+        : {}),
+    });
+    writeConfigAtomically(CONFIG_PATH, next);
+    return next;
+  });
 }
 
 export function writeInstafyProfileConfig(
@@ -173,25 +296,45 @@ export function writeInstafyProfileConfig(
   update: Partial<InstafyCliConfig>,
 ): InstafyCliConfig {
   const filePath = getInstafyProfileConfigPath(profile);
-  const existing = readInstafyProfileConfig(profile);
-  const next: InstafyCliConfig = {
-    controllerUrl: normalizeUrl(update.controllerUrl ?? existing.controllerUrl ?? null),
-    studioUrl: normalizeUrl(update.studioUrl ?? existing.studioUrl ?? null),
-    accessToken: normalizeToken(update.accessToken ?? existing.accessToken ?? null),
-    refreshToken: normalizeToken(update.refreshToken ?? existing.refreshToken ?? null),
-    supabaseUrl: normalizeUrl(update.supabaseUrl ?? existing.supabaseUrl ?? null),
-    supabaseAnonKey: normalizeToken(update.supabaseAnonKey ?? existing.supabaseAnonKey ?? null),
-    updatedAt: new Date().toISOString(),
-  };
+  return withConfigWriteLock(filePath, () => {
+    const next = mergeConfig(readInstafyProfileConfig(profile), update);
+    writeConfigAtomically(filePath, next);
+    return next;
+  });
+}
 
-  fs.mkdirSync(PROFILES_DIR, { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(next, null, 2), { encoding: "utf8" });
-  try {
-    fs.chmodSync(filePath, 0o600);
-  } catch {
-    // ignore chmod failures (windows / unusual fs)
-  }
-  return next;
+export type StoredAuthSessionSnapshot = Pick<
+  InstafyCliConfig,
+  "controllerUrl" | "accessToken" | "refreshToken" | "supabaseUrl" | "supabaseAnonKey"
+>;
+
+function authSessionMatches(
+  config: InstafyCliConfig,
+  expected: StoredAuthSessionSnapshot,
+): boolean {
+  return (
+    normalizeUrl(config.controllerUrl ?? null) === normalizeUrl(expected.controllerUrl ?? null) &&
+    normalizeToken(config.accessToken ?? null) === normalizeToken(expected.accessToken ?? null) &&
+    normalizeToken(config.refreshToken ?? null) === normalizeToken(expected.refreshToken ?? null) &&
+    normalizeUrl(config.supabaseUrl ?? null) === normalizeUrl(expected.supabaseUrl ?? null) &&
+    normalizeToken(config.supabaseAnonKey ?? null) === normalizeToken(expected.supabaseAnonKey ?? null)
+  );
+}
+
+export function replaceStoredAuthSessionIfUnchanged(params: {
+  profile?: string | null;
+  expected: StoredAuthSessionSnapshot;
+  update: StoredAuthSessionSnapshot;
+}): InstafyCliConfig | null {
+  const profile = normalizeProfileName(params.profile ?? null);
+  const filePath = profile ? getInstafyProfileConfigPath(profile) : CONFIG_PATH;
+  return withConfigWriteLock(filePath, () => {
+    const existing = profile ? readInstafyProfileConfig(profile) : readInstafyCliConfig();
+    if (!authSessionMatches(existing, params.expected)) return null;
+    const next = mergeConfig(existing, params.update);
+    writeConfigAtomically(filePath, next);
+    return next;
+  });
 }
 
 export function clearInstafyCliConfig(keys?: Array<keyof InstafyCliConfig>): void {
@@ -204,12 +347,11 @@ export function clearInstafyCliConfig(keys?: Array<keyof InstafyCliConfig>): voi
     return;
   }
 
-  const existing = readInstafyCliConfig();
-  const next: InstafyCliConfig = { ...existing };
+  const update: Partial<InstafyCliConfig> = {};
   for (const key of keys) {
-    next[key] = null;
+    update[key] = null;
   }
-  writeInstafyCliConfig(next);
+  writeInstafyCliConfig(update);
 }
 
 export function clearInstafyProfileConfig(
@@ -226,12 +368,11 @@ export function clearInstafyProfileConfig(
     return;
   }
 
-  const existing = readInstafyProfileConfig(profile);
-  const next: InstafyCliConfig = { ...existing };
+  const update: Partial<InstafyCliConfig> = {};
   for (const key of keys) {
-    next[key] = null;
+    update[key] = null;
   }
-  writeInstafyProfileConfig(profile, next);
+  writeInstafyProfileConfig(profile, update);
 }
 
 export function resolveActiveProfileName(params?: {
@@ -303,7 +444,6 @@ export function resolveControllerUrl(params?: {
   return (
     normalizeUrl(params?.controllerUrl ?? null) ??
     normalizeUrl(process.env["INSTAFY_SERVER_URL"] ?? null) ??
-    normalizeUrl(process.env["CONTROLLER_BASE_URL"] ?? null) ??
     normalizeUrl(config.controllerUrl ?? null) ??
     DEFAULT_CONTROLLER_URL
   );
@@ -319,8 +459,6 @@ export function resolveUserAccessToken(params?: {
   return (
     normalizeToken(params?.accessToken ?? null) ??
     normalizeToken(process.env["INSTAFY_ACCESS_TOKEN"] ?? null) ??
-    normalizeToken(process.env["CONTROLLER_ACCESS_TOKEN"] ?? null) ??
-    normalizeToken(process.env["RUNTIME_ACCESS_TOKEN"] ?? null) ??
     normalizeToken(process.env["SUPABASE_ACCESS_TOKEN"] ?? null) ??
     normalizeToken(config.accessToken ?? null)
   );
@@ -343,8 +481,6 @@ export function resolveUserAccessTokenWithSource(params?: {
 
   const envKeys = [
     "INSTAFY_ACCESS_TOKEN",
-    "CONTROLLER_ACCESS_TOKEN",
-    "RUNTIME_ACCESS_TOKEN",
     "SUPABASE_ACCESS_TOKEN",
   ] as const;
 

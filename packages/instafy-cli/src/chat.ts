@@ -119,7 +119,7 @@ function normalizeBooleanEnv(value: string | undefined): boolean | null {
 function isRuntimeJobEnvironment(env: NodeJS.ProcessEnv = process.env): boolean {
   const runtimeId = env["RUNTIME_ID"]?.trim();
   const conversationId = env["INSTAFY_CONVERSATION_ID"]?.trim() || env["CONVERSATION_ID"]?.trim();
-  const controllerToken = env["CONTROLLER_ACCESS_TOKEN"]?.trim() || env["RUNTIME_ACCESS_TOKEN"]?.trim();
+  const controllerToken = env["CONTROLLER_ACCESS_TOKEN"]?.trim();
   return Boolean(runtimeId && conversationId && controllerToken);
 }
 

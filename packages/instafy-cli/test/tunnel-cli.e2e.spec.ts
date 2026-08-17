@@ -256,10 +256,9 @@ describe("instafy tunnel CLI", () => {
     }
   }, 30000);
 
-  it("uses the active-job token and sends its exact runtime lease binding", async () => {
+  it("uses the active-job token without requiring a runtime lease", async () => {
     const projectId = randomUUID();
     const runtimeId = randomUUID();
-    const runtimeLeaseId = randomUUID();
     const captures: RequestCapture[] = [];
     const server = http.createServer((req, res) => {
       let body = "";
@@ -298,14 +297,16 @@ describe("instafy tunnel CLI", () => {
       "CONTROLLER_ACCESS_TOKEN",
       "RUNTIME_ACCESS_TOKEN",
       "RUNTIME_ID",
-      "RUNTIME_LEASE_ID",
+      "INSTAFY_CONVERSATION_ID",
+      "CONTROLLER_BASE_URL",
     ] as const;
     const previous = new Map(envKeys.map((key) => [key, process.env[key]]));
     delete process.env.INSTAFY_ACCESS_TOKEN;
     process.env.CONTROLLER_ACCESS_TOKEN = "active-job-token";
     process.env.RUNTIME_ACCESS_TOKEN = "runtime-machine-token";
     process.env.RUNTIME_ID = runtimeId;
-    process.env.RUNTIME_LEASE_ID = runtimeLeaseId;
+    process.env.INSTAFY_CONVERSATION_ID = randomUUID();
+    process.env.CONTROLLER_BASE_URL = `http://127.0.0.1:${addr.port}`;
 
     const stubRathole = makeStubRathole();
     try {
@@ -321,7 +322,7 @@ describe("instafy tunnel CLI", () => {
       expect(requested?.authorization).toBe("Bearer active-job-token");
       const body = JSON.parse(requested?.body || "{}") as Record<string, unknown>;
       expect(body.runtimeId).toBe(runtimeId);
-      expect(body.runtimeLeaseId).toBe(runtimeLeaseId);
+      expect(body.runtimeLeaseId).toBeUndefined();
       expect(body.purpose).toBe("web");
       expect(body.localPort).toBe(4173);
       expect(body.metadata).toMatchObject({ source: "instafy-cli", localPort: 4173 });
@@ -339,4 +340,43 @@ describe("instafy tunnel CLI", () => {
       }
     }
   }, 30000);
+
+  it("does not send an active-job token to a different tunnel controller origin", async () => {
+    const envKeys = [
+      "INSTAFY_ACCESS_TOKEN",
+      "CONTROLLER_ACCESS_TOKEN",
+      "RUNTIME_ACCESS_TOKEN",
+      "RUNTIME_ID",
+      "INSTAFY_CONVERSATION_ID",
+      "CONTROLLER_BASE_URL",
+    ] as const;
+    const previous = new Map(envKeys.map((key) => [key, process.env[key]]));
+    delete process.env.INSTAFY_ACCESS_TOKEN;
+    process.env.CONTROLLER_ACCESS_TOKEN = "active-job-token";
+    process.env.RUNTIME_ACCESS_TOKEN = "runtime-machine-token";
+    process.env.RUNTIME_ID = randomUUID();
+    process.env.INSTAFY_CONVERSATION_ID = randomUUID();
+    process.env.CONTROLLER_BASE_URL = "http://127.0.0.1:8788";
+
+    try {
+      await expect(
+        startTunnelSession({
+          project: randomUUID(),
+          controllerUrl: "http://127.0.0.1:8789",
+          port: 4173,
+          ratholeBin: makeStubRathole(),
+        }),
+      ).rejects.toThrow(
+        "Refusing to send a runtime-scoped credential to a controller origin other than CONTROLLER_BASE_URL",
+      );
+    } finally {
+      for (const [key, value] of previous) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+    }
+  });
 });

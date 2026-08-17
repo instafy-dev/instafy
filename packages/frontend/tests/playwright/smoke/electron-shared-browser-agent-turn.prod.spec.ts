@@ -624,6 +624,13 @@ test.describe("Electron Shared Browser real agent turn", () => {
   test("imports local Codex auth through Desktop and shows the AI cursor during a BYOC turn", async ({
     electronBrowserLiveCleanup,
     page: provisioningPage,
+    // Admin/service-key calls must use this standalone APIRequestContext,
+    // never provisioningPage.context().request: a browser context's fetch
+    // carries browser identification headers, and Supabase rejects secret
+    // API keys presented from anything that looks like a browser
+    // ("Forbidden use of secret API key in browser" — three releases died
+    // on that 401 before the error said so). The page is only a driver.
+    request: adminRequest,
   }, testInfo) => {
     // Crash recovery only needs cleanup credentials. Run it before checking
     // launch-only prerequisites (the desktop build and local auth.json), so a
@@ -632,7 +639,7 @@ test.describe("Electron Shared Browser real agent turn", () => {
     electronBrowserLiveCleanup.config = cleanupConfig;
     const recoveryDirectory = resolveElectronBrowserRecoveryDirectory();
     await recoverElectronBrowserStudiosBeforeProvisioning(
-      provisioningPage.context().request,
+      adminRequest,
       cleanupConfig,
       recoveryDirectory,
     );
@@ -653,7 +660,7 @@ test.describe("Electron Shared Browser real agent turn", () => {
     );
     electronBrowserLiveCleanup.recoveryJournalPath = recoveryJournalPath;
     const provisioned = await provisionElectronBrowserStudio(
-      provisioningPage.context().request,
+      adminRequest,
       config,
       electronBrowserLiveCleanup.provisioning,
       (checkpoint) => {
@@ -734,7 +741,7 @@ test.describe("Electron Shared Browser real agent turn", () => {
         .poll(
           async () => {
             const proof = await fetchConnectedCodexCredentialProof(
-              provisioningPage.context().request,
+              adminRequest,
               config.controllerUrl,
               provisioned.session.accessToken,
             );
@@ -749,7 +756,7 @@ test.describe("Electron Shared Browser real agent turn", () => {
         )
         .toEqual({ kind: "codex_auth_json", isDefault: true });
       const credentialProof = await fetchConnectedCodexCredentialProof(
-        provisioningPage.context().request,
+        adminRequest,
         config.controllerUrl,
         provisioned.session.accessToken,
       );
@@ -773,7 +780,7 @@ test.describe("Electron Shared Browser real agent turn", () => {
       ).toHaveCount(0);
 
       const ledgerBefore = await fetchCreditLedger(
-        provisioningPage.context().request,
+        adminRequest,
         config,
         provisioned.session,
         provisioned.projectId,
@@ -938,7 +945,7 @@ test.describe("Electron Shared Browser real agent turn", () => {
           .poll(
             () =>
               fetchAgentJobCredentialProof(
-                provisioningPage.context().request,
+                adminRequest,
                 config.supabaseUrl,
                 config.supabaseServiceRoleKey,
                 jobId,
@@ -951,7 +958,7 @@ test.describe("Electron Shared Browser real agent turn", () => {
           .poll(
             async () => {
               const metadata = await fetchRunMetadata(
-                provisioningPage.context().request,
+                adminRequest,
                 config,
                 provisioned.session,
                 runId,
@@ -962,7 +969,7 @@ test.describe("Electron Shared Browser real agent turn", () => {
           )
           .toBe("byoc");
         const runMetadata = await fetchRunMetadata(
-          provisioningPage.context().request,
+          adminRequest,
           config,
           provisioned.session,
           runId,
@@ -972,7 +979,7 @@ test.describe("Electron Shared Browser real agent turn", () => {
           .poll(
             async () => {
               const proof = await fetchConnectedCodexCredentialProof(
-                provisioningPage.context().request,
+                adminRequest,
                 config.controllerUrl,
                 provisioned.session.accessToken,
               );
@@ -986,7 +993,7 @@ test.describe("Electron Shared Browser real agent turn", () => {
               }
 
               const job = await fetchAgentJobExecutionState(
-                provisioningPage.context().request,
+                adminRequest,
                 config.supabaseUrl,
                 config.supabaseServiceRoleKey,
                 jobId,
@@ -1002,7 +1009,7 @@ test.describe("Electron Shared Browser real agent turn", () => {
           )
           .toEqual({ kind: "credential-used" });
         await expectNoManagedAiLedgerBurn(
-          provisioningPage.context().request,
+          adminRequest,
           config,
           provisioned.session,
           provisioned.projectId,
@@ -1061,7 +1068,7 @@ test.describe("Electron Shared Browser real agent turn", () => {
         );
 
         await expectNoManagedAiLedgerBurn(
-          provisioningPage.context().request,
+          adminRequest,
           config,
           provisioned.session,
           provisioned.projectId,

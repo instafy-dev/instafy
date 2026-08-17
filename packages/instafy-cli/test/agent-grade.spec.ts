@@ -17,33 +17,40 @@ function run(args: string[], input = "") {
 }
 
 describe("agent-grade CLI contract", () => {
-  it("non-interactive login without credentials fails fast, not after a 10-minute wait", () => {
-    // The blocker: this used to block on the browser callback for 10 minutes
-    // and then throw a message naming no fix, so an agent's shell timeout
-    // killed it with nothing learned.
-    const r = run(["login"], "");
-    expect(r.status).toBe(1);
-    expect(r.stderr).toMatch(/Non-interactive session/);
-    expect(r.stderr).toMatch(/--token/);
+  it("non-interactive login without credentials fails fast", () => {
+    const result = run(["login"], "");
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/Non-interactive session/);
+    expect(result.stderr).toMatch(/--token/);
   });
 
-  it("login --token --json performs the login instead of silently printing a URL", () => {
-    const r = run(["login", "--token", "faketoken123", "--json", "--no-store"]);
-    expect(r.status).toBe(0);
-    const payload = JSON.parse(r.stdout.trim());
-    expect(payload).toMatchObject({ ok: true, stored: false, method: "token" });
+  it("login --token --json performs the login", () => {
+    const result = run(["login", "--token", "faketoken123", "--json", "--no-store"]);
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout.trim())).toMatchObject({
+      ok: true,
+      stored: false,
+      method: "token",
+    });
+  });
+
+  it("rejects an ambiguous JSON browser-wait mode", () => {
+    const result = run(["login", "--json", "--wait-for-browser"], "");
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/cannot be combined/);
+    expect(result.stdout).toBe("");
   });
 
   it("an unknown subcommand errors on stderr with a non-zero exit", () => {
-    const r = run(["space", "definitely-not-a-real-subcommand"]);
-    expect(r.status).toBe(1);
-    expect(r.stderr).toMatch(/unknown command/);
+    const result = run(["space", "definitely-not-a-real-subcommand"]);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/unknown command/);
   });
 
-  it("config list reports the effective controller URL, not just the stored one", () => {
-    const r = run(["config", "list", "--json"]);
-    expect(r.status).toBe(0);
-    const payload = JSON.parse(r.stdout.trim());
+  it("config list reports the effective controller URL", () => {
+    const result = run(["config", "list", "--json"]);
+    expect(result.status).toBe(0);
+    const payload = JSON.parse(result.stdout.trim());
     expect(payload).toHaveProperty("effectiveControllerUrl");
     expect(typeof payload.effectiveControllerUrl).toBe("string");
   });

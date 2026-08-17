@@ -110,9 +110,9 @@ describe("runtime token", () => {
         "token",
         "--space",
         projectId,
-        "--controller-url",
+        "--server-url",
         controllerUrl,
-        "--controller-access-token",
+        "--access-token",
         "controller-token",
       ]);
 

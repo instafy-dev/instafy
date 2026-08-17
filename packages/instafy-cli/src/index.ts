@@ -16,7 +16,6 @@ import { projectInit, projectProfile, refreshProjectDefaults } from "./project.j
 import { secretsGet, secretsList, secretsPut, secretsRevoke } from "./secrets.js";
 import { automationsCreate, automationsDelete, automationsList, automationsRun, automationsUpdateStatus } from "./automations.js";
 import { listTunnelSessions, startTunnelDetached, stopTunnelSession, tailTunnelLogs, runTunnelCommand } from "./tunnel.js";
-import { requestControllerApi } from "./api.js";
 import { configGet, configList, configPath, configSet, configUnset } from "./config-command.js";
 import { getInstafyProfileConfigPath, listInstafyProfileNames, readInstafyProfileConfig } from "./config.js";
 import { runInstafyGit, runInstafyGitSync } from "./git-wrapper.js";
@@ -47,36 +46,17 @@ import {
   showProviderBinding,
 } from "./provider-bindings.js";
 import {
-  opsCreditsAdd,
-  opsCreditsSet,
-  opsCreditsStatus,
-  opsProjectsSearch,
-  opsRuntimesList,
-  opsRuntimesStop,
-} from "./ops.js";
-import {
-  activateOtaChannelCli,
-  listDesktopPromotions,
-  listOtaChannels,
-  listOtaReleases,
-  registerOtaRelease,
-  requestDesktopPromotionCli,
-  rollbackOtaChannelCli,
-} from "./ota.js";
-import {
   providersDiscover,
   providersList,
   providersProbe,
   providersRead,
 } from "./providers.js";
+import { diagnosticsRunResult, diagnosticsRuntimeEvents } from "./diagnostics.js";
+import { supportList, supportReport, supportShow } from "./support.js";
 
 export const program = new Command();
 program.showSuggestionAfterError();
 
-// Group commands used to respond to both a bare invocation and an unknown
-// subcommand by printing help to stdout and exiting 0 -- scripts and agents
-// read that as "command succeeded". A group invoked without a valid
-// subcommand has not done anything; say so on stderr and fail.
 function failWithGroupHelp(command: Command) {
   command.action(() => {
     const extra = command.args.filter((value) => typeof value === "string" && value.length > 0);
@@ -92,24 +72,14 @@ const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { version?: string };
 
 function addServerUrlOptions(command: Command) {
-  return command
-    .option(
-      "--server-url <url>",
-      "Instafy server URL (default: INSTAFY_SERVER_URL env, then the URL saved by `instafy login`, then http://127.0.0.1:8788; hosted: https://controller.instafy.dev)",
-    )
-    .addOption(new Option("--controller-url <url>").hideHelp());
+  return command.option(
+    "--server-url <url>",
+    "Instafy server URL (default: INSTAFY_SERVER_URL env, then the URL saved by `instafy login`, then http://127.0.0.1:8788; hosted: https://controller.instafy.dev)",
+  );
 }
 
 function addAccessTokenOptions(command: Command, description: string) {
-  return command
-    .option("--access-token <token>", description)
-    .addOption(new Option("--controller-access-token <token>").hideHelp());
-}
-
-function addServiceTokenOptions(command: Command, description: string) {
-  return command
-    .option("--service-token <token>", description)
-    .addOption(new Option("--controller-token <token>").hideHelp());
+  return command.option("--access-token <token>", description);
 }
 
 function pickTrimmedString(...values: unknown[]): string | undefined {
@@ -208,7 +178,7 @@ program
   .option("--json", "Output JSON")
   .option(
     "--wait-for-browser",
-    "Without a TTY, wait up to 10 minutes for the browser login callback instead of failing fast (for harnesses that drive the browser)",
+    "Without a TTY, wait up to 10 minutes for the browser login callback instead of failing fast",
   )
   .action(async (opts) => {
     try {
@@ -259,7 +229,6 @@ const chatCommand = program
 addSpaceOption(chatCommand, "Space UUID (defaults to .instafy/space.json or SPACE_ID)");
 addServerUrlOptions(chatCommand);
 addAccessTokenOptions(chatCommand, "Instafy access token");
-addServiceTokenOptions(chatCommand, "Instafy service token (advanced)");
 
 chatCommand
   .option("--json", "Output JSON")
@@ -274,9 +243,8 @@ chatCommand
         acceptStatusReply: opts.acceptStatusReply,
         timeoutMs: opts.timeoutMs,
         pollMs: opts.pollMs,
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        accessToken: opts.accessToken ?? opts.controllerAccessToken,
-        serviceToken: opts.serviceToken ?? opts.controllerToken,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
         json: opts.json,
       });
     } catch (error) {
@@ -305,7 +273,7 @@ function registerSpaceCommand(command: Command) {
       try {
         await projectInit({
           path: opts.path,
-          controllerUrl: opts.serverUrl ?? opts.controllerUrl,
+          controllerUrl: opts.serverUrl,
           accessToken: opts.accessToken,
           profile: opts.profile,
           projectType: resolveSpaceTypeOption(opts),
@@ -448,7 +416,7 @@ function registerSpaceCommand(command: Command) {
         await refreshProjectDefaults({
           project: resolveSpaceIdOption(opts),
           path: opts.path,
-          controllerUrl: opts.serverUrl ?? opts.controllerUrl,
+          controllerUrl: opts.serverUrl,
           accessToken: opts.accessToken,
           json: opts.json,
         });
@@ -469,7 +437,7 @@ function registerSpaceCommand(command: Command) {
     .action(async (opts) => {
       try {
         await (await import("./project.js")).listProjects({
-          controllerUrl: opts.serverUrl ?? opts.controllerUrl,
+          controllerUrl: opts.serverUrl,
           accessToken: opts.accessToken,
           orgId: resolveTeamIdOption(opts),
           orgSlug: resolveTeamSlugOption(opts),
@@ -497,7 +465,6 @@ function registerSpaceCommand(command: Command) {
   );
   addServerUrlOptions(spaceInviteCommand);
   addAccessTokenOptions(spaceInviteCommand, "Instafy access token");
-  addServiceTokenOptions(spaceInviteCommand, "Instafy service token (advanced)");
 
   spaceInviteCommand.action(async (email, opts) => {
     try {
@@ -507,9 +474,8 @@ function registerSpaceCommand(command: Command) {
         project: resolveSpaceIdOption(opts),
         orgId: resolveTeamIdOption(opts),
         path: opts.path,
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        accessToken: opts.accessToken ?? opts.controllerAccessToken,
-        serviceToken: opts.serviceToken ?? opts.controllerToken,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
         json: opts.json,
       });
     } catch (error) {
@@ -533,7 +499,6 @@ function registerSpaceCommand(command: Command) {
   );
   addServerUrlOptions(spaceRoleCommand);
   addAccessTokenOptions(spaceRoleCommand, "Instafy access token");
-  addServiceTokenOptions(spaceRoleCommand, "Instafy service token (advanced)");
 
   spaceRoleCommand.action(async (email, role, opts) => {
     try {
@@ -543,9 +508,8 @@ function registerSpaceCommand(command: Command) {
         project: resolveSpaceIdOption(opts),
         orgId: resolveTeamIdOption(opts),
         path: opts.path,
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        accessToken: opts.accessToken ?? opts.controllerAccessToken,
-        serviceToken: opts.serviceToken ?? opts.controllerToken,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
         json: opts.json,
       });
     } catch (error) {
@@ -850,7 +814,6 @@ addSpaceOption(
 );
 addServerUrlOptions(agentsListCommand);
 addAccessTokenOptions(agentsListCommand, "Instafy access token");
-addServiceTokenOptions(agentsListCommand, "Instafy service token (advanced)");
 
 agentsListCommand
   .option("--json", "Output JSON")
@@ -858,9 +821,8 @@ agentsListCommand
     try {
       await agentsList({
         project: resolveSpaceIdOption(opts),
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        accessToken: opts.accessToken ?? opts.controllerAccessToken,
-        serviceToken: opts.serviceToken ?? opts.controllerToken,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
         json: opts.json,
       });
     } catch (error) {
@@ -885,7 +847,6 @@ addSpaceOption(
 );
 addServerUrlOptions(agentsContextListCommand);
 addAccessTokenOptions(agentsContextListCommand, "Instafy access token");
-addServiceTokenOptions(agentsContextListCommand, "Instafy service token (advanced)");
 
 agentsContextListCommand
   .option("--agent <handle>", "Filter by agent handle (for example @octo)")
@@ -905,9 +866,8 @@ agentsContextListCommand
         scopeId: opts.scopeId,
         query: opts.query,
         limit: opts.limit,
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        accessToken: opts.accessToken ?? opts.controllerAccessToken,
-        serviceToken: opts.serviceToken ?? opts.controllerToken,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
         json: opts.json,
       });
     } catch (error) {
@@ -933,7 +893,6 @@ addSpaceOption(
 );
 addServerUrlOptions(agentsContextPutCommand);
 addAccessTokenOptions(agentsContextPutCommand, "Instafy access token");
-addServiceTokenOptions(agentsContextPutCommand, "Instafy service token (advanced)");
 
 agentsContextPutCommand.action(async (contextParts, opts) => {
   try {
@@ -945,9 +904,8 @@ agentsContextPutCommand.action(async (contextParts, opts) => {
       scopeId: opts.scopeId,
       title: opts.title,
       context: Array.isArray(contextParts) ? contextParts.join(" ") : String(contextParts ?? ""),
-      controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-      accessToken: opts.accessToken ?? opts.controllerAccessToken,
-      serviceToken: opts.serviceToken ?? opts.controllerToken,
+      controllerUrl: opts.serverUrl,
+      accessToken: opts.accessToken,
       json: opts.json,
     });
   } catch (error) {
@@ -963,7 +921,6 @@ const agentsStatusCommand = agentsCommand
 
 addServerUrlOptions(agentsStatusCommand);
 addAccessTokenOptions(agentsStatusCommand, "Instafy access token");
-addServiceTokenOptions(agentsStatusCommand, "Instafy service token (advanced)");
 
 agentsStatusCommand
   .option("--json", "Output JSON")
@@ -971,9 +928,8 @@ agentsStatusCommand
     try {
       await agentPlanGroupStatus({
         groupId,
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        accessToken: opts.accessToken ?? opts.controllerAccessToken,
-        serviceToken: opts.serviceToken ?? opts.controllerToken,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
         json: opts.json,
       });
     } catch (error) {
@@ -991,7 +947,6 @@ const agentsCancelCommand = agentsCommand
 
 addServerUrlOptions(agentsCancelCommand);
 addAccessTokenOptions(agentsCancelCommand, "Instafy access token");
-addServiceTokenOptions(agentsCancelCommand, "Instafy service token (advanced)");
 
 agentsCancelCommand
   .option("--json", "Output JSON")
@@ -1001,9 +956,8 @@ agentsCancelCommand
         group: opts.group,
         job: opts.job,
         reason: opts.reason,
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        accessToken: opts.accessToken ?? opts.controllerAccessToken,
-        serviceToken: opts.serviceToken ?? opts.controllerToken,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
         json: opts.json,
       });
     } catch (error) {
@@ -1029,7 +983,6 @@ addSpaceOption(
 
 addServerUrlOptions(secretsListCommand);
 addAccessTokenOptions(secretsListCommand, "Instafy access token");
-addServiceTokenOptions(secretsListCommand, "Instafy service token (advanced)");
 
 secretsListCommand
   .option("--json", "Output JSON")
@@ -1037,12 +990,8 @@ secretsListCommand
     try {
       await secretsList({
         project: resolveSpaceIdOption(opts),
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        accessToken:
-          opts.accessToken ??
-          opts.controllerAccessToken ??
-          opts.serviceToken ??
-          opts.controllerToken,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
         json: opts.json,
       });
     } catch (error) {
@@ -1063,7 +1012,6 @@ addSpaceOption(
 
 addServerUrlOptions(secretsGetCommand);
 addAccessTokenOptions(secretsGetCommand, "Instafy access token");
-addServiceTokenOptions(secretsGetCommand, "Instafy service token (advanced)");
 
 secretsGetCommand
   .option("--json", "Output JSON")
@@ -1072,12 +1020,8 @@ secretsGetCommand
       await secretsGet({
         nameOrId,
         project: resolveSpaceIdOption(opts),
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        accessToken:
-          opts.accessToken ??
-          opts.controllerAccessToken ??
-          opts.serviceToken ??
-          opts.controllerToken,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
         json: opts.json,
       });
     } catch (error) {
@@ -1102,7 +1046,6 @@ addSpaceOption(
 
 addServerUrlOptions(secretsPutCommand);
 addAccessTokenOptions(secretsPutCommand, "Instafy access token");
-addServiceTokenOptions(secretsPutCommand, "Instafy service token (advanced)");
 
 secretsPutCommand
   .option("--json", "Output JSON")
@@ -1115,12 +1058,8 @@ secretsPutCommand
         description: opts.description,
         agentHandles: opts.agentHandle,
         project: resolveSpaceIdOption(opts),
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        accessToken:
-          opts.accessToken ??
-          opts.controllerAccessToken ??
-          opts.serviceToken ??
-          opts.controllerToken,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
         json: opts.json,
       });
     } catch (error) {
@@ -1141,7 +1080,6 @@ addSpaceOption(
 
 addServerUrlOptions(secretsRevokeCommand);
 addAccessTokenOptions(secretsRevokeCommand, "Instafy access token");
-addServiceTokenOptions(secretsRevokeCommand, "Instafy service token (advanced)");
 
 secretsRevokeCommand
   .option("--json", "Output JSON")
@@ -1150,12 +1088,8 @@ secretsRevokeCommand
       await secretsRevoke({
         nameOrId,
         project: resolveSpaceIdOption(opts),
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        accessToken:
-          opts.accessToken ??
-          opts.controllerAccessToken ??
-          opts.serviceToken ??
-          opts.controllerToken,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
         json: opts.json,
       });
     } catch (error) {
@@ -1188,8 +1122,8 @@ automationsListCommand
     try {
       await automationsList({
         project: resolveSpaceIdOption(opts),
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        accessToken: opts.accessToken ?? opts.controllerAccessToken,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
         json: opts.json,
       });
     } catch (error) {
@@ -1211,6 +1145,10 @@ const automationsCreateCommand = automationsCommand
   .option("--timezone <tz>", "IANA timezone (e.g. America/New_York)")
   .option("--runtime-mode <mode>", "auto|hosted|existing (default: auto)")
   .option("--runtime-provider <id>", "Runtime provider id (optional)")
+  .option(
+    "--silent-when-nothing-to-report",
+    "Do not post a completion result or send a result notification when a successful run has no findings",
+  )
   .option("--paused", "Create paused");
 
 addSpaceOption(
@@ -1236,10 +1174,11 @@ automationsCreateCommand
         timezone: opts.timezone,
         runtimeMode: opts.runtimeMode,
         runtimeProvider: opts.runtimeProvider,
+        silentWhenNothingToReport: Boolean(opts.silentWhenNothingToReport),
         paused: Boolean(opts.paused),
         project: resolveSpaceIdOption(opts),
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        accessToken: opts.accessToken ?? opts.controllerAccessToken,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
         json: opts.json,
       });
     } catch (error) {
@@ -1263,8 +1202,8 @@ automationsPauseCommand
       await automationsUpdateStatus({
         automationId,
         status: "paused",
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        accessToken: opts.accessToken ?? opts.controllerAccessToken,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
         json: opts.json,
       });
     } catch (error) {
@@ -1288,8 +1227,8 @@ automationsResumeCommand
       await automationsUpdateStatus({
         automationId,
         status: "active",
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        accessToken: opts.accessToken ?? opts.controllerAccessToken,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
         json: opts.json,
       });
     } catch (error) {
@@ -1312,8 +1251,8 @@ automationsRunCommand
     try {
       await automationsRun({
         automationId,
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        accessToken: opts.accessToken ?? opts.controllerAccessToken,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
         json: opts.json,
       });
     } catch (error) {
@@ -1336,8 +1275,8 @@ automationsDeleteCommand
     try {
       await automationsDelete({
         automationId,
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        accessToken: opts.accessToken ?? opts.controllerAccessToken,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
         json: opts.json,
       });
     } catch (error) {
@@ -1432,7 +1371,6 @@ const runtimeStartCommand = runtimeCommand
 addSpaceOption(runtimeStartCommand, "Space UUID");
 
 addServerUrlOptions(runtimeStartCommand);
-addServiceTokenOptions(runtimeStartCommand, "Instafy service token (advanced)");
 addAccessTokenOptions(runtimeStartCommand, "Instafy access token (from Studio)");
 
 runtimeStartCommand
@@ -1460,9 +1398,8 @@ runtimeStartCommand
       await runtimeStart({
         ...opts,
         project: space,
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        controllerToken: opts.serviceToken ?? opts.controllerToken,
-        controllerAccessToken: opts.accessToken ?? opts.controllerAccessToken,
+        controllerUrl: opts.serverUrl,
+        controllerAccessToken: opts.accessToken,
       });
     } catch (error) {
       console.error(kleur.red(String(error)));
@@ -1523,8 +1460,8 @@ runtimeTokenCommand
       }
       await runtimeToken({
         project,
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        controllerAccessToken: opts.accessToken ?? opts.controllerAccessToken,
+        controllerUrl: opts.serverUrl,
+        controllerAccessToken: opts.accessToken,
         runtimeId: opts.runtimeId,
         scopes: opts.scope,
         json: opts.json,
@@ -1535,174 +1472,154 @@ runtimeTokenCommand
     }
   });
 
-const opsCommand = program
-  .command("ops")
-  .description("Internal operator support actions");
+const diagnosticsCommand = program
+  .command("diagnostics")
+  .description("Inspect user-authorized run and runtime diagnostics as stable JSON");
 
-failWithGroupHelp(opsCommand);
+failWithGroupHelp(diagnosticsCommand);
 
-const opsProjectsCommand = opsCommand
-  .command("projects")
-  .description("Find projects for operator support");
-
-failWithGroupHelp(opsProjectsCommand);
-
-const opsProjectsFindCommand = opsProjectsCommand
-  .command("find")
-  .description("Search projects by id, name, org, or owner email")
-  .requiredOption("--query <text>", "Search text")
-  .option("--limit <count>", "Maximum results (default: 10)", Number.parseInt)
-  .option("--json", "Output JSON");
-addServerUrlOptions(opsProjectsFindCommand);
-addAccessTokenOptions(opsProjectsFindCommand, "Instafy access token");
-addServiceTokenOptions(opsProjectsFindCommand, "Instafy service token (advanced)");
-opsProjectsFindCommand.action(async (opts) => {
+const diagnosticsRuntimeEventsCommand = diagnosticsCommand
+  .command("runtime-events")
+  .description("Read sanitized runtime events for a space as JSON")
+  .option("--space <id>", "Space UUID (defaults to .instafy/space.json or SPACE_ID)")
+  .option("--runtime-id <uuid>", "Filter by runtime UUID")
+  .option("--session-id <uuid>", "Use a session UUID for project authorization")
+  .option("--kind <kind>", "Filter by runtime event kind")
+  .option("--since <timestamp>", "Return events at or after an RFC3339 timestamp")
+  .option("--limit <count>", "Maximum events (1-200, default: 50)", Number.parseInt);
+addServerUrlOptions(diagnosticsRuntimeEventsCommand);
+addAccessTokenOptions(diagnosticsRuntimeEventsCommand, "Signed-in user access token");
+diagnosticsRuntimeEventsCommand.action(async (opts) => {
   try {
-    await opsProjectsSearch({
-      query: opts.query,
-      limit: opts.limit,
-      controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-      accessToken: opts.accessToken ?? opts.controllerAccessToken,
-      serviceToken: opts.serviceToken ?? opts.controllerToken,
-      json: opts.json,
-    });
-  } catch (error) {
-    console.error(kleur.red(String(error)));
-    process.exit(1);
-  }
-});
-
-const opsCreditsCommand = opsCommand
-  .command("credits")
-  .description("Inspect or adjust project credits");
-
-failWithGroupHelp(opsCreditsCommand);
-
-const opsCreditsStatusCommand = opsCreditsCommand
-  .command("status")
-  .description("Show operator credit status for a project")
-  .requiredOption("--project-id <uuid>", "Project UUID")
-  .option("--json", "Output JSON");
-addServerUrlOptions(opsCreditsStatusCommand);
-addAccessTokenOptions(opsCreditsStatusCommand, "Instafy access token");
-addServiceTokenOptions(opsCreditsStatusCommand, "Instafy service token (advanced)");
-opsCreditsStatusCommand.action(async (opts) => {
-  try {
-    await opsCreditsStatus({
-      projectId: opts.projectId,
-      controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-      accessToken: opts.accessToken ?? opts.controllerAccessToken,
-      serviceToken: opts.serviceToken ?? opts.controllerToken,
-      json: opts.json,
-    });
-  } catch (error) {
-    console.error(kleur.red(String(error)));
-    process.exit(1);
-  }
-});
-
-const opsCreditsAddCommand = opsCreditsCommand
-  .command("add")
-  .description("Add credits to a project org balance")
-  .requiredOption("--project-id <uuid>", "Project UUID")
-  .requiredOption("--amount <credits>", "Credits to add", Number.parseInt)
-  .option("--note <text>", "Optional operator note")
-  .option("--json", "Output JSON");
-addServerUrlOptions(opsCreditsAddCommand);
-addAccessTokenOptions(opsCreditsAddCommand, "Instafy access token");
-addServiceTokenOptions(opsCreditsAddCommand, "Instafy service token (advanced)");
-opsCreditsAddCommand.action(async (opts) => {
-  try {
-    await opsCreditsAdd({
-      projectId: opts.projectId,
-      amount: opts.amount,
-      note: opts.note,
-      controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-      accessToken: opts.accessToken ?? opts.controllerAccessToken,
-      serviceToken: opts.serviceToken ?? opts.controllerToken,
-      json: opts.json,
-    });
-  } catch (error) {
-    console.error(kleur.red(String(error)));
-    process.exit(1);
-  }
-});
-
-const opsCreditsSetCommand = opsCreditsCommand
-  .command("set")
-  .description("Set a project org balance to an exact value")
-  .requiredOption("--project-id <uuid>", "Project UUID")
-  .requiredOption("--amount <credits>", "Target credit balance", Number.parseInt)
-  .option("--note <text>", "Optional operator note")
-  .option("--json", "Output JSON");
-addServerUrlOptions(opsCreditsSetCommand);
-addAccessTokenOptions(opsCreditsSetCommand, "Instafy access token");
-addServiceTokenOptions(opsCreditsSetCommand, "Instafy service token (advanced)");
-opsCreditsSetCommand.action(async (opts) => {
-  try {
-    await opsCreditsSet({
-      projectId: opts.projectId,
-      amount: opts.amount,
-      note: opts.note,
-      controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-      accessToken: opts.accessToken ?? opts.controllerAccessToken,
-      serviceToken: opts.serviceToken ?? opts.controllerToken,
-      json: opts.json,
-    });
-  } catch (error) {
-    console.error(kleur.red(String(error)));
-    process.exit(1);
-  }
-});
-
-const opsRuntimesCommand = opsCommand
-  .command("runtimes")
-  .description("List and stop project runtimes");
-
-failWithGroupHelp(opsRuntimesCommand);
-
-const opsRuntimesListCommand = opsRuntimesCommand
-  .command("list")
-  .description("List runtimes for a project")
-  .requiredOption("--project-id <uuid>", "Project UUID")
-  .option("--json", "Output JSON");
-addServerUrlOptions(opsRuntimesListCommand);
-addAccessTokenOptions(opsRuntimesListCommand, "Instafy access token");
-addServiceTokenOptions(opsRuntimesListCommand, "Instafy service token (advanced)");
-opsRuntimesListCommand.action(async (opts) => {
-  try {
-    await opsRuntimesList({
-      projectId: opts.projectId,
-      controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-      accessToken: opts.accessToken ?? opts.controllerAccessToken,
-      serviceToken: opts.serviceToken ?? opts.controllerToken,
-      json: opts.json,
-    });
-  } catch (error) {
-    console.error(kleur.red(String(error)));
-    process.exit(1);
-  }
-});
-
-const opsRuntimesStopCommand = opsRuntimesCommand
-  .command("stop")
-  .description("Stop one runtime for a project")
-  .requiredOption("--project-id <uuid>", "Project UUID")
-  .requiredOption("--runtime-id <uuid>", "Runtime UUID")
-  .option("--reason <text>", "Optional operator stop reason")
-  .option("--json", "Output JSON");
-addServerUrlOptions(opsRuntimesStopCommand);
-addAccessTokenOptions(opsRuntimesStopCommand, "Instafy access token");
-addServiceTokenOptions(opsRuntimesStopCommand, "Instafy service token (advanced)");
-opsRuntimesStopCommand.action(async (opts) => {
-  try {
-    await opsRuntimesStop({
-      projectId: opts.projectId,
+    await diagnosticsRuntimeEvents({
+      space: opts.space,
       runtimeId: opts.runtimeId,
-      reason: opts.reason,
-      controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-      accessToken: opts.accessToken ?? opts.controllerAccessToken,
-      serviceToken: opts.serviceToken ?? opts.controllerToken,
+      sessionId: opts.sessionId,
+      kind: opts.kind,
+      since: opts.since,
+      limit: opts.limit,
+      controllerUrl: opts.serverUrl,
+      accessToken: opts.accessToken,
+    });
+  } catch (error) {
+    console.error(kleur.red(String(error)));
+    process.exit(1);
+  }
+});
+
+const diagnosticsRunResultCommand = diagnosticsCommand
+  .command("run-result")
+  .description("Read the authorized persisted result for one run as JSON")
+  .argument("<run-id>", "Run UUID");
+addServerUrlOptions(diagnosticsRunResultCommand);
+addAccessTokenOptions(diagnosticsRunResultCommand, "Signed-in user access token");
+diagnosticsRunResultCommand.action(async (runId, opts) => {
+  try {
+    await diagnosticsRunResult({
+      runId,
+      controllerUrl: opts.serverUrl,
+      accessToken: opts.accessToken,
+    });
+  } catch (error) {
+    console.error(kleur.red(String(error)));
+    process.exit(1);
+  }
+});
+
+const supportCommand = program
+  .command("support")
+  .description("Report issues and view your own support reports");
+
+failWithGroupHelp(supportCommand);
+
+const supportReportCommand = supportCommand
+  .command("report")
+  .description("Submit a support report as the signed-in user")
+  .argument("<summary...>", "Short summary of the issue")
+  .option("--details <text>", "Optional details (may be sensitive)")
+  .option("--details-file <path>", "Read details from a regular file inside the active workspace")
+  .option("--space <id>", "Space UUID (defaults to .instafy/space.json)")
+  .option("--no-linked-space", "Do not attach the linked space automatically")
+  .option("--runtime-id <uuid>", "Attach a runtime UUID")
+  .option("--run-id <uuid>", "Attach a run UUID")
+  .option("--conversation-id <uuid>", "Attach a conversation UUID")
+  .option("--metadata-file <path>", "Attach a workspace-local JSON metadata object")
+  .option("--logs-file <path>", "Attach a workspace-local JSON array of log entries")
+  .option(
+    "--screenshot <path>",
+    "Attach a workspace-local PNG, JPEG, or WebP screenshot",
+    collectStringOption,
+    [],
+  )
+  .option("--preview", "Show what would be uploaded without making a request")
+  .option("--json", "Output the safe response as JSON");
+addServerUrlOptions(supportReportCommand);
+addAccessTokenOptions(supportReportCommand, "Signed-in user access token");
+supportReportCommand.action(async (summaryParts, opts) => {
+  try {
+    await supportReport({
+      summary: Array.isArray(summaryParts) ? summaryParts.join(" ") : String(summaryParts ?? ""),
+      details: opts.details,
+      detailsFile: opts.detailsFile,
+      space: opts.space,
+      useLinkedSpace: opts.linkedSpace,
+      runtimeId: opts.runtimeId,
+      runId: opts.runId,
+      conversationId: opts.conversationId,
+      metadataFile: opts.metadataFile,
+      logsFile: opts.logsFile,
+      screenshots: opts.screenshot,
+      preview: opts.preview,
+      controllerUrl: opts.serverUrl,
+      accessToken: opts.accessToken,
+      json: opts.json,
+    });
+  } catch (error) {
+    console.error(kleur.red(String(error)));
+    process.exit(1);
+  }
+});
+
+const supportListCommand = supportCommand
+  .command("list")
+  .description("List support reports submitted by the signed-in user")
+  .option("--limit <count>", "Maximum reports (1-100, default: 25)", Number.parseInt)
+  .option("--status <status>", "Filter by open, in_progress, or resolved")
+  .option("--space <id>", "Filter by space UUID")
+  .option("--before <timestamp>", "List reports created before an RFC3339 timestamp")
+  .option("--json", "Output the safe report summaries as JSON");
+addServerUrlOptions(supportListCommand);
+addAccessTokenOptions(supportListCommand, "Signed-in user access token");
+supportListCommand.action(async (opts) => {
+  try {
+    await supportList({
+      limit: opts.limit,
+      status: opts.status,
+      space: opts.space,
+      before: opts.before,
+      controllerUrl: opts.serverUrl,
+      accessToken: opts.accessToken,
+      json: opts.json,
+    });
+  } catch (error) {
+    console.error(kleur.red(String(error)));
+    process.exit(1);
+  }
+});
+
+const supportShowCommand = supportCommand
+  .command("show")
+  .description("Show one support report owned by the signed-in user")
+  .argument("<report-id>", "Support report UUID")
+  .option("--json", "Output the safe report as JSON");
+addServerUrlOptions(supportShowCommand);
+addAccessTokenOptions(supportShowCommand, "Signed-in user access token");
+supportShowCommand.action(async (reportId, opts) => {
+  try {
+    await supportShow({
+      reportId,
+      controllerUrl: opts.serverUrl,
+      accessToken: opts.accessToken,
       json: opts.json,
     });
   } catch (error) {
@@ -1736,7 +1653,6 @@ addSpaceOption(
 
 addServerUrlOptions(tunnelStartCommand);
 addAccessTokenOptions(tunnelStartCommand, "Instafy access token (defaults to saved `instafy login` token)");
-addServiceTokenOptions(tunnelStartCommand, "Instafy service token (advanced)");
 
 tunnelStartCommand
   .option("--no-detach", "Run in foreground until interrupted")
@@ -1747,15 +1663,11 @@ tunnelStartCommand
     try {
       const space = resolveSpaceIdOption(opts);
       const port = opts.port ? Number(opts.port) : undefined;
-      const controllerToken =
-        opts.serviceToken ??
-        opts.controllerToken ??
-        opts.accessToken ??
-        opts.controllerAccessToken;
+      const controllerToken = opts.accessToken;
       if (opts.detach === false) {
         await runTunnelCommand({
           project: space,
-          controllerUrl: opts.serverUrl ?? opts.controllerUrl,
+          controllerUrl: opts.serverUrl,
           controllerToken,
           name: opts.name,
           rotate: Boolean(opts.rotate),
@@ -1767,7 +1679,7 @@ tunnelStartCommand
 
       const started = await startTunnelDetached({
         project: space,
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
+        controllerUrl: opts.serverUrl,
         controllerToken,
         name: opts.name,
         rotate: Boolean(opts.rotate),
@@ -1829,14 +1741,13 @@ tunnelCommand
   .argument("[tunnelId]", "Tunnel ID (defaults to the only active tunnel)")
   .option("--server-url <url>", "Instafy server URL")
   .option("--access-token <token>", "Instafy access token (defaults to saved `instafy login` token)")
-  .option("--service-token <token>", "Instafy service token (advanced)")
   .option("--json", "Output JSON")
   .action(async (tunnelId, opts) => {
     try {
       const result = await stopTunnelSession({
         tunnelId,
         controllerUrl: opts.serverUrl,
-        controllerToken: opts.serviceToken ?? opts.accessToken,
+        controllerToken: opts.accessToken,
         json: opts.json,
       });
       if (opts.json) {
@@ -1891,7 +1802,7 @@ orgListCommand
   .action(async (opts) => {
     try {
       await (await import("./org.js")).listOrganizations({
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
+        controllerUrl: opts.serverUrl,
         accessToken: opts.accessToken,
         json: opts.json,
       });
@@ -1960,7 +1871,6 @@ const historyMessagesCommand = historyCommand
   .option("--conversation <id>", "Conversation UUID (defaults to INSTAFY_CONVERSATION_ID)");
 addServerUrlOptions(historyMessagesCommand);
 addAccessTokenOptions(historyMessagesCommand, "Instafy access token");
-addServiceTokenOptions(historyMessagesCommand, "Instafy service token (advanced)");
 historyMessagesCommand
   .option("--limit <n>", "Max messages to return (1-200, default: 50)", Number.parseInt)
   .option("--cursor <messageId>", "Pagination cursor (message UUID)")
@@ -1971,9 +1881,8 @@ historyMessagesCommand
         conversation: opts.conversation,
         limit: opts.limit,
         cursor: opts.cursor,
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        accessToken: opts.accessToken ?? opts.controllerAccessToken,
-        serviceToken: opts.serviceToken ?? opts.controllerToken,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
         pretty: opts.pretty,
       });
     } catch (error) {
@@ -1988,7 +1897,6 @@ const historyRunsCommand = historyCommand
   .option("--conversation <id>", "Conversation UUID (defaults to INSTAFY_CONVERSATION_ID)");
 addServerUrlOptions(historyRunsCommand);
 addAccessTokenOptions(historyRunsCommand, "Instafy access token");
-addServiceTokenOptions(historyRunsCommand, "Instafy service token (advanced)");
 historyRunsCommand
   .option("--limit <n>", "Max runs to return (1-200, default: 50)", Number.parseInt)
   .option("--no-pretty", "Disable JSON pretty-printing")
@@ -1997,9 +1905,8 @@ historyRunsCommand
       await historyRuns({
         conversation: opts.conversation,
         limit: opts.limit,
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        accessToken: opts.accessToken ?? opts.controllerAccessToken,
-        serviceToken: opts.serviceToken ?? opts.controllerToken,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
         pretty: opts.pretty,
       });
     } catch (error) {
@@ -2014,7 +1921,6 @@ const historyConversationsCommand = historyCommand
   .option("--space <id>", "Space UUID (defaults to SPACE_ID or .instafy/space.json)");
 addServerUrlOptions(historyConversationsCommand);
 addAccessTokenOptions(historyConversationsCommand, "Instafy access token");
-addServiceTokenOptions(historyConversationsCommand, "Instafy service token (advanced)");
 historyConversationsCommand
   .option("--limit <n>", "Max conversations to return (1-200, default: 50)", Number.parseInt)
   .option("--no-pretty", "Disable JSON pretty-printing")
@@ -2023,9 +1929,8 @@ historyConversationsCommand
       await historyConversations({
         project: opts.space,
         limit: opts.limit,
-        controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-        accessToken: opts.accessToken ?? opts.controllerAccessToken,
-        serviceToken: opts.serviceToken ?? opts.controllerToken,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
         pretty: opts.pretty,
       });
     } catch (error) {
@@ -2050,7 +1955,6 @@ const conversationCreateCommand = conversationCommand
   .option("--json", "Output JSON");
 addServerUrlOptions(conversationCreateCommand);
 addAccessTokenOptions(conversationCreateCommand, "Instafy access token");
-addServiceTokenOptions(conversationCreateCommand, "Instafy service token (advanced)");
 conversationCreateCommand.action(async (opts) => {
   try {
     await createConversation({
@@ -2058,9 +1962,8 @@ conversationCreateCommand.action(async (opts) => {
       title: opts.title,
       parent: opts.parent,
       threadKind: opts.threadKind,
-      controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-      accessToken: opts.accessToken ?? opts.controllerAccessToken,
-      serviceToken: opts.serviceToken ?? opts.controllerToken,
+      controllerUrl: opts.serverUrl,
+      accessToken: opts.accessToken,
       json: opts.json,
     });
   } catch (error) {
@@ -2078,16 +1981,14 @@ const conversationListCommand = conversationCommand
   .option("--json", "Output JSON");
 addServerUrlOptions(conversationListCommand);
 addAccessTokenOptions(conversationListCommand, "Instafy access token");
-addServiceTokenOptions(conversationListCommand, "Instafy service token (advanced)");
 conversationListCommand.action(async (opts) => {
   try {
     await listConversations({
       project: opts.space,
       includeThreads: opts.includeThreads,
       limit: opts.limit,
-      controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-      accessToken: opts.accessToken ?? opts.controllerAccessToken,
-      serviceToken: opts.serviceToken ?? opts.controllerToken,
+      controllerUrl: opts.serverUrl,
+      accessToken: opts.accessToken,
       json: opts.json,
     });
   } catch (error) {
@@ -2106,7 +2007,6 @@ const conversationSearchCommand = conversationCommand
   .option("--json", "Output JSON");
 addServerUrlOptions(conversationSearchCommand);
 addAccessTokenOptions(conversationSearchCommand, "Instafy access token");
-addServiceTokenOptions(conversationSearchCommand, "Instafy service token (advanced)");
 conversationSearchCommand.action(async (queryParts, opts) => {
   try {
     await searchConversations({
@@ -2114,9 +2014,8 @@ conversationSearchCommand.action(async (queryParts, opts) => {
       project: opts.space,
       includeThreads: opts.includeThreads,
       limit: opts.limit,
-      controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-      accessToken: opts.accessToken ?? opts.controllerAccessToken,
-      serviceToken: opts.serviceToken ?? opts.controllerToken,
+      controllerUrl: opts.serverUrl,
+      accessToken: opts.accessToken,
       json: opts.json,
     });
   } catch (error) {
@@ -2135,7 +2034,6 @@ const conversationShowCommand = conversationCommand
   .option("--json", "Output JSON");
 addServerUrlOptions(conversationShowCommand);
 addAccessTokenOptions(conversationShowCommand, "Instafy access token");
-addServiceTokenOptions(conversationShowCommand, "Instafy service token (advanced)");
 conversationShowCommand.action(async (targetParts, opts) => {
   try {
     await showConversation({
@@ -2143,9 +2041,8 @@ conversationShowCommand.action(async (targetParts, opts) => {
       project: opts.space,
       includeThreads: opts.includeThreads,
       limit: opts.limit,
-      controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-      accessToken: opts.accessToken ?? opts.controllerAccessToken,
-      serviceToken: opts.serviceToken ?? opts.controllerToken,
+      controllerUrl: opts.serverUrl,
+      accessToken: opts.accessToken,
       json: opts.json,
     });
   } catch (error) {
@@ -2154,334 +2051,6 @@ conversationShowCommand.action(async (targetParts, opts) => {
   }
 });
 
-function configureApiCommand(command: Command, method: string) {
-  addServerUrlOptions(command);
-  addAccessTokenOptions(command, "Instafy access token");
-  addServiceTokenOptions(command, "Instafy service token (advanced)");
-
-  command
-    .option("--query <key=value>", "Query param (repeatable)", collectStringOption, [])
-    .option("--header <header>", "Extra header (repeatable, Key: Value)", collectStringOption, [])
-    .option("--json <json>", "JSON body as string")
-    .option("--json-file <path>", "JSON body read from file")
-    .option("--no-pretty", "Disable JSON pretty-printing")
-    .action(async (pathArg, opts) => {
-      try {
-        await requestControllerApi({
-          method,
-          path: pathArg,
-          controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-          accessToken: opts.accessToken ?? opts.controllerAccessToken,
-          serviceToken: opts.serviceToken ?? opts.controllerToken,
-          query: opts.query,
-          headers: opts.header,
-          json: opts.json,
-          jsonFile: opts.jsonFile,
-          pretty: opts.pretty,
-        });
-      } catch (error) {
-        console.error(kleur.red(String(error)));
-        process.exit(1);
-      }
-    });
-}
-
-const apiCommand = program
-  .command("api", { hidden: true })
-  .description("Advanced: authenticated requests to the controller API");
-
-failWithGroupHelp(apiCommand);
-
-const apiGetCommand = apiCommand
-  .command("get")
-  .description("Advanced: authenticated GET request to the controller API")
-  .argument("<path>", "API path (or full URL), e.g. /conversations/<id>/messages?limit=50");
-configureApiCommand(apiGetCommand, "GET");
-
-const apiPostCommand = apiCommand
-  .command("post")
-  .description("Advanced: authenticated POST request to the controller API")
-  .argument("<path>", "API path (or full URL)");
-configureApiCommand(apiPostCommand, "POST");
-
-const apiPatchCommand = apiCommand
-  .command("patch")
-  .description("Advanced: authenticated PATCH request to the controller API")
-  .argument("<path>", "API path (or full URL)");
-configureApiCommand(apiPatchCommand, "PATCH");
-
-const apiDeleteCommand = apiCommand
-  .command("delete")
-  .description("Advanced: authenticated DELETE request to the controller API")
-  .argument("<path>", "API path (or full URL)");
-configureApiCommand(apiDeleteCommand, "DELETE");
-
-const otaCommand = program
-  .command("ota")
-  .description("Operate the mobile OTA control plane");
-
-failWithGroupHelp(otaCommand);
-
-const otaReleasesCommand = otaCommand
-  .command("releases")
-  .description("List or register OTA releases");
-
-failWithGroupHelp(otaReleasesCommand);
-
-const otaReleasesListCommand = otaReleasesCommand
-  .command("list")
-  .description("List OTA releases")
-  .option("--platform <platform>", "Filter by platform (ios|android)")
-  .option("--channel <channel>", "Filter by channel")
-  .option("--status <status>", "Filter by release status")
-  .option("--json", "Output JSON");
-
-addServerUrlOptions(otaReleasesListCommand);
-addAccessTokenOptions(otaReleasesListCommand, "Instafy access token");
-addServiceTokenOptions(otaReleasesListCommand, "Instafy service token");
-
-otaReleasesListCommand.action(async (opts) => {
-  try {
-    await listOtaReleases({
-      controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-      accessToken: opts.accessToken ?? opts.controllerAccessToken,
-      serviceToken: opts.serviceToken ?? opts.controllerToken,
-      platform: opts.platform,
-      channel: opts.channel,
-      status: opts.status,
-      json: opts.json,
-    });
-  } catch (error) {
-    console.error(kleur.red(String(error)));
-    process.exit(1);
-  }
-});
-
-const otaReleasesRegisterCommand = otaReleasesCommand
-  .command("register")
-  .description("Register an OTA release")
-  .option("--file <path>", "JSON payload file produced by render-ota-release-payload.mjs")
-  .option("--release-id <id>", "Release id")
-  .option("--platform <platform>", "Platform (ios|android)")
-  .option("--channel <channel>", "Release channel")
-  .option("--bundle-version <value>", "Bundle version")
-  .option("--git-sha <sha>", "Source git SHA")
-  .option("--native-version <value>", "Native app version")
-  .option("--min-supported-native-version <value>", "Minimum native version")
-  .option("--artifact-url <url>", "Artifact URL")
-  .option("--artifact-sha256 <sha>", "Artifact SHA256")
-  .option("--artifact-size-bytes <bytes>", "Artifact size in bytes")
-  .option("--artifact-type <type>", "Artifact type")
-  .option("--signature <signature>", "Artifact signature")
-  .option("--rollout-percentage <percent>", "Default rollout percentage")
-  .option("--status <status>", "Initial release status")
-  .option("--published-at <iso>", "Published timestamp")
-  .option("--published-by <value>", "Published by")
-  .option("--notes <text>", "Internal notes")
-  .option("--json", "Output JSON");
-
-addServerUrlOptions(otaReleasesRegisterCommand);
-addAccessTokenOptions(otaReleasesRegisterCommand, "Instafy access token");
-addServiceTokenOptions(otaReleasesRegisterCommand, "Instafy service token");
-
-otaReleasesRegisterCommand.action(async (opts) => {
-  try {
-    await registerOtaRelease({
-      controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-      accessToken: opts.accessToken ?? opts.controllerAccessToken,
-      serviceToken: opts.serviceToken ?? opts.controllerToken,
-      file: opts.file,
-      releaseId: opts.releaseId,
-      platform: opts.platform,
-      channel: opts.channel,
-      bundleVersion: opts.bundleVersion,
-      gitSha: opts.gitSha,
-      nativeVersion: opts.nativeVersion,
-      minSupportedNativeVersion: opts.minSupportedNativeVersion,
-      artifactUrl: opts.artifactUrl,
-      artifactSha256: opts.artifactSha256,
-      artifactSizeBytes: opts.artifactSizeBytes,
-      artifactType: opts.artifactType,
-      signature: opts.signature,
-      rolloutPercentage: opts.rolloutPercentage,
-      status: opts.status,
-      publishedAt: opts.publishedAt,
-      publishedBy: opts.publishedBy,
-      notes: opts.notes,
-      json: opts.json,
-    });
-  } catch (error) {
-    console.error(kleur.red(String(error)));
-    process.exit(1);
-  }
-});
-
-const otaChannelsCommand = otaCommand
-  .command("channels")
-  .description("List or change OTA channel pointers");
-
-failWithGroupHelp(otaChannelsCommand);
-
-const otaChannelsListCommand = otaChannelsCommand
-  .command("list")
-  .description("List OTA channels")
-  .option("--platform <platform>", "Filter by platform (ios|android)")
-  .option("--channel <channel>", "Filter by channel")
-  .option("--json", "Output JSON");
-
-addServerUrlOptions(otaChannelsListCommand);
-addAccessTokenOptions(otaChannelsListCommand, "Instafy access token");
-addServiceTokenOptions(otaChannelsListCommand, "Instafy service token");
-
-otaChannelsListCommand.action(async (opts) => {
-  try {
-    await listOtaChannels({
-      controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-      accessToken: opts.accessToken ?? opts.controllerAccessToken,
-      serviceToken: opts.serviceToken ?? opts.controllerToken,
-      platform: opts.platform,
-      channel: opts.channel,
-      json: opts.json,
-    });
-  } catch (error) {
-    console.error(kleur.red(String(error)));
-    process.exit(1);
-  }
-});
-
-const otaChannelsActivateCommand = otaChannelsCommand
-  .command("activate")
-  .description("Activate a release on an OTA channel")
-  .requiredOption("--platform <platform>", "Platform (ios|android)")
-  .requiredOption("--channel <channel>", "Channel name")
-  .requiredOption("--release-id <id>", "Release id")
-  .requiredOption("--activated-by <value>", "Operator or workflow identity")
-  .option("--rollout-percentage <percent>", "Rollout percentage")
-  .option("--json", "Output JSON");
-
-addServerUrlOptions(otaChannelsActivateCommand);
-addAccessTokenOptions(otaChannelsActivateCommand, "Instafy access token");
-addServiceTokenOptions(otaChannelsActivateCommand, "Instafy service token");
-
-otaChannelsActivateCommand.action(async (opts) => {
-  try {
-    await activateOtaChannelCli({
-      controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-      accessToken: opts.accessToken ?? opts.controllerAccessToken,
-      serviceToken: opts.serviceToken ?? opts.controllerToken,
-      platform: opts.platform,
-      channel: opts.channel,
-      releaseId: opts.releaseId,
-      rolloutPercentage: opts.rolloutPercentage,
-      activatedBy: opts.activatedBy,
-      json: opts.json,
-    });
-  } catch (error) {
-    console.error(kleur.red(String(error)));
-    process.exit(1);
-  }
-});
-
-const otaChannelsRollbackCommand = otaChannelsCommand
-  .command("rollback")
-  .description("Rollback an OTA channel to the previous or a selected release")
-  .requiredOption("--platform <platform>", "Platform (ios|android)")
-  .requiredOption("--channel <channel>", "Channel name")
-  .requiredOption("--activated-by <value>", "Operator or workflow identity")
-  .option("--release-id <id>", "Explicit release id to restore")
-  .option("--json", "Output JSON");
-
-addServerUrlOptions(otaChannelsRollbackCommand);
-addAccessTokenOptions(otaChannelsRollbackCommand, "Instafy access token");
-addServiceTokenOptions(otaChannelsRollbackCommand, "Instafy service token");
-
-otaChannelsRollbackCommand.action(async (opts) => {
-  try {
-    await rollbackOtaChannelCli({
-      controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-      accessToken: opts.accessToken ?? opts.controllerAccessToken,
-      serviceToken: opts.serviceToken ?? opts.controllerToken,
-      platform: opts.platform,
-      channel: opts.channel,
-      releaseId: opts.releaseId,
-      activatedBy: opts.activatedBy,
-      json: opts.json,
-    });
-  } catch (error) {
-    console.error(kleur.red(String(error)));
-    process.exit(1);
-  }
-});
-
-const desktopUpdatesCommand = program
-  .command("desktop-updates")
-  .description("Operate desktop update promotions");
-
-failWithGroupHelp(desktopUpdatesCommand);
-
-const desktopPromotionsCommand = desktopUpdatesCommand
-  .command("promotions")
-  .description("List or request desktop promotions");
-
-failWithGroupHelp(desktopPromotionsCommand);
-
-const desktopPromotionsListCommand = desktopPromotionsCommand
-  .command("list")
-  .description("List desktop promotion requests")
-  .option("--target-channel <channel>", "Filter by target channel")
-  .option("--limit <n>", "Limit number of records")
-  .option("--json", "Output JSON");
-
-addServerUrlOptions(desktopPromotionsListCommand);
-addAccessTokenOptions(desktopPromotionsListCommand, "Instafy access token");
-addServiceTokenOptions(desktopPromotionsListCommand, "Instafy service token");
-
-desktopPromotionsListCommand.action(async (opts) => {
-  try {
-    await listDesktopPromotions({
-      controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-      accessToken: opts.accessToken ?? opts.controllerAccessToken,
-      serviceToken: opts.serviceToken ?? opts.controllerToken,
-      targetChannel: opts.targetChannel,
-      limit: opts.limit,
-      json: opts.json,
-    });
-  } catch (error) {
-    console.error(kleur.red(String(error)));
-    process.exit(1);
-  }
-});
-
-const desktopPromotionsRequestCommand = desktopPromotionsCommand
-  .command("request")
-  .description("Request a desktop promotion")
-  .requiredOption("--source-channel <channel>", "Source channel (stable)")
-  .requiredOption("--target-channel <channel>", "Target channel (internal)")
-  .requiredOption("--requested-by <value>", "Operator or workflow identity")
-  .option("--notes <text>", "Optional internal notes")
-  .option("--json", "Output JSON");
-
-addServerUrlOptions(desktopPromotionsRequestCommand);
-addAccessTokenOptions(desktopPromotionsRequestCommand, "Instafy access token");
-addServiceTokenOptions(desktopPromotionsRequestCommand, "Instafy service token");
-
-desktopPromotionsRequestCommand.action(async (opts) => {
-  try {
-    await requestDesktopPromotionCli({
-      controllerUrl: opts.serverUrl ?? opts.controllerUrl,
-      accessToken: opts.accessToken ?? opts.controllerAccessToken,
-      serviceToken: opts.serviceToken ?? opts.controllerToken,
-      sourceChannel: opts.sourceChannel,
-      targetChannel: opts.targetChannel,
-      requestedBy: opts.requestedBy,
-      notes: opts.notes,
-      json: opts.json,
-    });
-  } catch (error) {
-    console.error(kleur.red(String(error)));
-    process.exit(1);
-  }
-});
 
 export async function runCli(argv: string[] = process.argv) {
   if (argv.length <= 2) {
