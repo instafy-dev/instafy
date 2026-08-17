@@ -52,6 +52,11 @@ export function ChatSendQueue({
           >
             <span className="min-w-0" title={item.errorMessage ?? undefined}>
               <span className="block truncate text-sm font-normal text-slate-800 dark:text-slate-100">{item.message}</span>
+              {item.errorMessage ? (
+                <span className="mt-0.5 block truncate text-xs text-rose-600 dark:text-rose-300">
+                  {item.errorMessage}
+                </span>
+              ) : null}
               {item.browserTargetLabel ? (
                 <span className="mt-0.5 block truncate text-xxs uppercase tracking-[0.14em] text-primary-600 dark:text-primary-300">
                   Browser: {item.browserTargetLabel}

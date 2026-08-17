@@ -9,6 +9,7 @@ import type {
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Archery,
+  Lock,
   MagicWand,
   MediaImage,
   Microphone,
@@ -104,8 +105,37 @@ type ChatComposerSurfaceProps = {
   inviteModalProps: ComponentProps<typeof ComposerInviteModal>;
   mutationDisabled?: boolean;
   accessNotice?: string | null;
+  accessChecking?: boolean;
   silenceHintProps?: ComponentProps<typeof OctoSilenceHint> | null;
 };
+
+// The access check is a pending state, not a warning: neutral, quiet, with the
+// product's standard working shimmer instead of an amber slab. If it runs long
+// the copy escalates honestly rather than spinning forever.
+function AccessCheckingNotice({ flash }: { flash: boolean }) {
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => setSlow(true), 10_000);
+    return () => clearTimeout(timer);
+  }, []);
+  const text = slow
+    ? "Still checking your access. The workspace may be slow to respond."
+    : "Checking your access…";
+  return (
+    <div
+      className={`mx-2 rounded-lg px-1.5 py-1 text-xs text-slate-500 transition-shadow dark:text-slate-400 ${
+        flash ? "ring-2 ring-slate-400/50 dark:ring-slate-500/50" : ""
+      }`}
+      data-testid="project-access-checking-notice"
+      role="status"
+      aria-live="polite"
+    >
+      <span className="instafy-status-sweep" data-sweep-text={text}>
+        {text}
+      </span>
+    </div>
+  );
+}
 
 function resolveGoalStatusPillTone(tone: ConversationGoalHealth["tone"]): StatusPillTone {
   if (tone === "blocked") {
@@ -176,8 +206,28 @@ export function ChatComposerSurface({
   inviteModalProps,
   mutationDisabled = false,
   accessNotice = null,
+  accessChecking = false,
   silenceHintProps = null,
 }: ChatComposerSurfaceProps) {
+  // A read-only composer swallows keystrokes at the Lexical layer; flash the
+  // visible notice instead so a blocked attempt never feels like dead input.
+  const [blockedInputFlash, setBlockedInputFlash] = useState(false);
+  const blockedInputFlashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const handleReadOnlyKeyDown = useCallback(() => {
+    setBlockedInputFlash(true);
+    if (blockedInputFlashTimerRef.current !== null) {
+      clearTimeout(blockedInputFlashTimerRef.current);
+    }
+    blockedInputFlashTimerRef.current = setTimeout(() => setBlockedInputFlash(false), 650);
+  }, []);
+  useEffect(
+    () => () => {
+      if (blockedInputFlashTimerRef.current !== null) {
+        clearTimeout(blockedInputFlashTimerRef.current);
+      }
+    },
+    [],
+  );
   const showVoiceSecondaryStatus = showVoicePrimaryAction && showVoiceStatus;
   const showVoiceActiveStrip = showVoicePrimaryAction && showVoiceSecondaryStatus;
   const showActiveGoal =
@@ -481,12 +531,17 @@ export function ChatComposerSurface({
             ) : null}
             {accessNotice ? (
               <div
-                className="mx-1 rounded-xl border border-amber-300/60 bg-amber-50/95 px-3 py-2 text-xs font-medium text-amber-900 shadow-sm dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-100 sm:mx-2"
+                className={`mx-1 flex items-center gap-2 rounded-xl border border-secondary-300/70 bg-secondary-50/90 px-3 py-2 text-xs font-medium text-secondary-900 shadow-sm transition-shadow dark:border-secondary-400/30 dark:bg-secondary-400/10 dark:text-secondary-100 sm:mx-2 ${
+                  blockedInputFlash ? "ring-2 ring-secondary-400/70 dark:ring-secondary-300/50" : ""
+                }`}
                 data-testid="project-read-only-notice"
                 role="status"
               >
-                {accessNotice}
+                <Lock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                <span>{accessNotice}</span>
               </div>
+            ) : accessChecking ? (
+              <AccessCheckingNotice flash={blockedInputFlash} />
             ) : null}
             {silenceHintProps ? <OctoSilenceHint {...silenceHintProps} /> : null}
             <ChatSendQueueSurface {...queueSurfaceProps} mutationDisabled={mutationDisabled} />
@@ -526,7 +581,8 @@ export function ChatComposerSurface({
                   ref={chatInputRef}
                   {...chatInputProps}
                   compact={browserComposerCondensed}
-                  readOnly={mutationDisabled}
+                  readOnly={mutationDisabled || accessChecking}
+                  onReadOnlyKeyDown={handleReadOnlyKeyDown}
                 />
               </div>
               <input

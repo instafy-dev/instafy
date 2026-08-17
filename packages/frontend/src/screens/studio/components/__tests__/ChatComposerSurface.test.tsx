@@ -244,6 +244,26 @@ describe("ChatComposerSurface", () => {
     expect(container.querySelector<HTMLButtonElement>('[data-testid="chat-image-upload-button"]')?.disabled).toBe(true);
   });
 
+  it("renders the access check as a quiet pending notice, not the read-only warning", async () => {
+    await act(async () => {
+      root.render(
+        <ChatComposerSurface
+          {...createProps({
+            accessChecking: true,
+            showVoicePrimaryAction: false,
+          })}
+        />,
+      );
+    });
+
+    const checking = container.querySelector('[data-testid="project-access-checking-notice"]');
+    expect(checking?.textContent).toContain("Checking your access");
+    expect(container.querySelector('[data-testid="project-read-only-notice"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-input"]')?.getAttribute("data-read-only")).toBe(
+      "true",
+    );
+  });
+
   it("replaces the idle controls with an integrated active voice strip", async () => {
     await act(async () => {
       root.render(

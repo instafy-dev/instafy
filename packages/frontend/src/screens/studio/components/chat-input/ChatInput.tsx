@@ -42,6 +42,7 @@ type ChatInputProps = {
   recordingIndicatorLabel?: string | null;
   compact?: boolean;
   readOnly?: boolean;
+  onReadOnlyKeyDown?: () => void;
 };
 
 function applyTextToEditor(text: string) {
@@ -99,6 +100,7 @@ function ChatInputEditor(
     recordingIndicatorLabel,
     compact,
     readOnly = false,
+    onReadOnlyKeyDown,
   }: ChatInputProps,
   ref: React.Ref<ChatInputHandle>
 ) {
@@ -281,17 +283,30 @@ function ChatInputEditor(
             role="textbox"
             aria-multiline="true"
             aria-readonly={readOnly}
+            aria-disabled={readOnly || undefined}
             // Use capture phase so Enter-to-send can prevent Lexical's newline insertion first.
-            onKeyDownCapture={onKeyDown}
+            // A read-only editor discards keystrokes silently at the Lexical
+            // layer; surface the attempt to the composer instead of eating it.
+            onKeyDownCapture={(event) => {
+              if (readOnly) {
+                onReadOnlyKeyDown?.();
+                return;
+              }
+              onKeyDown?.(event);
+            }}
             onPaste={onPaste}
             className={`relative z-0 w-full overflow-auto whitespace-pre-wrap break-words text-base leading-5 text-slate-900 outline-none sm:text-sm dark:text-slate-100 ${
               compact ? "min-h-7 max-h-24 py-0.5" : "min-h-[2.5rem] max-h-36 py-1 sm:py-0.5"
-            }`}
+            } ${readOnly ? "cursor-not-allowed opacity-60" : ""}`}
           />
         }
         placeholder={
           showGhostSuggestion || showRecordingIndicator ? null : (
-            <div className="pointer-events-none absolute inset-x-0 top-1 z-10 block overflow-hidden text-ellipsis whitespace-nowrap pr-2 text-base leading-5 text-slate-400 sm:top-0.5 sm:text-sm">
+            <div
+              className={`pointer-events-none absolute inset-x-0 top-1 z-10 block overflow-hidden text-ellipsis whitespace-nowrap pr-2 text-base leading-5 text-slate-400 sm:top-0.5 sm:text-sm ${
+                readOnly ? "opacity-60" : ""
+              }`}
+            >
               {placeholder}
             </div>
           )
@@ -329,6 +344,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     recordingIndicatorLabel,
     compact,
     readOnly,
+    onReadOnlyKeyDown,
   },
   ref
 ) {
@@ -371,6 +387,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         recordingIndicatorLabel={recordingIndicatorLabel}
         compact={compact}
         readOnly={readOnly}
+        onReadOnlyKeyDown={onReadOnlyKeyDown}
       />
     </LexicalComposer>
   );
