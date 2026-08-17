@@ -213,7 +213,11 @@ function validatePackageManifest(entry, manifest) {
   if (manifest.name !== entry.name || manifest.version !== entry.version) {
     fail(`${entry.name} tarball manifest identity does not match the publish plan`);
   }
-  if (manifest.private === true || manifest.publishConfig?.access !== "public") {
+  if (
+    manifest.private === true ||
+    manifest.publishConfig?.access !== "public" ||
+    Object.keys(manifest.publishConfig).sort().join(",") !== "access"
+  ) {
     fail(`${entry.name} tarball manifest is not public`);
   }
   if (
@@ -238,18 +242,45 @@ async function registryPackageIntegrity(name, version) {
   return typeof body?.dist?.integrity === "string" ? body.dist.integrity : null;
 }
 
+async function registryLatestVersion(name) {
+  const response = await fetch(
+    `https://registry.npmjs.org/-/package/${encodeURIComponent(name)}/dist-tags`,
+    { redirect: "error", signal: AbortSignal.timeout(15_000) },
+  );
+  if (!response.ok) fail(`npm registry returned HTTP ${response.status} for ${name} dist-tags`);
+  const text = await response.text();
+  if (Buffer.byteLength(text) > MAX_PLAN_BYTES) fail(`npm dist-tags response for ${name} is too large`);
+  const body = JSON.parse(text);
+  return typeof body?.latest === "string" ? body.latest : null;
+}
+
+export function assessRegistryState(entry, sha512, state, mode) {
+  if (state.integrity && state.integrity !== sha512) {
+    fail(`npm already has different bytes for ${entry.name}@${entry.version}`);
+  }
+  if (mode === "before") {
+    if (!state.integrity) return { done: true, alreadyPublished: false };
+    if (state.latest !== entry.version) {
+      fail(`npm latest does not point to the existing exact ${entry.name}@${entry.version}`);
+    }
+    return { done: true, alreadyPublished: true };
+  }
+  return {
+    done: state.integrity === sha512 && state.latest === entry.version,
+    alreadyPublished: state.integrity === sha512,
+  };
+}
+
 async function verifyRegistry(entry, sha512, mode) {
   const attempts = mode === "after" ? 10 : 1;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    const registryIntegrity = await registryPackageIntegrity(entry.name, entry.version);
-    if (registryIntegrity === sha512) return true;
-    if (registryIntegrity && registryIntegrity !== sha512) {
-      fail(`npm already has different bytes for ${entry.name}@${entry.version}`);
-    }
+    const integrity = await registryPackageIntegrity(entry.name, entry.version);
+    const latest = integrity ? await registryLatestVersion(entry.name) : null;
+    const assessment = assessRegistryState(entry, sha512, { integrity, latest }, mode);
+    if (assessment.done) return assessment.alreadyPublished;
     if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 3_000));
   }
-  if (mode === "after") fail(`npm did not expose ${entry.name}@${entry.version} with the expected integrity`);
-  return false;
+  fail(`npm did not expose ${entry.name}@${entry.version} as latest with the expected integrity`);
 }
 
 export async function verifyPackDirectory(packDirectory, options = {}) {

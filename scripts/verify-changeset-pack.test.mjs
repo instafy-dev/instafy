@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { verifyPackDirectory } from "./verify-changeset-pack.mjs";
+import { assessRegistryState, verifyPackDirectory } from "./verify-changeset-pack.mjs";
 
 const temporaryDirectories = [];
 
@@ -14,7 +14,7 @@ test.afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) => fs.rm(directory, { recursive: true, force: true })));
 });
 
-async function createCliPack() {
+async function createCliPack({ publishConfig = { access: "public" } } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "instafy-changeset-pack-"));
   temporaryDirectories.push(root);
   const source = path.join(root, "source");
@@ -37,7 +37,7 @@ async function createCliPack() {
         type: "module",
         bin: { instafy: "bin/instafy.js" },
         files: ["bin", "dist/cli.js", "LICENSE", "README.md"],
-        publishConfig: { access: "public" },
+        publishConfig,
         repository: {
           type: "git",
           url: "git+https://github.com/instafy-dev/instafy.git",
@@ -120,4 +120,58 @@ test("rejects packages outside the reviewed public allowlist", async () => {
   plan.plan[0][0].name = "@instafy/unreviewed";
   await fs.writeFile(planPath, `${JSON.stringify(plan)}\n`);
   await assert.rejects(() => verifyPackDirectory(pack), /unrecognized publishable package/u);
+});
+
+test("rejects package-level registry overrides", async () => {
+  const pack = await createCliPack({
+    publishConfig: { access: "public", registry: "https://registry.example.invalid/" },
+  });
+  await assert.rejects(() => verifyPackDirectory(pack), /tarball manifest is not public/u);
+});
+
+test("requires both exact registry bytes and the planned latest dist-tag", () => {
+  const entry = { name: "@instafy/cli", version: "0.2.0" };
+  const sha512 = "sha512-reviewed";
+  assert.deepEqual(
+    assessRegistryState(entry, sha512, { integrity: null, latest: "0.1.11" }, "before"),
+    { done: true, alreadyPublished: false },
+  );
+  assert.deepEqual(
+    assessRegistryState(
+      entry,
+      sha512,
+      { integrity: sha512, latest: "0.2.0" },
+      "after",
+    ),
+    { done: true, alreadyPublished: true },
+  );
+  assert.deepEqual(
+    assessRegistryState(
+      entry,
+      sha512,
+      { integrity: sha512, latest: "0.1.11" },
+      "after",
+    ),
+    { done: false, alreadyPublished: true },
+  );
+  assert.throws(
+    () =>
+      assessRegistryState(
+        entry,
+        sha512,
+        { integrity: sha512, latest: "0.1.11" },
+        "before",
+      ),
+    /npm latest does not point/u,
+  );
+  assert.throws(
+    () =>
+      assessRegistryState(
+        entry,
+        sha512,
+        { integrity: "sha512-other", latest: "0.2.0" },
+        "after",
+      ),
+    /different bytes/u,
+  );
 });
