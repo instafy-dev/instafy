@@ -47,6 +47,11 @@ release signing and deployment configuration do not belong here.
 5. Report commands that actually ran, any checks that remain, and any behavior or compatibility
    change. Do not claim a no-op command as validation.
 
+Changesets are mandatory release intent for publishable npm packages. Add a changeset for every
+user-visible or contract change to `@instafy/cli` or `@instafy/provider-contract`; do not edit
+their versions or changelogs manually. Changes confined to a package's `test/` directory are
+exempt because they cannot enter the npm artifact. See [Package Releases](docs/Package-Releases.md).
+
 Useful frontend checks:
 
 ```bash
@@ -123,6 +128,8 @@ around this.
 - Review the diff for credential material, personal paths and provider-specific implementation
   that belongs outside the generic core.
 - Verify new package, workflow, Docker and script references exist in a clean checkout.
+- Verify every publishable-package change has the correct Changeset and that package versions
+  were not edited outside the generated version pull request.
 - Update public documentation when behavior or setup changes.
 - Do not publish packages, push release tags, deploy services or change repository visibility
   as part of an ordinary code change.
