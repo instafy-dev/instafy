@@ -47,7 +47,9 @@ describe("ChatSendQueue", () => {
     const editButton = container.querySelector('[data-testid="chat-send-queue-steer"]') as HTMLButtonElement | null;
     expect(editButton).not.toBeNull();
     expect(editButton?.textContent?.trim()).toBe("Edit");
-    expect(editButton?.getAttribute("aria-label")).toBe("Edit queued message");
+    expect(editButton?.getAttribute("aria-label")).toBe(
+      "Edit queued message 1: Follow up on the codec lane",
+    );
     expect(container.textContent).not.toContain("@octo");
 
     await act(async () => {
@@ -57,7 +59,7 @@ describe("ChatSendQueue", () => {
     expect(onEdit).toHaveBeenCalledWith("queued-1");
   });
 
-  it("surfaces failed entry errors as a tooltip", async () => {
+  it("surfaces failed entry errors visibly and as a tooltip", async () => {
     await act(async () => {
       root.render(
         <ChatSendQueue
@@ -78,6 +80,7 @@ describe("ChatSendQueue", () => {
     const messageSpan = container.querySelector('[title="runtime offline"]');
     expect(messageSpan).not.toBeNull();
     expect(messageSpan?.textContent).toContain("Follow up on the codec lane");
+    expect(messageSpan?.textContent).toContain("runtime offline");
   });
 
   it("disables editing while queued message editing is unavailable", async () => {

@@ -15,7 +15,6 @@ function buildProps(overrides: Partial<SurfaceProps> = {}): SurfaceProps {
     collapsedQueuedMessageSummary: {
       message: "two",
     },
-    queueQuickSendItemId: "queued-1",
     queueCanSendNow: false,
     queueStatusLabel: "Reply in progress",
     queueStatusAction: null,
@@ -60,30 +59,30 @@ describe("ChatSendQueueSurface", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it("keeps the collapsed queue focused on the message and edit action", async () => {
+  it("keeps the collapsed queue behind a counted task-list icon", async () => {
+    const onToggleExpanded = vi.fn();
     const onEditQueuedMessage = vi.fn();
 
     await act(async () => {
-      root.render(<ChatSendQueueSurface {...buildProps({ onEditQueuedMessage })} />);
+      root.render(<ChatSendQueueSurface {...buildProps({ onToggleExpanded, onEditQueuedMessage })} />);
     });
 
-    expect(container.textContent).toContain("two");
-    expect(container.textContent).not.toContain("Queued message");
+    expect(container.textContent).not.toContain("two");
     expect(container.textContent).not.toContain("Reply in progress");
     expect(container.textContent).not.toContain("@octo");
-    expect(container.querySelector('[data-testid="chat-send-queue-agent-summary"]')?.textContent).toBe("two");
-
-    const editButton = container.querySelector(
-      '[data-testid="chat-send-queue-steer-collapsed"]',
-    ) as HTMLButtonElement | null;
-    expect(editButton).not.toBeNull();
-    expect(editButton?.textContent?.trim()).toBe("Edit");
+    const summary = container.querySelector('[data-testid="chat-send-queue-agent-summary"]');
+    expect(summary?.getAttribute("aria-label")).toBe("Queued messages (1): two");
+    expect(summary?.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelector(`#${summary?.getAttribute("aria-controls")}`)).not.toBeNull();
+    expect(container.querySelector('[data-testid="chat-send-queue-icon"]')).not.toBeNull();
+    expect(container.textContent).toBe("1");
 
     await act(async () => {
-      editButton?.click();
+      (summary as HTMLButtonElement).click();
     });
 
-    expect(onEditQueuedMessage).toHaveBeenCalledWith("queued-1");
+    expect(onToggleExpanded).toHaveBeenCalledTimes(1);
+    expect(onEditQueuedMessage).not.toHaveBeenCalled();
   });
 
   it("opens the queued list when editing a collapsed multi-message queue", async () => {
@@ -96,7 +95,6 @@ describe("ChatSendQueueSurface", () => {
           {...buildProps({
             totalQueuedCount: 2,
             collapsedQueuedMessageSummary: null,
-            queueQuickSendItemId: null,
             chatSendQueueDisplay: [
               {
                 id: "queued-1",
@@ -116,12 +114,12 @@ describe("ChatSendQueueSurface", () => {
       );
     });
 
-    const editButton = container.querySelector(
-      '[data-testid="chat-send-queue-steer-collapsed"]',
-    ) as HTMLButtonElement | null;
+    const editButton = container.querySelector('[data-testid="chat-send-queue-steer-collapsed"]');
+    expect(editButton).toBeNull();
+    expect(container.textContent).toBe("2");
 
     await act(async () => {
-      editButton?.click();
+      (container.querySelector('[data-testid="chat-send-queue-agent-summary"]') as HTMLButtonElement).click();
     });
 
     expect(onEditQueuedMessage).not.toHaveBeenCalled();
@@ -157,7 +155,29 @@ describe("ChatSendQueueSurface", () => {
 
     expect(container.textContent).toContain("how");
     expect(container.textContent).toContain("are");
+    expect(
+      container.querySelector('[data-testid="chat-send-queue-agent-summary"]')?.getAttribute("aria-expanded"),
+    ).toBe("true");
     expect(container.textContent).not.toContain("Reply in progress");
     expect(container.textContent).not.toContain("@octo");
+  });
+
+  it("shows queue editing without a misleading zero-count queue toggle", async () => {
+    await act(async () => {
+      root.render(
+        <ChatSendQueueSurface
+          {...buildProps({
+            totalQueuedCount: 0,
+            editingQueuedItem: { targetAgentHandles: ["octo"] },
+            chatSendQueueDisplay: [],
+            collapsedQueuedMessageSummary: null,
+          })}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Editing queued message");
+    expect(container.querySelector('[data-testid="chat-send-queue-agent-summary"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-send-queue-icon"]')).toBeNull();
   });
 });

@@ -38,19 +38,10 @@ export function ChatSendQueue({
       className="divide-y divide-slate-200/70 dark:divide-slate-800/80"
       data-testid="chat-send-queue-list"
     >
-      {items.map((item) => (
+      {items.map((item, index) => (
         <div key={item.id} className="flex items-center gap-2.5 px-3 py-2.5">
-          <Button
-            variant="ghost"
-            size="sm"
-            radius="md"
-            className="min-w-0 flex-1 justify-start bg-transparent px-0 py-0 text-left shadow-none hover:bg-transparent data-[hovered]:bg-transparent"
-            onPress={() => {
-              onEdit?.(item.id);
-            }}
-            isDisabled={!onEdit || editDisabled}
-          >
-            <span className="min-w-0" title={item.errorMessage ?? undefined}>
+          <div className="min-w-0 flex-1" title={item.errorMessage ?? undefined}>
+            <span className="min-w-0">
               <span className="block truncate text-sm font-normal text-slate-800 dark:text-slate-100">{item.message}</span>
               {item.errorMessage ? (
                 <span className="mt-0.5 block truncate text-xs text-rose-600 dark:text-rose-300">
@@ -62,12 +53,17 @@ export function ChatSendQueue({
                   Browser: {item.browserTargetLabel}
                 </span>
               ) : null}
+              {item.errorMessage ? (
+                <span className="mt-0.5 block truncate text-xxs text-rose-600 dark:text-rose-300">
+                  {item.errorMessage}
+                </span>
+              ) : null}
             </span>
-          </Button>
+          </div>
           <div className="flex flex-none items-center gap-0.5">
             {onSendNow ? (
               <IconButton
-                aria-label="Send queued message now"
+                aria-label={`Send queued message ${index + 1} now: ${item.message}`}
                 variant="ghost"
                 size="xs"
                 radius="full"
@@ -80,7 +76,7 @@ export function ChatSendQueue({
             ) : null}
             {onEdit ? (
               <Button
-                aria-label="Edit queued message"
+                aria-label={`Edit queued message ${index + 1}: ${item.message}`}
                 variant="outline"
                 size="xs"
                 radius="full"
@@ -93,7 +89,7 @@ export function ChatSendQueue({
               </Button>
             ) : null}
             <IconButton
-              aria-label="Remove queued message"
+              aria-label={`Remove queued message ${index + 1}: ${item.message}`}
               variant="ghost"
               size="xs"
               radius="full"

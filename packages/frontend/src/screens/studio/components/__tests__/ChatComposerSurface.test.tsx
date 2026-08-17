@@ -219,6 +219,7 @@ describe("ChatComposerSurface", () => {
     expect(container.textContent).not.toContain("Voice capture is not ready yet on this client.");
     expect(container.querySelector('[data-testid="mock-voice-action-strip"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="chat-voice-active-strip"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-primary-action-status"]')).toBeNull();
   });
 
   it("shows and enforces the read-only composer state", async () => {
@@ -647,6 +648,29 @@ describe("ChatComposerSurface", () => {
     expect(container.querySelector('[data-testid="conversation-roster"]')).toBeNull();
   });
 
+  it("hides the stash expander while a queued message is being edited", async () => {
+    await act(async () => {
+      root.render(
+        <ChatComposerSurface
+          {...createProps({
+            queueSurfaceProps: {
+              totalQueuedCount: 0,
+              editingQueuedItem: { targetAgentHandles: ["octo"] },
+            } as never,
+            stashTrayProps: {
+              stashes: [{ id: "stash-1", text: "Saved draft" }],
+              restoredStashId: null,
+              onRestore: vi.fn(),
+              onDelete: vi.fn(),
+            } as never,
+          })}
+        />,
+      );
+    });
+
+    expect(container.querySelector('[data-testid="chat-message-stashes"]')).toBeNull();
+  });
+
   it("submits from a native click fallback when press events are unavailable", async () => {
     const onSendButtonPress = vi.fn();
     await act(async () => {
@@ -703,10 +727,9 @@ describe("ChatComposerSurface", () => {
     expect(sendButton?.getAttribute("aria-label")).toBe("Steer current reply (Enter)");
     expect(sendButton?.getAttribute("title")).toBe("Steer current reply (Enter)");
     expect(sendButton?.getAttribute("data-send-mode")).toBe("steer");
-    expect(sendButton?.className).toContain("!w-auto");
-    expect(container.querySelector('[data-testid="chat-steer-action-label"]')?.textContent).toBe(
-      "Steer↵",
-    );
+    expect(sendButton?.className).not.toContain("!w-auto");
+    expect(container.querySelector('[data-testid="chat-steer-action-label"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-send-action-icon"]')).not.toBeNull();
     expect(actionStatus?.textContent).toBe("Enter steers the current reply.");
 
     await act(async () => renderSurface("send"));
