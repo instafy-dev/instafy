@@ -18,7 +18,7 @@ instafy login
 
 This prints a Studio URL where you can sign in. After you finish logging in, the Studio page will send the token back to the CLI automatically (no copy/paste). If that callback fails, you can still copy the token from the page and paste it into the terminal.
 
-If you haven't configured a server/studio yet, `instafy login` will use `http://localhost:5173` only when it can reach it (and a local controller is selected); otherwise it will use `https://staging.instafy.dev` with `https://controller.instafy.dev`.
+If you haven't configured a server/studio yet, `instafy login` will use `http://localhost:5173` only when it can reach it (and a local controller is selected); otherwise it will use `https://instafy.dev` with `https://controller.instafy.dev`.
 
 By default, `instafy login` also installs a git credential helper so `git clone` / `git push` works with Instafy Git Service without copying tokens. Disable with `instafy login --no-git-setup`.
 
@@ -157,7 +157,7 @@ The CLI stores defaults under `~/.instafy/config.json`. Manage it with:
 ```bash
 instafy config list
 instafy config set controller-url https://controller.instafy.dev
-instafy config set studio-url https://staging.instafy.dev
+instafy config set studio-url https://instafy.dev
 ```
 
 Profiles are stored under `~/.instafy/profiles/<name>.json` and are selected by `.instafy/space.json` (`profile`) or `INSTAFY_PROFILE`.
