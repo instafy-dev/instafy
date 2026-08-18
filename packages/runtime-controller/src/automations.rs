@@ -96,21 +96,28 @@ struct UpdateAutomationBody {
 }
 
 impl UpdateAutomationBody {
+    fn has_settings_updates(&self) -> bool {
+        self.name.is_some()
+            || self.prompt_text.is_some()
+            || self.metadata.is_some()
+            || self.schedule_kind.is_some()
+            || self.run_at.is_some()
+            || self.interval_hours.is_some()
+            || self.by_day.is_some()
+            || self.by_hour.is_some()
+            || self.by_minute.is_some()
+            || self.timezone.is_some()
+            || self.runtime_mode.is_some()
+            || self.runtime_provider.is_some()
+            || self.silent_when_nothing_to_report.is_some()
+    }
+
     fn is_status_only(&self) -> bool {
-        self.status.is_some()
-            && self.name.is_none()
-            && self.prompt_text.is_none()
-            && self.metadata.is_none()
-            && self.schedule_kind.is_none()
-            && self.run_at.is_none()
-            && self.interval_hours.is_none()
-            && self.by_day.is_none()
-            && self.by_hour.is_none()
-            && self.by_minute.is_none()
-            && self.timezone.is_none()
-            && self.runtime_mode.is_none()
-            && self.runtime_provider.is_none()
-            && self.silent_when_nothing_to_report.is_none()
+        self.status.is_some() && !self.has_settings_updates()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.status.is_none() && !self.has_settings_updates()
     }
 }
 
@@ -1439,6 +1446,11 @@ async fn update_automation(
     let context = authenticate_request(&state.config, &headers).await?;
     let automation_id = Uuid::from_str(automation_id_raw.trim())
         .map_err(|_| bad_request("automationId must be a valid UUID"))?;
+    if body.is_empty() {
+        return Err(bad_request(
+            "at least one automation field must be provided",
+        ));
+    }
 
     let mut connection = state
         .pool
@@ -1636,8 +1648,22 @@ async fn update_automation(
         return Err(bad_request("status must be active or paused"));
     }
 
+    // Only reschedule when the effective schedule or status changed. Editing the
+    // prompt, name, or runtime settings must not push an active automation's next
+    // run further out.
+    let schedule_changed = schedule_kind != existing_record.schedule_kind
+        || interval_hours != existing_record.interval_hours
+        || by_day != existing_record.by_day
+        || by_hour != existing_record.by_hour
+        || by_minute != existing_record.by_minute
+        || timezone != existing_record.timezone
+        || run_at != existing_record.run_at;
+    let status_changed = status != existing_record.status;
+
     let now = Utc::now();
-    let next_run_at = if status == "active" {
+    let next_run_at = if status == "active"
+        && (schedule_changed || status_changed || existing_record.next_run_at.is_none())
+    {
         match schedule_kind.as_str() {
             "once" => {
                 let run_at = run_at.expect("once schedules require runAt");
@@ -1991,6 +2017,26 @@ mod tests {
             ..UpdateAutomationBody::default()
         }
         .is_status_only());
+    }
+
+    #[test]
+    fn automation_update_body_is_empty_only_without_any_field() {
+        assert!(UpdateAutomationBody::default().is_empty());
+        assert!(!UpdateAutomationBody {
+            status: Some("paused".to_string()),
+            ..UpdateAutomationBody::default()
+        }
+        .is_empty());
+        assert!(!UpdateAutomationBody {
+            prompt_text: Some("Report dependency changes.".to_string()),
+            ..UpdateAutomationBody::default()
+        }
+        .is_empty());
+        assert!(!UpdateAutomationBody {
+            silent_when_nothing_to_report: Some(false),
+            ..UpdateAutomationBody::default()
+        }
+        .is_empty());
     }
 
     #[test]
