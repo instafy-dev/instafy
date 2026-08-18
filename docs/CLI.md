@@ -447,6 +447,33 @@ for a successful run that explicitly finds nothing to report; results, errors, u
 output, and execution records remain visible. See
 [Automations](Automations.md) for the controller semantics and audit behavior.
 
+## Credentials
+
+`instafy credentials` shows which AI provider credentials (bring-your-own keys and Codex logins)
+your account holds, lets you verify one actually works, and picks the default that jobs use when
+no credential is chosen explicitly. Secret material is never returned or printed.
+
+```bash
+instafy credentials list                 # active credentials; add --all to include revoked
+instafy credentials test <id-or-prefix>  # probe one credential through the proxy (exit 1 on failure)
+instafy credentials default <id-or-prefix>
+instafy credentials default --clear
+instafy credentials revoke <id-or-prefix> --yes
+```
+
+- `list` prints the short id, kind, provider, default model, default marker, last-used and
+  revoked timestamps. Revoked credentials are hidden unless `--all` is passed.
+- `test` calls the upstream provider through the configured proxy, so it can take up to a minute
+  and counts as real usage of the credential. It prints `ok` or `failed`, the provider and model,
+  and the first ~300 characters of the model output.
+- `default` sets the credential jobs fall back to; `--clear` removes the default so nothing is
+  picked automatically.
+- `revoke` disconnects agents bound to the credential and stops jobs from using it. It asks for
+  confirmation in a terminal and requires `--yes` when run non-interactively.
+
+Every command accepts a full credential UUID or a unique id prefix (as shown by `list`), plus
+`--json`. Ambiguous or unknown prefixes fail with an error rather than guessing.
+
 ## Public and operator CLI boundary
 
 The published `@instafy/cli` package is the customer and self-hoster CLI. Hosted Instafy staff
