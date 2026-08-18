@@ -788,6 +788,7 @@ mod tests {
             stripe: None,
             operator_console_org_id: None,
             operator_console_allowed_user_ids: vec![],
+            bug_reports_operator_user_ids: vec![],
             desktop_release_github_owner: None,
             desktop_release_github_repo: None,
             desktop_release_github_token: None,
