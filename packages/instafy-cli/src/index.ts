@@ -14,7 +14,14 @@ import { login, logout } from "./auth.js";
 import { runGitCredentialHelper } from "./git-credential.js";
 import { projectInit, projectProfile, refreshProjectDefaults } from "./project.js";
 import { secretsGet, secretsList, secretsPut, secretsRevoke } from "./secrets.js";
-import { automationsCreate, automationsDelete, automationsList, automationsRun, automationsUpdateStatus } from "./automations.js";
+import {
+  automationsCreate,
+  automationsDelete,
+  automationsList,
+  automationsRun,
+  automationsUpdate,
+  automationsUpdateStatus,
+} from "./automations.js";
 import { listTunnelSessions, startTunnelDetached, stopTunnelSession, tailTunnelLogs, runTunnelCommand } from "./tunnel.js";
 import { configGet, configList, configPath, configSet, configUnset } from "./config-command.js";
 import { getInstafyProfileConfigPath, listInstafyProfileNames, readInstafyProfileConfig } from "./config.js";
@@ -1177,6 +1184,61 @@ automationsCreateCommand
         silentWhenNothingToReport: Boolean(opts.silentWhenNothingToReport),
         paused: Boolean(opts.paused),
         project: resolveSpaceIdOption(opts),
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+const automationsUpdateCommand = automationsCommand
+  .command("update")
+  .description("Update an automation's name, prompt, schedule, or runtime settings in place")
+  .argument("<automation-id>", "Automation UUID")
+  .option("--name <name>", "New automation name")
+  .option("--prompt <text>", "New prompt to run on schedule")
+  .option("--prompt-file <path>", "Read the new prompt from a file")
+  .option("--schedule-kind <kind>", "weekly|hourly|once")
+  .option("--run-at <datetime>", "Run time for once schedule (RFC3339 or YYYY-MM-DDTHH:MM[:SS])")
+  .option("--interval-hours <n>", "Interval hours (hourly schedule)", (value) => Number(value))
+  .option("--days <list>", "Weekdays for weekly schedule (e.g. mo,tu,we,th,fr)")
+  .option("--time <hh:mm>", "Time for weekly schedule (24h, e.g. 09:00)")
+  .option("--timezone <tz>", "IANA timezone (e.g. America/New_York)")
+  .option("--runtime-mode <mode>", "auto|hosted|existing")
+  .option("--runtime-provider <id>", "Runtime provider id")
+  .option(
+    "--silent-when-nothing-to-report",
+    "Do not post a completion result or send a result notification when a successful run has no findings",
+  )
+  .option(
+    "--no-silent-when-nothing-to-report",
+    "Always post a completion result and send a result notification",
+  );
+
+addServerUrlOptions(automationsUpdateCommand);
+addAccessTokenOptions(automationsUpdateCommand, "Instafy access token");
+
+automationsUpdateCommand
+  .option("--json", "Output JSON")
+  .action(async (automationId, opts) => {
+    try {
+      await automationsUpdate({
+        automationId,
+        name: opts.name,
+        prompt: opts.prompt,
+        promptFile: opts.promptFile,
+        scheduleKind: opts.scheduleKind,
+        runAt: opts.runAt,
+        intervalHours: opts.intervalHours,
+        days: opts.days,
+        time: opts.time,
+        timezone: opts.timezone,
+        runtimeMode: opts.runtimeMode,
+        runtimeProvider: opts.runtimeProvider,
+        silentWhenNothingToReport: opts.silentWhenNothingToReport,
         controllerUrl: opts.serverUrl,
         accessToken: opts.accessToken,
         json: opts.json,

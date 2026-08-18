@@ -15019,6 +15019,252 @@ async fn automation_silence_is_opt_in_success_only_and_keeps_runs_observable() -
     Ok(())
 }
 
+async fn automation_json_request(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    token: &str,
+    body: serde_json::Value,
+) -> anyhow::Result<(StatusCode, serde_json::Value)> {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(body.to_string()))?,
+        )
+        .await?;
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+    let payload = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    Ok((status, payload))
+}
+
+#[tokio::test]
+async fn automation_update_keeps_identity_and_reschedules_only_on_schedule_change(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping automation update test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let owner_user_id = Uuid::new_v4();
+    let teammate_user_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
+    ensure_test_user(&pool, &teammate_user_id).await?;
+    seed_group_participation_project(
+        &pool,
+        &org_id,
+        &project_id,
+        &owner_user_id,
+        &teammate_user_id,
+        "Automation update test",
+    )
+    .await?;
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "automation-update",
+    );
+    let owner_token = crate::auth::issue_controller_token(&config, &owner_user_id)
+        .map_err(|error| controller_error("issue automation owner token", error))?
+        .token;
+    let teammate_token = crate::auth::issue_controller_token(&config, &teammate_user_id)
+        .map_err(|error| controller_error("issue automation teammate token", error))?
+        .token;
+    let state = build_test_state(pool.clone(), config);
+    let app = automations::router().with_state(state);
+
+    let (status, created) = automation_json_request(
+        &app,
+        "POST",
+        &format!("/projects/{project_id}/automations"),
+        &owner_token,
+        json!({
+            "name": "Dependency check",
+            "promptText": "Report dependency changes.",
+            "scheduleKind": "hourly",
+            "intervalHours": 24,
+            "timezone": "UTC",
+            "runtimeMode": "existing"
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "create failed: {created}");
+    let automation_id = created["id"].as_str().expect("automation id").to_string();
+    let conversation_id = created["conversationId"]
+        .as_str()
+        .expect("automation conversation id")
+        .to_string();
+    let initial_next_run_at = created["nextRunAt"]
+        .as_str()
+        .expect("initial next run")
+        .to_string();
+    let automation_path = format!("/automations/{automation_id}");
+
+    // A prompt/runtime-settings edit keeps the automation identity, its private
+    // conversation, and its pending next run.
+    let (status, updated) = automation_json_request(
+        &app,
+        "PATCH",
+        &automation_path,
+        &owner_token,
+        json!({
+            "promptText": "Report dependency and license changes.",
+            "silentWhenNothingToReport": true
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "prompt update failed: {updated}");
+    assert_eq!(updated["id"], json!(automation_id));
+    assert_eq!(updated["conversationId"], json!(conversation_id));
+    assert_eq!(
+        updated["promptText"],
+        json!("Report dependency and license changes.")
+    );
+    assert_eq!(updated["silentWhenNothingToReport"], json!(true));
+    assert_eq!(updated["scheduleKind"], json!("hourly"));
+    assert_eq!(updated["intervalHours"], json!(24));
+    assert_eq!(updated["status"], json!("active"));
+    assert_eq!(
+        updated["nextRunAt"],
+        json!(initial_next_run_at),
+        "prompt edits must not reschedule the pending run"
+    );
+
+    // A schedule change recomputes the next run with the new schedule and keeps
+    // the previously edited prompt.
+    let (status, rescheduled) = automation_json_request(
+        &app,
+        "PATCH",
+        &automation_path,
+        &owner_token,
+        json!({
+            "scheduleKind": "weekly",
+            "byDay": ["we", "mo"],
+            "byHour": 7,
+            "byMinute": 30,
+            "timezone": "Europe/Vienna"
+        }),
+    )
+    .await?;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "schedule update failed: {rescheduled}"
+    );
+    assert_eq!(rescheduled["id"], json!(automation_id));
+    assert_eq!(rescheduled["conversationId"], json!(conversation_id));
+    assert_eq!(rescheduled["scheduleKind"], json!("weekly"));
+    assert_eq!(rescheduled["byDay"], json!(["mo", "we"]));
+    assert_eq!(rescheduled["byHour"], json!(7));
+    assert_eq!(rescheduled["byMinute"], json!(30));
+    assert_eq!(rescheduled["timezone"], json!("Europe/Vienna"));
+    assert_eq!(rescheduled["intervalHours"], serde_json::Value::Null);
+    assert_eq!(
+        rescheduled["promptText"],
+        json!("Report dependency and license changes.")
+    );
+    assert_ne!(rescheduled["nextRunAt"], json!(initial_next_run_at));
+    let next_run_at = chrono::DateTime::parse_from_rfc3339(
+        rescheduled["nextRunAt"]
+            .as_str()
+            .expect("rescheduled next run"),
+    )?
+    .with_timezone(&Utc);
+    let now = Utc::now();
+    assert!(next_run_at > now);
+    assert!(next_run_at <= now + ChronoDuration::days(8));
+    let local_next_run = next_run_at.with_timezone(&chrono_tz::Europe::Vienna);
+    assert!(matches!(
+        chrono::Datelike::weekday(&local_next_run),
+        chrono::Weekday::Mon | chrono::Weekday::Wed
+    ));
+    assert_eq!(chrono::Timelike::hour(&local_next_run), 7);
+    assert_eq!(chrono::Timelike::minute(&local_next_run), 30);
+    let weekly_next_run_at = rescheduled["nextRunAt"].clone();
+
+    // Pause/resume semantics are unchanged: pausing keeps the pending run and
+    // resuming recomputes it from the current schedule.
+    let (status, paused) = automation_json_request(
+        &app,
+        "PATCH",
+        &automation_path,
+        &owner_token,
+        json!({ "status": "paused" }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "pause failed: {paused}");
+    assert_eq!(paused["status"], json!("paused"));
+    assert_eq!(paused["nextRunAt"], weekly_next_run_at);
+    let (status, resumed) = automation_json_request(
+        &app,
+        "PATCH",
+        &automation_path,
+        &owner_token,
+        json!({ "status": "active" }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "resume failed: {resumed}");
+    assert_eq!(resumed["status"], json!("active"));
+    let resumed_next_run_at = chrono::DateTime::parse_from_rfc3339(
+        resumed["nextRunAt"].as_str().expect("resumed next run"),
+    )?
+    .with_timezone(&Utc);
+    assert!(resumed_next_run_at > Utc::now());
+    assert_eq!(
+        chrono::Timelike::hour(&resumed_next_run_at.with_timezone(&chrono_tz::Europe::Vienna)),
+        7
+    );
+
+    // Nothing to update is a client error rather than a silent rewrite.
+    let (status, rejected) =
+        automation_json_request(&app, "PATCH", &automation_path, &owner_token, json!({})).await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "empty update: {rejected}");
+
+    // Project teammates who do not own the automation cannot edit it.
+    let (status, denied) = automation_json_request(
+        &app,
+        "PATCH",
+        &automation_path,
+        &teammate_token,
+        json!({ "promptText": "Exfiltrate the repository." }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::FORBIDDEN, "teammate update: {denied}");
+
+    let row = pool
+        .get()
+        .await?
+        .query_one(
+            "select prompt_text, conversation_id, schedule_kind
+             from automations where id = $1",
+            &[&Uuid::from_str(&automation_id)?],
+        )
+        .await?;
+    assert_eq!(
+        row.get::<_, String>("prompt_text"),
+        "Report dependency and license changes."
+    );
+    assert_eq!(
+        row.get::<_, Option<Uuid>>("conversation_id"),
+        Some(Uuid::from_str(&conversation_id)?)
+    );
+    assert_eq!(row.get::<_, String>("schedule_kind"), "weekly");
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_org(&pool, &org_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
+    cleanup_test_user(&pool, &teammate_user_id).await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn skill_mode_ambient_turn_dispatches_evaluation_and_swallows_decline() -> anyhow::Result<()>
 {
