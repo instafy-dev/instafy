@@ -423,6 +423,69 @@ show which images were attached. The controller applies the same minimized proje
 bug-report reads made by ordinary users; only operator/service authorization can retrieve the full
 triage record and attachment bytes.
 
+## Teams and invitations
+
+Manage team (organization) membership and invitations with `instafy team`. Every subcommand
+resolves the team from `--team-id <uuid|slug>`. If you omit it and belong to a single team, that
+team is used automatically; otherwise the command asks you to pass `--team-id` and points you at
+`instafy team list`.
+
+List teams and their members:
+
+```bash
+instafy team list
+instafy team members --team-id acme
+```
+
+There are two ways to bring someone in:
+
+- An **email invitation** targets one address. The person must sign in to Instafy with that exact
+  email to accept.
+- An **invite link** is a shareable token. Anyone who opens it and signs in — with any sign-in
+  method — can join, so treat it like a shared secret.
+
+```bash
+# Email invitation (roles: owner, admin, builder, viewer; default builder).
+# Only owners can assign the owner role.
+instafy team invite teammate@example.com --role builder --team-id acme
+
+# Shareable invite link (roles: builder or viewer; default builder).
+instafy team invite-link --role builder --team-id acme
+```
+
+`instafy team invite-link` prints the full accept URL and the token. The URL is the Studio base
+(from config, `INSTAFY_STUDIO_URL`, `--studio-url`, or the default `https://instafy.dev`) joined
+with the controller-returned accept path, for example:
+
+```
+https://instafy.dev/invite?token=<uuid>&panel=chat
+```
+
+If the invitee already has an Instafy account, add them directly instead of emailing an invite:
+
+```bash
+instafy team add-member --user-id <uuid> --role builder --team-id acme
+```
+
+Review and clean up pending invitations and links:
+
+```bash
+instafy team invites --team-id acme
+instafy team revoke-invite <invitation-id> --team-id acme --yes
+instafy team revoke-link <invite-link-id> --team-id acme --yes
+```
+
+`revoke-invite` and `revoke-link` ask for confirmation on an interactive terminal; pass `--yes` to
+skip the prompt (required when there is no TTY).
+
+Accept an invitation or invite link as the account you are currently signed in with:
+
+```bash
+instafy team accept <token>
+```
+
+Add `--json` to any of these commands for machine-readable output.
+
 ## Scheduled automations
 
 Create and manage scheduled project prompts with `instafy automations`. When no local space
