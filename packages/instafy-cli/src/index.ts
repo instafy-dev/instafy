@@ -14,7 +14,7 @@ import { login, logout } from "./auth.js";
 import { runGitCredentialHelper } from "./git-credential.js";
 import { projectInit, projectProfile, refreshProjectDefaults } from "./project.js";
 import { secretsGet, secretsList, secretsPut, secretsRevoke } from "./secrets.js";
-import { automationsCreate, automationsDelete, automationsList, automationsRun, automationsUpdateStatus } from "./automations.js";
+import { automationsCreate, automationsDelete, automationsList, automationsRun, automationsUpdate, automationsUpdateStatus } from "./automations.js";
 import { listTunnelSessions, startTunnelDetached, stopTunnelSession, tailTunnelLogs, runTunnelCommand } from "./tunnel.js";
 import { configGet, configList, configPath, configSet, configUnset } from "./config-command.js";
 import { getInstafyProfileConfigPath, listInstafyProfileNames, readInstafyProfileConfig } from "./config.js";
@@ -1098,6 +1098,23 @@ secretsRevokeCommand
     }
   });
 
+function resolveResultVisibilityFlag(opts: {
+  resultVisibility?: string;
+  shareResults?: boolean;
+}): "private" | "team" | undefined {
+  if (opts.resultVisibility !== undefined) {
+    const value = String(opts.resultVisibility).trim().toLowerCase();
+    if (value !== "private" && value !== "team") {
+      throw new Error("--result-visibility must be private or team");
+    }
+    return value;
+  }
+  // `--share-results` sets team-visible; `--no-share-results` forces private.
+  if (opts.shareResults === true) return "team";
+  if (opts.shareResults === false) return "private";
+  return undefined;
+}
+
 const automationsCommand = program
   .command("automations")
   .description("Manage scheduled automations (run prompts on a schedule)");
@@ -1149,6 +1166,18 @@ const automationsCreateCommand = automationsCommand
     "--silent-when-nothing-to-report",
     "Do not post a completion result or send a result notification when a successful run has no findings",
   )
+  .option(
+    "--share-results",
+    "Share this automation's result threads with your team (visible to anyone with space access)",
+  )
+  .option(
+    "--no-share-results",
+    "Keep this automation's result threads private to you (default)",
+  )
+  .option(
+    "--result-visibility <private|team>",
+    "Result-thread visibility (private|team); overrides --share-results",
+  )
   .option("--paused", "Create paused");
 
 addSpaceOption(
@@ -1175,8 +1204,46 @@ automationsCreateCommand
         runtimeMode: opts.runtimeMode,
         runtimeProvider: opts.runtimeProvider,
         silentWhenNothingToReport: Boolean(opts.silentWhenNothingToReport),
+        resultVisibility: resolveResultVisibilityFlag(opts),
         paused: Boolean(opts.paused),
         project: resolveSpaceIdOption(opts),
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+const automationsUpdateCommand = automationsCommand
+  .command("update")
+  .description("Update an automation's result-sharing visibility")
+  .argument("<automation-id>", "Automation UUID")
+  .option(
+    "--share-results",
+    "Share this automation's result threads with your team (visible to anyone with space access)",
+  )
+  .option(
+    "--no-share-results",
+    "Keep this automation's result threads private to you",
+  )
+  .option(
+    "--result-visibility <private|team>",
+    "Result-thread visibility (private|team); overrides --share-results",
+  );
+
+addServerUrlOptions(automationsUpdateCommand);
+addAccessTokenOptions(automationsUpdateCommand, "Instafy access token");
+
+automationsUpdateCommand
+  .option("--json", "Output JSON")
+  .action(async (automationId, opts) => {
+    try {
+      await automationsUpdate({
+        automationId,
+        resultVisibility: resolveResultVisibilityFlag(opts),
         controllerUrl: opts.serverUrl,
         accessToken: opts.accessToken,
         json: opts.json,
