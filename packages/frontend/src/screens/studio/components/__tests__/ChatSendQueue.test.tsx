@@ -222,6 +222,12 @@ describe("ChatSendQueue", () => {
     };
     await press("Enter", "Enter");
     expect(secondHandle.getAttribute("aria-pressed")).toBe("true");
+    const dragOverlay = document.body.querySelector<HTMLElement>(
+      '[data-testid="chat-send-queue-drag-overlay"]',
+    );
+    expect(dragOverlay).not.toBeNull();
+    expect(container.contains(dragOverlay)).toBe(false);
+    expect(dragOverlay?.parentElement?.style.zIndex).toBe("100001");
     await press("ArrowUp", "ArrowUp");
     expect(document.body.textContent).toContain("position 1 of 2");
     await press("Enter", "Enter");
