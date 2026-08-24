@@ -30,6 +30,11 @@ export type QueuedChatPrompt = {
   errorMessage?: string | null;
 };
 
+// React Aria positions overlays at z-index 100000. The drag preview is
+// portaled to document.body to escape the queue's clipped scroll surface, so
+// it must sit one layer above the popover while reordering.
+const QUEUE_DRAG_OVERLAY_Z_INDEX = 100_001;
+
 export function buildQueuedMessageAccessiblePreview(
   value: string | null | undefined,
 ): string | null {
@@ -170,11 +175,12 @@ export function ChatSendQueue({
       </SortableContext>
       {typeof document !== "undefined"
         ? createPortal(
-            <DragOverlay dropAnimation={null}>
+            <DragOverlay dropAnimation={null} zIndex={QUEUE_DRAG_OVERLAY_Z_INDEX}>
               {activeItem ? (
                 <div
                   aria-hidden="true"
                   className="pointer-events-none flex w-[min(23rem,calc(100vw-2rem))] items-center gap-2 rounded-xl border border-slate-200/80 bg-white px-3 py-2.5 text-sm text-slate-800 shadow-xl dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+                  data-testid="chat-send-queue-drag-overlay"
                 >
                   <Drag className="h-4 w-4 flex-none text-slate-400" />
                   <span className="truncate">{activeItem.message}</span>
