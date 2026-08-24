@@ -1921,8 +1921,7 @@ async fn get_internal_credential(
     let ciphertext_b64: String = row.get("ciphertext_b64");
     let metadata: JsonValue = row.get::<_, PgJson<JsonValue>>("metadata").0;
 
-    let mut parsed =
-        decode_authoritative_credential_payload(key, &nonce_b64, &ciphertext_b64)?;
+    let mut parsed = decode_authoritative_credential_payload(key, &nonce_b64, &ciphertext_b64)?;
 
     let auth_json_to_persist = if let Some(updated_auth_json) =
         maybe_refresh_codex_oauth_access_token(&state, &parsed, query.force_refresh).await?
@@ -3023,13 +3022,13 @@ mod codex_refresh_tests {
 #[cfg(test)]
 mod credential_lease_contract_tests {
     use super::{
+        decode_authoritative_credential_payload, encrypt_secret_payload,
+        materialize_internal_credential, require_proxy_credential_lease_token,
         CREDENTIAL_KIND_CODEX_AUTH_JSON, CREDENTIAL_KIND_OPENAI_API_KEY,
-        INTERNAL_CREDENTIAL_LEASE_SECONDS, decode_authoritative_credential_payload,
-        encrypt_secret_payload, materialize_internal_credential,
-        require_proxy_credential_lease_token,
+        INTERNAL_CREDENTIAL_LEASE_SECONDS,
     };
     use axum::http::{HeaderMap, HeaderValue};
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
 
     use crate::tests::build_app_config;
 
