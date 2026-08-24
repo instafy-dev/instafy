@@ -7,6 +7,29 @@ export type ComposerEnterAction =
   | "menu"
   | "ignore";
 
+export type ComposerSendModifierAction = "queue" | "stash" | null;
+
+export type ComposerSendModifierKeys = {
+  shiftKey: boolean;
+  metaKey: boolean;
+  ctrlKey: boolean;
+  altKey: boolean;
+};
+
+export function resolveComposerSendModifierAction({
+  shiftKey,
+  metaKey,
+  ctrlKey,
+  altKey,
+}: ComposerSendModifierKeys): ComposerSendModifierAction {
+  // Alt is a text-entry modifier, including Ctrl+Alt/AltGraph on
+  // international layouts. It must never preview or execute a send mode.
+  if (altKey || (!metaKey && !ctrlKey)) {
+    return null;
+  }
+  return shiftKey ? "stash" : "queue";
+}
+
 export type ResolveComposerEnterActionInput = {
   key: string;
   shiftKey: boolean;
@@ -40,12 +63,14 @@ export function resolveComposerEnterAction({
     return "menu";
   }
 
-  const commandKey = metaKey || ctrlKey;
-  if (commandKey && shiftKey) {
-    return "stash";
-  }
-  if (commandKey) {
-    return "queue";
+  const sendModifierAction = resolveComposerSendModifierAction({
+    shiftKey,
+    metaKey,
+    ctrlKey,
+    altKey,
+  });
+  if (sendModifierAction) {
+    return sendModifierAction;
   }
   if (shiftKey || altKey) {
     return "newline";
