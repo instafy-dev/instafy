@@ -36,9 +36,13 @@ describe("resolveComposerEnterAction", () => {
     expect(resolve({ ctrlKey: true, shiftKey: true })).toBe("stash");
   });
 
-  it("leaves Shift+Enter and Alt+Enter to the editor as newlines", () => {
+  it("leaves Shift+Enter and Alt-modified Enter to the editor as newlines", () => {
     expect(resolve({ shiftKey: true })).toBe("newline");
     expect(resolve({ altKey: true })).toBe("newline");
+    expect(resolve({ ctrlKey: true, altKey: true })).toBe("newline");
+    expect(resolve({ ctrlKey: true, shiftKey: true, altKey: true })).toBe("newline");
+    expect(resolve({ metaKey: true, altKey: true })).toBe("newline");
+    expect(resolve({ metaKey: true, shiftKey: true, altKey: true })).toBe("newline");
   });
 
   it("preserves IME composition and open-menu selection behavior", () => {

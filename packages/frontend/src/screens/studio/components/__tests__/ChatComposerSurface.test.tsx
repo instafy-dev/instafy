@@ -1434,4 +1434,449 @@ describe("ChatComposerSurface", () => {
     expect(container.querySelector('[data-testid="chat-steer-action-label"]')).toBeNull();
     expect(actionStatus?.textContent).toBe("Enter sends the message.");
   });
+
+  it("previews Queue and Stash from desktop modifiers, then restores Steer on release", async () => {
+    await act(async () => {
+      root.render(
+        <ChatComposerSurface
+          {...createProps({
+            chatInputProps: {
+              ...createProps().chatInputProps,
+              value: "A useful draft",
+            },
+            composerActionMenuProps: {
+              onQueueMessage: vi.fn(),
+              onStashDraft: vi.fn(),
+            } as never,
+            primaryActionMode: "steer",
+            showVoicePrimaryAction: false,
+          })}
+        />,
+      );
+    });
+
+    const input = container.querySelector<HTMLElement>('[data-testid="chat-input"]');
+    const sendButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-send-button"]',
+    );
+    input?.setAttribute("tabindex", "0");
+    await act(async () => input?.focus());
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Meta", metaKey: true, bubbles: true }),
+      );
+    });
+
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("queue");
+    expect(sendButton?.getAttribute("data-send-modifier-preview")).toBe("queue");
+    expect(sendButton?.getAttribute("aria-label")).toBe(
+      "Queue message (Command or Ctrl plus Enter)",
+    );
+    expect(container.querySelector('[data-testid="chat-queue-action-icon"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="chat-send-action-icon"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-primary-action-status"]')?.textContent).toBe(
+      "Queue selected. Press Enter or click to queue the message.",
+    );
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Shift",
+          metaKey: true,
+          shiftKey: true,
+          bubbles: true,
+        }),
+      );
+    });
+
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("stash");
+    expect(sendButton?.getAttribute("data-send-modifier-preview")).toBe("stash");
+    expect(sendButton?.getAttribute("aria-label")).toBe(
+      "Stash draft (Command or Ctrl plus Shift plus Enter)",
+    );
+    expect(container.querySelector('[data-testid="chat-stash-action-icon"]')).not.toBeNull();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keyup", {
+          key: "Shift",
+          metaKey: true,
+          shiftKey: false,
+          bubbles: true,
+        }),
+      );
+    });
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("queue");
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keyup", { key: "Meta", bubbles: true }));
+    });
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("steer");
+    expect(sendButton?.hasAttribute("data-send-modifier-preview")).toBe(false);
+    expect(sendButton?.getAttribute("aria-label")).toBe("Steer current reply (Enter)");
+    expect(container.querySelector('[data-testid="chat-send-action-icon"]')).not.toBeNull();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Shift", shiftKey: true, bubbles: true }),
+      );
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Alt", altKey: true, bubbles: true }),
+      );
+    });
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("steer");
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "AltGraph",
+          ctrlKey: true,
+          altKey: true,
+          bubbles: true,
+        }),
+      );
+    });
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("steer");
+
+    const composerMenu = document.createElement("div");
+    composerMenu.dataset.testid = "chat-slash-command-menu";
+    document.body.appendChild(composerMenu);
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Meta", metaKey: true, bubbles: true }),
+      );
+    });
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("steer");
+    composerMenu.remove();
+
+    const outsideButton = document.createElement("button");
+    document.body.appendChild(outsideButton);
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Meta", metaKey: true, bubbles: true }),
+      );
+      outsideButton.focus();
+    });
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("steer");
+    outsideButton.remove();
+
+    await act(async () => input?.focus());
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Meta", metaKey: true, bubbles: true }),
+      );
+    });
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("queue");
+    const visibilityState = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockReturnValue("hidden");
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("steer");
+    visibilityState.mockRestore();
+  });
+
+  it("performs the previewed Queue or Stash action on modifier-click", async () => {
+    const onQueueMessage = vi.fn();
+    const onStashDraft = vi.fn();
+    const onSendButtonPress = vi.fn();
+    await act(async () => {
+      root.render(
+        <ChatComposerSurface
+          {...createProps({
+            chatInputProps: {
+              ...createProps().chatInputProps,
+              value: "A useful draft",
+            },
+            composerActionMenuProps: {
+              onQueueMessage,
+              onStashDraft,
+            } as never,
+            onSendButtonPress,
+            showVoicePrimaryAction: false,
+          })}
+        />,
+      );
+    });
+
+    const sendButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-send-button"]',
+    );
+    await act(async () => sendButton?.focus());
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Meta", metaKey: true, bubbles: true }),
+      );
+    });
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("queue");
+    await act(async () => {
+      sendButton?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true, metaKey: true }),
+      );
+    });
+    expect(onQueueMessage).toHaveBeenCalledTimes(1);
+    expect(onStashDraft).not.toHaveBeenCalled();
+    expect(onSendButtonPress).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      window.dispatchEvent(new KeyboardEvent("keyup", { key: "Meta", bubbles: true }));
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Control", ctrlKey: true, bubbles: true }),
+      );
+    });
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("queue");
+    await act(async () => {
+      sendButton?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true, ctrlKey: true }),
+      );
+    });
+    expect(onQueueMessage).toHaveBeenCalledTimes(2);
+    expect(onSendButtonPress).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Shift",
+          ctrlKey: true,
+          shiftKey: true,
+          bubbles: true,
+        }),
+      );
+    });
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("stash");
+    await act(async () => {
+      sendButton?.dispatchEvent(
+        new MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          ctrlKey: true,
+          shiftKey: true,
+        }),
+      );
+    });
+    expect(onStashDraft).toHaveBeenCalledTimes(1);
+    expect(onSendButtonPress).not.toHaveBeenCalled();
+  });
+
+  it("does not perform an alternate action unless that mode is visibly previewed", async () => {
+    const onQueueMessage = vi.fn();
+    const onStashDraft = vi.fn();
+    const onSendButtonPress = vi.fn();
+    await act(async () => {
+      root.render(
+        <ChatComposerSurface
+          {...createProps({
+            chatInputProps: {
+              ...createProps().chatInputProps,
+              value: "A useful draft",
+            },
+            composerActionMenuProps: {
+              onQueueMessage,
+              onStashDraft,
+            } as never,
+            onSendButtonPress,
+            showVoicePrimaryAction: false,
+          })}
+        />,
+      );
+    });
+
+    const input = container.querySelector<HTMLElement>('[data-testid="chat-input"]');
+    const sendButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-send-button"]',
+    );
+    input?.setAttribute("tabindex", "0");
+    const outsideButton = document.createElement("button");
+    document.body.appendChild(outsideButton);
+    await act(async () => outsideButton.focus());
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Meta", metaKey: true, bubbles: true }),
+      );
+      sendButton?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true, metaKey: true }),
+      );
+    });
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("send");
+    expect(onQueueMessage).not.toHaveBeenCalled();
+    expect(onStashDraft).not.toHaveBeenCalled();
+    expect(onSendButtonPress).toHaveBeenCalledTimes(1);
+    outsideButton.remove();
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      window.dispatchEvent(new KeyboardEvent("keyup", { key: "Meta", bubbles: true }));
+      input?.focus();
+    });
+    const composerMenu = document.createElement("div");
+    composerMenu.dataset.testid = "assistant-mention-menu";
+    document.body.appendChild(composerMenu);
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Meta", metaKey: true, bubbles: true }),
+      );
+      sendButton?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true, metaKey: true }),
+      );
+    });
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("send");
+    expect(onQueueMessage).not.toHaveBeenCalled();
+    expect(onStashDraft).not.toHaveBeenCalled();
+    expect(onSendButtonPress).toHaveBeenCalledTimes(2);
+    composerMenu.remove();
+  });
+
+  it("previews and performs Queue or Stash when ordinary Send is unavailable", async () => {
+    const onQueueMessage = vi.fn();
+    const onStashDraft = vi.fn();
+    const onSendButtonPress = vi.fn();
+    await act(async () => {
+      root.render(
+        <ChatComposerSurface
+          {...createProps({
+            chatInputProps: {
+              ...createProps().chatInputProps,
+              value: "Save this useful draft",
+            },
+            composerActionMenuProps: {
+              onQueueMessage,
+              onStashDraft,
+            } as never,
+            onSendButtonPress,
+            sendButtonDisabled: true,
+            showVoicePrimaryAction: false,
+          })}
+        />,
+      );
+    });
+
+    const input = container.querySelector<HTMLElement>('[data-testid="chat-input"]');
+    const sendButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-send-button"]',
+    );
+    input?.setAttribute("tabindex", "0");
+    await act(async () => input?.focus());
+    expect(sendButton?.disabled).toBe(true);
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Meta", metaKey: true, bubbles: true }),
+      );
+    });
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("queue");
+    expect(sendButton?.disabled).toBe(false);
+    await act(async () => {
+      sendButton?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true, metaKey: true }),
+      );
+    });
+    expect(onQueueMessage).toHaveBeenCalledTimes(1);
+    expect(onSendButtonPress).not.toHaveBeenCalled();
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Shift",
+          metaKey: true,
+          shiftKey: true,
+          bubbles: true,
+        }),
+      );
+    });
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("stash");
+    expect(sendButton?.disabled).toBe(false);
+    await act(async () => {
+      sendButton?.dispatchEvent(
+        new MouseEvent("click", {
+          bubbles: true,
+          cancelable: true,
+          metaKey: true,
+          shiftKey: true,
+        }),
+      );
+    });
+    expect(onStashDraft).toHaveBeenCalledTimes(1);
+    expect(onSendButtonPress).not.toHaveBeenCalled();
+  });
+
+  it("does not preview or execute unavailable modifier actions", async () => {
+    const onQueueMessage = vi.fn();
+    const onStashDraft = vi.fn();
+    const onSendButtonPress = vi.fn();
+    await act(async () => {
+      root.render(
+        <ChatComposerSurface
+          {...createProps({
+            chatInputProps: {
+              ...createProps().chatInputProps,
+              value: "A useful draft",
+            },
+            composerActionMenuProps: {
+              onQueueMessage,
+              onStashDraft,
+              queueDisabled: true,
+              stashDisabled: true,
+            } as never,
+            onSendButtonPress,
+            showVoicePrimaryAction: false,
+          })}
+        />,
+      );
+    });
+
+    const sendButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-send-button"]',
+    );
+    await act(async () => sendButton?.focus());
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Meta", metaKey: true, bubbles: true }),
+      );
+    });
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("send");
+
+    await act(async () => {
+      sendButton?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true, metaKey: true }),
+      );
+    });
+    expect(onQueueMessage).not.toHaveBeenCalled();
+    expect(onStashDraft).not.toHaveBeenCalled();
+    expect(onSendButtonPress).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not preview a modifier action without a usable draft", async () => {
+    await act(async () => {
+      root.render(
+        <ChatComposerSurface
+          {...createProps({
+            composerActionMenuProps: {
+              onQueueMessage: vi.fn(),
+              onStashDraft: vi.fn(),
+            } as never,
+            showVoicePrimaryAction: false,
+          })}
+        />,
+      );
+    });
+
+    const sendButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-send-button"]',
+    );
+    await act(async () => sendButton?.focus());
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Meta", metaKey: true, bubbles: true }),
+      );
+    });
+
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("send");
+    expect(sendButton?.hasAttribute("data-send-modifier-preview")).toBe(false);
+  });
 });

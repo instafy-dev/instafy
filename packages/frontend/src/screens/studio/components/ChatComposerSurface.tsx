@@ -9,6 +9,7 @@ import type {
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Archery,
+  Bookmark,
   Lock,
   MagicWand,
   MediaImage,
@@ -17,6 +18,7 @@ import {
   Pause,
   Play,
   Send,
+  TaskList,
   WarningTriangle,
   Xmark,
 } from "iconoir-react";
@@ -36,6 +38,10 @@ import { ComposerActionMenu } from "./ComposerActionMenu";
 import { ComposerInviteModal } from "./ComposerInviteModal";
 import { ChatBrowserDock } from "./ChatBrowserDock";
 import { ChatInput, type ChatInputHandle } from "./chat-input/ChatInput";
+import {
+  resolveComposerSendModifierAction,
+  type ComposerSendModifierKeys,
+} from "./chat-input/enterBehavior";
 import {
   CHAT_SEND_QUEUE_ITEMS_ID,
   ChatSendQueuePanel,
@@ -150,6 +156,21 @@ function AccessCheckingNotice({ flash }: { flash: boolean }) {
 }
 
 type OpenSavedMessagePanel = "stash" | "queue" | null;
+type DesktopSendModifierMode = "queue" | "stash" | null;
+
+function composerMenuIsOpen(): boolean {
+  if (typeof document === "undefined" || typeof window === "undefined") {
+    return false;
+  }
+  return Array.from(
+    document.querySelectorAll<HTMLElement>(
+      '[data-testid="assistant-mention-menu"], [data-testid="chat-slash-command-menu"]',
+    ),
+  ).some((menu) => {
+    const style = window.getComputedStyle(menu);
+    return style.display !== "none" && style.visibility !== "hidden";
+  });
+}
 
 function resolveGoalStatusPillTone(tone: ConversationGoalHealth["tone"]): StatusPillTone {
   if (tone === "blocked") {
@@ -251,12 +272,63 @@ export function ChatComposerSurface({
     stashDisabled: stashDraftDisabled,
   } = composerActionMenuProps;
   const showVoiceSecondaryStatus = showVoicePrimaryAction && showVoiceStatus;
+  const composerHasUsablePayload =
+    chatInputProps.value.trim().length > 0 || imageAttachments.length > 0;
+  const modifierPreviewBaseAvailable =
+    !showVoicePrimaryAction &&
+    composerHasUsablePayload &&
+    !mutationDisabled;
+  const queueModifierAvailable =
+    modifierPreviewBaseAvailable &&
+    queueMessageDisabled !== true &&
+    Boolean(onQueueMessageFromComposer);
+  const stashModifierAvailable =
+    modifierPreviewBaseAvailable &&
+    stashDraftDisabled !== true &&
+    Boolean(onStashDraftFromComposer);
+  const resolveAvailableDesktopSendModifierMode = useCallback(
+    (keys: ComposerSendModifierKeys): DesktopSendModifierMode => {
+      const requestedMode = resolveComposerSendModifierAction(keys);
+      if (requestedMode === "queue") {
+        return queueModifierAvailable ? "queue" : null;
+      }
+      if (requestedMode === "stash") {
+        return stashModifierAvailable ? "stash" : null;
+      }
+      return null;
+    },
+    [queueModifierAvailable, stashModifierAvailable],
+  );
+  const [desktopSendModifierMode, setDesktopSendModifierMode] =
+    useState<DesktopSendModifierMode>(null);
+  const [desktopSendModifierFocusWithin, setDesktopSendModifierFocusWithin] = useState(false);
+  const visibleDesktopSendModifierMode =
+    desktopSendModifierFocusWithin &&
+    desktopSendModifierMode === "queue" &&
+    queueModifierAvailable
+      ? "queue"
+      : desktopSendModifierFocusWithin &&
+          desktopSendModifierMode === "stash" &&
+          stashModifierAvailable
+        ? "stash"
+        : null;
+  const visiblePrimaryActionMode = visibleDesktopSendModifierMode ?? primaryActionMode;
   const primaryActionLabel =
-    primaryActionMode === "steer" ? "Steer current reply (Enter)" : "Send message";
+    visibleDesktopSendModifierMode === "queue"
+      ? "Queue message (Command or Ctrl plus Enter)"
+      : visibleDesktopSendModifierMode === "stash"
+        ? "Stash draft (Command or Ctrl plus Shift plus Enter)"
+        : primaryActionMode === "steer"
+          ? "Steer current reply (Enter)"
+          : "Send message";
   const primaryActionStatus =
-    primaryActionMode === "steer"
-      ? "Enter steers the current reply."
-      : "Enter sends the message.";
+    visibleDesktopSendModifierMode === "queue"
+      ? "Queue selected. Press Enter or click to queue the message."
+      : visibleDesktopSendModifierMode === "stash"
+        ? "Stash selected. Press Enter or click to stash the draft."
+        : primaryActionMode === "steer"
+          ? "Enter steers the current reply."
+          : "Enter sends the message.";
   // Hold-to-talk must keep the same microphone DOM node from press through
   // release. The richer active strip is reserved for tap/continuous modes;
   // hold mode communicates activity on the stable button itself.
@@ -310,6 +382,61 @@ export function ChatComposerSurface({
     queueSurfaceProps.totalQueuedCount === 0 &&
     !queueSurfaceProps.editingQueuedItem &&
     !stashTrayProps?.stashes.length;
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const sendModifierFocusIsWithin = (element: Element | null) => {
+      const composer = composerOverlayRef.current;
+      if (!composer || !element || !composer.contains(element)) {
+        return false;
+      }
+      return Boolean(
+        element.closest('[data-testid="chat-input"], [data-testid="chat-send-button"]'),
+      );
+    };
+    const updatePreview = (event: KeyboardEvent) => {
+      const focusWithin = sendModifierFocusIsWithin(document.activeElement);
+      setDesktopSendModifierFocusWithin(focusWithin);
+      setDesktopSendModifierMode(
+        focusWithin && !composerMenuIsOpen()
+          ? resolveAvailableDesktopSendModifierMode(event)
+          : null,
+      );
+    };
+    const clearPreview = () => {
+      setDesktopSendModifierFocusWithin(false);
+      setDesktopSendModifierMode(null);
+    };
+    const handleFocusIn = (event: FocusEvent) => {
+      setDesktopSendModifierFocusWithin(sendModifierFocusIsWithin(event.target as Element | null));
+    };
+    const handleFocusOut = (event: FocusEvent) => {
+      if (!sendModifierFocusIsWithin(event.relatedTarget as Element | null)) {
+        clearPreview();
+      }
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== "visible") {
+        clearPreview();
+      }
+    };
+    window.addEventListener("keydown", updatePreview);
+    window.addEventListener("keyup", updatePreview);
+    window.addEventListener("blur", clearPreview);
+    document.addEventListener("focusin", handleFocusIn);
+    document.addEventListener("focusout", handleFocusOut);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("keydown", updatePreview);
+      window.removeEventListener("keyup", updatePreview);
+      window.removeEventListener("blur", clearPreview);
+      document.removeEventListener("focusin", handleFocusIn);
+      document.removeEventListener("focusout", handleFocusOut);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [composerOverlayRef, resolveAvailableDesktopSendModifierMode]);
 
   useEffect(() => {
     setGoalDetailsExpanded(false);
@@ -550,20 +677,65 @@ export function ChatComposerSurface({
         return;
       }
       markSendPressHandled();
+      if (event.pointerType !== "touch") {
+        const eventModifierMode = resolveAvailableDesktopSendModifierMode(event);
+        const modifierMode =
+          eventModifierMode === visibleDesktopSendModifierMode
+            ? visibleDesktopSendModifierMode
+            : null;
+        if (modifierMode === "queue") {
+          onQueueMessageFromComposer?.();
+          return;
+        }
+        if (modifierMode === "stash") {
+          onStashDraftFromComposer?.();
+          return;
+        }
+      }
       onSendButtonPress?.(event);
     },
-    [markSendPressHandled, onSendButtonPress],
+    [
+      markSendPressHandled,
+      onQueueMessageFromComposer,
+      onSendButtonPress,
+      onStashDraftFromComposer,
+      resolveAvailableDesktopSendModifierMode,
+      visibleDesktopSendModifierMode,
+    ],
   );
 
   const handleSendClick = useCallback<NonNullable<ComponentProps<typeof IconButton>["onClick"]>>(
     (event) => {
-      if (sendButtonDisabled || sendPressHandledRef.current) {
+      if (sendPressHandledRef.current) {
         return;
       }
       event.preventDefault();
+      const eventModifierMode = resolveAvailableDesktopSendModifierMode(event);
+      const modifierMode =
+        eventModifierMode === visibleDesktopSendModifierMode
+          ? visibleDesktopSendModifierMode
+          : null;
+      if (modifierMode === "queue") {
+        onQueueMessageFromComposer?.();
+        return;
+      }
+      if (modifierMode === "stash") {
+        onStashDraftFromComposer?.();
+        return;
+      }
+      if (sendButtonDisabled) {
+        return;
+      }
       onSendButtonPress?.({ pointerType: "mouse" } as never);
     },
-    [onSendButtonPress, sendButtonDisabled],
+    [
+      onQueueMessageFromComposer,
+      onSendButtonPress,
+      onStashDraftFromComposer,
+      resolveAvailableDesktopSendModifierMode,
+      sendButtonDisabled,
+      visibleDesktopSendModifierMode,
+    ],
   );
   const toggleGoalDetails = useCallback(() => {
     if (!hasGoalDetails) {
@@ -1149,7 +1321,10 @@ export function ChatComposerSurface({
                               {...touchSendModePicker.triggerProps}
                               onPress={handleSendPress}
                               onClick={handleSendClick}
-                              isDisabled={mutationDisabled || sendButtonDisabled}
+                              isDisabled={
+                                mutationDisabled ||
+                                (visibleDesktopSendModifierMode === null && sendButtonDisabled)
+                              }
                               aria-label={primaryActionLabel}
                               title={primaryActionLabel}
                               style={{ touchAction: "none" }}
@@ -1166,15 +1341,32 @@ export function ChatComposerSurface({
                                 .filter(Boolean)
                                 .join(" ")}
                               data-testid="chat-send-button"
-                              data-send-mode={primaryActionMode}
+                              data-send-mode={visiblePrimaryActionMode}
+                              data-send-modifier-preview={
+                                visibleDesktopSendModifierMode ?? undefined
+                              }
                               data-send-options-open={touchSendModePicker.isOpen ? "true" : "false"}
                             >
                               <span className="sr-only">{primaryActionLabel}</span>
-                              <Send
-                                className={composerActionIconClass}
-                                aria-hidden="true"
-                                data-testid="chat-send-action-icon"
-                              />
+                              {visibleDesktopSendModifierMode === "queue" ? (
+                                <TaskList
+                                  className={composerActionIconClass}
+                                  aria-hidden="true"
+                                  data-testid="chat-queue-action-icon"
+                                />
+                              ) : visibleDesktopSendModifierMode === "stash" ? (
+                                <Bookmark
+                                  className={composerActionIconClass}
+                                  aria-hidden="true"
+                                  data-testid="chat-stash-action-icon"
+                                />
+                              ) : (
+                                <Send
+                                  className={composerActionIconClass}
+                                  aria-hidden="true"
+                                  data-testid="chat-send-action-icon"
+                                />
+                              )}
                             </IconButton>
                           </>
                         ) : null}
