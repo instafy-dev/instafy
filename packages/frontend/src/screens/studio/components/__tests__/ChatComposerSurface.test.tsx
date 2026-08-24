@@ -1578,6 +1578,61 @@ describe("ChatComposerSurface", () => {
     visibilityState.mockRestore();
   });
 
+  it("previews held modifiers even when the editor stops keyboard-event bubbling", async () => {
+    await act(async () => {
+      root.render(
+        <ChatComposerSurface
+          {...createProps({
+            chatInputProps: {
+              ...createProps().chatInputProps,
+              value: "A useful draft",
+            },
+            composerActionMenuProps: {
+              onQueueMessage: vi.fn(),
+              onStashDraft: vi.fn(),
+            } as never,
+            showVoicePrimaryAction: false,
+          })}
+        />,
+      );
+    });
+
+    const input = container.querySelector<HTMLElement>('[data-testid="chat-input"]');
+    const sendButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-send-button"]',
+    );
+    input?.setAttribute("tabindex", "0");
+    await act(async () => input?.focus());
+    const stopBubbling = (event: KeyboardEvent) => event.stopPropagation();
+    input?.addEventListener("keydown", stopBubbling);
+    input?.addEventListener("keyup", stopBubbling);
+
+    await act(async () => {
+      input?.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Meta",
+          metaKey: true,
+          bubbles: true,
+        }),
+      );
+    });
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("queue");
+    expect(container.querySelector('[data-testid="chat-queue-action-icon"]')).not.toBeNull();
+
+    await act(async () => {
+      input?.dispatchEvent(
+        new KeyboardEvent("keyup", {
+          key: "Meta",
+          bubbles: true,
+        }),
+      );
+    });
+    expect(sendButton?.getAttribute("data-send-mode")).toBe("send");
+
+    input?.removeEventListener("keydown", stopBubbling);
+    input?.removeEventListener("keyup", stopBubbling);
+  });
+
   it("performs the previewed Queue or Stash action on modifier-click", async () => {
     const onQueueMessage = vi.fn();
     const onStashDraft = vi.fn();
