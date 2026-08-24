@@ -18,6 +18,7 @@ export type ChatVoiceComposerViewStateInput = {
 export type ChatVoiceComposerViewState = {
   recordingIndicatorLabel: string;
   showVoicePrimaryAction: boolean;
+  showVoiceSecondaryAction: boolean;
   showVoiceStatus: boolean;
   voiceActionActive: boolean;
   voiceStatusMessage: string;
@@ -62,14 +63,24 @@ export function deriveChatVoiceComposerViewState(
                     ? "Listening. Speak now and tap again to stop."
                     : "Listening. Speak now and release to stop.";
 
+  // Hold-to-talk owns its pointer until release. Keep a draft's dedicated mic
+  // in the secondary slot for the complete hold lifecycle so React never
+  // replaces the pointer-owning button with the active-strip copy mid-gesture.
+  const preserveSecondaryHoldAction =
+    input.voiceInputSupported &&
+    input.composerHasSendPayload &&
+    input.chatVoiceInteractionMode === "hold";
   const showVoicePrimaryAction =
     input.voiceInputSupported &&
+    !preserveSecondaryHoldAction &&
     (!input.composerHasSendPayload ||
       input.voiceInputStarting ||
       input.voiceInputTranscribing ||
       input.voiceHoldActive ||
       (input.chatVoiceInteractionMode === "continuous" &&
         (input.continuousConversationActive || input.continuousAwaitingAssistantReply)));
+  const showVoiceSecondaryAction =
+    input.voiceInputSupported && input.composerHasSendPayload && !showVoicePrimaryAction;
 
   const showVoiceStatus =
     input.voiceHoldActive ||
@@ -91,6 +102,7 @@ export function deriveChatVoiceComposerViewState(
   return {
     recordingIndicatorLabel,
     showVoicePrimaryAction,
+    showVoiceSecondaryAction,
     showVoiceStatus,
     voiceActionActive,
     voiceStatusMessage,
