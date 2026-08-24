@@ -6,6 +6,8 @@ export * from "./runs";
 export * from "./jobs";
 export * from "./conversations";
 export * from "./sendQueue";
+export * from "./sendIntents";
+export * from "./messageStashes";
 export * from "./origins";
 export * from "./providerBindings";
 export * from "./providerBindingApproval";

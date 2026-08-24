@@ -378,6 +378,7 @@ fn issue_agent_token_with_browser_profile_scope(
         "agent.heartbeat".to_string(),
         "agent.message".to_string(),
         "agent.complete".to_string(),
+        "agent.input".to_string(),
         "agent.secrets".to_string(),
         "agent.stop".to_string(),
     ];

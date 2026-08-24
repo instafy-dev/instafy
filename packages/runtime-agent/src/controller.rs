@@ -3,7 +3,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use parking_lot::Mutex;
 use reqwest::{StatusCode, Url};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use std::collections::HashMap;
 use tracing::{info, warn};
@@ -124,6 +124,39 @@ pub struct LeaseJob {
 #[derive(Debug, Deserialize)]
 struct LeaseResponse {
     jobs: Vec<LeaseJob>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentJobInput {
+    pub command_id: Uuid,
+    pub job_id: Uuid,
+    pub run_id: Option<Uuid>,
+    pub message_id: Option<Uuid>,
+    pub sequence: i64,
+    pub target_turn_id: String,
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentJobInputPollResponse {
+    commands: Vec<AgentJobInput>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentJobInputPollRequest<'a> {
+    active_turn_id: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentJobInputAckRequest<'a> {
+    outcome: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    codex_turn_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_message: Option<&'a str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -470,6 +503,104 @@ impl ControllerClient {
             ));
         }
 
+        Ok(())
+    }
+
+    pub async fn poll_job_inputs(
+        &self,
+        registration: &Registration,
+        job_id: Uuid,
+        active_turn_id: &str,
+    ) -> Result<Vec<AgentJobInput>> {
+        let url = self
+            .base_url
+            .join(&format!("/agent/jobs/{job_id}/inputs"))?;
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(&registration.agent_token)
+            .json(&AgentJobInputPollRequest { active_turn_id })
+            .send()
+            .await
+            .context("active-turn input poll failed")?;
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .context("active-turn input poll response body")?;
+        if !status.is_success() {
+            return Err(anyhow!(
+                "active-turn input poll failed: status={} body={}",
+                status,
+                text
+            ));
+        }
+        serde_json::from_str::<AgentJobInputPollResponse>(&text)
+            .map(|response| response.commands)
+            .with_context(|| format!("failed to parse active-turn input poll response: {text}"))
+    }
+
+    pub async fn clear_job_input_readiness(
+        &self,
+        registration: &Registration,
+        job_id: Uuid,
+    ) -> Result<()> {
+        let url = self
+            .base_url
+            .join(&format!("/agent/jobs/{job_id}/inputs"))?;
+        let response = self
+            .http
+            .delete(url)
+            .bearer_auth(&registration.agent_token)
+            .send()
+            .await
+            .context("active-turn input readiness clear failed")?;
+        let status = response.status();
+        if !status.is_success() && status != StatusCode::CONFLICT {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "active-turn input readiness clear failed: status={} body={}",
+                status,
+                text
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn acknowledge_job_input(
+        &self,
+        registration: &Registration,
+        job_id: Uuid,
+        command_id: Uuid,
+        outcome: &str,
+        codex_turn_id: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        let url = self
+            .base_url
+            .join(&format!("/agent/jobs/{job_id}/inputs/{command_id}/ack"))?;
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(&registration.agent_token)
+            .header("content-type", "application/json")
+            .json(&AgentJobInputAckRequest {
+                outcome,
+                codex_turn_id,
+                error_message,
+            })
+            .send()
+            .await
+            .context("active-turn input acknowledgement failed")?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "active-turn input acknowledgement failed: status={} body={}",
+                status,
+                text
+            ));
+        }
         Ok(())
     }
 

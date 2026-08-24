@@ -438,6 +438,8 @@ export function useConversationSubmitFlow({
                 },
                 options?.runtimeOverride,
                 conversationWithGoal,
+                undefined,
+                options?.expectedLaneIdle ?? false,
               );
               if (dispatchResult?.ok === false && result.goal?.status === "active") {
                 const blockedGoal = updateConversationGoal(
@@ -944,6 +946,7 @@ export function useConversationSubmitFlow({
             options?.runtimeOverride,
             threadConversation,
             terminalRequest ? "terminal_command" : undefined,
+            options?.expectedLaneIdle ?? false,
           );
         }
         if (inlineExplicitAgentHandles.length === 0) {
@@ -1220,6 +1223,7 @@ export function useConversationSubmitFlow({
           runtimeOverride,
           targetConversation,
           terminalRequest ? "terminal_command" : undefined,
+          options?.expectedLaneIdle ?? false,
         );
       } else {
         await recordMessageToController(

@@ -20,6 +20,7 @@ export interface ControllerSendQueueEntry {
   id: string;
   conversationId: string;
   status: ControllerSendQueueEntryStatus;
+  queuePosition: number | null;
   targetAgentHandles: string[];
   message: Record<string, unknown>;
   errorMessage: string | null;
@@ -32,9 +33,16 @@ export interface ControllerSendQueueCancelResult {
   entry: ControllerSendQueueEntry | null;
 }
 
+export interface ControllerSendQueueReorderResult {
+  ok: boolean;
+  changed: boolean;
+  entries: ControllerSendQueueEntry[];
+}
+
 export type ControllerSendQueueDispatchOutcome =
   | "dispatched"
   | "alreadyDispatched"
+  | "queued"
   | "notFound";
 
 export interface ControllerSendQueueDispatchResult {
@@ -66,11 +74,99 @@ function normalizeSendQueueEntry(value: unknown): ControllerSendQueueEntry | nul
     id,
     conversationId,
     status: record.status === "failed" ? "failed" : "queued",
+    queuePosition:
+      typeof record.queuePosition === "number" &&
+      Number.isSafeInteger(record.queuePosition) &&
+      record.queuePosition > 0
+        ? record.queuePosition
+        : null,
     targetAgentHandles,
     message,
     errorMessage: typeof record.errorMessage === "string" ? record.errorMessage : null,
     createdAt: typeof record.createdAt === "string" ? record.createdAt : new Date().toISOString(),
     dispatchedAt: typeof record.dispatchedAt === "string" ? record.dispatchedAt : null,
+  };
+}
+
+export async function reorderSendQueueEntry(params: {
+  conversationId: string;
+  entryId: string;
+  beforeEntryId: string | null;
+  accessToken?: string | null;
+}): Promise<ControllerSendQueueReorderResult | null> {
+  if (!runtimeControllerEnabled) {
+    return null;
+  }
+
+  const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
+  const sessionToken = requestContext.accessToken;
+  if (!sessionToken) {
+    console.warn(
+      "[runtime-controller] No access token available; skipping send queue reorder.",
+    );
+    return null;
+  }
+
+  const response = await fetch(
+    `${requestContext.baseUrl}/conversations/${encodeURIComponent(params.conversationId)}/send-queue/${encodeURIComponent(params.entryId)}/reorder`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${sessionToken}`,
+      },
+      body: JSON.stringify({ beforeEntryId: params.beforeEntryId }),
+    },
+  );
+
+  if (!response.ok) {
+    const message = await readControllerError(
+      response,
+      "send queue reorder failed",
+      requestContext,
+    );
+    throw new Error(message);
+  }
+
+  const data = (await response.json()) as {
+    ok?: unknown;
+    changed?: unknown;
+    entries?: unknown;
+  } | null;
+  if (data?.ok !== true || typeof data.changed !== "boolean" || !Array.isArray(data.entries)) {
+    throw new Error("send queue reorder returned an invalid response");
+  }
+  const entries: ControllerSendQueueEntry[] = [];
+  const entryIds = new Set<string>();
+  const queuePositions = new Set<number>();
+  for (const value of data.entries) {
+    const entry = normalizeSendQueueEntry(value);
+    if (
+      !entry ||
+      entry.conversationId !== params.conversationId ||
+      entry.queuePosition === null ||
+      entryIds.has(entry.id) ||
+      queuePositions.has(entry.queuePosition)
+    ) {
+      throw new Error("send queue reorder returned an invalid response");
+    }
+    entryIds.add(entry.id);
+    queuePositions.add(entry.queuePosition);
+    entries.push(entry);
+  }
+  if (
+    entries.length === 0 ||
+    !entryIds.has(params.entryId) ||
+    (params.beforeEntryId !== null &&
+      params.beforeEntryId !== params.entryId &&
+      !entryIds.has(params.beforeEntryId))
+  ) {
+    throw new Error("send queue reorder returned an invalid response");
+  }
+  return {
+    ok: true,
+    changed: data.changed,
+    entries,
   };
 }
 
@@ -258,10 +354,14 @@ export async function dispatchSendQueueEntryNow(params: {
 
   const data = (await response.json()) as DispatchControllerPromptResponse & {
     alreadyDispatched?: unknown;
+    queued?: unknown;
   };
   if (data.alreadyDispatched === true) {
     // The server drain claimed and dispatched the entry before this request.
     return { outcome: "alreadyDispatched", response: null };
+  }
+  if (data.queued === true) {
+    return { outcome: "queued", response: null };
   }
   return {
     outcome: "dispatched",
