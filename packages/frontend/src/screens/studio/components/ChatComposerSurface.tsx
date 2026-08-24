@@ -422,15 +422,18 @@ export function ChatComposerSurface({
         clearPreview();
       }
     };
-    window.addEventListener("keydown", updatePreview);
-    window.addEventListener("keyup", updatePreview);
+    // Lexical may consume editor keyboard events during bubbling. Observe the
+    // modifiers in capture so the button preview still reflects the physical
+    // keys the user is holding.
+    window.addEventListener("keydown", updatePreview, true);
+    window.addEventListener("keyup", updatePreview, true);
     window.addEventListener("blur", clearPreview);
     document.addEventListener("focusin", handleFocusIn);
     document.addEventListener("focusout", handleFocusOut);
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
-      window.removeEventListener("keydown", updatePreview);
-      window.removeEventListener("keyup", updatePreview);
+      window.removeEventListener("keydown", updatePreview, true);
+      window.removeEventListener("keyup", updatePreview, true);
       window.removeEventListener("blur", clearPreview);
       document.removeEventListener("focusin", handleFocusIn);
       document.removeEventListener("focusout", handleFocusOut);
