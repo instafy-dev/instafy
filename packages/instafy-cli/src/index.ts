@@ -1875,13 +1875,11 @@ const teamInviteLinkCommand = teamScopeCommandFactory(
 );
 teamInviteLinkCommand
   .option("--role <role>", "builder or viewer (default: builder)")
-  .option("--expires <iso>", "Requested expiry (ISO 8601); the stored value is authoritative")
   .option("--studio-url <url>", "Studio base URL for the accept link (default: https://instafy.dev)")
   .action(async (opts) => {
     try {
       await teamInviteLink({
         role: opts.role,
-        expires: opts.expires,
         studioUrl: opts.studioUrl,
         teamId: opts.teamId,
         controllerUrl: opts.serverUrl,

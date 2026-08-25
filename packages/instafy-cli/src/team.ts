@@ -413,7 +413,6 @@ export async function teamInvite(options: TeamCommonOptions & {
 
 export async function teamInviteLink(options: TeamCommonOptions & {
   role?: string;
-  expires?: string;
   studioUrl?: string;
 }): Promise<void> {
   const auth = resolveControllerAuth(options, "instafy team invite-link");
@@ -426,12 +425,6 @@ export async function teamInviteLink(options: TeamCommonOptions & {
 
   const body: Record<string, unknown> = {};
   if (role) body.role = role;
-  const expires = options.expires?.trim();
-  if (expires) {
-    // Forwarded for controllers that honor a caller-supplied expiry. The
-    // response's expiresAt is authoritative for what was actually stored.
-    body.expiresAt = expires;
-  }
 
   const payload = (await controllerJson(auth, "instafy team invite-link", {
     method: "POST",
