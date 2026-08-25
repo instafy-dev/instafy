@@ -30,6 +30,7 @@ import {
   formatUnits,
 } from "./CreditsUsageRates";
 import { SettingsShell, type SettingsCategory } from "./SettingsShell";
+import { compactIdentifier } from "../../../utils/compactIdentifier";
 
 const CHECKOUT_STATUS_PARAM = "billingCheckout";
 const CHECKOUT_PLAN_PARAM = "billingPlan";
@@ -326,13 +327,6 @@ export function CreditsPanel() {
         }
       }
       return null;
-    };
-
-    const compactIdentifier = (value: string): string => {
-      if (value.length <= 18) {
-        return value;
-      }
-      return `${value.slice(0, 8)}…${value.slice(-4)}`;
     };
 
     const usage = (() => {
