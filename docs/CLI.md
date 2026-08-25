@@ -442,7 +442,8 @@ There are two ways to bring someone in:
 - An **email invitation** targets one address. The person must sign in to Instafy with that exact
   email to accept.
 - An **invite link** is a shareable token. Anyone who opens it and signs in — with any sign-in
-  method — can join, so treat it like a shared secret.
+  method — can join, so treat it like a shared secret. Links expire 30 days after creation
+  (server-controlled).
 
 ```bash
 # Email invitation (roles: owner, admin, builder, viewer; default builder).
