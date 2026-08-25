@@ -1710,8 +1710,22 @@ async fn update_automation(
         return Err(bad_request("status must be active or paused"));
     }
 
+    // Only reschedule when the effective schedule or status changed. Editing the
+    // prompt, name, result visibility, or runtime settings must not push an
+    // active automation's next run further out.
+    let schedule_changed = schedule_kind != existing_record.schedule_kind
+        || interval_hours != existing_record.interval_hours
+        || by_day != existing_record.by_day
+        || by_hour != existing_record.by_hour
+        || by_minute != existing_record.by_minute
+        || timezone != existing_record.timezone
+        || run_at != existing_record.run_at;
+    let status_changed = status != existing_record.status;
+
     let now = Utc::now();
-    let next_run_at = if status == "active" {
+    let next_run_at = if status == "active"
+        && (schedule_changed || status_changed || existing_record.next_run_at.is_none())
+    {
         match schedule_kind.as_str() {
             "once" => {
                 let run_at = run_at.expect("once schedules require runAt");

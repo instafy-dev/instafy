@@ -62,7 +62,6 @@ export type AutomationsUpdateStatusOptions = AutomationsCommonOptions & {
 export type AutomationsUpdateOptions = AutomationsCommonOptions & {
   automationId: string;
   resultVisibility?: ResultVisibility;
-  status?: "active" | "paused";
 };
 
 export type AutomationsRunOptions = AutomationsCommonOptions & {
@@ -443,9 +442,6 @@ export async function automationsUpdate(options: AutomationsUpdateOptions) {
   const body: Record<string, unknown> = {};
   if (options.resultVisibility !== undefined) {
     body.resultVisibility = options.resultVisibility;
-  }
-  if (options.status !== undefined) {
-    body.status = options.status;
   }
   if (Object.keys(body).length === 0) {
     throw new Error(

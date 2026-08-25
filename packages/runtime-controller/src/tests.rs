@@ -15157,27 +15157,58 @@ async fn automation_result_visibility_controls_team_thread_access() -> anyhow::R
         "teammate must not see the private automation thread"
     );
 
-    // Owner flips the private automation to team visibility.
-    let patch_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("PATCH")
-                .uri(format!("/automations/{private_automation_id}"))
-                .header(axum::http::header::CONTENT_TYPE, "application/json")
-                .header(
-                    axum::http::header::AUTHORIZATION,
-                    format!("Bearer {owner_token}"),
+    // Owner flips the private automation to team visibility. A visibility-only
+    // PATCH must not reset the active automation's schedule anchor.
+    let next_run_at_before = private_json["nextRunAt"]
+        .as_str()
+        .expect("active automation must have nextRunAt")
+        .to_string();
+    let patch_automation = |body: serde_json::Value| {
+        let app = app.clone();
+        let owner_token = owner_token.clone();
+        let private_automation_id = private_automation_id.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(format!("/automations/{private_automation_id}"))
+                        .header(axum::http::header::CONTENT_TYPE, "application/json")
+                        .header(
+                            axum::http::header::AUTHORIZATION,
+                            format!("Bearer {owner_token}"),
+                        )
+                        .body(Body::from(body.to_string()))
+                        .expect("build patch request"),
                 )
-                .body(Body::from(
-                    json!({ "resultVisibility": "team" }).to_string(),
-                ))?,
-        )
-        .await?;
-    assert_eq!(patch_response.status(), StatusCode::OK);
-    let patch_body = to_bytes(patch_response.into_body(), usize::MAX).await?;
-    let patch_json: serde_json::Value = serde_json::from_slice(&patch_body)?;
+                .await
+                .expect("patch automation");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read patch body");
+            serde_json::from_slice::<serde_json::Value>(&body).expect("parse patch body")
+        }
+    };
+
+    let patch_json = patch_automation(json!({ "resultVisibility": "team" })).await;
     assert_eq!(patch_json["resultVisibility"], json!("team"));
+    assert_eq!(
+        patch_json["nextRunAt"],
+        json!(next_run_at_before),
+        "a visibility-only update must leave nextRunAt untouched"
+    );
+
+    // Changing the effective schedule must recompute nextRunAt.
+    let reschedule_json = patch_automation(json!({ "intervalHours": 6 })).await;
+    assert_eq!(reschedule_json["intervalHours"], json!(6));
+    let next_run_at_after = reschedule_json["nextRunAt"]
+        .as_str()
+        .expect("rescheduled automation must have nextRunAt");
+    assert_ne!(
+        next_run_at_after, next_run_at_before,
+        "a schedule change must recompute nextRunAt"
+    );
 
     let teammate_after = list_automation_conversations(teammate_token.clone()).await;
     assert!(
