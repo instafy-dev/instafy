@@ -22,7 +22,6 @@ import {
   automationsUpdate,
   automationsUpdateStatus,
 } from "./automations.js";
-import { automationsCreate, automationsDelete, automationsList, automationsRun, automationsUpdateStatus } from "./automations.js";
 import {
   credentialsClearDefault,
   credentialsList,
