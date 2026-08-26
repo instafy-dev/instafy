@@ -237,6 +237,7 @@ pub(crate) fn build_app_config(private_key: &str, public_key: &str, key_id: &str
         stripe: None,
         operator_console_org_id: None,
         operator_console_allowed_user_ids: vec![],
+        bug_reports_operator_user_ids: vec![],
         desktop_release_github_owner: None,
         desktop_release_github_repo: None,
         desktop_release_github_token: None,
@@ -3726,6 +3727,326 @@ async fn support_report_routes_enforce_customer_privacy_boundary() -> anyhow::Re
         .await?;
     cleanup_test_user(&pool, &reporter_b_id).await?;
     cleanup_test_user(&pool, &reporter_a_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn bug_report_operator_allowlist_grants_only_bug_report_routes() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("bug report operator allowlist test").await?;
+
+    let reporter_id = Uuid::new_v4();
+    let bug_report_operator_id = Uuid::new_v4();
+    ensure_test_user(&pool, &reporter_id).await?;
+    ensure_test_user(&pool, &bug_report_operator_id).await?;
+
+    // The bug-reports-only role must work on its own: no operator org and no
+    // full operator allowlist are configured here.
+    let mut config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "bug-report-operator-allowlist",
+    );
+    config.operator_console_org_id = None;
+    config.operator_console_allowed_user_ids = vec![];
+    config.bug_reports_operator_user_ids = vec![bug_report_operator_id];
+
+    let reporter_token = crate::auth::issue_controller_token(&config, &reporter_id)
+        .map_err(|error| controller_error("issue bug report reporter token", error))?
+        .token;
+    let bug_report_operator_token =
+        crate::auth::issue_controller_token(&config, &bug_report_operator_id)
+            .map_err(|error| controller_error("issue bug report operator token", error))?
+            .token;
+    let scoped_runtime_id = Uuid::new_v4();
+    let bug_report_operator_scoped_token = mint_scoped_token(
+        &config,
+        ScopedTokenRequest {
+            audience: scoped_runtime_id.to_string(),
+            subject: bug_report_operator_id.to_string(),
+            project_id: Uuid::new_v4().to_string(),
+            origin_id: None,
+            runtime_id: Some(scoped_runtime_id.to_string()),
+            protocol: None,
+            scopes: vec!["telemetry.write".to_string()],
+            lease_id: None,
+            run_id: None,
+            prefer_runtime: None,
+            ttl_seconds: Some(300),
+        },
+    )
+    .map_err(|error| controller_error("mint scoped bug report operator token", error))?
+    .token;
+
+    let state = build_test_state(pool.clone(), config);
+    let app = crate::bug_reports::router().with_state(state.clone());
+    let operator_admin_app = crate::operator_admin::router().with_state(state.clone());
+    let ota_app = crate::ota::router().with_state(state);
+
+    let unique_message = format!("Allowlist triage {}", Uuid::new_v4());
+    let png_signature = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/support/reports")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_token}"),
+                )
+                .body(Body::from(
+                    json!({
+                        "message": unique_message,
+                        "details": "Details from the reporter",
+                        "screenshots": [{
+                            "fileName": "screen.png",
+                            "mediaType": "image/png",
+                            "dataBase64": STANDARD.encode(&png_signature),
+                            "byteLength": png_signature.len()
+                        }]
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(create.status(), StatusCode::CREATED);
+    let create_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(create.into_body(), usize::MAX).await?)?;
+    let report_id = Uuid::parse_str(
+        create_payload["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("support create response omitted report id"))?,
+    )?;
+
+    pool.get()
+        .await?
+        .execute(
+            "update bug_reports
+                set priority = 'urgent',
+                    metadata = '{\"triageSecret\":\"internal-only\"}'::jsonb,
+                    logs = '[{\"secret\":\"internal-only\"}]'::jsonb,
+                    updated_at = now()
+              where id = $1",
+            &[&report_id],
+        )
+        .await?;
+
+    // A user in BUG_REPORTS_OPERATOR_USER_IDS gets the operator projection on list,
+    // including reports filed by other users and the internal triage fields.
+    let operator_list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/bug-reports?limit=100&search={}",
+                    urlencoding::encode(&unique_message)
+                ))
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {bug_report_operator_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(operator_list.status(), StatusCode::OK);
+    let operator_list_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(operator_list.into_body(), usize::MAX).await?)?;
+    let operator_reports = operator_list_payload["reports"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("operator list response omitted reports"))?;
+    let listed = operator_reports
+        .iter()
+        .find(|report| report["id"] == report_id.to_string())
+        .ok_or_else(|| {
+            anyhow::anyhow!("bug-report operator must see reports filed by other users")
+        })?;
+    assert_eq!(listed["priority"], "urgent");
+    assert_eq!(listed["userId"], reporter_id.to_string());
+    assert_eq!(listed["metadata"]["triageSecret"], "internal-only");
+    assert_eq!(listed["screenshotCount"], 1);
+
+    // ...the full detail on get...
+    let operator_show = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/bug-reports/{report_id}"))
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {bug_report_operator_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(operator_show.status(), StatusCode::OK);
+    let operator_show_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(operator_show.into_body(), usize::MAX).await?)?;
+    assert_eq!(operator_show_payload["id"], report_id.to_string());
+    assert_eq!(operator_show_payload["priority"], "urgent");
+    assert_eq!(operator_show_payload["userId"], reporter_id.to_string());
+    assert_eq!(
+        operator_show_payload["metadata"]["triageSecret"],
+        "internal-only"
+    );
+    assert_eq!(operator_show_payload["logs"][0]["secret"], "internal-only");
+    assert_eq!(
+        operator_show_payload["screenshots"][0]["dataBase64"],
+        STANDARD.encode(&png_signature)
+    );
+
+    // ...and can PATCH triage fields.
+    let operator_patch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/bug-reports/{report_id}"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {bug_report_operator_token}"),
+                )
+                .body(Body::from(
+                    json!({ "status": "in_progress", "assignee": "bug-report-operator" })
+                        .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(operator_patch.status(), StatusCode::OK);
+    let operator_patch_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(operator_patch.into_body(), usize::MAX).await?)?;
+    assert_eq!(operator_patch_payload["id"], report_id.to_string());
+    assert_eq!(operator_patch_payload["status"], "in_progress");
+    assert_eq!(operator_patch_payload["assignee"], "bug-report-operator");
+
+    // The role authenticates like the full operator gate: a runtime-scoped token
+    // for the same user is not an interactive operator session.
+    let scoped_patch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/bug-reports/{report_id}"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {bug_report_operator_scoped_token}"),
+                )
+                .body(Body::from(json!({ "status": "resolved" }).to_string()))?,
+        )
+        .await?;
+    assert_eq!(scoped_patch.status(), StatusCode::FORBIDDEN);
+
+    // The same user is refused on operator-only routes outside bug reports.
+    let operator_search = operator_admin_app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/operator/projects/search?q=allowlist&limit=10")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {bug_report_operator_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(operator_search.status(), StatusCode::FORBIDDEN);
+
+    let ota_releases = ota_app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ota/releases")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {bug_report_operator_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(ota_releases.status(), StatusCode::FORBIDDEN);
+
+    // A user in neither list still gets the customer projection and cannot PATCH.
+    let customer_list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/bug-reports?limit=100")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(customer_list.status(), StatusCode::OK);
+    let customer_list_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(customer_list.into_body(), usize::MAX).await?)?;
+    let customer_reports = customer_list_payload["reports"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("customer list response omitted reports"))?;
+    assert_eq!(customer_reports.len(), 1);
+    assert_eq!(customer_reports[0]["id"], report_id.to_string());
+    assert_eq!(customer_reports[0]["status"], "in_progress");
+    for operator_only_key in ["priority", "assignee", "metadata", "logs", "userId"] {
+        assert!(
+            customer_reports[0].get(operator_only_key).is_none(),
+            "customer list projection leaked {operator_only_key}"
+        );
+    }
+
+    let customer_show = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/bug-reports/{report_id}"))
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(customer_show.status(), StatusCode::OK);
+    let customer_show_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(customer_show.into_body(), usize::MAX).await?)?;
+    assert_eq!(customer_show_payload["id"], report_id.to_string());
+    for operator_only_key in ["priority", "assignee", "metadata", "logs", "userId"] {
+        assert!(
+            customer_show_payload.get(operator_only_key).is_none(),
+            "customer detail projection leaked {operator_only_key}"
+        );
+    }
+    assert!(customer_show_payload["screenshots"][0]
+        .get("dataBase64")
+        .is_none());
+
+    let customer_patch = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/bug-reports/{report_id}"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_token}"),
+                )
+                .body(Body::from(json!({ "status": "resolved" }).to_string()))?,
+        )
+        .await?;
+    assert_eq!(customer_patch.status(), StatusCode::FORBIDDEN);
+
+    pool.get()
+        .await?
+        .execute("delete from bug_reports where id = $1", &[&report_id])
+        .await?;
+    cleanup_test_user(&pool, &bug_report_operator_id).await?;
+    cleanup_test_user(&pool, &reporter_id).await?;
     Ok(())
 }
 
