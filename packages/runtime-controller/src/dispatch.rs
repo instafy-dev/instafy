@@ -91,7 +91,7 @@ pub(crate) struct DispatchPromptRequest {
     pub(crate) prefer_runtime: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DispatchPromptRepo {
     pub(crate) owner: Option<String>,
@@ -113,7 +113,7 @@ pub(crate) struct DispatchPromptRepoNormalized {
     pub(crate) working_branch: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DispatchPromptUi {
     pub(crate) requested_preview: Option<bool>,
@@ -176,6 +176,12 @@ pub(crate) struct DispatchPromptNormalized {
     pub(crate) runtime_updated_at: Option<DateTime<Utc>>,
     pub(crate) runtime_display_name: Option<String>,
     pub(crate) prefer_runtime: bool,
+    /// Optimistic admission fence used by interactive composer sends. Callers
+    /// that intentionally allow overlapping work leave this false.
+    pub(crate) expected_lane_idle: bool,
+    /// Controller-private queue reservation ignored by that entry's own lane
+    /// admission check. Browser payloads can never set this field.
+    pub(crate) dispatch_queue_entry_id: Option<Uuid>,
     /// Trusted internal opt-in set only by the automation scheduler. This is
     /// deliberately absent from the public dispatch request shape.
     pub(crate) allow_silent_automation_decline: bool,
@@ -845,6 +851,24 @@ pub(crate) async fn process_dispatch_prompt(
         conversations::ensure_conversation_record(&transaction, &project, &mut request, context)
             .await?;
 
+    // Every dispatch that can create an agent job crosses this fence. Most
+    // internal callers intentionally retain their existing overlap policy,
+    // but interactive sends and send-queue drains perform their authoritative
+    // lane-idle comparison while holding the same lock as job insertion. This
+    // closes the stale-client/drain race across controller processes.
+    let dispatch_fence_key = format!("conversation-dispatch:{}", conversation.id);
+    transaction
+        .query_one(
+            "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&dispatch_fence_key],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to acquire conversation dispatch fence: {error}"
+            ))
+        })?;
+
     let mut existing_recorded_message = None;
     if !should_suppress_dispatch_user_message(&request.metadata) {
         if let Some(client_message_id) =
@@ -902,6 +926,91 @@ pub(crate) async fn process_dispatch_prompt(
                 }
                 existing_recorded_message = Some(existing);
             }
+        }
+    }
+
+    // Idempotent retries must win before the optimistic lane comparison. A
+    // retry of a successfully admitted message naturally finds its own active
+    // job and must return that run, never enqueue a duplicate follow-up.
+    if request.expected_lane_idle {
+        let requested_handles = extract_agent_selection_handles(&request.metadata);
+        let rows = transaction
+            .query(
+                "select payload from agent_jobs
+                 where conversation_id = $1
+                   and status in ('queued','leased')",
+                &[&conversation.id],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!(
+                    "failed to verify dispatch lane availability: {error}"
+                ))
+            })?;
+        let mut active_handles = HashSet::new();
+        let mut has_unknown_active_lane = false;
+        for row in rows {
+            let payload = row.get::<_, PgJson<JsonValue>>("payload").0;
+            let handle = payload
+                .get("metadata")
+                .and_then(JsonValue::as_object)
+                .and_then(|metadata| metadata.get("agent"))
+                .and_then(JsonValue::as_object)
+                .and_then(|agent| agent.get("handle"))
+                .and_then(JsonValue::as_str)
+                .and_then(normalize_agent_handle);
+            if let Some(handle) = handle {
+                active_handles.insert(handle);
+            } else {
+                has_unknown_active_lane = true;
+            }
+        }
+        let reservation_rows = transaction
+            .query(
+                "select request
+                 from conversation_send_queue
+                 where conversation_id = $1
+                   and (
+                     (
+                       status = 'dispatched'
+                       and dispatched_run_id is null
+                       and dispatched_at >= now() - interval '10 minutes'
+                       and ($2::uuid is null or id <> $2)
+                     )
+                     or ($2::uuid is null and status = 'queued')
+                   )",
+                &[&conversation.id, &request.dispatch_queue_entry_id],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!(
+                    "failed to verify queued lane reservations: {error}"
+                ))
+            })?;
+        for row in reservation_rows {
+            let queued_request = row.get::<_, PgJson<JsonValue>>("request").0;
+            let metadata = queued_request
+                .get("metadata")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            active_handles.extend(extract_agent_selection_handles(&metadata));
+        }
+        if has_unknown_active_lane
+            || requested_handles
+                .iter()
+                .any(|handle| active_handles.contains(handle))
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ApiError::with_details(
+                    "The selected agent lane became busy before this message was dispatched.",
+                    "dispatch_lane_busy",
+                    json!({
+                        "conversationId": conversation.id,
+                        "targetAgentHandles": requested_handles,
+                    }),
+                )),
+            ));
         }
     }
 
@@ -972,6 +1081,7 @@ pub(crate) async fn process_dispatch_prompt(
                 coverage => coverage,
             };
             let mut canceled_arithmetic_coverage = None;
+            let mut canceled_job_input_state_updates = Vec::new();
             let mut participation = match arithmetic_coverage {
                 Some(coverage)
                     if coverage.action
@@ -985,6 +1095,14 @@ pub(crate) async fn process_dispatch_prompt(
                     )
                     .await?
                     {
+                        canceled_job_input_state_updates.extend(
+                            crate::send_intents::reject_unacknowledged_inputs_for_job(
+                                &transaction,
+                                &coverage.job_id,
+                                "agent job was canceled before input acknowledgement",
+                            )
+                            .await?,
+                        );
                         canceled_arithmetic_coverage = Some(coverage);
                         crate::group_participation::apply_arithmetic_coverage(
                             base_participation,
@@ -1071,6 +1189,10 @@ pub(crate) async fn process_dispatch_prompt(
                         "failed to finalize ambient human-only message: {error}"
                     ))
                 })?;
+                crate::send_intents::publish_job_input_state_updates(
+                    state,
+                    &canceled_job_input_state_updates,
+                );
                 if let Some(message) = user_message.as_ref() {
                     conversations::publish_conversation_message_event(&state.events, message);
                     crate::notifications::enqueue_message_push_notifications(
@@ -1746,6 +1868,13 @@ pub(crate) async fn process_dispatch_prompt(
             provider_conversation_state.as_ref(),
         )
         .await?;
+        if let Some(job_uuid) = job_id {
+            // The run is the frontend's authoritative live-activity record,
+            // while the job is the controller's exact steer CAS target. Keep
+            // that one-to-one identity durable in the same transaction as the
+            // enqueue so initial hydration and reconnect cannot lose it.
+            persist_run_job_identity(&transaction, &project.id, run_id, &job_uuid).await?;
+        }
         dispatches.push((
             *run_id,
             job_id,
@@ -2400,6 +2529,8 @@ pub(crate) fn normalize_dispatch_request(
         runtime_updated_at,
         runtime_display_name,
         prefer_runtime,
+        expected_lane_idle: false,
+        dispatch_queue_entry_id: None,
         allow_silent_automation_decline: false,
     })
 }
@@ -3784,6 +3915,41 @@ async fn build_managed_ai_reserve_trace(
             "delta": -(reserve_units.abs()),
         }))
     }))
+}
+
+pub(crate) async fn persist_run_job_identity(
+    transaction: &Transaction<'_>,
+    project_id: &Uuid,
+    run_id: &Uuid,
+    job_id: &Uuid,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let updated = transaction
+        .execute(
+            "update runs
+             set metadata =
+                 (case
+                    when jsonb_typeof(metadata) = 'object' then metadata
+                    else '{}'::jsonb
+                  end)
+                 || jsonb_build_object('jobId', $3::uuid)
+             where id = $1
+               and project_id = $2",
+            &[run_id, project_id, job_id],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to persist authoritative agent job identity onto run: {error}"
+            ))
+        })?;
+
+    if updated != 1 {
+        return Err(internal_error(
+            "failed to persist authoritative agent job identity: run not found in project",
+        ));
+    }
+
+    Ok(())
 }
 
 pub(crate) async fn persist_run_managed_ai_credit_metadata(
