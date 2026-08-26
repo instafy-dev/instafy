@@ -15,6 +15,10 @@ use tokio::time::{MissedTickBehavior, interval, sleep};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+use crate::active_turn_input::{
+    ActiveTurnInputCancellation, ActiveTurnInputOutcome, ActiveTurnInputReceiver,
+    ActiveTurnInputSender, active_turn_input_channel,
+};
 use crate::agent_executor::AgentExecutor;
 use crate::config::Config;
 use crate::controller::{
@@ -146,6 +150,211 @@ impl HeartbeatTask {
 struct SecretsRefreshTask {
     stop_signal: Arc<Notify>,
     handle: JoinHandle<()>,
+}
+
+struct JobInputTask {
+    stop_signal: ShutdownSignal,
+    cancellation: ActiveTurnInputCancellation,
+    handle: JoinHandle<()>,
+}
+
+impl JobInputTask {
+    fn spawn(
+        client: Arc<ControllerClient>,
+        registration: Registration,
+        job_id: Uuid,
+        mut sender: ActiveTurnInputSender,
+        cancellation: ActiveTurnInputCancellation,
+    ) -> Self {
+        let stop_signal = ShutdownSignal::new();
+        let stop_listener = stop_signal.clone();
+        let task_cancellation = cancellation.clone();
+        let handle = tokio::spawn(async move {
+            let mut ticker = interval(Duration::from_millis(400));
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            let mut readiness_advertised = false;
+            let mut terminal_outcomes = HashMap::<Uuid, ActiveTurnInputOutcome>::new();
+            loop {
+                tokio::select! {
+                    _ = stop_listener.cancelled() => break,
+                    _ = ticker.tick() => {}
+                    changed = sender.readiness_changed() => {
+                        if !changed {
+                            break;
+                        }
+                    }
+                }
+
+                let Some(active_turn_id) = sender.active_turn_id() else {
+                    if readiness_advertised {
+                        if let Err(error) = client
+                            .clear_job_input_readiness(&registration, job_id)
+                            .await
+                        {
+                            warn!(?error, job_id = %job_id, "failed to clear active-turn input readiness");
+                        }
+                        readiness_advertised = false;
+                    }
+                    continue;
+                };
+
+                let commands = match client
+                    .poll_job_inputs(&registration, job_id, &active_turn_id)
+                    .await
+                {
+                    Ok(commands) => {
+                        readiness_advertised = true;
+                        commands
+                    }
+                    Err(error) => {
+                        let message = error.to_string();
+                        if message.contains("status=401")
+                            || message.contains("status=403")
+                            || message.contains("status=409")
+                        {
+                            debug!(job_id = %job_id, %message, "active-turn input polling stopped");
+                            break;
+                        }
+                        warn!(?error, job_id = %job_id, "active-turn input poll failed");
+                        continue;
+                    }
+                };
+
+                let Some(command) = commands.into_iter().next() else {
+                    continue;
+                };
+                if let Some(cached_outcome) =
+                    cached_terminal_job_input_outcome(&terminal_outcomes, &command.command_id)
+                {
+                    acknowledge_job_input_with_retry(
+                        &client,
+                        &registration,
+                        job_id,
+                        command.command_id,
+                        cached_outcome,
+                    )
+                    .await;
+                    continue;
+                }
+                if command.job_id != job_id || command.content.trim().is_empty() {
+                    let error_message = if command.job_id != job_id {
+                        "controller returned an active-turn input for a different job"
+                    } else {
+                        "controller returned an empty active-turn input"
+                    };
+                    let outcome = ActiveTurnInputOutcome::Rejected {
+                        error_message: error_message.to_string(),
+                    };
+                    terminal_outcomes.insert(command.command_id, outcome.clone());
+                    acknowledge_job_input_with_retry(
+                        &client,
+                        &registration,
+                        job_id,
+                        command.command_id,
+                        outcome,
+                    )
+                    .await;
+                    continue;
+                }
+
+                // Commands are claimed one at a time and the sender waits for
+                // Codex's direct `steer_input` result. This preserves database
+                // sequence order and never acknowledges mere HTTP receipt as
+                // application to the model turn.
+                let outcome = sender
+                    .submit(command.command_id, command.content, command.target_turn_id)
+                    .await;
+                terminal_outcomes.insert(command.command_id, outcome.clone());
+                acknowledge_job_input_with_retry(
+                    &client,
+                    &registration,
+                    job_id,
+                    command.command_id,
+                    outcome,
+                )
+                .await;
+            }
+            if readiness_advertised {
+                if let Err(error) = client
+                    .clear_job_input_readiness(&registration, job_id)
+                    .await
+                {
+                    warn!(?error, job_id = %job_id, "failed to clear active-turn input readiness at shutdown");
+                }
+            }
+        });
+        Self {
+            stop_signal,
+            cancellation: task_cancellation,
+            handle,
+        }
+    }
+
+    async fn shutdown(self) {
+        self.cancellation.cancel();
+        self.stop_signal.cancel();
+        if let Err(error) = self.handle.await
+            && !error.is_cancelled()
+        {
+            warn!(?error, "active-turn input task ended unexpectedly");
+        }
+    }
+}
+
+fn cached_terminal_job_input_outcome(
+    outcomes: &HashMap<Uuid, ActiveTurnInputOutcome>,
+    command_id: &Uuid,
+) -> Option<ActiveTurnInputOutcome> {
+    outcomes.get(command_id).cloned()
+}
+
+async fn acknowledge_job_input_with_retry(
+    client: &ControllerClient,
+    registration: &Registration,
+    job_id: Uuid,
+    command_id: Uuid,
+    outcome: ActiveTurnInputOutcome,
+) {
+    let (status, codex_turn_id, error_message) = match &outcome {
+        ActiveTurnInputOutcome::Applied { codex_turn_id } => {
+            ("applied", Some(codex_turn_id.as_str()), None)
+        }
+        ActiveTurnInputOutcome::Rejected { error_message } => {
+            ("rejected", None, Some(error_message.as_str()))
+        }
+    };
+    for attempt in 1..=10 {
+        match client
+            .acknowledge_job_input(
+                registration,
+                job_id,
+                command_id,
+                status,
+                codex_turn_id,
+                error_message,
+            )
+            .await
+        {
+            Ok(()) => return,
+            Err(error) => {
+                warn!(
+                    ?error,
+                    job_id = %job_id,
+                    command_id = %command_id,
+                    attempt,
+                    "failed to acknowledge active-turn input"
+                );
+                if attempt < 10 {
+                    sleep(Duration::from_millis((attempt as u64).saturating_mul(150))).await;
+                }
+            }
+        }
+    }
+    warn!(
+        job_id = %job_id,
+        command_id = %command_id,
+        "active-turn input acknowledgement exhausted retries; command remains durably delivering"
+    );
 }
 
 impl SecretsRefreshTask {
@@ -770,6 +979,32 @@ impl RuntimeAgent {
         }
 
         let mode = execution_mode(&job);
+        let (mut job_input_task, mut active_turn_input): (
+            Option<JobInputTask>,
+            Option<ActiveTurnInputReceiver>,
+        ) = if registration
+            .agent_token_scopes
+            .iter()
+            .any(|scope| scope == "agent.input")
+        {
+            let (sender, receiver, cancellation) = active_turn_input_channel(1);
+            (
+                Some(JobInputTask::spawn(
+                    client.clone(),
+                    registration.clone(),
+                    job.id,
+                    sender,
+                    cancellation,
+                )),
+                Some(receiver),
+            )
+        } else {
+            debug!(
+                job_id = %job.id,
+                "controller did not grant agent.input; active-turn steering is disabled for this job"
+            );
+            (None, None)
+        };
 
         match mode {
             ExecutionMode::Apply => {
@@ -779,6 +1014,9 @@ impl RuntimeAgent {
                         message = %message,
                         "completing coordination-required write-scope job without edits"
                     );
+                    if let Some(task) = job_input_task.take() {
+                        task.shutdown().await;
+                    }
                     Self::complete_job(
                         &client,
                         registration,
@@ -815,9 +1053,13 @@ impl RuntimeAgent {
                                 registration,
                                 &job,
                                 Some(lease_lost_signal.clone()),
+                                active_turn_input.take(),
                             )
                             .await
                     };
+                    if let Some(task) = job_input_task.take() {
+                        task.shutdown().await;
+                    }
                     match execution_result {
                         Ok(execution) => {
                             Self::complete_job(&client, registration, &job, execution).await;
@@ -911,6 +1153,9 @@ impl RuntimeAgent {
             other => {
                 warn!(job_id = %job.id, mode = %other.as_str(), "execution mode not supported yet");
                 let message = format!("execution mode '{}' is not yet implemented", other.as_str());
+                if let Some(task) = job_input_task.take() {
+                    task.shutdown().await;
+                }
                 if let Err(report_error) =
                     client.fail_job(registration, job.id, &message, None).await
                 {
@@ -921,6 +1166,10 @@ impl RuntimeAgent {
                     );
                 }
             }
+        }
+
+        if let Some(task) = job_input_task.take() {
+            task.shutdown().await;
         }
 
         if let Some(task) = periodic_heartbeat {
@@ -1439,6 +1688,24 @@ fn push_unique_case_insensitive(values: &mut Vec<String>, candidate: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redelivered_command_reuses_terminal_outcome_instead_of_resubmitting() {
+        let command_id = Uuid::new_v4();
+        let expected = ActiveTurnInputOutcome::Applied {
+            codex_turn_id: "turn-1".to_string(),
+        };
+        let outcomes = HashMap::from([(command_id, expected.clone())]);
+
+        assert_eq!(
+            cached_terminal_job_input_outcome(&outcomes, &command_id),
+            Some(expected)
+        );
+        assert_eq!(
+            cached_terminal_job_input_outcome(&outcomes, &Uuid::new_v4()),
+            None
+        );
+    }
 
     #[tokio::test]
     async fn shutdown_signal_remains_observable_after_work_finishes() {
