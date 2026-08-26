@@ -23,11 +23,14 @@ type AutomationRecord = {
   runtimeMode: string;
   runtimeProvider: string | null;
   silentWhenNothingToReport: boolean;
+  resultVisibility: "private" | "team";
   status: string;
   nextRunAt: string | null;
   lastRunAt: string | null;
   lastError: string | null;
 };
+
+type ResultVisibility = "private" | "team";
 
 type AutomationsCommonOptions = {
   project?: string;
@@ -49,6 +52,7 @@ export type AutomationsCreateOptions = AutomationsCommonOptions & {
   runtimeMode?: "auto" | "hosted" | "existing";
   runtimeProvider?: string;
   silentWhenNothingToReport?: boolean;
+  resultVisibility?: ResultVisibility;
   paused?: boolean;
 };
 
@@ -66,6 +70,7 @@ export type AutomationsUpdateOptions = AutomationsCommonOptions & {
   runtimeMode?: "auto" | "hosted" | "existing";
   runtimeProvider?: string;
   silentWhenNothingToReport?: boolean;
+  resultVisibility?: ResultVisibility;
 };
 
 export type AutomationsUpdateStatusOptions = AutomationsCommonOptions & {
@@ -227,6 +232,7 @@ function normalizeAutomationRecord(input: unknown): AutomationRecord | null {
     runtimeMode: typeof record.runtimeMode === "string" ? record.runtimeMode : "auto",
     runtimeProvider: toMaybeString(record.runtimeProvider),
     silentWhenNothingToReport: record.silentWhenNothingToReport === true,
+    resultVisibility: record.resultVisibility === "team" ? "team" : "private",
     status: typeof record.status === "string" ? record.status : "active",
     nextRunAt: toMaybeString(record.nextRunAt),
     lastRunAt: toMaybeString(record.lastRunAt),
@@ -339,9 +345,13 @@ export async function automationsList(options: AutomationsCommonOptions) {
     const status = record.status === "paused" ? kleur.gray("paused") : kleur.green("active");
     const next = record.nextRunAt ? kleur.cyan(record.nextRunAt) : kleur.gray("n/a");
     const delivery = record.silentWhenNothingToReport ? " · findings only" : "";
+    const sharing =
+      record.resultVisibility === "team"
+        ? ` · ${kleur.cyan("team-visible")}`
+        : "";
     console.log(`${kleur.bold(record.name)}  ${kleur.gray(record.id)}`);
     console.log(
-      `  ${schedule} · ${record.runtimeMode}${delivery} · ${status} · next ${next}`,
+      `  ${schedule} · ${record.runtimeMode}${delivery}${sharing} · ${status} · next ${next}`,
     );
     if (record.lastError) {
       console.log(`  ${kleur.red(record.lastError)}`);
@@ -373,6 +383,7 @@ export async function automationsCreate(options: AutomationsCreateOptions) {
     runtimeMode: options.runtimeMode ?? "auto",
     runtimeProvider: options.runtimeProvider?.trim() || undefined,
     silentWhenNothingToReport: options.silentWhenNothingToReport ?? false,
+    resultVisibility: options.resultVisibility ?? undefined,
     status: options.paused ? "paused" : "active",
   };
 
@@ -420,7 +431,8 @@ const RUNTIME_MODES = new Set(["auto", "hosted", "existing"]);
 const UPDATE_FIELD_FLAGS =
   "--name, --prompt, --prompt-file, --schedule-kind, --run-at, --interval-hours, --days, --time, " +
   "--timezone, --runtime-mode, --runtime-provider, --silent-when-nothing-to-report, " +
-  "--no-silent-when-nothing-to-report";
+  "--no-silent-when-nothing-to-report, --share-results, --no-share-results, " +
+  "--result-visibility";
 
 function readUpdatePrompt(
   options: Pick<AutomationsUpdateOptions, "prompt" | "promptFile">,
@@ -537,6 +549,10 @@ function buildAutomationUpdateBody(
     body.silentWhenNothingToReport = options.silentWhenNothingToReport;
   }
 
+  if (options.resultVisibility !== undefined) {
+    body.resultVisibility = options.resultVisibility;
+  }
+
   return body;
 }
 
@@ -569,7 +585,13 @@ export async function automationsUpdate(options: AutomationsUpdateOptions) {
     console.log(kleur.green("Automation updated."));
     return;
   }
-  console.log(`${kleur.green("Updated")} ${kleur.bold(record.name)} (${record.id})`);
+  const sharing =
+    record.resultVisibility === "team"
+      ? " · results shared with the team"
+      : record.resultVisibility === "private"
+        ? " · results kept private"
+        : "";
+  console.log(`${kleur.green("Updated")} ${kleur.bold(record.name)} (${record.id})${sharing}`);
 }
 
 export async function automationsUpdateStatus(options: AutomationsUpdateStatusOptions) {
