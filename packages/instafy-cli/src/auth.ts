@@ -134,7 +134,7 @@ async function isStudioHealthy(studioUrl: string, timeoutMs: number): Promise<bo
 }
 
 async function resolveDefaultStudioUrl(controllerUrl: string): Promise<string> {
-  const hosted = "https://staging.instafy.dev";
+  const hosted = "https://instafy.dev";
   if (isStagingCli) {
     return hosted;
   }
