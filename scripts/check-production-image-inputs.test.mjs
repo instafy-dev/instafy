@@ -152,12 +152,15 @@ test("provider service pins the complete Docker CLI toolchain", () => {
     source,
     /^FROM alpine:3\.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40$/mu,
   );
+  assert.equal(argumentDefaults(source).get("OPENSSL_VERSION"), "3.5.8-r0");
   assert.equal(argumentDefaults(source).get("DOCKER_CLI_VERSION"), "29.5.2-r0");
   assert.equal(argumentDefaults(source).get("DOCKER_BUILDX_VERSION"), "0.30.1-r6");
   assert.equal(argumentDefaults(source).get("DOCKER_COMPOSE_VERSION"), "2.40.3-r6");
   assertOrdered(
     source,
     relativePath,
+    '"libcrypto3=${OPENSSL_VERSION}"',
+    '"libssl3=${OPENSSL_VERSION}"',
     '"docker-cli=${DOCKER_CLI_VERSION}"',
     '"docker-cli-buildx=${DOCKER_BUILDX_VERSION}"',
     '"docker-cli-compose=${DOCKER_COMPOSE_VERSION}"',
@@ -201,18 +204,29 @@ test("runtime downloads verify architecture-bound checksums before extraction", 
   );
   assert.equal(
     [...source.matchAll(/sha256sum --check --status/gu)].length,
-    7,
+    9,
     "runtime and webdev downloads must each verify their archive",
   );
   assert.equal(
     [...source.matchAll(/curl --proto '=https' --tlsv1\.2/gu)].length,
-    7,
+    9,
     "runtime release downloads must enforce HTTPS and TLS 1.2+",
   );
+
+  // pnpm 11.24.0 vendors node-tar 7.5.22. Earlier images carried
+  // vulnerable 7.5.19/7.5.20 copies (CVE-2026-73566).
+  assert.equal(argumentDefaults(source).get("PNPM_VERSION"), "11.24.0");
 
   // npm's vendored vulnerable packages must stay pinned by exact version and
   // tarball checksum, and both runtime flavors must verify every replaced
   // module's version after extraction.
+  assert.equal(argumentDefaults(source).get("NPM_TAR_VERSION"), "7.5.22");
+  assertPinnedChecksumArgument(
+    source,
+    "NPM_TAR_SHA256",
+    "b792c2d1c7fc770910522ca1ffc29eee02ee38de4fa3a01e7832eb705879c6c6",
+    relativePath,
+  );
   assert.equal(
     argumentDefaults(source).get("BRACE_EXPANSION_VERSION"),
     "5.0.9",
@@ -233,6 +247,18 @@ test("runtime downloads verify architecture-bound checksums before extraction", 
   // Patch EVERY npm installation in the image, not one hardcoded prefix: the
   // webdev (Playwright) base ships a second npm at /usr/lib/node_modules that
   // the /usr/local-only patch missed (run 30750744597, webdev cells only).
+  assert.equal(
+    [...source.matchAll(
+      /for nt_dir in \$\(find \/usr -type d -path '\*\/node_modules\/npm\/node_modules\/tar'/gu,
+    )].length,
+    2,
+    "both runtime flavors must patch every npm root's tar",
+  );
+  assert.doesNotMatch(
+    source,
+    /tar -xzf \/tmp\/npm-tar\.tgz -C \/usr\/local/u,
+    "the patch must not target a single hardcoded npm prefix",
+  );
   assert.equal(
     [...source.matchAll(
       /for be_dir in \$\(find \/usr -type d -path '\*\/node_modules\/npm\/node_modules\/brace-expansion'/gu,
@@ -258,6 +284,11 @@ test("runtime downloads verify architecture-bound checksums before extraction", 
     "the patch must not target a single hardcoded npm prefix",
   );
   // Each flavor fails the build if any vendored copy is left unpatched.
+  assert.equal(
+    [...source.matchAll(/unpatched npm tar copies/gu)].length,
+    2,
+    "both runtime flavors must fail closed on a remaining vulnerable copy",
+  );
   assert.equal(
     [...source.matchAll(/unpatched brace-expansion copies/gu)].length,
     2,
