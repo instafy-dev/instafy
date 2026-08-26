@@ -9,6 +9,7 @@ const listSendQueueMock = vi.hoisted(() => vi.fn());
 const enqueueSendQueueEntryMock = vi.hoisted(() => vi.fn());
 const cancelSendQueueEntryMock = vi.hoisted(() => vi.fn());
 const dispatchSendQueueEntryNowMock = vi.hoisted(() => vi.fn());
+const reorderSendQueueEntryMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../../../../services/runtimeController/sendQueue", () => ({
   CONVERSATION_SEND_QUEUE_EVENT: "instafy:conversation-send-queue",
@@ -16,12 +17,15 @@ vi.mock("../../../../services/runtimeController/sendQueue", () => ({
   enqueueSendQueueEntry: enqueueSendQueueEntryMock,
   cancelSendQueueEntry: cancelSendQueueEntryMock,
   dispatchSendQueueEntryNow: dispatchSendQueueEntryNowMock,
+  reorderSendQueueEntry: reorderSendQueueEntryMock,
 }));
 
 import type { ControllerSendQueueEntry } from "../../../../services/runtimeController/sendQueue";
 import {
   buildServerSendQueuePromptBody,
   mapServerSendQueueEntryToQueuedItem,
+  reconcileServerQueueEntryPositions,
+  reorderServerQueueEntries,
   useChatServerSendQueue,
 } from "../useChatServerSendQueue";
 
@@ -32,6 +36,7 @@ function createEntry(overrides: Partial<ControllerSendQueueEntry> = {}): Control
     id: "entry-1",
     conversationId: "controller-conversation-1",
     status: "queued",
+    queuePosition: 10,
     targetAgentHandles: ["octo"],
     message: { promptText: "Follow up on the codec lane" },
     errorMessage: null,
@@ -69,6 +74,7 @@ describe("useChatServerSendQueue", () => {
     enqueueSendQueueEntryMock.mockReset();
     cancelSendQueueEntryMock.mockReset();
     dispatchSendQueueEntryNowMock.mockReset();
+    reorderSendQueueEntryMock.mockReset();
   });
 
   afterEach(async () => {
@@ -107,6 +113,251 @@ describe("useChatServerSendQueue", () => {
         status: "queued",
       }),
     ]);
+    expect(resultRef.current?.serverQueueHydrated).toBe(true);
+  });
+
+  it("stays unhydrated until the initial queue request settles successfully", async () => {
+    let resolveList: (entries: ControllerSendQueueEntry[]) => void = () => undefined;
+    listSendQueueMock.mockImplementation(
+      () =>
+        new Promise<ControllerSendQueueEntry[]>((resolve) => {
+          resolveList = resolve;
+        }),
+    );
+    const resultRef = await renderHook("controller-conversation-1");
+    expect(resultRef.current?.serverQueueHydrated).toBe(false);
+
+    await act(async () => {
+      resolveList([]);
+      await Promise.resolve();
+    });
+    expect(resultRef.current?.serverQueueHydrated).toBe(true);
+  });
+
+  it("does not hydrate from a stale GET while a newer queue refresh is pending", async () => {
+    const resolvers: Array<(entries: ControllerSendQueueEntry[]) => void> = [];
+    listSendQueueMock.mockImplementation(
+      () =>
+        new Promise<ControllerSendQueueEntry[]>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    const resultRef = await renderHook("controller-conversation-1");
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("instafy:conversation-send-queue", {
+          detail: {
+            projectId: "project-1",
+            conversationId: "controller-conversation-1",
+            data: { action: "enqueued" },
+          },
+        }),
+      );
+    });
+    expect(resolvers).toHaveLength(2);
+
+    await act(async () => {
+      resolvers[0]?.([]);
+      await Promise.resolve();
+    });
+    expect(resultRef.current?.serverQueueHydrated).toBe(false);
+
+    await act(async () => {
+      resolvers[1]?.([createEntry()]);
+      await Promise.resolve();
+    });
+    expect(resultRef.current?.serverQueueHydrated).toBe(true);
+    expect(resultRef.current?.serverSendQueueItems).toHaveLength(1);
+  });
+
+  it("moves an entry before an anchor without mutating the input", () => {
+    const entries = [
+      createEntry({ id: "entry-1", queuePosition: 10 }),
+      createEntry({ id: "entry-2", queuePosition: 20 }),
+      createEntry({ id: "entry-3", queuePosition: 30 }),
+    ];
+
+    const reordered = reorderServerQueueEntries(entries, "entry-3", "entry-1");
+
+    expect(reordered.map((entry) => entry.id)).toEqual(["entry-3", "entry-1", "entry-2"]);
+    expect(entries.map((entry) => entry.id)).toEqual(["entry-1", "entry-2", "entry-3"]);
+    expect(reorderServerQueueEntries(reordered, "entry-3", "entry-1")).toBe(reordered);
+  });
+
+  it("adopts persisted positions without dropping concurrent queue changes", () => {
+    const first = createEntry({ id: "entry-1", queuePosition: 10 });
+    const second = createEntry({ id: "entry-2", queuePosition: 20 });
+    const concurrent = createEntry({ id: "entry-3", queuePosition: 30 });
+
+    const reconciled = reconcileServerQueueEntryPositions(
+      [second, first, concurrent],
+      [
+        { ...second, queuePosition: 10 },
+        { ...first, queuePosition: 20 },
+      ],
+    );
+
+    expect(reconciled.map((entry) => entry.id)).toEqual(["entry-2", "entry-1", "entry-3"]);
+  });
+
+  it("optimistically reorders once and adopts the authoritative persisted order", async () => {
+    const first = createEntry({ id: "entry-1", queuePosition: 10 });
+    const second = createEntry({ id: "entry-2", queuePosition: 20 });
+    listSendQueueMock.mockResolvedValue([first, second]);
+    let resolveReorder: (value: {
+      ok: boolean;
+      changed: boolean;
+      entries: ControllerSendQueueEntry[];
+    }) => void = () => undefined;
+    reorderSendQueueEntryMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveReorder = resolve;
+        }),
+    );
+    const resultRef = await renderHook("controller-conversation-1");
+
+    let reorderPromise: Promise<boolean> | undefined;
+    await act(async () => {
+      reorderPromise = resultRef.current?.reorderServerSendQueueEntry("entry-2", "entry-1");
+    });
+    expect(resultRef.current?.serverSendQueueItems.map((entry) => entry.id)).toEqual([
+      "entry-2",
+      "entry-1",
+    ]);
+    expect(resultRef.current?.serverQueueReordering).toBe(true);
+    await expect(
+      resultRef.current?.reorderServerSendQueueEntry("entry-1", null),
+    ).resolves.toBe(false);
+
+    await act(async () => {
+      resolveReorder({
+        ok: true,
+        changed: true,
+        entries: [
+          { ...second, queuePosition: 10 },
+          { ...first, queuePosition: 20 },
+        ],
+      });
+      await expect(reorderPromise).resolves.toBe(true);
+    });
+
+    expect(reorderSendQueueEntryMock).toHaveBeenCalledTimes(1);
+    expect(reorderSendQueueEntryMock).toHaveBeenCalledWith({
+      conversationId: "controller-conversation-1",
+      entryId: "entry-2",
+      beforeEntryId: "entry-1",
+    });
+    expect(resultRef.current?.serverSendQueueItems.map((entry) => entry.id)).toEqual([
+      "entry-2",
+      "entry-1",
+    ]);
+    expect(resultRef.current?.serverQueueReordering).toBe(false);
+  });
+
+  it("restores persisted order when reorder and reconciliation both fail", async () => {
+    const first = createEntry({ id: "entry-1", queuePosition: 10 });
+    const second = createEntry({ id: "entry-2", queuePosition: 20 });
+    listSendQueueMock.mockResolvedValueOnce([first, second]).mockResolvedValueOnce(null);
+    reorderSendQueueEntryMock.mockRejectedValue(new Error("request failed"));
+    const resultRef = await renderHook("controller-conversation-1");
+
+    let result: boolean | undefined;
+    await act(async () => {
+      result = await resultRef.current?.reorderServerSendQueueEntry("entry-2", "entry-1");
+    });
+
+    expect(result).toBe(false);
+    expect(resultRef.current?.serverSendQueueItems.map((entry) => entry.id)).toEqual([
+      "entry-1",
+      "entry-2",
+    ]);
+    expect(resultRef.current?.serverQueueReordering).toBe(false);
+  });
+
+  it("does not let a stale reorder refresh or unlock the next conversation", async () => {
+    const firstA = createEntry({ id: "entry-a-1", conversationId: "controller-conversation-1" });
+    const secondA = createEntry({
+      id: "entry-a-2",
+      conversationId: "controller-conversation-1",
+      queuePosition: 20,
+    });
+    const firstB = createEntry({ id: "entry-b-1", conversationId: "controller-conversation-2" });
+    const secondB = createEntry({
+      id: "entry-b-2",
+      conversationId: "controller-conversation-2",
+      queuePosition: 20,
+    });
+    listSendQueueMock.mockImplementation(({ conversationId }: { conversationId: string }) =>
+      Promise.resolve(
+        conversationId === "controller-conversation-1"
+          ? [firstA, secondA]
+          : [firstB, secondB],
+      ),
+    );
+    let rejectA: (error: Error) => void = () => undefined;
+    let resolveB: (value: {
+      ok: boolean;
+      changed: boolean;
+      entries: ControllerSendQueueEntry[];
+    }) => void = () => undefined;
+    reorderSendQueueEntryMock.mockImplementation(
+      ({ conversationId }: { conversationId: string }) =>
+        new Promise((resolve, reject) => {
+          if (conversationId === "controller-conversation-1") {
+            rejectA = reject;
+          } else {
+            resolveB = resolve;
+          }
+        }),
+    );
+    const resultRef = await renderHook("controller-conversation-1");
+    let reorderA: Promise<boolean> | undefined;
+    act(() => {
+      reorderA = resultRef.current?.reorderServerSendQueueEntry("entry-a-2", "entry-a-1");
+    });
+
+    await act(async () => {
+      root.render(
+        <Harness conversationControllerId="controller-conversation-2" resultRef={resultRef} />,
+      );
+    });
+    let reorderB: Promise<boolean> | undefined;
+    act(() => {
+      reorderB = resultRef.current?.reorderServerSendQueueEntry("entry-b-2", "entry-b-1");
+    });
+    expect(resultRef.current?.serverQueueReordering).toBe(true);
+
+    await act(async () => {
+      rejectA(new Error("stale failure"));
+      await expect(reorderA).resolves.toBe(false);
+    });
+    expect(resultRef.current?.serverSendQueueItems.map((entry) => entry.id)).toEqual([
+      "entry-b-2",
+      "entry-b-1",
+    ]);
+    expect(resultRef.current?.serverQueueReordering).toBe(true);
+    await expect(
+      resultRef.current?.reorderServerSendQueueEntry("entry-b-1", null),
+    ).resolves.toBe(false);
+
+    await act(async () => {
+      resolveB({
+        ok: true,
+        changed: true,
+        entries: [
+          { ...secondB, queuePosition: 10 },
+          { ...firstB, queuePosition: 20 },
+        ],
+      });
+      await expect(reorderB).resolves.toBe(true);
+    });
+    expect(resultRef.current?.serverQueueReordering).toBe(false);
+    expect(
+      listSendQueueMock.mock.calls.filter(
+        ([params]) => params.conversationId === "controller-conversation-1",
+      ),
+    ).toHaveLength(1);
   });
 
   it("refetches when a conversation.sendQueue event targets this conversation", async () => {

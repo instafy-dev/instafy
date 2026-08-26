@@ -35,6 +35,7 @@ describe("deriveChatVoiceComposerViewState", () => {
     expect(result.voiceStatusMessage).toBe("Listening. Speak now and release to stop.");
     expect(result.recordingIndicatorLabel).toBe("Voice input recording");
     expect(result.showVoicePrimaryAction).toBe(true);
+    expect(result.showVoiceSecondaryAction).toBe(false);
   });
 
   it("describes tap-mode startup state", () => {
@@ -78,6 +79,44 @@ describe("deriveChatVoiceComposerViewState", () => {
     );
 
     expect(result.showVoicePrimaryAction).toBe(false);
+    expect(result.showVoiceSecondaryAction).toBe(false);
+  });
+
+  it("keeps a dedicated voice action beside Send when a draft exists", () => {
+    const result = deriveChatVoiceComposerViewState(
+      createInput({
+        composerHasSendPayload: true,
+      }),
+    );
+
+    expect(result.showVoicePrimaryAction).toBe(false);
+    expect(result.showVoiceSecondaryAction).toBe(true);
+  });
+
+  it("keeps the dedicated draft mic in one slot through a hold and release", () => {
+    const lifecycleStates = [
+      createInput({ composerHasSendPayload: true }),
+      createInput({
+        composerHasSendPayload: true,
+        voiceHoldActive: true,
+        voiceInputStarting: true,
+      }),
+      createInput({
+        composerHasSendPayload: true,
+        voiceHoldActive: true,
+        voiceInputListening: true,
+      }),
+      createInput({
+        composerHasSendPayload: true,
+        voiceInputTranscribing: true,
+      }),
+    ];
+
+    for (const state of lifecycleStates) {
+      const result = deriveChatVoiceComposerViewState(state);
+      expect(result.showVoicePrimaryAction).toBe(false);
+      expect(result.showVoiceSecondaryAction).toBe(true);
+    }
   });
 
   it("describes continuous active transcript state", () => {

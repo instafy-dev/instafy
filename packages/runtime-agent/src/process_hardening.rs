@@ -183,7 +183,7 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::time::Duration;
 
-    use super::{harden_runtime_process, CAP_SYS_PTRACE_BIT};
+    use super::{CAP_SYS_PTRACE_BIT, harden_runtime_process};
 
     const CHILD_PROBE_ENV: &str = "INSTAFY_PROCESS_HARDENING_CHILD_PROBE";
     const INITIAL_SECRET_ENV: &str = "INSTAFY_PROCESS_HARDENING_INITIAL_SECRET";

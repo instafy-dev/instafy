@@ -13,9 +13,9 @@ use codex_core::config::{
 };
 use codex_core::test_support::EmptyUserInstructionsProvider;
 use codex_core::{
-    CodexAppsToolsCache, CodexThread, NewThread, ThreadManager, build_models_manager,
-    init_state_db, local_agent_graph_store_from_state_db, resolve_installation_id,
-    thread_store_from_config,
+    CodexAppsToolsCache, CodexThread, NewThread, SteerInputError, ThreadManager,
+    build_models_manager, init_state_db, local_agent_graph_store_from_state_db,
+    resolve_installation_id, thread_store_from_config,
 };
 use codex_exec_server::{EnvironmentManager, LOCAL_ENVIRONMENT_ID, LOCAL_FS};
 use codex_extension_api::empty_extension_registry;
@@ -43,6 +43,10 @@ use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+
+use crate::active_turn_input::{
+    ActiveTurnInputCommand, ActiveTurnInputOutcome, ActiveTurnInputReceiver,
+};
 
 use crate::job_cancel::JobCancelSignal;
 use crate::model_environment::{
@@ -592,6 +596,7 @@ pub struct CodexRunOptions {
     pub plain_text_write_mode: bool,
     pub require_first_tool_call: bool,
     pub cancel_signal: Option<JobCancelSignal>,
+    pub active_turn_input: Option<ActiveTurnInputReceiver>,
 }
 
 async fn run_on_fresh_task<T, F>(future: F) -> T
@@ -1452,7 +1457,7 @@ impl CodexClient {
         });
 
         let bounded_browser_mode = personal_browser_mode || shared_browser_mode;
-        conversation
+        let active_turn_id = conversation
             .submit(Op::UserInput {
                 items,
                 final_output_json_schema,
@@ -1496,18 +1501,55 @@ impl CodexClient {
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(5usize);
         let mut stream_error_count: usize = 0;
+        let mut active_turn_input = options.active_turn_input.clone();
+        let mut active_turn_input_readiness: Option<ActiveTurnInputReadinessGuard> = None;
 
         loop {
-            let event = next_codex_event(
-                &conversation,
-                cancel_signal.as_ref(),
-                options.shared_browser,
-            )
-            .await?;
+            let event = if let Some(receiver) = active_turn_input.as_ref() {
+                tokio::select! {
+                    command = receiver.recv() => {
+                        match command {
+                            Some(command) => {
+                                apply_active_turn_input(&conversation, command).await;
+                                continue;
+                            }
+                            None => {
+                                active_turn_input = None;
+                                continue;
+                            }
+                        }
+                    }
+                    event = next_codex_event(
+                        &conversation,
+                        cancel_signal.as_ref(),
+                        options.shared_browser,
+                    ) => event?,
+                }
+            } else {
+                next_codex_event(
+                    &conversation,
+                    cancel_signal.as_ref(),
+                    options.shared_browser,
+                )
+                .await?
+            };
             if browser_mode && bool_from_env("CODEX_DEBUG_BROWSER_EVENTS").unwrap_or(false) {
                 eprintln!("[codex-browser-events] event_msg={:?}", &event.msg);
             }
             tracing::debug!(msg = ?event.msg, "received Codex event");
+
+            // `submit` only confirms that the Op reached Codex's channel. Do
+            // not advertise steering until Codex proves that this exact
+            // submission ID became the live regular turn.
+            if active_turn_input_readiness.is_none()
+                && event.id == active_turn_id
+                && matches!(&event.msg, EventMsg::TurnStarted(_))
+            {
+                active_turn_input_readiness = Some(ActiveTurnInputReadinessGuard::new(
+                    options.active_turn_input.clone(),
+                    &active_turn_id,
+                ));
+            }
 
             collect_events(&mut aggregator, &event, &mut events, on_event)?;
 
@@ -1708,6 +1750,63 @@ impl CodexClient {
 
         run_result
     }
+}
+
+struct ActiveTurnInputReadinessGuard {
+    receiver: Option<ActiveTurnInputReceiver>,
+}
+
+impl ActiveTurnInputReadinessGuard {
+    fn new(receiver: Option<ActiveTurnInputReceiver>, turn_id: &str) -> Self {
+        if let Some(receiver) = receiver.as_ref() {
+            receiver.set_ready(Some(turn_id.to_string()));
+        }
+        Self { receiver }
+    }
+}
+
+impl Drop for ActiveTurnInputReadinessGuard {
+    fn drop(&mut self) {
+        if let Some(receiver) = self.receiver.as_ref() {
+            receiver.set_ready(None);
+        }
+    }
+}
+
+async fn apply_active_turn_input(conversation: &CodexThread, command: ActiveTurnInputCommand) {
+    let command_id = command.command_id;
+    let items = vec![UserInput::Text {
+        text: command.content.clone(),
+        text_elements: Vec::new(),
+    }];
+    let outcome = match conversation
+        .steer_input(
+            items,
+            Default::default(),
+            Some(&command.expected_turn_id),
+            Some(command_id.to_string()),
+            None,
+        )
+        .await
+    {
+        Ok(codex_turn_id) => ActiveTurnInputOutcome::Applied { codex_turn_id },
+        Err(error) => {
+            let error_message = match error {
+                SteerInputError::NoActiveTurn(_) => "Codex turn completed before input submission",
+                SteerInputError::ExpectedTurnMismatch { .. } => {
+                    "Codex active turn changed before input submission"
+                }
+                SteerInputError::ActiveTurnNotSteerable { .. } => {
+                    "Codex active turn does not accept steering input"
+                }
+                SteerInputError::EmptyInput => "Codex rejected empty steering input",
+            };
+            ActiveTurnInputOutcome::Rejected {
+                error_message: error_message.to_string(),
+            }
+        }
+    };
+    command.acknowledge(outcome);
 }
 
 async fn confirm_shared_browser_shutdown(conversation: &CodexThread) -> Result<()> {
