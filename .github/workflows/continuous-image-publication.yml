@@ -147,7 +147,7 @@ jobs:
               -H 'X-GitHub-Api-Version: 2026-03-10' \
               "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/dispatches" \
               --input - <<JSON
-          {"ref":"main","inputs":${inputs},"return_run_details":true}
+          {"ref":"main","inputs":${inputs}}
           JSON
           }
 
