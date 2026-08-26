@@ -227,6 +227,10 @@ import {
   type ConversationRosterHuman,
 } from "./conversationRosterMembers";
 import { ConversationRoster } from "./ConversationRoster";
+import {
+  clearChatParticipants,
+  publishChatParticipants,
+} from "./chatParticipantsStore";
 import { useChatComposerLayoutState } from "./useChatComposerLayoutState";
 import { useChatAutoScrollSync, useChatScrollController } from "./useChatScrollOrchestration";
 import {
@@ -4215,6 +4219,27 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     sendingAttachment,
     waitingForPreferredRuntime,
   });
+
+  // Mirror the roster, run state, and queue depth for surfaces outside the
+  // chat surface (the participants drawer is a StudioLayout sibling, so props
+  // cannot reach it). ChatPanel stays the single writer.
+  const participantsSnapshotConversationId = activeConversationEntry?.controllerId ?? null;
+  useEffect(() => {
+    publishChatParticipants({
+      conversationId: participantsSnapshotConversationId,
+      humans: conversationRosterHumans,
+      agents: conversationRosterAgents,
+      runningAgentHandles: Array.from(activeConversationRunAgentHandles),
+      totalQueuedCount,
+    });
+    return () => clearChatParticipants(participantsSnapshotConversationId);
+  }, [
+    activeConversationRunAgentHandles,
+    conversationRosterAgents,
+    conversationRosterHumans,
+    participantsSnapshotConversationId,
+    totalQueuedCount,
+  ]);
 
   const {
     browserModalBottomInset,
