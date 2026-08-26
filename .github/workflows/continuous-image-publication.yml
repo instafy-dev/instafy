@@ -147,7 +147,7 @@ jobs:
               -H 'X-GitHub-Api-Version: 2026-03-10' \
               "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/dispatches" \
               --input - <<JSON
-          {"ref":"main","inputs":${inputs}}
+          {"ref":"main","inputs":${inputs},"return_run_details":true}
           JSON
           }
 
@@ -210,7 +210,7 @@ jobs:
                   .event == "workflow_dispatch" and
                   .head_branch == "main" and
                   .head_sha == $sha and
-                  (.path | startswith($path + "@"))
+                  .path == $path
                 ' <<<"$payload" >/dev/null; then
                 echo "::error::Child run ${run_id} has unexpected provenance."
                 exit 1
@@ -248,7 +248,7 @@ jobs:
           wait_for_run \
             "$SERVICES_RUN_ID" \
             publish-production-services.yml \
-            production-services-release-manifest
+            production-service-release-manifest
           wait_for_run \
             "$RUNTIME_RUN_ID" \
             publish-runtime-agent.yml \
