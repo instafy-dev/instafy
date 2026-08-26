@@ -1,8 +1,6 @@
-import { Capacitor } from "@capacitor/core";
 import {
   type ComponentProps,
   type MutableRefObject,
-  type PointerEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -41,7 +39,6 @@ const CHAT_CONTINUOUS_ASSISTANT_REPLY_TIMEOUT_MS = 45_000;
 
 type VoiceProviderTriggerNoticeProps = ComponentProps<typeof ProviderTriggerNotice> | null;
 type ShowStatus = (message: string, intent?: StatusIntent, durationMs?: number) => void;
-type FocusInput = (options?: { force?: boolean }) => void;
 type OnInputChange = (
   conversationId: string | null,
   value: string,
@@ -56,7 +53,6 @@ type UseChatVoiceComposerControllerOptions = {
   activeConversationId: string | null;
   activeProjectId: string | null;
   chatInputRef: MutableRefObject<ChatInputHandle | null>;
-  focusInput: FocusInput;
   imageAttachmentCount: number;
   inputValue: string;
   invokeSubmitMessage: SubmitMessageFn;
@@ -74,7 +70,6 @@ export function useChatVoiceComposerController({
   activeConversationId,
   activeProjectId,
   chatInputRef,
-  focusInput,
   imageAttachmentCount,
   inputValue,
   invokeSubmitMessage,
@@ -91,9 +86,6 @@ export function useChatVoiceComposerController({
   const voiceHoldRequestedRef = useRef(false);
   const voiceStartAttemptRef = useRef(0);
   const voicePendingFinalTranscriptTimerRef = useRef<number | null>(null);
-  const voiceSendLongPressTimerRef = useRef<number | null>(null);
-  const voiceSendLongPressTriggeredRef = useRef(false);
-  const canLongPressSendForVoiceRef = useRef(false);
   const voiceConversationTurnRef = useRef<{
     attemptId: number;
     autoSubmit: boolean;
@@ -143,11 +135,6 @@ export function useChatVoiceComposerController({
         window.clearTimeout(voicePendingFinalTranscriptTimerRef.current);
         voicePendingFinalTranscriptTimerRef.current = null;
       }
-      if (voiceSendLongPressTimerRef.current !== null && typeof window !== "undefined") {
-        window.clearTimeout(voiceSendLongPressTimerRef.current);
-        voiceSendLongPressTimerRef.current = null;
-      }
-      voiceSendLongPressTriggeredRef.current = false;
       voiceHoldRequestedRef.current = false;
       voiceConversationTurnRef.current = null;
       voiceAutoSubmittingRef.current = false;
@@ -257,11 +244,6 @@ export function useChatVoiceComposerController({
       window.clearTimeout(voicePendingFinalTranscriptTimerRef.current);
       voicePendingFinalTranscriptTimerRef.current = null;
     }
-    if (voiceSendLongPressTimerRef.current !== null && typeof window !== "undefined") {
-      window.clearTimeout(voiceSendLongPressTimerRef.current);
-      voiceSendLongPressTimerRef.current = null;
-    }
-    voiceSendLongPressTriggeredRef.current = false;
     voiceHoldRequestedRef.current = false;
     voiceConversationTurnRef.current = null;
     voiceAutoSubmittingRef.current = false;
@@ -758,112 +740,14 @@ export function useChatVoiceComposerController({
     voiceInputTranscribing,
   ]);
 
-  const clearSendVoiceLongPressTimer = useCallback(() => {
-    if (voiceSendLongPressTimerRef.current !== null && typeof window !== "undefined") {
-      window.clearTimeout(voiceSendLongPressTimerRef.current);
-      voiceSendLongPressTimerRef.current = null;
-    }
-  }, []);
-
-  const captureTouchLikePressTarget = useCallback((event: PointerEvent<HTMLButtonElement>) => {
-    const pointerType = (event.pointerType ?? "").toLowerCase();
-    const touchLikePointer = Capacitor.isNativePlatform() || pointerType === "touch" || pointerType === "pen";
-    if (!touchLikePointer) {
-      return;
-    }
-    try {
-      event.currentTarget.setPointerCapture(event.pointerId);
-    } catch {
-      // Some platforms can reject capture during transient state changes.
-    }
-  }, []);
-
-  const releaseCapturedPressTarget = useCallback((event: PointerEvent<HTMLButtonElement>) => {
-    try {
-      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-        event.currentTarget.releasePointerCapture(event.pointerId);
-      }
-    } catch {
-      // Ignore repeated release attempts.
-    }
-  }, []);
-
   const composerHasSendPayload = inputValue.trim().length > 0 || imageAttachmentCount > 0;
-  const canLongPressSendForVoice =
-    touchLikeInput &&
-    voiceInputSupported &&
-    composerHasSendPayload &&
-    !voiceInputStarting &&
-    !voiceInputListening &&
-    !voiceInputTranscribing &&
-    !voiceHoldActive &&
-    !sendingAttachment;
-  canLongPressSendForVoiceRef.current = canLongPressSendForVoice;
-
-  const handleSendButtonPointerDown = useCallback(
-    (event: PointerEvent<HTMLButtonElement>) => {
-      captureTouchLikePressTarget(event);
-      const pointerType = (event.pointerType ?? "").toLowerCase();
-      const touchLikePointer = pointerType === "touch" || pointerType === "pen";
-      if (!Capacitor.isNativePlatform() && !touchLikePointer) {
-        return;
-      }
-      if (canLongPressSendForVoiceRef.current) {
-        return;
-      }
-      event.preventDefault();
-      focusInput({ force: true });
-    },
-    [captureTouchLikePressTarget, focusInput],
-  );
-
-  const handleSendButtonPressStart = useCallback(
-    (event: { pointerType?: string }) => {
-      if (!canLongPressSendForVoiceRef.current) {
-        return;
-      }
-      const pointerType = (event.pointerType ?? "").toLowerCase();
-      if (pointerType && pointerType !== "touch" && pointerType !== "pen") {
-        return;
-      }
-      clearSendVoiceLongPressTimer();
-      voiceSendLongPressTriggeredRef.current = false;
-      if (typeof window === "undefined") {
-        return;
-      }
-      voiceSendLongPressTimerRef.current = window.setTimeout(() => {
-        voiceSendLongPressTimerRef.current = null;
-        voiceSendLongPressTriggeredRef.current = true;
-        if (touchLikeInput && typeof document !== "undefined") {
-          const activeElement = document.activeElement;
-          if (activeElement instanceof HTMLElement) {
-            activeElement.blur();
-          }
-        }
-        void handleStartVoiceInputHold();
-      }, 260);
-    },
-    [clearSendVoiceLongPressTimer, handleStartVoiceInputHold, touchLikeInput],
-  );
-
-  const handleSendButtonPressEnd = useCallback(() => {
-    const triggeredVoiceInput = voiceSendLongPressTriggeredRef.current;
-    clearSendVoiceLongPressTimer();
-    if (!triggeredVoiceInput) {
-      return;
-    }
-    handleStopVoiceInputHold();
-  }, [clearSendVoiceLongPressTimer, handleStopVoiceInputHold]);
-
   const handleSendButtonPress = useCallback(() => {
     if (
-      voiceSendLongPressTriggeredRef.current ||
       voiceInputStarting ||
       voiceInputListening ||
       voiceInputTranscribing ||
       voiceHoldActive
     ) {
-      voiceSendLongPressTriggeredRef.current = false;
       return;
     }
     scheduleSubmitMessage();
@@ -872,6 +756,7 @@ export function useChatVoiceComposerController({
   const {
     recordingIndicatorLabel,
     showVoicePrimaryAction,
+    showVoiceSecondaryAction,
     showVoiceStatus,
     voiceActionActive,
     voiceStatusMessage,
@@ -935,18 +820,14 @@ export function useChatVoiceComposerController({
   ]);
 
   return {
-    captureTouchLikePressTarget,
     handleChatVoiceTap,
-    handleSendButtonPointerDown,
     handleSendButtonPress,
-    handleSendButtonPressEnd,
-    handleSendButtonPressStart,
     handleStartVoiceInputHold,
     handleStopVoiceInputHold,
     providerTriggerNoticeProps,
     recordingIndicatorLabel,
-    releaseCapturedPressTarget,
     showVoicePrimaryAction,
+    showVoiceSecondaryAction,
     showVoiceStatus,
     voiceActionActive,
     voiceDebugState,

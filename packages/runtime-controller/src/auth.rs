@@ -378,6 +378,7 @@ fn issue_agent_token_with_browser_profile_scope(
         "agent.heartbeat".to_string(),
         "agent.message".to_string(),
         "agent.complete".to_string(),
+        "agent.input".to_string(),
         "agent.secrets".to_string(),
         "agent.stop".to_string(),
     ];
@@ -788,6 +789,7 @@ mod tests {
             stripe: None,
             operator_console_org_id: None,
             operator_console_allowed_user_ids: vec![],
+            bug_reports_operator_user_ids: vec![],
             desktop_release_github_owner: None,
             desktop_release_github_repo: None,
             desktop_release_github_token: None,
