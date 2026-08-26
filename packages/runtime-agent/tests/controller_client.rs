@@ -475,6 +475,62 @@ async fn controller_client_registers_and_leases() {
 }
 
 #[tokio::test]
+async fn renewal_register_presents_the_renewed_runtime_token() {
+    let shared = Arc::new(Mutex::new(ReceivedRequests::default()));
+    let project_id = Uuid::new_v4();
+    let key_id = "test-agent-key".to_string();
+    let jwks = build_jwks(test_origin_public_key(), &key_id);
+    let state = ControllerState {
+        requests: shared.clone(),
+        private_key_pem: Arc::new(test_origin_private_key().to_string()),
+        jwks_body: Arc::new(jwks),
+        key_id,
+        project_id,
+    };
+    let addr = spawn_controller(state).await;
+    let workspace_root = tempfile::tempdir().expect("temp workspace root");
+    let config = test_config(addr, project_id, workspace_root.path());
+
+    let client = ControllerClient::new(&config).expect("client init");
+    let initial = client
+        .register_runtime(&config)
+        .await
+        .expect("initial register");
+    // The renewal scheduler needs to know when the agent token lapses.
+    let expires_at = initial
+        .agent_token_expires_at
+        .as_deref()
+        .expect("register surfaces agent token expiry");
+    let expires_at = chrono::DateTime::parse_from_rfc3339(expires_at).expect("rfc3339 expiry");
+    assert!(expires_at > Utc::now());
+
+    // A proactive renewal re-registers with the same client: it must carry the
+    // runtime token minted by the previous register, not the bootstrap token.
+    client
+        .register_runtime(&config)
+        .await
+        .expect("renewal register");
+
+    let captured = shared.lock().unwrap();
+    assert_eq!(captured.register.len(), 2);
+    let bearer = |request: &RecordedRequest| {
+        request
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .map(|(_, value)| value.clone())
+    };
+    assert_eq!(
+        bearer(&captured.register[0]).as_deref(),
+        Some("Bearer test-runtime-token")
+    );
+    assert_eq!(
+        bearer(&captured.register[1]).as_deref(),
+        Some("Bearer fresh-runtime-token")
+    );
+}
+
+#[tokio::test]
 async fn tunnel_request_prefers_fresh_runtime_token() {
     let shared = Arc::new(Mutex::new(ReceivedRequests::default()));
     let project_id = Uuid::new_v4();
