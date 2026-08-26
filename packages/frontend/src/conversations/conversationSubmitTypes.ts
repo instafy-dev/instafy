@@ -17,6 +17,7 @@ export interface SubmitConversationOptions {
   dispatchInput?: string | null;
   metadata?: Record<string, unknown> | null;
   runtimeOverride?: SubmitConversationRuntimeOverride | null;
+  expectedLaneIdle?: boolean;
 }
 
 export interface UseConversationSubmitFlowArgs {

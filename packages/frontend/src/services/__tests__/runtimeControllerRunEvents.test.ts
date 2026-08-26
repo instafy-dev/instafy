@@ -424,6 +424,67 @@ describe("runtime controller run event streaming", () => {
     unsubscribe();
   });
 
+  it("retains the authoritative job id from a run event before snapshot hydration", async () => {
+    const { subscribeToRunsFromController } = await import(
+      "../runtimeController/runs"
+    );
+    const onRun = vi.fn();
+    const unsubscribe = subscribeToRunsFromController({
+      projectId: "11111111-1111-4111-8111-111111111111",
+      quietErrors: true,
+      onRun,
+    });
+
+    await vi.waitFor(() => expect(streamingRequests).toHaveLength(1));
+    const runId = "22222222-2222-4222-8222-222222222222";
+    const authoritativeJobId = "33333333-3333-4333-8333-333333333333";
+    streamingRequests[0].write(
+      `data: ${JSON.stringify({
+        kind: "run.progress",
+        project_id: "11111111-1111-4111-8111-111111111111",
+        conversation_id: "44444444-4444-4444-8444-444444444444",
+        run_id: runId,
+        job_id: authoritativeJobId,
+        timestamp: "2026-08-17T06:08:05.588Z",
+        data: {
+          status: "in_progress",
+          jobId: authoritativeJobId,
+          run: {
+            id: runId,
+            project_id: "11111111-1111-4111-8111-111111111111",
+            conversation_id: "44444444-4444-4444-8444-444444444444",
+            run_type: "prompt",
+            status: "in_progress",
+            progress: 1,
+            progress_stage: "agent:leased",
+            metadata: {
+              custom: true,
+              jobId: "55555555-5555-4555-8555-555555555555",
+            },
+            created_at: "2026-08-17T06:08:05.087Z",
+            updated_at: "2026-08-17T06:08:05.588Z",
+          },
+        },
+      })}\n\n`,
+    );
+
+    await vi.waitFor(() => expect(onRun).toHaveBeenCalledOnce());
+    expect(onRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: runId,
+        status: "in_progress",
+        conversationId: "44444444-4444-4444-8444-444444444444",
+        metadata: {
+          custom: true,
+          jobId: authoritativeJobId,
+        },
+      }),
+      "UPDATE",
+    );
+
+    unsubscribe();
+  });
+
   it("authenticates with a header and parses chunked multiline CRLF events", async () => {
     const { subscribeToRunsFromController } = await import(
       "../runtimeController/runs"

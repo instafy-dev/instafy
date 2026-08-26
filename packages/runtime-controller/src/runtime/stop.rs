@@ -99,6 +99,7 @@ pub(crate) struct StopOutcome {
     pub(crate) requeued_jobs: Vec<Uuid>,
     pub(crate) failed_personal_browser_jobs: Vec<Uuid>,
     pub(crate) failed_shared_browser_jobs: Vec<Uuid>,
+    pub(crate) job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
     pub(crate) skip_reason: Option<String>,
     pub(crate) released_runtime_lease_id: Option<Uuid>,
 }
@@ -112,6 +113,7 @@ impl StopOutcome {
             requeued_jobs: Vec::new(),
             failed_personal_browser_jobs: Vec::new(),
             failed_shared_browser_jobs: Vec::new(),
+            job_input_state_updates: Vec::new(),
             skip_reason: Some(reason.into()),
             released_runtime_lease_id: None,
         }
@@ -145,12 +147,15 @@ pub(crate) const PERSONAL_BROWSER_DISCONNECTED_ERROR: &str =
     "Personal Browser disconnected. Reconnect the desktop app and retry this request.";
 pub(crate) const SHARED_BROWSER_DISCONNECTED_ERROR: &str =
     "Shared Browser disconnected because its runtime stopped. Reopen the Shared Browser and retry this request.";
+const UNAVAILABLE_RUNTIME_INPUT_REJECTION: &str =
+    "runtime stopped before active-turn input acknowledgement";
 
 #[derive(Debug, Default)]
 pub(super) struct UnavailableRuntimeJobDisposition {
     pub(super) requeued_jobs: Vec<Uuid>,
     pub(super) failed_personal_browser_jobs: Vec<Uuid>,
     pub(super) failed_shared_browser_jobs: Vec<Uuid>,
+    pub(super) job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
 }
 
 enum StopAuth {
@@ -197,7 +202,7 @@ async fn quarantine_runtime_for_provider_release(
     runtime: &RuntimeDetails,
     lease_id: &Uuid,
     reason: &str,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
+) -> Result<Vec<crate::send_intents::JobInputStateUpdate>, (StatusCode, Json<ApiError>)> {
     let lease = fetch_runtime_lease_for_update(transaction, lease_id).await?;
     if lease.project_id != runtime.project_id
         || lease.runtime_id != Some(runtime.id)
@@ -285,7 +290,7 @@ async fn quarantine_runtime_for_provider_release(
     )
     .await?;
 
-    Ok(())
+    Ok(job_disposition.job_input_state_updates)
 }
 
 async fn preflight_runtime_stop(
@@ -381,13 +386,19 @@ pub(super) async fn stop_runtime_safely(
             .as_deref()
             .unwrap_or(options.source)
             .to_string();
-        quarantine_runtime_for_provider_release(&transaction, &runtime, &lease_id, &stop_reason)
-            .await?;
+        let quarantine_input_updates = quarantine_runtime_for_provider_release(
+            &transaction,
+            &runtime,
+            &lease_id,
+            &stop_reason,
+        )
+        .await?;
         transaction.commit().await.map_err(|error| {
             internal_error(format!(
                 "failed to commit runtime provider-release quarantine: {error}"
             ))
         })?;
+        crate::send_intents::publish_job_input_state_updates(state, &quarantine_input_updates);
         drop(connection);
 
         let provider_release = release_runtime_via_provider(
@@ -450,6 +461,10 @@ pub(super) async fn stop_runtime_safely(
         final_transaction.commit().await.map_err(|error| {
             internal_error(format!("failed to commit stop finalization: {error}"))
         })?;
+        crate::send_intents::publish_job_input_state_updates(
+            state,
+            &outcome.job_input_state_updates,
+        );
         return Ok(SafeRuntimeStop {
             runtime: runtime_snapshot,
             outcome,
@@ -462,6 +477,10 @@ pub(super) async fn stop_runtime_safely(
             .commit()
             .await
             .map_err(|error| internal_error(format!("failed to commit runtime stop: {error}")))?;
+        crate::send_intents::publish_job_input_state_updates(
+            state,
+            &outcome.job_input_state_updates,
+        );
     } else {
         transaction.rollback().await.map_err(|error| {
             internal_error(format!("failed to rollback skipped runtime stop: {error}"))
@@ -695,7 +714,7 @@ pub(crate) async fn runtime_stop(
 
     let (outcome, provider_release) =
         if let Some(lease_id) = fenced_release_lease_id.filter(|_| !preflight_skip) {
-            quarantine_runtime_for_provider_release(
+            let quarantine_input_updates = quarantine_runtime_for_provider_release(
                 &transaction,
                 &runtime,
                 &lease_id,
@@ -707,6 +726,7 @@ pub(crate) async fn runtime_stop(
                     "failed to commit runtime provider-release quarantine: {error}"
                 ))
             })?;
+            crate::send_intents::publish_job_input_state_updates(&state, &quarantine_input_updates);
             drop(connection);
 
             let provider_release = release_runtime_via_provider(
@@ -766,6 +786,10 @@ pub(crate) async fn runtime_stop(
                     "failed to commit runtime stop finalization: {error}"
                 ))
             })?;
+            crate::send_intents::publish_job_input_state_updates(
+                &state,
+                &outcome.job_input_state_updates,
+            );
             // `revoke_tunnels_for_scope` acquires its own pool connection.
             // Release the stop-finalization connection first so this path also
             // works with DATABASE_POOL_SIZE=1.
@@ -776,6 +800,10 @@ pub(crate) async fn runtime_stop(
             transaction.commit().await.map_err(|error| {
                 internal_error(format!("failed to commit runtime stop: {error}"))
             })?;
+            crate::send_intents::publish_job_input_state_updates(
+                &state,
+                &outcome.job_input_state_updates,
+            );
             drop(connection);
 
             let provider_release = if require_provider_release
@@ -889,7 +917,7 @@ pub(crate) async fn stop_runtime_for_project(
 
     let (outcome, provider_release) =
         if let Some(lease_id) = provider_release_lease_id {
-            quarantine_runtime_for_provider_release(
+            let quarantine_input_updates = quarantine_runtime_for_provider_release(
                 &transaction,
                 &runtime,
                 &lease_id,
@@ -901,6 +929,7 @@ pub(crate) async fn stop_runtime_for_project(
                     "failed to commit runtime provider-release quarantine: {error}"
                 ))
             })?;
+            crate::send_intents::publish_job_input_state_updates(state, &quarantine_input_updates);
             drop(connection);
 
             let provider_release = release_runtime_via_provider(
@@ -956,6 +985,10 @@ pub(crate) async fn stop_runtime_for_project(
                     "failed to commit runtime stop finalization: {error}"
                 ))
             })?;
+            crate::send_intents::publish_job_input_state_updates(
+                state,
+                &outcome.job_input_state_updates,
+            );
             // Tunnel revocation below acquires a fresh pool connection.
             drop(final_connection);
             (outcome, provider_release)
@@ -964,6 +997,10 @@ pub(crate) async fn stop_runtime_for_project(
             transaction.commit().await.map_err(|error| {
                 internal_error(format!("failed to commit runtime stop: {error}"))
             })?;
+            crate::send_intents::publish_job_input_state_updates(
+                state,
+                &outcome.job_input_state_updates,
+            );
             drop(connection);
             (outcome, ProviderReleaseOutcome::default())
         };
@@ -1249,13 +1286,19 @@ pub(crate) async fn runtime_remove(
     if let Some(lease_id) = runtime.active_lease_id {
         fetch_runtime_lease_for_update(&transaction, &lease_id).await?;
         if runtime_requires_provider_release(&state, &runtime) {
-            quarantine_runtime_for_provider_release(&transaction, &runtime, &lease_id, &stop_label)
-                .await?;
+            let quarantine_input_updates = quarantine_runtime_for_provider_release(
+                &transaction,
+                &runtime,
+                &lease_id,
+                &stop_label,
+            )
+            .await?;
             transaction.commit().await.map_err(|error| {
                 internal_error(format!(
                     "failed to commit runtime removal quarantine: {error}"
                 ))
             })?;
+            crate::send_intents::publish_job_input_state_updates(&state, &quarantine_input_updates);
             drop(connection);
 
             let provider_release = release_runtime_via_provider(
@@ -1322,6 +1365,10 @@ pub(crate) async fn runtime_remove(
             final_transaction.commit().await.map_err(|error| {
                 internal_error(format!("failed to commit runtime removal: {error}"))
             })?;
+            crate::send_intents::publish_job_input_state_updates(
+                &state,
+                &outcome.job_input_state_updates,
+            );
             // Runtime preferences and tunnel revocation may perform nested
             // work; never retain the sole database connection across them.
             drop(final_connection);
@@ -1379,6 +1426,7 @@ pub(crate) async fn runtime_remove(
         .commit()
         .await
         .map_err(|error| internal_error(format!("failed to commit runtime removal: {error}")))?;
+    crate::send_intents::publish_job_input_state_updates(&state, &outcome.job_input_state_updates);
     drop(connection);
 
     // Revoke tunnels for this runtime scope.
@@ -1544,6 +1592,9 @@ async fn fail_browser_jobs_for_unavailable_runtime(
                  error_message = $3,
                  leased_by_runtime_id = null,
                  lease_expires_at = null,
+                 active_input_ready_runtime_id = null,
+                 active_input_ready_expires_at = null,
+                 active_input_ready_turn_id = null,
                  heartbeat_at = null,
                  completed_at = now(),
                  updated_at = now()
@@ -1642,6 +1693,9 @@ pub(super) async fn resolve_jobs_for_unavailable_runtime(
                  leased_by_runtime_id = null,
                  lease_expires_at = null,
                  leased_at = null,
+                 active_input_ready_runtime_id = null,
+                 active_input_ready_expires_at = null,
+                 active_input_ready_turn_id = null,
                  heartbeat_at = null,
                  target_runtime_id = null,
                  payload = payload || jsonb_build_object(
@@ -1671,7 +1725,23 @@ pub(super) async fn resolve_jobs_for_unavailable_runtime(
     let requeued_jobs = requeued_rows
         .into_iter()
         .map(|row| row.get::<_, Uuid>("id"))
-        .collect();
+        .collect::<Vec<_>>();
+
+    let mut job_input_state_updates = Vec::new();
+    for job_id in failed_personal_browser_jobs
+        .iter()
+        .chain(failed_shared_browser_jobs.iter())
+        .chain(requeued_jobs.iter())
+    {
+        job_input_state_updates.extend(
+            crate::send_intents::reject_unacknowledged_inputs_for_job(
+                transaction,
+                job_id,
+                UNAVAILABLE_RUNTIME_INPUT_REJECTION,
+            )
+            .await?,
+        );
+    }
 
     if !failed_personal_browser_jobs.is_empty() {
         record_runtime_event(
@@ -1709,6 +1779,7 @@ pub(super) async fn resolve_jobs_for_unavailable_runtime(
         requeued_jobs,
         failed_personal_browser_jobs,
         failed_shared_browser_jobs,
+        job_input_state_updates,
     })
 }
 
@@ -1755,6 +1826,7 @@ pub(crate) async fn perform_runtime_stop(
     let requeued_jobs = job_disposition.requeued_jobs;
     let failed_personal_browser_jobs = job_disposition.failed_personal_browser_jobs;
     let failed_shared_browser_jobs = job_disposition.failed_shared_browser_jobs;
+    let job_input_state_updates = job_disposition.job_input_state_updates;
 
     if should_skip_stop_for_terminal_runtime(runtime) {
         // Job reconciliation may still have changed rows that must commit, but
@@ -1772,6 +1844,7 @@ pub(crate) async fn perform_runtime_stop(
             requeued_jobs,
             failed_personal_browser_jobs,
             failed_shared_browser_jobs,
+            job_input_state_updates,
             skip_reason: Some("already_stopped".to_string()),
             released_runtime_lease_id: None,
         });
@@ -1900,6 +1973,7 @@ pub(crate) async fn perform_runtime_stop(
         requeued_jobs,
         failed_personal_browser_jobs,
         failed_shared_browser_jobs,
+        job_input_state_updates,
         skip_reason: None,
         released_runtime_lease_id,
     })
@@ -2126,6 +2200,7 @@ mod tests {
             requeued_jobs: Vec::new(),
             failed_personal_browser_jobs: Vec::new(),
             failed_shared_browser_jobs: Vec::new(),
+            job_input_state_updates: Vec::new(),
             skip_reason: Some("active_jobs".to_string()),
             released_runtime_lease_id: None,
         };
@@ -2201,6 +2276,7 @@ mod tests {
             requeued_jobs: Vec::new(),
             failed_personal_browser_jobs: Vec::new(),
             failed_shared_browser_jobs: Vec::new(),
+            job_input_state_updates: Vec::new(),
             skip_reason: None,
             released_runtime_lease_id: None,
         }
@@ -2504,7 +2580,8 @@ pub(crate) async fn runtime_mark_offline(
     // Offline is terminal for a device-local Personal Browser target. Resolve
     // bindings in the same transaction instead of leaving them for delayed
     // terminal-record cleanup.
-    resolve_jobs_for_unavailable_runtime(&transaction, &runtime, "dev_runtime_offline").await?;
+    let job_disposition =
+        resolve_jobs_for_unavailable_runtime(&transaction, &runtime, "dev_runtime_offline").await?;
 
     let rows_updated = transaction
         .execute(
@@ -2524,6 +2601,10 @@ pub(crate) async fn runtime_mark_offline(
             "failed to finalize runtime offline update: {error}"
         ))
     })?;
+    crate::send_intents::publish_job_input_state_updates(
+        &state,
+        &job_disposition.job_input_state_updates,
+    );
 
     publish_controller_event(
         &state.events,
