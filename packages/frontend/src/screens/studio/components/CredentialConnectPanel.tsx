@@ -13,6 +13,10 @@ import {
   shouldPromptForCodexAuthJsonUpload,
   useDesktopCodexAuthJsonStatus,
 } from "./desktopCodexAuthJson";
+import {
+  canUseDevServerCodexAuthJson,
+  connectDevServerCodexAuthJson,
+} from "./devServerCodexAuthJson";
 import { formatProxyUpstreamErrorSummary } from "./proxyError";
 
 interface CredentialConnectPanelProps {
@@ -54,6 +58,7 @@ export function CredentialConnectPanel({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const canUseDesktopConnect = canUseDesktopCodexAuthJson();
+  const canUseDevServerConnect = canUseDevServerCodexAuthJson();
   const desktopCodexAuthJsonStatus = useDesktopCodexAuthJsonStatus(canUseDesktopConnect);
   const shouldPromptForAuthJsonUpload = shouldPromptForCodexAuthJsonUpload(
     desktopCodexAuthJsonStatus,
@@ -104,6 +109,29 @@ export function CredentialConnectPanel({
       setBusy(false);
     }
   }, [busy, canUseDesktopConnect, onClose, onConnected, shouldMakeDefault, showStatus]);
+
+  const handleConnectDevServer = useCallback(async () => {
+    if (busy) {
+      return;
+    }
+    setBusy(true);
+    try {
+      // Always take over as default: the point of the dev seed is replacing a
+      // stale snapshot with the machine's current login in one click.
+      const result = await connectDevServerCodexAuthJson({ makeDefault: true });
+      if (!result.success) {
+        throw new Error(result.error ?? "Unable to save credentials.");
+      }
+      showStatus("Connected this machine's Codex login.", "success", 3500);
+      onConnected?.();
+      onClose?.();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      showStatus(message, "error", 5000);
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, onClose, onConnected, showStatus]);
 
   const beginDeviceAuth = useCallback(async () => {
     if (busy) {
@@ -429,6 +457,18 @@ export function CredentialConnectPanel({
           {showDeviceAuthConnect ? (
             <Button onPress={beginDeviceAuth} variant="primary" size="xs" radius="full" isDisabled={busy}>
               Connect with ChatGPT
+            </Button>
+          ) : null}
+          {canUseDevServerConnect ? (
+            <Button
+              onPress={() => void handleConnectDevServer()}
+              variant="outline"
+              size="xs"
+              radius="full"
+              isDisabled={busy}
+              data-testid="credentials-connect-dev-seed"
+            >
+              Use local Codex login (dev)
             </Button>
           ) : null}
 
