@@ -26,7 +26,7 @@ use crate::{
     publish_controller_event_with_conversation, runs, ApiError, AppState, EventHub,
 };
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConversationPromptBody {
     pub(crate) session_id: Option<String>,
@@ -53,6 +53,8 @@ pub(crate) struct ConversationPromptBody {
     pub(crate) runtime_display_name: Option<String>,
     #[serde(rename = "preferRuntime", alias = "prefer_runtime")]
     pub(crate) prefer_runtime: Option<bool>,
+    #[serde(rename = "expectedLaneIdle", alias = "expected_lane_idle")]
+    pub(crate) expected_lane_idle: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -198,7 +200,7 @@ pub(crate) struct ConversationRecord {
 }
 
 #[allow(dead_code)]
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct ConversationMessageRow {
     pub(crate) id: Uuid,
     pub(crate) conversation_id: Uuid,
@@ -1626,6 +1628,7 @@ pub(crate) struct JobCancellationSet {
     pub(crate) job_ids: Vec<Uuid>,
     pub(crate) pairs: Vec<(Uuid, Uuid)>,
     pub(crate) notice: ConversationMessageRow,
+    pub(crate) job_input_state_updates: Vec<crate::send_intents::JobInputStateUpdate>,
 }
 
 pub(crate) async fn cancel_jobs_within_transaction(
@@ -1657,12 +1660,27 @@ pub(crate) async fn cancel_jobs_within_transaction(
                  summary = coalesce(summary, $2),
                  completed_at = now(),
                  lease_expires_at = null,
+                 active_input_ready_runtime_id = null,
+                 active_input_ready_expires_at = null,
+                 active_input_ready_turn_id = null,
                  heartbeat_at = now()
              where id = any($1)",
             &[&job_ids, &summary_ref],
         )
         .await
         .map_err(|error| internal_error(format!("failed to cancel agent jobs: {error}")))?;
+
+    let mut job_input_state_updates = Vec::new();
+    for job_id in &job_ids {
+        job_input_state_updates.extend(
+            crate::send_intents::reject_unacknowledged_inputs_for_job(
+                transaction,
+                job_id,
+                "agent job was canceled before input acknowledgement",
+            )
+            .await?,
+        );
+    }
 
     if !run_ids.is_empty() {
         transaction
@@ -1696,6 +1714,7 @@ pub(crate) async fn cancel_jobs_within_transaction(
         job_ids,
         pairs,
         notice,
+        job_input_state_updates,
     })
 }
 
@@ -1724,6 +1743,10 @@ where
     crate::notifications::enqueue_message_push_notifications(
         state.clone(),
         cancellation.notice.clone(),
+    );
+    crate::send_intents::publish_job_input_state_updates(
+        state,
+        &cancellation.job_input_state_updates,
     );
 
     canceled_run_ids
@@ -2286,6 +2309,22 @@ pub(crate) async fn post_conversation_message(
         body.prefer_runtime = Some(true);
     }
 
+    let expected_lane_idle = body.expected_lane_idle.unwrap_or(false);
+    let queued_message = if expected_lane_idle {
+        Some(serde_json::to_value(&body).map_err(|error| {
+            internal_error(format!(
+                "failed to preserve interactive message for lane admission: {error}"
+            ))
+        })?)
+    } else {
+        None
+    };
+    let client_send_id = body
+        .metadata
+        .as_ref()
+        .and_then(extract_client_message_id_from_metadata)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+
     let dispatch_request = build_dispatch_request_from_conversation(
         &conversation.project_id,
         Some(&conversation_id),
@@ -2299,13 +2338,42 @@ pub(crate) async fn post_conversation_message(
     }
 
     request.conversation_is_new = false;
+    request.expected_lane_idle = expected_lane_idle;
 
     if let Some(conversation_id) = request.conversation_id {
         inject_conversation_metadata(&mut request.metadata, &conversation_id);
     }
 
-    let response = process_dispatch_prompt(&state, &access_context, request).await?;
-    Ok(Json(response))
+    match process_dispatch_prompt(&state, &access_context, request).await {
+        Ok(response) => Ok(Json(response)),
+        Err((StatusCode::CONFLICT, Json(api_error)))
+            if expected_lane_idle && api_error.code.as_deref() == Some("dispatch_lane_busy") =>
+        {
+            // The composer observed an idle lane, but another linearized
+            // dispatch won the shared fence. Preserve the user's message in
+            // the durable queue instead of either losing it or creating a
+            // concurrent same-agent run.
+            let message = queued_message.unwrap_or_else(|| unreachable!());
+            crate::send_queue::enqueue_prompt_with_context(
+                &state,
+                &context,
+                conversation_id,
+                &client_send_id,
+                message,
+            )
+            .await?;
+            Ok(Json(DispatchPromptResponse {
+                run_id: None,
+                run_ids: None,
+                prompt_id: None,
+                job_id: None,
+                job_ids: None,
+                status: "queued".to_string(),
+                conversation_id: Some(conversation_id),
+            }))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) async fn list_conversation_runs(

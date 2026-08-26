@@ -108,6 +108,7 @@ function createOptions(
     showStatus: vi.fn(),
     shouldAutoScrollRef: { current: false },
     softPrefillSuggestion: null,
+    submitSendIntent: vi.fn(async () => true),
     targetsOverlapActiveRuns: vi.fn(() => true),
     ...overrides,
   };

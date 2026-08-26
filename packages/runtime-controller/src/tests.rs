@@ -9275,6 +9275,11 @@ async fn dispatch_keeps_ready_private_runtime_without_runtime_type() -> anyhow::
                 .query_one("select metadata from runs where id = $1", &[&run_id])
                 .await?
                 .get("metadata");
+            assert_eq!(
+                run_metadata.0["jobId"],
+                json!(job_id.to_string()),
+                "ready private {selection} dispatch must persist the exact run job id"
+            );
             assert!(
                 run_metadata.0.get("runtimeAlert").is_none(),
                 "ready private {selection} runtime must not produce an alert: {}",
@@ -17232,23 +17237,20 @@ async fn dispatch_prompt_dedupes_nested_client_message_id() -> anyhow::Result<()
         runtime_display_name: None,
         prefer_runtime: None,
     };
+    let build_expected_idle_request = || {
+        let mut request = dispatch::normalize_dispatch_request(build_request())
+            .map_err(|error| controller_error("normalize expected-idle dispatch", error))?;
+        request.expected_lane_idle = true;
+        Ok::<_, anyhow::Error>(request)
+    };
 
-    let first = dispatch::process_dispatch_prompt(
-        &state,
-        &context,
-        dispatch::normalize_dispatch_request(build_request())
-            .map_err(|error| controller_error("normalize first dispatch request", error))?,
-    )
-    .await
-    .map_err(|error| controller_error("process first dispatch prompt", error))?;
-    let second = dispatch::process_dispatch_prompt(
-        &state,
-        &context,
-        dispatch::normalize_dispatch_request(build_request())
-            .map_err(|error| controller_error("normalize second dispatch request", error))?,
-    )
-    .await
-    .map_err(|error| controller_error("process second dispatch prompt", error))?;
+    let first = dispatch::process_dispatch_prompt(&state, &context, build_expected_idle_request()?)
+        .await
+        .map_err(|error| controller_error("process first dispatch prompt", error))?;
+    let second =
+        dispatch::process_dispatch_prompt(&state, &context, build_expected_idle_request()?)
+            .await
+            .map_err(|error| controller_error("process second dispatch prompt", error))?;
 
     assert_eq!(second.run_id, first.run_id);
     assert_eq!(second.prompt_id, first.prompt_id);
@@ -17281,9 +17283,25 @@ async fn dispatch_prompt_dedupes_nested_client_message_id() -> anyhow::Result<()
         )
         .await?
         .get(0);
+    let job_count: i64 = connection
+        .query_one(
+            "SELECT count(*) FROM agent_jobs WHERE conversation_id = $1",
+            &[&conversation_id],
+        )
+        .await?
+        .get(0);
+    let queue_count: i64 = connection
+        .query_one(
+            "SELECT count(*) FROM conversation_send_queue WHERE conversation_id = $1",
+            &[&conversation_id],
+        )
+        .await?
+        .get(0);
 
     assert_eq!(message_count, 1);
     assert_eq!(run_count, 1);
+    assert_eq!(job_count, 1);
+    assert_eq!(queue_count, 0, "an idempotent retry must not autoqueue");
 
     cleanup_origin_project(&pool, &project_id).await?;
     Ok(())
@@ -22778,6 +22796,78 @@ async fn persist_prompt_and_run_ai_access_metadata_override_client_claims() -> a
     assert_eq!(prompt_metadata["customPrompt"], json!(true));
     assert_eq!(prompt_metadata["aiAccessMode"], json!("byoc"));
     assert_eq!(prompt_metadata["managedAiUsed"], json!(false));
+
+    connection_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn persist_run_job_identity_overrides_client_metadata_in_dispatch_transaction(
+) -> anyhow::Result<()> {
+    let Some((mut client, connection_handle)) = connect_test_db().await? else {
+        eprintln!("skipping run job identity test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    client
+        .batch_execute(
+            "CREATE TEMP TABLE runs (
+                id uuid PRIMARY KEY,
+                project_id uuid NOT NULL,
+                metadata jsonb
+            );",
+        )
+        .await?;
+
+    let run_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let client_claimed_job_id = Uuid::new_v4();
+    let authoritative_job_id = Uuid::new_v4();
+    client
+        .execute(
+            "INSERT INTO runs (id, project_id, metadata) VALUES ($1, $2, $3::jsonb)",
+            &[
+                &run_id,
+                &project_id,
+                &PgJson(json!({
+                    "custom": true,
+                    "jobId": client_claimed_job_id,
+                })),
+            ],
+        )
+        .await?;
+
+    let transaction = client.transaction().await?;
+    crate::dispatch::persist_run_job_identity(
+        &transaction,
+        &project_id,
+        &run_id,
+        &authoritative_job_id,
+    )
+    .await
+    .expect("persist authoritative run job identity");
+
+    let in_transaction_metadata: serde_json::Value = transaction
+        .query_one("SELECT metadata FROM runs WHERE id = $1", &[&run_id])
+        .await?
+        .get::<_, PgJson<serde_json::Value>>("metadata")
+        .0;
+    assert_eq!(in_transaction_metadata["custom"], json!(true));
+    assert_eq!(
+        in_transaction_metadata["jobId"],
+        json!(authoritative_job_id.to_string())
+    );
+    transaction.commit().await?;
+
+    let hydrated_metadata: serde_json::Value = client
+        .query_one("SELECT metadata FROM runs WHERE id = $1", &[&run_id])
+        .await?
+        .get::<_, PgJson<serde_json::Value>>("metadata")
+        .0;
+    assert_eq!(
+        hydrated_metadata["jobId"],
+        json!(authoritative_job_id.to_string())
+    );
 
     connection_handle.abort();
     Ok(())
