@@ -31,11 +31,17 @@ import {
 import type { PendingConversationInvitePrompt } from "./useChatInvitePromptHandlers";
 import type { ChatSubmitDispatchPayload } from "./useChatSubmitDispatch";
 import type { EnqueueServerSendQueuePayload } from "./useChatServerSendQueue";
+import { buildServerSendQueuePromptBody } from "./useChatServerSendQueue";
 import type { PreparedEmailInvite } from "../../../sharing/preparedEmailInvite";
 
 export type SubmitMessageFn = (
   override?: ChatSubmitOverride,
-  options?: { allowWhileBusy?: boolean; metadata?: Record<string, unknown> | null },
+  options?: {
+    allowWhileBusy?: boolean;
+    metadata?: Record<string, unknown> | null;
+    intent?: "send" | "queue" | "steer";
+    expectedActiveJobId?: string | null;
+  },
 ) => Promise<boolean>;
 
 export function resolvePersonalBrowserSubmitRouting(input: {
@@ -122,6 +128,7 @@ export function useChatSubmitFlow({
   showStatus,
   shouldAutoScrollRef,
   softPrefillSuggestion,
+  submitSendIntent,
   targetsOverlapActiveRuns,
 }: {
   activeConversationEntry: ConversationEntryLike;
@@ -225,6 +232,12 @@ export function useChatSubmitFlow({
   showStatus: ShowStatus;
   shouldAutoScrollRef: MutableRefObject<boolean>;
   softPrefillSuggestion: string | null | undefined;
+  submitSendIntent: (input: {
+    mode: "queue" | "steer";
+    request: Record<string, unknown>;
+    targetAgentHandles: string[];
+    expectedActiveJobId: string | null;
+  }) => Promise<boolean>;
   targetsOverlapActiveRuns: (targetAgentHandles: string[]) => boolean;
 }) {
   const submitMessageInFlightRef = useRef(false);
@@ -235,6 +248,7 @@ export function useChatSubmitFlow({
     }
 
     const allowWhileBusy = options?.allowWhileBusy ?? false;
+    const requestedIntent = options?.intent ?? "send";
     const baseSubmitMetadata = override?.metadata ?? options?.metadata ?? null;
     const {
       agentSelection,
@@ -357,6 +371,80 @@ export function useChatSubmitFlow({
             runtimeId: submitRuntimeOverride.runtimeId,
           })
       : resolvedBaseSubmitMetadata;
+    const queuedSubmitMetadata = {
+      ...(submitMetadata ?? {}),
+      agentSelection: {
+        active: effectiveTargetAgentHandles,
+        mentions:
+          agentSelection.mentionedHandles.length > 0
+            ? effectiveTargetAgentHandles
+            : [],
+      },
+    };
+    const consumeBrowserComposerTarget = () => {
+      if (shouldConsumeNewBrowserLaunch) {
+        clearPendingBrowserLaunchMode();
+      }
+    };
+    const effectiveIntent =
+      requestedIntent === "steer" &&
+      (participationRecordOnly || effectiveTargetAgentHandles.length === 0)
+        ? "send"
+        : requestedIntent;
+
+    if (effectiveIntent === "queue" || effectiveIntent === "steer") {
+      if (imageFiles.length > 0) {
+        showStatus(
+          effectiveIntent === "steer"
+            ? "Steer currently supports text only. Remove image attachments first."
+            : "Queue currently supports text only. Remove image attachments first.",
+          "info",
+          4500,
+        );
+        focusInput();
+        return false;
+      }
+      if (!activeConversationEntry?.controllerId) {
+        showStatus(
+          "Send the first message normally before using Queue or Steer.",
+          "info",
+          4500,
+        );
+        focusInput();
+        return false;
+      }
+      const accepted = await submitSendIntent({
+        mode: effectiveIntent,
+        request: buildServerSendQueuePromptBody({
+          message: dispatchedMessage,
+          targetAgentHandles: effectiveTargetAgentHandles,
+          metadata: queuedSubmitMetadata,
+          runtimeOverride: submitRuntimeOverride,
+          intent: terminalRequest ? "terminal_command" : null,
+        }),
+        targetAgentHandles: effectiveTargetAgentHandles,
+        expectedActiveJobId: options?.expectedActiveJobId ?? null,
+      });
+      if (!accepted) {
+        return false;
+      }
+      consumeBrowserComposerTarget();
+      if (activeConversationId) {
+        if (effectiveIntent === "queue") {
+          clearComposerAfterQueue(activeConversationId, inputValue);
+        } else {
+          clearComposerIfUnchanged(activeConversationId, messageToSend);
+        }
+      }
+      pendingTypingBroadcastRef.current = null;
+      if (localTypingStateRef.current.isTyping) {
+        localTypingStateRef.current.isTyping = false;
+        localTypingStateRef.current.lastSentAt = Date.now();
+        broadcastTyping(false, activeConversationEntry.controllerId);
+      }
+      focusInput();
+      return true;
+    }
     if (
       usePersonalBrowserRuntime &&
       !allowWhileBusy &&
@@ -394,12 +482,6 @@ export function useChatSubmitFlow({
       }
     }
 
-    const consumeBrowserComposerTarget = () => {
-      if (shouldConsumeNewBrowserLaunch) {
-        clearPendingBrowserLaunchMode();
-      }
-    };
-
     const pinToBottom = () => {
       shouldAutoScrollRef.current = true;
       scrollToBottom();
@@ -412,7 +494,7 @@ export function useChatSubmitFlow({
         targetAgentHandles: effectiveTargetAgentHandles,
         browserPageTarget: shouldApplyBrowserPageTarget ? browserPageTarget : null,
         browserLaunchMode: shouldApplyNewBrowserLaunch ? browserLaunchMode : null,
-        metadata: submitMetadata,
+        metadata: queuedSubmitMetadata,
         runtimeOverride: submitRuntimeOverride,
       });
     };
@@ -421,7 +503,7 @@ export function useChatSubmitFlow({
       return await enqueueServerSendQueueItem({
         message: dispatchedMessage,
         targetAgentHandles: effectiveTargetAgentHandles,
-        metadata: submitMetadata,
+        metadata: queuedSubmitMetadata,
         runtimeOverride: submitRuntimeOverride,
         intent: terminalRequest ? "terminal_command" : null,
       });
@@ -537,6 +619,7 @@ export function useChatSubmitFlow({
       isPrivateConversation: activeConversationEntry?.visibility === "private",
       listConversationParticipants: listConversationParticipants,
       message: messageToSend,
+      expectedLaneIdle: !allowWhileBusy && !participationBypassesBusySerialization,
     });
     if (invitePromptRequest) {
       if (usePersonalBrowserRuntime) {
@@ -559,6 +642,7 @@ export function useChatSubmitFlow({
       imageFiles: submitImageFiles,
       metadata: submitMetadata,
       runtimeOverride: submitRuntimeOverride,
+      expectedLaneIdle: !allowWhileBusy && !participationBypassesBusySerialization,
     });
     consumeBrowserComposerTarget();
     return true;
@@ -621,6 +705,7 @@ export function useChatSubmitFlow({
     showStatus,
     shouldAutoScrollRef,
     softPrefillSuggestion,
+    submitSendIntent,
     targetsOverlapActiveRuns,
   ]);
 
