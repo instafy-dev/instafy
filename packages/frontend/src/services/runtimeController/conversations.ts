@@ -32,6 +32,7 @@ export interface ControllerConversationParams
 export interface ControllerConversationMessageParams
   extends ControllerConversationParams {
   conversationId: string;
+  expectedLaneIdle?: boolean;
 }
 
 export interface RecordControllerConversationMessageParams {
@@ -1025,6 +1026,7 @@ export async function sendControllerConversationMessage(
     runtimeId: params.runtimeId ?? undefined,
     runtimeDisplayName: params.runtimeDisplayName ?? undefined,
     preferRuntime: params.preferRuntime ?? undefined,
+    expectedLaneIdle: params.expectedLaneIdle ?? undefined,
     ui:
       params.requestedPreview === undefined
         ? undefined

@@ -23,6 +23,7 @@ import {
   dispatchSendQueueEntryNow,
   enqueueSendQueueEntry,
   listSendQueue,
+  reorderSendQueueEntry,
 } from "../sendQueue";
 
 const CONVERSATION_ID = "22222222-2222-2222-2222-222222222222";
@@ -33,6 +34,7 @@ function buildEntryPayload(overrides: Record<string, unknown> = {}) {
     id: ENTRY_ID,
     conversationId: CONVERSATION_ID,
     status: "queued",
+    queuePosition: 10,
     targetAgentHandles: ["octo"],
     message: { promptText: "Follow up on the codec lane" },
     errorMessage: null,
@@ -69,6 +71,7 @@ describe("sendQueue controller client", () => {
         id: ENTRY_ID,
         conversationId: CONVERSATION_ID,
         status: "queued",
+        queuePosition: 10,
         targetAgentHandles: ["octo"],
         message: { promptText: "Follow up on the codec lane" },
         errorMessage: null,
@@ -99,6 +102,13 @@ describe("sendQueue controller client", () => {
     ).resolves.toBeNull();
     await expect(
       dispatchSendQueueEntryNow({ conversationId: CONVERSATION_ID, entryId: ENTRY_ID }),
+    ).resolves.toBeNull();
+    await expect(
+      reorderSendQueueEntry({
+        conversationId: CONVERSATION_ID,
+        entryId: ENTRY_ID,
+        beforeEntryId: null,
+      }),
     ).resolves.toBeNull();
 
     expect(fetchMock).not.toHaveBeenCalled();
@@ -164,6 +174,79 @@ describe("sendQueue controller client", () => {
     expect(init.method).toBe("DELETE");
   });
 
+  it("persists an entry before its new anchor and returns the authoritative order", async () => {
+    const beforeEntryId = "33333333-3333-3333-3333-333333333333";
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({
+        ok: true,
+        changed: true,
+        entries: [
+          buildEntryPayload({ queuePosition: 10 }),
+          buildEntryPayload({ id: beforeEntryId, queuePosition: 20 }),
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await reorderSendQueueEntry({
+      conversationId: CONVERSATION_ID,
+      entryId: ENTRY_ID,
+      beforeEntryId,
+    });
+
+    expect(result).toEqual({
+      ok: true,
+      changed: true,
+      entries: [
+        expect.objectContaining({ id: ENTRY_ID, queuePosition: 10 }),
+        expect.objectContaining({ id: beforeEntryId, queuePosition: 20 }),
+      ],
+    });
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(
+      `http://controller.test/conversations/${CONVERSATION_ID}/send-queue/${ENTRY_ID}/reorder`,
+    );
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual({ beforeEntryId });
+  });
+
+  it("rejects partial or cross-conversation reorder snapshots", async () => {
+    const invalidPayloads = [
+      { ok: true, changed: true },
+      { ok: true, changed: true, entries: [] },
+      {
+        ok: true,
+        changed: true,
+        entries: [buildEntryPayload({ id: "44444444-4444-4444-4444-444444444444" })],
+      },
+      {
+        ok: true,
+        changed: true,
+        entries: [buildEntryPayload({ conversationId: "different-conversation" })],
+      },
+      {
+        ok: true,
+        changed: true,
+        entries: [buildEntryPayload(), buildEntryPayload()],
+      },
+    ];
+
+    for (const payload of invalidPayloads) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({ ok: true, json: vi.fn().mockResolvedValue(payload) }),
+      );
+      await expect(
+        reorderSendQueueEntry({
+          conversationId: CONVERSATION_ID,
+          entryId: ENTRY_ID,
+          beforeEntryId: null,
+        }),
+      ).rejects.toThrow("send queue reorder returned an invalid response");
+    }
+  });
+
   it("dispatches entries immediately through the dispatch endpoint", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -206,6 +289,18 @@ describe("sendQueue controller client", () => {
     await expect(
       dispatchSendQueueEntryNow({ conversationId: CONVERSATION_ID, entryId: ENTRY_ID }),
     ).resolves.toEqual({ outcome: "alreadyDispatched", response: null });
+  });
+
+  it("keeps send-now entries queued when their lane became busy", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: vi.fn().mockResolvedValue({ ok: false, queued: true }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      dispatchSendQueueEntryNow({ conversationId: CONVERSATION_ID, entryId: ENTRY_ID }),
+    ).resolves.toEqual({ outcome: "queued", response: null });
   });
 
   it("reports unknown or canceled entries instead of throwing on 404", async () => {

@@ -3,12 +3,13 @@ import type {
   ComponentProps,
   DragEventHandler,
   FormEventHandler,
-  PointerEventHandler,
+  KeyboardEventHandler,
   RefObject,
 } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Archery,
+  Bookmark,
   Lock,
   MagicWand,
   MediaImage,
@@ -17,6 +18,7 @@ import {
   Pause,
   Play,
   Send,
+  TaskList,
   WarningTriangle,
   Xmark,
 } from "iconoir-react";
@@ -24,6 +26,7 @@ import { HomeIcon } from "../../../components/AppIcons";
 import { IconButton } from "../../../components/Button";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
+import { StudioPopover } from "../../../components/aria/StudioPopover";
 import {
   DARK_PANEL_BORDER_CLASS,
   DARK_PANEL_SHADOW_CLASS,
@@ -35,7 +38,22 @@ import { ComposerActionMenu } from "./ComposerActionMenu";
 import { ComposerInviteModal } from "./ComposerInviteModal";
 import { ChatBrowserDock } from "./ChatBrowserDock";
 import { ChatInput, type ChatInputHandle } from "./chat-input/ChatInput";
-import { ChatSendQueueSurface } from "./ChatSendQueueSurface";
+import {
+  resolveComposerSendModifierAction,
+  type ComposerSendModifierKeys,
+} from "./chat-input/enterBehavior";
+import {
+  CHAT_SEND_QUEUE_ITEMS_ID,
+  ChatSendQueuePanel,
+  ChatSendQueueSurface,
+  ChatSendQueueTrigger,
+} from "./ChatSendQueueSurface";
+import {
+  CHAT_MESSAGE_STASH_PANEL_ID,
+  ChatMessageStashPanel,
+  ChatMessageStashTray,
+  ChatMessageStashTrigger,
+} from "./ChatMessageStashTray";
 import { OctoAgentChip } from "./OctoAgentChip";
 import { OctoSilenceHint } from "./OctoSilenceHint";
 import { StatusPill, StatusPillButton, type StatusPillTone } from "./StatusPill";
@@ -48,6 +66,8 @@ import {
 } from "../../../conversations/conversationGoals";
 import type { PendingChatImageAttachment } from "./useChatComposerAttachments";
 import { CHAT_COMPOSER_COLUMN_CLASS_NAME } from "./ChatColumn";
+import { useTouchSendModePicker } from "./useTouchSendModePicker";
+import type { TouchSendModePickerOutcome } from "./touchSendModePicker";
 
 type ChatComposerSurfaceProps = {
   browserDockProps: ComponentProps<typeof ChatBrowserDock>;
@@ -57,6 +77,7 @@ type ChatComposerSurfaceProps = {
   compactBrowserViewport: boolean;
   onSubmit: FormEventHandler<HTMLFormElement>;
   queueSurfaceProps: ComponentProps<typeof ChatSendQueueSurface>;
+  stashTrayProps?: ComponentProps<typeof ChatMessageStashTray> | null;
   activeGoal: ConversationGoal | null;
   activeGoalHealth: ConversationGoalHealth | null;
   onPauseGoal: () => void;
@@ -89,14 +110,11 @@ type ChatComposerSurfaceProps = {
   showMobileGhostSuggestionAcceptButton: boolean;
   onAcceptGhostSuggestion: () => void;
   showVoicePrimaryAction: boolean;
+  showVoiceSecondaryAction: boolean;
   voiceConversationActionStripProps: ComponentProps<typeof VoiceConversationActionStrip>;
   sendButtonDisabled: boolean;
   sendButtonVariant: ComponentProps<typeof IconButton>["variant"];
-  onSendButtonPointerDown: PointerEventHandler<HTMLButtonElement>;
-  onSendButtonPointerUp: PointerEventHandler<HTMLButtonElement>;
-  onSendButtonPointerCancel: PointerEventHandler<HTMLButtonElement>;
-  onSendButtonPressStart: ComponentProps<typeof IconButton>["onPressStart"];
-  onSendButtonPressEnd: ComponentProps<typeof IconButton>["onPressEnd"];
+  primaryActionMode?: "send" | "steer";
   onSendButtonPress: ComponentProps<typeof IconButton>["onPress"];
   composerOutlinedActionClass: string;
   composerPrimaryActionClass: string;
@@ -137,6 +155,23 @@ function AccessCheckingNotice({ flash }: { flash: boolean }) {
   );
 }
 
+type OpenSavedMessagePanel = "stash" | "queue" | null;
+type DesktopSendModifierMode = "queue" | "stash" | null;
+
+function composerMenuIsOpen(): boolean {
+  if (typeof document === "undefined" || typeof window === "undefined") {
+    return false;
+  }
+  return Array.from(
+    document.querySelectorAll<HTMLElement>(
+      '[data-testid="assistant-mention-menu"], [data-testid="chat-slash-command-menu"]',
+    ),
+  ).some((menu) => {
+    const style = window.getComputedStyle(menu);
+    return style.display !== "none" && style.visibility !== "hidden";
+  });
+}
+
 function resolveGoalStatusPillTone(tone: ConversationGoalHealth["tone"]): StatusPillTone {
   if (tone === "blocked") {
     return "danger";
@@ -158,6 +193,7 @@ export function ChatComposerSurface({
   compactBrowserViewport,
   onSubmit,
   queueSurfaceProps,
+  stashTrayProps = null,
   activeGoal,
   activeGoalHealth,
   onPauseGoal,
@@ -190,14 +226,11 @@ export function ChatComposerSurface({
   showMobileGhostSuggestionAcceptButton,
   onAcceptGhostSuggestion,
   showVoicePrimaryAction,
+  showVoiceSecondaryAction,
   voiceConversationActionStripProps,
   sendButtonDisabled,
   sendButtonVariant,
-  onSendButtonPointerDown,
-  onSendButtonPointerUp,
-  onSendButtonPointerCancel,
-  onSendButtonPressStart,
-  onSendButtonPressEnd,
+  primaryActionMode = "send",
   onSendButtonPress,
   composerOutlinedActionClass,
   composerPrimaryActionClass,
@@ -228,8 +261,81 @@ export function ChatComposerSurface({
     },
     [],
   );
+  const queueExpandedFromParent = Boolean(queueSurfaceProps.chatSendQueueExpanded);
+  const queueEditingItem = queueSurfaceProps.editingQueuedItem;
+  const queuedMessageCount = queueSurfaceProps.totalQueuedCount;
+  const onToggleQueueExpanded = queueSurfaceProps.onToggleExpanded;
+  const {
+    onQueueMessage: onQueueMessageFromComposer,
+    onStashDraft: onStashDraftFromComposer,
+    queueDisabled: queueMessageDisabled,
+    stashDisabled: stashDraftDisabled,
+  } = composerActionMenuProps;
   const showVoiceSecondaryStatus = showVoicePrimaryAction && showVoiceStatus;
-  const showVoiceActiveStrip = showVoicePrimaryAction && showVoiceSecondaryStatus;
+  const composerHasUsablePayload =
+    chatInputProps.value.trim().length > 0 || imageAttachments.length > 0;
+  const modifierPreviewBaseAvailable =
+    !showVoicePrimaryAction &&
+    composerHasUsablePayload &&
+    !mutationDisabled;
+  const queueModifierAvailable =
+    modifierPreviewBaseAvailable &&
+    queueMessageDisabled !== true &&
+    Boolean(onQueueMessageFromComposer);
+  const stashModifierAvailable =
+    modifierPreviewBaseAvailable &&
+    stashDraftDisabled !== true &&
+    Boolean(onStashDraftFromComposer);
+  const resolveAvailableDesktopSendModifierMode = useCallback(
+    (keys: ComposerSendModifierKeys): DesktopSendModifierMode => {
+      const requestedMode = resolveComposerSendModifierAction(keys);
+      if (requestedMode === "queue") {
+        return queueModifierAvailable ? "queue" : null;
+      }
+      if (requestedMode === "stash") {
+        return stashModifierAvailable ? "stash" : null;
+      }
+      return null;
+    },
+    [queueModifierAvailable, stashModifierAvailable],
+  );
+  const [desktopSendModifierMode, setDesktopSendModifierMode] =
+    useState<DesktopSendModifierMode>(null);
+  const [desktopSendModifierFocusWithin, setDesktopSendModifierFocusWithin] = useState(false);
+  const visibleDesktopSendModifierMode =
+    desktopSendModifierFocusWithin &&
+    desktopSendModifierMode === "queue" &&
+    queueModifierAvailable
+      ? "queue"
+      : desktopSendModifierFocusWithin &&
+          desktopSendModifierMode === "stash" &&
+          stashModifierAvailable
+        ? "stash"
+        : null;
+  const visiblePrimaryActionMode = visibleDesktopSendModifierMode ?? primaryActionMode;
+  const primaryActionLabel =
+    visibleDesktopSendModifierMode === "queue"
+      ? "Queue message (Command or Ctrl plus Enter)"
+      : visibleDesktopSendModifierMode === "stash"
+        ? "Stash draft (Command or Ctrl plus Shift plus Enter)"
+        : primaryActionMode === "steer"
+          ? "Steer current reply (Enter)"
+          : "Send message";
+  const primaryActionStatus =
+    visibleDesktopSendModifierMode === "queue"
+      ? "Queue selected. Press Enter or click to queue the message."
+      : visibleDesktopSendModifierMode === "stash"
+        ? "Stash selected. Press Enter or click to stash the draft."
+        : primaryActionMode === "steer"
+          ? "Enter steers the current reply."
+          : "Enter sends the message.";
+  // Hold-to-talk must keep the same microphone DOM node from press through
+  // release. The richer active strip is reserved for tap/continuous modes;
+  // hold mode communicates activity on the stable button itself.
+  const showVoiceActiveStrip =
+    showVoicePrimaryAction &&
+    showVoiceSecondaryStatus &&
+    voiceConversationActionStripProps.voiceInteractionMode !== "hold";
   const showActiveGoal =
     activeGoal !== null &&
     (activeGoal.status === "active" ||
@@ -247,6 +353,15 @@ export function ChatComposerSurface({
           : "bg-primary-50 text-primary-700 dark:bg-primary-400/10 dark:text-primary-200";
   const sendPressHandledRef = useRef(false);
   const [goalDetailsExpanded, setGoalDetailsExpanded] = useState(false);
+  const [openSavedMessagePanel, setOpenSavedMessagePanel] = useState<OpenSavedMessagePanel>(
+    queueExpandedFromParent ? "queue" : null,
+  );
+  const [queueDragActive, setQueueDragActive] = useState(false);
+  const stashTrayTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const queueTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const savedMessageDialogRef = useRef<HTMLDivElement | null>(null);
+  const savedMessagePopoverContentRef = useRef<HTMLDivElement | null>(null);
+  const savedMessagePopoverHadFocusRef = useRef(false);
   const goalDetail =
     normalizeConversationGoalProgressSummaryForDisplay(activeGoalHealth?.detail) ?? "";
   const hasGoalDetails = goalDetail.length > 0;
@@ -265,7 +380,66 @@ export function ChatComposerSurface({
     !showVoiceActiveStrip &&
     !providerTriggerNoticeProps &&
     queueSurfaceProps.totalQueuedCount === 0 &&
-    !queueSurfaceProps.editingQueuedItem;
+    !queueSurfaceProps.editingQueuedItem &&
+    !stashTrayProps?.stashes.length;
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const sendModifierFocusIsWithin = (element: Element | null) => {
+      const composer = composerOverlayRef.current;
+      if (!composer || !element || !composer.contains(element)) {
+        return false;
+      }
+      return Boolean(
+        element.closest('[data-testid="chat-input"], [data-testid="chat-send-button"]'),
+      );
+    };
+    const updatePreview = (event: KeyboardEvent) => {
+      const focusWithin = sendModifierFocusIsWithin(document.activeElement);
+      setDesktopSendModifierFocusWithin(focusWithin);
+      setDesktopSendModifierMode(
+        focusWithin && !composerMenuIsOpen()
+          ? resolveAvailableDesktopSendModifierMode(event)
+          : null,
+      );
+    };
+    const clearPreview = () => {
+      setDesktopSendModifierFocusWithin(false);
+      setDesktopSendModifierMode(null);
+    };
+    const handleFocusIn = (event: FocusEvent) => {
+      setDesktopSendModifierFocusWithin(sendModifierFocusIsWithin(event.target as Element | null));
+    };
+    const handleFocusOut = (event: FocusEvent) => {
+      if (!sendModifierFocusIsWithin(event.relatedTarget as Element | null)) {
+        clearPreview();
+      }
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== "visible") {
+        clearPreview();
+      }
+    };
+    // Lexical may consume editor keyboard events during bubbling. Observe the
+    // modifiers in capture so the button preview still reflects the physical
+    // keys the user is holding.
+    window.addEventListener("keydown", updatePreview, true);
+    window.addEventListener("keyup", updatePreview, true);
+    window.addEventListener("blur", clearPreview);
+    document.addEventListener("focusin", handleFocusIn);
+    document.addEventListener("focusout", handleFocusOut);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.removeEventListener("keydown", updatePreview, true);
+      window.removeEventListener("keyup", updatePreview, true);
+      window.removeEventListener("blur", clearPreview);
+      document.removeEventListener("focusin", handleFocusIn);
+      document.removeEventListener("focusout", handleFocusOut);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [composerOverlayRef, resolveAvailableDesktopSendModifierMode]);
 
   useEffect(() => {
     setGoalDetailsExpanded(false);
@@ -274,6 +448,176 @@ export function ChatComposerSurface({
   useEffect(() => {
     setGoalDetailsExpanded(false);
   }, [goalDetailsCollapseToken]);
+
+  useEffect(() => {
+    if (queueEditingItem) {
+      setOpenSavedMessagePanel(null);
+      return;
+    }
+    if (queueExpandedFromParent) {
+      setOpenSavedMessagePanel("queue");
+      return;
+    }
+    setOpenSavedMessagePanel((current) => (current === "queue" ? null : current));
+  }, [queueEditingItem, queueExpandedFromParent]);
+
+  useEffect(() => {
+    if (openSavedMessagePanel === "stash" && !stashTrayProps?.stashes.length) {
+      const shouldFocusComposer =
+        savedMessagePopoverHadFocusRef.current ||
+        (typeof document !== "undefined" &&
+          savedMessagePopoverContentRef.current?.contains(document.activeElement));
+      savedMessagePopoverHadFocusRef.current = false;
+      setOpenSavedMessagePanel(null);
+      if (shouldFocusComposer && typeof window !== "undefined") {
+        window.setTimeout(() => chatInputRef.current?.focus(), 0);
+      }
+    }
+  }, [chatInputRef, openSavedMessagePanel, stashTrayProps?.stashes.length]);
+
+  useEffect(() => {
+    if (openSavedMessagePanel !== "queue" || queuedMessageCount > 0) {
+      return;
+    }
+    const shouldFocusComposer =
+      savedMessagePopoverHadFocusRef.current ||
+      (typeof document !== "undefined" &&
+        savedMessagePopoverContentRef.current?.contains(document.activeElement));
+    savedMessagePopoverHadFocusRef.current = false;
+    setOpenSavedMessagePanel(null);
+    if (queueExpandedFromParent) {
+      onToggleQueueExpanded?.();
+    }
+    if (shouldFocusComposer && typeof window !== "undefined") {
+      window.setTimeout(() => chatInputRef.current?.focus(), 0);
+    }
+  }, [
+    chatInputRef,
+    onToggleQueueExpanded,
+    openSavedMessagePanel,
+    queuedMessageCount,
+    queueExpandedFromParent,
+  ]);
+
+  const setExternalQueueExpanded = useCallback(
+    (nextExpanded: boolean) => {
+      if (queueExpandedFromParent !== nextExpanded) {
+        onToggleQueueExpanded?.();
+      }
+    },
+    [onToggleQueueExpanded, queueExpandedFromParent],
+  );
+
+  const handleStashTrayExpandedChange = useCallback(
+    (nextExpanded: boolean) => {
+      if (nextExpanded) {
+        setExternalQueueExpanded(false);
+        setOpenSavedMessagePanel("stash");
+        return;
+      }
+      setOpenSavedMessagePanel((current) => (current === "stash" ? null : current));
+    },
+    [setExternalQueueExpanded],
+  );
+
+  const handleQueuePanelToggle = useCallback(() => {
+    const nextExpanded = openSavedMessagePanel !== "queue";
+    setExternalQueueExpanded(nextExpanded);
+    setOpenSavedMessagePanel(nextExpanded ? "queue" : null);
+  }, [openSavedMessagePanel, setExternalQueueExpanded]);
+
+  const handleSavedMessagePopoverOpenChange = useCallback(
+    (nextOpen: boolean) => {
+      if (nextOpen || openSavedMessagePanel === null) {
+        return;
+      }
+      if (openSavedMessagePanel === "queue") {
+        setExternalQueueExpanded(false);
+      }
+      setOpenSavedMessagePanel(null);
+    },
+    [openSavedMessagePanel, setExternalQueueExpanded],
+  );
+
+  const handleSavedMessagePopoverKeyDown = useCallback<KeyboardEventHandler<HTMLDivElement>>(
+    (event) => {
+      if (
+        event.key !== "Escape" ||
+        openSavedMessagePanel === null ||
+        queueDragActive
+      ) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      const trigger =
+        openSavedMessagePanel === "stash"
+          ? stashTrayTriggerRef.current
+          : queueTriggerRef.current;
+      handleSavedMessagePopoverOpenChange(false);
+      if (typeof window !== "undefined") {
+        window.setTimeout(() => trigger?.focus(), 0);
+      }
+    },
+    [handleSavedMessagePopoverOpenChange, openSavedMessagePanel, queueDragActive],
+  );
+
+  const handleEditQueuedMessageFromPopover = useCallback(
+    (id: string) => {
+      setExternalQueueExpanded(false);
+      setOpenSavedMessagePanel(null);
+      queueSurfaceProps.onEditQueuedMessage(id);
+    },
+    [queueSurfaceProps, setExternalQueueExpanded],
+  );
+
+  const savedMessagePopoverTriggerRef =
+    openSavedMessagePanel === "stash" ? stashTrayTriggerRef : queueTriggerRef;
+
+  useEffect(() => {
+    if (openSavedMessagePanel === null || typeof document === "undefined") {
+      return;
+    }
+    const ownerDocument =
+      savedMessagePopoverTriggerRef.current?.ownerDocument ?? document;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (queueDragActive) {
+        return;
+      }
+      const target = event.target;
+      if (!(target instanceof Node)) {
+        return;
+      }
+      if (
+        stashTrayTriggerRef.current?.contains(target) ||
+        queueTriggerRef.current?.contains(target) ||
+        savedMessagePopoverContentRef.current?.contains(target)
+      ) {
+        return;
+      }
+      handleSavedMessagePopoverOpenChange(false);
+    };
+    ownerDocument.addEventListener("pointerdown", handlePointerDown, true);
+    return () => ownerDocument.removeEventListener("pointerdown", handlePointerDown, true);
+  }, [
+    handleSavedMessagePopoverOpenChange,
+    openSavedMessagePanel,
+    queueDragActive,
+    savedMessagePopoverTriggerRef,
+  ]);
+
+  useEffect(() => {
+    if (openSavedMessagePanel === null || typeof window === "undefined") {
+      return;
+    }
+    const focusTimer = window.setTimeout(() => {
+      const firstAction = savedMessagePopoverContentRef.current?.querySelector<HTMLElement>(
+        '[data-testid="chat-send-queue-reorder"]:not([disabled]), [data-testid="chat-send-queue-send-now"]:not([disabled]), [data-testid="chat-send-queue-steer"]:not([disabled]), [data-testid="chat-message-stash-restore"]:not([disabled]), button:not([disabled])',
+      );
+      (firstAction ?? savedMessageDialogRef.current)?.focus();
+    }, 0);
+    return () => window.clearTimeout(focusTimer);
+  }, [openSavedMessagePanel]);
 
   const markSendPressHandled = useCallback(() => {
     sendPressHandledRef.current = true;
@@ -286,23 +630,115 @@ export function ChatComposerSurface({
     }, 0);
   }, []);
 
+  const handleTouchSendModeOutcome = useCallback(
+    (outcome: TouchSendModePickerOutcome) => {
+      if (outcome.type === "none" || outcome.type === "tap") {
+        return;
+      }
+      // The pointer-up and its synthetic click share one browser task. Reuse
+      // the normal one-task duplicate guard so this hold consumes only that
+      // activation, never a legitimate follow-up tap.
+      markSendPressHandled();
+      if (outcome.type !== "commit") {
+        return;
+      }
+      if (outcome.mode === "queue") {
+        onQueueMessageFromComposer?.();
+        return;
+      }
+      if (outcome.mode === "stash") {
+        onStashDraftFromComposer?.();
+        return;
+      }
+      onSendButtonPress?.({ pointerType: "touch" } as never);
+    },
+    [
+      markSendPressHandled,
+      onQueueMessageFromComposer,
+      onSendButtonPress,
+      onStashDraftFromComposer,
+    ],
+  );
+
+  const touchSendModePicker = useTouchSendModePicker({
+    primaryMode: primaryActionMode,
+    primaryDisabled: mutationDisabled || sendButtonDisabled,
+    queueDisabled:
+      mutationDisabled ||
+      queueMessageDisabled === true ||
+      !onQueueMessageFromComposer,
+    stashDisabled:
+      mutationDisabled ||
+      stashDraftDisabled === true ||
+      !onStashDraftFromComposer,
+    onOutcome: handleTouchSendModeOutcome,
+  });
+
   const handleSendPress = useCallback<NonNullable<ComponentProps<typeof IconButton>["onPress"]>>(
     (event) => {
+      if (sendPressHandledRef.current) {
+        return;
+      }
       markSendPressHandled();
+      if (event.pointerType !== "touch") {
+        const eventModifierMode = resolveAvailableDesktopSendModifierMode(event);
+        const modifierMode =
+          eventModifierMode === visibleDesktopSendModifierMode
+            ? visibleDesktopSendModifierMode
+            : null;
+        if (modifierMode === "queue") {
+          onQueueMessageFromComposer?.();
+          return;
+        }
+        if (modifierMode === "stash") {
+          onStashDraftFromComposer?.();
+          return;
+        }
+      }
       onSendButtonPress?.(event);
     },
-    [markSendPressHandled, onSendButtonPress],
+    [
+      markSendPressHandled,
+      onQueueMessageFromComposer,
+      onSendButtonPress,
+      onStashDraftFromComposer,
+      resolveAvailableDesktopSendModifierMode,
+      visibleDesktopSendModifierMode,
+    ],
   );
 
   const handleSendClick = useCallback<NonNullable<ComponentProps<typeof IconButton>["onClick"]>>(
     (event) => {
-      if (sendButtonDisabled || sendPressHandledRef.current) {
+      if (sendPressHandledRef.current) {
         return;
       }
       event.preventDefault();
+      const eventModifierMode = resolveAvailableDesktopSendModifierMode(event);
+      const modifierMode =
+        eventModifierMode === visibleDesktopSendModifierMode
+          ? visibleDesktopSendModifierMode
+          : null;
+      if (modifierMode === "queue") {
+        onQueueMessageFromComposer?.();
+        return;
+      }
+      if (modifierMode === "stash") {
+        onStashDraftFromComposer?.();
+        return;
+      }
+      if (sendButtonDisabled) {
+        return;
+      }
       onSendButtonPress?.({ pointerType: "mouse" } as never);
     },
-    [onSendButtonPress, sendButtonDisabled],
+    [
+      onQueueMessageFromComposer,
+      onSendButtonPress,
+      onStashDraftFromComposer,
+      resolveAvailableDesktopSendModifierMode,
+      sendButtonDisabled,
+      visibleDesktopSendModifierMode,
+    ],
   );
   const toggleGoalDetails = useCallback(() => {
     if (!hasGoalDetails) {
@@ -544,7 +980,114 @@ export function ChatComposerSurface({
               <AccessCheckingNotice flash={blockedInputFlash} />
             ) : null}
             {silenceHintProps ? <OctoSilenceHint {...silenceHintProps} /> : null}
-            <ChatSendQueueSurface {...queueSurfaceProps} mutationDisabled={mutationDisabled} />
+            {stashTrayProps?.stashes.length || queuedMessageCount > 0 || queueEditingItem ? (
+              <div
+                role="group"
+                aria-label="Saved messages"
+                className="mx-1 flex flex-wrap items-start justify-end gap-2 sm:mx-2"
+                data-testid="chat-saved-message-controls"
+              >
+                {stashTrayProps && !queueEditingItem ? (
+                  <div className="contents" data-testid="chat-message-stashes">
+                    <ChatMessageStashTrigger
+                      count={stashTrayProps.stashes.length}
+                      expanded={openSavedMessagePanel === "stash"}
+                      onExpandedChange={handleStashTrayExpandedChange}
+                      triggerRef={stashTrayTriggerRef}
+                    />
+                  </div>
+                ) : null}
+                {queuedMessageCount > 0 && !queueEditingItem ? (
+                  <div className="contents" data-testid="chat-send-queue">
+                    <ChatSendQueueTrigger
+                      totalQueuedCount={queuedMessageCount}
+                      collapsedQueuedMessageSummary={queueSurfaceProps.collapsedQueuedMessageSummary}
+                      expanded={openSavedMessagePanel === "queue"}
+                      onToggleExpanded={handleQueuePanelToggle}
+                      triggerRef={queueTriggerRef}
+                    />
+                  </div>
+                ) : null}
+                {openSavedMessagePanel !== "stash" && stashTrayProps?.stashes.length && !queueEditingItem ? (
+                  <span id={CHAT_MESSAGE_STASH_PANEL_ID} hidden />
+                ) : null}
+                {queueEditingItem ? (
+                  <div
+                    className="contents"
+                    data-testid="chat-send-queue"
+                  >
+                    <ChatSendQueuePanel
+                      {...queueSurfaceProps}
+                      chatSendQueueExpanded={false}
+                      mutationDisabled={mutationDisabled}
+                      onToggleExpanded={handleQueuePanelToggle}
+                      triggerRef={queueTriggerRef}
+                    />
+                  </div>
+                ) : queuedMessageCount > 0 && openSavedMessagePanel !== "queue" ? (
+                  <span id={CHAT_SEND_QUEUE_ITEMS_ID} hidden />
+                ) : null}
+                {openSavedMessagePanel !== null && !queueEditingItem ? (
+                  <StudioPopover
+                    key={openSavedMessagePanel}
+                    triggerRef={savedMessagePopoverTriggerRef}
+                    isOpen
+                    onOpenChange={handleSavedMessagePopoverOpenChange}
+                    isNonModal
+                    isKeyboardDismissDisabled={queueDragActive}
+                    placement="top end"
+                    offset={8}
+                    containerPadding={8}
+                    className="max-h-[calc(100dvh-1rem)] w-[min(24rem,calc(100dvw-1rem))] overflow-hidden p-0 [&>div:first-child]:hidden"
+                    data-testid="chat-saved-message-popover"
+                  >
+                    <div
+                      ref={savedMessageDialogRef}
+                      role="dialog"
+                      aria-label={
+                        openSavedMessagePanel === "stash" ? "Stashed drafts" : "Queued messages"
+                      }
+                      tabIndex={-1}
+                      className="outline-none"
+                      onFocusCapture={() => {
+                        savedMessagePopoverHadFocusRef.current = true;
+                      }}
+                    >
+                      <div
+                        ref={savedMessagePopoverContentRef}
+                        onKeyDown={handleSavedMessagePopoverKeyDown}
+                      >
+                        {openSavedMessagePanel === "stash" && stashTrayProps ? (
+                          <ChatMessageStashPanel
+                            stashes={stashTrayProps.stashes}
+                            restoredStashId={stashTrayProps.restoredStashId}
+                            busy={stashTrayProps.busy}
+                            onRestore={(stash) => {
+                              stashTrayProps.onRestore(stash);
+                              handleStashTrayExpandedChange(false);
+                            }}
+                            onDelete={stashTrayProps.onDelete}
+                          />
+                        ) : (
+                          <ChatSendQueuePanel
+                            {...queueSurfaceProps}
+                            chatSendQueueExpanded
+                            mutationDisabled={mutationDisabled}
+                            reorderDisabled={
+                              mutationDisabled || queueSurfaceProps.reorderDisabled
+                            }
+                            onDraggingChange={setQueueDragActive}
+                            onToggleExpanded={handleQueuePanelToggle}
+                            onEditQueuedMessage={handleEditQueuedMessageFromPopover}
+                            triggerRef={queueTriggerRef}
+                          />
+                        )}
+                      </div>
+                    </div>
+                  </StudioPopover>
+                ) : null}
+              </div>
+            ) : null}
             <Surface
               tone="default"
               radius="2xl"
@@ -750,38 +1293,86 @@ export function ChatComposerSurface({
                             <MagicWand className={composerActionIconClass} aria-hidden="true" />
                           </IconButton>
                         ) : null}
-                        {showVoicePrimaryAction ? (
-                          <VoiceConversationActionStrip {...voiceConversationActionStripProps} />
-                        ) : (
-                          <IconButton
-                            type="button"
-                            onPointerDown={onSendButtonPointerDown}
-                            onPointerUp={onSendButtonPointerUp}
-                            onPointerCancel={onSendButtonPointerCancel}
-                            onPressStart={onSendButtonPressStart}
-                            onPressEnd={onSendButtonPressEnd}
-                            onPress={handleSendPress}
-                            onClick={handleSendClick}
-                            isDisabled={mutationDisabled || sendButtonDisabled}
-                            aria-label="Send message"
-                            variant={sendButtonVariant}
-                            size="md"
-                            radius="xl"
-                            className={[
-                              composerActionButtonClass,
-                              sendButtonVariant === "primary"
-                                ? composerPrimaryActionClass
-                                : "border-slate-200/70 bg-transparent shadow-none dark:border-[color:var(--color-studio-dark-panel-border)]",
-                              sendingAttachment ? "opacity-70" : "",
-                            ]
-                              .filter(Boolean)
-                              .join(" ")}
-                            data-testid="chat-send-button"
-                          >
-                            <span className="sr-only">Send message</span>
-                            <Send className={composerActionIconClass} aria-hidden="true" />
-                          </IconButton>
-                        )}
+                        {showVoicePrimaryAction || showVoiceSecondaryAction ? (
+                          <VoiceConversationActionStrip
+                            {...voiceConversationActionStripProps}
+                            showVoiceRepliesToggle={
+                              showVoicePrimaryAction
+                                ? voiceConversationActionStripProps.showVoiceRepliesToggle
+                                : false
+                            }
+                            voiceInputTestId={
+                              showVoicePrimaryAction
+                                ? voiceConversationActionStripProps.voiceInputTestId
+                                : "chat-voice-secondary-input-button"
+                            }
+                          />
+                        ) : null}
+                        {!showVoicePrimaryAction ? (
+                          <>
+                            <span
+                              role="status"
+                              aria-atomic="true"
+                              aria-live="polite"
+                              className="sr-only"
+                              data-testid="chat-primary-action-status"
+                            >
+                              {primaryActionStatus}
+                            </span>
+                            <IconButton
+                              type="button"
+                              {...touchSendModePicker.triggerProps}
+                              onPress={handleSendPress}
+                              onClick={handleSendClick}
+                              isDisabled={
+                                mutationDisabled ||
+                                (visibleDesktopSendModifierMode === null && sendButtonDisabled)
+                              }
+                              aria-label={primaryActionLabel}
+                              title={primaryActionLabel}
+                              style={{ touchAction: "none" }}
+                              variant={sendButtonVariant}
+                              size="md"
+                              radius="xl"
+                              className={[
+                                composerActionButtonClass,
+                                sendButtonVariant === "primary"
+                                  ? composerPrimaryActionClass
+                                  : "border-slate-200/70 bg-transparent shadow-none dark:border-[color:var(--color-studio-dark-panel-border)]",
+                                sendingAttachment ? "opacity-70" : "",
+                              ]
+                                .filter(Boolean)
+                                .join(" ")}
+                              data-testid="chat-send-button"
+                              data-send-mode={visiblePrimaryActionMode}
+                              data-send-modifier-preview={
+                                visibleDesktopSendModifierMode ?? undefined
+                              }
+                              data-send-options-open={touchSendModePicker.isOpen ? "true" : "false"}
+                            >
+                              <span className="sr-only">{primaryActionLabel}</span>
+                              {visibleDesktopSendModifierMode === "queue" ? (
+                                <TaskList
+                                  className={composerActionIconClass}
+                                  aria-hidden="true"
+                                  data-testid="chat-queue-action-icon"
+                                />
+                              ) : visibleDesktopSendModifierMode === "stash" ? (
+                                <Bookmark
+                                  className={composerActionIconClass}
+                                  aria-hidden="true"
+                                  data-testid="chat-stash-action-icon"
+                                />
+                              ) : (
+                                <Send
+                                  className={composerActionIconClass}
+                                  aria-hidden="true"
+                                  data-testid="chat-send-action-icon"
+                                />
+                              )}
+                            </IconButton>
+                          </>
+                        ) : null}
                       </div>
                     </div>
                   )}
@@ -791,6 +1382,7 @@ export function ChatComposerSurface({
           </div>
         </form>
         <ComposerInviteModal {...inviteModalProps} />
+        {touchSendModePicker.overlay}
       </div>
     </>
   );
