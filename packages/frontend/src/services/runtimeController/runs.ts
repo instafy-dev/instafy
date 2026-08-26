@@ -103,6 +103,8 @@ interface ControllerRunSnapshot {
 
 interface RunEventData {
   run?: ControllerRunSnapshot | null;
+  jobId?: string | null;
+  job_id?: string | null;
   percent?: number | null;
   stage?: string | null;
   message?: string | null;
@@ -895,6 +897,26 @@ function handleControllerEvent(
 
   if (!runRecord) {
     return;
+  }
+
+  // A run snapshot is created before its agent job. The controller publishes
+  // the subsequently assigned job UUID on the run event itself, so retain it
+  // immediately even when an older controller snapshot has not embedded it in
+  // run.metadata yet. Durable controller hydration carries the same field.
+  const authoritativeJobIdCandidates = [
+    event.job_id,
+    data?.jobId,
+    data?.job_id,
+  ];
+  const authoritativeJobId = authoritativeJobIdCandidates.find(
+    (candidate): candidate is string =>
+      typeof candidate === "string" && candidate.trim().length > 0,
+  );
+  if (authoritativeJobId) {
+    runRecord.metadata = {
+      ...(runRecord.metadata ?? {}),
+      jobId: authoritativeJobId.trim(),
+    };
   }
 
   const eventType: "INSERT" | "UPDATE" =

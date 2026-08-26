@@ -70,6 +70,7 @@ function createOptions(overrides: Partial<HookOptions> = {}): HookOptions {
     runtimeReady: true,
     sendingAttachment: false,
     serverSendQueueItems: [],
+    serverQueueHydrated: true,
     setChatSendQueue: vi.fn(),
     setChatSendQueueExpanded: vi.fn(),
     setEditingQueuedItem: vi.fn(),
@@ -196,6 +197,40 @@ describe("useChatSendQueueActions", () => {
       expect.objectContaining({ message: "Queued locally" }),
       { allowWhileBusy: true },
     );
+  });
+
+  it("keeps local fallback entries behind the visible server queue", async () => {
+    const options = createOptions({
+      chatSendQueue: [createLocalItem()],
+      serverSendQueueItems: [createServerItem()],
+    });
+    await renderHook(options);
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(options.submitMessage).not.toHaveBeenCalled();
+  });
+
+  it("waits for server queue hydration before draining a local fallback", async () => {
+    const options = createOptions({
+      chatSendQueue: [createLocalItem()],
+      serverQueueHydrated: false,
+    });
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => {
+      root.render(<Harness options={options} resultRef={resultRef} />);
+    });
+    expect(options.submitMessage).not.toHaveBeenCalled();
+
+    await act(async () => {
+      root.render(
+        <Harness options={{ ...options, serverQueueHydrated: true }} resultRef={resultRef} />,
+      );
+      await Promise.resolve();
+    });
+    expect(options.submitMessage).toHaveBeenCalledTimes(1);
   });
 
   it("cancels the server entry when steering it into the composer", async () => {
