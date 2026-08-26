@@ -49,6 +49,47 @@ test("every external public workflow action is pinned to an exact commit", () =>
   }
 });
 
+test("protected main publishes both exact image manifests only after CI", () => {
+  const source = readWorkflow("continuous-image-publication.yml");
+
+  assert.match(source, /\n  push:\n    branches:\n      - main\n/u);
+  assert.match(source, /\n  workflow_dispatch:\n/u);
+  assert.match(source, /actions: write/u);
+  assert.match(source, /contents: read/u);
+  assert.match(source, /cancel-in-progress: false/u);
+  assert.match(source, /timeout-minutes: 180/u);
+  assert.match(source, /github\.repository == 'instafy-dev\/instafy'/u);
+  assert.match(source, /github\.ref == 'refs\/heads\/main'/u);
+  assert.match(source, /REQUESTED_COMMIT" != "\$GITHUB_SHA"/u);
+  assert.match(source, /actions\/workflows\/build\.yml\/runs\?event=push&head_sha=/u);
+  assert.match(source, /X-GitHub-Api-Version: 2026-03-10/u);
+  assert.match(source, /\.workflow_run_id/u);
+  assert.match(source, /\.event == "workflow_dispatch"/u);
+  assert.match(source, /\.head_branch == "main"/u);
+  assert.match(source, /\.head_sha == \$sha/u);
+  assert.match(source, /production-services-release-manifest/u);
+  assert.match(source, /runtime-agent-release-manifest/u);
+  assert.match(source, /\\"update_channel_tags\\":false/u);
+  assert.doesNotMatch(source, /\bsecrets\./u);
+  assert.doesNotMatch(source, /^\s+pull_request_target:|^\s+workflow_run:/mu);
+  assert.equal(
+    [...source.matchAll(/publish-production-services\.yml/gu)].length,
+    2,
+  );
+  assert.equal(
+    [...source.matchAll(/publish-runtime-agent\.yml/gu)].length,
+    2,
+  );
+  assertOrdered(
+    source,
+    "Authorize the exact current protected-main commit",
+    "Wait for exact protected-main CI",
+    "Recheck protected main before publication",
+    "Dispatch both immutable image publishers",
+    "Require both exact image manifests",
+  );
+});
+
 test("Changesets separates pull-request, version, pack, and npm publish authority", () => {
   const source = readWorkflow("npm-release.yml");
   const pullRequest = jobSection(source, "pull-request-policy", "select");
