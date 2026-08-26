@@ -11,7 +11,7 @@ The controller supports three schedule kinds:
 - `hourly` runs every configured number of hours.
 - `weekly` runs on selected weekdays at a local hour and minute in an IANA timezone.
 
-Creating an automation also creates its private conversation and adds the owner as a participant.
+Creating an automation also creates its result conversation and adds the owner as a participant.
 Later runs reuse that thread, so results stay together without appearing in an unrelated chat.
 Pausing an automation stops scheduled runs without deleting its configuration or thread.
 
@@ -23,6 +23,30 @@ creation. The automation keeps its id and conversation thread, so run history st
 controller recomputes `nextRunAt` only when the effective schedule or the status changes; editing
 the prompt or runtime settings does not move a pending run. A request without any field is
 rejected.
+
+## Share results with your team
+
+By default an automation's result conversation is private to its owner. Other members can see the
+automation record (status, next run, last error) but not the result threads. An automation can opt
+in to sharing so its result conversation becomes visible to anyone with access to the space.
+
+The choice is stored as `resultVisibility` in the controller API, backed by the
+`automations.result_visibility` column. It is an enum:
+
+- `private` (default) keeps the result conversation owner-only.
+- `team` makes the result conversation team-visible.
+
+Internally `team` maps onto the conversation `public` visibility. The conversation list gate shows
+any non-private thread to members with project access, so a shared automation's results appear for
+teammates while the automation stays owner-managed. "Team" means visible to anyone with access to
+the space; it is not world-readable, because listing is still gated by project access.
+
+`resultVisibility` is accepted on automation create and update, validated to `private` or `team`,
+and returned on the automation record. Updating it also updates the existing result conversation's
+visibility so past and future runs follow the current setting. The CLI exposes this through
+`instafy automations create --share-results` and
+`instafy automations update <id> --share-results | --no-share-results | --result-visibility <private|team>`
+(see [CLI](CLI.md#share-results-with-your-team)).
 
 ## Quiet runs
 

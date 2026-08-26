@@ -528,6 +528,44 @@ instafy automations update <automation-id> \
 
 The next run is recomputed only when the schedule or status changes; editing the name, prompt, or
 runtime settings leaves the pending run where it is. Use `pause` and `resume` to change status.
+
+### Share results with your team
+
+By default an automation's result conversations are private to the person who created it: other
+members see the automation record (status, next run, last error) but not the result threads. Add
+`--share-results` to make a new automation's result threads visible to anyone with access to the
+space:
+
+```bash
+instafy automations create --json \
+  --space "<Project ID>" \
+  --name "Dependency change check" \
+  --prompt "Check whether dependency versions changed and report the changes." \
+  --schedule-kind weekly \
+  --days mo,tu,we,th,fr \
+  --time 08:00 \
+  --timezone "Europe/Vienna" \
+  --share-results
+```
+
+The visibility is stored as `resultVisibility` (`private` by default, `team` when shared) and is
+shown in `automations list`/`--json` output. Flip an existing automation with `automations update`:
+
+```bash
+# Share an existing automation's results with the team
+instafy automations update "<Automation ID>" --share-results
+
+# Return it to owner-only
+instafy automations update "<Automation ID>" --no-share-results
+
+# Or set it explicitly
+instafy automations update "<Automation ID>" --result-visibility team
+```
+
+`--share-results` maps to `--result-visibility team`; `--no-share-results` to `--result-visibility
+private`. "Team" here means visible to anyone with access to the space, not world-readable. The
+same flags are accepted by `automations create`.
+
 ## Credentials
 
 `instafy credentials` shows which AI provider credentials (bring-your-own keys and Codex logins)
