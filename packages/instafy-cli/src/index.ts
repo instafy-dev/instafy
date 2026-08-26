@@ -48,6 +48,16 @@ import {
 } from "./conversations.js";
 import { inviteSpaceMember, setSpaceMemberRole } from "./invitations.js";
 import {
+  teamAccept,
+  teamAddMember,
+  teamInvite,
+  teamInviteLink,
+  teamInvites,
+  teamMembersList,
+  teamRevokeInvite,
+  teamRevokeLink,
+} from "./team.js";
+import {
   grantProviderBinding,
   revokeProviderBinding,
   showProviderBinding,
@@ -1932,6 +1942,180 @@ orgListCommand
   .action(async (opts) => {
     try {
       await (await import("./org.js")).listOrganizations({
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+function teamScopeCommandFactory(nameAndArgs: string, description: string): Command {
+  const command = orgCommand.command(nameAndArgs).description(description);
+  addServerUrlOptions(command);
+  addAccessTokenOptions(command, "Instafy access token");
+  command
+    .option("--team-id <team>", "Team id (UUID) or slug (defaults to your only team)")
+    .option("--json", "Output JSON");
+  return command;
+}
+
+const teamMembersCommand = teamScopeCommandFactory("members", "List members of a team");
+teamMembersCommand.action(async (opts) => {
+  try {
+    await teamMembersList({
+      teamId: opts.teamId,
+      controllerUrl: opts.serverUrl,
+      accessToken: opts.accessToken,
+      json: opts.json,
+    });
+  } catch (error) {
+    console.error(kleur.red(String(error)));
+    process.exit(1);
+  }
+});
+
+const teamInviteCommand = teamScopeCommandFactory(
+  "invite <email>",
+  "Invite a teammate by email (they must sign in with that email to accept)",
+);
+teamInviteCommand
+  .option("--role <role>", "owner, admin, builder, or viewer (default: builder)")
+  .action(async (email, opts) => {
+    try {
+      await teamInvite({
+        email,
+        role: opts.role,
+        teamId: opts.teamId,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+const teamInviteLinkCommand = teamScopeCommandFactory(
+  "invite-link",
+  "Create a shareable invite link that works with any sign-in method",
+);
+teamInviteLinkCommand
+  .option("--role <role>", "builder or viewer (default: builder)")
+  .option("--studio-url <url>", "Studio base URL for the accept link (default: https://instafy.dev)")
+  .action(async (opts) => {
+    try {
+      await teamInviteLink({
+        role: opts.role,
+        studioUrl: opts.studioUrl,
+        teamId: opts.teamId,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+const teamInvitesCommand = teamScopeCommandFactory(
+  "invites",
+  "List pending email invitations and invite links",
+);
+teamInvitesCommand.action(async (opts) => {
+  try {
+    await teamInvites({
+      teamId: opts.teamId,
+      controllerUrl: opts.serverUrl,
+      accessToken: opts.accessToken,
+      json: opts.json,
+    });
+  } catch (error) {
+    console.error(kleur.red(String(error)));
+    process.exit(1);
+  }
+});
+
+const teamAddMemberCommand = teamScopeCommandFactory(
+  "add-member",
+  "Add an existing Instafy account to a team by user id",
+);
+teamAddMemberCommand
+  .requiredOption("--user-id <uuid>", "User id of an existing Instafy account")
+  .option("--role <role>", "owner, admin, builder, or viewer (default: builder)")
+  .action(async (opts) => {
+    try {
+      await teamAddMember({
+        userId: opts.userId,
+        role: opts.role,
+        teamId: opts.teamId,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+const teamAcceptCommand = teamScopeCommandFactory(
+  "accept <token>",
+  "Accept a team invitation or invite link with the current account",
+);
+teamAcceptCommand.action(async (token, opts) => {
+  try {
+    await teamAccept({
+      token,
+      teamId: opts.teamId,
+      controllerUrl: opts.serverUrl,
+      accessToken: opts.accessToken,
+      json: opts.json,
+    });
+  } catch (error) {
+    console.error(kleur.red(String(error)));
+    process.exit(1);
+  }
+});
+
+const teamRevokeInviteCommand = teamScopeCommandFactory(
+  "revoke-invite <invitation-id>",
+  "Revoke a pending email invitation",
+);
+teamRevokeInviteCommand
+  .option("--yes", "Skip the confirmation prompt")
+  .action(async (invitationId, opts) => {
+    try {
+      await teamRevokeInvite({
+        invitationId,
+        yes: opts.yes,
+        teamId: opts.teamId,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+const teamRevokeLinkCommand = teamScopeCommandFactory(
+  "revoke-link <invite-link-id>",
+  "Revoke a shareable invite link",
+);
+teamRevokeLinkCommand
+  .option("--yes", "Skip the confirmation prompt")
+  .action(async (inviteLinkId, opts) => {
+    try {
+      await teamRevokeLink({
+        inviteLinkId,
+        yes: opts.yes,
+        teamId: opts.teamId,
         controllerUrl: opts.serverUrl,
         accessToken: opts.accessToken,
         json: opts.json,
