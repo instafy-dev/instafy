@@ -14,8 +14,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, Sse};
 use axum::routing::post;
-use openai_proxy_server::{auth, proxy};
 use futures_util::stream;
+use openai_proxy_server::{auth, proxy};
 use reqwest::Url;
 use runtime_agent::codex::{CodexClient, CodexRunOptions};
 use runtime_agent::config::Config;
@@ -705,7 +705,7 @@ async fn codex_embedded_via_proxy_creates_file_inner() -> Result<()> {
 
     let execution = tokio::time::timeout(
         Duration::from_secs(300),
-        processor.run_apply_job(&registration, &job, true, None, None),
+        processor.run_apply_job(&registration, &job, true, None, None, None),
     )
     .await
     .context("proxy-backed embedded job timed out")?
@@ -1002,7 +1002,7 @@ async fn codex_embedded_retries_after_stream_error_inner() -> Result<()> {
 
     let execution = tokio::time::timeout(
         Duration::from_secs(300),
-        processor.run_apply_job(&registration, &job, true, None, None),
+        processor.run_apply_job(&registration, &job, true, None, None, None),
     )
     .await
     .context("retry scenario job timed out")?
@@ -1193,7 +1193,14 @@ async fn codex_proxy_live_creates_file() -> Result<()> {
 
     let execution = tokio::time::timeout(
         Duration::from_secs(300),
-        processor.run_apply_job(&registration_for_live(runtime_id), &job, true, None, None),
+        processor.run_apply_job(
+            &registration_for_live(runtime_id),
+            &job,
+            true,
+            None,
+            None,
+            None,
+        ),
     )
     .await
     .context("live proxy job timed out")??;
@@ -1419,7 +1426,14 @@ async fn codex_proxy_live_browser_prompt_simulation() -> Result<()> {
 
     let execution = tokio::time::timeout(
         Duration::from_secs(300),
-        processor.run_apply_job(&registration_for_live(runtime_id), &job, true, None, None),
+        processor.run_apply_job(
+            &registration_for_live(runtime_id),
+            &job,
+            true,
+            None,
+            None,
+            None,
+        ),
     )
     .await
     .context("live browser simulation job timed out")?

@@ -15,6 +15,15 @@ Creating an automation also creates its result conversation and adds the owner a
 Later runs reuse that thread, so results stay together without appearing in an unrelated chat.
 Pausing an automation stops scheduled runs without deleting its configuration or thread.
 
+The owner can update an automation in place through the same controller route that pauses and
+resumes it (`PATCH /automations/{id}`) or with `instafy automations update`. Any subset of the
+name, prompt, schedule (kind, `runAt`, `intervalHours`, `byDay`, `byHour`, `byMinute`,
+`timezone`), runtime mode and provider, and quiet-run setting can change; validation matches
+creation. The automation keeps its id and conversation thread, so run history stays attached. The
+controller recomputes `nextRunAt` only when the effective schedule or the status changes; editing
+the prompt or runtime settings does not move a pending run. A request without any field is
+rejected.
+
 ## Share results with your team
 
 By default an automation's result conversation is private to its owner. Other members can see the
@@ -46,7 +55,9 @@ Quiet runs are opt-in through `silentWhenNothingToReport` in the controller API,
 automations created before the option existed.
 
 In Studio, enable **Only notify me when there’s something to report** in the automation editor.
-The CLI exposes the same setting at creation time:
+The CLI exposes the same setting at creation time (and later through
+`instafy automations update <automation-id> --silent-when-nothing-to-report` or
+`--no-silent-when-nothing-to-report`):
 
 ```bash
 instafy automations create \

@@ -108,22 +108,29 @@ struct UpdateAutomationBody {
 }
 
 impl UpdateAutomationBody {
+    fn has_settings_updates(&self) -> bool {
+        self.name.is_some()
+            || self.prompt_text.is_some()
+            || self.metadata.is_some()
+            || self.schedule_kind.is_some()
+            || self.run_at.is_some()
+            || self.interval_hours.is_some()
+            || self.by_day.is_some()
+            || self.by_hour.is_some()
+            || self.by_minute.is_some()
+            || self.timezone.is_some()
+            || self.runtime_mode.is_some()
+            || self.runtime_provider.is_some()
+            || self.silent_when_nothing_to_report.is_some()
+            || self.result_visibility.is_some()
+    }
+
     fn is_status_only(&self) -> bool {
-        self.status.is_some()
-            && self.name.is_none()
-            && self.prompt_text.is_none()
-            && self.metadata.is_none()
-            && self.schedule_kind.is_none()
-            && self.run_at.is_none()
-            && self.interval_hours.is_none()
-            && self.by_day.is_none()
-            && self.by_hour.is_none()
-            && self.by_minute.is_none()
-            && self.timezone.is_none()
-            && self.runtime_mode.is_none()
-            && self.runtime_provider.is_none()
-            && self.silent_when_nothing_to_report.is_none()
-            && self.result_visibility.is_none()
+        self.status.is_some() && !self.has_settings_updates()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.status.is_none() && !self.has_settings_updates()
     }
 }
 
@@ -844,6 +851,8 @@ async fn execute_automation_once(
             runtime_updated_at: runtime_id.map(|_| now),
             runtime_display_name: None,
             prefer_runtime: runtime_id.is_some(),
+            expected_lane_idle: false,
+            dispatch_queue_entry_id: None,
             allow_silent_automation_decline: record.silent_when_nothing_to_report,
         },
     )
@@ -1505,6 +1514,11 @@ async fn update_automation(
     let context = authenticate_request(&state.config, &headers).await?;
     let automation_id = Uuid::from_str(automation_id_raw.trim())
         .map_err(|_| bad_request("automationId must be a valid UUID"))?;
+    if body.is_empty() {
+        return Err(bad_request(
+            "at least one automation field must be provided",
+        ));
+    }
 
     let mut connection = state
         .pool
@@ -2152,6 +2166,26 @@ mod tests {
         }))
         .expect("deserialize automation result visibility opt-in");
         assert_eq!(opted_in.result_visibility.as_deref(), Some("team"));
+    }
+
+    #[test]
+    fn automation_update_body_is_empty_only_without_any_field() {
+        assert!(UpdateAutomationBody::default().is_empty());
+        assert!(!UpdateAutomationBody {
+            status: Some("paused".to_string()),
+            ..UpdateAutomationBody::default()
+        }
+        .is_empty());
+        assert!(!UpdateAutomationBody {
+            prompt_text: Some("Report dependency changes.".to_string()),
+            ..UpdateAutomationBody::default()
+        }
+        .is_empty());
+        assert!(!UpdateAutomationBody {
+            silent_when_nothing_to_report: Some(false),
+            ..UpdateAutomationBody::default()
+        }
+        .is_empty());
     }
 
     #[test]

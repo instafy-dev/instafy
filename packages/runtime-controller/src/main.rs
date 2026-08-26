@@ -41,6 +41,7 @@ mod group_participation;
 mod imports;
 mod integrations;
 mod jwks;
+mod message_stashes;
 mod model_defaults;
 mod multi_agent_plan;
 mod notifications;
@@ -58,6 +59,7 @@ mod redis_bus;
 mod runs;
 mod runtime;
 mod secrets;
+mod send_intents;
 mod send_queue;
 mod skills_discovery;
 mod speech_proxy;
@@ -284,6 +286,7 @@ async fn main() -> anyhow::Result<()> {
     workspace::spawn_local_workspace_housekeeping(&state);
     origins::spawn_origin_presence_housekeeping(&state);
     automations::spawn_automation_scheduler(state.clone());
+    send_queue::spawn_send_queue_recovery_sweep(state.clone());
 
     let idle_state = state.clone();
     tokio::spawn(async move {
@@ -461,6 +464,8 @@ async fn main() -> anyhow::Result<()> {
         .merge(skills_discovery::router())
         .merge(device_auth::router())
         .merge(conversations::router())
+        .merge(message_stashes::router())
+        .merge(send_intents::router())
         .merge(send_queue::router())
         .merge(notifications::router())
         .merge(runs::router())
