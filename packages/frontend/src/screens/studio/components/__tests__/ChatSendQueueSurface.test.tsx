@@ -15,10 +15,7 @@ function buildProps(overrides: Partial<SurfaceProps> = {}): SurfaceProps {
     collapsedQueuedMessageSummary: {
       message: "two",
     },
-    queueQuickSendItemId: "queued-1",
     queueCanSendNow: false,
-    queueStatusLabel: "Reply in progress",
-    queueStatusAction: null,
     chatSendQueueDisplay: [
       {
         id: "queued-1",
@@ -30,9 +27,8 @@ function buildProps(overrides: Partial<SurfaceProps> = {}): SurfaceProps {
     inputValue: "",
     onToggleExpanded: vi.fn(),
     onSendQueuedMessageNow: vi.fn(),
-    onRequestRuntimeRecovery: vi.fn(),
     onRemoveQueuedItem: vi.fn(),
-    onMoveQueuedItem: vi.fn(),
+    onReorderQueuedItem: vi.fn(),
     onEditQueuedMessage: vi.fn(),
     onCancelQueuedEdit: vi.fn(),
     onRequeueEditedMessage: vi.fn(),
@@ -60,33 +56,34 @@ describe("ChatSendQueueSurface", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it("keeps the collapsed queue focused on the message and steering action", async () => {
+  it("keeps the collapsed queue behind a counted task-list icon", async () => {
+    const onToggleExpanded = vi.fn();
     const onEditQueuedMessage = vi.fn();
 
     await act(async () => {
-      root.render(<ChatSendQueueSurface {...buildProps({ onEditQueuedMessage })} />);
+      root.render(<ChatSendQueueSurface {...buildProps({ onToggleExpanded, onEditQueuedMessage })} />);
     });
 
-    expect(container.textContent).toContain("two");
-    expect(container.textContent).not.toContain("Queued message");
+    expect(container.textContent).not.toContain("two");
     expect(container.textContent).not.toContain("Reply in progress");
     expect(container.textContent).not.toContain("@octo");
-    expect(container.querySelector('[data-testid="chat-send-queue-agent-summary"]')?.textContent).toBe("two");
-
-    const steerButton = container.querySelector(
-      '[data-testid="chat-send-queue-steer-collapsed"]',
-    ) as HTMLButtonElement | null;
-    expect(steerButton).not.toBeNull();
-    expect(steerButton?.textContent?.trim()).toBe("Steer");
+    const summary = container.querySelector('[data-testid="chat-send-queue-agent-summary"]');
+    expect(summary?.getAttribute("aria-label")).toBe("Queued messages (1): two");
+    expect(summary?.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelector(`#${summary?.getAttribute("aria-controls")}`)).not.toBeNull();
+    expect(container.querySelector('[data-testid="chat-send-queue-icon"]')).not.toBeNull();
+    expect(summary?.querySelector('span[aria-hidden="true"]')?.className).toContain("bg-primary-600");
+    expect(container.textContent).toBe("1");
 
     await act(async () => {
-      steerButton?.click();
+      (summary as HTMLButtonElement).click();
     });
 
-    expect(onEditQueuedMessage).toHaveBeenCalledWith("queued-1");
+    expect(onToggleExpanded).toHaveBeenCalledTimes(1);
+    expect(onEditQueuedMessage).not.toHaveBeenCalled();
   });
 
-  it("opens the queued list when steering a collapsed multi-message queue", async () => {
+  it("opens the queued list when editing a collapsed multi-message queue", async () => {
     const onToggleExpanded = vi.fn();
     const onEditQueuedMessage = vi.fn();
 
@@ -96,7 +93,6 @@ describe("ChatSendQueueSurface", () => {
           {...buildProps({
             totalQueuedCount: 2,
             collapsedQueuedMessageSummary: null,
-            queueQuickSendItemId: null,
             chatSendQueueDisplay: [
               {
                 id: "queued-1",
@@ -116,19 +112,19 @@ describe("ChatSendQueueSurface", () => {
       );
     });
 
-    const steerButton = container.querySelector(
-      '[data-testid="chat-send-queue-steer-collapsed"]',
-    ) as HTMLButtonElement | null;
+    const editButton = container.querySelector('[data-testid="chat-send-queue-steer-collapsed"]');
+    expect(editButton).toBeNull();
+    expect(container.textContent).toBe("2");
 
     await act(async () => {
-      steerButton?.click();
+      (container.querySelector('[data-testid="chat-send-queue-agent-summary"]') as HTMLButtonElement).click();
     });
 
     expect(onEditQueuedMessage).not.toHaveBeenCalled();
     expect(onToggleExpanded).toHaveBeenCalledTimes(1);
   });
 
-  it("hides passive queue status text in the expanded list", async () => {
+  it("omits runtime status and duplicate count from the expanded list", async () => {
     await act(async () => {
       root.render(
         <ChatSendQueueSurface
@@ -136,8 +132,6 @@ describe("ChatSendQueueSurface", () => {
             totalQueuedCount: 2,
             chatSendQueueExpanded: true,
             collapsedQueuedMessageSummary: null,
-            queueStatusLabel: "Reply in progress",
-            queueStatusAction: null,
             chatSendQueueDisplay: [
               {
                 id: "queued-1",
@@ -157,7 +151,75 @@ describe("ChatSendQueueSurface", () => {
 
     expect(container.textContent).toContain("how");
     expect(container.textContent).toContain("are");
-    expect(container.textContent).not.toContain("Reply in progress");
+    expect(
+      container.querySelector('[data-testid="chat-send-queue-agent-summary"]')?.getAttribute("aria-expanded"),
+    ).toBe("true");
+    expect(container.textContent).not.toContain("Runtime offline");
+    expect(container.textContent).not.toContain("Reconnect");
+    expect(container.querySelector('[data-testid="chat-send-queue-runtime-action-expanded"]')).toBeNull();
     expect(container.textContent).not.toContain("@octo");
+    expect(container.querySelector('[data-testid="chat-send-queue-panel-header"]')?.textContent?.trim()).toBe(
+      "Queue",
+    );
+    const panel = container.querySelector('[aria-label="Queued messages"][role="region"]');
+    expect(panel?.className).toContain("basis-full");
+    expect(panel?.firstElementChild?.className).toContain("sm:w-[min(24rem,100%)]");
+  });
+
+  it("shows queue editing without a misleading queue toggle", async () => {
+    await act(async () => {
+      root.render(
+        <ChatSendQueueSurface
+          {...buildProps({
+            totalQueuedCount: 2,
+            editingQueuedItem: { targetAgentHandles: ["octo"] },
+            chatSendQueueDisplay: [
+              {
+                id: "queued-1",
+                message: "one",
+                targetHandles: ["octo"],
+              },
+              {
+                id: "queued-2",
+                message: "two",
+                targetHandles: ["octo"],
+              },
+            ],
+            collapsedQueuedMessageSummary: null,
+          })}
+        />,
+      );
+    });
+
+    expect(container.textContent).toContain("Editing queued message");
+    expect(container.querySelector('[data-testid="chat-send-queue-agent-summary"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-send-queue-icon"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Queued messages"][role="region"]')).not.toBeNull();
+  });
+
+  it("bounds long queued-message previews in the trigger name", async () => {
+    const message = "a".repeat(400);
+    await act(async () => {
+      root.render(
+        <ChatSendQueueSurface
+          {...buildProps({
+            collapsedQueuedMessageSummary: { message },
+            chatSendQueueDisplay: [
+              {
+                id: "queued-1",
+                message,
+                targetHandles: ["octo"],
+              },
+            ],
+          })}
+        />,
+      );
+    });
+
+    const name = container
+      .querySelector('[data-testid="chat-send-queue-agent-summary"]')
+      ?.getAttribute("aria-label");
+    expect(name).toBe(`Queued messages (1): ${"a".repeat(119)}…`);
+    expect(name).not.toContain(message);
   });
 });

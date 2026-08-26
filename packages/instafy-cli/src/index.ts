@@ -15,6 +15,13 @@ import { runGitCredentialHelper } from "./git-credential.js";
 import { projectInit, projectProfile, refreshProjectDefaults } from "./project.js";
 import { secretsGet, secretsList, secretsPut, secretsRevoke } from "./secrets.js";
 import { automationsCreate, automationsDelete, automationsList, automationsRun, automationsUpdateStatus } from "./automations.js";
+import {
+  credentialsClearDefault,
+  credentialsList,
+  credentialsRevoke,
+  credentialsSetDefault,
+  credentialsTest,
+} from "./credentials.js";
 import { listTunnelSessions, startTunnelDetached, stopTunnelSession, tailTunnelLogs, runTunnelCommand } from "./tunnel.js";
 import { configGet, configList, configPath, configSet, configUnset } from "./config-command.js";
 import { getInstafyProfileConfigPath, listInstafyProfileNames, readInstafyProfileConfig } from "./config.js";
@@ -1285,6 +1292,129 @@ automationsDeleteCommand
     try {
       await automationsDelete({
         automationId,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+const credentialsCommand = program
+  .command("credentials")
+  .description("Inspect, verify and pick the AI provider credentials your jobs use");
+
+failWithGroupHelp(credentialsCommand);
+
+const credentialsListCommand = credentialsCommand
+  .command("list")
+  .description("List your AI credentials (secret material is never shown)")
+  .option("--all", "Include revoked credentials");
+
+addServerUrlOptions(credentialsListCommand);
+addAccessTokenOptions(credentialsListCommand, "Instafy access token");
+
+credentialsListCommand
+  .option("--json", "Output JSON")
+  .action(async (opts) => {
+    try {
+      await credentialsList({
+        all: Boolean(opts.all),
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+const credentialsTestCommand = credentialsCommand
+  .command("test")
+  .description("Probe one credential through the proxy against its upstream provider (exit 1 on failure)")
+  .argument("<id-or-prefix>", "Credential UUID or unique id prefix");
+
+addServerUrlOptions(credentialsTestCommand);
+addAccessTokenOptions(credentialsTestCommand, "Instafy access token");
+
+credentialsTestCommand
+  .option("--json", "Output JSON")
+  .action(async (idOrPrefix, opts) => {
+    try {
+      const result = await credentialsTest({
+        idOrPrefix,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+      if (!result.ok) {
+        process.exitCode = 1;
+      }
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+const credentialsDefaultCommand = credentialsCommand
+  .command("default")
+  .description("Set the default credential jobs use, or clear it with --clear")
+  .argument("[id-or-prefix]", "Credential UUID or unique id prefix")
+  .option("--clear", "Clear the default credential instead of setting one");
+
+addServerUrlOptions(credentialsDefaultCommand);
+addAccessTokenOptions(credentialsDefaultCommand, "Instafy access token");
+
+credentialsDefaultCommand
+  .option("--json", "Output JSON")
+  .action(async (idOrPrefix, opts) => {
+    try {
+      const target = pickTrimmedString(idOrPrefix);
+      if (opts.clear && target) {
+        throw new Error("Pass either a credential id or --clear, not both.");
+      }
+      if (!opts.clear && !target) {
+        throw new Error("Provide a credential id (or unique prefix), or pass --clear.");
+      }
+      if (opts.clear) {
+        await credentialsClearDefault({
+          controllerUrl: opts.serverUrl,
+          accessToken: opts.accessToken,
+          json: opts.json,
+        });
+        return;
+      }
+      await credentialsSetDefault({
+        idOrPrefix: target!,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+const credentialsRevokeCommand = credentialsCommand
+  .command("revoke")
+  .description("Revoke a credential (asks for confirmation unless --yes)")
+  .argument("<id-or-prefix>", "Credential UUID or unique id prefix")
+  .option("--yes", "Skip the confirmation prompt (required when not running in a terminal)");
+
+addServerUrlOptions(credentialsRevokeCommand);
+addAccessTokenOptions(credentialsRevokeCommand, "Instafy access token");
+
+credentialsRevokeCommand
+  .option("--json", "Output JSON")
+  .action(async (idOrPrefix, opts) => {
+    try {
+      await credentialsRevoke({
+        idOrPrefix,
+        yes: Boolean(opts.yes),
         controllerUrl: opts.serverUrl,
         accessToken: opts.accessToken,
         json: opts.json,

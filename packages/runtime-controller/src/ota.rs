@@ -1775,6 +1775,18 @@ pub(crate) async fn require_operator_access(
     headers: &HeaderMap,
 ) -> Result<RequestContext, (StatusCode, Json<ApiError>)> {
     let context = authenticate_request(&state.config, headers).await?;
+    require_operator_access_for_context(state, context).await
+}
+
+/// Full operator check for an already-authenticated request context: service
+/// role, `OPERATOR_CONSOLE_ALLOWED_USER_IDS`, or owner/admin membership in
+/// `OPERATOR_CONSOLE_ORG_ID`. Split out so narrower roles (for example the
+/// bug-reports-only operator allowlist) can authenticate once and fall back to
+/// this check without re-reading the bearer.
+pub(crate) async fn require_operator_access_for_context(
+    state: &AppState,
+    context: RequestContext,
+) -> Result<RequestContext, (StatusCode, Json<ApiError>)> {
     if context.is_service_role {
         return Ok(context);
     }
