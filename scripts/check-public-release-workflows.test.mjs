@@ -53,6 +53,7 @@ test("protected main publishes both exact image manifests only after CI", () => 
   const source = readWorkflow("continuous-image-publication.yml");
 
   assert.match(source, /\n  push:\n    branches:\n      - main\n/u);
+  assert.match(source, /\n  schedule:\n    - cron: "17 \*\/6 \* \* \*"\n/u);
   assert.match(source, /\n  workflow_dispatch:\n/u);
   assert.match(source, /actions: write/u);
   assert.match(source, /contents: read/u);
@@ -69,22 +70,27 @@ test("protected main publishes both exact image manifests only after CI", () => 
   assert.match(source, /\.head_sha == \$sha/u);
   assert.match(source, /production-service-release-manifest/u);
   assert.match(source, /runtime-agent-release-manifest/u);
+  assert.match(source, /Check exact manifest freshness/u);
+  assert.match(source, /14 \* 24 \* 60 \* 60/u);
+  assert.match(source, /steps\.freshness\.outputs\.publish == 'true'/u);
+  assert.match(source, /Report fresh immutable manifests/u);
   assert.match(source, /\\"update_channel_tags\\":false/u);
   assert.doesNotMatch(source, /\bsecrets\./u);
   assert.doesNotMatch(source, /^\s+pull_request_target:|^\s+workflow_run:/mu);
   assert.equal(
     [...source.matchAll(/publish-production-services\.yml/gu)].length,
-    2,
+    3,
   );
   assert.equal(
     [...source.matchAll(/publish-runtime-agent\.yml/gu)].length,
-    2,
+    3,
   );
   assertOrdered(
     source,
     "Authorize the exact current protected-main commit",
     "Wait for exact protected-main CI",
     "Recheck protected main before publication",
+    "Check exact manifest freshness",
     "Dispatch both immutable image publishers",
     "Require both exact image manifests",
   );
