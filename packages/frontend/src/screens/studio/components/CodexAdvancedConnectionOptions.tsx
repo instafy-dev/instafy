@@ -4,12 +4,6 @@ import { Button } from "../../../components/Button";
 import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
 import { Text } from "../../../components/Text";
-import { useStatus } from "../../../status/useStatus";
-import { emitAiConfigChanged } from "./aiConfigEvents";
-import {
-  canUseDevServerCodexAuthJson,
-  connectDevServerCodexAuthJson,
-} from "./devServerCodexAuthJson";
 import {
   canShareDesktopSetupLink,
   INSTAFY_DESKTOP_INSTALL_URL,
@@ -26,6 +20,11 @@ type CodexAdvancedConnectionOptionsProps = {
   onExpandedChange: (expanded: boolean) => void;
   onLabelChange: (label: string) => void;
   onChooseAuthJson: () => void;
+  // Dev-only: seed this machine's Codex login. Handled by the connect flow so
+  // completion (loadCredentials + close) and busy state match every other path.
+  canDevSeed?: boolean;
+  busy?: boolean;
+  onDevSeed?: () => void;
 };
 
 const ADVANCED_OPTIONS_ID = "credentials-codex-advanced-options";
@@ -37,37 +36,12 @@ export function CodexAdvancedConnectionOptions({
   onExpandedChange,
   onLabelChange,
   onChooseAuthJson,
+  canDevSeed = false,
+  busy = false,
+  onDevSeed,
 }: CodexAdvancedConnectionOptionsProps) {
   const panelRef = useRef<HTMLDivElement>(null);
-  const { showStatus } = useStatus();
-  const canUseDevServerConnect = canUseDevServerCodexAuthJson();
-  const [devSeedBusy, setDevSeedBusy] = useState(false);
   const [desktopSetupShareFailed, setDesktopSetupShareFailed] = useState(false);
-
-  const handleDevSeed = async () => {
-    if (devSeedBusy) {
-      return;
-    }
-    setDevSeedBusy(true);
-    try {
-      const result = await connectDevServerCodexAuthJson({
-        label: label.trim() || undefined,
-        makeDefault: true,
-      });
-      if (!result.success) {
-        throw new Error(result.error ?? "Unable to save credentials.");
-      }
-      emitAiConfigChanged("dev-seed");
-      showStatus("Connected this machine's Codex login as default.", "success", 3500, {
-        presentation: "confirmation",
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      showStatus(message, "error", 5000);
-    } finally {
-      setDevSeedBusy(false);
-    }
-  };
   const canShareDesktopSetup =
     !desktopSetupShareFailed && canShareDesktopSetupLink();
 
@@ -117,7 +91,7 @@ export function CodexAdvancedConnectionOptions({
         >
           {allowAuthJsonImport ? (
             <>
-              {canUseDevServerConnect ? (
+              {canDevSeed && onDevSeed ? (
                 <div className="space-y-1.5 border-b border-slate-200 pb-3 dark:border-slate-800">
                   <div className="space-y-0.5">
                     <Text variant="bodyStrong" tone="secondary" className="text-sm">
@@ -125,21 +99,22 @@ export function CodexAdvancedConnectionOptions({
                     </Text>
                     <Text variant="caption" tone="muted">
                       Connects ~/.codex/auth.json via the local dev server and makes
-                      it the default. Always current — no upload needed.
+                      it the default, replacing any earlier dev seed. Always current
+                      — no upload needed.
                     </Text>
                   </div>
                   <Button
                     type="button"
-                    onPress={() => void handleDevSeed()}
+                    onPress={onDevSeed}
                     variant="outline"
                     size="sm"
                     radius="full"
-                    isDisabled={devSeedBusy}
+                    isDisabled={busy}
                     className="min-h-11 w-full sm:w-auto"
                     data-testid="credentials-codex-dev-seed"
                   >
                     <FloppyDisk className="h-4 w-4" aria-hidden="true" />
-                    {devSeedBusy ? "Seeding…" : "Use local Codex login (dev)"}
+                    {busy ? "Seeding…" : "Use local Codex login (dev)"}
                   </Button>
                 </div>
               ) : null}
