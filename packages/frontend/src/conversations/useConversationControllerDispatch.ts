@@ -294,6 +294,7 @@ export function useConversationControllerDispatch({
       runtimeOverride?: RuntimeDispatchOverride,
       conversationOverride?: ConversationState | null,
       intent?: string,
+      expectedLaneIdle = false,
     ) => {
       const projectId = resolveProjectId();
       if (!projectId) {
@@ -391,6 +392,7 @@ export function useConversationControllerDispatch({
           runtimeId,
           runtimeDisplayName,
           preferRuntime,
+          expectedLaneIdle,
         });
         if (!response) {
           throw new Error("Controller unavailable. Try again shortly.");

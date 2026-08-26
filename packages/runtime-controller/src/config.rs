@@ -50,6 +50,21 @@ pub(crate) fn database_tls() -> MakeRustlsConnect {
     MakeRustlsConnect::new(config)
 }
 
+fn database_pool_size_from_values(
+    configured_pool_size: Option<&str>,
+    dev_mode: Option<&str>,
+) -> u32 {
+    let dev_mode_hint = dev_mode
+        .map(str::to_lowercase)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+
+    configured_pool_size
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(if dev_mode_hint { 12 } else { 4 })
+}
+
 #[derive(Clone)]
 pub struct CredentialEncryptionKey([u8; 32]);
 
@@ -516,16 +531,12 @@ impl AppConfig {
         // Playwright/local dev runs can fan out many concurrent controller requests. If callers
         // don't explicitly size the pool, default to a slightly larger pool in dev mode to avoid
         // bb8 timeouts during e2e runs.
-        let dev_mode_hint = std::env::var("DEV_MODE")
-            .ok()
-            .map(|value| value.to_lowercase())
-            .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
-            .unwrap_or(false);
-        let database_pool_size = std::env::var("DATABASE_POOL_SIZE")
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u32>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(if dev_mode_hint { 12 } else { 8 });
+        let configured_database_pool_size = std::env::var("DATABASE_POOL_SIZE").ok();
+        let dev_mode_hint = std::env::var("DEV_MODE").ok();
+        let database_pool_size = database_pool_size_from_values(
+            configured_database_pool_size.as_deref(),
+            dev_mode_hint.as_deref(),
+        );
         let redis_url = std::env::var("REDIS_URL")
             .ok()
             .map(|raw| raw.trim().to_string())
@@ -1248,7 +1259,10 @@ impl StripeConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_public_app_url, parse_browser_profile_persist_project_ids};
+    use super::{
+        database_pool_size_from_values, normalize_public_app_url,
+        parse_browser_profile_persist_project_ids,
+    };
     use uuid::Uuid;
 
     /// The HS256 fallback must never disable JWKS refresh.
@@ -1296,6 +1310,47 @@ mod tests {
         // and forms a valid rustls client configuration at startup rather
         // than on the first pooled connection.
         let _connector = super::database_tls();
+    }
+
+    #[test]
+    fn database_pool_defaults_to_four_outside_development() {
+        assert_eq!(database_pool_size_from_values(None, None), 4);
+        assert_eq!(database_pool_size_from_values(None, Some("false")), 4);
+    }
+
+    #[test]
+    fn database_pool_keeps_the_larger_development_default() {
+        for dev_mode in ["1", "true", "TRUE", "yes", "on"] {
+            assert_eq!(
+                database_pool_size_from_values(None, Some(dev_mode)),
+                12,
+                "expected DEV_MODE={dev_mode:?} to select the development default"
+            );
+        }
+    }
+
+    #[test]
+    fn database_pool_honors_explicit_positive_overrides_in_every_mode() {
+        for dev_mode in [None, Some("true")] {
+            assert_eq!(database_pool_size_from_values(Some(" 1 "), dev_mode), 1);
+            assert_eq!(database_pool_size_from_values(Some("20"), dev_mode), 20);
+        }
+    }
+
+    #[test]
+    fn database_pool_rejects_non_positive_or_malformed_overrides() {
+        for configured in ["", "0", "-1", "not-a-number"] {
+            assert_eq!(
+                database_pool_size_from_values(Some(configured), None),
+                4,
+                "expected {configured:?} to use the production fallback"
+            );
+            assert_eq!(
+                database_pool_size_from_values(Some(configured), Some("true")),
+                12,
+                "expected {configured:?} to use the development fallback"
+            );
+        }
     }
 
     #[test]
