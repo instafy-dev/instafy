@@ -184,8 +184,21 @@ function devCodexAuthJsonPlugin(): Plugin {
           res.setHeader("cache-control", "no-store");
           res.end(JSON.stringify(body));
         };
-        const origin = req.headers.origin;
+        // Pin the Host header to loopback names before the same-origin check:
+        // origin === host alone is satisfiable via DNS rebinding (an attacker
+        // domain resolving to 127.0.0.1 makes both headers the attacker's).
         const host = req.headers.host ?? "";
+        const hostname = host.replace(/:\d+$/, "").toLowerCase();
+        const loopback =
+          hostname === "localhost" ||
+          hostname === "127.0.0.1" ||
+          hostname === "[::1]" ||
+          hostname.endsWith(".localhost");
+        if (!loopback) {
+          finish(403, { error: "loopback only" });
+          return;
+        }
+        const origin = req.headers.origin;
         if (origin) {
           let originHost = "";
           try {
