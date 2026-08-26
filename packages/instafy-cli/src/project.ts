@@ -236,7 +236,7 @@ async function resolveOrg(
 
   const orgSlug = options.orgSlug?.trim() || null;
   const orgName = options.orgName?.trim() || null;
-  const studioUrl = resolveConfiguredStudioUrl({ profile: options.profile ?? null }) ?? "https://staging.instafy.dev";
+  const studioUrl = resolveConfiguredStudioUrl({ profile: options.profile ?? null }) ?? "https://instafy.dev";
   const studioOrgUrl = `${studioUrl.replace(/\/$/, "")}/studio?panel=settings`;
   const allowInteractive = Boolean(
     input.isTTY && process.stdout.isTTY && options.json !== true && process.env.CI !== "true",
