@@ -805,6 +805,8 @@ async fn execute_automation_once(
             runtime_updated_at: runtime_id.map(|_| now),
             runtime_display_name: None,
             prefer_runtime: runtime_id.is_some(),
+            expected_lane_idle: false,
+            dispatch_queue_entry_id: None,
             allow_silent_automation_decline: record.silent_when_nothing_to_report,
         },
     )
