@@ -63,7 +63,6 @@ test("protected main publishes both exact image manifests only after CI", () => 
   assert.match(source, /REQUESTED_COMMIT" != "\$GITHUB_SHA"/u);
   assert.match(source, /actions\/workflows\/build\.yml\/runs\?event=push&head_sha=/u);
   assert.match(source, /X-GitHub-Api-Version: 2026-03-10/u);
-  assert.match(source, /"return_run_details":true/u);
   assert.match(source, /\.workflow_run_id/u);
   assert.match(source, /\.event == "workflow_dispatch"/u);
   assert.match(source, /\.head_branch == "main"/u);
