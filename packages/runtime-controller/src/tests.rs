@@ -15592,6 +15592,221 @@ async fn automation_update_keeps_identity_and_reschedules_only_on_schedule_chang
 }
 
 #[tokio::test]
+async fn automation_result_visibility_controls_team_thread_access() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping automation result visibility test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let owner_user_id = Uuid::new_v4();
+    let teammate_user_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
+    ensure_test_user(&pool, &teammate_user_id).await?;
+    seed_group_participation_project(
+        &pool,
+        &org_id,
+        &project_id,
+        &owner_user_id,
+        &teammate_user_id,
+        "Automation result visibility",
+    )
+    .await?;
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "automation-result-visibility",
+    );
+    let owner_token = crate::auth::issue_controller_token(&config, &owner_user_id)
+        .map_err(|error| controller_error("issue owner token", error))?
+        .token;
+    let teammate_token = crate::auth::issue_controller_token(&config, &teammate_user_id)
+        .map_err(|error| controller_error("issue teammate token", error))?
+        .token;
+    let app = automations::router()
+        .merge(conversations::router())
+        .with_state(build_test_state(pool.clone(), config));
+
+    // Owner creates an automation that shares its result thread with the team.
+    let create_team = |body: serde_json::Value| {
+        let app = app.clone();
+        let owner_token = owner_token.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/projects/{project_id}/automations"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {owner_token}"),
+                    )
+                    .body(Body::from(body.to_string()))
+                    .expect("build create request"),
+            )
+            .await
+        }
+    };
+
+    let team_response = create_team(json!({
+        "name": "Team dependency check",
+        "scheduleKind": "hourly",
+        "intervalHours": 24,
+        "timezone": "UTC",
+        "resultVisibility": "team",
+    }))
+    .await?;
+    assert_eq!(team_response.status(), StatusCode::OK);
+    let team_body = to_bytes(team_response.into_body(), usize::MAX).await?;
+    let team_json: serde_json::Value = serde_json::from_slice(&team_body)?;
+    assert_eq!(team_json["resultVisibility"], json!("team"));
+    let team_conversation_id = team_json["conversationId"]
+        .as_str()
+        .expect("team automation conversation id")
+        .to_string();
+
+    // Owner creates a default automation; its result thread stays private.
+    let private_response = create_team(json!({
+        "name": "Private dependency check",
+        "scheduleKind": "hourly",
+        "intervalHours": 24,
+        "timezone": "UTC",
+    }))
+    .await?;
+    assert_eq!(private_response.status(), StatusCode::OK);
+    let private_body = to_bytes(private_response.into_body(), usize::MAX).await?;
+    let private_json: serde_json::Value = serde_json::from_slice(&private_body)?;
+    assert_eq!(private_json["resultVisibility"], json!("private"));
+    let private_automation_id = private_json["id"]
+        .as_str()
+        .expect("private automation id")
+        .to_string();
+    let private_conversation_id = private_json["conversationId"]
+        .as_str()
+        .expect("private automation conversation id")
+        .to_string();
+
+    // A non-owner teammate lists the project's automation threads.
+    let list_automation_conversations = |token: String| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!(
+                            "/projects/{project_id}/conversations?threadKind=automation"
+                        ))
+                        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .expect("build list request"),
+                )
+                .await
+                .expect("list conversations");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read list body");
+            let value: serde_json::Value = serde_json::from_slice(&body).expect("parse list body");
+            value
+                .as_array()
+                .expect("conversation list array")
+                .iter()
+                .filter_map(|entry| entry["id"].as_str().map(str::to_string))
+                .collect::<Vec<String>>()
+        }
+    };
+
+    let teammate_before = list_automation_conversations(teammate_token.clone()).await;
+    assert!(
+        teammate_before.contains(&team_conversation_id),
+        "teammate must see the team-visible automation thread"
+    );
+    assert!(
+        !teammate_before.contains(&private_conversation_id),
+        "teammate must not see the private automation thread"
+    );
+
+    // Owner flips the private automation to team visibility. A visibility-only
+    // PATCH must not reset the active automation's schedule anchor.
+    let next_run_at_before = private_json["nextRunAt"]
+        .as_str()
+        .expect("active automation must have nextRunAt")
+        .to_string();
+    let patch_automation = |body: serde_json::Value| {
+        let app = app.clone();
+        let owner_token = owner_token.clone();
+        let private_automation_id = private_automation_id.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(format!("/automations/{private_automation_id}"))
+                        .header(axum::http::header::CONTENT_TYPE, "application/json")
+                        .header(
+                            axum::http::header::AUTHORIZATION,
+                            format!("Bearer {owner_token}"),
+                        )
+                        .body(Body::from(body.to_string()))
+                        .expect("build patch request"),
+                )
+                .await
+                .expect("patch automation");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read patch body");
+            serde_json::from_slice::<serde_json::Value>(&body).expect("parse patch body")
+        }
+    };
+
+    let patch_json = patch_automation(json!({ "resultVisibility": "team" })).await;
+    assert_eq!(patch_json["resultVisibility"], json!("team"));
+    assert_eq!(
+        patch_json["nextRunAt"],
+        json!(next_run_at_before),
+        "a visibility-only update must leave nextRunAt untouched"
+    );
+
+    // Changing the effective schedule must recompute nextRunAt.
+    let reschedule_json = patch_automation(json!({ "intervalHours": 6 })).await;
+    assert_eq!(reschedule_json["intervalHours"], json!(6));
+    let next_run_at_after = reschedule_json["nextRunAt"]
+        .as_str()
+        .expect("rescheduled automation must have nextRunAt");
+    assert_ne!(
+        next_run_at_after, next_run_at_before,
+        "a schedule change must recompute nextRunAt"
+    );
+
+    let teammate_after = list_automation_conversations(teammate_token.clone()).await;
+    assert!(
+        teammate_after.contains(&private_conversation_id),
+        "the flipped automation thread must become visible to the teammate"
+    );
+
+    // Invalid enum values are rejected.
+    let invalid_response = create_team(json!({
+        "name": "Invalid visibility",
+        "scheduleKind": "hourly",
+        "intervalHours": 24,
+        "timezone": "UTC",
+        "resultVisibility": "everyone",
+    }))
+    .await?;
+    assert_eq!(invalid_response.status(), StatusCode::BAD_REQUEST);
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_org(&pool, &org_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
+    cleanup_test_user(&pool, &teammate_user_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn skill_mode_ambient_turn_dispatches_evaluation_and_swallows_decline() -> anyhow::Result<()>
 {
     let Some(pool) = setup_origin_test_pool().await? else {
