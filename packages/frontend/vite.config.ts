@@ -1,7 +1,9 @@
 import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vitest/config";
+import { defineConfig, type Plugin } from "vitest/config";
 import { loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import {
@@ -162,10 +164,90 @@ const instafyBuildInfo = {
   releaseId,
 };
 
+/**
+ * Dev-only endpoint that hands the app this machine's Codex subscription
+ * login so local testing does not require re-uploading auth.json after every
+ * token refresh (see devServerCodexAuthJson.ts for the client side). Reads
+ * the file fresh per request, so the served copy can never go stale. Serve
+ * only (`apply: "serve"`), same-origin only: a cross-origin page in the same
+ * browser must not be able to read the login through the dev server.
+ */
+function devCodexAuthJsonPlugin(): Plugin {
+  return {
+    name: "instafy-dev-codex-auth-json",
+    apply: "serve",
+    configureServer(server) {
+      server.middlewares.use("/__instafy-dev/codex-auth-json", (req, res) => {
+        const finish = (statusCode: number, body: unknown) => {
+          res.statusCode = statusCode;
+          res.setHeader("content-type", "application/json");
+          res.setHeader("cache-control", "no-store");
+          res.end(JSON.stringify(body));
+        };
+        const origin = req.headers.origin;
+        const host = req.headers.host ?? "";
+        if (origin) {
+          let originHost = "";
+          try {
+            originHost = new URL(origin).host;
+          } catch {
+            originHost = "";
+          }
+          if (!originHost || originHost !== host) {
+            finish(403, { error: "same-origin only" });
+            return;
+          }
+        }
+        if (req.method !== "GET") {
+          finish(405, { error: "method not allowed" });
+          return;
+        }
+        try {
+          const raw = readFileSync(join(homedir(), ".codex", "auth.json"), "utf8");
+          const parsed = JSON.parse(raw) as {
+            auth_mode?: unknown;
+            last_refresh?: unknown;
+            tokens?: {
+              id_token?: unknown;
+              access_token?: unknown;
+              refresh_token?: unknown;
+              account_id?: unknown;
+            };
+          } | null;
+          const tokens = parsed?.tokens;
+          if (
+            !parsed ||
+            parsed.auth_mode !== "chatgpt" ||
+            typeof tokens?.access_token !== "string" ||
+            typeof tokens?.refresh_token !== "string"
+          ) {
+            finish(404, { error: "no usable codex subscription login" });
+            return;
+          }
+          finish(200, {
+            authJson: {
+              auth_mode: "chatgpt",
+              tokens: {
+                id_token: tokens.id_token,
+                access_token: tokens.access_token,
+                refresh_token: tokens.refresh_token,
+                account_id: tokens.account_id,
+              },
+              last_refresh: parsed.last_refresh,
+            },
+          });
+        } catch {
+          finish(404, { error: "no usable codex subscription login" });
+        }
+      });
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   assertNoClientServiceRoleEnv(mode);
   return {
-  plugins: [react()],
+  plugins: [react(), devCodexAuthJsonPlugin()],
   resolve: {
     alias: [
       {

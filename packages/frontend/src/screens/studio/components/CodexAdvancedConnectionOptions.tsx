@@ -1,9 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { Computer, NavArrowDown, ShareAndroid, Upload } from "iconoir-react";
+import { Computer, FloppyDisk, NavArrowDown, ShareAndroid, Upload } from "iconoir-react";
 import { Button } from "../../../components/Button";
 import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
 import { Text } from "../../../components/Text";
+import { useStatus } from "../../../status/useStatus";
+import { emitAiConfigChanged } from "./aiConfigEvents";
+import {
+  canUseDevServerCodexAuthJson,
+  connectDevServerCodexAuthJson,
+} from "./devServerCodexAuthJson";
 import {
   canShareDesktopSetupLink,
   INSTAFY_DESKTOP_INSTALL_URL,
@@ -33,7 +39,35 @@ export function CodexAdvancedConnectionOptions({
   onChooseAuthJson,
 }: CodexAdvancedConnectionOptionsProps) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const { showStatus } = useStatus();
+  const canUseDevServerConnect = canUseDevServerCodexAuthJson();
+  const [devSeedBusy, setDevSeedBusy] = useState(false);
   const [desktopSetupShareFailed, setDesktopSetupShareFailed] = useState(false);
+
+  const handleDevSeed = async () => {
+    if (devSeedBusy) {
+      return;
+    }
+    setDevSeedBusy(true);
+    try {
+      const result = await connectDevServerCodexAuthJson({
+        label: label.trim() || undefined,
+        makeDefault: true,
+      });
+      if (!result.success) {
+        throw new Error(result.error ?? "Unable to save credentials.");
+      }
+      emitAiConfigChanged("dev-seed");
+      showStatus("Connected this machine's Codex login as default.", "success", 3500, {
+        presentation: "confirmation",
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      showStatus(message, "error", 5000);
+    } finally {
+      setDevSeedBusy(false);
+    }
+  };
   const canShareDesktopSetup =
     !desktopSetupShareFailed && canShareDesktopSetupLink();
 
@@ -83,6 +117,32 @@ export function CodexAdvancedConnectionOptions({
         >
           {allowAuthJsonImport ? (
             <>
+              {canUseDevServerConnect ? (
+                <div className="space-y-1.5 border-b border-slate-200 pb-3 dark:border-slate-800">
+                  <div className="space-y-0.5">
+                    <Text variant="bodyStrong" tone="secondary" className="text-sm">
+                      Seed from this machine (dev)
+                    </Text>
+                    <Text variant="caption" tone="muted">
+                      Connects ~/.codex/auth.json via the local dev server and makes
+                      it the default. Always current — no upload needed.
+                    </Text>
+                  </div>
+                  <Button
+                    type="button"
+                    onPress={() => void handleDevSeed()}
+                    variant="outline"
+                    size="sm"
+                    radius="full"
+                    isDisabled={devSeedBusy}
+                    className="min-h-11 w-full sm:w-auto"
+                    data-testid="credentials-codex-dev-seed"
+                  >
+                    <FloppyDisk className="h-4 w-4" aria-hidden="true" />
+                    {devSeedBusy ? "Seeding…" : "Use local Codex login (dev)"}
+                  </Button>
+                </div>
+              ) : null}
               <div className="space-y-0.5">
                 <Text variant="bodyStrong" tone="secondary" className="text-sm">
                   Import an existing Codex login
