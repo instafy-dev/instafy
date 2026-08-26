@@ -512,6 +512,22 @@ for a successful run that explicitly finds nothing to report; results, errors, u
 output, and execution records remain visible. See
 [Automations](Automations.md) for the controller semantics and audit behavior.
 
+Change an existing automation in place with `instafy automations update <automation-id>`. Pass only
+the fields to change; the automation keeps its id, its private conversation thread, and its run
+history. `--prompt-file` reads the new prompt from a file, and
+`--no-silent-when-nothing-to-report` turns quiet runs back off:
+
+```bash
+instafy automations update <automation-id> \
+  --prompt-file ./prompts/dependency-check.md \
+  --schedule-kind weekly \
+  --days mo,we \
+  --time 07:30 \
+  --timezone "Europe/Vienna"
+```
+
+The next run is recomputed only when the schedule or status changes; editing the name, prompt, or
+runtime settings leaves the pending run where it is. Use `pause` and `resume` to change status.
 ## Credentials
 
 `instafy credentials` shows which AI provider credentials (bring-your-own keys and Codex logins)
