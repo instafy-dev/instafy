@@ -420,8 +420,9 @@ instafy support report "Build fails on startup" \
 `support show` returns only the customer-safe report view. Stored metadata, logs, internal triage
 fields, and screenshot bytes are never returned by the customer endpoint; screenshot descriptors
 show which images were attached. The controller applies the same minimized projection to legacy
-bug-report reads made by ordinary users; only operator/service authorization can retrieve the full
-triage record and attachment bytes.
+bug-report reads made by ordinary users; only operator/service authorization (or a user listed in
+the controller's `BUG_REPORTS_OPERATOR_USER_IDS`, which grants bug-report triage and nothing else)
+can retrieve the full triage record and attachment bytes.
 
 ## Scheduled automations
 
