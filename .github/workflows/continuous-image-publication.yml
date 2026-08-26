@@ -1,9 +1,9 @@
 name: Publish images after protected main
 
-# Every protected-main commit gets both immutable image manifests. Private
-# compositions pin arbitrary protected-main commits, and the backend release
-# contract requires both manifests to bind the exact pin, so even a docs-only
-# commit must remain releasable without a cross-repository write credential.
+# The latest protected-main commit gets both immutable image manifests after
+# its exact CI succeeds. If main advances, older queued runs yield to the newer
+# cumulative source; a private composition pinned to an unpublished
+# intermediate commit fails closed until its reviewed pin advances.
 on:
   push:
     branches:
