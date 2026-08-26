@@ -2392,6 +2392,9 @@ pub(crate) async fn agent_complete(
                          artifacts = coalesce($7::jsonb, '[]'::jsonb),
                          completed_at = now(),
                          lease_expires_at = null,
+                         active_input_ready_runtime_id = null,
+                         active_input_ready_expires_at = null,
+                         active_input_ready_turn_id = null,
                          heartbeat_at = now()
                      where id = $1
                        and project_id = $2
@@ -2431,6 +2434,9 @@ pub(crate) async fn agent_complete(
                          artifacts = coalesce($7::jsonb, '[]'::jsonb),
                          completed_at = now(),
                          lease_expires_at = null,
+                         active_input_ready_runtime_id = null,
+                         active_input_ready_expires_at = null,
+                         active_input_ready_turn_id = null,
                          heartbeat_at = now()
                      where id = $1 and project_id = $2 and status in ('leased','queued')
                      returning id,
@@ -2469,6 +2475,14 @@ pub(crate) async fn agent_complete(
             return Err(not_found("agent job not found or already completed"));
         }
     };
+
+    // Completion and human steering serialize on the agent_jobs row. Any
+    // unacknowledged command is rejected in the same transaction. A command
+    // already claimed by this runtime/lease may still deliver a late `applied`
+    // acknowledgement when Codex accepted it immediately before completion.
+    let job_input_state_updates =
+        crate::send_intents::reject_unclaimed_inputs_for_completed_job(&transaction, &job_uuid)
+            .await?;
 
     let project_id: Uuid = row.get("project_id");
     let run_id: Option<Uuid> = row.get("run_id");
@@ -2861,6 +2875,8 @@ pub(crate) async fn agent_complete(
         .commit()
         .await
         .map_err(|error| internal_error(format!("failed to commit completion: {error}")))?;
+
+    crate::send_intents::publish_job_input_state_updates(&state, &job_input_state_updates);
 
     if let Err((status, Json(api_error))) =
         crate::multi_agent_plan::maybe_enqueue_lead_continuation_after_completion(
@@ -3506,6 +3522,9 @@ pub(crate) async fn lease_next_agent_job(
                  lease_expires_at = now() + interval '1 second' * greatest($3::int, 30),
                  lease_attempts = lease_attempts + 1,
                  leased_by_runtime_id = $2,
+                 active_input_ready_runtime_id = null,
+                 active_input_ready_expires_at = null,
+                 active_input_ready_turn_id = null,
                  heartbeat_at = now(),
                  payload = aj.payload - 'requeuedAt' - 'requeuedReason'
              from candidate

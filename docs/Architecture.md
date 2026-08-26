@@ -88,6 +88,25 @@ This does **not** require a dedicated public file server. Private storage stays 
   bounds individual lines and accumulated event data before parsing JSON.
 - Supabase is a fallback when the controller is disabled.
 
+## Conversation delivery intents
+
+The controller is authoritative for explicit composer delivery intent:
+
+- A **queue** intent resolves the target agent lane on the server, persists an idempotent entry,
+  and attempts a drain immediately. Busy lanes retain FIFO ordering; an idle lane must not leave
+  the entry stranded.
+- A **steer** intent is bound to one expected active job. The controller persists an ordered job
+  input and the owning runtime acknowledges it only after submitting the input to that same active
+  model turn. Steering never aliases to conversation-wide cancellation.
+- A **stash** is owner-private draft state. It is not conversation history and cannot enter the
+  job or send-queue state machines. Per-owner/conversation row and serialized-byte quotas bound
+  both storage and list responses.
+
+Client-generated send and stash IDs make retries idempotent. Target lane identity, active-job
+checks, queue ownership, and stash ownership are controller decisions; browser-supplied handles
+are hints rather than authority. Provider-specific active-turn mechanics stay behind runtime
+capabilities.
+
 ## Runtime Providers
 - Docker provider is the default for local dev.
 - Desktop runtime agents can run outside Docker (use `PROXY_BASE_URL=http://127.0.0.1:8789`).
