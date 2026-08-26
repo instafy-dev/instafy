@@ -387,6 +387,11 @@ pub struct AppConfig {
     pub stripe: Option<StripeConfig>,
     pub operator_console_org_id: Option<Uuid>,
     pub operator_console_allowed_user_ids: Vec<Uuid>,
+    /// User ids granted the operator projection and triage updates on the
+    /// bug-report routes only. Unlike `operator_console_allowed_user_ids`,
+    /// this list grants nothing else (no OTA, desktop-update, telemetry or
+    /// operator-admin access). Empty/unset means nobody holds the role.
+    pub bug_reports_operator_user_ids: Vec<Uuid>,
     pub desktop_release_github_owner: Option<String>,
     pub desktop_release_github_repo: Option<String>,
     pub desktop_release_github_token: Option<String>,
@@ -701,6 +706,10 @@ impl AppConfig {
                 anyhow::anyhow!("OPERATOR_CONSOLE_ORG_ID must be a valid UUID: {error}")
             })?;
         let operator_console_allowed_user_ids = std::env::var("OPERATOR_CONSOLE_ALLOWED_USER_IDS")
+            .ok()
+            .map(|value| parse_uuid_list(&value))
+            .unwrap_or_default();
+        let bug_reports_operator_user_ids = std::env::var("BUG_REPORTS_OPERATOR_USER_IDS")
             .ok()
             .map(|value| parse_uuid_list(&value))
             .unwrap_or_default();
@@ -1124,6 +1133,7 @@ impl AppConfig {
             stripe,
             operator_console_org_id,
             operator_console_allowed_user_ids,
+            bug_reports_operator_user_ids,
             desktop_release_github_owner,
             desktop_release_github_repo,
             desktop_release_github_token,
