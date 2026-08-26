@@ -25,6 +25,7 @@ function automationPayload(overrides: Record<string, unknown> = {}): MockAutomat
     timezone: "UTC",
     runtimeMode: "auto",
     runtimeProvider: null,
+    resultVisibility: "private",
     status: "active",
     nextRunAt: "2026-08-16T09:00:00Z",
     lastRunAt: null,
@@ -45,7 +46,7 @@ async function readJsonBody(req: http.IncomingMessage): Promise<Record<string, u
 function startMockController(token: string, initialAutomations: MockAutomation[] = []) {
   const projectId = randomUUID();
   const state = {
-    automations: [...initialAutomations],
+    automations: [...initialAutomations] as MockAutomation[],
     createBodies: [] as Record<string, unknown>[],
     updateBodies: [] as Array<{ automationId: string; body: Record<string, unknown> }>,
   };
@@ -74,6 +75,7 @@ function startMockController(token: string, initialAutomations: MockAutomation[]
         timezone: body.timezone,
         runtimeMode: body.runtimeMode,
         silentWhenNothingToReport: body.silentWhenNothingToReport,
+        resultVisibility: body.resultVisibility ?? "private",
         status: body.status,
       });
       state.automations.push(created);
@@ -380,6 +382,113 @@ describe("automations cli", () => {
       expect(bothPrompts.code).toBe(1);
       expect(bothPrompts.stderr).toContain("either --prompt or --prompt-file");
       expect(state.updateBodies).toEqual([]);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("shares results with the team on create and omits the field by default", async () => {
+    const token = "controller-token";
+    const { server, projectId, state } = startMockController(token);
+    await once(server, "listening");
+
+    try {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      const controllerUrl = `http://127.0.0.1:${port}`;
+      const sharedArgs = controllerArgs(projectId, controllerUrl, token);
+
+      const shared = await execCli([
+        "automations",
+        "create",
+        "--name",
+        "Team dependency check",
+        "--prompt",
+        "Report dependency changes.",
+        "--schedule-kind",
+        "hourly",
+        "--interval-hours",
+        "24",
+        "--timezone",
+        "UTC",
+        "--share-results",
+        ...sharedArgs,
+        "--json",
+      ]);
+      const privateDefault = await execCli([
+        "automations",
+        "create",
+        "--name",
+        "Private dependency check",
+        "--prompt",
+        "Report dependency changes.",
+        "--schedule-kind",
+        "hourly",
+        "--interval-hours",
+        "24",
+        "--timezone",
+        "UTC",
+        ...sharedArgs,
+        "--json",
+      ]);
+
+      expect(shared.code).toBe(0);
+      expect(privateDefault.code).toBe(0);
+      expect(state.createBodies.map((body) => body.resultVisibility)).toEqual([
+        "team",
+        undefined,
+      ]);
+      expect(JSON.parse(shared.stdout).resultVisibility).toBe("team");
+      expect(JSON.parse(privateDefault.stdout).resultVisibility).toBe("private");
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("flips result visibility on update and reflects it in list output", async () => {
+    const token = "controller-token";
+    const existing = automationPayload({
+      name: "Shared nightly check",
+      resultVisibility: "team",
+    });
+    const { server, projectId, state } = startMockController(token, [existing]);
+    await once(server, "listening");
+
+    try {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      const controllerUrl = `http://127.0.0.1:${port}`;
+      const sharedArgs = controllerArgs(projectId, controllerUrl, token);
+      // `automations update` targets an automation by id (like pause/resume/run/delete)
+      // and does not take --space.
+      const idArgs = ["--server-url", controllerUrl, "--access-token", token];
+
+      const teamJsonList = await execCli(["automations", "list", ...sharedArgs, "--json"]);
+      expect(teamJsonList.code).toBe(0);
+      const teamRecords = JSON.parse(teamJsonList.stdout) as Array<Record<string, unknown>>;
+      expect(teamRecords[0]?.resultVisibility).toBe("team");
+
+      const humanTeamList = await execCli(["automations", "list", ...sharedArgs]);
+      expect(humanTeamList.stdout).toContain("team-visible");
+
+      const updated = await execCli([
+        "automations",
+        "update",
+        String(existing.id),
+        "--result-visibility",
+        "private",
+        ...idArgs,
+        "--json",
+      ]);
+
+      expect(updated.code).toBe(0);
+      expect(state.updateBodies).toEqual([
+        { automationId: String(existing.id), body: { resultVisibility: "private" } },
+      ]);
+      expect(JSON.parse(updated.stdout).resultVisibility).toBe("private");
+
+      const humanPrivateList = await execCli(["automations", "list", ...sharedArgs]);
+      expect(humanPrivateList.stdout).not.toContain("team-visible");
     } finally {
       await closeServer(server);
     }

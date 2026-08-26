@@ -1122,6 +1122,23 @@ secretsRevokeCommand
     }
   });
 
+function resolveResultVisibilityFlag(opts: {
+  resultVisibility?: string;
+  shareResults?: boolean;
+}): "private" | "team" | undefined {
+  if (opts.resultVisibility !== undefined) {
+    const value = String(opts.resultVisibility).trim().toLowerCase();
+    if (value !== "private" && value !== "team") {
+      throw new Error("--result-visibility must be private or team");
+    }
+    return value;
+  }
+  // `--share-results` sets team-visible; `--no-share-results` forces private.
+  if (opts.shareResults === true) return "team";
+  if (opts.shareResults === false) return "private";
+  return undefined;
+}
+
 const automationsCommand = program
   .command("automations")
   .description("Manage scheduled automations (run prompts on a schedule)");
@@ -1173,6 +1190,18 @@ const automationsCreateCommand = automationsCommand
     "--silent-when-nothing-to-report",
     "Do not post a completion result or send a result notification when a successful run has no findings",
   )
+  .option(
+    "--share-results",
+    "Share this automation's result threads with your team (visible to anyone with space access)",
+  )
+  .option(
+    "--no-share-results",
+    "Keep this automation's result threads private to you (default)",
+  )
+  .option(
+    "--result-visibility <private|team>",
+    "Result-thread visibility (private|team); overrides --share-results",
+  )
   .option("--paused", "Create paused");
 
 addSpaceOption(
@@ -1199,6 +1228,7 @@ automationsCreateCommand
         runtimeMode: opts.runtimeMode,
         runtimeProvider: opts.runtimeProvider,
         silentWhenNothingToReport: Boolean(opts.silentWhenNothingToReport),
+        resultVisibility: resolveResultVisibilityFlag(opts),
         paused: Boolean(opts.paused),
         project: resolveSpaceIdOption(opts),
         controllerUrl: opts.serverUrl,
@@ -1213,7 +1243,9 @@ automationsCreateCommand
 
 const automationsUpdateCommand = automationsCommand
   .command("update")
-  .description("Update an automation's name, prompt, schedule, or runtime settings in place")
+  .description(
+    "Update an automation's name, prompt, schedule, runtime settings, or result-sharing visibility in place",
+  )
   .argument("<automation-id>", "Automation UUID")
   .option("--name <name>", "New automation name")
   .option("--prompt <text>", "New prompt to run on schedule")
@@ -1233,6 +1265,18 @@ const automationsUpdateCommand = automationsCommand
   .option(
     "--no-silent-when-nothing-to-report",
     "Always post a completion result and send a result notification",
+  )
+  .option(
+    "--share-results",
+    "Share this automation's result threads with your team (visible to anyone with space access)",
+  )
+  .option(
+    "--no-share-results",
+    "Keep this automation's result threads private to you",
+  )
+  .option(
+    "--result-visibility <private|team>",
+    "Result-thread visibility (private|team); overrides --share-results",
   );
 
 addServerUrlOptions(automationsUpdateCommand);
@@ -1256,6 +1300,7 @@ automationsUpdateCommand
         runtimeMode: opts.runtimeMode,
         runtimeProvider: opts.runtimeProvider,
         silentWhenNothingToReport: opts.silentWhenNothingToReport,
+        resultVisibility: resolveResultVisibilityFlag(opts),
         controllerUrl: opts.serverUrl,
         accessToken: opts.accessToken,
         json: opts.json,
