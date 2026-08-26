@@ -7,10 +7,12 @@ ARG NODE_IMAGE=node:24-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b12
 ARG CLI_NODE_IMAGE=node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3
 ARG PLAYWRIGHT_VERSION=1.61.1
 ARG NPM_VERSION=12.0.1
-ARG PNPM_VERSION=11.17.0
-# npm (through 12.0.2) vendors vulnerable brace-expansion and ip-address
+ARG PNPM_VERSION=11.24.0
+# npm (through 12.0.2) vendors vulnerable brace-expansion, ip-address, and tar
 # versions. Replace every vendored copy with exact fixed tarballs whose
-# checksums are committed here until npm ships both fixes itself.
+# checksums are committed here until npm ships the fixes itself.
+ARG NPM_TAR_VERSION=7.5.22
+ARG NPM_TAR_SHA256=b792c2d1c7fc770910522ca1ffc29eee02ee38de4fa3a01e7832eb705879c6c6
 ARG BRACE_EXPANSION_VERSION=5.0.9
 ARG BRACE_EXPANSION_SHA256=5d06001fddd25cbee90c96db4dc5b7b57711b984c3141e28d10f143deb52dbaf
 ARG IP_ADDRESS_VERSION=10.3.1
@@ -191,6 +193,8 @@ ARG TARGETARCH
 ARG PLAYWRIGHT_VERSION
 ARG NPM_VERSION
 ARG PNPM_VERSION
+ARG NPM_TAR_VERSION
+ARG NPM_TAR_SHA256
 ARG BRACE_EXPANSION_VERSION
 ARG BRACE_EXPANSION_SHA256
 ARG IP_ADDRESS_VERSION
@@ -223,6 +227,17 @@ RUN npm install -g "npm@${NPM_VERSION}" && \
     npm install -g "pnpm@${PNPM_VERSION}" && \
     ln -sf /usr/local/bin/pnpm /usr/local/bin/pnpx && \
     if [ ! -e /usr/local/bin/npx ] && [ -x /usr/bin/npx ]; then ln -s /usr/bin/npx /usr/local/bin/npx; fi && \
+    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+      "https://registry.npmjs.org/tar/-/tar-${NPM_TAR_VERSION}.tgz" \
+      --output /tmp/npm-tar.tgz && \
+    printf '%s  %s\n' "${NPM_TAR_SHA256}" /tmp/npm-tar.tgz | sha256sum --check --status && \
+    for nt_dir in $(find /usr -type d -path '*/node_modules/npm/node_modules/tar' 2>/dev/null); do \
+      rm -rf "$nt_dir" && mkdir -p "$nt_dir" && \
+      tar -xzf /tmp/npm-tar.tgz -C "$nt_dir" --strip-components=1; \
+    done && \
+    rm /tmp/npm-tar.tgz && \
+    unpatched="$(find /usr -type f -path '*/node_modules/npm/node_modules/tar/package.json' -exec grep -L "\"version\": \"${NPM_TAR_VERSION}\"" {} + 2>/dev/null || true)" && \
+    if [ -n "$unpatched" ]; then echo "unpatched npm tar copies: $unpatched" >&2; exit 1; fi && \
     curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
       "https://registry.npmjs.org/brace-expansion/-/brace-expansion-${BRACE_EXPANSION_VERSION}.tgz" \
       --output /tmp/brace-expansion.tgz && \
@@ -323,6 +338,8 @@ ARG TARGETARCH
 ARG PLAYWRIGHT_VERSION
 ARG NPM_VERSION
 ARG PNPM_VERSION
+ARG NPM_TAR_VERSION
+ARG NPM_TAR_SHA256
 ARG BRACE_EXPANSION_VERSION
 ARG BRACE_EXPANSION_SHA256
 ARG IP_ADDRESS_VERSION
@@ -362,6 +379,17 @@ RUN npm install -g "npm@${NPM_VERSION}" && \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g "playwright@${PLAYWRIGHT_VERSION}" "@playwright/test@${PLAYWRIGHT_VERSION}" && \
     npm install -g "pnpm@${PNPM_VERSION}" && \
     if [ ! -e /usr/local/bin/npx ] && [ -x /usr/bin/npx ]; then ln -s /usr/bin/npx /usr/local/bin/npx; fi && \
+    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+      "https://registry.npmjs.org/tar/-/tar-${NPM_TAR_VERSION}.tgz" \
+      --output /tmp/npm-tar.tgz && \
+    printf '%s  %s\n' "${NPM_TAR_SHA256}" /tmp/npm-tar.tgz | sha256sum --check --status && \
+    for nt_dir in $(find /usr -type d -path '*/node_modules/npm/node_modules/tar' 2>/dev/null); do \
+      rm -rf "$nt_dir" && mkdir -p "$nt_dir" && \
+      tar -xzf /tmp/npm-tar.tgz -C "$nt_dir" --strip-components=1; \
+    done && \
+    rm /tmp/npm-tar.tgz && \
+    unpatched="$(find /usr -type f -path '*/node_modules/npm/node_modules/tar/package.json' -exec grep -L "\"version\": \"${NPM_TAR_VERSION}\"" {} + 2>/dev/null || true)" && \
+    if [ -n "$unpatched" ]; then echo "unpatched npm tar copies: $unpatched" >&2; exit 1; fi && \
     curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
       "https://registry.npmjs.org/brace-expansion/-/brace-expansion-${BRACE_EXPANSION_VERSION}.tgz" \
       --output /tmp/brace-expansion.tgz && \
