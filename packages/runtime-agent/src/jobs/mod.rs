@@ -8,6 +8,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::active_turn_input::ActiveTurnInputReceiver;
 use crate::codex::{
     CodexClient, CodexFallbackSummaryKind, CodexFinalOutputSchema, CodexRunOptions, CodexRunOutput,
     classify_internal_codex_fallback_summary,
@@ -4655,6 +4656,7 @@ impl JobProcessor {
         commit_to_workspace: bool,
         progress: Option<JobProgress>,
         cancel_signal: Option<JobCancelSignal>,
+        active_turn_input: Option<ActiveTurnInputReceiver>,
     ) -> Result<JobExecution> {
         let proxy_envelope = job.proxy.as_ref().or(registration.proxy.as_ref());
 
@@ -5066,6 +5068,7 @@ impl JobProcessor {
                 || explicit_shared_browser_execution
                 || explicit_personal_browser_execution,
             cancel_signal: cancel_signal.clone(),
+            active_turn_input,
         };
 
         let routing_pre_observation =
@@ -22061,10 +22064,9 @@ mod tests {
         let prompt = "What is happening in `repos/example-device-provider/firmware/esp32/rust/src/runtime_telemetry.rs`?";
         let section = format_prompt_referenced_files_section(tmp.path(), prompt).expect("section");
 
-        assert!(
-            section
-                .contains("repos/example-device-provider/firmware/esp32/rust/src/runtime_telemetry.rs")
-        );
+        assert!(section.contains(
+            "repos/example-device-provider/firmware/esp32/rust/src/runtime_telemetry.rs"
+        ));
         assert!(section.contains("encoder_mode"));
     }
 

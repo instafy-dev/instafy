@@ -18,6 +18,7 @@ import { resolveChatLocalCapabilityHandle } from "./chatLocalCapabilityIntent";
 export type ChatSubmitOverride = {
   message: string;
   editorState: string | null;
+  targetAgentHandles?: string[];
   browserPageTarget?: BrowserSessionPageTarget | null;
   browserLaunchMode?: "new_page" | null;
   metadata?: Record<string, unknown> | null;
@@ -94,10 +95,16 @@ export function buildChatSubmitPlan({
     shouldAutoTargetBrowserSessionMessage(messageToSend);
 
   const aiOverride = startsWithAssistantMention(messageToSend);
-  const agentSelection = resolvePromptAgentTargets(messageToSend, {
+  const resolvedAgentSelection = resolvePromptAgentTargets(messageToSend, {
     useSticky: true,
     updateSticky: true,
   });
+  const overrideTargetAgentHandles = override?.targetAgentHandles
+    ?.map((handle) => handle.trim().replace(/^@+/, "").toLowerCase())
+    .filter((handle, index, all) => handle.length > 0 && all.indexOf(handle) === index);
+  const agentSelection = overrideTargetAgentHandles
+    ? { ...resolvedAgentSelection, targetHandles: overrideTargetAgentHandles }
+    : resolvedAgentSelection;
   const hasMentionedAgent = agentSelection.explicitMentionedHandles.length > 0;
   const hasAgentTarget = agentSelection.targetHandles.length > 0;
   const terminalRequest = parseTerminalCommandRequest(messageToSend);

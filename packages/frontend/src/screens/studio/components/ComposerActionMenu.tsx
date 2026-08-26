@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import {
+  Bookmark,
   Github,
   Group,
   NavArrowLeft,
@@ -7,6 +8,7 @@ import {
   OpenNewWindow,
   Plus,
   Safari,
+  Send,
   Terminal,
 } from "iconoir-react";
 import { DialogTrigger } from "react-aria-components";
@@ -28,12 +30,14 @@ function ActionRow({
   onPress,
   end,
   testId,
+  disabled = false,
 }: {
   icon: ReactNode;
   title: string;
   onPress: () => void;
   end?: ReactNode;
   testId?: string;
+  disabled?: boolean;
 }) {
   return (
     <Button
@@ -42,6 +46,7 @@ function ActionRow({
       size="sm"
       radius="xl"
       onPress={onPress}
+      isDisabled={disabled}
       className="h-11 w-full justify-start px-2.5 text-left"
       data-testid={testId}
     >
@@ -71,6 +76,10 @@ export function ComposerActionMenu({
   onOpenInvite,
   onImportGithubRepo,
   onInsertCommand,
+  onQueueMessage,
+  onStashDraft,
+  queueDisabled = false,
+  stashDisabled = false,
   triggerClassName,
   mutationDisabled = false,
   inviteActionLabel = "Invite teammates",
@@ -85,6 +94,10 @@ export function ComposerActionMenu({
   onOpenInvite: () => void;
   onImportGithubRepo: () => void;
   onInsertCommand: (command: string) => void;
+  onQueueMessage?: () => void;
+  onStashDraft?: () => void;
+  queueDisabled?: boolean;
+  stashDisabled?: boolean;
   triggerClassName?: string;
   mutationDisabled?: boolean;
   inviteActionLabel?: string;
@@ -108,6 +121,12 @@ export function ComposerActionMenu({
     () => CHAT_SLASH_COMMANDS.filter((command) => !command.hidden),
     [],
   );
+  const commandKeyLabel = useMemo(() => {
+    if (typeof navigator !== "undefined" && /Mac|iPhone|iPad|iPod/i.test(navigator.platform)) {
+      return "⌘";
+    }
+    return "Ctrl";
+  }, []);
 
   return (
     <DialogTrigger isOpen={open} onOpenChange={handleOpenChange}>
@@ -157,6 +176,54 @@ export function ComposerActionMenu({
           </div>
         ) : (
           <div className="space-y-1">
+            {!mutationDisabled && onQueueMessage ? (
+              <ActionRow
+                icon={<Send className="h-4 w-4" aria-hidden="true" />}
+                title="Queue message"
+                onPress={() => {
+                  closeMenu();
+                  onQueueMessage();
+                }}
+                end={
+                  <kbd aria-label={`${commandKeyLabel} plus Enter`} className="font-sans text-xxs">
+                    {commandKeyLabel} ↵
+                  </kbd>
+                }
+                disabled={queueDisabled}
+                testId="composer-action-menu-queue"
+              />
+            ) : null}
+            {!mutationDisabled && onStashDraft ? (
+              <ActionRow
+                icon={<Bookmark className="h-4 w-4" aria-hidden="true" />}
+                title="Stash draft"
+                onPress={() => {
+                  closeMenu();
+                  onStashDraft();
+                }}
+                end={
+                  <kbd aria-label={`${commandKeyLabel} plus Shift plus Enter`} className="font-sans text-xxs">
+                    {commandKeyLabel} ⇧ ↵
+                  </kbd>
+                }
+                disabled={stashDisabled}
+                testId="composer-action-menu-stash"
+              />
+            ) : null}
+            {!mutationDisabled && (onQueueMessage || onStashDraft) ? (
+              <>
+                <p
+                  className="px-3 pb-1 pt-0.5 text-xxs text-slate-400 dark:text-slate-500"
+                  data-testid="composer-action-menu-enter-hint"
+                >
+                  Enter sends or steers · ⇧Enter adds a line
+                </p>
+                <div
+                  role="separator"
+                  className="mx-2 my-1 border-t border-slate-200/70 dark:border-[color:var(--color-studio-dark-panel-border)]"
+                />
+              </>
+            ) : null}
             {!mutationDisabled ? (
               <ActionRow
                 icon={<Github className="h-4 w-4" aria-hidden="true" />}

@@ -6,6 +6,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
+use crate::active_turn_input::ActiveTurnInputReceiver;
 use crate::config::Config;
 use crate::controller::{ControllerClient, LeaseJob, Registration};
 use crate::job_cancel::JobCancelSignal;
@@ -35,6 +36,7 @@ impl AgentExecutor {
         registration: &Registration,
         job: &LeaseJob,
         lease_lost_signal: Option<JobCancelSignal>,
+        active_turn_input: Option<ActiveTurnInputReceiver>,
     ) -> Result<JobExecution> {
         let (progress_tx, progress_status, progress_task) =
             spawn_progress_dispatch(client, registration, job.id, lease_lost_signal.clone());
@@ -51,6 +53,7 @@ impl AgentExecutor {
                 true,
                 Some(progress_handle),
                 lease_lost_signal.clone(),
+                active_turn_input,
             )
             .await;
 
