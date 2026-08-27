@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use reqwest::{StatusCode, Url};
 use serde::{Deserialize, Serialize};
@@ -377,6 +378,12 @@ impl ControllerClient {
             .agent_token_scopes
             .clone()
             .unwrap_or_else(|| claims.scopes.clone());
+        // Proactive registration renewal is scheduled from this expiry. Fall
+        // back to the verified JWT `exp` claim so a controller that omits the
+        // informational field still gets renewed before the token lapses.
+        let agent_token_expires_at = parsed.agent_token_expires_at.clone().or_else(|| {
+            DateTime::<Utc>::from_timestamp(claims.exp, 0).map(|expires_at| expires_at.to_rfc3339())
+        });
 
         if let Some(renewed_runtime_token) = parsed
             .runtime_token
@@ -402,7 +409,7 @@ impl ControllerClient {
             parent_lease_id: config.parent_lease_id,
             agent_token_scopes,
             agent_token_issued_at: parsed.agent_token_issued_at,
-            agent_token_expires_at: parsed.agent_token_expires_at,
+            agent_token_expires_at,
             agent_token_ttl: parsed.agent_token_ttl,
         })
     }

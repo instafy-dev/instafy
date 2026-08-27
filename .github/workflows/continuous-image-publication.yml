@@ -8,6 +8,8 @@ on:
   push:
     branches:
       - main
+  schedule:
+    - cron: "17 */6 * * *"
   workflow_dispatch:
     inputs:
       commit_sha:
@@ -129,8 +131,108 @@ jobs:
           fi
           echo "current=true" >> "$GITHUB_OUTPUT"
 
-      - name: Dispatch both immutable image publishers
+      - name: Check exact manifest freshness
         if: ${{ steps.recheck.outputs.current == 'true' }}
+        id: freshness
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ steps.source.outputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          minimum_expiry_epoch="$(( $(date -u +%s) + 14 * 24 * 60 * 60 ))"
+
+          manifest_is_fresh() {
+            local workflow="$1"
+            local artifact_name="$2"
+            local runs run_id run artifacts matches expires_at expires_epoch
+            runs="$(gh api --method GET \
+              -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs" \
+              -f event=workflow_dispatch \
+              -f head_sha="$RELEASE_COMMIT" \
+              -f status=success \
+              -f per_page=100)" || return 2
+            if [[ "$(jq -er '.total_count' <<<"$runs")" -gt 100 ]]; then
+              echo "::error::Exact release history for ${workflow} is unbounded." >&2
+              return 2
+            fi
+            while read -r run_id; do
+              [[ -n "$run_id" ]] || continue
+              run="$(jq -ec --argjson id "$run_id" \
+                '.workflow_runs[] | select(.id == $id)' <<<"$runs")" || return 2
+              jq -e \
+                --arg sha "$RELEASE_COMMIT" \
+                --arg path ".github/workflows/${workflow}" '
+                  .repository.full_name == "instafy-dev/instafy" and
+                  .path == $path and
+                  .event == "workflow_dispatch" and
+                  .head_branch == "main" and
+                  .head_sha == $sha and
+                  .status == "completed" and
+                  .conclusion == "success"
+                ' <<<"$run" >/dev/null || return 2
+              artifacts="$(gh api --method GET \
+                -H 'Accept: application/vnd.github+json' \
+                -H 'X-GitHub-Api-Version: 2026-03-10' \
+                "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts" \
+                -f per_page=100)" || return 2
+              if [[ "$(jq -er '.total_count' <<<"$artifacts")" -gt 100 ]]; then
+                echo "::error::Release run ${run_id} has an unbounded artifact inventory." >&2
+                return 2
+              fi
+              matches="$(jq -ec --arg name "$artifact_name" \
+                '[.artifacts[] | select(.name == $name)]' <<<"$artifacts")" || return 2
+              if [[ "$(jq -er 'length' <<<"$matches")" -gt 1 ]]; then
+                echo "::error::Release run ${run_id} has duplicate ${artifact_name} artifacts." >&2
+                return 2
+              fi
+              if [[ "$(jq -er 'length' <<<"$matches")" == "1" ]] &&
+                 jq -e '
+                   .[0].expired == false and
+                   (. [0].digest | type) == "string" and
+                   (. [0].digest | test("^sha256:[0-9a-f]{64}$")) and
+                   (. [0].expires_at | type) == "string"
+                 ' <<<"$matches" >/dev/null; then
+                expires_at="$(jq -er '.[0].expires_at' <<<"$matches")" || return 2
+                expires_epoch="$(date -u -d "$expires_at" +%s)" || return 2
+                if [[ "$expires_epoch" -ge "$minimum_expiry_epoch" ]]; then
+                  return 0
+                fi
+              fi
+            done < <(jq -r '.workflow_runs[].id' <<<"$runs")
+            return 1
+          }
+
+          services_fresh=false
+          if manifest_is_fresh \
+            publish-production-services.yml \
+            production-service-release-manifest; then
+            services_fresh=true
+          else
+            status=$?
+            [[ "$status" == "1" ]] || exit "$status"
+          fi
+          runtime_fresh=false
+          if manifest_is_fresh \
+            publish-runtime-agent.yml \
+            runtime-agent-release-manifest; then
+            runtime_fresh=true
+          else
+            status=$?
+            [[ "$status" == "1" ]] || exit "$status"
+          fi
+          if [[ "$services_fresh" == "true" && "$runtime_fresh" == "true" ]]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Dispatch both immutable image publishers
+        if: >-
+          steps.recheck.outputs.current == 'true' &&
+          steps.freshness.outputs.publish == 'true'
         id: dispatch
         shell: bash
         env:
@@ -183,7 +285,9 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Require both exact image manifests
-        if: ${{ steps.recheck.outputs.current == 'true' }}
+        if: >-
+          steps.recheck.outputs.current == 'true' &&
+          steps.freshness.outputs.publish == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -255,7 +359,9 @@ jobs:
             runtime-agent-release-manifest
 
       - name: Report immutable image publication
-        if: ${{ steps.recheck.outputs.current == 'true' }}
+        if: >-
+          steps.recheck.outputs.current == 'true' &&
+          steps.freshness.outputs.publish == 'true'
         shell: bash
         env:
           RELEASE_COMMIT: ${{ steps.source.outputs.commit_sha }}
@@ -271,4 +377,19 @@ jobs:
             echo "- Production services: [run ${SERVICES_RUN_ID}](${SERVICES_URL})"
             echo "- Runtime agent: [run ${RUNTIME_RUN_ID}](${RUNTIME_URL})"
             echo "- Mutable channel tags were not moved."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report fresh immutable manifests
+        if: >-
+          steps.recheck.outputs.current == 'true' &&
+          steps.freshness.outputs.publish == 'false'
+        shell: bash
+        env:
+          RELEASE_COMMIT: ${{ steps.source.outputs.commit_sha }}
+        run: |
+          {
+            echo "### Immutable production images are fresh"
+            echo
+            echo "- Public core: \`$RELEASE_COMMIT\`"
+            echo "- Both exact manifests remain live for at least 14 days, so no image was rebuilt or pushed."
           } >> "$GITHUB_STEP_SUMMARY"

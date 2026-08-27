@@ -14,7 +14,21 @@ import { login, logout } from "./auth.js";
 import { runGitCredentialHelper } from "./git-credential.js";
 import { projectInit, projectProfile, refreshProjectDefaults } from "./project.js";
 import { secretsGet, secretsList, secretsPut, secretsRevoke } from "./secrets.js";
-import { automationsCreate, automationsDelete, automationsList, automationsRun, automationsUpdateStatus } from "./automations.js";
+import {
+  automationsCreate,
+  automationsDelete,
+  automationsList,
+  automationsRun,
+  automationsUpdate,
+  automationsUpdateStatus,
+} from "./automations.js";
+import {
+  credentialsClearDefault,
+  credentialsList,
+  credentialsRevoke,
+  credentialsSetDefault,
+  credentialsTest,
+} from "./credentials.js";
 import { listTunnelSessions, startTunnelDetached, stopTunnelSession, tailTunnelLogs, runTunnelCommand } from "./tunnel.js";
 import { configGet, configList, configPath, configSet, configUnset } from "./config-command.js";
 import { getInstafyProfileConfigPath, listInstafyProfileNames, readInstafyProfileConfig } from "./config.js";
@@ -40,6 +54,16 @@ import {
   showConversation,
 } from "./conversations.js";
 import { inviteSpaceMember, setSpaceMemberRole } from "./invitations.js";
+import {
+  teamAccept,
+  teamAddMember,
+  teamInvite,
+  teamInviteLink,
+  teamInvites,
+  teamMembersList,
+  teamRevokeInvite,
+  teamRevokeLink,
+} from "./team.js";
 import {
   grantProviderBinding,
   revokeProviderBinding,
@@ -1098,6 +1122,23 @@ secretsRevokeCommand
     }
   });
 
+function resolveResultVisibilityFlag(opts: {
+  resultVisibility?: string;
+  shareResults?: boolean;
+}): "private" | "team" | undefined {
+  if (opts.resultVisibility !== undefined) {
+    const value = String(opts.resultVisibility).trim().toLowerCase();
+    if (value !== "private" && value !== "team") {
+      throw new Error("--result-visibility must be private or team");
+    }
+    return value;
+  }
+  // `--share-results` sets team-visible; `--no-share-results` forces private.
+  if (opts.shareResults === true) return "team";
+  if (opts.shareResults === false) return "private";
+  return undefined;
+}
+
 const automationsCommand = program
   .command("automations")
   .description("Manage scheduled automations (run prompts on a schedule)");
@@ -1149,6 +1190,18 @@ const automationsCreateCommand = automationsCommand
     "--silent-when-nothing-to-report",
     "Do not post a completion result or send a result notification when a successful run has no findings",
   )
+  .option(
+    "--share-results",
+    "Share this automation's result threads with your team (visible to anyone with space access)",
+  )
+  .option(
+    "--no-share-results",
+    "Keep this automation's result threads private to you (default)",
+  )
+  .option(
+    "--result-visibility <private|team>",
+    "Result-thread visibility (private|team); overrides --share-results",
+  )
   .option("--paused", "Create paused");
 
 addSpaceOption(
@@ -1175,8 +1228,79 @@ automationsCreateCommand
         runtimeMode: opts.runtimeMode,
         runtimeProvider: opts.runtimeProvider,
         silentWhenNothingToReport: Boolean(opts.silentWhenNothingToReport),
+        resultVisibility: resolveResultVisibilityFlag(opts),
         paused: Boolean(opts.paused),
         project: resolveSpaceIdOption(opts),
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+const automationsUpdateCommand = automationsCommand
+  .command("update")
+  .description(
+    "Update an automation's name, prompt, schedule, runtime settings, or result-sharing visibility in place",
+  )
+  .argument("<automation-id>", "Automation UUID")
+  .option("--name <name>", "New automation name")
+  .option("--prompt <text>", "New prompt to run on schedule")
+  .option("--prompt-file <path>", "Read the new prompt from a file")
+  .option("--schedule-kind <kind>", "weekly|hourly|once")
+  .option("--run-at <datetime>", "Run time for once schedule (RFC3339 or YYYY-MM-DDTHH:MM[:SS])")
+  .option("--interval-hours <n>", "Interval hours (hourly schedule)", (value) => Number(value))
+  .option("--days <list>", "Weekdays for weekly schedule (e.g. mo,tu,we,th,fr)")
+  .option("--time <hh:mm>", "Time for weekly schedule (24h, e.g. 09:00)")
+  .option("--timezone <tz>", "IANA timezone (e.g. America/New_York)")
+  .option("--runtime-mode <mode>", "auto|hosted|existing")
+  .option("--runtime-provider <id>", "Runtime provider id")
+  .option(
+    "--silent-when-nothing-to-report",
+    "Do not post a completion result or send a result notification when a successful run has no findings",
+  )
+  .option(
+    "--no-silent-when-nothing-to-report",
+    "Always post a completion result and send a result notification",
+  )
+  .option(
+    "--share-results",
+    "Share this automation's result threads with your team (visible to anyone with space access)",
+  )
+  .option(
+    "--no-share-results",
+    "Keep this automation's result threads private to you",
+  )
+  .option(
+    "--result-visibility <private|team>",
+    "Result-thread visibility (private|team); overrides --share-results",
+  );
+
+addServerUrlOptions(automationsUpdateCommand);
+addAccessTokenOptions(automationsUpdateCommand, "Instafy access token");
+
+automationsUpdateCommand
+  .option("--json", "Output JSON")
+  .action(async (automationId, opts) => {
+    try {
+      await automationsUpdate({
+        automationId,
+        name: opts.name,
+        prompt: opts.prompt,
+        promptFile: opts.promptFile,
+        scheduleKind: opts.scheduleKind,
+        runAt: opts.runAt,
+        intervalHours: opts.intervalHours,
+        days: opts.days,
+        time: opts.time,
+        timezone: opts.timezone,
+        runtimeMode: opts.runtimeMode,
+        runtimeProvider: opts.runtimeProvider,
+        silentWhenNothingToReport: opts.silentWhenNothingToReport,
+        resultVisibility: resolveResultVisibilityFlag(opts),
         controllerUrl: opts.serverUrl,
         accessToken: opts.accessToken,
         json: opts.json,
@@ -1275,6 +1399,129 @@ automationsDeleteCommand
     try {
       await automationsDelete({
         automationId,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+const credentialsCommand = program
+  .command("credentials")
+  .description("Inspect, verify and pick the AI provider credentials your jobs use");
+
+failWithGroupHelp(credentialsCommand);
+
+const credentialsListCommand = credentialsCommand
+  .command("list")
+  .description("List your AI credentials (secret material is never shown)")
+  .option("--all", "Include revoked credentials");
+
+addServerUrlOptions(credentialsListCommand);
+addAccessTokenOptions(credentialsListCommand, "Instafy access token");
+
+credentialsListCommand
+  .option("--json", "Output JSON")
+  .action(async (opts) => {
+    try {
+      await credentialsList({
+        all: Boolean(opts.all),
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+const credentialsTestCommand = credentialsCommand
+  .command("test")
+  .description("Probe one credential through the proxy against its upstream provider (exit 1 on failure)")
+  .argument("<id-or-prefix>", "Credential UUID or unique id prefix");
+
+addServerUrlOptions(credentialsTestCommand);
+addAccessTokenOptions(credentialsTestCommand, "Instafy access token");
+
+credentialsTestCommand
+  .option("--json", "Output JSON")
+  .action(async (idOrPrefix, opts) => {
+    try {
+      const result = await credentialsTest({
+        idOrPrefix,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+      if (!result.ok) {
+        process.exitCode = 1;
+      }
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+const credentialsDefaultCommand = credentialsCommand
+  .command("default")
+  .description("Set the default credential jobs use, or clear it with --clear")
+  .argument("[id-or-prefix]", "Credential UUID or unique id prefix")
+  .option("--clear", "Clear the default credential instead of setting one");
+
+addServerUrlOptions(credentialsDefaultCommand);
+addAccessTokenOptions(credentialsDefaultCommand, "Instafy access token");
+
+credentialsDefaultCommand
+  .option("--json", "Output JSON")
+  .action(async (idOrPrefix, opts) => {
+    try {
+      const target = pickTrimmedString(idOrPrefix);
+      if (opts.clear && target) {
+        throw new Error("Pass either a credential id or --clear, not both.");
+      }
+      if (!opts.clear && !target) {
+        throw new Error("Provide a credential id (or unique prefix), or pass --clear.");
+      }
+      if (opts.clear) {
+        await credentialsClearDefault({
+          controllerUrl: opts.serverUrl,
+          accessToken: opts.accessToken,
+          json: opts.json,
+        });
+        return;
+      }
+      await credentialsSetDefault({
+        idOrPrefix: target!,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+const credentialsRevokeCommand = credentialsCommand
+  .command("revoke")
+  .description("Revoke a credential (asks for confirmation unless --yes)")
+  .argument("<id-or-prefix>", "Credential UUID or unique id prefix")
+  .option("--yes", "Skip the confirmation prompt (required when not running in a terminal)");
+
+addServerUrlOptions(credentialsRevokeCommand);
+addAccessTokenOptions(credentialsRevokeCommand, "Instafy access token");
+
+credentialsRevokeCommand
+  .option("--json", "Output JSON")
+  .action(async (idOrPrefix, opts) => {
+    try {
+      await credentialsRevoke({
+        idOrPrefix,
+        yes: Boolean(opts.yes),
         controllerUrl: opts.serverUrl,
         accessToken: opts.accessToken,
         json: opts.json,
@@ -1802,6 +2049,180 @@ orgListCommand
   .action(async (opts) => {
     try {
       await (await import("./org.js")).listOrganizations({
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+function teamScopeCommandFactory(nameAndArgs: string, description: string): Command {
+  const command = orgCommand.command(nameAndArgs).description(description);
+  addServerUrlOptions(command);
+  addAccessTokenOptions(command, "Instafy access token");
+  command
+    .option("--team-id <team>", "Team id (UUID) or slug (defaults to your only team)")
+    .option("--json", "Output JSON");
+  return command;
+}
+
+const teamMembersCommand = teamScopeCommandFactory("members", "List members of a team");
+teamMembersCommand.action(async (opts) => {
+  try {
+    await teamMembersList({
+      teamId: opts.teamId,
+      controllerUrl: opts.serverUrl,
+      accessToken: opts.accessToken,
+      json: opts.json,
+    });
+  } catch (error) {
+    console.error(kleur.red(String(error)));
+    process.exit(1);
+  }
+});
+
+const teamInviteCommand = teamScopeCommandFactory(
+  "invite <email>",
+  "Invite a teammate by email (they must sign in with that email to accept)",
+);
+teamInviteCommand
+  .option("--role <role>", "owner, admin, builder, or viewer (default: builder)")
+  .action(async (email, opts) => {
+    try {
+      await teamInvite({
+        email,
+        role: opts.role,
+        teamId: opts.teamId,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+const teamInviteLinkCommand = teamScopeCommandFactory(
+  "invite-link",
+  "Create a shareable invite link that works with any sign-in method",
+);
+teamInviteLinkCommand
+  .option("--role <role>", "builder or viewer (default: builder)")
+  .option("--studio-url <url>", "Studio base URL for the accept link (default: https://instafy.dev)")
+  .action(async (opts) => {
+    try {
+      await teamInviteLink({
+        role: opts.role,
+        studioUrl: opts.studioUrl,
+        teamId: opts.teamId,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+const teamInvitesCommand = teamScopeCommandFactory(
+  "invites",
+  "List pending email invitations and invite links",
+);
+teamInvitesCommand.action(async (opts) => {
+  try {
+    await teamInvites({
+      teamId: opts.teamId,
+      controllerUrl: opts.serverUrl,
+      accessToken: opts.accessToken,
+      json: opts.json,
+    });
+  } catch (error) {
+    console.error(kleur.red(String(error)));
+    process.exit(1);
+  }
+});
+
+const teamAddMemberCommand = teamScopeCommandFactory(
+  "add-member",
+  "Add an existing Instafy account to a team by user id",
+);
+teamAddMemberCommand
+  .requiredOption("--user-id <uuid>", "User id of an existing Instafy account")
+  .option("--role <role>", "owner, admin, builder, or viewer (default: builder)")
+  .action(async (opts) => {
+    try {
+      await teamAddMember({
+        userId: opts.userId,
+        role: opts.role,
+        teamId: opts.teamId,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+const teamAcceptCommand = teamScopeCommandFactory(
+  "accept <token>",
+  "Accept a team invitation or invite link with the current account",
+);
+teamAcceptCommand.action(async (token, opts) => {
+  try {
+    await teamAccept({
+      token,
+      teamId: opts.teamId,
+      controllerUrl: opts.serverUrl,
+      accessToken: opts.accessToken,
+      json: opts.json,
+    });
+  } catch (error) {
+    console.error(kleur.red(String(error)));
+    process.exit(1);
+  }
+});
+
+const teamRevokeInviteCommand = teamScopeCommandFactory(
+  "revoke-invite <invitation-id>",
+  "Revoke a pending email invitation",
+);
+teamRevokeInviteCommand
+  .option("--yes", "Skip the confirmation prompt")
+  .action(async (invitationId, opts) => {
+    try {
+      await teamRevokeInvite({
+        invitationId,
+        yes: opts.yes,
+        teamId: opts.teamId,
+        controllerUrl: opts.serverUrl,
+        accessToken: opts.accessToken,
+        json: opts.json,
+      });
+    } catch (error) {
+      console.error(kleur.red(String(error)));
+      process.exit(1);
+    }
+  });
+
+const teamRevokeLinkCommand = teamScopeCommandFactory(
+  "revoke-link <invite-link-id>",
+  "Revoke a shareable invite link",
+);
+teamRevokeLinkCommand
+  .option("--yes", "Skip the confirmation prompt")
+  .action(async (inviteLinkId, opts) => {
+    try {
+      await teamRevokeLink({
+        inviteLinkId,
+        yes: opts.yes,
+        teamId: opts.teamId,
         controllerUrl: opts.serverUrl,
         accessToken: opts.accessToken,
         json: opts.json,
