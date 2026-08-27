@@ -332,4 +332,4 @@ jobs:
             production-service-release-manifest.json
             production-service-release-manifest.sha256
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90

@@ -420,8 +420,73 @@ instafy support report "Build fails on startup" \
 `support show` returns only the customer-safe report view. Stored metadata, logs, internal triage
 fields, and screenshot bytes are never returned by the customer endpoint; screenshot descriptors
 show which images were attached. The controller applies the same minimized projection to legacy
-bug-report reads made by ordinary users; only operator/service authorization can retrieve the full
-triage record and attachment bytes.
+bug-report reads made by ordinary users; only operator/service authorization (or a user listed in
+the controller's `BUG_REPORTS_OPERATOR_USER_IDS`, which grants bug-report triage and nothing else)
+can retrieve the full triage record and attachment bytes.
+
+## Teams and invitations
+
+Manage team (organization) membership and invitations with `instafy team`. Every subcommand
+resolves the team from `--team-id <uuid|slug>`. If you omit it and belong to a single team, that
+team is used automatically; otherwise the command asks you to pass `--team-id` and points you at
+`instafy team list`.
+
+List teams and their members:
+
+```bash
+instafy team list
+instafy team members --team-id acme
+```
+
+There are two ways to bring someone in:
+
+- An **email invitation** targets one address. The person must sign in to Instafy with that exact
+  email to accept.
+- An **invite link** is a shareable token. Anyone who opens it and signs in — with any sign-in
+  method — can join, so treat it like a shared secret. Links expire 30 days after creation
+  (server-controlled).
+
+```bash
+# Email invitation (roles: owner, admin, builder, viewer; default builder).
+# Only owners can assign the owner role.
+instafy team invite teammate@example.com --role builder --team-id acme
+
+# Shareable invite link (roles: builder or viewer; default builder).
+instafy team invite-link --role builder --team-id acme
+```
+
+`instafy team invite-link` prints the full accept URL and the token. The URL is the Studio base
+(from config, `INSTAFY_STUDIO_URL`, `--studio-url`, or the default `https://instafy.dev`) joined
+with the controller-returned accept path, for example:
+
+```
+https://instafy.dev/invite?token=<uuid>&panel=chat
+```
+
+If the invitee already has an Instafy account, add them directly instead of emailing an invite:
+
+```bash
+instafy team add-member --user-id <uuid> --role builder --team-id acme
+```
+
+Review and clean up pending invitations and links:
+
+```bash
+instafy team invites --team-id acme
+instafy team revoke-invite <invitation-id> --team-id acme --yes
+instafy team revoke-link <invite-link-id> --team-id acme --yes
+```
+
+`revoke-invite` and `revoke-link` ask for confirmation on an interactive terminal; pass `--yes` to
+skip the prompt (required when there is no TTY).
+
+Accept an invitation or invite link as the account you are currently signed in with:
+
+```bash
+instafy team accept <token>
+```
+
+Add `--json` to any of these commands for machine-readable output.
 
 ## Scheduled automations
 
@@ -446,6 +511,87 @@ The flag is default-off. It suppresses only the completion result message and re
 for a successful run that explicitly finds nothing to report; results, errors, unexpected empty
 output, and execution records remain visible. See
 [Automations](Automations.md) for the controller semantics and audit behavior.
+
+Change an existing automation in place with `instafy automations update <automation-id>`. Pass only
+the fields to change; the automation keeps its id, its private conversation thread, and its run
+history. `--prompt-file` reads the new prompt from a file, and
+`--no-silent-when-nothing-to-report` turns quiet runs back off:
+
+```bash
+instafy automations update <automation-id> \
+  --prompt-file ./prompts/dependency-check.md \
+  --schedule-kind weekly \
+  --days mo,we \
+  --time 07:30 \
+  --timezone "Europe/Vienna"
+```
+
+The next run is recomputed only when the schedule or status changes; editing the name, prompt, or
+runtime settings leaves the pending run where it is. Use `pause` and `resume` to change status.
+
+### Share results with your team
+
+By default an automation's result conversations are private to the person who created it: other
+members see the automation record (status, next run, last error) but not the result threads. Add
+`--share-results` to make a new automation's result threads visible to anyone with access to the
+space:
+
+```bash
+instafy automations create --json \
+  --space "<Project ID>" \
+  --name "Dependency change check" \
+  --prompt "Check whether dependency versions changed and report the changes." \
+  --schedule-kind weekly \
+  --days mo,tu,we,th,fr \
+  --time 08:00 \
+  --timezone "Europe/Vienna" \
+  --share-results
+```
+
+The visibility is stored as `resultVisibility` (`private` by default, `team` when shared) and is
+shown in `automations list`/`--json` output. Flip an existing automation with `automations update`:
+
+```bash
+# Share an existing automation's results with the team
+instafy automations update "<Automation ID>" --share-results
+
+# Return it to owner-only
+instafy automations update "<Automation ID>" --no-share-results
+
+# Or set it explicitly
+instafy automations update "<Automation ID>" --result-visibility team
+```
+
+`--share-results` maps to `--result-visibility team`; `--no-share-results` to `--result-visibility
+private`. "Team" here means visible to anyone with access to the space, not world-readable. The
+same flags are accepted by `automations create`.
+
+## Credentials
+
+`instafy credentials` shows which AI provider credentials (bring-your-own keys and Codex logins)
+your account holds, lets you verify one actually works, and picks the default that jobs use when
+no credential is chosen explicitly. Secret material is never returned or printed.
+
+```bash
+instafy credentials list                 # active credentials; add --all to include revoked
+instafy credentials test <id-or-prefix>  # probe one credential through the proxy (exit 1 on failure)
+instafy credentials default <id-or-prefix>
+instafy credentials default --clear
+instafy credentials revoke <id-or-prefix> --yes
+```
+
+- `list` prints the short id, kind, provider, default model, default marker, last-used and
+  revoked timestamps. Revoked credentials are hidden unless `--all` is passed.
+- `test` calls the upstream provider through the configured proxy, so it can take up to a minute
+  and counts as real usage of the credential. It prints `ok` or `failed`, the provider and model,
+  and the first ~300 characters of the model output.
+- `default` sets the credential jobs fall back to; `--clear` removes the default so nothing is
+  picked automatically.
+- `revoke` disconnects agents bound to the credential and stops jobs from using it. It asks for
+  confirmation in a terminal and requires `--yes` when run non-interactively.
+
+Every command accepts a full credential UUID or a unique id prefix (as shown by `list`), plus
+`--json`. Ambiguous or unknown prefixes fail with an error rather than guessing.
 
 ## Public and operator CLI boundary
 

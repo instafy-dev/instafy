@@ -126,6 +126,10 @@ test("every service is scanned before registry login and publication", () => {
   assert.match(source, /--severity HIGH,CRITICAL/u);
   assert.match(source, /--exit-code 1/u);
   assert.match(source, /production-service-release-manifest\.sha256/u);
+  assert.match(
+    source,
+    /name: Upload sealed release manifest[\s\S]*?retention-days: 90/u,
+  );
 });
 
 test("both image workflows parse the tagged digest line emitted by docker push", () => {

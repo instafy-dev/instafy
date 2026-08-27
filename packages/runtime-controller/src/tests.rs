@@ -237,6 +237,7 @@ pub(crate) fn build_app_config(private_key: &str, public_key: &str, key_id: &str
         stripe: None,
         operator_console_org_id: None,
         operator_console_allowed_user_ids: vec![],
+        bug_reports_operator_user_ids: vec![],
         desktop_release_github_owner: None,
         desktop_release_github_repo: None,
         desktop_release_github_token: None,
@@ -3726,6 +3727,326 @@ async fn support_report_routes_enforce_customer_privacy_boundary() -> anyhow::Re
         .await?;
     cleanup_test_user(&pool, &reporter_b_id).await?;
     cleanup_test_user(&pool, &reporter_a_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn bug_report_operator_allowlist_grants_only_bug_report_routes() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("bug report operator allowlist test").await?;
+
+    let reporter_id = Uuid::new_v4();
+    let bug_report_operator_id = Uuid::new_v4();
+    ensure_test_user(&pool, &reporter_id).await?;
+    ensure_test_user(&pool, &bug_report_operator_id).await?;
+
+    // The bug-reports-only role must work on its own: no operator org and no
+    // full operator allowlist are configured here.
+    let mut config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "bug-report-operator-allowlist",
+    );
+    config.operator_console_org_id = None;
+    config.operator_console_allowed_user_ids = vec![];
+    config.bug_reports_operator_user_ids = vec![bug_report_operator_id];
+
+    let reporter_token = crate::auth::issue_controller_token(&config, &reporter_id)
+        .map_err(|error| controller_error("issue bug report reporter token", error))?
+        .token;
+    let bug_report_operator_token =
+        crate::auth::issue_controller_token(&config, &bug_report_operator_id)
+            .map_err(|error| controller_error("issue bug report operator token", error))?
+            .token;
+    let scoped_runtime_id = Uuid::new_v4();
+    let bug_report_operator_scoped_token = mint_scoped_token(
+        &config,
+        ScopedTokenRequest {
+            audience: scoped_runtime_id.to_string(),
+            subject: bug_report_operator_id.to_string(),
+            project_id: Uuid::new_v4().to_string(),
+            origin_id: None,
+            runtime_id: Some(scoped_runtime_id.to_string()),
+            protocol: None,
+            scopes: vec!["telemetry.write".to_string()],
+            lease_id: None,
+            run_id: None,
+            prefer_runtime: None,
+            ttl_seconds: Some(300),
+        },
+    )
+    .map_err(|error| controller_error("mint scoped bug report operator token", error))?
+    .token;
+
+    let state = build_test_state(pool.clone(), config);
+    let app = crate::bug_reports::router().with_state(state.clone());
+    let operator_admin_app = crate::operator_admin::router().with_state(state.clone());
+    let ota_app = crate::ota::router().with_state(state);
+
+    let unique_message = format!("Allowlist triage {}", Uuid::new_v4());
+    let png_signature = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/support/reports")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_token}"),
+                )
+                .body(Body::from(
+                    json!({
+                        "message": unique_message,
+                        "details": "Details from the reporter",
+                        "screenshots": [{
+                            "fileName": "screen.png",
+                            "mediaType": "image/png",
+                            "dataBase64": STANDARD.encode(&png_signature),
+                            "byteLength": png_signature.len()
+                        }]
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(create.status(), StatusCode::CREATED);
+    let create_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(create.into_body(), usize::MAX).await?)?;
+    let report_id = Uuid::parse_str(
+        create_payload["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("support create response omitted report id"))?,
+    )?;
+
+    pool.get()
+        .await?
+        .execute(
+            "update bug_reports
+                set priority = 'urgent',
+                    metadata = '{\"triageSecret\":\"internal-only\"}'::jsonb,
+                    logs = '[{\"secret\":\"internal-only\"}]'::jsonb,
+                    updated_at = now()
+              where id = $1",
+            &[&report_id],
+        )
+        .await?;
+
+    // A user in BUG_REPORTS_OPERATOR_USER_IDS gets the operator projection on list,
+    // including reports filed by other users and the internal triage fields.
+    let operator_list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/bug-reports?limit=100&search={}",
+                    urlencoding::encode(&unique_message)
+                ))
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {bug_report_operator_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(operator_list.status(), StatusCode::OK);
+    let operator_list_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(operator_list.into_body(), usize::MAX).await?)?;
+    let operator_reports = operator_list_payload["reports"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("operator list response omitted reports"))?;
+    let listed = operator_reports
+        .iter()
+        .find(|report| report["id"] == report_id.to_string())
+        .ok_or_else(|| {
+            anyhow::anyhow!("bug-report operator must see reports filed by other users")
+        })?;
+    assert_eq!(listed["priority"], "urgent");
+    assert_eq!(listed["userId"], reporter_id.to_string());
+    assert_eq!(listed["metadata"]["triageSecret"], "internal-only");
+    assert_eq!(listed["screenshotCount"], 1);
+
+    // ...the full detail on get...
+    let operator_show = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/bug-reports/{report_id}"))
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {bug_report_operator_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(operator_show.status(), StatusCode::OK);
+    let operator_show_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(operator_show.into_body(), usize::MAX).await?)?;
+    assert_eq!(operator_show_payload["id"], report_id.to_string());
+    assert_eq!(operator_show_payload["priority"], "urgent");
+    assert_eq!(operator_show_payload["userId"], reporter_id.to_string());
+    assert_eq!(
+        operator_show_payload["metadata"]["triageSecret"],
+        "internal-only"
+    );
+    assert_eq!(operator_show_payload["logs"][0]["secret"], "internal-only");
+    assert_eq!(
+        operator_show_payload["screenshots"][0]["dataBase64"],
+        STANDARD.encode(&png_signature)
+    );
+
+    // ...and can PATCH triage fields.
+    let operator_patch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/bug-reports/{report_id}"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {bug_report_operator_token}"),
+                )
+                .body(Body::from(
+                    json!({ "status": "in_progress", "assignee": "bug-report-operator" })
+                        .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(operator_patch.status(), StatusCode::OK);
+    let operator_patch_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(operator_patch.into_body(), usize::MAX).await?)?;
+    assert_eq!(operator_patch_payload["id"], report_id.to_string());
+    assert_eq!(operator_patch_payload["status"], "in_progress");
+    assert_eq!(operator_patch_payload["assignee"], "bug-report-operator");
+
+    // The role authenticates like the full operator gate: a runtime-scoped token
+    // for the same user is not an interactive operator session.
+    let scoped_patch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/bug-reports/{report_id}"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {bug_report_operator_scoped_token}"),
+                )
+                .body(Body::from(json!({ "status": "resolved" }).to_string()))?,
+        )
+        .await?;
+    assert_eq!(scoped_patch.status(), StatusCode::FORBIDDEN);
+
+    // The same user is refused on operator-only routes outside bug reports.
+    let operator_search = operator_admin_app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/operator/projects/search?q=allowlist&limit=10")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {bug_report_operator_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(operator_search.status(), StatusCode::FORBIDDEN);
+
+    let ota_releases = ota_app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ota/releases")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {bug_report_operator_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(ota_releases.status(), StatusCode::FORBIDDEN);
+
+    // A user in neither list still gets the customer projection and cannot PATCH.
+    let customer_list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/bug-reports?limit=100")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(customer_list.status(), StatusCode::OK);
+    let customer_list_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(customer_list.into_body(), usize::MAX).await?)?;
+    let customer_reports = customer_list_payload["reports"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("customer list response omitted reports"))?;
+    assert_eq!(customer_reports.len(), 1);
+    assert_eq!(customer_reports[0]["id"], report_id.to_string());
+    assert_eq!(customer_reports[0]["status"], "in_progress");
+    for operator_only_key in ["priority", "assignee", "metadata", "logs", "userId"] {
+        assert!(
+            customer_reports[0].get(operator_only_key).is_none(),
+            "customer list projection leaked {operator_only_key}"
+        );
+    }
+
+    let customer_show = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/bug-reports/{report_id}"))
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(customer_show.status(), StatusCode::OK);
+    let customer_show_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(customer_show.into_body(), usize::MAX).await?)?;
+    assert_eq!(customer_show_payload["id"], report_id.to_string());
+    for operator_only_key in ["priority", "assignee", "metadata", "logs", "userId"] {
+        assert!(
+            customer_show_payload.get(operator_only_key).is_none(),
+            "customer detail projection leaked {operator_only_key}"
+        );
+    }
+    assert!(customer_show_payload["screenshots"][0]
+        .get("dataBase64")
+        .is_none());
+
+    let customer_patch = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/bug-reports/{report_id}"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_token}"),
+                )
+                .body(Body::from(json!({ "status": "resolved" }).to_string()))?,
+        )
+        .await?;
+    assert_eq!(customer_patch.status(), StatusCode::FORBIDDEN);
+
+    pool.get()
+        .await?
+        .execute("delete from bug_reports where id = $1", &[&report_id])
+        .await?;
+    cleanup_test_user(&pool, &bug_report_operator_id).await?;
+    cleanup_test_user(&pool, &reporter_id).await?;
     Ok(())
 }
 
@@ -15016,6 +15337,467 @@ async fn automation_silence_is_opt_in_success_only_and_keeps_runs_observable() -
             );
         }
     }
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_org(&pool, &org_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
+    cleanup_test_user(&pool, &teammate_user_id).await?;
+    Ok(())
+}
+
+async fn automation_json_request(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    token: &str,
+    body: serde_json::Value,
+) -> anyhow::Result<(StatusCode, serde_json::Value)> {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(body.to_string()))?,
+        )
+        .await?;
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+    let payload = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    Ok((status, payload))
+}
+
+#[tokio::test]
+async fn automation_update_keeps_identity_and_reschedules_only_on_schedule_change(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping automation update test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let owner_user_id = Uuid::new_v4();
+    let teammate_user_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
+    ensure_test_user(&pool, &teammate_user_id).await?;
+    seed_group_participation_project(
+        &pool,
+        &org_id,
+        &project_id,
+        &owner_user_id,
+        &teammate_user_id,
+        "Automation update test",
+    )
+    .await?;
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "automation-update",
+    );
+    let owner_token = crate::auth::issue_controller_token(&config, &owner_user_id)
+        .map_err(|error| controller_error("issue automation owner token", error))?
+        .token;
+    let teammate_token = crate::auth::issue_controller_token(&config, &teammate_user_id)
+        .map_err(|error| controller_error("issue automation teammate token", error))?
+        .token;
+    let state = build_test_state(pool.clone(), config);
+    let app = automations::router().with_state(state);
+
+    let (status, created) = automation_json_request(
+        &app,
+        "POST",
+        &format!("/projects/{project_id}/automations"),
+        &owner_token,
+        json!({
+            "name": "Dependency check",
+            "promptText": "Report dependency changes.",
+            "scheduleKind": "hourly",
+            "intervalHours": 24,
+            "timezone": "UTC",
+            "runtimeMode": "existing"
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "create failed: {created}");
+    let automation_id = created["id"].as_str().expect("automation id").to_string();
+    let conversation_id = created["conversationId"]
+        .as_str()
+        .expect("automation conversation id")
+        .to_string();
+    let initial_next_run_at = created["nextRunAt"]
+        .as_str()
+        .expect("initial next run")
+        .to_string();
+    let automation_path = format!("/automations/{automation_id}");
+
+    // A prompt/runtime-settings edit keeps the automation identity, its private
+    // conversation, and its pending next run.
+    let (status, updated) = automation_json_request(
+        &app,
+        "PATCH",
+        &automation_path,
+        &owner_token,
+        json!({
+            "promptText": "Report dependency and license changes.",
+            "silentWhenNothingToReport": true
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "prompt update failed: {updated}");
+    assert_eq!(updated["id"], json!(automation_id));
+    assert_eq!(updated["conversationId"], json!(conversation_id));
+    assert_eq!(
+        updated["promptText"],
+        json!("Report dependency and license changes.")
+    );
+    assert_eq!(updated["silentWhenNothingToReport"], json!(true));
+    assert_eq!(updated["scheduleKind"], json!("hourly"));
+    assert_eq!(updated["intervalHours"], json!(24));
+    assert_eq!(updated["status"], json!("active"));
+    assert_eq!(
+        updated["nextRunAt"],
+        json!(initial_next_run_at),
+        "prompt edits must not reschedule the pending run"
+    );
+
+    // A schedule change recomputes the next run with the new schedule and keeps
+    // the previously edited prompt.
+    let (status, rescheduled) = automation_json_request(
+        &app,
+        "PATCH",
+        &automation_path,
+        &owner_token,
+        json!({
+            "scheduleKind": "weekly",
+            "byDay": ["we", "mo"],
+            "byHour": 7,
+            "byMinute": 30,
+            "timezone": "Europe/Vienna"
+        }),
+    )
+    .await?;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "schedule update failed: {rescheduled}"
+    );
+    assert_eq!(rescheduled["id"], json!(automation_id));
+    assert_eq!(rescheduled["conversationId"], json!(conversation_id));
+    assert_eq!(rescheduled["scheduleKind"], json!("weekly"));
+    assert_eq!(rescheduled["byDay"], json!(["mo", "we"]));
+    assert_eq!(rescheduled["byHour"], json!(7));
+    assert_eq!(rescheduled["byMinute"], json!(30));
+    assert_eq!(rescheduled["timezone"], json!("Europe/Vienna"));
+    assert_eq!(rescheduled["intervalHours"], serde_json::Value::Null);
+    assert_eq!(
+        rescheduled["promptText"],
+        json!("Report dependency and license changes.")
+    );
+    assert_ne!(rescheduled["nextRunAt"], json!(initial_next_run_at));
+    let next_run_at = chrono::DateTime::parse_from_rfc3339(
+        rescheduled["nextRunAt"]
+            .as_str()
+            .expect("rescheduled next run"),
+    )?
+    .with_timezone(&Utc);
+    let now = Utc::now();
+    assert!(next_run_at > now);
+    assert!(next_run_at <= now + ChronoDuration::days(8));
+    let local_next_run = next_run_at.with_timezone(&chrono_tz::Europe::Vienna);
+    assert!(matches!(
+        chrono::Datelike::weekday(&local_next_run),
+        chrono::Weekday::Mon | chrono::Weekday::Wed
+    ));
+    assert_eq!(chrono::Timelike::hour(&local_next_run), 7);
+    assert_eq!(chrono::Timelike::minute(&local_next_run), 30);
+    let weekly_next_run_at = rescheduled["nextRunAt"].clone();
+
+    // Pause/resume semantics are unchanged: pausing keeps the pending run and
+    // resuming recomputes it from the current schedule.
+    let (status, paused) = automation_json_request(
+        &app,
+        "PATCH",
+        &automation_path,
+        &owner_token,
+        json!({ "status": "paused" }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "pause failed: {paused}");
+    assert_eq!(paused["status"], json!("paused"));
+    assert_eq!(paused["nextRunAt"], weekly_next_run_at);
+    let (status, resumed) = automation_json_request(
+        &app,
+        "PATCH",
+        &automation_path,
+        &owner_token,
+        json!({ "status": "active" }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "resume failed: {resumed}");
+    assert_eq!(resumed["status"], json!("active"));
+    let resumed_next_run_at = chrono::DateTime::parse_from_rfc3339(
+        resumed["nextRunAt"].as_str().expect("resumed next run"),
+    )?
+    .with_timezone(&Utc);
+    assert!(resumed_next_run_at > Utc::now());
+    assert_eq!(
+        chrono::Timelike::hour(&resumed_next_run_at.with_timezone(&chrono_tz::Europe::Vienna)),
+        7
+    );
+
+    // Nothing to update is a client error rather than a silent rewrite.
+    let (status, rejected) =
+        automation_json_request(&app, "PATCH", &automation_path, &owner_token, json!({})).await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "empty update: {rejected}");
+
+    // Project teammates who do not own the automation cannot edit it.
+    let (status, denied) = automation_json_request(
+        &app,
+        "PATCH",
+        &automation_path,
+        &teammate_token,
+        json!({ "promptText": "Exfiltrate the repository." }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::FORBIDDEN, "teammate update: {denied}");
+
+    let row = pool
+        .get()
+        .await?
+        .query_one(
+            "select prompt_text, conversation_id, schedule_kind
+             from automations where id = $1",
+            &[&Uuid::from_str(&automation_id)?],
+        )
+        .await?;
+    assert_eq!(
+        row.get::<_, String>("prompt_text"),
+        "Report dependency and license changes."
+    );
+    assert_eq!(
+        row.get::<_, Option<Uuid>>("conversation_id"),
+        Some(Uuid::from_str(&conversation_id)?)
+    );
+    assert_eq!(row.get::<_, String>("schedule_kind"), "weekly");
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_org(&pool, &org_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
+    cleanup_test_user(&pool, &teammate_user_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn automation_result_visibility_controls_team_thread_access() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping automation result visibility test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let owner_user_id = Uuid::new_v4();
+    let teammate_user_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
+    ensure_test_user(&pool, &teammate_user_id).await?;
+    seed_group_participation_project(
+        &pool,
+        &org_id,
+        &project_id,
+        &owner_user_id,
+        &teammate_user_id,
+        "Automation result visibility",
+    )
+    .await?;
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "automation-result-visibility",
+    );
+    let owner_token = crate::auth::issue_controller_token(&config, &owner_user_id)
+        .map_err(|error| controller_error("issue owner token", error))?
+        .token;
+    let teammate_token = crate::auth::issue_controller_token(&config, &teammate_user_id)
+        .map_err(|error| controller_error("issue teammate token", error))?
+        .token;
+    let app = automations::router()
+        .merge(conversations::router())
+        .with_state(build_test_state(pool.clone(), config));
+
+    // Owner creates an automation that shares its result thread with the team.
+    let create_team = |body: serde_json::Value| {
+        let app = app.clone();
+        let owner_token = owner_token.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/projects/{project_id}/automations"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {owner_token}"),
+                    )
+                    .body(Body::from(body.to_string()))
+                    .expect("build create request"),
+            )
+            .await
+        }
+    };
+
+    let team_response = create_team(json!({
+        "name": "Team dependency check",
+        "scheduleKind": "hourly",
+        "intervalHours": 24,
+        "timezone": "UTC",
+        "resultVisibility": "team",
+    }))
+    .await?;
+    assert_eq!(team_response.status(), StatusCode::OK);
+    let team_body = to_bytes(team_response.into_body(), usize::MAX).await?;
+    let team_json: serde_json::Value = serde_json::from_slice(&team_body)?;
+    assert_eq!(team_json["resultVisibility"], json!("team"));
+    let team_conversation_id = team_json["conversationId"]
+        .as_str()
+        .expect("team automation conversation id")
+        .to_string();
+
+    // Owner creates a default automation; its result thread stays private.
+    let private_response = create_team(json!({
+        "name": "Private dependency check",
+        "scheduleKind": "hourly",
+        "intervalHours": 24,
+        "timezone": "UTC",
+    }))
+    .await?;
+    assert_eq!(private_response.status(), StatusCode::OK);
+    let private_body = to_bytes(private_response.into_body(), usize::MAX).await?;
+    let private_json: serde_json::Value = serde_json::from_slice(&private_body)?;
+    assert_eq!(private_json["resultVisibility"], json!("private"));
+    let private_automation_id = private_json["id"]
+        .as_str()
+        .expect("private automation id")
+        .to_string();
+    let private_conversation_id = private_json["conversationId"]
+        .as_str()
+        .expect("private automation conversation id")
+        .to_string();
+
+    // A non-owner teammate lists the project's automation threads.
+    let list_automation_conversations = |token: String| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!(
+                            "/projects/{project_id}/conversations?threadKind=automation"
+                        ))
+                        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .expect("build list request"),
+                )
+                .await
+                .expect("list conversations");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read list body");
+            let value: serde_json::Value = serde_json::from_slice(&body).expect("parse list body");
+            value
+                .as_array()
+                .expect("conversation list array")
+                .iter()
+                .filter_map(|entry| entry["id"].as_str().map(str::to_string))
+                .collect::<Vec<String>>()
+        }
+    };
+
+    let teammate_before = list_automation_conversations(teammate_token.clone()).await;
+    assert!(
+        teammate_before.contains(&team_conversation_id),
+        "teammate must see the team-visible automation thread"
+    );
+    assert!(
+        !teammate_before.contains(&private_conversation_id),
+        "teammate must not see the private automation thread"
+    );
+
+    // Owner flips the private automation to team visibility. A visibility-only
+    // PATCH must not reset the active automation's schedule anchor.
+    let next_run_at_before = private_json["nextRunAt"]
+        .as_str()
+        .expect("active automation must have nextRunAt")
+        .to_string();
+    let patch_automation = |body: serde_json::Value| {
+        let app = app.clone();
+        let owner_token = owner_token.clone();
+        let private_automation_id = private_automation_id.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(format!("/automations/{private_automation_id}"))
+                        .header(axum::http::header::CONTENT_TYPE, "application/json")
+                        .header(
+                            axum::http::header::AUTHORIZATION,
+                            format!("Bearer {owner_token}"),
+                        )
+                        .body(Body::from(body.to_string()))
+                        .expect("build patch request"),
+                )
+                .await
+                .expect("patch automation");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read patch body");
+            serde_json::from_slice::<serde_json::Value>(&body).expect("parse patch body")
+        }
+    };
+
+    let patch_json = patch_automation(json!({ "resultVisibility": "team" })).await;
+    assert_eq!(patch_json["resultVisibility"], json!("team"));
+    assert_eq!(
+        patch_json["nextRunAt"],
+        json!(next_run_at_before),
+        "a visibility-only update must leave nextRunAt untouched"
+    );
+
+    // Changing the effective schedule must recompute nextRunAt.
+    let reschedule_json = patch_automation(json!({ "intervalHours": 6 })).await;
+    assert_eq!(reschedule_json["intervalHours"], json!(6));
+    let next_run_at_after = reschedule_json["nextRunAt"]
+        .as_str()
+        .expect("rescheduled automation must have nextRunAt");
+    assert_ne!(
+        next_run_at_after, next_run_at_before,
+        "a schedule change must recompute nextRunAt"
+    );
+
+    let teammate_after = list_automation_conversations(teammate_token.clone()).await;
+    assert!(
+        teammate_after.contains(&private_conversation_id),
+        "the flipped automation thread must become visible to the teammate"
+    );
+
+    // Invalid enum values are rejected.
+    let invalid_response = create_team(json!({
+        "name": "Invalid visibility",
+        "scheduleKind": "hourly",
+        "intervalHours": 24,
+        "timezone": "UTC",
+        "resultVisibility": "everyone",
+    }))
+    .await?;
+    assert_eq!(invalid_response.status(), StatusCode::BAD_REQUEST);
 
     cleanup_origin_project(&pool, &project_id).await?;
     cleanup_org(&pool, &org_id).await?;
