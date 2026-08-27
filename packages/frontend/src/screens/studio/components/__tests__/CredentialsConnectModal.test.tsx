@@ -61,6 +61,8 @@ function createProps(
     onZaiLabelDraftChange: vi.fn(),
     onGeminiApiKeyDraftChange: vi.fn(),
     onConnectCodex: vi.fn(),
+    canDevSeedCodex: false,
+    onDevSeedCodex: vi.fn(),
     onBeginDeviceAuth: vi.fn(),
     onCancelDeviceAuthSession: vi.fn(),
     onTriggerUpload: vi.fn(),
