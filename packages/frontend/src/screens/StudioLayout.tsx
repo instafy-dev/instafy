@@ -2217,7 +2217,7 @@ function DesktopRuntimeHelpDialog() {
   const handleCopyCliCommand = async () => {
     try {
       await writeClipboardText(cliCommand);
-      showStatus("CLI command copied.", "success", 2500);
+      showStatus("CLI command copied.", "success", 2500, { presentation: "confirmation" });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to copy.";
       showStatus(message, "error", 3500);

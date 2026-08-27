@@ -83,7 +83,7 @@ export function BuildLogOverlay({
     }
     try {
       await writeClipboardText(copyText);
-      showStatus("Copied to clipboard.", "success", 2500);
+      showStatus("Copied to clipboard.", "success", 2500, { presentation: "confirmation" });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to copy.";
       showStatus(message, "error", 3500);
