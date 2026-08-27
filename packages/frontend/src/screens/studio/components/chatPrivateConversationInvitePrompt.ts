@@ -16,6 +16,7 @@ type ResolvePrivateConversationInvitePromptOptions = {
     accessToken: null;
   }) => Promise<ControllerConversationParticipant[] | null>;
   message: string;
+  expectedLaneIdle: boolean;
 };
 
 export async function resolvePrivateConversationInvitePrompt({
@@ -28,6 +29,7 @@ export async function resolvePrivateConversationInvitePrompt({
   isPrivateConversation,
   listConversationParticipants,
   message,
+  expectedLaneIdle,
 }: ResolvePrivateConversationInvitePromptOptions): Promise<PendingConversationInvitePrompt | null> {
   if (!isPrivateConversation || !controllerId) {
     return null;
@@ -61,5 +63,6 @@ export async function resolvePrivateConversationInvitePrompt({
     imageFiles,
     browserPageTarget,
     browserLaunchMode,
+    expectedLaneIdle,
   };
 }

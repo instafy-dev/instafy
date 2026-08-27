@@ -9,6 +9,7 @@ export type ChatSubmitDispatchPayload = {
   imageFiles: File[];
   metadata?: Record<string, unknown> | null;
   runtimeOverride?: SubmitConversationOptions["runtimeOverride"];
+  expectedLaneIdle?: boolean;
 };
 
 type UseChatSubmitDispatchOptions = {
@@ -95,6 +96,7 @@ export function useChatSubmitDispatch({
           agentHandles: mentionableAgentHandles,
           metadata: payload.metadata ?? null,
           runtimeOverride: payload.runtimeOverride ?? null,
+          expectedLaneIdle: payload.expectedLaneIdle,
         });
         clearImageAttachments();
         if (shouldRefocus && !Capacitor.isNativePlatform()) {
