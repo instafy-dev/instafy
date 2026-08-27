@@ -27,6 +27,14 @@ use crate::{
 
 const DEFAULT_TIMEZONE: &str = "UTC";
 const DEFAULT_HOURLY_INTERVAL: i32 = 24;
+// Result-thread visibility (public API words). `private` keeps automation result
+// conversations owner-only; `team` makes them visible to anyone with project access.
+const RESULT_VISIBILITY_PRIVATE: &str = "private";
+const RESULT_VISIBILITY_TEAM: &str = "team";
+// Conversation visibility values (from conversations.rs). `team` maps onto `public`,
+// which the conversation list gate exposes to anyone with project access.
+const CONVERSATION_VISIBILITY_PRIVATE: &str = "private";
+const CONVERSATION_VISIBILITY_PUBLIC: &str = "public";
 const AUTOMATION_SCHEDULER_TICK_SECONDS: u64 = 30;
 const AUTOMATION_SCHEDULER_LOCK_SECONDS: i64 = 10 * 60;
 const AUTOMATION_SCHEDULER_BATCH_SIZE: i64 = 10;
@@ -60,6 +68,8 @@ struct CreateAutomationBody {
     status: Option<String>,
     #[serde(default)]
     silent_when_nothing_to_report: bool,
+    #[serde(default)]
+    result_visibility: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -93,24 +103,34 @@ struct UpdateAutomationBody {
     status: Option<String>,
     #[serde(default)]
     silent_when_nothing_to_report: Option<bool>,
+    #[serde(default)]
+    result_visibility: Option<String>,
 }
 
 impl UpdateAutomationBody {
+    fn has_settings_updates(&self) -> bool {
+        self.name.is_some()
+            || self.prompt_text.is_some()
+            || self.metadata.is_some()
+            || self.schedule_kind.is_some()
+            || self.run_at.is_some()
+            || self.interval_hours.is_some()
+            || self.by_day.is_some()
+            || self.by_hour.is_some()
+            || self.by_minute.is_some()
+            || self.timezone.is_some()
+            || self.runtime_mode.is_some()
+            || self.runtime_provider.is_some()
+            || self.silent_when_nothing_to_report.is_some()
+            || self.result_visibility.is_some()
+    }
+
     fn is_status_only(&self) -> bool {
-        self.status.is_some()
-            && self.name.is_none()
-            && self.prompt_text.is_none()
-            && self.metadata.is_none()
-            && self.schedule_kind.is_none()
-            && self.run_at.is_none()
-            && self.interval_hours.is_none()
-            && self.by_day.is_none()
-            && self.by_hour.is_none()
-            && self.by_minute.is_none()
-            && self.timezone.is_none()
-            && self.runtime_mode.is_none()
-            && self.runtime_provider.is_none()
-            && self.silent_when_nothing_to_report.is_none()
+        self.status.is_some() && !self.has_settings_updates()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.status.is_none() && !self.has_settings_updates()
     }
 }
 
@@ -142,6 +162,7 @@ struct AutomationPayload {
     runtime_mode: String,
     runtime_provider: Option<String>,
     silent_when_nothing_to_report: bool,
+    result_visibility: String,
     conversation_id: Option<String>,
     status: String,
     locked_until: Option<String>,
@@ -170,6 +191,7 @@ struct AutomationRecord {
     runtime_mode: String,
     runtime_provider: Option<String>,
     silent_when_nothing_to_report: bool,
+    result_visibility: String,
     conversation_id: Option<Uuid>,
     status: String,
     locked_until: Option<DateTime<Utc>>,
@@ -200,6 +222,33 @@ fn normalize_status(raw: Option<String>) -> String {
     raw.map(|value| value.trim().to_ascii_lowercase())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "active".to_string())
+}
+
+fn normalize_result_visibility(
+    raw: Option<String>,
+) -> Result<String, (StatusCode, Json<ApiError>)> {
+    match raw {
+        None => Ok(RESULT_VISIBILITY_PRIVATE.to_string()),
+        Some(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            match normalized.as_str() {
+                RESULT_VISIBILITY_PRIVATE | RESULT_VISIBILITY_TEAM => Ok(normalized),
+                _ => Err(bad_request("resultVisibility must be private or team")),
+            }
+        }
+    }
+}
+
+/// Map a stored automation `result_visibility` enum onto the conversation `visibility`
+/// value used when the automation's result thread is created. `team` becomes the
+/// first-class `public` visibility (visible to anyone with project access via the
+/// conversation list gate); anything else stays owner-only `private`.
+fn conversation_visibility_for_result_visibility(result_visibility: &str) -> &'static str {
+    if result_visibility == RESULT_VISIBILITY_TEAM {
+        CONVERSATION_VISIBILITY_PUBLIC
+    } else {
+        CONVERSATION_VISIBILITY_PRIVATE
+    }
 }
 
 fn normalize_schedule_kind(raw: &str) -> Result<String, (StatusCode, Json<ApiError>)> {
@@ -422,6 +471,7 @@ fn row_to_record(row: &tokio_postgres::Row) -> AutomationRecord {
         runtime_mode: row.get("runtime_mode"),
         runtime_provider: row.get("runtime_provider"),
         silent_when_nothing_to_report: row.get("silent_when_nothing_to_report"),
+        result_visibility: row.get("result_visibility"),
         conversation_id: row.get("conversation_id"),
         status: row.get("status"),
         locked_until: row.get("locked_until"),
@@ -451,6 +501,7 @@ fn record_to_payload(record: AutomationRecord) -> AutomationPayload {
         runtime_mode: record.runtime_mode,
         runtime_provider: record.runtime_provider,
         silent_when_nothing_to_report: record.silent_when_nothing_to_report,
+        result_visibility: record.result_visibility,
         conversation_id: record.conversation_id.map(|value| value.to_string()),
         status: record.status,
         locked_until: record.locked_until.map(|value| value.to_rfc3339()),
@@ -557,6 +608,7 @@ async fn claim_due_automations(state: &AppState) -> anyhow::Result<Vec<Automatio
                        runtime_mode,
                        runtime_provider,
                        silent_when_nothing_to_report,
+                       result_visibility,
                        conversation_id,
                        status,
                        locked_until,
@@ -776,6 +828,7 @@ async fn execute_automation_once(
                 record.user_id,
                 record.id,
                 record.name.as_str(),
+                conversation_visibility_for_result_visibility(&record.result_visibility),
             )),
             parent_conversation_id: None,
             thread_kind: Some("automation".to_string()),
@@ -798,6 +851,8 @@ async fn execute_automation_once(
             runtime_updated_at: runtime_id.map(|_| now),
             runtime_display_name: None,
             prefer_runtime: runtime_id.is_some(),
+            expected_lane_idle: false,
+            dispatch_queue_entry_id: None,
             allow_silent_automation_decline: record.silent_when_nothing_to_report,
         },
     )
@@ -861,11 +916,12 @@ fn build_automation_conversation_metadata(
     user_id: Uuid,
     automation_id: Uuid,
     name: &str,
+    conversation_visibility: &str,
 ) -> JsonValue {
     let lifecycle_key = format!("instafy_conversation_lifecycle_v1_{user_id}");
     json!({
         "title": name,
-        "visibility": "private",
+        "visibility": conversation_visibility,
         lifecycle_key: "hidden",
         "automationId": automation_id.to_string(),
     })
@@ -1056,6 +1112,7 @@ async fn list_project_automations(
 	                    runtime_mode,
 	                    runtime_provider,
 	                    silent_when_nothing_to_report,
+	                    result_visibility,
 	                    conversation_id,
                     status,
                     locked_until,
@@ -1136,6 +1193,7 @@ async fn get_automation(
                     runtime_mode,
                     runtime_provider,
                     silent_when_nothing_to_report,
+                    result_visibility,
                     conversation_id,
                     status,
                     locked_until,
@@ -1207,6 +1265,7 @@ async fn create_project_automation(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let status = normalize_status(body.status);
+    let result_visibility = normalize_result_visibility(body.result_visibility)?;
 
     let now = Utc::now();
 
@@ -1305,15 +1364,27 @@ async fn create_project_automation(
 
     let automation_id = Uuid::new_v4();
     let conversation_id = Uuid::new_v4();
-    let conversation_metadata =
-        build_automation_conversation_metadata(user_id, automation_id, name.as_str());
+    let conversation_visibility =
+        conversation_visibility_for_result_visibility(&result_visibility).to_string();
+    let conversation_metadata = build_automation_conversation_metadata(
+        user_id,
+        automation_id,
+        name.as_str(),
+        conversation_visibility.as_str(),
+    );
     let conversation_metadata_param = PgJson(&conversation_metadata);
 
     transaction
         .execute(
             "insert into conversations (id, project_id, created_by, metadata, visibility, thread_kind)
-             values ($1, $2, $3, $4::jsonb, 'private', 'automation')",
-            &[&conversation_id, &project_id, &user_id, &conversation_metadata_param],
+             values ($1, $2, $3, $4::jsonb, $5, 'automation')",
+            &[
+                &conversation_id,
+                &project_id,
+                &user_id,
+                &conversation_metadata_param,
+                &conversation_visibility,
+            ],
         )
         .await
         .map_err(|error| internal_error(format!("failed to insert automation conversation: {error}")))?;
@@ -1351,7 +1422,8 @@ async fn create_project_automation(
 	                 conversation_id,
 	                 status,
 	                 run_at,
-	                 next_run_at
+	                 next_run_at,
+	                 result_visibility
 	             ) values (
 	                 $1,
 	                 $2,
@@ -1371,7 +1443,8 @@ async fn create_project_automation(
 	                 $16,
 	                 $17,
 	                 $18,
-	                 $19
+	                 $19,
+	                 $20
 	             )
 	             returning id,
 	                       project_id,
@@ -1389,6 +1462,7 @@ async fn create_project_automation(
                        runtime_mode,
                        runtime_provider,
                        silent_when_nothing_to_report,
+                       result_visibility,
                        conversation_id,
                        status,
                        locked_until,
@@ -1417,6 +1491,7 @@ async fn create_project_automation(
                 &status,
                 &run_at,
                 &next_run_at,
+                &result_visibility,
             ],
         )
         .await
@@ -1439,6 +1514,11 @@ async fn update_automation(
     let context = authenticate_request(&state.config, &headers).await?;
     let automation_id = Uuid::from_str(automation_id_raw.trim())
         .map_err(|_| bad_request("automationId must be a valid UUID"))?;
+    if body.is_empty() {
+        return Err(bad_request(
+            "at least one automation field must be provided",
+        ));
+    }
 
     let mut connection = state
         .pool
@@ -1488,6 +1568,7 @@ async fn update_automation(
 	                    runtime_mode,
 	                    runtime_provider,
 	                    silent_when_nothing_to_report,
+	                    result_visibility,
 	                    conversation_id,
                     status,
                     locked_until,
@@ -1627,6 +1708,13 @@ async fn update_automation(
         .silent_when_nothing_to_report
         .unwrap_or(existing_record.silent_when_nothing_to_report);
 
+    let result_visibility = match body.result_visibility {
+        Some(value) => normalize_result_visibility(Some(value))?,
+        None => existing_record.result_visibility.clone(),
+    };
+    let conversation_visibility =
+        conversation_visibility_for_result_visibility(&result_visibility).to_string();
+
     let status = if body.status.is_some() {
         normalize_status(body.status).trim().to_string()
     } else {
@@ -1636,8 +1724,22 @@ async fn update_automation(
         return Err(bad_request("status must be active or paused"));
     }
 
+    // Only reschedule when the effective schedule or status changed. Editing the
+    // prompt, name, result visibility, or runtime settings must not push an
+    // active automation's next run further out.
+    let schedule_changed = schedule_kind != existing_record.schedule_kind
+        || interval_hours != existing_record.interval_hours
+        || by_day != existing_record.by_day
+        || by_hour != existing_record.by_hour
+        || by_minute != existing_record.by_minute
+        || timezone != existing_record.timezone
+        || run_at != existing_record.run_at;
+    let status_changed = status != existing_record.status;
+
     let now = Utc::now();
-    let next_run_at = if status == "active" {
+    let next_run_at = if status == "active"
+        && (schedule_changed || status_changed || existing_record.next_run_at.is_none())
+    {
         match schedule_kind.as_str() {
             "once" => {
                 let run_at = run_at.expect("once schedules require runAt");
@@ -1660,13 +1762,17 @@ async fn update_automation(
     };
 
     if let Some(conversation_id) = existing_record.conversation_id {
-        let meta =
-            build_automation_conversation_metadata(user_id, existing_record.id, name.as_str());
+        let meta = build_automation_conversation_metadata(
+            user_id,
+            existing_record.id,
+            name.as_str(),
+            conversation_visibility.as_str(),
+        );
         let meta_param = PgJson(&meta);
         transaction
             .execute(
-                "update conversations set metadata = $2::jsonb, updated_at = now() where id = $1",
-                &[&conversation_id, &meta_param],
+                "update conversations set metadata = $2::jsonb, visibility = $3, updated_at = now() where id = $1",
+                &[&conversation_id, &meta_param, &conversation_visibility],
             )
             .await
             .map_err(|error| {
@@ -1695,6 +1801,7 @@ async fn update_automation(
 	                 run_at = $14,
 	                 next_run_at = $15,
 	                 silent_when_nothing_to_report = $16,
+	                 result_visibility = $17,
 	                 updated_at = now()
 	             where id = $1
 	             returning id,
@@ -1713,6 +1820,7 @@ async fn update_automation(
                        runtime_mode,
                        runtime_provider,
                        silent_when_nothing_to_report,
+                       result_visibility,
                        conversation_id,
                        status,
                        locked_until,
@@ -1738,6 +1846,7 @@ async fn update_automation(
                 &run_at,
                 &next_run_at,
                 &silent_when_nothing_to_report,
+                &result_visibility,
             ],
         )
         .await
@@ -1879,6 +1988,7 @@ async fn run_automation_now(
 	                    runtime_mode,
 	                    runtime_provider,
 	                    silent_when_nothing_to_report,
+	                    result_visibility,
 	                    conversation_id,
                     status,
                     locked_until,
@@ -1948,7 +2058,8 @@ async fn run_automation_now(
 mod tests {
     use super::{
         automation_runtime_is_selectable, can_access_owned_automation,
-        hosted_automation_provider_is_managed, UpdateAutomationBody,
+        conversation_visibility_for_result_visibility, hosted_automation_provider_is_managed,
+        normalize_result_visibility, UpdateAutomationBody,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -1991,6 +2102,90 @@ mod tests {
             ..UpdateAutomationBody::default()
         }
         .is_status_only());
+        assert!(!UpdateAutomationBody {
+            status: Some("active".to_string()),
+            result_visibility: Some("team".to_string()),
+            ..UpdateAutomationBody::default()
+        }
+        .is_status_only());
+    }
+
+    #[test]
+    fn result_visibility_defaults_private_and_validates_enum() {
+        assert_eq!(normalize_result_visibility(None).unwrap(), "private");
+        assert_eq!(
+            normalize_result_visibility(Some("  Team ".to_string())).unwrap(),
+            "team"
+        );
+        assert_eq!(
+            normalize_result_visibility(Some("PRIVATE".to_string())).unwrap(),
+            "private"
+        );
+
+        let error = normalize_result_visibility(Some("public".to_string()))
+            .expect_err("public is not a valid automation result visibility word");
+        assert_eq!(error.0, axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn team_result_visibility_maps_to_public_conversation_visibility() {
+        // `team` is the product word; the conversation layer stores it as `public`,
+        // which the conversation list gate exposes to anyone with project access.
+        assert_eq!(
+            conversation_visibility_for_result_visibility("team"),
+            "public"
+        );
+        assert_eq!(
+            conversation_visibility_for_result_visibility("private"),
+            "private"
+        );
+        // Unknown values fail closed to owner-only private.
+        assert_eq!(
+            conversation_visibility_for_result_visibility("bogus"),
+            "private"
+        );
+    }
+
+    #[test]
+    fn automation_result_visibility_defaults_private_and_accepts_team_opt_in() {
+        let defaulted: super::CreateAutomationBody = serde_json::from_value(json!({
+            "name": "Daily check",
+            "scheduleKind": "hourly"
+        }))
+        .expect("deserialize default automation result visibility");
+        assert!(defaulted.result_visibility.is_none());
+        assert_eq!(
+            normalize_result_visibility(defaulted.result_visibility).unwrap(),
+            "private"
+        );
+
+        let opted_in: super::CreateAutomationBody = serde_json::from_value(json!({
+            "name": "Daily check",
+            "scheduleKind": "hourly",
+            "resultVisibility": "team"
+        }))
+        .expect("deserialize automation result visibility opt-in");
+        assert_eq!(opted_in.result_visibility.as_deref(), Some("team"));
+    }
+
+    #[test]
+    fn automation_update_body_is_empty_only_without_any_field() {
+        assert!(UpdateAutomationBody::default().is_empty());
+        assert!(!UpdateAutomationBody {
+            status: Some("paused".to_string()),
+            ..UpdateAutomationBody::default()
+        }
+        .is_empty());
+        assert!(!UpdateAutomationBody {
+            prompt_text: Some("Report dependency changes.".to_string()),
+            ..UpdateAutomationBody::default()
+        }
+        .is_empty());
+        assert!(!UpdateAutomationBody {
+            silent_when_nothing_to_report: Some(false),
+            ..UpdateAutomationBody::default()
+        }
+        .is_empty());
     }
 
     #[test]

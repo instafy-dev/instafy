@@ -1312,6 +1312,9 @@ pub(super) async fn release_leases_for_project(
                      leased_by_runtime_id = null,
                      lease_expires_at = null,
                      leased_at = null,
+                     active_input_ready_runtime_id = null,
+                     active_input_ready_expires_at = null,
+                     active_input_ready_turn_id = null,
                      heartbeat_at = null,
                      updated_at = now()
                  from expired_jobs expired
@@ -1326,6 +1329,25 @@ pub(super) async fn release_leases_for_project(
         .await
         .context("failed to release idle leases")?;
 
+    let mut job_input_state_updates = Vec::new();
+    for row in &rows {
+        let job_id: Uuid = row.get("id");
+        let updates = crate::send_intents::reject_unacknowledged_inputs_for_job(
+            &transaction,
+            &job_id,
+            "agent job lease ended before input acknowledgement",
+        )
+        .await
+        .map_err(|(status, Json(error))| {
+            anyhow::anyhow!(
+                "failed to reject inputs for expired job lease ({}): {}",
+                status,
+                error.message
+            )
+        })?;
+        job_input_state_updates.extend(updates);
+    }
+
     let runtime_id_set: HashSet<Uuid> = rows
         .iter()
         .filter_map(|row| row.get::<_, Option<Uuid>>("leased_by_runtime_id"))
@@ -1335,6 +1357,7 @@ pub(super) async fn release_leases_for_project(
         .commit()
         .await
         .context("failed to commit idle lease release")?;
+    crate::send_intents::publish_job_input_state_updates(state, &job_input_state_updates);
     // Runtime cleanup and tunnel revocation both acquire their own pool
     // connections. Drop this one before the loop so pool size one remains a
     // supported production configuration.
