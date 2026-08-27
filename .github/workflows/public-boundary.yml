@@ -51,6 +51,9 @@ jobs:
           # step below remains the enforced security property.
           candidate_oid=""
           for attempt in $(seq 1 32); do
+            if [[ "$attempt" -gt 1 ]]; then
+              sleep 15
+            fi
             candidate_oid="$(
               gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
                 --jq '.merge_commit_sha // empty' 2>/dev/null || true
@@ -64,7 +67,6 @@ jobs:
                 exit 0
               fi
             fi
-            sleep 15
           done
           echo "::error::No merge candidate bound to head ${EXPECTED_HEAD_SHA}" \
             "after 8 minutes (last candidate: ${candidate_oid:-none}). Either" \

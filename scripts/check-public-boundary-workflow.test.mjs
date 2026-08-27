@@ -89,6 +89,9 @@ test("trusted boundary waits for a fresh merge candidate before any checkout", (
   assert.match(wait, /\[\[ "\$EXPECTED_HEAD_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\]/u);
   assert.match(wait, /pulls\/\$\{PR_NUMBER\}/u);
   assert.match(wait, /git\/commits\/\$\{candidate_oid\}/u);
+  // The head parent is parents[1]: parents[0] is the base tip. Polling the
+  // wrong parent would wait on a condition that never becomes true.
+  assert.match(wait, /\.parents\[1\]\.sha/u);
   assert.match(wait, /"\$head_parent" == "\$EXPECTED_HEAD_SHA"/u);
   // The loop must be bounded and end in an explicit, actionable error.
   assert.match(wait, /seq 1 \d+/u);
