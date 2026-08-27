@@ -20,7 +20,7 @@ use crate::conversations::{ensure_conversation_access, load_conversation_record}
 use crate::errors::{
     bad_request, internal_error, not_found, too_many_requests, unauthorized, ApiError,
 };
-use crate::ota::require_operator_access;
+use crate::ota::require_operator_access_for_context;
 use crate::projects::{ensure_project_read_access, load_project_record};
 use crate::state::{publish_controller_event_with_conversation, AppState};
 
@@ -801,7 +801,10 @@ async fn list_bug_reports(
         internal_error(format!("failed to acquire database connection: {error}"))
     })?;
     let can_view_all = !mine_only
-        && (context.is_service_role || require_operator_access(&state, &headers).await.is_ok());
+        && (context.is_service_role
+            || require_bug_report_operator_access(&state, &headers)
+                .await
+                .is_ok());
 
     if !can_view_all {
         let user_id = context
@@ -916,7 +919,10 @@ async fn get_bug_report(
     })?;
 
     let can_view_all = !mine_only
-        && (context.is_service_role || require_operator_access(&state, &headers).await.is_ok());
+        && (context.is_service_role
+            || require_bug_report_operator_access(&state, &headers)
+                .await
+                .is_ok());
     let row = if !can_view_all {
         let viewer = context
             .user_id
@@ -1078,13 +1084,48 @@ fn require_bug_report_request_access(
     Ok(())
 }
 
+/// Whether the authenticated context belongs to a bug-reports-only operator
+/// (`BUG_REPORTS_OPERATOR_USER_IDS`). Only an interactive user session
+/// qualifies: `require_user_session` rejects service-role and runtime-scoped
+/// tokens, exactly like the general operator allowlist does.
+fn is_bug_report_operator(state: &AppState, context: &RequestContext) -> bool {
+    let Ok(user_id) = require_user_session(context) else {
+        return false;
+    };
+    state
+        .config
+        .bug_reports_operator_user_ids
+        .contains(&user_id)
+}
+
+/// Operator gate for the bug-report routes only.
+///
+/// Authenticates the bearer exactly like `require_operator_access` and succeeds
+/// when either the full operator check passes (service role, operator org
+/// membership, `OPERATOR_CONSOLE_ALLOWED_USER_IDS`) or the signed-in user is
+/// listed in `BUG_REPORTS_OPERATOR_USER_IDS`. The latter grants nothing outside
+/// this module: every other operator route keeps calling
+/// `require_operator_access`, so a bug-reports-only operator is still refused
+/// there. Failures carry the same error shape as `require_operator_access`.
+/// Deliberately private to this module so no other route can pick it up.
+async fn require_bug_report_operator_access(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<RequestContext, (StatusCode, Json<ApiError>)> {
+    let context = authenticate_request(&state.config, headers).await?;
+    if is_bug_report_operator(state, &context) {
+        return Ok(context);
+    }
+    require_operator_access_for_context(state, context).await
+}
+
 async fn patch_bug_report(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(bug_report_id_raw): Path<String>,
     Json(body): Json<UpdateBugReportRequest>,
 ) -> Result<Json<BugReportSummary>, (StatusCode, Json<ApiError>)> {
-    require_operator_access(&state, &headers).await?;
+    require_bug_report_operator_access(&state, &headers).await?;
     ensure_bug_report_tables(&state.pool).await?;
 
     let bug_report_id = Uuid::parse_str(bug_report_id_raw.trim())
@@ -1863,5 +1904,127 @@ mod tests {
             metadata["fingerprint"],
             JsonValue::String("proxy.down".to_string())
         );
+    }
+
+    fn build_dummy_pool() -> anyhow::Result<PgPool> {
+        let manager = bb8_postgres::PostgresConnectionManager::new_from_stringlike(
+            "postgresql://ignored:ignored@127.0.0.1:1/postgres",
+            crate::config::database_tls(),
+        )?;
+        Ok(bb8::Pool::builder().max_size(1).build_unchecked(manager))
+    }
+
+    fn bearer(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {token}")
+                .parse()
+                .expect("bearer header value"),
+        );
+        headers
+    }
+
+    #[tokio::test]
+    async fn bug_report_operator_gate_admits_listed_users_without_widening_operator_access(
+    ) -> anyhow::Result<()> {
+        use crate::ota::require_operator_access;
+        use crate::tests::{
+            build_app_config, build_test_state, test_origin_private_key, test_origin_public_key,
+        };
+        use crate::tokens::{mint_scoped_token, ScopedTokenRequest};
+
+        let listed_user_id = Uuid::new_v4();
+        let unlisted_user_id = Uuid::new_v4();
+        let mut config = build_app_config(
+            test_origin_private_key(),
+            test_origin_public_key(),
+            "bug-report-operator-gate",
+        );
+        config.operator_console_org_id = None;
+        config.operator_console_allowed_user_ids = vec![];
+        config.bug_reports_operator_user_ids = vec![listed_user_id];
+        // No database is reachable here: every path below must decide before
+        // touching the pool, exactly like `require_operator_access` does when no
+        // operator organization is configured.
+        let state = build_test_state(build_dummy_pool()?, config);
+
+        let listed_headers = bearer(
+            &crate::auth::issue_controller_token(&state.config, &listed_user_id)
+                .map_err(|error| anyhow::anyhow!("issue listed token: {error:?}"))?
+                .token,
+        );
+        let unlisted_headers = bearer(
+            &crate::auth::issue_controller_token(&state.config, &unlisted_user_id)
+                .map_err(|error| anyhow::anyhow!("issue unlisted token: {error:?}"))?
+                .token,
+        );
+        let service_headers = bearer("service-role-token");
+        let scoped_headers = bearer(
+            &mint_scoped_token(
+                &state.config,
+                ScopedTokenRequest {
+                    audience: Uuid::new_v4().to_string(),
+                    subject: listed_user_id.to_string(),
+                    project_id: Uuid::new_v4().to_string(),
+                    origin_id: None,
+                    runtime_id: Some(Uuid::new_v4().to_string()),
+                    protocol: None,
+                    scopes: vec!["telemetry.write".to_string()],
+                    lease_id: None,
+                    run_id: None,
+                    prefer_runtime: None,
+                    ttl_seconds: Some(300),
+                },
+            )
+            .map_err(|error| anyhow::anyhow!("mint scoped token: {error:?}"))?
+            .token,
+        );
+
+        // Listed interactive user: admitted to bug-report triage only.
+        let listed = require_bug_report_operator_access(&state, &listed_headers)
+            .await
+            .map_err(|error| anyhow::anyhow!("listed user must pass: {error:?}"))?;
+        assert_eq!(listed.user_id, Some(listed_user_id));
+        assert!(!listed.is_service_role);
+        let refused = require_operator_access(&state, &listed_headers)
+            .await
+            .expect_err("bug-reports-only operator must not pass the full operator gate");
+        assert_eq!(refused.0, StatusCode::FORBIDDEN);
+
+        // Everyone else gets exactly the full operator gate's answer.
+        let unlisted_bug_reports = require_bug_report_operator_access(&state, &unlisted_headers)
+            .await
+            .expect_err("unlisted user must be refused");
+        let unlisted_operator = require_operator_access(&state, &unlisted_headers)
+            .await
+            .expect_err("unlisted user must be refused by the operator gate too");
+        assert_eq!(unlisted_bug_reports.0, StatusCode::FORBIDDEN);
+        assert_eq!(unlisted_bug_reports.0, unlisted_operator.0);
+        assert_eq!(unlisted_bug_reports.1.message, unlisted_operator.1.message);
+
+        let service = require_bug_report_operator_access(&state, &service_headers)
+            .await
+            .map_err(|error| anyhow::anyhow!("service role must pass: {error:?}"))?;
+        assert!(service.is_service_role);
+
+        // A runtime-scoped token for the listed user is not an operator session.
+        let scoped = require_bug_report_operator_access(&state, &scoped_headers)
+            .await
+            .expect_err("scoped token must be refused");
+        assert_eq!(scoped.0, StatusCode::FORBIDDEN);
+
+        // No bearer at all is an anonymous context; the operator gate answers
+        // 403 "operator session required" and so does this one.
+        let anonymous = require_bug_report_operator_access(&state, &HeaderMap::new())
+            .await
+            .expect_err("missing bearer must be refused");
+        let anonymous_operator = require_operator_access(&state, &HeaderMap::new())
+            .await
+            .expect_err("missing bearer must be refused by the operator gate too");
+        assert_eq!(anonymous.0, StatusCode::FORBIDDEN);
+        assert_eq!(anonymous.0, anonymous_operator.0);
+        assert_eq!(anonymous.1.message, anonymous_operator.1.message);
+        Ok(())
     }
 }

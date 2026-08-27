@@ -49,6 +49,10 @@ Run Instafy spaces locally and connect them back to Instafy Studio — from any 
 - `instafy secrets get <name-or-id>` — inspect one space secret metadata entry.
 - `instafy secrets put <name> --value ...` — create/update a space secret.
 - `instafy secrets revoke <name-or-id>` — revoke a space secret.
+- `instafy credentials list` — list your AI provider credentials (short id, kind, provider, model, default marker; never secret material).
+- `instafy credentials test <id-or-prefix>` — probe one credential through the proxy; exits 1 when it fails.
+- `instafy credentials default <id-or-prefix>` — pick the credential jobs use by default (`--clear` to unset).
+- `instafy credentials revoke <id-or-prefix> --yes` — revoke a credential.
 - `instafy support report "Runtime stops after launch"` — submit a support report as the
   signed-in user.
 - `instafy support list` — list only your own support reports.

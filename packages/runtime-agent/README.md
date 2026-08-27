@@ -3,6 +3,12 @@
 Rust binary that runs inside the hosted runtime container. Responsibilities:
 
 - Register a runtime (`/runtime/register`) and maintain leases/heartbeats.
+- Renew that registration proactively: once half of the agent token's remaining
+  lifetime has elapsed the agent re-registers with the runtime token minted by the
+  previous register call, then swaps to the fresh tokens at the next idle point
+  between jobs (an in-flight job is never interrupted). Waiting for a `401` on
+  the lease call would be too late — the stored runtime token expires at the
+  same time as the agent token, and re-registration would fail forever.
 - Execute Codex workflows (headless) for each leased job.
 - Collect Codex event logs and return artifacts via `/agent/complete`.
 
