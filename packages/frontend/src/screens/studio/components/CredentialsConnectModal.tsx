@@ -101,6 +101,8 @@ export type CredentialsConnectModalProps = {
   onZaiLabelDraftChange: (value: string) => void;
   onGeminiApiKeyDraftChange: (value: string) => void;
   onConnectCodex: () => void;
+  canDevSeedCodex: boolean;
+  onDevSeedCodex: () => void;
   onBeginDeviceAuth: (provider: "codex") => void;
   onCancelDeviceAuthSession: () => void;
   onTriggerUpload: () => void;
@@ -144,6 +146,8 @@ export function CredentialsConnectModal({
   onZaiLabelDraftChange,
   onGeminiApiKeyDraftChange,
   onConnectCodex,
+  canDevSeedCodex,
+  onDevSeedCodex,
   onBeginDeviceAuth,
   onCancelDeviceAuthSession,
   onTriggerUpload,
@@ -636,6 +640,9 @@ export function CredentialsConnectModal({
               onExpandedChange={onShowAdvancedChange}
               onLabelChange={onLabelDraftChange}
               onChooseAuthJson={onTriggerUpload}
+              canDevSeed={canDevSeedCodex}
+              busy={modalBusy}
+              onDevSeed={onDevSeedCodex}
             />
 
             {allowAuthJsonImport ? (
