@@ -1,9 +1,12 @@
 import { execSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { defineConfig } from "vitest/config";
+import { defineConfig, type Plugin } from "vitest/config";
 import { loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
+import { sanitizeCodexSubscriptionAuthJson } from "./tests/playwright/utils/codexSubscriptionAuthJson.js";
 import {
   FRONTEND_FEATURE_MANIFEST_ENV,
   resolveFrontendFeatureManifest,
@@ -162,10 +165,109 @@ const instafyBuildInfo = {
   releaseId,
 };
 
+/**
+ * Dev-only endpoint that hands the app THIS machine's Codex subscription login
+ * so local testing does not require re-uploading auth.json after every token
+ * refresh (see devServerCodexAuthJson.ts for the client side). It serves live
+ * OAuth tokens, so it is guarded like a credential vault, not a convenience:
+ *
+ *  - OFF by default. It only mounts when INSTAFY_DEV_CODEX_SEED=1 is set, so a
+ *    plain `pnpm dev`, a `--host` demo, or a tunnel session never exposes it.
+ *  - The connecting SOCKET must be loopback (checked on req.socket, not the
+ *    forgeable Host header) — a LAN client reaching a `--host 0.0.0.0` server
+ *    is rejected even if it sends `Host: localhost`.
+ *  - Fail closed on the Host/Origin headers as defense in depth.
+ *  - Serve only (`apply: "serve"`); the middleware does not exist in builds.
+ *
+ * `INSTAFY_DEV_CODEX_SEED_ENABLED` is defined for the client so the button
+ * only renders when the endpoint can actually answer.
+ */
+const DEV_CODEX_SEED_ENABLED = process.env.INSTAFY_DEV_CODEX_SEED === "1";
+
+function isLoopbackAddress(address: string | undefined): boolean {
+  if (!address) {
+    return false;
+  }
+  const normalized = address.replace(/^::ffff:/i, "");
+  return (
+    normalized === "127.0.0.1" ||
+    normalized === "::1" ||
+    normalized.startsWith("127.")
+  );
+}
+
+function isLoopbackHost(host: string): boolean {
+  const hostname = host.replace(/:\d+$/, "").replace(/^\[|\]$/g, "").toLowerCase();
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname.endsWith(".localhost")
+  );
+}
+
+function devCodexAuthJsonPlugin(): Plugin {
+  return {
+    name: "instafy-dev-codex-auth-json",
+    apply: "serve",
+    configureServer(server) {
+      if (!DEV_CODEX_SEED_ENABLED) {
+        return;
+      }
+      server.middlewares.use("/__instafy-dev/codex-auth-json", (req, res) => {
+        const finish = (statusCode: number, body: unknown) => {
+          res.statusCode = statusCode;
+          res.setHeader("content-type", "application/json");
+          res.setHeader("cache-control", "no-store");
+          res.end(JSON.stringify(body));
+        };
+        // Primary guard: the real connecting socket must be loopback. This is
+        // not spoofable by a header, so it holds even under `--host`.
+        if (!isLoopbackAddress(req.socket.remoteAddress ?? undefined)) {
+          finish(403, { error: "loopback only" });
+          return;
+        }
+        // Defense in depth: forgeable but cheap header checks.
+        const host = req.headers.host ?? "";
+        if (!isLoopbackHost(host)) {
+          finish(403, { error: "loopback only" });
+          return;
+        }
+        const origin = req.headers.origin;
+        if (origin) {
+          let originHost = "";
+          try {
+            originHost = new URL(origin).host;
+          } catch {
+            originHost = "";
+          }
+          if (!originHost || originHost !== host) {
+            finish(403, { error: "same-origin only" });
+            return;
+          }
+        }
+        if (req.method !== "GET") {
+          finish(405, { error: "method not allowed" });
+          return;
+        }
+        try {
+          const raw = readFileSync(join(homedir(), ".codex", "auth.json"), "utf8");
+          // Reuse the canonical sanitizer so the served shape matches the
+          // desktop bridge and the Playwright harness exactly.
+          const authJson = sanitizeCodexSubscriptionAuthJson(JSON.parse(raw));
+          finish(200, { authJson });
+        } catch {
+          finish(404, { error: "no usable codex subscription login" });
+        }
+      });
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => {
   assertNoClientServiceRoleEnv(mode);
   return {
-  plugins: [react()],
+  plugins: [react(), devCodexAuthJsonPlugin()],
   resolve: {
     alias: [
       {
@@ -208,6 +310,7 @@ export default defineConfig(({ mode }) => {
   },
   define: {
     __INSTAFY_BUILD_INFO__: JSON.stringify(instafyBuildInfo),
+    "import.meta.env.INSTAFY_DEV_CODEX_SEED_ENABLED": JSON.stringify(DEV_CODEX_SEED_ENABLED),
   },
   build: {
     rollupOptions: {
