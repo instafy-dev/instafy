@@ -26,7 +26,10 @@ import { GitDiffView } from "./studio/components/GitDiffView";
 import { GitReviewView } from "./studio/components/GitReviewView";
 import { SourceControlDrawer } from "./studio/components/SourceControlDrawer";
 import { ParticipantsDrawer } from "./studio/components/ParticipantsDrawer";
-import { useBreakpoint } from "../hooks/useBreakpoint";
+import {
+  setParticipantsDrawerOpen,
+  useParticipantsDrawerOpen,
+} from "./studio/components/chatParticipantsStore";
 import { StudioSidebar } from "./studio/components/StudioSidebar";
 import { StudioTopBar } from "./studio/components/StudioTopBar";
 import { MobileBottomDock } from "./studio/components/MobileBottomDock";
@@ -321,9 +324,9 @@ function StudioLayoutInner() {
     activeWorkspaceTab?.kind === "conversation" ||
     activeWorkspaceTab?.kind === "jobThread" ||
     (activeWorkspaceTab?.kind === "panel" && activeWorkspaceTab.panel === "chat");
-  // The participants drawer needs genuinely wide viewports: a third column
-  // beside chat and the (potential) side panel only fits at xl and up.
-  const participantsDrawerViewportWide = useBreakpoint("xl");
+  // The participants drawer is an overlay opened from the chat roster facepile,
+  // so it needs no width gate — it renders over the workspace content when open.
+  const participantsDrawerOpen = useParticipantsDrawerOpen();
   const visibleConversationControllerId = useMemo((): string | null => {
     if (!isChatSurfaceVisible) {
       return null;
@@ -1996,7 +1999,10 @@ function StudioLayoutInner() {
             inert={showMobileLeftDrawerOverlay || undefined}
           >
             <StudioTopBar />
-            <div className="flex flex-1 min-h-0 min-w-0">
+            {/* relative: the participants drawer overlays the right edge of the
+                workspace content rather than pushing it, so it never competes
+                with the code/preview panel for width. */}
+            <div className="relative flex flex-1 min-h-0 min-w-0">
               <div
                 className={
                   isLargeScreen
@@ -2018,12 +2024,8 @@ function StudioLayoutInner() {
                   <div className="flex-none">{sidePaneNode}</div>
                 ) : null}
               </div>
-              {isLargeScreen && participantsDrawerViewportWide && isChatSurfaceVisible ? (
-                <ParticipantsDrawer
-                  // The code/preview panel owns the right edge when open; the
-                  // drawer yields to its avatar rail rather than competing.
-                  forceRail={shouldShowFilesWorkspace || effectiveSideVisible}
-                />
+              {isChatSurfaceVisible && participantsDrawerOpen ? (
+                <ParticipantsDrawer onClose={() => setParticipantsDrawerOpen(false)} />
               ) : null}
             </div>
           </div>

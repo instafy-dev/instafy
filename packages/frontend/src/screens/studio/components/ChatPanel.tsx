@@ -230,7 +230,11 @@ import { ConversationRoster } from "./ConversationRoster";
 import {
   clearChatParticipants,
   publishChatParticipants,
+  type ParticipantAgent,
+  type ParticipantCredentialState,
 } from "./chatParticipantsStore";
+import { formatProviderLabel } from "./CreditsUsageRates";
+import { resolveCredentialLabel } from "../../../utils/credentialFormatting";
 import { useChatComposerLayoutState } from "./useChatComposerLayoutState";
 import { useChatAutoScrollSync, useChatScrollController } from "./useChatScrollOrchestration";
 import {
@@ -4224,19 +4228,62 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // chat surface (the participants drawer is a StudioLayout sibling, so props
   // cannot reach it). ChatPanel stays the single writer.
   const participantsSnapshotConversationId = activeConversationEntry?.controllerId ?? null;
+  // Enrich each roster agent with the model, provider, and credential it draws
+  // from, resolving pinned-vs-default and stale credentials the same way the
+  // Runtime & AI panel does — so the drawer can show it without re-deriving.
+  const participantAgents = useMemo<ParticipantAgent[]>(() => {
+    const credentialsById = new Map(
+      availableCredentials.map((credential) => [credential.id, credential]),
+    );
+    return conversationRosterAgents.map((rosterAgent) => {
+      const profile = agentByHandle.get(rosterAgent.handle) ?? null;
+      let credentialLabel: string | null = null;
+      let credentialState: ParticipantCredentialState = "none";
+      if (profile?.credentialId) {
+        const pinned = credentialsById.get(profile.credentialId) ?? null;
+        if (!pinned) {
+          credentialState = "missing";
+        } else if (pinned.revokedAt) {
+          credentialState = "revoked";
+          credentialLabel = resolveCredentialLabel(pinned);
+        } else {
+          credentialState = "pinned";
+          credentialLabel = resolveCredentialLabel(pinned);
+        }
+      } else if (defaultAiCredential) {
+        credentialState = "default";
+        credentialLabel = resolveCredentialLabel(defaultAiCredential);
+      }
+      return {
+        ...rosterAgent,
+        model: profile?.model ?? null,
+        providerLabel: formatProviderLabel(profile?.provider),
+        credentialLabel,
+        credentialState,
+      };
+    });
+  }, [agentByHandle, availableCredentials, conversationRosterAgents, defaultAiCredential]);
+  // Amber dot on the roster facepile when any agent's credential needs
+  // attention — visible without opening the drawer.
+  const participantAgentsHaveCredentialWarning = participantAgents.some(
+    (agent) =>
+      agent.credentialState === "missing" ||
+      agent.credentialState === "revoked" ||
+      agent.credentialState === "none",
+  );
   useEffect(() => {
     publishChatParticipants({
       conversationId: participantsSnapshotConversationId,
       humans: conversationRosterHumans,
-      agents: conversationRosterAgents,
+      agents: participantAgents,
       runningAgentHandles: Array.from(activeConversationRunAgentHandles),
       totalQueuedCount,
     });
     return () => clearChatParticipants(participantsSnapshotConversationId);
   }, [
     activeConversationRunAgentHandles,
-    conversationRosterAgents,
     conversationRosterHumans,
+    participantAgents,
     participantsSnapshotConversationId,
     totalQueuedCount,
   ]);
@@ -5050,6 +5097,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           <ConversationRoster
             agents={conversationRosterPresence.agents}
             humans={conversationRosterPresence.humans}
+            hasCredentialWarning={participantAgentsHaveCredentialWarning}
           />
         </div>
       ) : null}

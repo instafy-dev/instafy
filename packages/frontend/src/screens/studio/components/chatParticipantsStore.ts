@@ -13,10 +13,28 @@ import type {
  * source of truth instead of re-running its stateful hooks elsewhere.
  */
 
+/** How the AI credential an agent draws from resolves right now. */
+export type ParticipantCredentialState =
+  | "default" // uses the workspace default credential
+  | "pinned" // pinned to a specific credential
+  | "missing" // pinned credential no longer exists
+  | "revoked" // pinned credential was revoked
+  | "none"; // no usable credential
+
+export interface ParticipantAgent extends ConversationRosterAgent {
+  /** Resolved model id, e.g. "gpt-5.5". */
+  model: string | null;
+  /** Provider label for display, e.g. "OpenAI". */
+  providerLabel: string | null;
+  /** Human-readable name of the credential this agent draws from. */
+  credentialLabel: string | null;
+  credentialState: ParticipantCredentialState;
+}
+
 export interface ChatParticipantsSnapshot {
   conversationId: string | null;
   humans: readonly ConversationRosterHuman[];
-  agents: readonly ConversationRosterAgent[];
+  agents: readonly ParticipantAgent[];
   /** Agent handles with an actively progressing run in this conversation. */
   runningAgentHandles: readonly string[];
   /** Messages waiting in this conversation's send queue. */
@@ -70,4 +88,58 @@ function getSnapshot(): ChatParticipantsSnapshot {
 
 export function useChatParticipantsSnapshot(): ChatParticipantsSnapshot {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+/**
+ * Open/closed state for the participants drawer. The trigger (the roster
+ * facepile) lives inside the chat surface while the drawer renders as a
+ * StudioLayout sibling, so the toggle must be shared out of band. Persisted so
+ * the drawer stays where the viewer left it across reloads. Default: closed —
+ * the drawer is opened deliberately, not ambient chrome.
+ */
+const OPEN_STORAGE_KEY = "instafy.participantsDrawer.open.v1";
+
+function readStoredOpen(): boolean {
+  try {
+    return window.localStorage.getItem(OPEN_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+let drawerOpen = readStoredOpen();
+const openListeners = new Set<() => void>();
+
+function emitOpen(): void {
+  for (const listener of openListeners) {
+    listener();
+  }
+}
+
+export function setParticipantsDrawerOpen(open: boolean): void {
+  if (drawerOpen === open) {
+    return;
+  }
+  drawerOpen = open;
+  try {
+    window.localStorage.setItem(OPEN_STORAGE_KEY, open ? "1" : "0");
+  } catch {
+    // Preference just won't persist (private mode).
+  }
+  emitOpen();
+}
+
+export function toggleParticipantsDrawer(): void {
+  setParticipantsDrawerOpen(!drawerOpen);
+}
+
+export function useParticipantsDrawerOpen(): boolean {
+  return useSyncExternalStore(
+    (listener) => {
+      openListeners.add(listener);
+      return () => openListeners.delete(listener);
+    },
+    () => drawerOpen,
+    () => false,
+  );
 }
