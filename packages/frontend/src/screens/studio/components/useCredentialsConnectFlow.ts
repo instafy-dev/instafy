@@ -15,6 +15,10 @@ import {
   useDesktopCodexAuthJsonStatus,
 } from "./desktopCodexAuthJson";
 import {
+  canUseDevServerCodexAuthJson,
+  connectDevServerCodexAuthJson,
+} from "./devServerCodexAuthJson";
+import {
   CHATGPT_CONNECTION_DEFAULT_WARNING,
   CHATGPT_CONNECTION_RESOLUTION_WARNING,
   CHATGPT_CONNECTION_VERIFICATION_WARNING,
@@ -322,6 +326,43 @@ export function useCredentialsConnectFlow({
     userPresent,
   ]);
 
+  // Dev-only: seed this machine's Codex login through the same completion
+  // contract as every other connect path (loadCredentials + close, folded into
+  // connectPending so the modal locks while it runs).
+  const canDevSeedCodex = canUseDevServerCodexAuthJson();
+  const handleDevSeedCodex = useCallback(async () => {
+    if (!userPresent) {
+      showStatus("Sign in to connect credentials.", "error", 3500);
+      return;
+    }
+    if (connectPending) {
+      return;
+    }
+    setConnectPending(true);
+    try {
+      const result = await connectDevServerCodexAuthJson();
+      if (!result.success) {
+        showStatus(result.error ?? "Unable to save credentials.", "error", 5000);
+        return;
+      }
+      showStatus("Connected this machine's Codex login.", "success", 3500);
+      await loadCredentials({ silent: true });
+      notifyAiConfigChanged("codex_connected");
+      closeConnectModal();
+    } catch {
+      showStatus("Unable to connect the local Codex login.", "error", 5000);
+    } finally {
+      setConnectPending(false);
+    }
+  }, [
+    closeConnectModal,
+    connectPending,
+    loadCredentials,
+    notifyAiConfigChanged,
+    showStatus,
+    userPresent,
+  ]);
+
   const handleTriggerUpload = useCallback(() => {
     fileInputRef.current?.click();
   }, []);
@@ -543,6 +584,8 @@ export function useCredentialsConnectFlow({
       onZaiLabelDraftChange: setZaiLabelDraft,
       onGeminiApiKeyDraftChange: setGeminiApiKeyDraft,
       onConnectCodex: handleConnectCodex,
+      canDevSeedCodex,
+      onDevSeedCodex: () => void handleDevSeedCodex(),
       onBeginDeviceAuth: (provider) => void beginDeviceAuth(provider),
       onCancelDeviceAuthSession: () => void cancelDeviceAuthSession(),
       onTriggerUpload: handleTriggerUpload,
