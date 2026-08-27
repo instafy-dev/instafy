@@ -3,6 +3,7 @@ import type { RuntimeAction } from "../runtimeStore";
 import type { RuntimeState } from "../../types";
 import { controllerClient, type ControllerRuntimeStatusEntry } from "../../sdk/instafy";
 import { clearProjectState } from "../../workspace/projectClear";
+import { recordRuntimeResourceSample } from "../runtimeResourceHistory";
 
 const runtimeControllerEnabled = controllerClient.core.enabled;
 
@@ -178,6 +179,12 @@ export function useRuntimeStatusRefresh({
               }
             });
           }
+        }
+        // Record BEFORE dispatching so the render this dispatch triggers
+        // already sees the samples it delivered (the runtime menu reads the
+        // history during render).
+        for (const entry of rawStatuses) {
+          recordRuntimeResourceSample(entry.runtimeId, entry.resources ?? null);
         }
         dispatch({
           type: "setRuntimeStatuses",

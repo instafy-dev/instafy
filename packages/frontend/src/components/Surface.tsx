@@ -1,6 +1,7 @@
 import type { HTMLAttributes } from "react";
+import { DARK_FLOATING_RAISED_BG_CLASS } from "../theme/darkSurfaces";
 
-type SurfaceTone = "default" | "muted" | "subtle" | "success" | "warning" | "danger";
+type SurfaceTone = "default" | "muted" | "subtle" | "raised" | "success" | "warning" | "danger";
 type SurfaceRadius = "none" | "lg" | "xl" | "2xl" | "3xl";
 type SurfaceShadow = "none" | "sm" | "md" | "lg";
 
@@ -13,6 +14,10 @@ const TONE_CLASSES: Record<SurfaceTone, string> = {
     "border-slate-200/70 bg-slate-50/70 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)]",
   subtle:
     "border-slate-200/70 bg-white/95 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-strong)]",
+  // For cards nested inside floating surfaces (darkSurfaces.ts rule 5): in dark
+  // the fill sits above the popover and the border disappears; light keeps its
+  // border because white-on-white has no usable background delta.
+  raised: `border-slate-200/70 bg-slate-50/70 dark:border-transparent ${DARK_FLOATING_RAISED_BG_CLASS}`,
   success: "border-primary-200/80 bg-primary-50/80 dark:border-primary-500/40 dark:bg-primary-500/10",
   warning: "border-secondary-200/80 bg-secondary-50/80 dark:border-secondary-500/40 dark:bg-secondary-500/10",
   danger: "border-rose-200/80 bg-rose-50/80 dark:border-rose-500/40 dark:bg-rose-500/10",
