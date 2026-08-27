@@ -56,6 +56,49 @@ test("trusted boundary is restricted to main PR target events", () => {
   assert.doesNotMatch(source, /^  workflow_dispatch:$/mu);
 });
 
+test("trusted boundary waits for a fresh merge candidate before any checkout", () => {
+  const source = readWorkflow("public-boundary.yml");
+  const wait = stepSection(
+    source,
+    "Wait for the event-bound merge candidate to be minted",
+    "Checkout trusted base controls",
+  );
+
+  // The wait step exists because refs/pull/N/merge is minted asynchronously:
+  // a checkout taken before the re-mint binds the previous head and turns the
+  // parent verification into a false failure (issue #99). It must run before
+  // both checkouts, read only the pulls API with the workflow token, and bind
+  // the candidate's head parent to this event's head.
+  assertOrdered(
+    source,
+    "Wait for the event-bound merge candidate to be minted",
+    "Checkout trusted base controls",
+    "Checkout server-generated merge candidate as data",
+    "Verify the event-bound merge object and parents",
+  );
+  assert.match(
+    wait,
+    /PR_NUMBER: \$\{\{ github\.event\.pull_request\.number \}\}/u,
+  );
+  assert.match(
+    wait,
+    /EXPECTED_HEAD_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/u,
+  );
+  assert.match(wait, /GH_TOKEN: \$\{\{ github\.token \}\}/u);
+  assert.match(wait, /\[\[ "\$PR_NUMBER" =~ \^\[0-9\]\+\$ \]\]/u);
+  assert.match(wait, /\[\[ "\$EXPECTED_HEAD_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\]/u);
+  assert.match(wait, /pulls\/\$\{PR_NUMBER\}/u);
+  assert.match(wait, /git\/commits\/\$\{candidate_oid\}/u);
+  assert.match(wait, /"\$head_parent" == "\$EXPECTED_HEAD_SHA"/u);
+  // The loop must be bounded and end in an explicit, actionable error.
+  assert.match(wait, /seq 1 \d+/u);
+  assert.match(wait, /::error::No merge candidate bound to head/u);
+  // The wait must never check anything out or add a pinned action: the
+  // two-checkout inventory asserted below stays exhaustive.
+  assert.doesNotMatch(wait, /uses:/u);
+  assert.doesNotMatch(wait, /checkout@/u);
+});
+
 test("trusted boundary checkouts are separate, pinned, and non-persistent", () => {
   const source = readWorkflow("public-boundary.yml");
   const trustedCheckout = stepSection(
@@ -126,6 +169,12 @@ test("trusted boundary binds the server merge ref to both event parents", () => 
   assert.match(
     verification,
     /EXPECTED_MERGE_SHA: \$\{\{ github\.event\.pull_request\.merge_commit_sha \}\}/u,
+  );
+  // Rejections must be diagnosable: the bare assertion lines stay, and the
+  // ERR trap names the failing command in the run annotations (issue #99).
+  assert.match(
+    verification,
+    /trap 'echo "::error::merge object verification failed on: \$\{BASH_COMMAND\}"' ERR/u,
   );
   assert.match(
     verification,

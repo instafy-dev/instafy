@@ -22,11 +22,57 @@ jobs:
   boundary:
     name: Public boundary (trusted base)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     permissions:
       contents: read
 
     steps:
+      - name: Wait for the event-bound merge candidate to be minted
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Read-only: watches the pulls API until the server-minted merge
+          # candidate binds this event's head. Never fetches candidate code.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]
+          [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          # refs/pull/N/merge is minted asynchronously. After a push — and
+          # especially after a long-unmergeable spell — the ref can lag this
+          # event by minutes, so a checkout taken immediately can bind the
+          # PREVIOUS head; the parent verification below then rejects that
+          # stale candidate with a failure indistinguishable from a real
+          # boundary violation, and a rerun fails again until the re-mint
+          # lands (observed 4x on PR #90, issue #99). Polling the read-only
+          # pulls API also schedules the recompute, so this loop both waits
+          # for and accelerates the fresh candidate. Only the wait moves
+          # here: the checkout still binds nothing, and the verification
+          # step below remains the enforced security property.
+          candidate_oid=""
+          for attempt in $(seq 1 32); do
+            candidate_oid="$(
+              gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+                --jq '.merge_commit_sha // empty' 2>/dev/null || true
+            )"
+            if [[ "$candidate_oid" =~ ^[0-9a-f]{40}$ ]]; then
+              head_parent="$(
+                gh api "repos/${GITHUB_REPOSITORY}/git/commits/${candidate_oid}" \
+                  --jq '.parents[1].sha // empty' 2>/dev/null || true
+              )"
+              if [[ "$head_parent" == "$EXPECTED_HEAD_SHA" ]]; then
+                exit 0
+              fi
+            fi
+            sleep 15
+          done
+          echo "::error::No merge candidate bound to head ${EXPECTED_HEAD_SHA}" \
+            "after 8 minutes (last candidate: ${candidate_oid:-none}). Either" \
+            "the pull request is unmergeable right now, or GitHub's" \
+            "mergeability job is delayed — re-run this check once the pull" \
+            "request page shows a mergeability result."
+          exit 1
+
       - name: Checkout trusted base controls
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -66,6 +112,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # The bindings below are deliberately bare assertions; the trap
+          # names the failing command so a rejection is diagnosable instead
+          # of a silent exit (issue #99).
+          trap 'echo "::error::merge object verification failed on: ${BASH_COMMAND}"' ERR
           [[ "$EXPECTED_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
           actual_merge_sha="$(
