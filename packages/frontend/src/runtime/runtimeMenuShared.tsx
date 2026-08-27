@@ -146,6 +146,40 @@ function writeClipboardTextWithDomFallback(value: string): void {
   }
 }
 
+export function formatCpuPct(value: number | null | undefined): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  return `${Math.round(value)}%`;
+}
+
+export function formatBytesCompact(bytes: number): string {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const decimals = unitIndex === 0 ? 0 : value < 10 ? 1 : 0;
+  const rounded = Math.round(value * 10 ** decimals) / 10 ** decimals;
+  return `${rounded} ${units[unitIndex]}`;
+}
+
+export function formatUsagePair(
+  used: number | null | undefined,
+  limit: number | null | undefined,
+): string | null {
+  if (typeof used !== "number" || Number.isNaN(used) || used < 0) {
+    return null;
+  }
+  const usedLabel = formatBytesCompact(used);
+  if (typeof limit !== "number" || Number.isNaN(limit) || limit <= 0) {
+    return usedLabel;
+  }
+  return `${usedLabel} / ${formatBytesCompact(limit)}`;
+}
+
 export async function writeClipboardText(value: string): Promise<void> {
   if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
     try {

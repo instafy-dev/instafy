@@ -31,6 +31,15 @@
  *    colours inline (`dark:border-white/10`, hand-written `var(--…)` strings);
  *    if a combination is missing, add a helper here so the ladder stays the
  *    single source of truth.
+ *
+ * 5. Inside a floating surface (popover, menu), a nested element gets a border
+ *    OR a background delta, never both. Content nested in a popover is flat
+ *    (sections + dividers); promoted cards — sparingly, they are the popover's
+ *    focal blocks — use `floating-raised` (lighter than the popover,
+ *    borderless) so they read as sitting on top rather than as outlined
+ *    holes. Semantic warning/danger tints are the exception — their border +
+ *    fill pair is the meaning. Small controls keep their `raised-control`
+ *    borders as usual.
  */
 
 export const DARK_CANVAS_CLASS = "dark:bg-[var(--color-studio-dark-canvas)]";
@@ -51,6 +60,8 @@ export const DARK_PANEL_SURFACE_CLASS = `${DARK_PANEL_BG_CLASS} ${DARK_PANEL_BOR
 
 export const DARK_FLOATING_BG_CLASS = "dark:bg-[var(--color-studio-dark-floating)]";
 export const DARK_FLOATING_SOLID_BG_CLASS = "dark:bg-[var(--color-studio-dark-floating-solid)]";
+export const DARK_FLOATING_RAISED_BG_CLASS =
+  "dark:bg-[var(--color-studio-dark-floating-raised)]";
 export const DARK_FLOATING_BORDER_CLASS = "dark:border-[color:var(--color-studio-dark-floating-border)]";
 export const DARK_FLOATING_SURFACE_CLASS = `${DARK_FLOATING_BG_CLASS} ${DARK_FLOATING_BORDER_CLASS}`;
 
@@ -62,6 +73,7 @@ export const DARK_RAISED_CONTROL_CLASS =
 
 export const DARK_ACTIVE_BG_CLASS = "dark:bg-[var(--color-studio-dark-active)]";
 export const DARK_ACTIVE_BORDER_CLASS = "dark:border-[color:var(--color-studio-dark-active-border)]";
+export const DARK_ACTIVE_RING_CLASS = "dark:ring-[color:var(--color-studio-dark-active-border)]";
 export const DARK_ACTIVE_SURFACE_CLASS = `${DARK_ACTIVE_BG_CLASS} ${DARK_ACTIVE_BORDER_CLASS}`;
 
 export const DARK_RAIL_HOVER_CLASS =

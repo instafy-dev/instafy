@@ -243,10 +243,10 @@ export function OctoAgentChip({
       ? `Low credits: ${displayedCreditBalance}/${creditLimit}`
       : `${displayedCreditBalance}/${creditLimit} credits left`;
   const creditsRowSubtitle = outOfCredits
-    ? "Open Credits to refill and keep chatting."
+    ? "Refill to keep chatting."
     : lowCredits
-      ? "Credits are getting low. Open Credits to refill or upgrade."
-      : "Open Credits to review usage, billing, or refill.";
+      ? "Running low. Refill or upgrade."
+      : "Usage, billing, and refills";
 
   const menuTriggerRef = useRef<HTMLButtonElement | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -1058,7 +1058,7 @@ export function OctoAgentChip({
 
                 {!aiControlsReady ? (
                   <Card
-                    tone="muted"
+                    tone="raised"
                     radius="xl"
                     shadow="none"
                     padding="sm"
@@ -1067,12 +1067,12 @@ export function OctoAgentChip({
                   >
                     <div className="space-y-1">
                       <Text as="div" variant="bodyStrong" tone="inherit" className="text-sm">
-                        {aiSetupState === "needs_default" ? "Choose default AI" : "Connect AI"}
+                        {aiSetupState === "needs_default" ? "Choose default AI" : "No AI connected"}
                       </Text>
-                      <Text as="div" variant="caption" tone="muted" className="text-xxs leading-relaxed">
+                      <Text as="div" variant="caption" tone="muted" className="leading-relaxed">
                         {aiSetupState === "needs_default"
                           ? `Pick which connected credential ${defaultAssistantDefinition.mentionToken} should use. Model controls show up after that.`
-                          : `Connect a provider to use ${defaultAssistantDefinition.mentionToken}, models, and assistant replies in chat.`}
+                          : `Add a provider to unlock ${defaultAssistantDefinition.mentionToken}, models, and chat replies.`}
                       </Text>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
@@ -1108,7 +1108,7 @@ export function OctoAgentChip({
                     {activeAgentCards.map((card) => (
                       <Card
                         key={card.handle}
-                        tone="muted"
+                        tone="raised"
                         radius="xl"
                         shadow="none"
                         padding="sm"
@@ -1196,7 +1196,7 @@ export function OctoAgentChip({
                           />
                         ) : null}
                         {card.agent ? (
-                          <div className="space-y-2 rounded-xl border border-slate-200/70 bg-white/70 px-2.5 py-2 dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-[var(--color-studio-dark-raised-control)]/70">
+                          <div className="flex flex-wrap items-end justify-between gap-x-2 gap-y-1">
                             <div className="min-w-0 flex-1 space-y-0.5">
                               <div className="flex min-w-0 items-center gap-1.5">
                                 {card.credentialIsMissing || card.credentialIsRevoked || !card.credentialUsesDefault ? (
@@ -1237,21 +1237,35 @@ export function OctoAgentChip({
                               ) : null}
                             </div>
                             {card.credentialCanUseDefault ? (
-                              <EntityRow
-                                title={
-                                  agentCredentialUpdatingId === card.agent.id
+                              <div className="flex shrink-0 flex-col items-end gap-0.5">
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="xs"
+                                  radius="full"
+                                  className="text-xxs"
+                                  onPress={() => {
+                                    void handleAgentUseDefaultCredential(card.agent as ControllerAgentProfile);
+                                  }}
+                                  isDisabled={Boolean(agentCredentialUpdatingId) || isDisabled}
+                                  data-testid={card.isPrimary ? "runtime-ai-use-default-credential" : undefined}
+                                >
+                                  {agentCredentialUpdatingId === card.agent.id
                                     ? "Switching to default..."
-                                    : "Use default credential"
-                                }
-                                subtitle={defaultCredential ? resolveCredentialLabel(defaultCredential) : undefined}
-                                surface="outlined"
-                                density="dense"
-                                onPress={() => {
-                                  void handleAgentUseDefaultCredential(card.agent as ControllerAgentProfile);
-                                }}
-                                isDisabled={Boolean(agentCredentialUpdatingId) || isDisabled}
-                                data-testid={card.isPrimary ? "runtime-ai-use-default-credential" : undefined}
-                              />
+                                    : "Use default credential"}
+                                </Button>
+                                {defaultCredential ? (
+                                  <Text
+                                    as="span"
+                                    variant="caption"
+                                    tone="subtle"
+                                    className="max-w-36 truncate text-3xs"
+                                    title={resolveCredentialLabel(defaultCredential)}
+                                  >
+                                    {resolveCredentialLabel(defaultCredential)}
+                                  </Text>
+                                ) : null}
+                              </div>
                             ) : null}
                           </div>
                         ) : null}
@@ -1317,7 +1331,8 @@ export function OctoAgentChip({
                       title={creditsRowTitle}
                       subtitle={creditsRowSubtitle}
                       end={<NavArrowRight className="h-3.5 w-3.5" aria-hidden="true" />}
-                      surface="outlined"
+                      surface="interactive"
+                      titleClassName="tabular-nums"
                       onPress={onOpenCredits}
                       isDisabled={isDisabled}
                       data-testid="runtime-ai-credits-row"
@@ -1335,7 +1350,7 @@ export function OctoAgentChip({
                           : "Profiles, responders, and routing"
                       }
                       end={<NavArrowRight className="h-3.5 w-3.5" aria-hidden="true" />}
-                      surface="outlined"
+                      surface="interactive"
                       onPress={() => setMenuView("agents")}
                       isDisabled={isDisabled}
                     />
@@ -1349,10 +1364,14 @@ export function OctoAgentChip({
                       label="Enable assistant"
                       description={
                         aiControlsReady
-                          ? "Assistant responses in this chat"
-                          : aiEnabled
-                            ? "Turn off assistant replies, or connect AI to keep using Octo."
-                            : "Plain chat works now. Turn this on after you connect AI."
+                          ? "Octo replies in this chat."
+                          : aiSetupState === "needs_default"
+                            ? aiEnabled
+                              ? "AI is connected. Pick a default above to resume replies."
+                              : "Pick a default AI above, then turn this on."
+                            : aiEnabled
+                              ? "No AI is connected, so replies are paused. Connect AI above, or turn this off."
+                              : "Connect AI first, then turn this on."
                       }
                       isSelected={aiEnabled}
                       onChange={handleAiEnabledChange}
