@@ -3299,7 +3299,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     try {
       await writeClipboardText(content);
-      showStatus("Copied message.", "success", 2000);
+      showStatus("Copied message.", "success", 2000, { presentation: "confirmation" });
       closeMessageMenu();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -3318,7 +3318,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
     try {
       await writeClipboardText(transcript);
-      showStatus("Copied conversation.", "success", 2000);
+      showStatus("Copied conversation.", "success", 2000, { presentation: "confirmation" });
       closeMessageMenu();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -3344,7 +3344,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     const summary = `Message stats — input: ${selectedMessageTokenUsage.inputTokens}, cached: ${selectedMessageTokenUsage.cachedInputTokens}, output: ${selectedMessageTokenUsage.outputTokens}${contextSummary}`;
     try {
       await writeClipboardText(summary);
-      showStatus("Copied message stats.", "success", 2000);
+      showStatus("Copied message stats.", "success", 2000, { presentation: "confirmation" });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       showStatus(`Unable to copy message stats: ${message}`, "error", 4000);

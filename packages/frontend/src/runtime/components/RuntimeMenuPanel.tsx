@@ -214,11 +214,11 @@ export function RuntimeMenuPanel({
           radius="xl"
           shadow="none"
           padding="sm"
-          className="mt-2 flex items-start gap-2 py-2 text-[12px] text-secondary-800"
+          className="mt-2 flex items-start gap-2 py-2 text-xs text-secondary-800"
         >
           <WarningTriangle className="mt-0.5 h-4 w-4 text-secondary-500" aria-hidden="true" />
           <div className="flex-1">
-            <Text as="p" variant="caption" tone="inherit" className="text-[12px] font-medium">
+            <Text as="p" variant="caption" tone="inherit" className="font-medium">
               {errorHeadline}
             </Text>
             <Text as="p" variant="caption" tone="inherit" className="text-xxs leading-snug">
@@ -252,7 +252,7 @@ export function RuntimeMenuPanel({
                 as="pre"
                 variant="mono"
                 tone="inherit"
-                className="mt-2 overflow-x-auto whitespace-pre-wrap break-words rounded-xl bg-secondary-100/80 p-2 text-3xs leading-snug text-secondary-900 dark:bg-secondary-950/40 dark:text-secondary-100"
+                className="mt-2 overflow-x-auto whitespace-pre-wrap break-words rounded-md bg-secondary-100/80 p-2 text-3xs leading-snug text-secondary-900 dark:bg-secondary-950/40 dark:text-secondary-100"
               >
                 {displayedRuntimeEnsureError}
               </Text>
@@ -320,12 +320,12 @@ export function RuntimeMenuPanel({
           radius="xl"
           shadow="none"
           padding="sm"
-          className="mt-2 flex items-start gap-2 py-2 text-[12px] text-secondary-800"
+          className="mt-2 flex items-start gap-2 py-2 text-xs text-secondary-800"
           data-testid="runtime-connection-warning"
         >
           <WarningTriangle className="mt-0.5 h-4 w-4 text-secondary-500" aria-hidden="true" />
           <div className="flex-1">
-            <Text as="p" variant="caption" tone="inherit" className="text-[12px] font-medium">
+            <Text as="p" variant="caption" tone="inherit" className="font-medium">
               Live runtime status is temporarily stale
             </Text>
             <Text as="p" variant="caption" tone="inherit" className="text-xxs leading-snug">
@@ -380,11 +380,11 @@ export function RuntimeMenuPanel({
         />
       ) : (
         <Card
-          tone="muted"
+          tone="raised"
           radius="xl"
           shadow="none"
           padding="sm"
-          className="mt-2 border-dashed py-4 text-center text-[12px] text-slate-500 dark:text-slate-300"
+          className="mt-2 border-dashed py-4 text-center text-xs text-slate-500 dark:text-slate-300"
         >
           <Text as="p" variant="caption" tone="inherit" className="leading-relaxed">
             {emptyStateMessage}

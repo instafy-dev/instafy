@@ -184,7 +184,7 @@ export function BugReportInboxDialog({ isOpen, onOpenChange }: BugReportInboxDia
                     onPress={async () => {
                       try {
                         await writeClipboardText(selectedReport.id);
-                        showStatus("Bug report id copied.", "success", 2500);
+                        showStatus("Bug report id copied.", "success", 2500, { presentation: "confirmation" });
                       } catch (error) {
                         const message = error instanceof Error ? error.message : "Unable to copy bug report id.";
                         showStatus(message, "error", 3500);

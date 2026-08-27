@@ -14,13 +14,15 @@ export interface RuntimeSizeChoice {
 
 // Mirrors the server catalog (runtime-controller/src/runtime/sizes.rs). The
 // exact credits/hour figure comes from the credit policy where available; the
-// multiplier here keeps the cost honest even without a policy fetch.
+// multiplier here keeps the cost honest even without a policy fetch. Standard
+// carries no costNote — a 1× baseline reads as noise; only deviations from it
+// are labeled.
 export const RUNTIME_SIZE_CHOICES: RuntimeSizeChoice[] = [
   {
     id: "standard",
     label: "Standard",
     specs: "2 CPU · 4 GB",
-    costNote: "1× credits",
+    costNote: "",
   },
   {
     id: "boost",

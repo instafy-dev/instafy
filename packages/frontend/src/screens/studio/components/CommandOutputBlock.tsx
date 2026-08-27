@@ -106,7 +106,7 @@ export function CommandOutputBlock({
   const handleCopy = async () => {
     try {
       await writeClipboardText(normalized);
-      showStatus("Copied output.", "success", 2000);
+      showStatus("Copied output.", "success", 2000, { presentation: "confirmation" });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to copy output.";
       showStatus(message, "error", 3500);
