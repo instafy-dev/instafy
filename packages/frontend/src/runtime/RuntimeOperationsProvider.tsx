@@ -360,6 +360,7 @@ export function RuntimeOperationsProvider({
           mode === "host" ? "Copied tunnel hostname" : "Copied tunnel link",
           "success",
           3200,
+          { presentation: "confirmation" },
         );
         return true;
       } catch (error) {

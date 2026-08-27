@@ -160,10 +160,19 @@ test.describe.serial("Runtime resources", () => {
     await expect(dockerRuntimeRow).toContainText("RAM 512 MB / 2 GB");
     await expect(dockerRuntimeRow).toContainText("Disk 10 GB / 50 GB");
 
-    await dockerRuntimeRow.getByRole("button", { name: "Runtime actions" }).click();
+    // The disclosure toggle is a sibling of the pressable row (interactive
+    // elements must not nest inside role="button").
+    await dockerRuntimeRow
+      .locator("xpath=following-sibling::button")
+      .first()
+      .click();
 
     await expect(runtimeMenu).toBeVisible();
-    await expect(runtimeMenu.getByText("Resources:", { exact: false })).toBeVisible();
+    const sparklines = runtimeMenu.getByTestId("runtime-resource-sparklines");
+    await expect(sparklines).toBeVisible();
+    await expect(sparklines).toContainText("CPU");
+    await expect(sparklines).toContainText("13%");
+    await expect(sparklines).toContainText("512 MB / 2 GB");
   });
 
   test("shows resource usage summary in mobile runtime menu", async ({ page }) => {

@@ -1,6 +1,12 @@
 import type { ReactNode } from "react";
 import { Button } from "./Button";
 import { Text } from "./Text";
+import {
+  DARK_ACTIVE_BG_CLASS,
+  DARK_ACTIVE_RING_CLASS,
+  DARK_CONTROL_HOVER_CLASS,
+  DARK_RAISED_CONTROL_CLASS,
+} from "../theme/darkSurfaces";
 
 export interface SegmentedControlOption<T extends string> {
   value: T;
@@ -51,7 +57,7 @@ export function SegmentedControl<T extends string>({
           "items-center gap-1 rounded-full border p-1",
           tone === "inverse"
             ? "border-[rgba(255,255,255,0.12)] bg-[rgba(15,23,42,0.72)]"
-            : "border-slate-200 bg-slate-50/70 dark:border-slate-700 dark:bg-slate-900/40",
+            : `border-slate-200 bg-slate-50/70 ${DARK_RAISED_CONTROL_CLASS}`,
         ].join(" ")}
       >
         {options.map((option) => {
@@ -73,10 +79,10 @@ export function SegmentedControl<T extends string>({
                 isSelected
                   ? tone === "inverse"
                     ? "bg-[rgba(255,255,255,0.12)] text-slate-50 shadow-sm ring-1 ring-[rgba(255,255,255,0.12)]"
-                    : "bg-white text-slate-900 shadow-sm ring-1 ring-slate-200 dark:bg-slate-800 dark:text-slate-50 dark:ring-slate-700"
+                    : `bg-white text-slate-900 shadow-sm ring-1 ring-slate-200 ${DARK_ACTIVE_BG_CLASS} dark:text-slate-50 ${DARK_ACTIVE_RING_CLASS}`
                   : tone === "inverse"
                     ? "text-slate-300 hover:bg-[rgba(255,255,255,0.08)] data-[hovered]:bg-[rgba(255,255,255,0.08)]"
-                    : "text-slate-600 hover:bg-white/70 data-[hovered]:bg-white/70 dark:text-slate-300 dark:hover:bg-slate-800/70 dark:data-[hovered]:bg-slate-800/70",
+                    : `text-slate-600 hover:bg-white/70 data-[hovered]:bg-white/70 dark:text-slate-300 ${DARK_CONTROL_HOVER_CLASS}`,
               ].join(" ")}
             >
               {option.label}
