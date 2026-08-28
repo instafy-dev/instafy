@@ -13,6 +13,23 @@ import type {
  * source of truth instead of re-running its stateful hooks elsewhere.
  */
 
+/** The runtime (machine) an agent runs in, for grouping the roster by machine. */
+export interface ParticipantRuntimeInfo {
+  /** Grouping key — agents that share a machine share this id. */
+  id: string;
+  /** Machine label, e.g. "Instafy Cloud" or "Your Mac". */
+  label: string;
+  /**
+   * How this agent relates to the machine: the shared workspace runtime, a
+   * dedicated one it pinned, or a native runtime on the user's own machine.
+   */
+  kind: "shared" | "dedicated" | "native";
+  /** Runtime status: "ready" | "booting" | "offline" | "expired" | "unknown". */
+  status: string;
+  /** Static capacity, e.g. "2 vCPU · 4 GB" — null when unknown. */
+  resourcesSummary: string | null;
+}
+
 /** How the AI credential an agent draws from resolves right now. */
 export type ParticipantCredentialState =
   | "default" // uses the workspace default credential
@@ -56,6 +73,8 @@ export interface ParticipantAgent extends ConversationRosterAgent {
   model: string | null;
   /** Per-agent reasoning effort (minimal|low|medium|high), or null to inherit. */
   reasoningEffort?: string | null;
+  /** The machine this agent runs in — used to group the roster by runtime. */
+  runtime?: ParticipantRuntimeInfo | null;
   /** Provider label for display, e.g. "OpenAI". */
   providerLabel: string | null;
   /** Id of the credential this agent draws from (dedupes shared meters). */

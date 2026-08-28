@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { NavArrowDown, Xmark } from "iconoir-react";
+import { Cpu, Cube, NavArrowDown, Xmark } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import { useCredits } from "../../../credits/useCredits";
@@ -16,6 +16,7 @@ import {
   useChatParticipantsSnapshot,
   type ParticipantAgent,
   type ParticipantEditingContext,
+  type ParticipantRuntimeInfo,
   type ParticipantSubscriptionUsage,
 } from "./chatParticipantsStore";
 import { ModelMenuSelect } from "./ModelMenuSelect";
@@ -192,6 +193,69 @@ function AgentEditControls({
   );
 }
 
+// Header for a runtime group: the machine's identity, how the agents relate to
+// it (shared / dedicated / native), its health, and its size. Agents that share
+// a machine cluster beneath one of these.
+function RuntimeGroupHeader({
+  runtime,
+  agentCount,
+}: {
+  runtime: ParticipantRuntimeInfo;
+  agentCount: number;
+}) {
+  const Icon = runtime.kind === "native" ? Cpu : Cube;
+  const kindLabel =
+    runtime.kind === "native" ? "Native" : runtime.kind === "dedicated" ? "Dedicated" : "Shared";
+  const status = runtime.status.toLowerCase();
+  const dotColor =
+    status === "ready" || status === "online" || status === "healthy"
+      ? "#57c06a"
+      : status === "booting" || status === "starting" || status === "pending"
+        ? "#e0a53a"
+        : status === "offline" || status === "expired" || status === "stopped" || status === "error"
+          ? "#e5706b"
+          : "#8b9096";
+  const detail = [
+    status && status !== "unknown" ? status : null,
+    runtime.kind === "native" ? "this machine" : runtime.resourcesSummary,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <div className="flex items-center gap-2 pb-0.5 pt-2.5" data-testid="participants-runtime-group">
+      <Icon className="h-3.5 w-3.5 shrink-0 text-slate-500 dark:text-slate-400" aria-hidden="true" />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <Text
+            as="span"
+            variant="caption"
+            tone="secondary"
+            className="truncate text-xxs font-medium"
+          >
+            {runtime.label}
+          </Text>
+          <span className="shrink-0 rounded bg-slate-200/70 px-1.5 py-px text-3xs font-medium text-slate-600 dark:bg-white/10 dark:text-slate-300">
+            {kindLabel}
+            {runtime.kind === "shared" && agentCount > 1 ? ` · ${agentCount}` : ""}
+          </span>
+        </div>
+        {detail ? (
+          <div className="flex items-center gap-1.5 pt-px">
+            <span
+              aria-hidden="true"
+              className="h-1.5 w-1.5 shrink-0 rounded-full"
+              style={{ backgroundColor: dotColor }}
+            />
+            <Text as="span" variant="caption" tone="muted" className="truncate text-3xs">
+              {detail}
+            </Text>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
   const snapshot = useChatParticipantsSnapshot();
   // Which agent rows are expanded into their edit controls (by handle).
@@ -264,6 +328,26 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
   // agents share one account, show the meters once (on the first agent that
   // uses it) instead of repeating identical bars down the list.
   const usageShownFor = new Set<string>();
+
+  // Cluster agents by the machine they run in (first-seen order), so the roster
+  // reads as "these agents share this runtime" rather than a flat list. Agents
+  // with no runtime info fall into a single unheadered group.
+  const runtimeGroups: {
+    key: string;
+    runtime: ParticipantRuntimeInfo | null;
+    agents: ParticipantAgent[];
+  }[] = [];
+  const runtimeGroupIndex = new Map<string, number>();
+  for (const agent of agents) {
+    const key = agent.runtime?.id ?? "__no_runtime__";
+    const existing = runtimeGroupIndex.get(key);
+    if (existing === undefined) {
+      runtimeGroupIndex.set(key, runtimeGroups.length);
+      runtimeGroups.push({ key, runtime: agent.runtime ?? null, agents: [agent] });
+    } else {
+      runtimeGroups[existing].agents.push(agent);
+    }
+  }
 
   return (
     <aside
@@ -344,9 +428,21 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
               tone="subtle"
               className="border-t border-slate-200/70 pb-1 pt-2.5 text-xxs font-medium dark:border-[color:var(--color-studio-dark-divider)]"
             >
-              Agents
+              Runtimes &amp; agents
             </Text>
-            {agents.map((agent) => {
+            {runtimeGroups.map((group) => (
+              <div key={group.key}>
+                {group.runtime ? (
+                  <RuntimeGroupHeader runtime={group.runtime} agentCount={group.agents.length} />
+                ) : null}
+                <div
+                  className={
+                    group.runtime
+                      ? "border-l border-slate-200/70 pl-2.5 dark:border-[color:var(--color-studio-dark-divider)]"
+                      : ""
+                  }
+                >
+                  {group.agents.map((agent) => {
               const credential = credentialLine(agent);
               const metaParts = [agent.model, agent.providerLabel].filter(Boolean);
               // Fold an unremarkable (healthy) credential into the model·provider
@@ -432,7 +528,10 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
                   </div>
                 </div>
               );
-            })}
+                  })}
+                </div>
+              </div>
+            ))}
           </section>
         ) : null}
       </div>

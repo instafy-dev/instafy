@@ -366,4 +366,79 @@ describe("ParticipantsDrawer", () => {
       container.querySelector('[data-testid="drawer-agent-reasoning-select-octo"]'),
     ).not.toBeNull();
   });
+
+  it("groups agents by runtime, with a header per machine (shared vs native)", async () => {
+    const cloudRuntime = {
+      id: "rt-cloud",
+      label: "Instafy Cloud",
+      kind: "shared" as const,
+      status: "ready",
+      resourcesSummary: "2 vCPU · 4 GB",
+    };
+    const baseAgent = {
+      displayName: "",
+      providerLabel: "OpenAI",
+      credentialState: "default" as const,
+      subscriptionUsage: null,
+    };
+    await act(async () => {
+      publishChatParticipants(
+        snapshot({
+          agents: [
+            {
+              ...baseAgent,
+              handle: "octo",
+              avatarSeed: "octo",
+              model: "gpt-5.5",
+              credentialId: "c1",
+              credentialLabel: "My ChatGPT",
+              runtime: cloudRuntime,
+            },
+            {
+              ...baseAgent,
+              handle: "scout",
+              avatarSeed: "scout",
+              model: "o4-mini",
+              credentialId: "c1",
+              credentialLabel: "My ChatGPT",
+              runtime: cloudRuntime,
+            },
+            {
+              ...baseAgent,
+              handle: "pixel",
+              avatarSeed: "pixel",
+              model: "gpt-5.5",
+              credentialId: "c2",
+              credentialLabel: "Local",
+              runtime: {
+                id: "rt-mac",
+                label: "Your Mac",
+                kind: "native" as const,
+                status: "ready",
+                resourcesSummary: null,
+              },
+            },
+          ],
+          runningAgentHandles: [],
+          totalQueuedCount: 0,
+        }),
+      );
+    });
+    await render();
+
+    // One header per machine: the shared cloud (2 agents) and the native Mac.
+    const groups = container.querySelectorAll('[data-testid="participants-runtime-group"]');
+    expect(groups.length).toBe(2);
+    const text = container.querySelector('section[aria-label="Agents"]')?.textContent ?? "";
+    expect(text).toContain("Instafy Cloud");
+    expect(text).toContain("Shared · 2"); // two agents share the cloud runtime
+    expect(text).toContain("2 vCPU · 4 GB");
+    expect(text).toContain("Your Mac");
+    expect(text).toContain("Native");
+    expect(text).toContain("this machine");
+    // Every agent still renders, clustered under its machine.
+    expect(text).toContain("@octo");
+    expect(text).toContain("@scout");
+    expect(text).toContain("@pixel");
+  });
 });

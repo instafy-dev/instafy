@@ -53,7 +53,7 @@ import {
 } from "../../../conversations/conversationGoals";
 import { resolveRunFailureRetryPrompt } from "../../../conversations/runFailurePresentation";
 import { isRunActivelyProgressing } from "../../../conversations/runLiveness";
-import { useRuntimeMenuOptions } from "../../../runtime/useRuntimeMenu";
+import { useRuntimeMenuOptions, type RuntimeMenuOption } from "../../../runtime/useRuntimeMenu";
 import {
   shouldPinChatMessagesToBottom,
   shouldShowBrowserSessionPageStripInComposer,
@@ -231,6 +231,7 @@ import {
   type ParticipantAgent,
   type ParticipantCredentialState,
   type ParticipantEditingContext,
+  type ParticipantRuntimeInfo,
 } from "./chatParticipantsStore";
 import { updateMyAgent } from "../../../services/runtimeController/agents";
 import { formatProviderLabel } from "./CreditsUsageRates";
@@ -4236,6 +4237,46 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       const metadata = defaultAiCredential.metadata as Record<string, unknown> | null | undefined;
       return normalizeAiProviderId(typeof metadata?.provider === "string" ? metadata.provider : "");
     })();
+    // Static machine size ("2 vCPU · 4 GB") from a runtime option's capacity.
+    const formatRuntimeCapacity = (
+      resources: RuntimeMenuOption["resources"],
+    ): string | null => {
+      if (!resources) return null;
+      const parts: string[] = [];
+      const cores = resources.cpuLimitCores;
+      if (typeof cores === "number" && cores > 0) {
+        parts.push(`${Number.isInteger(cores) ? cores : cores.toFixed(1)} vCPU`);
+      }
+      const mem = resources.memoryLimitBytes;
+      if (typeof mem === "number" && mem > 0) {
+        const gb = mem / 1024 ** 3;
+        parts.push(`${gb >= 1 ? Math.round(gb) : gb.toFixed(1)} GB`);
+      }
+      return parts.length > 0 ? parts.join(" · ") : null;
+    };
+    // Resolve the machine an agent runs in: its pinned runtime if it has one,
+    // otherwise the workspace's current (shared) runtime. `native` = a local
+    // self-hosted machine, `dedicated` = a pinned cloud box, `shared` = the
+    // default. The id is the grouping key that clusters agents by machine.
+    const resolveRuntime = (runtimeId: string | null): ParticipantRuntimeInfo | null => {
+      const pinnedId = (runtimeId ?? "").trim() || null;
+      const option =
+        (pinnedId ? runtimeMenu.runtimeOptionsById.get(pinnedId) : null) ??
+        runtimeMenu.currentRuntime;
+      if (!option) return null;
+      const kind: ParticipantRuntimeInfo["kind"] = option.isLikelyLocal
+        ? "native"
+        : pinnedId
+          ? "dedicated"
+          : "shared";
+      return {
+        id: option.id ?? pinnedId ?? "shared-runtime",
+        label: option.label,
+        kind,
+        status: String(option.state ?? "unknown"),
+        resourcesSummary: formatRuntimeCapacity(option.resources),
+      };
+    };
     return conversationRosterAgents.map((rosterAgent) => {
       const profile = agentByHandle.get(rosterAgent.handle) ?? null;
       const providerRaw = (profile?.provider ?? "").trim().toLowerCase();
@@ -4284,6 +4325,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         providerId,
         model,
         reasoningEffort: profile?.reasoningEffort ?? null,
+        runtime: resolveRuntime(profile?.runtimeId ?? null),
         providerLabel: formatProviderLabel(providerId),
         credentialId: effectiveCredential?.id ?? null,
         credentialLabel,
@@ -4291,7 +4333,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         subscriptionUsage,
       };
     });
-  }, [agentByHandle, availableCredentials, conversationRosterAgents, defaultAiCredential]);
+  }, [
+    agentByHandle,
+    availableCredentials,
+    conversationRosterAgents,
+    defaultAiCredential,
+    runtimeMenu,
+  ]);
   // Amber dot on the roster facepile when any agent's credential needs
   // attention — visible without opening the drawer.
   const participantAgentsHaveCredentialWarning = participantAgents.some(
