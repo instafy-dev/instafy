@@ -1,5 +1,5 @@
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use reqwest::StatusCode;
@@ -24,6 +24,12 @@ pub struct CodexCompletion {
     pub text: Option<String>,
     pub conversation_id: Option<String>,
     pub raw: Value,
+    /// Parsed BYOC subscription-usage snapshot captured from OpenAI's
+    /// `x-codex-*` rate-limit response headers (ChatGPT/Codex path only).
+    /// `None` for every other provider and whenever no usable window was
+    /// present. Serialized shape matches the frontend `subscriptionUsage`
+    /// contract; see `parse_codex_rate_limit_headers`.
+    pub rate_limits: Option<Value>,
 }
 
 pub struct CodexClient {
@@ -337,9 +343,21 @@ impl CodexClient {
             .send_upstream_request_with_retry(request_url.as_str(), &headers, &payload)
             .await?;
 
+        // Capture the subscription-usage snapshot from OpenAI's `x-codex-*`
+        // rate-limit headers before the body is consumed below. This is the
+        // only point where the upstream response headers are still available.
+        // ChatGPT/Codex path only; other providers do not emit these headers.
+        // Parsing never fails, so this stays strictly non-breaking.
+        let rate_limits = if self.credentials.is_chatgpt() {
+            parse_codex_rate_limit_headers(response.headers())
+        } else {
+            None
+        };
+
         if self.credentials.is_chatgpt() {
             let body = read_chatgpt_stream(response).await?;
-            let completion = parse_completion(body)?;
+            let mut completion = parse_completion(body)?;
+            completion.rate_limits = rate_limits;
             return Ok(completion);
         }
 
@@ -347,7 +365,7 @@ impl CodexClient {
             .json()
             .await
             .context("failed to decode JSON response")?;
-        let completion = match upstream_wire_api {
+        let mut completion = match upstream_wire_api {
             UpstreamWireApi::Responses => parse_completion(body)?,
             UpstreamWireApi::ChatCompletions => {
                 let adapted = chat_completions_to_responses(body)?;
@@ -358,6 +376,7 @@ impl CodexClient {
                 parse_completion(adapted)?
             }
         };
+        completion.rate_limits = rate_limits;
         Ok(completion)
     }
 
@@ -1475,7 +1494,135 @@ fn parse_completion(raw: Value) -> Result<CodexCompletion> {
         text,
         conversation_id,
         raw,
+        // Filled in by `complete_with_input` from the upstream response headers
+        // when they are still available; the body-parsing path leaves it None.
+        rate_limits: None,
     })
+}
+
+/// Build the canonical (non-model-prefixed) `x-codex-*` header name for a given
+/// window `kind` (`"primary"`/`"secondary"`) and `suffix`. An empty `kind`
+/// yields the un-scoped `x-codex-<suffix>` form.
+fn codex_rate_limit_header_name(kind: &str, suffix: &str) -> String {
+    if kind.is_empty() {
+        format!("x-codex-{suffix}")
+    } else {
+        format!("x-codex-{kind}-{suffix}")
+    }
+}
+
+fn codex_header_str(headers: &reqwest::header::HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+}
+
+/// Read a numeric `x-codex-*` header, tolerating a fractional value and
+/// rounding to the nearest integer. OpenAI reports `used-percent` as a float
+/// (e.g. `"37.4"`), so a strict integer parse would drop the value — and with
+/// it the whole window — on the normal production path. Parsing as `f64` first
+/// accepts both integer and fractional forms.
+fn codex_header_rounded_i64(headers: &reqwest::header::HeaderMap, name: &str) -> Option<i64> {
+    codex_header_str(headers, name).and_then(|value| {
+        value.parse::<f64>().ok().filter(|n| n.is_finite()).map(|n| n.round() as i64)
+    })
+}
+
+/// Parse a single rate-limit window (`primary` or `secondary`) from the
+/// `x-codex-*` response headers. A window is only emitted when
+/// `window-minutes > 0` AND `used-percent` parses (per the data contract).
+/// `resetAt` uses `x-codex-<kind>-reset-at` when present, else
+/// `now + x-codex-<kind>-reset-after-seconds`; it is omitted only when neither
+/// header is available.
+fn parse_codex_rate_limit_window(
+    headers: &reqwest::header::HeaderMap,
+    kind: &str,
+    now: i64,
+) -> Option<Value> {
+    let window_minutes =
+        codex_header_rounded_i64(headers, &codex_rate_limit_header_name(kind, "window-minutes"))?;
+    if window_minutes <= 0 {
+        return None;
+    }
+    // Clamp to the 0–100 contract range so a stray upstream value can't render a
+    // negative or overflowing "remaining" bar downstream.
+    let used_percent =
+        codex_header_rounded_i64(headers, &codex_rate_limit_header_name(kind, "used-percent"))?
+            .clamp(0, 100);
+
+    let reset_at =
+        codex_header_rounded_i64(headers, &codex_rate_limit_header_name(kind, "reset-at")).or_else(
+            || {
+                codex_header_rounded_i64(
+                    headers,
+                    &codex_rate_limit_header_name(kind, "reset-after-seconds"),
+                )
+                .map(|seconds| now + seconds)
+            },
+        );
+
+    let mut window = json!({
+        "kind": kind,
+        "usedPercent": used_percent,
+        "windowMinutes": window_minutes,
+    });
+    if let Some(reset_at) = reset_at {
+        window["resetAt"] = json!(reset_at);
+    }
+    Some(window)
+}
+
+/// Parse the `x-codex-*` rate-limit headers OpenAI returns on ChatGPT/Codex
+/// responses into the `subscriptionUsage` contract JSON the frontend consumes:
+///
+/// ```json
+/// {
+///   "windows": [
+///     { "kind": "primary"|"secondary", "usedPercent": <int>,
+///       "windowMinutes": <int>, "resetAt": <unix_seconds_int> }
+///   ],
+///   "planName": <string|null>,
+///   "capturedAt": <unix_seconds_int>
+/// }
+/// ```
+///
+/// Returns `None` when no usable window is present so callers can skip
+/// reporting entirely. Never fails: malformed or absent headers are simply
+/// dropped, keeping the user's response path unaffected.
+fn parse_codex_rate_limit_headers(headers: &reqwest::header::HeaderMap) -> Option<Value> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0);
+
+    let mut windows = Vec::new();
+    for kind in ["primary", "secondary"] {
+        if let Some(window) = parse_codex_rate_limit_window(headers, kind, now) {
+            windows.push(window);
+        }
+    }
+    if windows.is_empty() {
+        return None;
+    }
+
+    // The plan/limit name is provider-supplied. Prefer the primary window's
+    // name, then secondary, then an un-scoped fallback.
+    let plan_name = ["primary", "secondary", ""]
+        .into_iter()
+        .find_map(|kind| {
+            codex_header_str(headers, &codex_rate_limit_header_name(kind, "limit-name"))
+        })
+        .map(Value::String)
+        .unwrap_or(Value::Null);
+
+    Some(json!({
+        "windows": windows,
+        "planName": plan_name,
+        "capturedAt": now,
+    }))
 }
 
 #[cfg(test)]
@@ -1493,6 +1640,117 @@ mod tests {
             &mut items,
             &mut delta,
         )
+    }
+
+    #[test]
+    fn codex_rate_limit_headers_parse_into_subscription_usage_contract() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-primary-used-percent",
+            HeaderValue::from_static("42"),
+        );
+        headers.insert(
+            "x-codex-primary-window-minutes",
+            HeaderValue::from_static("300"),
+        );
+        headers.insert(
+            "x-codex-primary-reset-at",
+            HeaderValue::from_static("1893456000"),
+        );
+        headers.insert(
+            "x-codex-secondary-used-percent",
+            HeaderValue::from_static("10"),
+        );
+        headers.insert(
+            "x-codex-secondary-window-minutes",
+            HeaderValue::from_static("10080"),
+        );
+        headers.insert(
+            "x-codex-secondary-reset-after-seconds",
+            HeaderValue::from_static("3600"),
+        );
+        headers.insert(
+            "x-codex-primary-limit-name",
+            HeaderValue::from_static("GPT-5.3-Codex-Spark"),
+        );
+
+        let snapshot =
+            parse_codex_rate_limit_headers(&headers).expect("usable windows should be present");
+        assert_eq!(snapshot["planName"], json!("GPT-5.3-Codex-Spark"));
+
+        let windows = snapshot["windows"].as_array().expect("windows array");
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0]["kind"], json!("primary"));
+        assert_eq!(windows[0]["usedPercent"], json!(42));
+        assert_eq!(windows[0]["windowMinutes"], json!(300));
+        assert_eq!(windows[0]["resetAt"], json!(1893456000));
+        assert_eq!(windows[1]["kind"], json!("secondary"));
+        // The secondary window has no reset-at header, so resetAt is derived
+        // from now + reset-after-seconds and must land in the future.
+        assert!(windows[1]["resetAt"].as_i64().unwrap() >= 3600);
+        assert!(snapshot["capturedAt"].as_i64().is_some());
+    }
+
+    #[test]
+    fn codex_rate_limit_window_with_zero_minutes_is_omitted() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-codex-primary-used-percent", HeaderValue::from_static("5"));
+        headers.insert(
+            "x-codex-primary-window-minutes",
+            HeaderValue::from_static("0"),
+        );
+        // window-minutes == 0 disqualifies the only window, so nothing is emitted.
+        assert!(parse_codex_rate_limit_headers(&headers).is_none());
+    }
+
+    #[test]
+    fn codex_rate_limit_used_percent_accepts_fractional_values() {
+        // OpenAI reports used-percent as a float; a strict integer parse would
+        // drop the whole window on the normal path. It must round instead.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-primary-used-percent",
+            HeaderValue::from_static("37.4"),
+        );
+        headers.insert(
+            "x-codex-primary-window-minutes",
+            HeaderValue::from_static("300"),
+        );
+        headers.insert(
+            "x-codex-primary-reset-after-seconds",
+            HeaderValue::from_static("1800"),
+        );
+
+        let snapshot = parse_codex_rate_limit_headers(&headers)
+            .expect("a fractional percent must still yield a window");
+        let windows = snapshot["windows"].as_array().expect("windows array");
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0]["usedPercent"], json!(37)); // 37.4 rounds to 37
+        assert_eq!(windows[0]["windowMinutes"], json!(300));
+    }
+
+    #[test]
+    fn codex_rate_limit_window_without_reset_headers_still_emits() {
+        // No reset-at and no reset-after-seconds: the window is still usable
+        // (the frontend renders it without a reset label), so it must not be
+        // dropped merely for lacking a reset time.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-codex-primary-used-percent",
+            HeaderValue::from_static("42"),
+        );
+        headers.insert(
+            "x-codex-primary-window-minutes",
+            HeaderValue::from_static("300"),
+        );
+
+        let snapshot = parse_codex_rate_limit_headers(&headers)
+            .expect("a window without a reset time is still usable");
+        let windows = snapshot["windows"].as_array().expect("windows array");
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0]["usedPercent"], json!(42));
+        // resetAt is intentionally absent when neither reset header is present.
+        assert!(windows[0].get("resetAt").is_none());
     }
 
     #[test]
