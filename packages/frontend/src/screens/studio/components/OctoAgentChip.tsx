@@ -10,6 +10,8 @@ import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
 import { Toggle } from "../../../components/Toggle";
 import { ModelMenuSelect } from "./ModelMenuSelect";
+import { ReasoningMenuSelect } from "./ReasoningMenuSelect";
+import { normalizeReasoningEffort, type AiReasoningEffort } from "../../../utils/aiReasoning";
 import { useStatus } from "../../../status/useStatus";
 import { useCredits } from "../../../credits/useCredits";
 import {
@@ -313,6 +315,7 @@ export function OctoAgentChip({
   );
 
   const [agentModelUpdatingId, setAgentModelUpdatingId] = useState<string | null>(null);
+  const [agentReasoningUpdatingId, setAgentReasoningUpdatingId] = useState<string | null>(null);
   const [agentRuntimeUpdatingId, setAgentRuntimeUpdatingId] = useState<string | null>(null);
   const [agentCredentialUpdatingId, setAgentCredentialUpdatingId] = useState<string | null>(null);
   const agentCredentialActionInFlightRef = useRef(false);
@@ -565,6 +568,7 @@ export function OctoAgentChip({
       })();
       const modelOptions = modelOptionsForProvider(providerId);
       const modelValue = normalizeAiModelId(providerId, agent?.model);
+      const reasoningValue = normalizeReasoningEffort(agent?.reasoningEffort);
       const pinnedRuntimeId = agent?.runtimeId?.trim() ?? "";
       const runtimeMode: "shared" | "dedicated" = pinnedRuntimeId ? "dedicated" : "shared";
       const runtimeOption = pinnedRuntimeId
@@ -605,6 +609,7 @@ export function OctoAgentChip({
         providerId,
         modelOptions,
         modelValue,
+        reasoningValue,
         runtimeId,
         runtimeIdShort,
         runtimeModeLabel,
@@ -666,6 +671,35 @@ export function OctoAgentChip({
       }
     },
     [agentModelUpdatingId, onCredentialsRefresh, showStatus],
+  );
+
+  const handleAgentReasoningChange = useCallback(
+    async (agent: ControllerAgentProfile, nextEffort: AiReasoningEffort | null) => {
+      if (agentReasoningUpdatingId) {
+        return;
+      }
+      const currentValue = normalizeReasoningEffort(agent.reasoningEffort);
+      if (nextEffort === currentValue) {
+        return;
+      }
+
+      setAgentReasoningUpdatingId(agent.id);
+      try {
+        const result = await updateMyAgent(agent.id, { reasoningEffort: nextEffort });
+        if (!result.success || !result.agent) {
+          showStatus(result.error ?? "Unable to update reasoning effort.", "error", 4500);
+          return;
+        }
+        showStatus("Reasoning updated.", "success", 2500);
+        onCredentialsRefresh();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        showStatus(`Unable to update reasoning: ${message}`, "error", 4500);
+      } finally {
+        setAgentReasoningUpdatingId(null);
+      }
+    },
+    [agentReasoningUpdatingId, onCredentialsRefresh, showStatus],
   );
 
   const handleAgentRuntimePreferenceChange = useCallback(
@@ -1193,6 +1227,18 @@ export function OctoAgentChip({
                             }}
                             triggerTestId={card.isPrimary ? "octo-agent-model-select" : `agent-model-select-${card.handle}`}
                             menuTestId={card.isPrimary ? "octo-agent-model-menu" : `agent-model-menu-${card.handle}`}
+                          />
+                        ) : null}
+                        {card.agent && card.providerId === "openai" ? (
+                          <ReasoningMenuSelect
+                            value={card.reasoningValue}
+                            disabled={Boolean(agentReasoningUpdatingId) || isDisabled}
+                            ariaLabel={`Select reasoning effort for @${card.handle}`}
+                            onSelect={(nextEffort) => {
+                              void handleAgentReasoningChange(card.agent as ControllerAgentProfile, nextEffort);
+                            }}
+                            triggerTestId={card.isPrimary ? "octo-agent-reasoning-select" : `agent-reasoning-select-${card.handle}`}
+                            menuTestId={card.isPrimary ? "octo-agent-reasoning-menu" : `agent-reasoning-menu-${card.handle}`}
                           />
                         ) : null}
                         {card.agent ? (

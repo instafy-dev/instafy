@@ -10,6 +10,8 @@ export interface ControllerAgentProfile {
   avatarSeed: string;
   provider: string;
   model: string | null;
+  /** Per-agent reasoning effort (minimal|low|medium|high), or null to inherit. */
+  reasoningEffort: string | null;
   credentialId: string | null;
   runtimeId: string | null;
   createdAt: string;
@@ -56,6 +58,7 @@ function mapAgentPayload(payload: Record<string, unknown>): ControllerAgentProfi
     avatarSeed: typeof payload.avatarSeed === "string" ? payload.avatarSeed : id,
     provider: typeof payload.provider === "string" ? payload.provider : "openai",
     model: typeof payload.model === "string" ? payload.model : null,
+    reasoningEffort: typeof payload.reasoningEffort === "string" ? payload.reasoningEffort : null,
     credentialId: typeof payload.credentialId === "string" ? payload.credentialId : null,
     runtimeId: typeof payload.runtimeId === "string" ? payload.runtimeId : null,
     createdAt: typeof payload.createdAt === "string" ? payload.createdAt : "",
@@ -100,6 +103,7 @@ export async function createMyAgent(
     avatarSeed?: string;
     provider?: string;
     model?: string | null;
+    reasoningEffort?: string | null;
   },
   params?: { accessToken?: string | null }
 ): Promise<CreateMyAgentResult> {
@@ -132,6 +136,7 @@ export async function updateMyAgent(
     avatarSeed?: string;
     credentialId?: string | null;
     model?: string | null;
+    reasoningEffort?: string | null;
     projectId?: string;
     runtimeId?: string | null;
   },
