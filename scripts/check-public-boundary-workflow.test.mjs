@@ -58,6 +58,7 @@ test("trusted boundary is restricted to main PR target events", () => {
 
 test("trusted boundary waits for a fresh merge candidate before any checkout", () => {
   const source = readWorkflow("public-boundary.yml");
+  const boundary = jobSection(source, "boundary");
   const wait = stepSection(
     source,
     "Wait for the event-bound merge candidate to be minted",
@@ -85,6 +86,10 @@ test("trusted boundary waits for a fresh merge candidate before any checkout", (
     /EXPECTED_HEAD_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/u,
   );
   assert.match(wait, /GH_TOKEN: \$\{\{ github\.token \}\}/u);
+  assert.match(
+    boundary,
+    /permissions:\n      contents: read\n      pull-requests: read/u,
+  );
   assert.match(wait, /\[\[ "\$PR_NUMBER" =~ \^\[0-9\]\+\$ \]\]/u);
   assert.match(wait, /\[\[ "\$EXPECTED_HEAD_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\]/u);
   assert.match(wait, /pulls\/\$\{PR_NUMBER\}/u);

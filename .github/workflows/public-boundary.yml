@@ -25,6 +25,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+      pull-requests: read
 
     steps:
       - name: Wait for the event-bound merge candidate to be minted
