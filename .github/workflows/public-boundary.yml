@@ -17,6 +17,10 @@ concurrency:
 
 permissions:
   contents: read
+  # The wait step polls the pulls API; the workflow token needs the explicit
+  # pull-requests scope for that (contents alone 403s, which once burned the
+  # whole poll budget on every pull request).
+  pull-requests: read
 
 jobs:
   boundary:
@@ -25,6 +29,7 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+      pull-requests: read
 
     steps:
       - name: Wait for the event-bound merge candidate to be minted
@@ -54,10 +59,19 @@ jobs:
             if [[ "$attempt" -gt 1 ]]; then
               sleep 15
             fi
-            candidate_oid="$(
+            if ! api_body="$(
               gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
-                --jq '.merge_commit_sha // empty' 2>/dev/null || true
-            )"
+                --jq '.merge_commit_sha // empty' 2>/dev/null
+            )"; then
+              # The wait is availability-only; the parent verification below is
+              # the enforced property. An inaccessible pulls API (permissions
+              # regression, API outage) must not brick the check — skip the
+              # wait loudly rather than failing every pull request.
+              echo "::warning::pulls API not accessible from this token;" \
+                "skipping the merge-candidate wait (attempt ${attempt})."
+              exit 0
+            fi
+            candidate_oid="$api_body"
             if [[ "$candidate_oid" =~ ^[0-9a-f]{40}$ ]]; then
               head_parent="$(
                 gh api "repos/${GITHUB_REPOSITORY}/git/commits/${candidate_oid}" \
