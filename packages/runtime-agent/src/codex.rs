@@ -1163,6 +1163,21 @@ impl CodexClient {
             );
             config.model_reasoning_effort = Some(target);
         }
+        // A per-agent reasoning effort (the controller emits it as
+        // CODEX_AGENT_REASONING_EFFORT from the agent's `reasoning_effort` column)
+        // wins over the runtime clamp and the per-job heuristic above. Applied last
+        // so it is authoritative; when the env is absent/empty/unparseable this is a
+        // no-op and the existing per-job / global behavior is preserved untouched.
+        if let Some(agent_effort) = agent_reasoning_effort_override()
+            && config.model_reasoning_effort.as_ref() != Some(&agent_effort)
+        {
+            tracing::info!(
+                from = ?config.model_reasoning_effort,
+                to = ?agent_effort,
+                "applied per-agent Codex reasoning effort override"
+            );
+            config.model_reasoning_effort = Some(agent_effort);
+        }
         if options.disable_shell_tool {
             // For browser-session jobs we want MCP-first behavior and to avoid shell-script fallbacks.
             // Disable both shell modes (legacy shell + unified exec) and freeform patching.
@@ -2813,6 +2828,24 @@ fn clamp_runtime_reasoning_effort(config: &mut Config) {
             "clamped Codex reasoning effort for runtime-agent background run"
         );
         config.model_reasoning_effort = Some(target);
+    }
+}
+
+/// Parse the per-agent reasoning effort the controller emits as
+/// `CODEX_AGENT_REASONING_EFFORT`. Only the four supported values
+/// (minimal|low|medium|high, case-insensitive) are honored, mapping to the real
+/// `ReasoningEffort` variants; anything else (including unset/empty) yields None
+/// so callers fall back to the existing per-job / global reasoning behavior.
+/// Note: we intentionally match explicitly rather than `str::parse::<ReasoningEffort>()`,
+/// whose FromStr is case-sensitive and coerces unknown strings into a Custom variant.
+fn agent_reasoning_effort_override() -> Option<ReasoningEffort> {
+    let raw = optional_env("CODEX_AGENT_REASONING_EFFORT")?;
+    match raw.to_ascii_lowercase().as_str() {
+        "minimal" => Some(ReasoningEffort::Minimal),
+        "low" => Some(ReasoningEffort::Low),
+        "medium" => Some(ReasoningEffort::Medium),
+        "high" => Some(ReasoningEffort::High),
+        _ => None,
     }
 }
 
