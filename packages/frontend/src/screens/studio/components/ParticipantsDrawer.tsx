@@ -20,11 +20,11 @@ import type { ConversationRosterAgent } from "./conversationRosterMembers";
  * and is forced to the rail while the code/preview panel owns the right edge.
  */
 
-const COLLAPSED_STORAGE_KEY = "instafy.participantsDrawer.collapsed.v1";
+const COLLAPSED_STORAGE_NAME = "instafy.participantsDrawer.collapsed.v1";
 
 function readStoredCollapsed(): boolean {
   try {
-    return window.localStorage.getItem(COLLAPSED_STORAGE_KEY) === "1";
+    return window.localStorage.getItem(COLLAPSED_STORAGE_NAME) === "1";
   } catch {
     return false;
   }
@@ -77,7 +77,7 @@ export function ParticipantsDrawer({ forceRail }: { forceRail: boolean }) {
     setUserCollapsed((current) => {
       const next = !current;
       try {
-        window.localStorage.setItem(COLLAPSED_STORAGE_KEY, next ? "1" : "0");
+        window.localStorage.setItem(COLLAPSED_STORAGE_NAME, next ? "1" : "0");
       } catch {
         // Preference just won't stick (private mode).
       }
