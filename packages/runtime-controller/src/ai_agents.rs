@@ -39,6 +39,7 @@ pub(crate) struct AgentProfile {
     avatar_seed: String,
     provider: String,
     model: Option<String>,
+    reasoning_effort: Option<String>,
     credential_id: Option<String>,
     runtime_id: Option<String>,
     deleted_at: Option<String>,
@@ -62,6 +63,7 @@ pub(crate) struct CreateAgentBody {
     avatar_seed: Option<String>,
     provider: Option<String>,
     model: Option<String>,
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,6 +80,8 @@ pub(crate) struct UpdateAgentBody {
     credential_id: Option<Option<String>>,
     #[serde(default)]
     model: Option<Option<String>>,
+    #[serde(default)]
+    reasoning_effort: Option<Option<String>>,
     project_id: Option<String>,
     #[serde(default)]
     runtime_id: Option<Option<String>>,
@@ -171,6 +175,17 @@ fn normalize_optional_model(
         }
     }
     Ok(normalized)
+}
+
+/// Normalize a per-agent reasoning-effort override to one of the four supported
+/// values (minimal|low|medium|high). Empty or unknown values collapse to NULL
+/// (inherit) rather than erroring, mirroring how `model` treats blank input.
+fn normalize_optional_reasoning_effort(value: Option<String>) -> Option<String> {
+    value
+        .map(|entry| entry.trim().to_ascii_lowercase())
+        .filter(|entry| {
+            matches!(entry.as_str(), "minimal" | "low" | "medium" | "high")
+        })
 }
 
 async fn resolve_agent_provider_for_credential(
@@ -368,6 +383,7 @@ pub(crate) async fn create_default_agent_for_credential(
     label: Option<&str>,
     description: Option<String>,
     model: Option<String>,
+    reasoning_effort: Option<String>,
     provider: &str,
 ) -> Result<(Uuid, String), (StatusCode, Json<ApiError>)> {
     let base = generate_handle_base(label);
@@ -406,18 +422,20 @@ pub(crate) async fn create_default_agent_for_credential(
         .filter(|value| !value.is_empty());
     let description = normalize_optional_description(description)?;
     let model = normalize_optional_model(model)?;
+    let reasoning_effort = normalize_optional_reasoning_effort(reasoning_effort);
 
     transaction
         .execute(
             "insert into user_agents (
-                 id, user_id, credential_id, provider, model, handle, display_name, description, avatar_seed
-             ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                 id, user_id, credential_id, provider, model, reasoning_effort, handle, display_name, description, avatar_seed
+             ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             &[
                 &agent_id,
                 &user_id,
                 &credential_id,
                 &provider,
                 &model,
+                &reasoning_effort,
                 &handle,
                 &display_name,
                 &description,
@@ -497,6 +515,7 @@ async fn list_my_agents(
                     ua.avatar_seed,
                     ua.provider,
                     ua.model,
+                    ua.reasoning_effort,
                     ua.credential_id,
                     ua.deleted_at,
                     ua.created_at,
@@ -525,6 +544,7 @@ async fn list_my_agents(
             let avatar_seed: String = row.get("avatar_seed");
             let provider: String = row.get("provider");
             let model: Option<String> = row.get("model");
+            let reasoning_effort: Option<String> = row.get("reasoning_effort");
             let credential_id: Option<Uuid> = row.get("credential_id");
             let runtime_id: Option<Uuid> = row.get("runtime_id");
             let deleted_at: Option<DateTime<Utc>> = row.get("deleted_at");
@@ -539,6 +559,7 @@ async fn list_my_agents(
                 avatar_seed,
                 provider,
                 model,
+                reasoning_effort,
                 credential_id: credential_id.map(|value| value.to_string()),
                 runtime_id: runtime_id.map(|value| value.to_string()),
                 deleted_at: deleted_at.map(|dt| dt.to_rfc3339()),
@@ -577,6 +598,7 @@ async fn create_my_agent(
     let display_name = normalize_optional_text(body.display_name);
     let description = normalize_optional_description(body.description)?;
     let model = normalize_optional_model(body.model)?;
+    let reasoning_effort = normalize_optional_reasoning_effort(body.reasoning_effort);
 
     let mut connection = state
         .pool
@@ -611,14 +633,15 @@ async fn create_my_agent(
         transaction
             .execute(
                 "insert into user_agents (
-                     id, user_id, credential_id, provider, model, handle, display_name, description, avatar_seed
-                 ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                     id, user_id, credential_id, provider, model, reasoning_effort, handle, display_name, description, avatar_seed
+                 ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
                 &[
                     &agent_id,
                     &user_id,
                     &credential_id,
                     &provider,
                     &model,
+                    &reasoning_effort,
                     &handle,
                     &display_name,
                     &description,
@@ -652,6 +675,7 @@ async fn create_my_agent(
             seed_label,
             description.clone(),
             model.clone(),
+            reasoning_effort.clone(),
             &provider,
         )
         .await?
@@ -659,7 +683,7 @@ async fn create_my_agent(
 
     let row = transaction
         .query_one(
-            "select id, handle, display_name, description, avatar_seed, provider, model, credential_id, deleted_at, created_at, updated_at
+            "select id, handle, display_name, description, avatar_seed, provider, model, reasoning_effort, credential_id, deleted_at, created_at, updated_at
              from user_agents
              where id = $1 and user_id = $2
              limit 1",
@@ -680,6 +704,7 @@ async fn create_my_agent(
     let avatar_seed: String = row.get("avatar_seed");
     let provider: String = row.get("provider");
     let model: Option<String> = row.get("model");
+    let reasoning_effort: Option<String> = row.get("reasoning_effort");
     let credential_id: Option<Uuid> = row.get("credential_id");
     let deleted_at: Option<DateTime<Utc>> = row.get("deleted_at");
     let created_at: DateTime<Utc> = row.get("created_at");
@@ -693,6 +718,7 @@ async fn create_my_agent(
         avatar_seed,
         provider,
         model,
+        reasoning_effort,
         credential_id: credential_id.map(|value| value.to_string()),
         runtime_id: None,
         deleted_at: deleted_at.map(|dt| dt.to_rfc3339()),
@@ -731,7 +757,7 @@ async fn update_my_agent(
 
     let existing = transaction
         .query_opt(
-            "select handle, display_name, description, avatar_seed, provider, model, credential_id
+            "select handle, display_name, description, avatar_seed, provider, model, reasoning_effort, credential_id
              from user_agents
              where id = $1 and user_id = $2 and deleted_at is null
              limit 1",
@@ -750,6 +776,7 @@ async fn update_my_agent(
     let existing_avatar_seed: String = existing.get("avatar_seed");
     let existing_provider: String = existing.get("provider");
     let existing_model: Option<String> = existing.get("model");
+    let existing_reasoning_effort: Option<String> = existing.get("reasoning_effort");
     let existing_credential_id: Option<Uuid> = existing.get("credential_id");
 
     let next_handle = desired_handle.unwrap_or_else(|| existing_handle.clone());
@@ -824,6 +851,11 @@ async fn update_my_agent(
     let next_model = match body.model {
         None => existing_model,
         Some(value) => normalize_optional_model(value)?,
+    };
+
+    let next_reasoning_effort = match body.reasoning_effort {
+        None => existing_reasoning_effort,
+        Some(value) => normalize_optional_reasoning_effort(value),
     };
 
     let project_id = body
@@ -952,9 +984,10 @@ async fn update_my_agent(
                  credential_id = $7,
                  provider = $8,
                  model = $9,
+                 reasoning_effort = $10,
                  updated_at = now()
              where id = $1 and user_id = $2 and deleted_at is null
-             returning id, handle, display_name, description, avatar_seed, provider, model, credential_id, deleted_at, created_at, updated_at",
+             returning id, handle, display_name, description, avatar_seed, provider, model, reasoning_effort, credential_id, deleted_at, created_at, updated_at",
             &[
                 &agent_id,
                 &user_id,
@@ -965,6 +998,7 @@ async fn update_my_agent(
                 &next_credential_id,
                 &next_provider,
                 &next_model,
+                &next_reasoning_effort,
             ],
         )
         .await
@@ -986,6 +1020,7 @@ async fn update_my_agent(
     let avatar_seed: String = row.get("avatar_seed");
     let provider: String = row.get("provider");
     let model: Option<String> = row.get("model");
+    let reasoning_effort: Option<String> = row.get("reasoning_effort");
     let credential_id: Option<Uuid> = row.get("credential_id");
     let deleted_at: Option<DateTime<Utc>> = row.get("deleted_at");
     let created_at: DateTime<Utc> = row.get("created_at");
@@ -999,6 +1034,7 @@ async fn update_my_agent(
         avatar_seed,
         provider,
         model,
+        reasoning_effort,
         credential_id: credential_id.map(|value| value.to_string()),
         runtime_id: agent_runtime_id.map(|value| value.to_string()),
         deleted_at: deleted_at.map(|dt| dt.to_rfc3339()),

@@ -1114,16 +1114,30 @@ fn apply_managed_ai_env_overrides(
     );
 }
 
+/// Resolved per-agent runtime overrides loaded from `user_agents`. `model` is
+/// provider-resolved; `reasoning_effort` is the raw per-agent value (one of
+/// minimal|low|medium|high, already normalized on write) or None to inherit.
+struct AgentRuntimeOverrides {
+    model: Option<String>,
+    reasoning_effort: Option<String>,
+}
+
+fn read_agent_reasoning_effort(row: &tokio_postgres::Row) -> Option<String> {
+    row.get::<_, Option<String>>("reasoning_effort")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 async fn load_agent_model(
     transaction: &tokio_postgres::Transaction<'_>,
     user_id: &Uuid,
     agent_id: Option<&Uuid>,
     agent_handle: Option<&str>,
-) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
+) -> Result<AgentRuntimeOverrides, (StatusCode, Json<ApiError>)> {
     if let Some(agent_id) = agent_id {
         let row = transaction
             .query_opt(
-                "select provider, model
+                "select provider, model, reasoning_effort
                  from user_agents
                  where id = $1 and user_id = $2 and deleted_at is null
                  limit 1",
@@ -1132,7 +1146,10 @@ async fn load_agent_model(
             .await
             .map_err(|error| internal_error(format!("failed to load agent model: {error}")))?;
         let Some(row) = row else {
-            return Ok(None);
+            return Ok(AgentRuntimeOverrides {
+                model: None,
+                reasoning_effort: None,
+            });
         };
         let provider: String = row.get("provider");
         let provider = resolve_effective_agent_model_provider(transaction, user_id, &provider)
@@ -1142,20 +1159,30 @@ async fn load_agent_model(
             .get::<_, Option<String>>("model")
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        return Ok(resolve_agent_model_for_provider(&provider, model));
+        let reasoning_effort = read_agent_reasoning_effort(&row);
+        return Ok(AgentRuntimeOverrides {
+            model: resolve_agent_model_for_provider(&provider, model),
+            reasoning_effort,
+        });
     }
 
     let Some(handle) = agent_handle else {
-        return Ok(None);
+        return Ok(AgentRuntimeOverrides {
+            model: None,
+            reasoning_effort: None,
+        });
     };
     let trimmed = handle.trim().trim_start_matches('@').trim();
     if trimmed.is_empty() {
-        return Ok(None);
+        return Ok(AgentRuntimeOverrides {
+            model: None,
+            reasoning_effort: None,
+        });
     }
 
     let row = transaction
         .query_opt(
-            "select provider, model
+            "select provider, model, reasoning_effort
              from user_agents
              where user_id = $1 and lower(handle) = lower($2) and deleted_at is null
              limit 1",
@@ -1165,7 +1192,10 @@ async fn load_agent_model(
         .map_err(|error| internal_error(format!("failed to load agent model: {error}")))?;
 
     let Some(row) = row else {
-        return Ok(None);
+        return Ok(AgentRuntimeOverrides {
+            model: None,
+            reasoning_effort: None,
+        });
     };
     let provider: String = row.get("provider");
     let provider = resolve_effective_agent_model_provider(transaction, user_id, &provider)
@@ -1175,7 +1205,11 @@ async fn load_agent_model(
         .get::<_, Option<String>>("model")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    Ok(resolve_agent_model_for_provider(&provider, model))
+    let reasoning_effort = read_agent_reasoning_effort(&row);
+    Ok(AgentRuntimeOverrides {
+        model: resolve_agent_model_for_provider(&provider, model),
+        reasoning_effort,
+    })
 }
 
 async fn resolve_effective_agent_model_provider(
@@ -1313,7 +1347,7 @@ async fn agent_secrets(
         std::collections::HashMap::new();
 
     if let Some(user_id) = user_id.as_ref() {
-        if let Ok(model) = load_agent_model(
+        if let Ok(overrides) = load_agent_model(
             &transaction,
             user_id,
             agent_id.as_ref(),
@@ -1321,9 +1355,17 @@ async fn agent_secrets(
         )
         .await
         {
-            if let Some(model) = model {
+            if let Some(model) = overrides.model {
                 env.entry("CODEX_MODEL".to_string())
                     .or_insert(JsonValue::String(model));
+            }
+            // Emit the per-agent reasoning effort only when the agent actually sets
+            // one. When it is null we omit the key entirely so the runtime keeps its
+            // existing per-job / global reasoning behavior. Use a distinct key from
+            // the proxy's global CODEX_REASONING_EFFORT fallback.
+            if let Some(reasoning_effort) = overrides.reasoning_effort {
+                env.entry("CODEX_AGENT_REASONING_EFFORT".to_string())
+                    .or_insert(JsonValue::String(reasoning_effort));
             }
         }
     }

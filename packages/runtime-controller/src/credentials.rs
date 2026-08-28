@@ -313,6 +313,8 @@ pub(crate) async fn insert_user_credential(
         label.as_deref(),
         None,
         agent_model,
+        // New credential-seeded agents inherit reasoning effort (null) until set.
+        None,
         &agent_provider,
     )
     .await?;
