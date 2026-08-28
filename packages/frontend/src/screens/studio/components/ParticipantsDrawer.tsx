@@ -65,10 +65,10 @@ function credentialLine(
   }
 }
 
-// Per-window "how much headroom is left" meter. Fills to the REMAINING share
-// (so a fuller bar means more room — matching the team-credits meter above) and
-// warns as it drains. Reset time rides the header, relative when it's close.
-function UsageWindowMeter({
+// One compact line per window: "<label> · <reset>" on the left, "<n>% left" on
+// the right (amber as it drains). No bar — the number is the signal, and a
+// single row keeps the drawer tight even with two windows per agent.
+function UsageWindowRow({
   window,
   nowMs,
 }: {
@@ -78,41 +78,28 @@ function UsageWindowMeter({
   const label = windowLabel(window.windowMinutes);
   // Once the reset time has passed and no fresher snapshot has arrived, the
   // window has rolled over — the last-known "used" figure is stale. Show it as
-  // refreshed (full) instead of a drained bar that would wrongly read as
-  // "nearly out of quota".
+  // refreshed (full) rather than "nearly out of quota".
   const lapsed = window.resetAt > 0 && window.resetAt * 1000 <= nowMs;
   const remaining = lapsed ? 100 : Math.max(0, 100 - window.usedPercent);
   const low = !lapsed && remaining <= 15;
   const reset = lapsed ? "just reset" : formatReset(window.resetAt, nowMs);
   return (
-    <div className="pt-1.5" data-testid="participants-usage-window">
-      <div className="flex items-baseline justify-between gap-2 pb-0.5">
-        <Text as="span" variant="caption" tone="muted" className="min-w-0 truncate text-xxs">
-          {label}
-          {reset ? ` · ${reset}` : ""}
-        </Text>
-        <Text
-          as="span"
-          variant="caption"
-          tone={low ? "warning" : "muted"}
-          className="shrink-0 text-xxs tabular-nums"
-        >
-          {remaining}% left
-        </Text>
-      </div>
-      <div
-        role="meter"
-        aria-label={`${label} allowance remaining`}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={remaining}
-        className="h-1 overflow-hidden rounded-full bg-primary-500/15"
+    <div
+      className="flex items-baseline justify-between gap-2 pt-0.5"
+      data-testid="participants-usage-window"
+    >
+      <Text as="span" variant="caption" tone="muted" className="min-w-0 truncate text-xxs">
+        {label}
+        {reset ? ` · ${reset}` : ""}
+      </Text>
+      <Text
+        as="span"
+        variant="caption"
+        tone={low ? "warning" : "muted"}
+        className="shrink-0 text-xxs tabular-nums"
       >
-        <span
-          className={`block h-full rounded-full ${low ? "bg-secondary-500" : "bg-primary-500"}`}
-          style={{ width: `${remaining}%` }}
-        />
-      </div>
+        {remaining}% left
+      </Text>
     </div>
   );
 }
@@ -128,9 +115,9 @@ function SubscriptionUsageMeters({
   // upstream lists them — so the fast-moving one reads at the top.
   const windows = [...usage.windows].sort((a, b) => a.windowMinutes - b.windowMinutes);
   return (
-    <div className="mt-1.5" data-testid="participants-usage">
+    <div className="mt-1" data-testid="participants-usage">
       {windows.map((window) => (
-        <UsageWindowMeter key={window.kind} window={window} nowMs={nowMs} />
+        <UsageWindowRow key={window.kind} window={window} nowMs={nowMs} />
       ))}
     </div>
   );
@@ -160,6 +147,21 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  // Clicking anywhere outside the drawer closes it. Skip clicks on the roster
+  // facepile — it toggles on its own, so closing here would race its toggle and
+  // reopen the drawer. Uses mousedown so it settles before the click lands.
+  useEffect(() => {
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as Element | null;
+      if (!target) return;
+      if (target.closest('[data-testid="participants-drawer"]')) return;
+      if (target.closest('[data-testid="conversation-roster"]')) return;
+      onClose();
+    };
+    window.addEventListener("mousedown", onPointerDown);
+    return () => window.removeEventListener("mousedown", onPointerDown);
   }, [onClose]);
 
   const { humans, agents, runningAgentHandles, totalQueuedCount } = snapshot;

@@ -148,8 +148,8 @@ describe("ParticipantsDrawer", () => {
     expect(text).toContain("Weekly");
     expect(text).toContain("60% left");
     expect(text).not.toContain("Weekly · resets in");
-    // Revoked agent has no live snapshot → no meters for it.
-    expect(container.querySelectorAll('[role="meter"]').length).toBe(3); // 2 usage + team credits
+    // Usage rows are text-only now; the only meter left is the team-credits bar.
+    expect(container.querySelectorAll('[role="meter"]').length).toBe(1);
   });
 
   it("presents a lapsed window as refreshed, not drained", async () => {
@@ -286,5 +286,25 @@ describe("ParticipantsDrawer", () => {
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     });
     expect(onClose).toHaveBeenCalledTimes(2);
+  });
+
+  it("closes when clicking outside, but not inside the drawer", async () => {
+    await act(async () => {
+      publishChatParticipants(snapshot());
+    });
+    const onClose = await render();
+
+    const drawer = container.querySelector('[data-testid="participants-drawer"]');
+    // A click inside the drawer must not close it.
+    await act(async () => {
+      drawer?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+    expect(onClose).not.toHaveBeenCalled();
+
+    // A click anywhere outside closes it.
+    await act(async () => {
+      document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });
