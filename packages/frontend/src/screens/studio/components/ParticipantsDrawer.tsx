@@ -1,5 +1,5 @@
-import { useCallback, useState } from "react";
-import { NavArrowRight } from "iconoir-react";
+import { useEffect } from "react";
+import { Xmark } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import { useCredits } from "../../../credits/useCredits";
@@ -7,44 +7,33 @@ import {
   resolveAgentAvatarGradient,
   resolveAgentAvatarText,
 } from "../../../utils/agentAvatar";
-import { useChatParticipantsSnapshot } from "./chatParticipantsStore";
-import type { ConversationRosterAgent } from "./conversationRosterMembers";
+import {
+  useChatParticipantsSnapshot,
+  type ParticipantAgent,
+} from "./chatParticipantsStore";
 
 /**
- * Right-edge roster for the active conversation on wide screens: who is here,
- * what each agent is doing HERE (statuses are conversation-scoped — the send
- * queue belongs to the conversation, so queue depth is a summary line and
- * never an agent-row claim), and the shared team-credit pool. Docked
- * panel-tier surface, flat rows; the only data source is the snapshot
- * ChatPanel publishes plus the credits provider. Collapses to an avatar rail,
- * and is forced to the rail while the code/preview panel owns the right edge.
+ * Right-edge overlay listing the active conversation's people and agents, what
+ * each agent runs HERE (statuses are conversation-scoped — queue depth is the
+ * summary line, never an agent-row claim), the model/provider/credential each
+ * agent draws from, and the shared team-credit pool. Opened from the chat's
+ * roster facepile and closed to nothing — it overlays rather than pushes, so
+ * it never competes with the code/preview panel for the right edge.
  */
-
-const COLLAPSED_STORAGE_KEY = "instafy.participantsDrawer.collapsed.v1";
-
-function readStoredCollapsed(): boolean {
-  try {
-    return window.localStorage.getItem(COLLAPSED_STORAGE_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
 
 function humanInitials(label: string): string {
   const parts = label.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) {
-    return "?";
-  }
+  if (parts.length === 0) return "?";
   const first = parts[0]?.[0] ?? "";
   const last = parts.length > 1 ? parts[parts.length - 1]?.[0] ?? "" : "";
   return `${first}${last}`.toUpperCase() || first.toUpperCase();
 }
 
-function AgentAvatar({ agent }: { agent: ConversationRosterAgent }) {
+function AgentAvatar({ agent }: { agent: ParticipantAgent }) {
   return (
     <span
       aria-hidden="true"
-      className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-3xs font-semibold text-white ring-1 ring-black/5 dark:ring-white/10"
+      className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-3xs font-semibold text-white ring-1 ring-black/5 dark:ring-white/10"
       style={{ backgroundImage: resolveAgentAvatarGradient(agent.avatarSeed) }}
     >
       {resolveAgentAvatarText({ handle: agent.handle, displayName: agent.displayName })}
@@ -52,54 +41,53 @@ function AgentAvatar({ agent }: { agent: ConversationRosterAgent }) {
   );
 }
 
-function RunningMarker() {
-  return (
-    <span className="flex shrink-0 items-center gap-1.5 text-xxs font-semibold text-primary-600 dark:text-primary-300">
-      <span
-        aria-hidden="true"
-        className="h-1.5 w-1.5 rounded-full bg-primary-500 shadow-[0_0_5px_rgba(55,148,255,0.8)]"
-      />
-      Running
-    </span>
-  );
+// Lead with the account the agent uses (what a person recognizes) and annotate
+// only the notable states. "Default" (follows the workspace default) is the
+// unremarkable norm and needs no label; "Pinned" (locked to this one) and the
+// broken states are what's worth flagging.
+function credentialLine(
+  agent: ParticipantAgent,
+): { text: string; tone: "muted" | "warning" | "danger" } {
+  const label = agent.credentialLabel ?? "credential";
+  switch (agent.credentialState) {
+    case "missing":
+      return { text: "Its credential is missing", tone: "danger" };
+    case "revoked":
+      return { text: "Its credential was revoked", tone: "danger" };
+    case "none":
+      return { text: "No AI credential", tone: "warning" };
+    case "pinned":
+      return { text: `${label} · pinned`, tone: "muted" };
+    default:
+      return { text: label, tone: "muted" };
+  }
 }
 
-export function ParticipantsDrawer({ forceRail }: { forceRail: boolean }) {
+export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
   const snapshot = useChatParticipantsSnapshot();
   const {
     billing,
     hasLoaded: creditsLoaded,
     controllerEnabled: creditsEnabled,
   } = useCredits();
-  const [userCollapsed, setUserCollapsed] = useState(readStoredCollapsed);
 
-  const toggleCollapsed = useCallback(() => {
-    setUserCollapsed((current) => {
-      const next = !current;
-      try {
-        window.localStorage.setItem(COLLAPSED_STORAGE_KEY, next ? "1" : "0");
-      } catch {
-        // Preference just won't stick (private mode).
-      }
-      return next;
-    });
-  }, []);
+  // Escape closes; the panel is docked-style (no backdrop), so this is the
+  // keyboard exit alongside the header close button and the facepile toggle.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
 
   const { humans, agents, runningAgentHandles, totalQueuedCount } = snapshot;
-  if (humans.length === 0 && agents.length === 0) {
-    return null;
-  }
-
   const runningSet = new Set(runningAgentHandles);
   const runningCount = agents.filter((agent) => runningSet.has(agent.handle)).length;
   const summaryParts: string[] = [];
-  if (runningCount > 0) {
-    summaryParts.push(`${runningCount} running`);
-  }
+  if (runningCount > 0) summaryParts.push(`${runningCount} running`);
   if (totalQueuedCount > 0) {
-    summaryParts.push(
-      `${totalQueuedCount} message${totalQueuedCount === 1 ? "" : "s"} queued`,
-    );
+    summaryParts.push(`${totalQueuedCount} message${totalQueuedCount === 1 ? "" : "s"} queued`);
   }
 
   const creditLimit = billing.creditLimit ?? 0;
@@ -108,71 +96,11 @@ export function ParticipantsDrawer({ forceRail }: { forceRail: boolean }) {
   const creditFraction = showCredits ? Math.min(1, creditBalance / creditLimit) : 0;
   const creditsLow = showCredits && creditBalance <= Math.max(2, Math.floor(creditLimit * 0.2));
 
-  const collapsed = forceRail || userCollapsed;
-
-  if (collapsed) {
-    return (
-      <aside
-        aria-label="Conversation participants"
-        data-testid="participants-drawer-rail"
-        className="flex h-full w-11 shrink-0 flex-col items-center gap-2 border-l border-slate-200/70 bg-white py-2.5 dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-panel)]"
-      >
-        {forceRail ? null : (
-          <IconButton
-            variant="ghost"
-            size="xs"
-            radius="full"
-            onPress={toggleCollapsed}
-            aria-label="Expand participants"
-            aria-expanded={false}
-            className="text-slate-500 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-300 dark:hover:text-slate-100 dark:data-[hovered]:text-slate-100"
-          >
-            <NavArrowRight className="h-3.5 w-3.5 rotate-180" aria-hidden="true" />
-          </IconButton>
-        )}
-        <div className="flex flex-col items-center gap-1.5">
-          {humans.slice(0, 3).map((human) => (
-            <span
-              key={human.userId}
-              title={human.label}
-              className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-slate-500 text-3xs font-semibold text-white dark:bg-slate-600"
-            >
-              {humanInitials(human.label)}
-            </span>
-          ))}
-          {agents.slice(0, 4).map((agent) => (
-            <span key={agent.handle} title={agent.displayName} className="relative">
-              <AgentAvatar agent={agent} />
-              {runningSet.has(agent.handle) ? (
-                <span
-                  aria-hidden="true"
-                  className="absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full border-2 border-white bg-primary-500 dark:border-[color:var(--color-studio-dark-panel)]"
-                />
-              ) : null}
-            </span>
-          ))}
-        </div>
-        {showCredits ? (
-          <span
-            title={`Team credits ${creditBalance}/${creditLimit}`}
-            aria-hidden="true"
-            className="mt-auto flex h-6 w-6 items-center justify-center rounded-full"
-            style={{
-              background: `conic-gradient(${creditsLow ? "#d7b686" : "var(--color-primary-500)"} 0 ${Math.round(creditFraction * 100)}%, rgba(127,127,127,0.25) ${Math.round(creditFraction * 100)}% 100%)`,
-            }}
-          >
-            <span className="h-4 w-4 rounded-full bg-white dark:bg-[var(--color-studio-dark-panel)]" />
-          </span>
-        ) : null}
-      </aside>
-    );
-  }
-
   return (
     <aside
       aria-label="Conversation participants"
       data-testid="participants-drawer"
-      className="flex h-full w-[272px] shrink-0 flex-col border-l border-slate-200/70 bg-white dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-panel)]"
+      className="absolute right-0 top-0 bottom-0 z-30 flex w-[300px] max-w-[85vw] flex-col border-l border-slate-200/70 bg-white shadow-[0_0_40px_-12px_rgba(0,0,0,0.25)] dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-panel)] dark:shadow-[0_0_40px_-12px_rgba(0,0,0,0.6)]"
     >
       <div className="flex items-center justify-between px-3.5 pb-0.5 pt-3">
         <Text as="div" variant="bodyStrong" tone="primary" className="text-sm">
@@ -182,12 +110,11 @@ export function ParticipantsDrawer({ forceRail }: { forceRail: boolean }) {
           variant="ghost"
           size="xs"
           radius="full"
-          onPress={toggleCollapsed}
-          aria-label="Collapse participants"
-          aria-expanded
+          onPress={onClose}
+          aria-label="Close participants"
           className="text-slate-500 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-300 dark:hover:text-slate-100 dark:data-[hovered]:text-slate-100"
         >
-          <NavArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+          <Xmark className="h-4 w-4" aria-hidden="true" />
         </IconButton>
       </div>
       {summaryParts.length > 0 ? (
@@ -203,6 +130,12 @@ export function ParticipantsDrawer({ forceRail }: { forceRail: boolean }) {
       ) : null}
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3.5 pb-2">
+        {humans.length === 0 && agents.length === 0 ? (
+          <Text as="p" variant="caption" tone="muted" className="pt-6 text-center text-xs">
+            No one here yet.
+          </Text>
+        ) : null}
+
         {humans.length > 0 ? (
           <section aria-label="People">
             <Text
@@ -215,7 +148,7 @@ export function ParticipantsDrawer({ forceRail }: { forceRail: boolean }) {
             </Text>
             {humans.map((human) => (
               <div key={human.userId} className="flex items-center gap-2.5 py-1.5">
-                <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-500 text-3xs font-semibold text-white dark:bg-slate-600">
+                <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-slate-500 text-3xs font-semibold text-white dark:bg-slate-600">
                   {humanInitials(human.label)}
                 </span>
                 <Text
@@ -244,27 +177,47 @@ export function ParticipantsDrawer({ forceRail }: { forceRail: boolean }) {
             >
               Agents
             </Text>
-            {agents.map((agent) => (
-              <div key={agent.handle} className="flex items-center gap-2.5 py-1.5">
-                <AgentAvatar agent={agent} />
-                <div className="min-w-0 flex-1">
-                  <Text
-                    as="div"
-                    variant="caption"
-                    tone="secondary"
-                    className="truncate text-xs font-medium"
-                  >
-                    @{agent.handle}
-                  </Text>
-                  {agent.displayName && agent.displayName !== `@${agent.handle}` ? (
-                    <Text as="div" variant="caption" tone="muted" className="truncate text-xxs">
-                      {agent.displayName}
+            {agents.map((agent) => {
+              const credential = credentialLine(agent);
+              const metaParts = [agent.model, agent.providerLabel].filter(Boolean);
+              return (
+                <div key={agent.handle} className="flex items-start gap-2.5 py-2">
+                  <AgentAvatar agent={agent} />
+                  <div className="min-w-0 flex-1">
+                    <Text
+                      as="div"
+                      variant="caption"
+                      tone="secondary"
+                      className="truncate text-xs font-medium"
+                    >
+                      @{agent.handle}
                     </Text>
+                    {metaParts.length > 0 ? (
+                      <Text as="div" variant="caption" tone="muted" className="truncate text-xxs">
+                        {metaParts.join(" · ")}
+                      </Text>
+                    ) : null}
+                    <Text
+                      as="div"
+                      variant="caption"
+                      tone={credential.tone}
+                      className="truncate text-xxs"
+                    >
+                      {credential.text}
+                    </Text>
+                  </div>
+                  {runningSet.has(agent.handle) ? (
+                    <span className="flex shrink-0 items-center gap-1.5 pt-0.5 text-xxs font-semibold text-primary-600 dark:text-primary-300">
+                      <span
+                        aria-hidden="true"
+                        className="h-1.5 w-1.5 rounded-full bg-primary-500 shadow-[0_0_5px_rgba(55,148,255,0.8)]"
+                      />
+                      Running
+                    </span>
                   ) : null}
                 </div>
-                {runningSet.has(agent.handle) ? <RunningMarker /> : null}
-              </div>
-            ))}
+              );
+            })}
           </section>
         ) : null}
       </div>
