@@ -33,8 +33,27 @@ function snapshot(overrides: Partial<ChatParticipantsSnapshot> = {}): ChatPartic
         avatarSeed: "octo",
         model: "gpt-5.5",
         providerLabel: "OpenAI",
+        credentialId: "cred-1",
         credentialLabel: "My ChatGPT",
         credentialState: "default",
+        subscriptionUsage: {
+          windows: [
+            {
+              kind: "primary",
+              usedPercent: 12,
+              windowMinutes: 300,
+              resetAt: Math.floor(Date.parse("2026-08-28T12:10:00Z") / 1000),
+            },
+            {
+              kind: "secondary",
+              usedPercent: 40,
+              windowMinutes: 10080,
+              resetAt: Math.floor(Date.parse("2026-09-02T09:00:00Z") / 1000),
+            },
+          ],
+          planName: "GPT-5.5-Codex",
+          capturedAt: Math.floor(Date.parse("2026-08-28T09:55:00Z") / 1000),
+        },
       },
       {
         handle: "pixel",
@@ -42,8 +61,10 @@ function snapshot(overrides: Partial<ChatParticipantsSnapshot> = {}): ChatPartic
         avatarSeed: "pixel",
         model: "gpt-5.5",
         providerLabel: "OpenAI",
+        credentialId: null,
         credentialLabel: null,
         credentialState: "revoked",
+        subscriptionUsage: null,
       },
     ],
     runningAgentHandles: ["octo"],
@@ -58,6 +79,9 @@ describe("ParticipantsDrawer", () => {
 
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    // Pin the clock so relative reset times ("resets in 2h 10m") are deterministic.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-28T10:00:00Z"));
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -70,6 +94,7 @@ describe("ParticipantsDrawer", () => {
     container.remove();
     clearChatParticipants("conv-1");
     clearChatParticipants(null);
+    vi.useRealTimers();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -102,6 +127,132 @@ describe("ParticipantsDrawer", () => {
     const credits = container.querySelector('[data-testid="participants-drawer-credits"]');
     expect(credits?.textContent).toContain("162 / 200");
     expect(credits?.querySelector('[role="meter"]')).not.toBeNull();
+  });
+
+  it("renders subscription usage meters: 5h + weekly, remaining %, relative reset when close", async () => {
+    await act(async () => {
+      publishChatParticipants(snapshot());
+    });
+    await render();
+
+    const usage = container.querySelector('[data-testid="participants-usage"]');
+    expect(usage).not.toBeNull();
+    const windows = container.querySelectorAll('[data-testid="participants-usage-window"]');
+    expect(windows.length).toBe(2);
+    const text = usage?.textContent ?? "";
+    // 5h window first (sorted by length), used 12% → 88% left, reset ~2h out → relative.
+    expect(text).toContain("5h");
+    expect(text).toContain("88% left");
+    expect(text).toContain("resets in 2h 10m");
+    // Weekly window, used 40% → 60% left; reset is days out so it isn't relative.
+    expect(text).toContain("Weekly");
+    expect(text).toContain("60% left");
+    expect(text).not.toContain("Weekly · resets in");
+    // Revoked agent has no live snapshot → no meters for it.
+    expect(container.querySelectorAll('[role="meter"]').length).toBe(3); // 2 usage + team credits
+  });
+
+  it("presents a lapsed window as refreshed, not drained", async () => {
+    await act(async () => {
+      publishChatParticipants(
+        snapshot({
+          agents: [
+            {
+              handle: "octo",
+              displayName: "Octo",
+              avatarSeed: "octo",
+              model: "gpt-5.5",
+              providerLabel: "OpenAI",
+              credentialId: "cred-1",
+              credentialLabel: "My ChatGPT",
+              credentialState: "default",
+              subscriptionUsage: {
+                windows: [
+                  {
+                    kind: "primary",
+                    usedPercent: 90, // was nearly exhausted...
+                    windowMinutes: 300,
+                    // ...but the reset time is an hour in the PAST relative to
+                    // the pinned clock (10:00Z), with no newer snapshot.
+                    resetAt: Math.floor(Date.parse("2026-08-28T09:00:00Z") / 1000),
+                  },
+                ],
+                planName: null,
+                capturedAt: Math.floor(Date.parse("2026-08-28T03:00:00Z") / 1000),
+              },
+            },
+          ],
+          runningAgentHandles: [],
+          totalQueuedCount: 0,
+        }),
+      );
+    });
+    await render();
+    const usage = container.querySelector('[data-testid="participants-usage"]');
+    const text = usage?.textContent ?? "";
+    expect(text).toContain("just reset");
+    expect(text).toContain("100% left"); // rolled over → full, not "10% left"
+    expect(text).not.toContain("10% left");
+  });
+
+  it("shows one set of meters when agents share a credential", async () => {
+    await act(async () => {
+      publishChatParticipants(
+        snapshot({
+          agents: [
+            {
+              handle: "octo",
+              displayName: "Octo",
+              avatarSeed: "octo",
+              model: "gpt-5.5",
+              providerLabel: "OpenAI",
+              credentialId: "cred-shared",
+              credentialLabel: "My ChatGPT",
+              credentialState: "default",
+              subscriptionUsage: {
+                windows: [
+                  {
+                    kind: "primary",
+                    usedPercent: 20,
+                    windowMinutes: 300,
+                    resetAt: Math.floor(Date.parse("2026-08-28T12:00:00Z") / 1000),
+                  },
+                ],
+                planName: null,
+                capturedAt: Math.floor(Date.parse("2026-08-28T09:55:00Z") / 1000),
+              },
+            },
+            {
+              handle: "pixel",
+              displayName: "Pixel",
+              avatarSeed: "pixel",
+              model: "gpt-5.5",
+              providerLabel: "OpenAI",
+              credentialId: "cred-shared",
+              credentialLabel: "My ChatGPT",
+              credentialState: "default",
+              subscriptionUsage: {
+                windows: [
+                  {
+                    kind: "primary",
+                    usedPercent: 20,
+                    windowMinutes: 300,
+                    resetAt: Math.floor(Date.parse("2026-08-28T12:00:00Z") / 1000),
+                  },
+                ],
+                planName: null,
+                capturedAt: Math.floor(Date.parse("2026-08-28T09:55:00Z") / 1000),
+              },
+            },
+          ],
+          runningAgentHandles: [],
+          totalQueuedCount: 0,
+        }),
+      );
+    });
+    await render();
+    // Both agents draw on "cred-shared" → meters render once, not twice.
+    expect(container.querySelectorAll('[data-testid="participants-usage"]').length).toBe(1);
   });
 
   it("statuses stay conversation-scoped: idle agents show no marker", async () => {

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Xmark } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
@@ -10,7 +10,9 @@ import {
 import {
   useChatParticipantsSnapshot,
   type ParticipantAgent,
+  type ParticipantSubscriptionUsage,
 } from "./chatParticipantsStore";
+import { formatReset, windowLabel } from "./subscriptionUsageFormat";
 
 /**
  * Right-edge overlay listing the active conversation's people and agents, what
@@ -63,8 +65,87 @@ function credentialLine(
   }
 }
 
+// Per-window "how much headroom is left" meter. Fills to the REMAINING share
+// (so a fuller bar means more room — matching the team-credits meter above) and
+// warns as it drains. Reset time rides the header, relative when it's close.
+function UsageWindowMeter({
+  window,
+  nowMs,
+}: {
+  window: ParticipantSubscriptionUsage["windows"][number];
+  nowMs: number;
+}) {
+  const label = windowLabel(window.windowMinutes);
+  // Once the reset time has passed and no fresher snapshot has arrived, the
+  // window has rolled over — the last-known "used" figure is stale. Show it as
+  // refreshed (full) instead of a drained bar that would wrongly read as
+  // "nearly out of quota".
+  const lapsed = window.resetAt > 0 && window.resetAt * 1000 <= nowMs;
+  const remaining = lapsed ? 100 : Math.max(0, 100 - window.usedPercent);
+  const low = !lapsed && remaining <= 15;
+  const reset = lapsed ? "just reset" : formatReset(window.resetAt, nowMs);
+  return (
+    <div className="pt-1.5" data-testid="participants-usage-window">
+      <div className="flex items-baseline justify-between gap-2 pb-0.5">
+        <Text as="span" variant="caption" tone="muted" className="min-w-0 truncate text-xxs">
+          {label}
+          {reset ? ` · ${reset}` : ""}
+        </Text>
+        <Text
+          as="span"
+          variant="caption"
+          tone={low ? "warning" : "muted"}
+          className="shrink-0 text-xxs tabular-nums"
+        >
+          {remaining}% left
+        </Text>
+      </div>
+      <div
+        role="meter"
+        aria-label={`${label} allowance remaining`}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={remaining}
+        className="h-1 overflow-hidden rounded-full bg-primary-500/15"
+      >
+        <span
+          className={`block h-full rounded-full ${low ? "bg-secondary-500" : "bg-primary-500"}`}
+          style={{ width: `${remaining}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function SubscriptionUsageMeters({
+  usage,
+  nowMs,
+}: {
+  usage: ParticipantSubscriptionUsage;
+  nowMs: number;
+}) {
+  // Short rolling window first, longer window second — regardless of the order
+  // upstream lists them — so the fast-moving one reads at the top.
+  const windows = [...usage.windows].sort((a, b) => a.windowMinutes - b.windowMinutes);
+  return (
+    <div className="mt-1.5" data-testid="participants-usage">
+      {windows.map((window) => (
+        <UsageWindowMeter key={window.kind} window={window} nowMs={nowMs} />
+      ))}
+    </div>
+  );
+}
+
 export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
   const snapshot = useChatParticipantsSnapshot();
+  // Relative reset times ("resets in 2h 10m") go stale between snapshots, so
+  // re-tick every 30s while the drawer is open. Cheap: a single interval, no
+  // network. Seeded lazily so tests can render deterministically at mount.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
   const {
     billing,
     hasLoaded: creditsLoaded,
@@ -95,6 +176,11 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
   const showCredits = creditsEnabled && creditsLoaded && creditLimit > 0;
   const creditFraction = showCredits ? Math.min(1, creditBalance / creditLimit) : 0;
   const creditsLow = showCredits && creditBalance <= Math.max(2, Math.floor(creditLimit * 0.2));
+
+  // Usage is a property of the credential, not the agent — so when several
+  // agents share one account, show the meters once (on the first agent that
+  // uses it) instead of repeating identical bars down the list.
+  const usageShownFor = new Set<string>();
 
   return (
     <aside
@@ -180,6 +266,14 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
             {agents.map((agent) => {
               const credential = credentialLine(agent);
               const metaParts = [agent.model, agent.providerLabel].filter(Boolean);
+              // First agent on a live credential carries its usage meters; the
+              // rest reference the same account by name without repeating them.
+              const showUsage =
+                agent.subscriptionUsage != null &&
+                (agent.credentialState === "default" || agent.credentialState === "pinned") &&
+                agent.credentialId != null &&
+                !usageShownFor.has(agent.credentialId);
+              if (showUsage && agent.credentialId) usageShownFor.add(agent.credentialId);
               return (
                 <div key={agent.handle} className="flex items-start gap-2.5 py-2">
                   <AgentAvatar agent={agent} />
@@ -205,6 +299,9 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
                     >
                       {credential.text}
                     </Text>
+                    {showUsage && agent.subscriptionUsage ? (
+                      <SubscriptionUsageMeters usage={agent.subscriptionUsage} nowMs={nowMs} />
+                    ) : null}
                   </div>
                   {runningSet.has(agent.handle) ? (
                     <span className="flex shrink-0 items-center gap-1.5 pt-0.5 text-xxs font-semibold text-primary-600 dark:text-primary-300">
