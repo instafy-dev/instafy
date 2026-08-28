@@ -77,7 +77,7 @@ const COLLABORATION_SKILL_PLANNING_MAX_CHARS: usize = 3_200;
 const COLLABORATION_SKILL_ROUTING_MAX_CHARS: usize = 1_400;
 const ROUTING_PRE_OBSERVATION_OUTPUT_MAX_CHARS: usize = 4_000;
 const ROUTING_PRE_OBSERVATION_TIMEOUT_SECS: u64 = 10;
-const DEFAULT_DIRECT_WORKER_MODEL: &str = "gpt-5.5";
+const DEFAULT_DIRECT_WORKER_MODEL: &str = "gpt-5.6-sol";
 const WORKSPACE_LEASE_WRITE_SCOPE: &str = "workspace.lease.write";
 const ORIGIN_TOKEN_MINT_SCOPE: &str = "origin.token.mint";
 const WORKSPACE_TOKEN_SEPARATED_SCOPE: &str = "job.token.workspace-separated";
@@ -19243,30 +19243,30 @@ mod tests {
 
     #[test]
     fn direct_worker_model_normalizes_retired_codex_slugs() {
-        assert_eq!(resolve_direct_worker_model_id(None), "gpt-5.5");
+        assert_eq!(resolve_direct_worker_model_id(None), "gpt-5.6-sol");
         assert_eq!(
             resolve_direct_worker_model_id(Some("gpt-5-codex".to_string())),
-            "gpt-5.5"
+            "gpt-5.6-sol"
         );
         assert_eq!(
             resolve_direct_worker_model_id(Some("gpt-5.3-codex".to_string())),
-            "gpt-5.5"
+            "gpt-5.6-sol"
         );
         assert_eq!(
             resolve_direct_worker_model_id(Some("gpt-5.3".to_string())),
-            "gpt-5.5"
+            "gpt-5.6-sol"
         );
         assert_eq!(
             resolve_direct_worker_model_id(Some("gpt-5.2".to_string())),
-            "gpt-5.5"
+            "gpt-5.6-sol"
         );
         assert_eq!(
             resolve_direct_worker_model_id(Some("gpt-5.4".to_string())),
-            "gpt-5.5"
+            "gpt-5.6-sol"
         );
         assert_eq!(
             resolve_direct_worker_model_id(Some("gpt-5.4-mini".to_string())),
-            "gpt-5.5"
+            "gpt-5.6-sol"
         );
     }
 
