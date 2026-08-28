@@ -222,9 +222,7 @@ import {
 } from "./gettingStartedConversationContext";
 import {
   resolveConversationRosterHumans,
-  shouldShowConversationRoster,
   type ConversationRosterAgent,
-  type ConversationRosterHuman,
 } from "./conversationRosterMembers";
 import { ConversationRoster } from "./ConversationRoster";
 import {
@@ -2452,22 +2450,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     return rosterAgents;
   }, [agentByHandle, agentHandles]);
-
-  // "Who is in this room", scoped to the conversation it describes: rendered at
-  // the top of the chat surface itself rather than in workspace chrome, so it
-  // travels with the active conversation instead of drifting with the tab strip
-  // — and so it exists at every viewport width. `null` means "show nothing".
-  const conversationRosterPresence = useMemo<{
-    agents: readonly ConversationRosterAgent[];
-    humans: readonly ConversationRosterHuman[];
-  } | null>(() => {
-    return shouldShowConversationRoster({
-      agents: conversationRosterAgents,
-      humans: conversationRosterHumans,
-    })
-      ? { agents: conversationRosterAgents, humans: conversationRosterHumans }
-      : null;
-  }, [conversationRosterAgents, conversationRosterHumans]);
 
   const peerTypingLabel = useMemo(() => {
     const peerIds = Object.keys(peerTypingActivity);
@@ -5126,23 +5108,22 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         hidden={browserSubtab !== "chat"}
         className={browserSubtab === "chat" ? "flex min-h-0 flex-1 flex-col" : "hidden"}
       >
-      {conversationRosterPresence ? (
-        // Presence belongs to the conversation, so it sits at the top of the
-        // conversation surface: one placement at every width, a flow row (never
-        // an overlay) so it cannot cover message text, and outside the scroller
-        // so it never scrolls away. Horizontal padding matches the scroll
-        // container below it.
-        <div
-          className="flex flex-none items-center justify-end px-3 pt-2 sm:px-4"
-          data-testid="chat-conversation-roster-row"
-        >
-          <ConversationRoster
-            agents={conversationRosterPresence.agents}
-            humans={conversationRosterPresence.humans}
-            hasCredentialWarning={participantAgentsHaveCredentialWarning}
-          />
-        </div>
-      ) : null}
+      {/* Presence belongs to the conversation, so it sits at the top of the
+          conversation surface: one placement at every width, a flow row (never
+          an overlay) so it cannot cover message text, and outside the scroller
+          so it never scrolls away. Always rendered — the roster collapses to a
+          plain "open participants" icon when no one has joined, so the
+          participants/config panel is reachable even on a brand-new chat. */}
+      <div
+        className="flex flex-none items-center justify-end px-3 pt-2 sm:px-4"
+        data-testid="chat-conversation-roster-row"
+      >
+        <ConversationRoster
+          agents={conversationRosterAgents}
+          humans={conversationRosterHumans}
+          hasCredentialWarning={participantAgentsHaveCredentialWarning}
+        />
+      </div>
       <div
         className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 pb-4 pt-2 sm:px-4 sm:pb-2"
         data-testid="chat-message-scroll"
