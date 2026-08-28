@@ -217,6 +217,28 @@ impl ControllerClient {
         })
     }
 
+    async fn send_register_request(
+        &self,
+        url: &Url,
+        request_body: &JsonValue,
+        token: Option<&str>,
+    ) -> Result<(StatusCode, String)> {
+        let mut request = self
+            .http
+            .post(url.clone())
+            .header("content-type", "application/json")
+            .json(request_body);
+
+        if let Some(value) = token {
+            request = request.bearer_auth(value);
+        }
+
+        let response = request.send().await.context("agent login request failed")?;
+        let status = response.status();
+        let text = response.text().await.context("register runtime body")?;
+        Ok((status, text))
+    }
+
     pub async fn register_runtime(&self, config: &Config) -> Result<Registration> {
         let (path, request_body) = if let Some(lease_id) = config.runtime_lease_id {
             let mut payload = serde_json::Map::new();
@@ -298,20 +320,9 @@ impl ControllerClient {
         let mut last_error: Option<(StatusCode, String)> = None;
 
         for (index, token) in token_candidates.iter().enumerate() {
-            let mut request = self
-                .http
-                .post(url.clone())
-                .header("content-type", "application/json")
-                .json(&request_body);
-
-            if let Some(value) = token.as_ref() {
-                request = request.bearer_auth(value);
-            }
-
-            let response = request.send().await.context("agent login request failed")?;
-
-            let status = response.status();
-            let text = response.text().await.context("register runtime body")?;
+            let (status, text) = self
+                .send_register_request(&url, &request_body, token.as_deref())
+                .await?;
             if status.is_success() {
                 parsed = Some(
                     serde_json::from_str(&text)
@@ -321,21 +332,64 @@ impl ControllerClient {
             }
 
             last_error = Some((status, text.clone()));
-            if index + 1 < token_candidates.len()
-                && matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
-            {
+            if !matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+                return Err(anyhow::anyhow!(
+                    "runtime register failed: status={} body={}",
+                    status,
+                    text
+                ));
+            }
+            if index + 1 < token_candidates.len() {
                 warn!(
                     %status,
                     "runtime register unauthorized; retrying with fallback token"
                 );
-                continue;
             }
+        }
 
-            return Err(anyhow::anyhow!(
-                "runtime register failed: status={} body={}",
-                status,
-                text
-            ));
+        // Self-heal a stale spawn-time token: another local process may have
+        // refreshed and rotated the shared CLI session while this agent kept
+        // presenting the token it was launched with. Re-read the persisted
+        // session and retry once with its access token; if that token is also
+        // rejected (or the file is absent), fall through to the existing
+        // retry behavior.
+        if parsed.is_none()
+            && matches!(
+                last_error.as_ref().map(|(status, _)| *status),
+                Some(StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
+            )
+        {
+            if let Some(config_path) = crate::cli_session::config_path() {
+                let reloaded_token = crate::cli_session::access_token_if_untried(
+                    crate::cli_session::read_access_token(&config_path),
+                    token_candidates.iter().filter_map(|token| token.as_deref()),
+                );
+                if let Some(reloaded_token) = reloaded_token {
+                    warn!(
+                        config_path = %config_path.display(),
+                        "runtime register unauthorized; recovering with the access token re-read from the persisted CLI session"
+                    );
+                    let (status, text) = self
+                        .send_register_request(&url, &request_body, Some(&reloaded_token))
+                        .await?;
+                    if status.is_success() {
+                        // Later registrations (proactive renewal, tunnel
+                        // refresh) must present the recovered token instead of
+                        // the stale spawn-time one. A renewed runtime_token in
+                        // the response still overrides this below.
+                        *self.runtime_access_token.lock() = Some(reloaded_token);
+                        parsed = Some(serde_json::from_str(&text).with_context(|| {
+                            format!("failed to parse register response: {}", text)
+                        })?);
+                    } else {
+                        warn!(
+                            %status,
+                            "re-read CLI session token was also rejected; keeping existing register retry behavior"
+                        );
+                        last_error = Some((status, text));
+                    }
+                }
+            }
         }
 
         let parsed = parsed.ok_or_else(|| {
