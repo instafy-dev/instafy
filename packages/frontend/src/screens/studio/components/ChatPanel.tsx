@@ -230,7 +230,17 @@ import { ConversationRoster } from "./ConversationRoster";
 import {
   clearChatParticipants,
   publishChatParticipants,
+  type ParticipantAgent,
+  type ParticipantCredentialState,
 } from "./chatParticipantsStore";
+import { formatProviderLabel } from "./CreditsUsageRates";
+import { resolveCredentialLabel } from "../../../utils/credentialFormatting";
+import {
+  modelOptionsForProvider,
+  normalizeAiModelId,
+  normalizeAiProviderId,
+  type AiProviderId,
+} from "../../../utils/aiProviderModels";
 import { useChatComposerLayoutState } from "./useChatComposerLayoutState";
 import { useChatAutoScrollSync, useChatScrollController } from "./useChatScrollOrchestration";
 import {
@@ -4224,19 +4234,83 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // chat surface (the participants drawer is a StudioLayout sibling, so props
   // cannot reach it). ChatPanel stays the single writer.
   const participantsSnapshotConversationId = activeConversationEntry?.controllerId ?? null;
+  // Enrich each roster agent with the model, provider, and credential it draws
+  // from, resolving pinned-vs-default and stale credentials the same way the
+  // Runtime & AI panel does — so the drawer can show it without re-deriving.
+  const participantAgents = useMemo<ParticipantAgent[]>(() => {
+    const credentialsById = new Map(
+      availableCredentials.map((credential) => [credential.id, credential]),
+    );
+    // The provider the workspace default credential routes to. A built-in
+    // agent stores provider "assistant" / no model, so its effective provider
+    // and model come from the default credential, not the profile.
+    const defaultCredentialProviderId: AiProviderId = (() => {
+      if (!defaultAiCredential || defaultAiCredential.kind === "codex_auth_json") {
+        return "openai";
+      }
+      const metadata = defaultAiCredential.metadata as Record<string, unknown> | null | undefined;
+      return normalizeAiProviderId(typeof metadata?.provider === "string" ? metadata.provider : "");
+    })();
+    return conversationRosterAgents.map((rosterAgent) => {
+      const profile = agentByHandle.get(rosterAgent.handle) ?? null;
+      const providerRaw = (profile?.provider ?? "").trim().toLowerCase();
+      const providerId: AiProviderId =
+        !providerRaw || providerRaw === "assistant"
+          ? defaultCredentialProviderId
+          : normalizeAiProviderId(providerRaw);
+      // Explicit model, or the provider's default (what "Default (gpt-5.5)"
+      // resolves to) when the agent pins none.
+      const model =
+        normalizeAiModelId(providerId, profile?.model) ??
+        modelOptionsForProvider(providerId)[0]?.id ??
+        null;
+      let credentialLabel: string | null = null;
+      let credentialState: ParticipantCredentialState = "none";
+      if (profile?.credentialId) {
+        const pinned = credentialsById.get(profile.credentialId) ?? null;
+        if (!pinned) {
+          credentialState = "missing";
+        } else if (pinned.revokedAt) {
+          credentialState = "revoked";
+          credentialLabel = resolveCredentialLabel(pinned);
+        } else {
+          credentialState = "pinned";
+          credentialLabel = resolveCredentialLabel(pinned);
+        }
+      } else if (defaultAiCredential) {
+        credentialState = "default";
+        credentialLabel = resolveCredentialLabel(defaultAiCredential);
+      }
+      return {
+        ...rosterAgent,
+        model,
+        providerLabel: formatProviderLabel(providerId),
+        credentialLabel,
+        credentialState,
+      };
+    });
+  }, [agentByHandle, availableCredentials, conversationRosterAgents, defaultAiCredential]);
+  // Amber dot on the roster facepile when any agent's credential needs
+  // attention — visible without opening the drawer.
+  const participantAgentsHaveCredentialWarning = participantAgents.some(
+    (agent) =>
+      agent.credentialState === "missing" ||
+      agent.credentialState === "revoked" ||
+      agent.credentialState === "none",
+  );
   useEffect(() => {
     publishChatParticipants({
       conversationId: participantsSnapshotConversationId,
       humans: conversationRosterHumans,
-      agents: conversationRosterAgents,
+      agents: participantAgents,
       runningAgentHandles: Array.from(activeConversationRunAgentHandles),
       totalQueuedCount,
     });
     return () => clearChatParticipants(participantsSnapshotConversationId);
   }, [
     activeConversationRunAgentHandles,
-    conversationRosterAgents,
     conversationRosterHumans,
+    participantAgents,
     participantsSnapshotConversationId,
     totalQueuedCount,
   ]);
@@ -5050,6 +5124,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           <ConversationRoster
             agents={conversationRosterPresence.agents}
             humans={conversationRosterPresence.humans}
+            hasCredentialWarning={participantAgentsHaveCredentialWarning}
           />
         </div>
       ) : null}
