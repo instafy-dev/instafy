@@ -81,7 +81,10 @@ function UsageWindowRow({
   // refreshed (full) rather than "nearly out of quota".
   const lapsed = window.resetAt > 0 && window.resetAt * 1000 <= nowMs;
   const remaining = lapsed ? 100 : Math.max(0, 100 - window.usedPercent);
-  const low = !lapsed && remaining <= 15;
+  // Colour only when it matters: neutral while there's plenty, amber as it runs
+  // low, red when nearly out — so a glance flags which agents to avoid leaning on.
+  const remainingTone: "muted" | "warning" | "danger" =
+    lapsed || remaining > 25 ? "muted" : remaining <= 10 ? "danger" : "warning";
   const reset = lapsed ? "just reset" : formatReset(window.resetAt, nowMs);
   return (
     <div
@@ -95,7 +98,7 @@ function UsageWindowRow({
       <Text
         as="span"
         variant="caption"
-        tone={low ? "warning" : "muted"}
+        tone={remainingTone}
         className="shrink-0 text-xxs tabular-nums"
       >
         {remaining}% left
@@ -268,6 +271,15 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
             {agents.map((agent) => {
               const credential = credentialLine(agent);
               const metaParts = [agent.model, agent.providerLabel].filter(Boolean);
+              // Fold an unremarkable (healthy) credential into the model·provider
+              // line so a normal agent is just handle + one meta line + usage.
+              // Broken states keep their own coloured line so the warning reads.
+              const credentialHealthy = credential.tone === "muted";
+              const metaLine = (
+                credentialHealthy ? [...metaParts, credential.text] : metaParts
+              )
+                .filter(Boolean)
+                .join(" · ");
               // First agent on a live credential carries its usage meters; the
               // rest reference the same account by name without repeating them.
               const showUsage =
@@ -277,7 +289,7 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
                 !usageShownFor.has(agent.credentialId);
               if (showUsage && agent.credentialId) usageShownFor.add(agent.credentialId);
               return (
-                <div key={agent.handle} className="flex items-start gap-2.5 py-2">
+                <div key={agent.handle} className="flex items-start gap-2.5 py-1.5">
                   <AgentAvatar agent={agent} />
                   <div className="min-w-0 flex-1">
                     <Text
@@ -288,19 +300,21 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
                     >
                       @{agent.handle}
                     </Text>
-                    {metaParts.length > 0 ? (
+                    {metaLine ? (
                       <Text as="div" variant="caption" tone="muted" className="truncate text-xxs">
-                        {metaParts.join(" · ")}
+                        {metaLine}
                       </Text>
                     ) : null}
-                    <Text
-                      as="div"
-                      variant="caption"
-                      tone={credential.tone}
-                      className="truncate text-xxs"
-                    >
-                      {credential.text}
-                    </Text>
+                    {!credentialHealthy ? (
+                      <Text
+                        as="div"
+                        variant="caption"
+                        tone={credential.tone}
+                        className="truncate text-xxs"
+                      >
+                        {credential.text}
+                      </Text>
+                    ) : null}
                     {showUsage && agent.subscriptionUsage ? (
                       <SubscriptionUsageMeters usage={agent.subscriptionUsage} nowMs={nowMs} />
                     ) : null}
