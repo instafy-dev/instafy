@@ -144,6 +144,18 @@ impl ControllerIntegration {
             )
             .await
     }
+
+    /// Forward a BYOC subscription-usage snapshot to the controller. Used
+    /// fire-and-forget by the proxy; never gates the user's response.
+    pub async fn post_credential_usage(
+        &self,
+        credential_id: &str,
+        snapshot: &serde_json::Value,
+    ) -> Result<()> {
+        self.client
+            .post_credential_usage(credential_id, snapshot)
+            .await
+    }
 }
 
 impl CreditBurn {
