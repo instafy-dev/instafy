@@ -27,8 +27,24 @@ function snapshot(overrides: Partial<ChatParticipantsSnapshot> = {}): ChatPartic
       { userId: "u2", label: "Kim Larsen", isSelf: false },
     ],
     agents: [
-      { handle: "octo", displayName: "Octo", avatarSeed: "octo" },
-      { handle: "pixel", displayName: "Pixel", avatarSeed: "pixel" },
+      {
+        handle: "octo",
+        displayName: "Octo",
+        avatarSeed: "octo",
+        model: "gpt-5.5",
+        providerLabel: "OpenAI",
+        credentialLabel: "My ChatGPT",
+        credentialState: "default",
+      },
+      {
+        handle: "pixel",
+        displayName: "Pixel",
+        avatarSeed: "pixel",
+        model: "gpt-5.5",
+        providerLabel: "OpenAI",
+        credentialLabel: null,
+        credentialState: "revoked",
+      },
     ],
     runningAgentHandles: ["octo"],
     totalQueuedCount: 2,
@@ -42,7 +58,6 @@ describe("ParticipantsDrawer", () => {
 
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-    window.localStorage.clear();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -58,18 +73,14 @@ describe("ParticipantsDrawer", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  async function render(forceRail = false) {
+  async function render(onClose = vi.fn()) {
     await act(async () => {
-      root.render(<ParticipantsDrawer forceRail={forceRail} />);
+      root.render(<ParticipantsDrawer onClose={onClose} />);
     });
+    return onClose;
   }
 
-  it("renders nothing without a published snapshot", async () => {
-    await render();
-    expect(container.querySelector("aside")).toBeNull();
-  });
-
-  it("shows people, agents, conversation summary, and the credit pool", async () => {
+  it("shows people, agents with model/provider/credential, summary, and credit pool", async () => {
     await act(async () => {
       publishChatParticipants(snapshot());
     });
@@ -78,8 +89,12 @@ describe("ParticipantsDrawer", () => {
     const drawer = container.querySelector('[data-testid="participants-drawer"]');
     expect(drawer).not.toBeNull();
     expect(drawer?.textContent).toContain("Taylor");
-    expect(drawer?.textContent).toContain("Kim Larsen");
     expect(drawer?.textContent).toContain("@octo");
+    expect(drawer?.textContent).toContain("gpt-5.5 · OpenAI");
+    // Default credential leads with just the account name (no "Using default").
+    expect(drawer?.textContent).toContain("My ChatGPT");
+    expect(drawer?.textContent).not.toContain("Using default");
+    expect(drawer?.textContent).toContain("Its credential was revoked");
     expect(drawer?.textContent).toContain("Running");
     expect(
       container.querySelector('[data-testid="participants-drawer-summary"]')?.textContent,
@@ -101,31 +116,24 @@ describe("ParticipantsDrawer", () => {
     ).toBeNull();
   });
 
-  it("collapses to the avatar rail and remembers the choice", async () => {
+  it("closes via the header button and Escape", async () => {
     await act(async () => {
       publishChatParticipants(snapshot());
     });
-    await render();
+    const onClose = await render();
 
-    const collapse = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Collapse participants"]',
+    const close = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Close participants"]',
     );
-    expect(collapse).not.toBeNull();
+    expect(close).not.toBeNull();
     await act(async () => {
-      collapse?.click();
+      close?.click();
     });
-    expect(container.querySelector('[data-testid="participants-drawer-rail"]')).not.toBeNull();
-    expect(window.localStorage.getItem("instafy.participantsDrawer.collapsed.v1")).toBe("1");
-  });
+    expect(onClose).toHaveBeenCalledTimes(1);
 
-  it("forceRail yields the rail without an expand control", async () => {
     await act(async () => {
-      publishChatParticipants(snapshot());
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
     });
-    await render(true);
-    expect(container.querySelector('[data-testid="participants-drawer-rail"]')).not.toBeNull();
-    expect(
-      container.querySelector('button[aria-label="Expand participants"]'),
-    ).toBeNull();
+    expect(onClose).toHaveBeenCalledTimes(2);
   });
 });
