@@ -42,30 +42,26 @@ function AgentAvatar({ agent }: { agent: ParticipantAgent }) {
   );
 }
 
-const CREDENTIAL_TONE: Record<
-  ParticipantCredentialState,
-  { tone: "muted" | "warning" | "danger"; prefix: string }
-> = {
-  default: { tone: "muted", prefix: "Using default" },
-  pinned: { tone: "muted", prefix: "Pinned" },
-  missing: { tone: "danger", prefix: "" },
-  revoked: { tone: "danger", prefix: "" },
-  none: { tone: "warning", prefix: "" },
-};
-
-function credentialLine(agent: ParticipantAgent): { text: string; tone: "muted" | "warning" | "danger" } {
-  const meta = CREDENTIAL_TONE[agent.credentialState];
-  if (agent.credentialState === "missing") {
-    return { text: "Pinned credential is missing", tone: "danger" };
-  }
-  if (agent.credentialState === "revoked") {
-    return { text: "Pinned credential was revoked", tone: "danger" };
-  }
-  if (agent.credentialState === "none") {
-    return { text: "No AI credential", tone: "warning" };
-  }
+// Lead with the account the agent uses (what a person recognizes) and annotate
+// only the notable states. "Default" (follows the workspace default) is the
+// unremarkable norm and needs no label; "Pinned" (locked to this one) and the
+// broken states are what's worth flagging.
+function credentialLine(
+  agent: ParticipantAgent,
+): { text: string; tone: "muted" | "warning" | "danger" } {
   const label = agent.credentialLabel ?? "credential";
-  return { text: `${meta.prefix} · ${label}`, tone: "muted" };
+  switch (agent.credentialState) {
+    case "missing":
+      return { text: "Its credential is missing", tone: "danger" };
+    case "revoked":
+      return { text: "Its credential was revoked", tone: "danger" };
+    case "none":
+      return { text: "No AI credential", tone: "warning" };
+    case "pinned":
+      return { text: `${label} · pinned`, tone: "muted" };
+    default:
+      return { text: label, tone: "muted" };
+  }
 }
 
 export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {

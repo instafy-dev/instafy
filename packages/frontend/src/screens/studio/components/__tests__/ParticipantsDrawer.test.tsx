@@ -91,8 +91,10 @@ describe("ParticipantsDrawer", () => {
     expect(drawer?.textContent).toContain("Marcus");
     expect(drawer?.textContent).toContain("@octo");
     expect(drawer?.textContent).toContain("gpt-5.5 · OpenAI");
-    expect(drawer?.textContent).toContain("Using default · My ChatGPT");
-    expect(drawer?.textContent).toContain("Pinned credential was revoked");
+    // Default credential leads with just the account name (no "Using default").
+    expect(drawer?.textContent).toContain("My ChatGPT");
+    expect(drawer?.textContent).not.toContain("Using default");
+    expect(drawer?.textContent).toContain("Its credential was revoked");
     expect(drawer?.textContent).toContain("Running");
     expect(
       container.querySelector('[data-testid="participants-drawer-summary"]')?.textContent,
