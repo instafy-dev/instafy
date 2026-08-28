@@ -10,7 +10,6 @@ import {
 import {
   useChatParticipantsSnapshot,
   type ParticipantAgent,
-  type ParticipantCredentialState,
 } from "./chatParticipantsStore";
 
 /**
