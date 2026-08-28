@@ -230,7 +230,9 @@ import {
   publishChatParticipants,
   type ParticipantAgent,
   type ParticipantCredentialState,
+  type ParticipantEditingContext,
 } from "./chatParticipantsStore";
+import { updateMyAgent } from "../../../services/runtimeController/agents";
 import { formatProviderLabel } from "./CreditsUsageRates";
 import { parseSubscriptionUsage } from "./subscriptionUsageFormat";
 import { resolveCredentialLabel } from "../../../utils/credentialFormatting";
@@ -4278,7 +4280,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       );
       return {
         ...rosterAgent,
+        agentId: profile?.id ?? null,
+        providerId,
         model,
+        reasoningEffort: profile?.reasoningEffort ?? null,
         providerLabel: formatProviderLabel(providerId),
         credentialId: effectiveCredential?.id ?? null,
         credentialLabel,
@@ -4295,6 +4300,29 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       agent.credentialState === "revoked" ||
       agent.credentialState === "none",
   );
+  // Editing capability handed to the drawer so its agent rows are two-way.
+  // ChatPanel owns the update + refresh; the drawer just calls saveAgent.
+  const participantsEditing = useMemo<ParticipantEditingContext>(
+    () => ({
+      credentials: availableCredentials.map((credential) => ({
+        id: credential.id,
+        label: resolveCredentialLabel(credential),
+        kind: credential.kind,
+        revoked: Boolean(credential.revokedAt),
+      })),
+      saveAgent: async (agentId, patch) => {
+        const result = await updateMyAgent(agentId, patch);
+        if (result.success) {
+          // Same refresh the chip's edits use, so the drawer's displayed
+          // values reflect the saved change on the next published snapshot.
+          void refreshCredentials();
+          void refreshAvailableAgents({ silent: true });
+        }
+        return result.success;
+      },
+    }),
+    [availableCredentials, refreshAvailableAgents, refreshCredentials],
+  );
   useEffect(() => {
     publishChatParticipants({
       conversationId: participantsSnapshotConversationId,
@@ -4302,12 +4330,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       agents: participantAgents,
       runningAgentHandles: Array.from(activeConversationRunAgentHandles),
       totalQueuedCount,
+      editing: participantsEditing,
     });
     return () => clearChatParticipants(participantsSnapshotConversationId);
   }, [
     activeConversationRunAgentHandles,
     conversationRosterHumans,
     participantAgents,
+    participantsEditing,
     participantsSnapshotConversationId,
     totalQueuedCount,
   ]);

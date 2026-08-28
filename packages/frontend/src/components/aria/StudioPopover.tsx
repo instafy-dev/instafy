@@ -74,6 +74,7 @@ export function StudioPopover({
   return (
     <Popover
       {...props}
+      data-studio-popover=""
       ref={popoverRef}
       isNonModal={isNonModal}
       triggerRef={triggerRef}
