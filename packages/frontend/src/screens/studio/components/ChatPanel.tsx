@@ -234,6 +234,7 @@ import {
   type ParticipantCredentialState,
 } from "./chatParticipantsStore";
 import { formatProviderLabel } from "./CreditsUsageRates";
+import { parseSubscriptionUsage } from "./subscriptionUsageFormat";
 import { resolveCredentialLabel } from "../../../utils/credentialFormatting";
 import {
   modelOptionsForProvider,
@@ -4266,6 +4267,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         null;
       let credentialLabel: string | null = null;
       let credentialState: ParticipantCredentialState = "none";
+      // The credential whose live usage applies to this agent: the pinned one
+      // when it resolves, otherwise the workspace default. Stays null for the
+      // broken states (missing/revoked) — there's no live snapshot to show.
+      let effectiveCredential: (typeof availableCredentials)[number] | null = null;
       if (profile?.credentialId) {
         const pinned = credentialsById.get(profile.credentialId) ?? null;
         if (!pinned) {
@@ -4276,17 +4281,27 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         } else {
           credentialState = "pinned";
           credentialLabel = resolveCredentialLabel(pinned);
+          effectiveCredential = pinned;
         }
       } else if (defaultAiCredential) {
         credentialState = "default";
         credentialLabel = resolveCredentialLabel(defaultAiCredential);
+        effectiveCredential = defaultAiCredential;
       }
+      // Read `subscriptionUsage` defensively: it's a recent addition to the
+      // controller payload, so tolerate its absence rather than hard-depend on
+      // the field being present in the credential type.
+      const subscriptionUsage = parseSubscriptionUsage(
+        (effectiveCredential as { subscriptionUsage?: unknown } | null)?.subscriptionUsage,
+      );
       return {
         ...rosterAgent,
         model,
         providerLabel: formatProviderLabel(providerId),
+        credentialId: effectiveCredential?.id ?? null,
         credentialLabel,
         credentialState,
+        subscriptionUsage,
       };
     });
   }, [agentByHandle, availableCredentials, conversationRosterAgents, defaultAiCredential]);

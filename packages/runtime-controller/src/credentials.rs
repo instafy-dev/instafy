@@ -102,6 +102,9 @@ struct CredentialListItem {
     label: Option<String>,
     is_default: bool,
     metadata: JsonValue,
+    // Latest BYOC subscription-usage snapshot; `null` until a usage report lands.
+    // Serialized as `subscriptionUsage` for the frontend usage meters.
+    subscription_usage: Option<JsonValue>,
     last_used_at: Option<String>,
     revoked_at: Option<String>,
     created_at: String,
@@ -175,6 +178,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/internal/credentials/:credential_id",
             get(get_internal_credential),
+        )
+        .route(
+            "/internal/credentials/:credential_id/usage",
+            post(set_internal_credential_usage),
         )
 }
 
@@ -1571,7 +1578,7 @@ async fn list_my_credentials(
 
     let rows = connection
         .query(
-            "select id, kind, label, metadata, is_default, last_used_at, revoked_at, created_at, updated_at
+            "select id, kind, label, metadata, is_default, subscription_usage, last_used_at, revoked_at, created_at, updated_at
              from user_credentials
              where user_id = $1
              order by created_at desc, id desc
@@ -1589,6 +1596,9 @@ async fn list_my_credentials(
             let label: Option<String> = row.get("label");
             let metadata: JsonValue = row.get::<_, PgJson<JsonValue>>("metadata").0;
             let is_default: bool = row.get("is_default");
+            let subscription_usage: Option<JsonValue> = row
+                .get::<_, Option<PgJson<JsonValue>>>("subscription_usage")
+                .map(|value| value.0);
             let last_used_at: Option<DateTime<Utc>> = row.get("last_used_at");
             let revoked_at: Option<DateTime<Utc>> = row.get("revoked_at");
             let created_at: DateTime<Utc> = row.get("created_at");
@@ -1600,6 +1610,7 @@ async fn list_my_credentials(
                 label,
                 is_default,
                 metadata,
+                subscription_usage,
                 last_used_at: last_used_at.map(|dt| dt.to_rfc3339()),
                 revoked_at: revoked_at.map(|dt| dt.to_rfc3339()),
                 created_at: created_at.to_rfc3339(),
@@ -1977,6 +1988,49 @@ async fn get_internal_credential(
     })?;
 
     Ok(Json(response))
+}
+
+/// Store the latest BYOC subscription-usage snapshot for a credential. Called
+/// by the proxy (fire-and-forget) after it captures OpenAI's x-codex-* rate
+/// limit headers. Guarded by the same proxy credential-lease token as the
+/// internal credential lease endpoint. The body is the opaque `subscriptionUsage`
+/// contract JSON produced by the proxy; the controller persists it verbatim and
+/// re-exposes it on GET /me/credentials.
+async fn set_internal_credential_usage(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(credential_id_raw): AxumPath<String>,
+    Json(usage): Json<JsonValue>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    require_proxy_credential_lease_token(&state.config, &headers)?;
+
+    let credential_id = Uuid::from_str(credential_id_raw.trim())
+        .map_err(|_| bad_request("credentialId must be a valid UUID"))?;
+
+    let connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+
+    let usage_param = PgJson(&usage);
+    let updated = connection
+        .execute(
+            "update user_credentials
+             set subscription_usage = $1, subscription_usage_updated_at = now()
+             where id = $2 and revoked_at is null",
+            &[&usage_param, &credential_id],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to persist credential subscription usage: {error}"))
+        })?;
+
+    if updated == 0 {
+        return Err(not_found("credential not found"));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, Deserialize)]

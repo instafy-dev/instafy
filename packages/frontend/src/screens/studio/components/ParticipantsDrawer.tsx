@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Xmark } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
@@ -10,7 +10,9 @@ import {
 import {
   useChatParticipantsSnapshot,
   type ParticipantAgent,
+  type ParticipantSubscriptionUsage,
 } from "./chatParticipantsStore";
+import { formatReset, windowLabel } from "./subscriptionUsageFormat";
 
 /**
  * Right-edge overlay listing the active conversation's people and agents, what
@@ -63,8 +65,77 @@ function credentialLine(
   }
 }
 
+// One compact line per window: "<label> · <reset>" on the left, "<n>% left" on
+// the right (amber as it drains). No bar — the number is the signal, and a
+// single row keeps the drawer tight even with two windows per agent.
+function UsageWindowRow({
+  window,
+  nowMs,
+}: {
+  window: ParticipantSubscriptionUsage["windows"][number];
+  nowMs: number;
+}) {
+  const label = windowLabel(window.windowMinutes);
+  // Once the reset time has passed and no fresher snapshot has arrived, the
+  // window has rolled over — the last-known "used" figure is stale. Show it as
+  // refreshed (full) rather than "nearly out of quota".
+  const lapsed = window.resetAt > 0 && window.resetAt * 1000 <= nowMs;
+  const remaining = lapsed ? 100 : Math.max(0, 100 - window.usedPercent);
+  // Colour only when it matters: neutral while there's plenty, amber as it runs
+  // low, red when nearly out — so a glance flags which agents to avoid leaning on.
+  const remainingTone: "muted" | "warning" | "danger" =
+    lapsed || remaining > 25 ? "muted" : remaining <= 10 ? "danger" : "warning";
+  const reset = lapsed ? "just reset" : formatReset(window.resetAt, nowMs);
+  return (
+    <div
+      className="flex items-baseline justify-between gap-2 pt-0.5"
+      data-testid="participants-usage-window"
+    >
+      <Text as="span" variant="caption" tone="muted" className="min-w-0 truncate text-xxs">
+        {label}
+        {reset ? ` · ${reset}` : ""}
+      </Text>
+      <Text
+        as="span"
+        variant="caption"
+        tone={remainingTone}
+        className="shrink-0 text-xxs tabular-nums"
+      >
+        {remaining}% left
+      </Text>
+    </div>
+  );
+}
+
+function SubscriptionUsageMeters({
+  usage,
+  nowMs,
+}: {
+  usage: ParticipantSubscriptionUsage;
+  nowMs: number;
+}) {
+  // Short rolling window first, longer window second — regardless of the order
+  // upstream lists them — so the fast-moving one reads at the top.
+  const windows = [...usage.windows].sort((a, b) => a.windowMinutes - b.windowMinutes);
+  return (
+    <div className="mt-1" data-testid="participants-usage">
+      {windows.map((window) => (
+        <UsageWindowRow key={window.kind} window={window} nowMs={nowMs} />
+      ))}
+    </div>
+  );
+}
+
 export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
   const snapshot = useChatParticipantsSnapshot();
+  // Relative reset times ("resets in 2h 10m") go stale between snapshots, so
+  // re-tick every 30s while the drawer is open. Cheap: a single interval, no
+  // network. Seeded lazily so tests can render deterministically at mount.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
   const {
     billing,
     hasLoaded: creditsLoaded,
@@ -81,6 +152,21 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
+  // Clicking anywhere outside the drawer closes it. Skip clicks on the roster
+  // facepile — it toggles on its own, so closing here would race its toggle and
+  // reopen the drawer. Uses mousedown so it settles before the click lands.
+  useEffect(() => {
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as Element | null;
+      if (!target) return;
+      if (target.closest('[data-testid="participants-drawer"]')) return;
+      if (target.closest('[data-testid="conversation-roster"]')) return;
+      onClose();
+    };
+    window.addEventListener("mousedown", onPointerDown);
+    return () => window.removeEventListener("mousedown", onPointerDown);
+  }, [onClose]);
+
   const { humans, agents, runningAgentHandles, totalQueuedCount } = snapshot;
   const runningSet = new Set(runningAgentHandles);
   const runningCount = agents.filter((agent) => runningSet.has(agent.handle)).length;
@@ -95,6 +181,11 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
   const showCredits = creditsEnabled && creditsLoaded && creditLimit > 0;
   const creditFraction = showCredits ? Math.min(1, creditBalance / creditLimit) : 0;
   const creditsLow = showCredits && creditBalance <= Math.max(2, Math.floor(creditLimit * 0.2));
+
+  // Usage is a property of the credential, not the agent — so when several
+  // agents share one account, show the meters once (on the first agent that
+  // uses it) instead of repeating identical bars down the list.
+  const usageShownFor = new Set<string>();
 
   return (
     <aside
@@ -180,8 +271,25 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
             {agents.map((agent) => {
               const credential = credentialLine(agent);
               const metaParts = [agent.model, agent.providerLabel].filter(Boolean);
+              // Fold an unremarkable (healthy) credential into the model·provider
+              // line so a normal agent is just handle + one meta line + usage.
+              // Broken states keep their own coloured line so the warning reads.
+              const credentialHealthy = credential.tone === "muted";
+              const metaLine = (
+                credentialHealthy ? [...metaParts, credential.text] : metaParts
+              )
+                .filter(Boolean)
+                .join(" · ");
+              // First agent on a live credential carries its usage meters; the
+              // rest reference the same account by name without repeating them.
+              const showUsage =
+                agent.subscriptionUsage != null &&
+                (agent.credentialState === "default" || agent.credentialState === "pinned") &&
+                agent.credentialId != null &&
+                !usageShownFor.has(agent.credentialId);
+              if (showUsage && agent.credentialId) usageShownFor.add(agent.credentialId);
               return (
-                <div key={agent.handle} className="flex items-start gap-2.5 py-2">
+                <div key={agent.handle} className="flex items-start gap-2.5 py-1.5">
                   <AgentAvatar agent={agent} />
                   <div className="min-w-0 flex-1">
                     <Text
@@ -192,19 +300,24 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
                     >
                       @{agent.handle}
                     </Text>
-                    {metaParts.length > 0 ? (
+                    {metaLine ? (
                       <Text as="div" variant="caption" tone="muted" className="truncate text-xxs">
-                        {metaParts.join(" · ")}
+                        {metaLine}
                       </Text>
                     ) : null}
-                    <Text
-                      as="div"
-                      variant="caption"
-                      tone={credential.tone}
-                      className="truncate text-xxs"
-                    >
-                      {credential.text}
-                    </Text>
+                    {!credentialHealthy ? (
+                      <Text
+                        as="div"
+                        variant="caption"
+                        tone={credential.tone}
+                        className="truncate text-xxs"
+                      >
+                        {credential.text}
+                      </Text>
+                    ) : null}
+                    {showUsage && agent.subscriptionUsage ? (
+                      <SubscriptionUsageMeters usage={agent.subscriptionUsage} nowMs={nowMs} />
+                    ) : null}
                   </div>
                   {runningSet.has(agent.handle) ? (
                     <span className="flex shrink-0 items-center gap-1.5 pt-0.5 text-xxs font-semibold text-primary-600 dark:text-primary-300">

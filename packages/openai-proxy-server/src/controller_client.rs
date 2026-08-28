@@ -154,6 +154,42 @@ impl ControllerClient {
         let payload = response.json::<CredentialResponse>().await?;
         Ok(payload)
     }
+
+    /// Report a BYOC subscription-usage snapshot for `credential_id` to the
+    /// controller. Authenticated with the same credential-lease bearer as
+    /// `fetch_credential*`. This is invoked fire-and-forget from the proxy, so
+    /// the caller is responsible for swallowing errors; we still surface them
+    /// here so a debug log can name the cause.
+    pub async fn post_credential_usage(
+        &self,
+        credential_id: &str,
+        snapshot: &serde_json::Value,
+    ) -> Result<()> {
+        let url = format!(
+            "{}/internal/credentials/{}/usage",
+            self.base_url.trim_end_matches('/'),
+            credential_id.trim()
+        );
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(&self.credential_lease_bearer)
+            .header("content-type", "application/json")
+            // Bound each best-effort report: a slow/degraded controller must not
+            // let a detached task (and its socket) linger indefinitely.
+            .timeout(Duration::from_secs(5))
+            .json(snapshot)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            bail!("controller credential usage returned {}: {}", status, text);
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
@@ -871,6 +872,55 @@ async fn complete_with_optional_controller_refresh(
     }
 }
 
+/// Caps how many best-effort usage reports may be in flight at once. If the
+/// controller degrades, excess reports are dropped rather than accumulating
+/// detached tasks and sockets — the report is telemetry, not correctness.
+static USAGE_REPORT_SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+
+fn usage_report_slots() -> &'static Arc<tokio::sync::Semaphore> {
+    USAGE_REPORT_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(16)))
+}
+
+/// Best-effort report of the BYOC subscription-usage snapshot captured from the
+/// upstream response headers to the controller, so it can be surfaced on
+/// `GET /me/credentials`. This is strictly fire-and-forget: it spawns a detached
+/// task and never blocks or fails the user's response, and errors are dropped
+/// (logged only when `PROXY_DEBUG_USAGE=1`). No-ops unless we have a controller,
+/// a credential id, and a captured snapshot. Concurrency is bounded (see
+/// `USAGE_REPORT_SLOTS`) and each report is time-bounded by the controller
+/// client, so a slow controller can't cause unbounded task/socket growth.
+fn spawn_credential_usage_report(
+    controller: Option<&ControllerIntegration>,
+    credential_id: Option<&str>,
+    completion: &CodexCompletion,
+) {
+    let (Some(controller), Some(credential_id)) = (controller, credential_id) else {
+        return;
+    };
+    let Some(snapshot) = completion.rate_limits.clone() else {
+        return;
+    };
+    // Drop this report if the in-flight budget is exhausted (controller likely
+    // struggling) instead of piling another detached task on top.
+    let Ok(permit) = usage_report_slots().clone().try_acquire_owned() else {
+        return;
+    };
+    let controller = controller.clone();
+    let credential_id = credential_id.to_string();
+    tokio::spawn(async move {
+        // Held for the report's lifetime; released to the pool on drop.
+        let _permit = permit;
+        if let Err(error) = controller
+            .post_credential_usage(&credential_id, &snapshot)
+            .await
+        {
+            if std::env::var("PROXY_DEBUG_USAGE").as_deref() == Ok("1") {
+                eprintln!("[proxy] credential usage report failed: {error:#}");
+            }
+        }
+    });
+}
+
 async fn create_response(
     State(state): State<ProxyState>,
     AuthenticatedProxyClaims(claims): AuthenticatedProxyClaims,
@@ -965,7 +1015,14 @@ async fn create_response(
             )
             .await
             {
-                Ok((response, _upstream_model)) => ProxyCompletion::Remote(response),
+                Ok((response, _upstream_model)) => {
+                    spawn_credential_usage_report(
+                        state.controller.as_ref(),
+                        credential_id,
+                        &response,
+                    );
+                    ProxyCompletion::Remote(response)
+                }
                 Err(error) => {
                     if let Some(burn) = credit_guard.take() {
                         if let Err(err) = burn.refund("proxy upstream failure").await {
@@ -1013,7 +1070,14 @@ async fn create_response(
             )
             .await
             {
-                Ok((response, _upstream_model)) => ProxyCompletion::Remote(response),
+                Ok((response, _upstream_model)) => {
+                    spawn_credential_usage_report(
+                        Some(controller),
+                        Some(credential_id),
+                        &response,
+                    );
+                    ProxyCompletion::Remote(response)
+                }
                 Err(error) => {
                     if let Some(burn) = credit_guard.take() {
                         if let Err(err) = burn.refund("proxy upstream failure").await {
@@ -1136,6 +1200,7 @@ async fn create_chat_completion(
                 }
             };
 
+            spawn_credential_usage_report(state.controller.as_ref(), credential_id, &completion);
             build_remote_chat_response(&payload, completion, upstream_model, credit_guard).await
         }
         ProxyBackend::RemoteDynamic => {
@@ -1186,6 +1251,7 @@ async fn create_chat_completion(
                 }
             };
 
+            spawn_credential_usage_report(Some(controller), Some(credential_id), &completion);
             build_remote_chat_response(&payload, completion, upstream_model, credit_guard).await
         }
     }

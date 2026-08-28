@@ -20,12 +20,26 @@ export interface CreateCodexCredentialResult {
   error?: string;
 }
 
+export interface SubscriptionUsageWindow {
+  kind: "primary" | "secondary";
+  usedPercent: number;
+  windowMinutes: number;
+  resetAt: number;
+}
+
+export interface SubscriptionUsage {
+  windows: SubscriptionUsageWindow[];
+  planName: string | null;
+  capturedAt: number;
+}
+
 export interface ControllerCredentialListItem {
   id: string;
   kind: string;
   label: string | null;
   isDefault: boolean;
   metadata: unknown;
+  subscriptionUsage?: SubscriptionUsage | null;
   lastUsedAt: string | null;
   revokedAt: string | null;
   createdAt: string;
@@ -219,6 +233,53 @@ export async function testMyCredential(
   }
 }
 
+// Light runtime validation of the `subscriptionUsage` contract the controller
+// re-exposes from the proxy. Drops malformed windows and returns null when no
+// usable window survives, so the caller can treat "unknown" uniformly.
+// Exported for direct testing of the contract-boundary behavior.
+export function parseSubscriptionUsage(raw: unknown): SubscriptionUsage | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  const rawWindows = Array.isArray(record.windows) ? record.windows : [];
+  const windows = rawWindows.reduce<SubscriptionUsageWindow[]>((result, entry) => {
+    if (!entry || typeof entry !== "object") {
+      return result;
+    }
+    const win = entry as Record<string, unknown>;
+    const kind = win.kind === "primary" || win.kind === "secondary" ? win.kind : null;
+    // resetAt is intentionally optional: the proxy omits it when the upstream
+    // sends no reset header. A window with a valid percent and length is still
+    // worth showing (without a reset label), so don't drop it — default to 0,
+    // which the reset formatter treats as "no reset time".
+    if (
+      kind === null ||
+      typeof win.usedPercent !== "number" ||
+      typeof win.windowMinutes !== "number"
+    ) {
+      return result;
+    }
+    result.push({
+      kind,
+      usedPercent: win.usedPercent,
+      windowMinutes: win.windowMinutes,
+      resetAt: typeof win.resetAt === "number" ? win.resetAt : 0,
+    });
+    return result;
+  }, []);
+
+  if (windows.length === 0) {
+    return null;
+  }
+
+  return {
+    windows,
+    planName: typeof record.planName === "string" ? record.planName : null,
+    capturedAt: typeof record.capturedAt === "number" ? record.capturedAt : 0,
+  };
+}
+
 export async function listMyCredentials(params?: {
   accessToken?: string | null;
 }): Promise<ListMyCredentialsResult> {
@@ -280,6 +341,7 @@ export async function listMyCredentials(params?: {
           label: typeof record.label === "string" ? record.label : null,
           isDefault: Boolean(record.isDefault),
           metadata: record.metadata ?? null,
+          subscriptionUsage: parseSubscriptionUsage(record.subscriptionUsage),
           lastUsedAt: typeof record.lastUsedAt === "string" ? record.lastUsedAt : null,
           revokedAt: typeof record.revokedAt === "string" ? record.revokedAt : null,
           createdAt: typeof record.createdAt === "string" ? record.createdAt : "",
