@@ -21,14 +21,44 @@ export type ParticipantCredentialState =
   | "revoked" // pinned credential was revoked
   | "none"; // no usable credential
 
+/**
+ * One rate-limit window reported by the BYOC subscription (ChatGPT/Codex). The
+ * upstream splits usage into a short rolling window and a longer one; we keep
+ * both verbatim and let the UI classify by `windowMinutes` (≈300 → "5h",
+ * ≈10080 → "Weekly").
+ */
+export interface ParticipantUsageWindow {
+  /** Upstream slot: "primary" is the short window, "secondary" the long one. */
+  kind: "primary" | "secondary";
+  /** 0–100, how much of this window's allowance is already spent. */
+  usedPercent: number;
+  /** Window length in minutes (300 = 5h, 10080 = weekly). */
+  windowMinutes: number;
+  /** When this window's allowance resets, unix seconds. */
+  resetAt: number;
+}
+
+/** Live remaining-usage snapshot for a subscription-backed credential. */
+export interface ParticipantSubscriptionUsage {
+  windows: readonly ParticipantUsageWindow[];
+  /** Plan/limit name upstream reports, e.g. "GPT-5.3-Codex-Spark". */
+  planName: string | null;
+  /** When the proxy last captured these numbers, unix seconds. */
+  capturedAt: number;
+}
+
 export interface ParticipantAgent extends ConversationRosterAgent {
   /** Resolved model id, e.g. "gpt-5.5". */
   model: string | null;
   /** Provider label for display, e.g. "OpenAI". */
   providerLabel: string | null;
+  /** Id of the credential this agent draws from (dedupes shared meters). */
+  credentialId: string | null;
   /** Human-readable name of the credential this agent draws from. */
   credentialLabel: string | null;
   credentialState: ParticipantCredentialState;
+  /** Subscription usage for the drawn credential, when it reports any. */
+  subscriptionUsage: ParticipantSubscriptionUsage | null;
 }
 
 export interface ChatParticipantsSnapshot {
