@@ -24,9 +24,6 @@ vi.mock("../ComposerInviteModal", () => ({
   ComposerInviteModal: () => null,
 }));
 
-vi.mock("../OctoAgentChip", () => ({
-  OctoAgentChip: () => <div data-testid="mock-octo-chip" />,
-}));
 
 vi.mock("../ConversationRoster", () => ({
   ConversationRoster: () => <div data-testid="mock-conversation-roster" />,
@@ -193,7 +190,6 @@ function createProps(
     onOpenHome: () => undefined,
     homeAttentionCount: 0,
     homeAttentionBadge: "",
-    octoAgentChipProps: {} as never,
     composerActionMenuProps: {} as never,
     onOpenImagePicker: () => undefined,
     sendingAttachment: false,

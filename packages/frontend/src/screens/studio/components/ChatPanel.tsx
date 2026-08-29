@@ -482,7 +482,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     extraAgentHandles,
     agentHandles,
     onAssistantEnabledChange,
-    onAddAgentHandle,
     onRemoveAgentHandle,
     isAssistantTyping,
     hasMoreHistory,
@@ -4194,7 +4193,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const {
     chatSendQueueDisplay,
     collapsedQueuedMessageSummary,
-    queuedByAgentHandle,
     queuedSummaryItems,
     queuedTargetHandlesByItemId,
     queueStatusLabel,
@@ -4603,11 +4601,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     return await enableMessageNotifications();
   }, []);
 
-  const refreshAgentCredentialData = useCallback(() => {
-    void refreshCredentials();
-    void refreshAvailableAgents({ silent: true });
-  }, [refreshAvailableAgents, refreshCredentials]);
-
   useEffect(() => {
     if (notificationsNudgeOpen) {
       return;
@@ -4774,7 +4767,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     composerActionIconClass,
     composerOutlinedActionClass,
     composerPrimaryActionClass,
-    composerRuntimeTriggerClass,
     queueCanSendNow,
     sendButtonDisabled,
     sendButtonVariant,
@@ -5598,36 +5590,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         }}
         homeAttentionCount={homeAttentionCount}
         homeAttentionBadge={homeAttentionBadge}
-        octoAgentChipProps={{
-          runtimeMenu,
-          runtimeReady,
-          assistantEnabled,
-          conversationId: activeConversationId,
-          onAssistantEnabledChange,
-          extraAgentHandles,
-          availableAgents,
-          onAddAgentHandle,
-          onRemoveAgentHandle,
-          onEditAgentProfile: openAgentProfileSettings,
-          credentials: availableCredentials,
-          credentialsReady,
-          onCredentialsRefresh: refreshAgentCredentialData,
-          onOpenAiOnboarding: openAiOnboarding,
-          onOpenAiManager: openAiManager,
-          onOpenCredits: () => openPanelTab("credits", { activate: true }),
-          projectId: activeProjectId,
-          pendingByAgentHandle: queuedByAgentHandle,
-          suppressLoadingIndicator: Boolean(
-            presentedCredentialGateStateForBubble ||
-              aiOnboardingOpen ||
-              gettingStartedConnectModalProps.connectModalOpen,
-          ),
-          isDisabled:
-            projectWriteDisabled ||
-            sendingAttachment ||
-            (onboardingInputLocked && !(presentedCredentialGateStateForBubble || aiOnboardingOpen)),
-          triggerClassName: composerRuntimeTriggerClass,
-        }}
         composerActionMenuProps={{
           // The pre-AI lock gates sending, not the "+" actions (import a repo,
           // open a browser, invite) — none of which need AI connected. Keeping
