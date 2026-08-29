@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Xmark } from "iconoir-react";
+import { NavArrowDown, Xmark } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import { useCredits } from "../../../credits/useCredits";
@@ -8,10 +8,18 @@ import {
   resolveAgentAvatarText,
 } from "../../../utils/agentAvatar";
 import {
+  modelOptionsForProvider,
+  normalizeAiProviderId,
+} from "../../../utils/aiProviderModels";
+import { normalizeReasoningEffort, type AiReasoningEffort } from "../../../utils/aiReasoning";
+import {
   useChatParticipantsSnapshot,
   type ParticipantAgent,
+  type ParticipantEditingContext,
   type ParticipantSubscriptionUsage,
 } from "./chatParticipantsStore";
+import { ModelMenuSelect } from "./ModelMenuSelect";
+import { ReasoningMenuSelect } from "./ReasoningMenuSelect";
 import { formatReset, windowLabel } from "./subscriptionUsageFormat";
 
 /**
@@ -126,8 +134,75 @@ function SubscriptionUsageMeters({
   );
 }
 
+// Inline edit controls for an agent row: the same Model + Reasoning pickers as
+// the composer chip, but here in the roster where you weigh them against each
+// agent's usage. Saves through the editing context (ChatPanel owns the write +
+// refresh); the row's displayed values update when the refreshed snapshot lands.
+function AgentEditControls({
+  agent,
+  editing,
+}: {
+  agent: ParticipantAgent;
+  editing: ParticipantEditingContext;
+}) {
+  const [saving, setSaving] = useState(false);
+  const agentId = agent.agentId;
+  if (!agentId) return null;
+
+  const providerId = normalizeAiProviderId(agent.providerId ?? "");
+  const modelOptions = modelOptionsForProvider(providerId);
+  const reasoningValue = normalizeReasoningEffort(agent.reasoningEffort);
+
+  const save = async (patch: {
+    model?: string | null;
+    reasoningEffort?: AiReasoningEffort | null;
+  }) => {
+    setSaving(true);
+    try {
+      await editing.saveAgent(agentId, patch);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mt-2 space-y-1.5" data-testid="participants-agent-edit">
+      {modelOptions.length > 0 ? (
+        <ModelMenuSelect
+          value={agent.model}
+          options={modelOptions}
+          disabled={saving}
+          includeDefaultOption
+          defaultLabel={`Default (${modelOptions[0]?.label ?? "recommended"})`}
+          ariaLabel={`Select model for @${agent.handle}`}
+          onSelect={(nextModel) => void save({ model: nextModel })}
+          triggerTestId={`drawer-agent-model-select-${agent.handle}`}
+        />
+      ) : null}
+      {providerId === "openai" ? (
+        <ReasoningMenuSelect
+          value={reasoningValue}
+          disabled={saving}
+          ariaLabel={`Select reasoning effort for @${agent.handle}`}
+          onSelect={(nextEffort) => void save({ reasoningEffort: nextEffort })}
+          triggerTestId={`drawer-agent-reasoning-select-${agent.handle}`}
+        />
+      ) : null}
+    </div>
+  );
+}
+
 export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
   const snapshot = useChatParticipantsSnapshot();
+  // Which agent rows are expanded into their edit controls (by handle).
+  const [expandedAgents, setExpandedAgents] = useState<ReadonlySet<string>>(() => new Set());
+  const toggleAgentExpanded = (handle: string) =>
+    setExpandedAgents((prev) => {
+      const next = new Set(prev);
+      if (next.has(handle)) next.delete(handle);
+      else next.add(handle);
+      return next;
+    });
   // Relative reset times ("resets in 2h 10m") go stale between snapshots, so
   // re-tick every 30s while the drawer is open. Cheap: a single interval, no
   // network. Seeded lazily so tests can render deterministically at mount.
@@ -161,13 +236,16 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
       if (!target) return;
       if (target.closest('[data-testid="participants-drawer"]')) return;
       if (target.closest('[data-testid="conversation-roster"]')) return;
+      // The row edit menus (model/reasoning) portal outside the drawer; a click
+      // inside one must not be read as a click-away that closes the drawer.
+      if (target.closest("[data-studio-popover]")) return;
       onClose();
     };
     window.addEventListener("mousedown", onPointerDown);
     return () => window.removeEventListener("mousedown", onPointerDown);
   }, [onClose]);
 
-  const { humans, agents, runningAgentHandles, totalQueuedCount } = snapshot;
+  const { humans, agents, runningAgentHandles, totalQueuedCount, editing } = snapshot;
   const runningSet = new Set(runningAgentHandles);
   const runningCount = agents.filter((agent) => runningSet.has(agent.handle)).length;
   const summaryParts: string[] = [];
@@ -288,6 +366,8 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
                 agent.credentialId != null &&
                 !usageShownFor.has(agent.credentialId);
               if (showUsage && agent.credentialId) usageShownFor.add(agent.credentialId);
+              const isEditable = editing != null && agent.agentId != null;
+              const isExpanded = expandedAgents.has(agent.handle);
               return (
                 <div key={agent.handle} className="flex items-start gap-2.5 py-1.5">
                   <AgentAvatar agent={agent} />
@@ -318,16 +398,38 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
                     {showUsage && agent.subscriptionUsage ? (
                       <SubscriptionUsageMeters usage={agent.subscriptionUsage} nowMs={nowMs} />
                     ) : null}
+                    {isEditable && isExpanded && editing ? (
+                      <AgentEditControls agent={agent} editing={editing} />
+                    ) : null}
                   </div>
-                  {runningSet.has(agent.handle) ? (
-                    <span className="flex shrink-0 items-center gap-1.5 pt-0.5 text-xxs font-semibold text-primary-600 dark:text-primary-300">
-                      <span
-                        aria-hidden="true"
-                        className="h-1.5 w-1.5 rounded-full bg-primary-500 shadow-[0_0_5px_rgba(55,148,255,0.8)]"
-                      />
-                      Running
-                    </span>
-                  ) : null}
+                  <div className="flex shrink-0 items-center gap-1.5 pt-0.5">
+                    {runningSet.has(agent.handle) ? (
+                      <span className="flex items-center gap-1.5 text-xxs font-semibold text-primary-600 dark:text-primary-300">
+                        <span
+                          aria-hidden="true"
+                          className="h-1.5 w-1.5 rounded-full bg-primary-500 shadow-[0_0_5px_rgba(55,148,255,0.8)]"
+                        />
+                        Running
+                      </span>
+                    ) : null}
+                    {isEditable ? (
+                      <IconButton
+                        variant="ghost"
+                        size="xs"
+                        radius="full"
+                        aria-label={isExpanded ? `Hide @${agent.handle} settings` : `Edit @${agent.handle} settings`}
+                        aria-expanded={isExpanded}
+                        data-testid={`participants-agent-expand-${agent.handle}`}
+                        onPress={() => toggleAgentExpanded(agent.handle)}
+                        className="text-slate-400 hover:text-slate-600 data-[hovered]:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300 dark:data-[hovered]:text-slate-300"
+                      >
+                        <NavArrowDown
+                          className={`h-4 w-4 transition-transform ${isExpanded ? "rotate-180" : ""}`}
+                          aria-hidden="true"
+                        />
+                      </IconButton>
+                    ) : null}
+                  </div>
                 </div>
               );
             })}

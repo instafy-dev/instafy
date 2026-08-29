@@ -48,8 +48,14 @@ export interface ParticipantSubscriptionUsage {
 }
 
 export interface ParticipantAgent extends ConversationRosterAgent {
+  /** Controller agent id — present when the agent is editable in place. */
+  agentId?: string | null;
+  /** Effective AI provider id (e.g. "openai"), for model options + gating. */
+  providerId?: string | null;
   /** Resolved model id, e.g. "gpt-5.5". */
   model: string | null;
+  /** Per-agent reasoning effort (minimal|low|medium|high), or null to inherit. */
+  reasoningEffort?: string | null;
   /** Provider label for display, e.g. "OpenAI". */
   providerLabel: string | null;
   /** Id of the credential this agent draws from (dedupes shared meters). */
@@ -61,6 +67,33 @@ export interface ParticipantAgent extends ConversationRosterAgent {
   subscriptionUsage: ParticipantSubscriptionUsage | null;
 }
 
+/** A credential the drawer can offer as an agent's option. */
+export interface ParticipantCredentialOption {
+  id: string;
+  label: string;
+  kind: string;
+  revoked: boolean;
+}
+
+/**
+ * Editing capability the drawer uses to make agent rows two-way. ChatPanel is
+ * the single owner of the agent/credential data and the refresh, so it hands
+ * the drawer a `saveAgent` that wraps its own update + refresh — the drawer
+ * never talks to the controller directly. Present only when editing is possible
+ * (a persisted agent + a signed-in workspace); `null` keeps the drawer read-only.
+ */
+export interface ParticipantEditingContext {
+  credentials: readonly ParticipantCredentialOption[];
+  saveAgent: (
+    agentId: string,
+    patch: {
+      model?: string | null;
+      reasoningEffort?: string | null;
+      credentialId?: string | null;
+    },
+  ) => Promise<boolean>;
+}
+
 export interface ChatParticipantsSnapshot {
   conversationId: string | null;
   humans: readonly ConversationRosterHuman[];
@@ -69,6 +102,8 @@ export interface ChatParticipantsSnapshot {
   runningAgentHandles: readonly string[];
   /** Messages waiting in this conversation's send queue. */
   totalQueuedCount: number;
+  /** Editing capability, or null/absent when the drawer is read-only. */
+  editing?: ParticipantEditingContext | null;
 }
 
 export const EMPTY_CHAT_PARTICIPANTS_SNAPSHOT: ChatParticipantsSnapshot = {
@@ -77,6 +112,7 @@ export const EMPTY_CHAT_PARTICIPANTS_SNAPSHOT: ChatParticipantsSnapshot = {
   agents: [],
   runningAgentHandles: [],
   totalQueuedCount: 0,
+  editing: null,
 };
 
 let current: ChatParticipantsSnapshot = EMPTY_CHAT_PARTICIPANTS_SNAPSHOT;
