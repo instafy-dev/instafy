@@ -3,6 +3,7 @@ import { Cpu, Cube, NavArrowRight, Xmark } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
 import { Button, IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
+import { Toggle } from "../../../components/Toggle";
 import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
 import {
@@ -541,7 +542,7 @@ export function ParticipantsDrawer({
     return () => window.removeEventListener("mousedown", onPointerDown);
   }, [onClose]);
 
-  const { humans, agents, runningAgentHandles, totalQueuedCount, editing } = snapshot;
+  const { humans, agents, runningAgentHandles, totalQueuedCount, editing, assistant } = snapshot;
   const runningSet = new Set(runningAgentHandles);
   const runningCount = agents.filter((agent) => runningSet.has(agent.handle)).length;
   const summaryParts: string[] = [];
@@ -797,6 +798,45 @@ export function ParticipantsDrawer({
           </section>
         ) : null}
       </div>
+
+      {assistant || editing?.onManageAgents ? (
+        // Conversation-scoped controls absorbed from the composer chip: the
+        // assistant switch (does AI reply here at all) and the door to agent
+        // management. Anything workspace-scoped stays out of this panel.
+        <div className="border-t border-slate-200/70 px-3.5 py-2.5 dark:border-[color:var(--color-studio-dark-divider)]">
+          {assistant ? (
+            <Toggle
+              size="sm"
+              label="Assistant replies here"
+              description={assistant.hint ?? undefined}
+              isSelected={assistant.enabled}
+              onChange={assistant.onToggle}
+              data-testid="participants-assistant-toggle"
+            />
+          ) : null}
+          {editing?.onManageAgents ? (
+            <button
+              type="button"
+              onClick={editing.onManageAgents}
+              data-testid="participants-manage-agents"
+              className="group mt-1.5 flex w-full items-center gap-1 text-left"
+            >
+              <Text
+                as="span"
+                variant="caption"
+                tone="muted"
+                className="text-xxs group-hover:text-slate-700 dark:group-hover:text-slate-200"
+              >
+                Manage agents
+              </Text>
+              <NavArrowRight
+                className="h-3 w-3 text-slate-400 dark:text-slate-500"
+                aria-hidden="true"
+              />
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </aside>
   );
 }
