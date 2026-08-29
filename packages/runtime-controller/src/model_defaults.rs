@@ -1,6 +1,6 @@
 pub const DEFAULT_MANAGED_AI_PROVIDER_ID: &str = "openai";
-pub const DEFAULT_OPENAI_MODEL_ID: &str = "gpt-5.5";
-pub const DEFAULT_OPENAI_MODEL_LABEL: &str = "GPT-5.5";
+pub const DEFAULT_OPENAI_MODEL_ID: &str = "gpt-5.6-sol";
+pub const DEFAULT_OPENAI_MODEL_LABEL: &str = "GPT-5.6 Sol";
 pub const DEFAULT_DEEPSEEK_MODEL_ID: &str = "deepseek-chat";
 pub const DEFAULT_ZAI_MODEL_ID: &str = "glm-5";
 pub const DEFAULT_GEMINI_MODEL_ID: &str = "gemini-2.5-pro";
@@ -123,7 +123,7 @@ mod tests {
             assert!(is_stale_openai_model(stale), "{stale} should be stale");
             assert_eq!(
                 resolve_agent_model_for_provider("openai", Some(stale.to_string())).as_deref(),
-                Some("gpt-5.5"),
+                Some("gpt-5.6-sol"),
                 "{stale} should resolve to the default model"
             );
         }
@@ -132,7 +132,7 @@ mod tests {
         assert!(!is_stale_openai_model("gpt-5.10"));
         assert_eq!(
             resolve_agent_model_for_provider("openai", Some("gpt-5.4-mini".to_string())).as_deref(),
-            Some("gpt-5.5")
+            Some("gpt-5.6-sol")
         );
     }
 

@@ -70,7 +70,7 @@ Key environment variables (see `AppConfig::from_env` for defaults):
 - `WORKSPACE_ROOT` — runtime/controller root directory containing per-project workspaces. In local-canonical desktop mode, the source-of-truth folder can live outside this hosted layout. In git-canonical hosted mode, this root holds the materialized working copies.
 - `PROXY_BASE_URL`/`PROXY_SIGNING_SECRET` — optional AI proxy envelope support.
 - `MANAGED_AI_ENABLED` — enables the platform-managed AI lane when the proxy is available with static credentials.
-- `MANAGED_AI_MODEL_ID` — upstream model id used for managed AI turns (defaults to `gpt-5.5`).
+- `MANAGED_AI_MODEL_ID` — upstream model id used for managed AI turns (defaults to `gpt-5.6-sol`).
 - `MANAGED_AI_STARTUP_CHECK` — when `true`, controller boot fails unless `PROXY_BASE_URL/healthz` reports `requiresCredential=false` (that is, the proxy has static credentials such as `OPENAI_API_KEY` or `auth.json`). Defaults to on outside `DEV_MODE`.
 - Shared Browser managed TURN (optional; unset the TURN values to disable):
   - `CONTROLLER_BROWSER_TURN_URLS` — comma-separated `turn:`/`turns:` URLs advertised to WebRTC clients (maximum 4; credentials must not be embedded in a URL).
