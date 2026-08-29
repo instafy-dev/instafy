@@ -54,7 +54,6 @@ import {
   ChatMessageStashTray,
   ChatMessageStashTrigger,
 } from "./ChatMessageStashTray";
-import { OctoAgentChip } from "./OctoAgentChip";
 import { OctoSilenceHint } from "./OctoSilenceHint";
 import { StatusPill, StatusPillButton, type StatusPillTone } from "./StatusPill";
 import { VoiceConversationActionStrip } from "./VoiceConversationActionStrip";
@@ -103,7 +102,6 @@ type ChatComposerSurfaceProps = {
   onOpenHome: () => void;
   homeAttentionCount: number;
   homeAttentionBadge: string;
-  octoAgentChipProps: ComponentProps<typeof OctoAgentChip>;
   composerActionMenuProps: ComponentProps<typeof ComposerActionMenu>;
   onOpenImagePicker: () => void;
   sendingAttachment: boolean;
@@ -219,7 +217,6 @@ export function ChatComposerSurface({
   onOpenHome,
   homeAttentionCount,
   homeAttentionBadge,
-  octoAgentChipProps,
   composerActionMenuProps,
   onOpenImagePicker,
   sendingAttachment,
@@ -1259,7 +1256,6 @@ export function ChatComposerSurface({
                             </span>
                           </IconButton>
                         ) : null}
-                        <OctoAgentChip {...octoAgentChipProps} />
                       </div>
                       <div className={`flex flex-none items-stretch justify-end gap-1.5 sm:gap-2 ${browserComposerCondensed ? "flex-nowrap" : "flex-wrap"}`}>
                         <ComposerActionMenu {...composerActionMenuProps} mutationDisabled={mutationDisabled} />
