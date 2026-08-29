@@ -81,6 +81,8 @@ export interface ParticipantAgent extends ConversationRosterAgent {
   credentialId: string | null;
   /** Human-readable name of the credential this agent draws from. */
   credentialLabel: string | null;
+  /** Credential kind (e.g. "codex_auth_json"), for a friendly type descriptor. */
+  credentialKind?: string | null;
   credentialState: ParticipantCredentialState;
   /** Subscription usage for the drawn credential, when it reports any. */
   subscriptionUsage: ParticipantSubscriptionUsage | null;

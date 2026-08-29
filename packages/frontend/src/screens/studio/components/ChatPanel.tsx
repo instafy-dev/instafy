@@ -4329,6 +4329,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         providerLabel: formatProviderLabel(providerId),
         credentialId: effectiveCredential?.id ?? null,
         credentialLabel,
+        credentialKind: effectiveCredential?.kind ?? null,
         credentialState,
         subscriptionUsage,
       };

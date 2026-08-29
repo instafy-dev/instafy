@@ -58,14 +58,37 @@ function AgentAvatar({ agent }: { agent: ParticipantAgent }) {
   );
 }
 
-// Lead with the account the agent uses (what a person recognizes) and annotate
-// only the notable states. "Default" (follows the workspace default) is the
-// unremarkable norm and needs no label; "Pinned" (locked to this one) and the
-// broken states are what's worth flagging.
+// A plain-language credential type from its kind. Unlike the model name (which
+// says nothing about the auth backend), this tells you *whose quota* pays for
+// the agent — a ChatGPT subscription vs a metered API key — and reads better
+// than a raw label like "Local Codex login (dev)". Falls back to the label for
+// kinds we don't have a friendly name for.
+function friendlyCredentialKind(kind?: string | null): string | null {
+  switch ((kind ?? "").trim()) {
+    case "codex_auth_json":
+      return "ChatGPT subscription";
+    case "openai_api_key":
+      return "OpenAI API key";
+    case "gemini_api":
+      return "Gemini API key";
+    case "gemini_cli":
+      return "Gemini (CLI)";
+    case "gemini_oauth_connected":
+    case "gemini_oauth_mode":
+      return "Gemini";
+    default:
+      return null;
+  }
+}
+
+// Show the credential's type (what pays for the agent), annotating only the
+// notable states. "Default" is the unremarkable norm; "Pinned" and the broken
+// states are what's worth flagging.
 function credentialLine(
   agent: ParticipantAgent,
 ): { text: string; tone: "muted" | "warning" | "danger" } {
-  const label = agent.credentialLabel ?? "credential";
+  const descriptor =
+    friendlyCredentialKind(agent.credentialKind) ?? agent.credentialLabel ?? "credential";
   switch (agent.credentialState) {
     case "missing":
       return { text: "Its credential is missing", tone: "danger" };
@@ -74,9 +97,9 @@ function credentialLine(
     case "none":
       return { text: "No AI credential", tone: "warning" };
     case "pinned":
-      return { text: `${label} · pinned`, tone: "muted" };
+      return { text: `${descriptor} · pinned`, tone: "muted" };
     default:
-      return { text: label, tone: "muted" };
+      return { text: descriptor, tone: "muted" };
   }
 }
 
