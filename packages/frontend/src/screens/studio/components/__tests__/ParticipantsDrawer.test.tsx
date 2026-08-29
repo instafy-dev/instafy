@@ -404,6 +404,44 @@ describe("ParticipantsDrawer", () => {
     expect(section?.textContent).not.toContain("Runtimes & agents");
   });
 
+  it("hosts the conversation's assistant switch and the manage-agents door", async () => {
+    const onToggle = vi.fn();
+    const onManageAgents = vi.fn();
+    await act(async () => {
+      publishChatParticipants(
+        snapshot({
+          assistant: { enabled: true, hint: null, onToggle },
+          editing: { credentials: [], saveAgent: vi.fn(), onManageAgents },
+          runningAgentHandles: [],
+          totalQueuedCount: 0,
+        }),
+      );
+    });
+    await render();
+
+    const toggle = container.querySelector('[data-testid="participants-assistant-toggle"]');
+    expect(toggle).not.toBeNull();
+    const manage = container.querySelector<HTMLButtonElement>(
+      '[data-testid="participants-manage-agents"]',
+    );
+    expect(manage).not.toBeNull();
+    await act(async () => {
+      manage?.click();
+    });
+    expect(onManageAgents).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows no assistant footer without the control", async () => {
+    await act(async () => {
+      publishChatParticipants(snapshot({ runningAgentHandles: [], totalQueuedCount: 0 }));
+    });
+    await render();
+    expect(
+      container.querySelector('[data-testid="participants-assistant-toggle"]'),
+    ).toBeNull();
+    expect(container.querySelector('[data-testid="participants-manage-agents"]')).toBeNull();
+  });
+
   it("machine rows deep-link to the Machines page when a handler is provided", async () => {
     const cloudRuntime = {
       id: "rt-cloud",

@@ -113,6 +113,22 @@ export interface ParticipantEditingContext {
       credentialId?: string | null;
     },
   ) => Promise<boolean>;
+  /** Opens the agents management surface (the AI Manager panel). */
+  onManageAgents?: () => void;
+}
+
+/**
+ * The conversation's assistant switch — whether AI replies here at all. This is
+ * the one genuinely conversation-scoped control from the composer chip, so it
+ * lives with the conversation's cast. ChatPanel owns the semantics (enable may
+ * first route through AI onboarding when nothing is connected; disable also
+ * clears extra invited agents).
+ */
+export interface ParticipantAssistantControl {
+  enabled: boolean;
+  /** Shown under the toggle when action is needed before enabling works. */
+  hint: string | null;
+  onToggle: (enabled: boolean) => void;
 }
 
 export interface ChatParticipantsSnapshot {
@@ -125,6 +141,8 @@ export interface ChatParticipantsSnapshot {
   totalQueuedCount: number;
   /** Editing capability, or null/absent when the drawer is read-only. */
   editing?: ParticipantEditingContext | null;
+  /** The conversation's assistant switch, or null/absent when unavailable. */
+  assistant?: ParticipantAssistantControl | null;
 }
 
 export const EMPTY_CHAT_PARTICIPANTS_SNAPSHOT: ChatParticipantsSnapshot = {

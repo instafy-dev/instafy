@@ -4384,9 +4384,59 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         }
         return result.success;
       },
+      onManageAgents: openAiManager,
     }),
-    [availableCredentials, refreshAvailableAgents, refreshCredentials],
+    [availableCredentials, openAiManager, refreshAvailableAgents, refreshCredentials],
   );
+  // The conversation's assistant switch, published for the participants panel —
+  // same semantics as the composer chip's toggle: enabling with no AI connected
+  // routes through onboarding first; disabling also clears invited agents.
+  const participantsAssistant = useMemo(() => {
+    const conversationId = activeConversationId;
+    if (!conversationId) return null;
+    const aiSetupState =
+      activeAiCredentials.length === 0
+        ? "missing"
+        : !defaultAiCredential
+          ? "needs_default"
+          : "ready";
+    const aiControlsReady = credentialsReady || aiSetupState === "ready";
+    const enabled = assistantEnabled || extraAgentHandles.length > 0;
+    return {
+      enabled,
+      hint: aiControlsReady
+        ? null
+        : aiSetupState === "needs_default"
+          ? "Pick a default AI to resume replies."
+          : "Connect AI first.",
+      onToggle: (nextEnabled: boolean) => {
+        if (nextEnabled) {
+          if (enabled) return;
+          if (!aiControlsReady) {
+            openAiOnboarding();
+            return;
+          }
+          onAssistantEnabledChange(conversationId, true);
+          return;
+        }
+        if (!enabled) return;
+        for (const handle of extraAgentHandles) {
+          onRemoveAgentHandle(conversationId, handle);
+        }
+        onAssistantEnabledChange(conversationId, false);
+      },
+    };
+  }, [
+    activeAiCredentials.length,
+    activeConversationId,
+    assistantEnabled,
+    credentialsReady,
+    defaultAiCredential,
+    extraAgentHandles,
+    onAssistantEnabledChange,
+    onRemoveAgentHandle,
+    openAiOnboarding,
+  ]);
   useEffect(() => {
     publishChatParticipants({
       conversationId: participantsSnapshotConversationId,
@@ -4395,12 +4445,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       runningAgentHandles: Array.from(activeConversationRunAgentHandles),
       totalQueuedCount,
       editing: participantsEditing,
+      assistant: participantsAssistant,
     });
     return () => clearChatParticipants(participantsSnapshotConversationId);
   }, [
     activeConversationRunAgentHandles,
     conversationRosterHumans,
     participantAgents,
+    participantsAssistant,
     participantsEditing,
     participantsSnapshotConversationId,
     totalQueuedCount,
