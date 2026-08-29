@@ -517,6 +517,9 @@ fn build_system_issue_from_telemetry(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("Runtime telemetry error");
+    if is_expected_provider_limit(message) {
+        return None;
+    }
     let upstream_ai_failure = is_upstream_ai_failure(message);
     let labels = if upstream_ai_failure {
         vec![
@@ -567,6 +570,14 @@ fn build_system_issue_from_telemetry(
         fingerprint,
         dedupe_window_seconds: Some(10 * 60),
     })
+}
+
+fn is_expected_provider_limit(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("usage_limit_reached")
+        || normalized.contains("insufficient_quota")
+        || normalized.contains("rate_limit_error")
+        || normalized.contains("rate limit reached")
 }
 
 fn is_upstream_ai_failure(message: &str) -> bool {
@@ -932,6 +943,27 @@ mod tests {
             &JsonValue::Null,
         )
         .is_none());
+    }
+
+    #[test]
+    fn telemetry_system_issue_ignores_expected_provider_limits() {
+        for message in [
+            r#"unexpected status 502 Bad Gateway: upstream request failed: backend responded with 429 Too Many Requests: {"error":{"type":"usage_limit_reached"}}"#,
+            r#"backend responded with 429 Too Many Requests: {"error":{"type":"insufficient_quota"}}"#,
+            r#"backend responded with 429 Too Many Requests: {"error":{"type":"rate_limit_error","message":"Rate limit reached"}}"#,
+        ] {
+            assert!(build_system_issue_from_telemetry(
+                "telemetry.error",
+                "error",
+                Some(message),
+                None,
+                None,
+                None,
+                None,
+                &JsonValue::Null,
+            )
+            .is_none());
+        }
     }
 
     #[test]
