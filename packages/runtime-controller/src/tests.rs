@@ -8686,6 +8686,21 @@ async fn hosted_runtime_sweep_burns_credits() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn hosted_runtime_sweep_does_not_report_pool_pressure() {
+    let timeout = anyhow::anyhow!("Timed out in bb8")
+        .context("failed to acquire connection for a background task");
+    assert!(runtime::is_transient_hosted_runtime_credit_sweep_error(
+        &timeout
+    ));
+
+    let query_error = anyhow::anyhow!("relation does not exist")
+        .context("failed to select active hosted runtimes");
+    assert!(!runtime::is_transient_hosted_runtime_credit_sweep_error(
+        &query_error
+    ));
+}
+
 #[tokio::test]
 async fn tunnel_broker_acl_hook_burns_credits() -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {

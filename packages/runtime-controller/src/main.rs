@@ -325,6 +325,10 @@ async fn main() -> anyhow::Result<()> {
             if let Err(error) = runtime::sweep_hosted_runtime_credit_usage(&billing_state).await {
                 let error_message = error.to_string();
                 tracing::warn!(error = %error_message, "hosted runtime credit sweep failed");
+                // Pool pressure is retried on the next tick and does not indicate a billing bug.
+                if runtime::is_transient_hosted_runtime_credit_sweep_error(&error) {
+                    continue;
+                }
                 if let Err(report_error) = bug_reports::record_system_bug_report(
                     &billing_state,
                     bug_reports::SystemBugReportInput {
