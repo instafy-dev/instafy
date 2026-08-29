@@ -752,6 +752,26 @@ async fn execute_automation_once(
             {
                 Some(runtime_id)
             } else {
+                let requested_provider = record
+                    .runtime_provider
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                let provider_is_self_hosted = requested_provider.is_some_and(|provider| {
+                    crate::runtime::provider_is_private_self_hosted_or_quarantined(state, provider)
+                });
+                if let Some(message) = no_live_self_hosted_runtime_error(provider_is_self_hosted) {
+                    finalize_automation_attempt(
+                        state,
+                        record.id,
+                        now,
+                        next_run_at,
+                        status_override,
+                        Some(message.to_string()),
+                    )
+                    .await?;
+                    return Ok(());
+                }
                 let response = crate::runtime::ensure_runtime_for_automation(
                     state,
                     record.project_id,
@@ -1052,6 +1072,17 @@ fn automation_runtime_is_selectable(
 
 fn hosted_automation_provider_is_managed(provider: &str, configured_as_self_hosted: bool) -> bool {
     !configured_as_self_hosted && !crate::provider_identifiers::is_self_hosted_provider_id(provider)
+}
+
+/// Scheduled runs cannot launch a self-hosted runtime on demand: the launch
+/// path requires an explicit owner-bound runtimeId that only a direct API
+/// caller can supply. When no live self-hosted runtime matched the automation,
+/// fail the run with an actionable operator message instead of leaking the
+/// launch-path refusal into lastError (instafy-dev/instafy#105).
+fn no_live_self_hosted_runtime_error(provider_is_self_hosted: bool) -> Option<&'static str> {
+    provider_is_self_hosted.then_some(
+        "no live self-hosted runtime available for this space; start or repair the runtime and re-run",
+    )
 }
 
 async fn list_project_automations(
@@ -2059,7 +2090,7 @@ mod tests {
     use super::{
         automation_runtime_is_selectable, can_access_owned_automation,
         conversation_visibility_for_result_visibility, hosted_automation_provider_is_managed,
-        normalize_result_visibility, UpdateAutomationBody,
+        no_live_self_hosted_runtime_error, normalize_result_visibility, UpdateAutomationBody,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -2247,6 +2278,22 @@ mod tests {
             owner,
             false,
         ));
+    }
+
+    #[test]
+    fn auto_dispatch_without_live_self_hosted_runtime_fails_with_operator_message() {
+        // Pin the exact wording: it becomes the automation's lastError and must
+        // point the operator at the offline runtime, not at a runtimeId field
+        // (instafy-dev/instafy#105).
+        assert_eq!(
+            no_live_self_hosted_runtime_error(true),
+            Some(
+                "no live self-hosted runtime available for this space; \
+                 start or repair the runtime and re-run"
+            )
+        );
+        // Managed providers keep falling through to the launch path.
+        assert_eq!(no_live_self_hosted_runtime_error(false), None);
     }
 
     #[test]

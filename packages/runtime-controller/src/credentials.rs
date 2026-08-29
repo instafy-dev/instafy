@@ -1925,8 +1925,9 @@ async fn get_internal_credential(
         .await
         .map_err(|error| internal_error(format!("failed to load credential: {error}")))?;
 
-    let Some(row) = row else {
-        return Err(not_found("credential not found"));
+    let (effective_credential_id, row) = match row {
+        Some(row) => (credential_id, row),
+        None => resolve_revoked_credential_fallback(&transaction, credential_id).await?,
     };
 
     let kind: String = row.get("kind");
@@ -1961,7 +1962,11 @@ async fn get_internal_credential(
                 "update user_credentials
                  set nonce_b64 = $2, ciphertext_b64 = $3, updated_at = now()
                  where id = $1",
-                &[&credential_id, &updated_nonce_b64, &updated_ciphertext_b64],
+                &[
+                    &effective_credential_id,
+                    &updated_nonce_b64,
+                    &updated_ciphertext_b64,
+                ],
             )
             .await
             .map_err(|error| {
@@ -1977,7 +1982,7 @@ async fn get_internal_credential(
     transaction
         .execute(
             "update user_credentials set last_used_at = now(), updated_at = now() where id = $1",
-            &[&credential_id],
+            &[&effective_credential_id],
         )
         .await
         .map_err(|error| {
@@ -1990,6 +1995,117 @@ async fn get_internal_credential(
     })?;
 
     Ok(Json(response))
+}
+
+/// The owner's current default credential, loaded as a candidate replacement
+/// for a revoked pinned credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FallbackCredentialCandidate {
+    pub(crate) id: Uuid,
+    pub(crate) user_id: Uuid,
+    pub(crate) kind: String,
+    pub(crate) metadata: JsonValue,
+}
+
+/// Authorization gate for the revoked-credential lease fallback: the candidate
+/// must be owned by the same user the original lease was pinned to and must
+/// resolve to the same provider. The SQL lookup already scopes candidates to
+/// the pinned credential's owner; this check is deliberate defense in depth so
+/// a future query change cannot silently lease a credential across users or
+/// swap providers under a running job.
+fn fallback_candidate_is_authorized(
+    pinned_owner_user_id: Uuid,
+    pinned_provider: &str,
+    candidate: &FallbackCredentialCandidate,
+) -> bool {
+    candidate.user_id == pinned_owner_user_id
+        && provider_for_credential(&candidate.kind, &candidate.metadata) == pinned_provider
+}
+
+/// The pinned credential id no longer resolves to a live row: routine
+/// credential rotation revokes a credential and replaces it with an equivalent
+/// default of the same provider, but running jobs keep the id they pinned at
+/// creation. Fall back to the owner's current default credential for the same
+/// provider so the job survives the rotation. Returns the effective credential
+/// id together with its row (same columns as the primary lease query), or the
+/// lease 404 when no authorized replacement exists.
+async fn resolve_revoked_credential_fallback(
+    transaction: &tokio_postgres::Transaction<'_>,
+    pinned_credential_id: Uuid,
+) -> Result<(Uuid, tokio_postgres::Row), (StatusCode, Json<ApiError>)> {
+    let pinned = transaction
+        .query_opt(
+            "select user_id, kind, metadata
+             from user_credentials
+             where id = $1
+             limit 1",
+            &[&pinned_credential_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load revoked credential: {error}")))?;
+
+    // The pinned row is gone entirely, so there is no owner to scope a
+    // fallback to: keep the plain 404.
+    let Some(pinned) = pinned else {
+        return Err(not_found("credential not found"));
+    };
+
+    let pinned_owner_user_id: Uuid = pinned.get("user_id");
+    let pinned_kind: String = pinned.get("kind");
+    let pinned_metadata: JsonValue = pinned.get::<_, PgJson<JsonValue>>("metadata").0;
+    let pinned_provider = provider_for_credential(&pinned_kind, &pinned_metadata);
+
+    // Row-lock the candidate like the primary lease query does: token
+    // refreshes on the fallback credential must stay serialized across
+    // controllers (the process-local refresh mutex is keyed by the pinned id
+    // on this path, so the row lock is the authority).
+    let candidate_row = transaction
+        .query_opt(
+            "select id, user_id, kind, nonce_b64, ciphertext_b64, metadata
+             from user_credentials
+             where user_id = $1 and is_default = true and revoked_at is null
+             order by updated_at desc, created_at desc
+             limit 1
+             for update",
+            &[&pinned_owner_user_id],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to load fallback default credential: {error}"
+            ))
+        })?;
+
+    let no_replacement = || {
+        not_found(
+            "credential not found: the pinned credential was revoked and no default \
+             replacement with the same provider exists",
+        )
+    };
+
+    let Some(candidate_row) = candidate_row else {
+        return Err(no_replacement());
+    };
+
+    let candidate = FallbackCredentialCandidate {
+        id: candidate_row.get("id"),
+        user_id: candidate_row.get("user_id"),
+        kind: candidate_row.get("kind"),
+        metadata: candidate_row.get::<_, PgJson<JsonValue>>("metadata").0,
+    };
+
+    if !fallback_candidate_is_authorized(pinned_owner_user_id, &pinned_provider, &candidate) {
+        return Err(no_replacement());
+    }
+
+    tracing::info!(
+        pinned_credential_id = %pinned_credential_id,
+        fallback_credential_id = %candidate.id,
+        provider = %pinned_provider,
+        "pinned credential is revoked; leasing the owner's current default credential instead"
+    );
+
+    Ok((candidate.id, candidate_row))
 }
 
 /// Store the latest BYOC subscription-usage snapshot for a credential. Called
@@ -2025,7 +2141,9 @@ async fn set_internal_credential_usage(
         )
         .await
         .map_err(|error| {
-            internal_error(format!("failed to persist credential subscription usage: {error}"))
+            internal_error(format!(
+                "failed to persist credential subscription usage: {error}"
+            ))
         })?;
 
     if updated == 0 {
@@ -2917,6 +3035,109 @@ mod provider_metadata_tests {
             default_model_for_credential(CREDENTIAL_KIND_CODEX_AUTH_JSON, PROVIDER_OPENAI),
             default_managed_ai_model_id()
         );
+    }
+}
+
+#[cfg(test)]
+mod revoked_credential_fallback_tests {
+    use super::{
+        fallback_candidate_is_authorized, provider_for_credential, FallbackCredentialCandidate,
+        CREDENTIAL_KIND_CODEX_AUTH_JSON, CREDENTIAL_KIND_OPENAI_API_KEY, PROVIDER_OPENAI,
+    };
+    use serde_json::json;
+    use uuid::Uuid;
+
+    fn candidate(
+        user_id: Uuid,
+        kind: &str,
+        metadata: serde_json::Value,
+    ) -> FallbackCredentialCandidate {
+        FallbackCredentialCandidate {
+            id: Uuid::new_v4(),
+            user_id,
+            kind: kind.to_string(),
+            metadata,
+        }
+    }
+
+    #[test]
+    fn accepts_same_owner_and_same_provider() {
+        let owner = Uuid::new_v4();
+        let replacement = candidate(
+            owner,
+            CREDENTIAL_KIND_OPENAI_API_KEY,
+            json!({ "provider": "openai" }),
+        );
+        assert!(fallback_candidate_is_authorized(
+            owner,
+            PROVIDER_OPENAI,
+            &replacement
+        ));
+    }
+
+    #[test]
+    fn rejects_a_credential_owned_by_another_user() {
+        let owner = Uuid::new_v4();
+        let other_user = Uuid::new_v4();
+        let replacement = candidate(
+            other_user,
+            CREDENTIAL_KIND_OPENAI_API_KEY,
+            json!({ "provider": "openai" }),
+        );
+        assert!(!fallback_candidate_is_authorized(
+            owner,
+            PROVIDER_OPENAI,
+            &replacement
+        ));
+    }
+
+    #[test]
+    fn rejects_a_default_with_a_different_provider() {
+        let owner = Uuid::new_v4();
+        let replacement = candidate(
+            owner,
+            CREDENTIAL_KIND_OPENAI_API_KEY,
+            json!({ "provider": "gemini" }),
+        );
+        assert!(!fallback_candidate_is_authorized(
+            owner,
+            PROVIDER_OPENAI,
+            &replacement
+        ));
+    }
+
+    #[test]
+    fn matches_providers_across_credential_kinds() {
+        // A revoked openai API-key credential may be replaced by a codex
+        // (ChatGPT auth.json) default: both resolve to the openai provider.
+        let owner = Uuid::new_v4();
+        let pinned_provider = provider_for_credential(
+            CREDENTIAL_KIND_OPENAI_API_KEY,
+            &json!({ "provider": "openai" }),
+        );
+        let replacement = candidate(
+            owner,
+            CREDENTIAL_KIND_CODEX_AUTH_JSON,
+            json!({ "source": "codex_cli" }),
+        );
+        assert!(fallback_candidate_is_authorized(
+            owner,
+            &pinned_provider,
+            &replacement
+        ));
+    }
+
+    #[test]
+    fn rejects_when_pinned_provider_is_not_openai_and_default_lacks_provider_metadata() {
+        // Metadata without a provider hint resolves to openai, which must not
+        // satisfy a zai-pinned lease.
+        let owner = Uuid::new_v4();
+        let replacement = candidate(owner, CREDENTIAL_KIND_OPENAI_API_KEY, json!({}));
+        assert!(!fallback_candidate_is_authorized(
+            owner,
+            "zai",
+            &replacement
+        ));
     }
 }
 
