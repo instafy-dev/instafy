@@ -70,7 +70,7 @@ use crate::shared_browser::{
     TRUSTED_NODE_MODULES_ROOT_ENV as SHARED_BROWSER_TRUSTED_NODE_MODULES_ROOT_ENV,
 };
 
-const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
+const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 const DEFAULT_CODEX_RUN_TIMEOUT_SECONDS: u64 = 600;
 const DEFAULT_CODEX_MAX_RUN_RETRIES: usize = 1;
 const DEFAULT_CODEX_RETRY_BASE_DELAY_MS: u64 = 1500;
@@ -4240,12 +4240,18 @@ mod tests {
 
     #[test]
     fn normalize_runtime_codex_model_id_migrates_retired_codex_slugs() {
-        assert_eq!(normalize_runtime_codex_model_id("gpt-5-codex"), "gpt-5.5");
-        assert_eq!(normalize_runtime_codex_model_id("gpt-5.2"), "gpt-5.5");
-        assert_eq!(normalize_runtime_codex_model_id("gpt-5.3-codex"), "gpt-5.5");
-        assert_eq!(normalize_runtime_codex_model_id("gpt-5.3"), "gpt-5.5");
-        assert_eq!(normalize_runtime_codex_model_id("gpt-5.4"), "gpt-5.5");
-        assert_eq!(normalize_runtime_codex_model_id("  "), "gpt-5.5");
+        assert_eq!(
+            normalize_runtime_codex_model_id("gpt-5-codex"),
+            "gpt-5.6-sol"
+        );
+        assert_eq!(normalize_runtime_codex_model_id("gpt-5.2"), "gpt-5.6-sol");
+        assert_eq!(
+            normalize_runtime_codex_model_id("gpt-5.3-codex"),
+            "gpt-5.6-sol"
+        );
+        assert_eq!(normalize_runtime_codex_model_id("gpt-5.3"), "gpt-5.6-sol");
+        assert_eq!(normalize_runtime_codex_model_id("gpt-5.4"), "gpt-5.6-sol");
+        assert_eq!(normalize_runtime_codex_model_id("  "), "gpt-5.6-sol");
     }
 
     #[test]
