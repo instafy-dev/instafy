@@ -167,27 +167,51 @@ function AgentEditControls({
   };
 
   return (
-    <div className="mt-2 space-y-1.5" data-testid="participants-agent-edit">
+    <div className="mt-1.5 space-y-1" data-testid="participants-agent-edit">
       {modelOptions.length > 0 ? (
-        <ModelMenuSelect
-          value={agent.model}
-          options={modelOptions}
-          disabled={saving}
-          includeDefaultOption
-          defaultLabel={`Default (${modelOptions[0]?.label ?? "recommended"})`}
-          ariaLabel={`Select model for @${agent.handle}`}
-          onSelect={(nextModel) => void save({ model: nextModel })}
-          triggerTestId={`drawer-agent-model-select-${agent.handle}`}
-        />
+        <div className="flex items-center gap-2">
+          <Text
+            as="span"
+            variant="caption"
+            tone="muted"
+            className="w-16 shrink-0 text-xxs"
+          >
+            Model
+          </Text>
+          <div className="min-w-0 flex-1">
+            <ModelMenuSelect
+              value={agent.model}
+              options={modelOptions}
+              disabled={saving}
+              includeDefaultOption
+              defaultLabel="Default"
+              ariaLabel={`Select model for @${agent.handle}`}
+              onSelect={(nextModel) => void save({ model: nextModel })}
+              triggerTestId={`drawer-agent-model-select-${agent.handle}`}
+            />
+          </div>
+        </div>
       ) : null}
       {providerId === "openai" ? (
-        <ReasoningMenuSelect
-          value={reasoningValue}
-          disabled={saving}
-          ariaLabel={`Select reasoning effort for @${agent.handle}`}
-          onSelect={(nextEffort) => void save({ reasoningEffort: nextEffort })}
-          triggerTestId={`drawer-agent-reasoning-select-${agent.handle}`}
-        />
+        <div className="flex items-center gap-2">
+          <Text
+            as="span"
+            variant="caption"
+            tone="muted"
+            className="w-16 shrink-0 text-xxs"
+          >
+            Reasoning
+          </Text>
+          <div className="min-w-0 flex-1">
+            <ReasoningMenuSelect
+              value={reasoningValue}
+              disabled={saving}
+              ariaLabel={`Select reasoning effort for @${agent.handle}`}
+              onSelect={(nextEffort) => void save({ reasoningEffort: nextEffort })}
+              triggerTestId={`drawer-agent-reasoning-select-${agent.handle}`}
+            />
+          </div>
+        </div>
       ) : null}
     </div>
   );
@@ -215,22 +239,23 @@ function RuntimeGroupHeader({
         : status === "offline" || status === "expired" || status === "stopped" || status === "error"
           ? "#e5706b"
           : "#8b9096";
-  const detail = [
-    status && status !== "unknown" ? status : null,
-    runtime.kind === "native" ? "this machine" : runtime.resourcesSummary,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  const healthy = status === "ready" || status === "online" || status === "healthy";
+  // Second line only when there's something worth it: the machine size, or the
+  // "this machine" tell for native. A healthy shared/auto box needs no line 2.
+  const detail = runtime.kind === "native" ? "this machine" : runtime.resourcesSummary;
   return (
-    <div className="flex items-center gap-2 pb-0.5 pt-2.5" data-testid="participants-runtime-group">
-      <Icon className="h-3.5 w-3.5 shrink-0 text-slate-500 dark:text-slate-400" aria-hidden="true" />
+    <div className="flex items-start gap-2 pb-0.5 pt-2.5" data-testid="participants-runtime-group">
+      <Icon
+        className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-500 dark:text-slate-400"
+        aria-hidden="true"
+      />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
           <Text
             as="span"
             variant="caption"
             tone="secondary"
-            className="truncate text-xxs font-medium"
+            className="min-w-0 truncate text-xxs font-medium"
           >
             {runtime.label}
           </Text>
@@ -238,18 +263,22 @@ function RuntimeGroupHeader({
             {kindLabel}
             {runtime.kind === "shared" && agentCount > 1 ? ` · ${agentCount}` : ""}
           </span>
+          <span
+            aria-hidden="true"
+            className="ml-auto h-1.5 w-1.5 shrink-0 rounded-full"
+            style={{ backgroundColor: dotColor }}
+          />
+          {/* The green dot carries "healthy"; only spell out a problem state. */}
+          {!healthy && status !== "unknown" ? (
+            <Text as="span" variant="caption" tone="muted" className="shrink-0 text-3xs">
+              {status}
+            </Text>
+          ) : null}
         </div>
         {detail ? (
-          <div className="flex items-center gap-1.5 pt-px">
-            <span
-              aria-hidden="true"
-              className="h-1.5 w-1.5 shrink-0 rounded-full"
-              style={{ backgroundColor: dotColor }}
-            />
-            <Text as="span" variant="caption" tone="muted" className="truncate text-3xs">
-              {detail}
-            </Text>
-          </div>
+          <Text as="div" variant="caption" tone="muted" className="truncate text-3xs">
+            {detail}
+          </Text>
         ) : null}
       </div>
     </div>
