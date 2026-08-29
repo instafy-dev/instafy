@@ -308,17 +308,20 @@ describe("ParticipantsDrawer", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("stays read-only (no edit affordance) without an editing context", async () => {
+  it("stays read-only (no inline controls) without an editing context", async () => {
     await act(async () => {
       publishChatParticipants(snapshot());
     });
     await render();
     expect(
-      container.querySelector('[data-testid="participants-agent-expand-octo"]'),
+      container.querySelector('[data-testid="participants-agent-controls"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="drawer-agent-model-select-octo"]'),
     ).toBeNull();
   });
 
-  it("reveals inline model + reasoning controls when an editing context is present", async () => {
+  it("shows inline model + reasoning chips (no expand step) with an editing context", async () => {
     const saveAgent = vi.fn().mockResolvedValue(true);
     await act(async () => {
       publishChatParticipants(
@@ -332,7 +335,7 @@ describe("ParticipantsDrawer", () => {
               agentId: "agent-1",
               providerId: "openai",
               model: "gpt-5.5",
-              reasoningEffort: null,
+              reasoningEffort: "high",
               providerLabel: "OpenAI",
               credentialId: "cred-1",
               credentialLabel: "My ChatGPT",
@@ -347,24 +350,19 @@ describe("ParticipantsDrawer", () => {
     });
     await render();
 
-    const expand = container.querySelector<HTMLButtonElement>(
-      '[data-testid="participants-agent-expand-octo"]',
-    );
-    expect(expand).not.toBeNull();
-    // Collapsed by default — no controls yet.
-    expect(container.querySelector('[data-testid="participants-agent-edit"]')).toBeNull();
-
-    await act(async () => {
-      expand?.click();
-    });
-    // Expanded: the model + reasoning pickers appear.
-    expect(container.querySelector('[data-testid="participants-agent-edit"]')).not.toBeNull();
+    // No expand affordance at all — the chips are present immediately.
     expect(
-      container.querySelector('[data-testid="drawer-agent-model-select-octo"]'),
-    ).not.toBeNull();
-    expect(
-      container.querySelector('[data-testid="drawer-agent-reasoning-select-octo"]'),
-    ).not.toBeNull();
+      container.querySelector('[data-testid="participants-agent-expand-octo"]'),
+    ).toBeNull();
+    const controls = container.querySelector('[data-testid="participants-agent-controls"]');
+    expect(controls).not.toBeNull();
+    const model = container.querySelector('[data-testid="drawer-agent-model-select-octo"]');
+    const reasoning = container.querySelector('[data-testid="drawer-agent-reasoning-select-octo"]');
+    expect(model).not.toBeNull();
+    expect(reasoning).not.toBeNull();
+    // Chips read out the current values inline.
+    expect(model?.textContent).toContain("gpt-5.5");
+    expect(reasoning?.textContent).toContain("High");
   });
 
   it("groups agents by runtime, with a header per machine (shared vs native)", async () => {

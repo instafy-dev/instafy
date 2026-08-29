@@ -1,7 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Cpu, Cube, NavArrowDown, Xmark } from "iconoir-react";
-import { IconButton } from "../../../components/Button";
+import { MenuTrigger } from "react-aria-components";
+import { Button, IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
+import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
+import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { useCredits } from "../../../credits/useCredits";
 import {
   resolveAgentAvatarGradient,
@@ -11,7 +14,12 @@ import {
   modelOptionsForProvider,
   normalizeAiProviderId,
 } from "../../../utils/aiProviderModels";
-import { normalizeReasoningEffort, type AiReasoningEffort } from "../../../utils/aiReasoning";
+import {
+  normalizeReasoningEffort,
+  reasoningEffortLabel,
+  REASONING_EFFORT_OPTIONS,
+  type AiReasoningEffort,
+} from "../../../utils/aiReasoning";
 import {
   useChatParticipantsSnapshot,
   type ParticipantAgent,
@@ -19,8 +27,6 @@ import {
   type ParticipantRuntimeInfo,
   type ParticipantSubscriptionUsage,
 } from "./chatParticipantsStore";
-import { ModelMenuSelect } from "./ModelMenuSelect";
-import { ReasoningMenuSelect } from "./ReasoningMenuSelect";
 import { formatReset, windowLabel } from "./subscriptionUsageFormat";
 
 /**
@@ -135,11 +141,85 @@ function SubscriptionUsageMeters({
   );
 }
 
-// Inline edit controls for an agent row: the same Model + Reasoning pickers as
-// the composer chip, but here in the roster where you weigh them against each
-// agent's usage. Saves through the editing context (ChatPanel owns the write +
-// refresh); the row's displayed values update when the refreshed snapshot lands.
-function AgentEditControls({
+const DEFAULT_MENU_KEY = "__default__";
+
+// A lightweight inline dropdown chip: the current value + a small caret, styled
+// as a subtle pill that sits in the agent row's text. One click opens the menu —
+// no expand step. The menu portals inside a StudioPopover, which the drawer's
+// click-away already exempts, so choosing a value doesn't close the drawer.
+function InlineMenuSelect({
+  displayLabel,
+  selectedKey,
+  options,
+  ariaLabel,
+  onSelect,
+  disabled = false,
+  triggerTestId,
+}: {
+  displayLabel: string;
+  selectedKey: string;
+  options: { key: string; label: string }[];
+  ariaLabel: string;
+  onSelect: (key: string) => void;
+  disabled?: boolean;
+  triggerTestId?: string;
+}) {
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const [open, setOpen] = useState(false);
+  return (
+    <MenuTrigger isOpen={open} onOpenChange={setOpen}>
+      <Button
+        ref={triggerRef}
+        type="button"
+        variant="ghost"
+        size="xs"
+        radius="lg"
+        isDisabled={disabled}
+        aria-label={ariaLabel}
+        aria-haspopup="menu"
+        data-testid={triggerTestId}
+        onPress={() => {
+          if (!open) setOpen(true);
+        }}
+        className="inline-flex max-w-full items-center gap-0.5 border-0 bg-slate-100/80 px-1.5 py-0 text-xxs font-medium text-slate-600 shadow-none hover:bg-slate-200/80 data-[hovered]:bg-slate-200/80 dark:bg-white/[0.07] dark:text-slate-200 dark:hover:bg-white/[0.12] dark:data-[hovered]:bg-white/[0.12]"
+      >
+        <span className="min-w-0 truncate">{displayLabel}</span>
+        <NavArrowDown className="shrink-0 text-xs text-slate-400" aria-hidden="true" />
+      </Button>
+      <StudioPopover
+        triggerRef={triggerRef}
+        isNonModal
+        placement="bottom start"
+        offset={4}
+        className="min-w-[9rem] p-2"
+        data-testid={triggerTestId ? `${triggerTestId}-menu` : undefined}
+      >
+        <StudioMenu
+          aria-label={ariaLabel}
+          selectionMode="single"
+          selectedKeys={new Set([selectedKey])}
+          onAction={(key) => {
+            onSelect(String(key));
+            setOpen(false);
+          }}
+          className="space-y-1"
+        >
+          {options.map((option) => (
+            <StudioMenuItem key={option.key} id={option.key}>
+              {option.label}
+            </StudioMenuItem>
+          ))}
+        </StudioMenu>
+      </StudioPopover>
+    </MenuTrigger>
+  );
+}
+
+// Model + reasoning as inline chips, always visible in the agent row — no expand
+// needed to see or change them. Saves through the editing context (ChatPanel
+// owns the write + refresh); the chip label updates when the refreshed snapshot
+// lands.
+function AgentInlineControls({
   agent,
   editing,
 }: {
@@ -154,64 +234,45 @@ function AgentEditControls({
   const modelOptions = modelOptionsForProvider(providerId);
   const reasoningValue = normalizeReasoningEffort(agent.reasoningEffort);
 
-  const save = async (patch: {
-    model?: string | null;
-    reasoningEffort?: AiReasoningEffort | null;
-  }) => {
+  const save = (patch: { model?: string | null; reasoningEffort?: AiReasoningEffort | null }) => {
     setSaving(true);
-    try {
-      await editing.saveAgent(agentId, patch);
-    } finally {
-      setSaving(false);
-    }
+    void editing.saveAgent(agentId, patch).finally(() => setSaving(false));
   };
 
+  const modelMenuOptions = [
+    { key: DEFAULT_MENU_KEY, label: "Default" },
+    ...modelOptions.map((option) => ({ key: option.id, label: option.label })),
+  ];
+  const reasoningMenuOptions = [
+    { key: DEFAULT_MENU_KEY, label: "Default" },
+    ...REASONING_EFFORT_OPTIONS.map((option) => ({ key: option.id, label: option.label })),
+  ];
+
   return (
-    <div className="mt-1.5 space-y-1" data-testid="participants-agent-edit">
+    <div className="flex flex-wrap items-center gap-1.5 pt-0.5" data-testid="participants-agent-controls">
       {modelOptions.length > 0 ? (
-        <div className="flex items-center gap-2">
-          <Text
-            as="span"
-            variant="caption"
-            tone="muted"
-            className="w-16 shrink-0 text-xxs"
-          >
-            Model
-          </Text>
-          <div className="min-w-0 flex-1">
-            <ModelMenuSelect
-              value={agent.model}
-              options={modelOptions}
-              disabled={saving}
-              includeDefaultOption
-              defaultLabel="Default"
-              ariaLabel={`Select model for @${agent.handle}`}
-              onSelect={(nextModel) => void save({ model: nextModel })}
-              triggerTestId={`drawer-agent-model-select-${agent.handle}`}
-            />
-          </div>
-        </div>
+        <InlineMenuSelect
+          displayLabel={agent.model ?? "Default"}
+          selectedKey={agent.model ?? DEFAULT_MENU_KEY}
+          options={modelMenuOptions}
+          ariaLabel={`Model for @${agent.handle}`}
+          disabled={saving}
+          onSelect={(key) => save({ model: key === DEFAULT_MENU_KEY ? null : key })}
+          triggerTestId={`drawer-agent-model-select-${agent.handle}`}
+        />
       ) : null}
       {providerId === "openai" ? (
-        <div className="flex items-center gap-2">
-          <Text
-            as="span"
-            variant="caption"
-            tone="muted"
-            className="w-16 shrink-0 text-xxs"
-          >
-            Reasoning
-          </Text>
-          <div className="min-w-0 flex-1">
-            <ReasoningMenuSelect
-              value={reasoningValue}
-              disabled={saving}
-              ariaLabel={`Select reasoning effort for @${agent.handle}`}
-              onSelect={(nextEffort) => void save({ reasoningEffort: nextEffort })}
-              triggerTestId={`drawer-agent-reasoning-select-${agent.handle}`}
-            />
-          </div>
-        </div>
+        <InlineMenuSelect
+          displayLabel={reasoningValue ? reasoningEffortLabel(reasoningValue) : "Default reasoning"}
+          selectedKey={reasoningValue ?? DEFAULT_MENU_KEY}
+          options={reasoningMenuOptions}
+          ariaLabel={`Reasoning for @${agent.handle}`}
+          disabled={saving}
+          onSelect={(key) =>
+            save({ reasoningEffort: key === DEFAULT_MENU_KEY ? null : (key as AiReasoningEffort) })
+          }
+          triggerTestId={`drawer-agent-reasoning-select-${agent.handle}`}
+        />
       ) : null}
     </div>
   );
@@ -287,15 +348,6 @@ function RuntimeGroupHeader({
 
 export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
   const snapshot = useChatParticipantsSnapshot();
-  // Which agent rows are expanded into their edit controls (by handle).
-  const [expandedAgents, setExpandedAgents] = useState<ReadonlySet<string>>(() => new Set());
-  const toggleAgentExpanded = (handle: string) =>
-    setExpandedAgents((prev) => {
-      const next = new Set(prev);
-      if (next.has(handle)) next.delete(handle);
-      else next.add(handle);
-      return next;
-    });
   // Relative reset times ("resets in 2h 10m") go stale between snapshots, so
   // re-tick every 30s while the drawer is open. Cheap: a single interval, no
   // network. Seeded lazily so tests can render deterministically at mount.
@@ -492,7 +544,6 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
                 !usageShownFor.has(agent.credentialId);
               if (showUsage && agent.credentialId) usageShownFor.add(agent.credentialId);
               const isEditable = editing != null && agent.agentId != null;
-              const isExpanded = expandedAgents.has(agent.handle);
               return (
                 <div key={agent.handle} className="flex items-start gap-2.5 py-1.5">
                   <AgentAvatar agent={agent} />
@@ -505,56 +556,58 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
                     >
                       @{agent.handle}
                     </Text>
-                    {metaLine ? (
-                      <Text as="div" variant="caption" tone="muted" className="truncate text-xxs">
-                        {metaLine}
-                      </Text>
-                    ) : null}
-                    {!credentialHealthy ? (
-                      <Text
-                        as="div"
-                        variant="caption"
-                        tone={credential.tone}
-                        className="truncate text-xxs"
-                      >
-                        {credential.text}
-                      </Text>
-                    ) : null}
+                    {isEditable && editing ? (
+                      // Model + reasoning are inline, always-visible chips — one
+                      // click to change, no expand. The credential rides its own
+                      // line since it's read-only here (edited from the chip).
+                      <>
+                        <AgentInlineControls agent={agent} editing={editing} />
+                        <Text
+                          as="div"
+                          variant="caption"
+                          tone={credential.tone}
+                          className="truncate pt-0.5 text-xxs"
+                        >
+                          {credential.text}
+                        </Text>
+                      </>
+                    ) : (
+                      <>
+                        {metaLine ? (
+                          <Text
+                            as="div"
+                            variant="caption"
+                            tone="muted"
+                            className="truncate text-xxs"
+                          >
+                            {metaLine}
+                          </Text>
+                        ) : null}
+                        {!credentialHealthy ? (
+                          <Text
+                            as="div"
+                            variant="caption"
+                            tone={credential.tone}
+                            className="truncate text-xxs"
+                          >
+                            {credential.text}
+                          </Text>
+                        ) : null}
+                      </>
+                    )}
                     {showUsage && agent.subscriptionUsage ? (
                       <SubscriptionUsageMeters usage={agent.subscriptionUsage} nowMs={nowMs} />
                     ) : null}
-                    {isEditable && isExpanded && editing ? (
-                      <AgentEditControls agent={agent} editing={editing} />
-                    ) : null}
                   </div>
-                  <div className="flex shrink-0 items-center gap-1.5 pt-0.5">
-                    {runningSet.has(agent.handle) ? (
-                      <span className="flex items-center gap-1.5 text-xxs font-semibold text-primary-600 dark:text-primary-300">
-                        <span
-                          aria-hidden="true"
-                          className="h-1.5 w-1.5 rounded-full bg-primary-500 shadow-[0_0_5px_rgba(55,148,255,0.8)]"
-                        />
-                        Running
-                      </span>
-                    ) : null}
-                    {isEditable ? (
-                      <IconButton
-                        variant="ghost"
-                        size="xs"
-                        radius="full"
-                        aria-label={isExpanded ? `Hide @${agent.handle} settings` : `Edit @${agent.handle} settings`}
-                        aria-expanded={isExpanded}
-                        data-testid={`participants-agent-expand-${agent.handle}`}
-                        onPress={() => toggleAgentExpanded(agent.handle)}
-                        className="text-slate-400 hover:text-slate-600 data-[hovered]:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300 dark:data-[hovered]:text-slate-300"
-                      >
-                        <NavArrowDown
-                          className={`h-4 w-4 transition-transform ${isExpanded ? "rotate-180" : ""}`}
-                          aria-hidden="true"
-                        />
-                      </IconButton>
-                    ) : null}
-                  </div>
+                  {runningSet.has(agent.handle) ? (
+                    <span className="flex shrink-0 items-center gap-1.5 pt-0.5 text-xxs font-semibold text-primary-600 dark:text-primary-300">
+                      <span
+                        aria-hidden="true"
+                        className="h-1.5 w-1.5 rounded-full bg-primary-500 shadow-[0_0_5px_rgba(55,148,255,0.8)]"
+                      />
+                      Running
+                    </span>
+                  ) : null}
                 </div>
               );
                   })}
