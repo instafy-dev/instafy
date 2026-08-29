@@ -115,9 +115,9 @@ function windowRemaining(
   return lapsed ? 100 : Math.max(0, 100 - window.usedPercent);
 }
 
-// Only the windows actually running low. Plenty of headroom is not news, so
-// the roster stays silent about it (the full breakdown belongs to a detail
-// surface, not the roster).
+// Only the windows actually running low. Their detail (reset times) appears
+// only then — but the headline % rides every row so agents' headroom can be
+// compared at a glance even when everyone is healthy.
 function lowUsageWindows(
   usage: ParticipantSubscriptionUsage,
   nowMs: number,
@@ -125,6 +125,13 @@ function lowUsageWindows(
   return usage.windows.filter(
     (window) => windowRemaining(window, nowMs) <= USAGE_LOW_THRESHOLD,
   );
+}
+
+// The tightest window's remaining % — the number that answers "how much can I
+// still lean on this agent". Null when the credential reports no windows.
+function lowestRemaining(usage: ParticipantSubscriptionUsage, nowMs: number): number | null {
+  if (usage.windows.length === 0) return null;
+  return Math.min(...usage.windows.map((window) => windowRemaining(window, nowMs)));
 }
 
 // One compact line per low window: "<label> · <reset>" left, "<n>% left" right.
@@ -629,15 +636,26 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
                     ]
                       .filter(Boolean)
                       .join(" · ");
-                    // Usage speaks only when a window is running low — and once
-                    // per shared credential, on the first agent that uses it.
-                    const lowWindows =
+                    const usageLive =
                       agent.subscriptionUsage != null &&
                       (agent.credentialState === "default" ||
-                        agent.credentialState === "pinned") &&
+                        agent.credentialState === "pinned");
+                    // Headline headroom rides EVERY row (no dedup) so agents can
+                    // be compared at a glance — and a sibling on a shared, drained
+                    // credential can't look deceptively fine.
+                    const remaining = usageLive
+                      ? lowestRemaining(agent.subscriptionUsage as ParticipantSubscriptionUsage, nowMs)
+                      : null;
+                    // The reset-time detail rows appear only when low — and once
+                    // per shared credential, on the first agent that uses it.
+                    const lowWindows =
+                      usageLive &&
                       agent.credentialId != null &&
                       !usageShownFor.has(agent.credentialId)
-                        ? lowUsageWindows(agent.subscriptionUsage, nowMs)
+                        ? lowUsageWindows(
+                            agent.subscriptionUsage as ParticipantSubscriptionUsage,
+                            nowMs,
+                          )
                         : [];
                     if (lowWindows.length > 0 && agent.credentialId) {
                       usageShownFor.add(agent.credentialId);
@@ -665,6 +683,23 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
                                 className="min-w-0 truncate text-xxs"
                               >
                                 {readOnlyMeta}
+                              </Text>
+                            ) : null}
+                            {remaining != null ? (
+                              <Text
+                                as="span"
+                                variant="caption"
+                                tone={
+                                  remaining <= 10
+                                    ? "danger"
+                                    : remaining <= USAGE_LOW_THRESHOLD
+                                      ? "warning"
+                                      : "muted"
+                                }
+                                className="shrink-0 text-xxs tabular-nums"
+                                data-testid="participants-agent-headroom"
+                              >
+                                · {remaining}% left
                               </Text>
                             ) : null}
                           </div>

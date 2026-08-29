@@ -108,11 +108,17 @@ describe("ParticipantsDrawer", () => {
     expect(drawer?.textContent).toContain("Marcus");
     expect(drawer?.textContent).toContain("@octo");
     expect(drawer?.textContent).toContain("gpt-5.5");
-    // Silence rules: the healthy default credential says nothing, plentiful
-    // usage says nothing, and team credits are not this panel's business.
+    // Silence rules: the healthy default credential says nothing, the reset
+    // detail stays hidden while headroom is plentiful, and team credits are
+    // not this panel's business.
     expect(drawer?.textContent).not.toContain("ChatGPT subscription");
     expect(drawer?.textContent).not.toContain("My ChatGPT");
     expect(container.querySelector('[data-testid="participants-usage"]')).toBeNull();
+    // ...but the headline headroom (tightest window) rides the row for
+    // at-a-glance comparison: min(88, 60) = 60.
+    expect(
+      container.querySelector('[data-testid="participants-agent-headroom"]')?.textContent,
+    ).toContain("60% left");
     expect(container.querySelector('[data-testid="participants-drawer-credits"]')).toBeNull();
     // Problems still speak: pixel's revoked credential.
     expect(drawer?.textContent).toContain("Its credential was revoked");
@@ -225,8 +231,16 @@ describe("ParticipantsDrawer", () => {
       );
     });
     await render();
-    // Both agents draw on "cred-shared" → the warning renders once, not twice.
+    // Both agents draw on "cred-shared" → the reset-detail renders once, not
+    // twice — but the headline % rides BOTH rows, so neither sibling looks
+    // deceptively fine on a drained shared account.
     expect(container.querySelectorAll('[data-testid="participants-usage"]').length).toBe(1);
+    const headrooms = container.querySelectorAll(
+      '[data-testid="participants-agent-headroom"]',
+    );
+    expect(headrooms.length).toBe(2);
+    expect(headrooms[0]?.textContent).toContain("10% left");
+    expect(headrooms[1]?.textContent).toContain("10% left");
   });
 
   it("statuses stay conversation-scoped: idle agents show no marker", async () => {
