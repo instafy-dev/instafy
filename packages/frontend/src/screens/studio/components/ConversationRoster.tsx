@@ -1,3 +1,4 @@
+import { Group } from "iconoir-react";
 import { Button } from "../../../components/Button";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
 import {
@@ -36,8 +37,25 @@ export function ConversationRoster({
 }) {
   const drawerOpen = useParticipantsDrawerOpen();
   const totalCount = humans.length + agents.length;
+  // Persistent entry point: even before anyone has joined (a brand-new chat),
+  // keep a plain icon so the participants/config panel is always reachable —
+  // otherwise there is no way to open it until a member appears.
   if (totalCount === 0) {
-    return null;
+    return (
+      <Button
+        type="button"
+        variant="ghost"
+        size="xs"
+        radius="full"
+        aria-label="Open participants"
+        aria-expanded={drawerOpen}
+        data-testid="conversation-roster"
+        onPress={() => toggleParticipantsDrawer()}
+        className="border-0 bg-transparent px-1 py-0.5 text-slate-400 shadow-none hover:text-slate-600 data-[hovered]:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300 dark:data-[hovered]:text-slate-300"
+      >
+        <Group className="h-4 w-4" aria-hidden="true" />
+      </Button>
+    );
   }
 
   const stackEntries = [

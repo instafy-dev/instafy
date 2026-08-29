@@ -222,9 +222,7 @@ import {
 } from "./gettingStartedConversationContext";
 import {
   resolveConversationRosterHumans,
-  shouldShowConversationRoster,
   type ConversationRosterAgent,
-  type ConversationRosterHuman,
 } from "./conversationRosterMembers";
 import { ConversationRoster } from "./ConversationRoster";
 import {
@@ -232,7 +230,9 @@ import {
   publishChatParticipants,
   type ParticipantAgent,
   type ParticipantCredentialState,
+  type ParticipantEditingContext,
 } from "./chatParticipantsStore";
+import { updateMyAgent } from "../../../services/runtimeController/agents";
 import { formatProviderLabel } from "./CreditsUsageRates";
 import { parseSubscriptionUsage } from "./subscriptionUsageFormat";
 import { resolveCredentialLabel } from "../../../utils/credentialFormatting";
@@ -2453,22 +2453,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     return rosterAgents;
   }, [agentByHandle, agentHandles]);
 
-  // "Who is in this room", scoped to the conversation it describes: rendered at
-  // the top of the chat surface itself rather than in workspace chrome, so it
-  // travels with the active conversation instead of drifting with the tab strip
-  // — and so it exists at every viewport width. `null` means "show nothing".
-  const conversationRosterPresence = useMemo<{
-    agents: readonly ConversationRosterAgent[];
-    humans: readonly ConversationRosterHuman[];
-  } | null>(() => {
-    return shouldShowConversationRoster({
-      agents: conversationRosterAgents,
-      humans: conversationRosterHumans,
-    })
-      ? { agents: conversationRosterAgents, humans: conversationRosterHumans }
-      : null;
-  }, [conversationRosterAgents, conversationRosterHumans]);
-
   const peerTypingLabel = useMemo(() => {
     const peerIds = Object.keys(peerTypingActivity);
     if (peerIds.length === 0) {
@@ -4296,7 +4280,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       );
       return {
         ...rosterAgent,
+        agentId: profile?.id ?? null,
+        providerId,
         model,
+        reasoningEffort: profile?.reasoningEffort ?? null,
         providerLabel: formatProviderLabel(providerId),
         credentialId: effectiveCredential?.id ?? null,
         credentialLabel,
@@ -4313,6 +4300,29 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       agent.credentialState === "revoked" ||
       agent.credentialState === "none",
   );
+  // Editing capability handed to the drawer so its agent rows are two-way.
+  // ChatPanel owns the update + refresh; the drawer just calls saveAgent.
+  const participantsEditing = useMemo<ParticipantEditingContext>(
+    () => ({
+      credentials: availableCredentials.map((credential) => ({
+        id: credential.id,
+        label: resolveCredentialLabel(credential),
+        kind: credential.kind,
+        revoked: Boolean(credential.revokedAt),
+      })),
+      saveAgent: async (agentId, patch) => {
+        const result = await updateMyAgent(agentId, patch);
+        if (result.success) {
+          // Same refresh the chip's edits use, so the drawer's displayed
+          // values reflect the saved change on the next published snapshot.
+          void refreshCredentials();
+          void refreshAvailableAgents({ silent: true });
+        }
+        return result.success;
+      },
+    }),
+    [availableCredentials, refreshAvailableAgents, refreshCredentials],
+  );
   useEffect(() => {
     publishChatParticipants({
       conversationId: participantsSnapshotConversationId,
@@ -4320,12 +4330,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       agents: participantAgents,
       runningAgentHandles: Array.from(activeConversationRunAgentHandles),
       totalQueuedCount,
+      editing: participantsEditing,
     });
     return () => clearChatParticipants(participantsSnapshotConversationId);
   }, [
     activeConversationRunAgentHandles,
     conversationRosterHumans,
     participantAgents,
+    participantsEditing,
     participantsSnapshotConversationId,
     totalQueuedCount,
   ]);
@@ -5126,23 +5138,22 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         hidden={browserSubtab !== "chat"}
         className={browserSubtab === "chat" ? "flex min-h-0 flex-1 flex-col" : "hidden"}
       >
-      {conversationRosterPresence ? (
-        // Presence belongs to the conversation, so it sits at the top of the
-        // conversation surface: one placement at every width, a flow row (never
-        // an overlay) so it cannot cover message text, and outside the scroller
-        // so it never scrolls away. Horizontal padding matches the scroll
-        // container below it.
-        <div
-          className="flex flex-none items-center justify-end px-3 pt-2 sm:px-4"
-          data-testid="chat-conversation-roster-row"
-        >
-          <ConversationRoster
-            agents={conversationRosterPresence.agents}
-            humans={conversationRosterPresence.humans}
-            hasCredentialWarning={participantAgentsHaveCredentialWarning}
-          />
-        </div>
-      ) : null}
+      {/* Presence belongs to the conversation, so it sits at the top of the
+          conversation surface: one placement at every width, a flow row (never
+          an overlay) so it cannot cover message text, and outside the scroller
+          so it never scrolls away. Always rendered — the roster collapses to a
+          plain "open participants" icon when no one has joined, so the
+          participants/config panel is reachable even on a brand-new chat. */}
+      <div
+        className="flex flex-none items-center justify-end px-3 pt-2 sm:px-4"
+        data-testid="chat-conversation-roster-row"
+      >
+        <ConversationRoster
+          agents={conversationRosterAgents}
+          humans={conversationRosterHumans}
+          hasCredentialWarning={participantAgentsHaveCredentialWarning}
+        />
+      </div>
       <div
         className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 pb-4 pt-2 sm:px-4 sm:pb-2"
         data-testid="chat-message-scroll"
