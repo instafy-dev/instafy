@@ -131,6 +131,9 @@ struct OriginGitSyncResponse {
     base_rev: Option<String>,
 }
 
+const ORIGIN_APPLY_MAX_ATTEMPTS: usize = 3;
+const ORIGIN_APPLY_RETRY_DELAY: Duration = Duration::from_millis(250);
+
 #[derive(Debug, Clone)]
 pub(crate) enum GitSyncOutcome {
     NotConfigured,
@@ -207,6 +210,12 @@ pub(super) fn normalize_origin_endpoint_for_runtime(endpoint: &str) -> String {
 
 fn git_sync_enabled() -> bool {
     parse_env_bool("RUNTIME_GIT_SYNC_AFTER_APPLY").unwrap_or(true)
+}
+
+fn should_retry_origin_apply(status: StatusCode, response_body: &str) -> bool {
+    status == StatusCode::BAD_GATEWAY
+        && response_body.contains("origin proxy request failed")
+        && response_body.to_ascii_lowercase().contains("connection refused")
 }
 
 pub(crate) async fn git_sync_only(
@@ -668,35 +677,14 @@ async fn commit_with_lease(
     let apply_url = format!("{}/apply", endpoint);
     let manifest_json = serde_json::to_vec(&manifest).context("failed to encode apply manifest")?;
 
-    let form = reqwest::multipart::Form::new()
-        .part(
-            "manifest",
-            reqwest::multipart::Part::bytes(manifest_json)
-                .file_name("manifest.json")
-                .mime_str("application/json")
-                .context("failed to build manifest multipart part")?,
-        )
-        .part(
-            "archive",
-            reqwest::multipart::Part::bytes(archive_bytes)
-                .file_name("workspace.zip")
-                .mime_str("application/zip")
-                .context("failed to build archive multipart part")?,
-        );
-
-    let response = client
-        .post(&apply_url)
-        .bearer_auth(&token.token)
-        .multipart(form)
-        .send()
-        .await
-        .context("origin apply request failed")?;
-
-    let status = response.status();
-    let text = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        bail!("origin apply failed ({}): {}", status, text);
-    }
+    let text = send_origin_apply_with_retry(
+        client,
+        &apply_url,
+        &token.token,
+        &manifest_json,
+        &archive_bytes,
+    )
+    .await?;
 
     let apply_response: OriginApplyResponse =
         serde_json::from_str(&text).unwrap_or(OriginApplyResponse {
@@ -735,6 +723,58 @@ async fn commit_with_lease(
         git_sync_error,
         paths: Vec::new(),
     })
+}
+
+async fn send_origin_apply_with_retry(
+    client: &reqwest::Client,
+    apply_url: &str,
+    token: &str,
+    manifest_json: &[u8],
+    archive_bytes: &[u8],
+) -> Result<String> {
+    for attempt in 1..=ORIGIN_APPLY_MAX_ATTEMPTS {
+        let form = reqwest::multipart::Form::new()
+            .part(
+                "manifest",
+                reqwest::multipart::Part::bytes(manifest_json.to_vec())
+                    .file_name("manifest.json")
+                    .mime_str("application/json")
+                    .context("failed to build manifest multipart part")?,
+            )
+            .part(
+                "archive",
+                reqwest::multipart::Part::bytes(archive_bytes.to_vec())
+                    .file_name("workspace.zip")
+                    .mime_str("application/zip")
+                    .context("failed to build archive multipart part")?,
+            );
+
+        let response = client
+            .post(apply_url)
+            .bearer_auth(token)
+            .multipart(form)
+            .send()
+            .await
+            .context("origin apply request failed")?;
+
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if status.is_success() {
+            return Ok(text);
+        }
+        if attempt == ORIGIN_APPLY_MAX_ATTEMPTS || !should_retry_origin_apply(status, &text) {
+            bail!("origin apply failed ({}): {}", status, text);
+        }
+
+        warn!(
+            attempt,
+            max_attempts = ORIGIN_APPLY_MAX_ATTEMPTS,
+            "origin apply proxy was temporarily unavailable; retrying"
+        );
+        tokio::time::sleep(ORIGIN_APPLY_RETRY_DELAY).await;
+    }
+
+    unreachable!("bounded origin apply retry loop always returns")
 }
 
 fn build_zip_archive(files: &[UploadEntry]) -> Result<Vec<u8>> {
@@ -812,12 +852,22 @@ async fn try_git_sync(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axum::Router;
+    use axum::extract::State;
+    use axum::http::StatusCode as AxumStatusCode;
+    use axum::routing::post;
     use std::io::{Cursor, Read};
 
     use zip::ZipArchive;
 
     use super::normalize_origin_endpoint_for_runtime_with_flag;
-    use super::{UploadEntry, build_zip_archive};
+    use super::{
+        UploadEntry, build_zip_archive, send_origin_apply_with_retry, should_retry_origin_apply,
+    };
+    use reqwest::StatusCode;
 
     #[test]
     fn normalize_origin_endpoint_for_runtime_rewrites_docker_host_when_requested() {
@@ -831,6 +881,63 @@ mod tests {
         let input = "http://host.docker.internal:61232/";
         let normalized = normalize_origin_endpoint_for_runtime_with_flag(input, false);
         assert_eq!(normalized, "http://host.docker.internal:61232");
+    }
+
+    #[test]
+    fn origin_apply_retries_connection_refused_from_proxy() {
+        let response = r#"{"message":"origin proxy request failed: tcp connect error: Connection refused (os error 111)"}"#;
+        assert!(should_retry_origin_apply(StatusCode::BAD_GATEWAY, response));
+    }
+
+    #[test]
+    fn origin_apply_does_not_retry_other_bad_gateway_responses() {
+        assert!(!should_retry_origin_apply(
+            StatusCode::BAD_GATEWAY,
+            r#"{"message":"origin proxy request failed: request timed out"}"#,
+        ));
+        assert!(!should_retry_origin_apply(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Connection refused",
+        ));
+    }
+
+    #[tokio::test]
+    async fn origin_apply_retries_a_temporarily_unavailable_proxy() {
+        async fn apply(State(attempts): State<Arc<AtomicUsize>>) -> (AxumStatusCode, &'static str) {
+            if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                (
+                    AxumStatusCode::BAD_GATEWAY,
+                    "origin proxy request failed: Connection refused",
+                )
+            } else {
+                (AxumStatusCode::OK, r#"{"rev":"abc123"}"#)
+            }
+        }
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/apply", post(apply))
+            .with_state(attempts.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let response = send_origin_apply_with_retry(
+            &reqwest::Client::new(),
+            &format!("http://{address}/apply"),
+            "token",
+            br#"{"projectId":"project"}"#,
+            b"archive",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response, r#"{"rev":"abc123"}"#);
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 
     #[test]
