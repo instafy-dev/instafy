@@ -9,6 +9,7 @@ export type StudioPanel =
   | "secrets"
   | "ai"
   | "automations"
+  | "machines"
   | "credits"
   | "sourceControl"
   | "projects"

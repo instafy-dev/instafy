@@ -121,6 +121,7 @@ function isStudioPanel(value: string | null): value is StudioPanel {
     value === "secrets" ||
     value === "ai" ||
     value === "automations" ||
+    value === "machines" ||
     value === "sourceControl" ||
     value === "projects" ||
     value === "settings"

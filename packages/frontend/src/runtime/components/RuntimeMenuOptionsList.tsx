@@ -353,7 +353,13 @@ export function RuntimeMenuOptionsList({
         const hasActions = hasDetails || canStart || canTerminate || canRemove;
 
         return (
-          <div key={optionKey} className="flex w-full flex-col">
+          <div
+            key={optionKey}
+            // Stable hook for cross-surface deep-links (the Machines page
+            // scrolls the focused machine into view by this id).
+            data-runtime-option-id={option.id ?? "auto"}
+            className="flex w-full flex-col"
+          >
             {/* The pressable selection surface and the disclosure toggle are
                 siblings: interactive elements must not nest inside the
                 header's role="button". */}

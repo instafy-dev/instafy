@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Cpu, Cube, Xmark } from "iconoir-react";
+import { Cpu, Cube, NavArrowRight, Xmark } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
 import { Button, IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
@@ -362,16 +362,30 @@ function runtimeKindLabel(kind: ParticipantRuntimeInfo["kind"]): string {
 function RuntimeGroupHeader({
   runtime,
   agentCount,
+  onOpen,
 }: {
   runtime: ParticipantRuntimeInfo;
   agentCount: number;
+  onOpen?: (runtimeId: string) => void;
 }) {
   const Icon = runtime.kind === "native" ? Cpu : Cube;
   const { status, healthy, dotColor } = runtimeStatusMeta(runtime.status);
   const detail = runtime.kind === "native" ? "this machine" : runtime.resourcesSummary;
+  const Container: "button" | "div" = onOpen ? "button" : "div";
   return (
-    <div
-      className="flex items-start gap-2 pb-0.5 pt-2.5"
+    <Container
+      {...(onOpen
+        ? {
+            type: "button" as const,
+            onClick: () => onOpen(runtime.id),
+            "aria-label": `Open ${runtime.label} on the Machines page`,
+          }
+        : {})}
+      className={`flex w-full items-start gap-2 pb-0.5 pt-2.5 text-left ${
+        onOpen
+          ? "group cursor-pointer rounded-md hover:bg-slate-100/70 dark:hover:bg-white/[0.05]"
+          : ""
+      }`}
       data-testid="participants-runtime-group"
     >
       <Icon
@@ -402,6 +416,12 @@ function RuntimeGroupHeader({
               {status}
             </Text>
           ) : null}
+          {onOpen ? (
+            <NavArrowRight
+              className="h-3 w-3 shrink-0 text-slate-400 opacity-0 transition-opacity group-hover:opacity-100 dark:text-slate-500"
+              aria-hidden="true"
+            />
+          ) : null}
         </div>
         {detail ? (
           <Text as="div" variant="caption" tone="muted" className="truncate text-3xs">
@@ -409,7 +429,7 @@ function RuntimeGroupHeader({
           </Text>
         ) : null}
       </div>
-    </div>
+    </Container>
   );
 }
 
@@ -419,22 +439,43 @@ function RuntimeGroupHeader({
 function MachineFooter({
   runtime,
   agentCount,
+  onOpen,
 }: {
   runtime: ParticipantRuntimeInfo;
   agentCount: number;
+  onOpen?: (runtimeId: string) => void;
 }) {
   const Icon = runtime.kind === "native" ? Cpu : Cube;
   const { status, healthy } = runtimeStatusMeta(runtime.status);
+  const Container: "button" | "div" = onOpen ? "button" : "div";
   return (
-    <div
-      className="mt-1.5 flex items-center gap-1.5 border-t border-slate-200/70 pt-2 dark:border-[color:var(--color-studio-dark-divider)]"
+    <Container
+      {...(onOpen
+        ? {
+            type: "button" as const,
+            onClick: () => onOpen(runtime.id),
+            "aria-label": `Open ${runtime.label} on the Machines page`,
+          }
+        : {})}
+      className={`mt-1.5 flex w-full items-center gap-1.5 border-t border-slate-200/70 pt-2 text-left dark:border-[color:var(--color-studio-dark-divider)] ${
+        onOpen ? "group cursor-pointer" : ""
+      }`}
       data-testid="participants-machine-footer"
     >
       <Icon
         className="h-3.5 w-3.5 shrink-0 text-slate-400 dark:text-slate-500"
         aria-hidden="true"
       />
-      <Text as="span" variant="caption" tone="muted" className="min-w-0 truncate text-xxs">
+      <Text
+        as="span"
+        variant="caption"
+        tone="muted"
+        className={`min-w-0 truncate text-xxs ${
+          onOpen
+            ? "group-hover:text-slate-700 dark:group-hover:text-slate-200"
+            : ""
+        }`}
+      >
         {agentCount > 1 ? "All on " : "On "}
         {runtime.label} · {runtimeKindLabel(runtime.kind).toLowerCase()}
         {runtime.kind === "native" ? " · this machine" : ""}
@@ -444,11 +485,24 @@ function MachineFooter({
           {status}
         </Text>
       ) : null}
-    </div>
+      {onOpen ? (
+        <NavArrowRight
+          className="ml-auto h-3 w-3 shrink-0 text-slate-400 opacity-0 transition-opacity group-hover:opacity-100 dark:text-slate-500"
+          aria-hidden="true"
+        />
+      ) : null}
+    </Container>
   );
 }
 
-export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
+export function ParticipantsDrawer({
+  onClose,
+  onOpenMachine,
+}: {
+  onClose: () => void;
+  /** Deep-link a machine into the Machines page; rows stay plain without it. */
+  onOpenMachine?: (runtimeId: string) => void;
+}) {
   const snapshot = useChatParticipantsSnapshot();
   // Relative reset times ("resets in 2h 10m") go stale between snapshots, so
   // re-tick every 30s while the drawer is open. Cheap: a single interval, no
@@ -613,6 +667,7 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
                   <RuntimeGroupHeader
                     runtime={group.runtime}
                     agentCount={group.agents.length}
+                    onOpen={onOpenMachine}
                   />
                 ) : null}
                 <div
@@ -736,6 +791,7 @@ export function ParticipantsDrawer({ onClose }: { onClose: () => void }) {
               <MachineFooter
                 runtime={runtimeGroups[0].runtime}
                 agentCount={runtimeGroups[0].agents.length}
+                onOpen={onOpenMachine}
               />
             ) : null}
           </section>
