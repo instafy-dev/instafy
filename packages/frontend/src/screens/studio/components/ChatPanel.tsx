@@ -4260,9 +4260,24 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     // default. The id is the grouping key that clusters agents by machine.
     const resolveRuntime = (runtimeId: string | null): ParticipantRuntimeInfo | null => {
       const pinnedId = (runtimeId ?? "").trim() || null;
-      const option =
+      let option =
         (pinnedId ? runtimeMenu.runtimeOptionsById.get(pinnedId) : null) ??
         runtimeMenu.currentRuntime;
+      // "Auto (best available)" is a policy, not a machine. The roster groups
+      // agents by machine, so when the workspace rides auto, name the concrete
+      // runtime that is actually ready to serve it; fall back to the auto label
+      // only when nothing concrete is up yet.
+      if (!pinnedId && option?.isAuto) {
+        const concrete = runtimeMenu.runtimeOptions.find(
+          (candidate) =>
+            Boolean(candidate.id) &&
+            !candidate.isAuto &&
+            ["ready", "online", "healthy"].includes(
+              String(candidate.state ?? "").toLowerCase(),
+            ),
+        );
+        if (concrete) option = concrete;
+      }
       if (!option) return null;
       const kind: ParticipantRuntimeInfo["kind"] = option.isLikelyLocal
         ? "native"
