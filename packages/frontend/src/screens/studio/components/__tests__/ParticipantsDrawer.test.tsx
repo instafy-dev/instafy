@@ -404,6 +404,39 @@ describe("ParticipantsDrawer", () => {
     expect(section?.textContent).not.toContain("Runtimes & agents");
   });
 
+  it("machine rows deep-link to the Machines page when a handler is provided", async () => {
+    const cloudRuntime = {
+      id: "rt-cloud",
+      label: "Instafy Cloud",
+      kind: "shared" as const,
+      status: "online",
+      resourcesSummary: null,
+    };
+    const agents = snapshot().agents.map((agent) => ({
+      ...agent,
+      credentialState: "default" as const,
+      credentialId: "cred-1",
+      subscriptionUsage: null,
+      runtime: cloudRuntime,
+    }));
+    await act(async () => {
+      publishChatParticipants(snapshot({ agents, runningAgentHandles: [], totalQueuedCount: 0 }));
+    });
+    const onOpenMachine = vi.fn();
+    await act(async () => {
+      root.render(<ParticipantsDrawer onClose={vi.fn()} onOpenMachine={onOpenMachine} />);
+    });
+
+    const footer = container.querySelector<HTMLButtonElement>(
+      '[data-testid="participants-machine-footer"]',
+    );
+    expect(footer?.tagName).toBe("BUTTON");
+    await act(async () => {
+      footer?.click();
+    });
+    expect(onOpenMachine).toHaveBeenCalledWith("rt-cloud");
+  });
+
   it("groups agents under machine headers only when machines differ", async () => {
     const cloudRuntime = {
       id: "rt-cloud",
