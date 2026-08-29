@@ -1641,8 +1641,13 @@ impl CodexClient {
                             }
                             _ => None,
                         });
-                    let fail_fast = matches!(stream_status_code, Some(401 | 403));
-                    if fatal_stream_error.is_none() && fail_fast {
+                    if fatal_stream_error.is_none()
+                        && should_terminate_codex_stream(
+                            stream_status_code,
+                            stream_error_count,
+                            max_stream_retries,
+                        )
+                    {
                         fatal_stream_error = err
                             .additional_details
                             .clone()
@@ -1658,19 +1663,19 @@ impl CodexClient {
                     }
 
                     stream_error_count = stream_error_count.saturating_add(1);
-                    let is_fatal_message = err.message.contains("error sending request for url");
-                    let exceeded_retries = stream_error_count > max_stream_retries;
-                    if fatal_stream_error.is_none() && (is_fatal_message || exceeded_retries) {
-                        let message = if is_fatal_message {
-                            err.message.clone()
-                        } else {
-                            format!(
-                                "Codex stream aborted after {} retries (limit {}): {}",
-                                stream_error_count.saturating_sub(1),
-                                max_stream_retries,
-                                err.message
-                            )
-                        };
+                    if fatal_stream_error.is_none()
+                        && should_terminate_codex_stream(
+                            stream_status_code,
+                            stream_error_count,
+                            max_stream_retries,
+                        )
+                    {
+                        let message = format!(
+                            "Codex stream aborted after {} retries (limit {}): {}",
+                            stream_error_count.saturating_sub(1),
+                            max_stream_retries,
+                            err.message
+                        );
                         fatal_stream_error = Some(message);
                         if !options.shared_browser && !shutdown_requested {
                             conversation
@@ -3573,6 +3578,15 @@ fn should_retry_codex_run(message: &str) -> bool {
         || normalized.contains("codex turn aborted")
 }
 
+fn should_terminate_codex_stream(
+    http_status_code: Option<u16>,
+    stream_error_count: usize,
+    max_stream_retries: usize,
+) -> bool {
+    // Transport disconnects are retried by Codex itself; only auth failures bypass that budget.
+    matches!(http_status_code, Some(401 | 403)) || stream_error_count > max_stream_retries
+}
+
 fn resolve_codex_home(workspace_dir: &Path) -> PathBuf {
     optional_env("CODEX_HOME")
         .map(PathBuf::from)
@@ -4742,6 +4756,19 @@ mod tests {
             "unexpected status 429 Too Many Requests"
         ));
         assert!(should_retry_codex_run("Codex turn aborted (interrupted)"));
+    }
+
+    #[test]
+    fn transient_stream_transport_errors_use_the_bounded_retry_budget() {
+        assert!(!should_terminate_codex_stream(None, 0, 5));
+        assert!(!should_terminate_codex_stream(None, 5, 5));
+        assert!(should_terminate_codex_stream(None, 6, 5));
+    }
+
+    #[test]
+    fn stream_auth_errors_still_fail_fast() {
+        assert!(should_terminate_codex_stream(Some(401), 0, 5));
+        assert!(should_terminate_codex_stream(Some(403), 0, 5));
     }
 
     #[test]
