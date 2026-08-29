@@ -40,6 +40,8 @@ import { SettingsPanel } from "./studio/components/SettingsPanel";
 import { SecretsPanel } from "./studio/components/SecretsPanel";
 import { AiPanel } from "./studio/components/AiPanel";
 import { AutomationsPanel } from "./studio/components/AutomationsPanel";
+import { MachinesPanel } from "./studio/components/MachinesPanel";
+import { setMachinesPanelFocus } from "./studio/components/machinesPanelStore";
 import { ExtensionsPanel } from "./studio/components/ExtensionsPanel";
 import { SkillsPanel } from "./studio/components/SkillsPanel";
 import { HomePanel } from "./studio/components/HomePanel";
@@ -114,6 +116,7 @@ const navMoreItems: StudioNavItem[] = [
   { id: "secrets", label: "Secrets", icon: Lock, accent: sidebarPrimaryAccentClass },
   { id: "skills", label: "Skills", icon: Puzzle, accent: sidebarPrimaryAccentClass },
   { id: "ai", label: "AI Manager", icon: Cpu, accent: sidebarPrimaryAccentClass },
+  { id: "machines", label: "Machines", icon: Cube, accent: sidebarPrimaryAccentClass },
   { id: "automations", label: "Automations", icon: Clock, accent: sidebarPrimaryAccentClass }
 ];
 
@@ -1824,6 +1827,8 @@ function StudioLayoutInner() {
             <AiPanel />
           ) : activeWorkspaceTab.panel === "automations" ? (
             <AutomationsPanel />
+          ) : activeWorkspaceTab.panel === "machines" ? (
+            <MachinesPanel />
           ) : null}
         </div>
       );
@@ -2025,7 +2030,15 @@ function StudioLayoutInner() {
                 ) : null}
               </div>
               {isChatSurfaceVisible && participantsDrawerOpen ? (
-                <ParticipantsDrawer onClose={() => setParticipantsDrawerOpen(false)} />
+                <ParticipantsDrawer
+                  onClose={() => setParticipantsDrawerOpen(false)}
+                  onOpenMachine={(runtimeId) => {
+                    // Deep-link: focus that machine on the Machines page, then
+                    // open the page (which replaces the chat surface).
+                    setMachinesPanelFocus(runtimeId);
+                    openPanelTab("machines", { activate: true });
+                  }}
+                />
               ) : null}
             </div>
           </div>
