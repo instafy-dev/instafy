@@ -307,4 +307,63 @@ describe("ParticipantsDrawer", () => {
     });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it("stays read-only (no edit affordance) without an editing context", async () => {
+    await act(async () => {
+      publishChatParticipants(snapshot());
+    });
+    await render();
+    expect(
+      container.querySelector('[data-testid="participants-agent-expand-octo"]'),
+    ).toBeNull();
+  });
+
+  it("reveals inline model + reasoning controls when an editing context is present", async () => {
+    const saveAgent = vi.fn().mockResolvedValue(true);
+    await act(async () => {
+      publishChatParticipants(
+        snapshot({
+          editing: { credentials: [], saveAgent },
+          agents: [
+            {
+              handle: "octo",
+              displayName: "Octo",
+              avatarSeed: "octo",
+              agentId: "agent-1",
+              providerId: "openai",
+              model: "gpt-5.5",
+              reasoningEffort: null,
+              providerLabel: "OpenAI",
+              credentialId: "cred-1",
+              credentialLabel: "My ChatGPT",
+              credentialState: "default",
+              subscriptionUsage: null,
+            },
+          ],
+          runningAgentHandles: [],
+          totalQueuedCount: 0,
+        }),
+      );
+    });
+    await render();
+
+    const expand = container.querySelector<HTMLButtonElement>(
+      '[data-testid="participants-agent-expand-octo"]',
+    );
+    expect(expand).not.toBeNull();
+    // Collapsed by default — no controls yet.
+    expect(container.querySelector('[data-testid="participants-agent-edit"]')).toBeNull();
+
+    await act(async () => {
+      expand?.click();
+    });
+    // Expanded: the model + reasoning pickers appear.
+    expect(container.querySelector('[data-testid="participants-agent-edit"]')).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="drawer-agent-model-select-octo"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="drawer-agent-reasoning-select-octo"]'),
+    ).not.toBeNull();
+  });
 });

@@ -153,9 +153,33 @@ describe("ConversationRoster", () => {
     expect(scoutStyle).not.toBe(medicStyle);
   });
 
-  it("renders nothing when there are no members", async () => {
+  it("renders a persistent open-participants button when there are no members", async () => {
     await renderRoster([], []);
-    expect(container.querySelector('[data-testid="conversation-roster"]')).toBeNull();
+    const trigger = container.querySelector('[data-testid="conversation-roster"]');
+    expect(trigger).not.toBeNull();
+    expect(trigger?.getAttribute("aria-label")).toBe("Open participants");
+    // No avatar stack in the empty state.
+    expect(
+      trigger?.querySelectorAll(
+        '[data-testid="chat-avatar-human"], [data-testid="chat-avatar-assistant"]',
+      ).length,
+    ).toBe(0);
+  });
+
+  it("toggles the drawer from the empty-state button too", async () => {
+    await renderRoster([], []);
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-testid="conversation-roster"]',
+    );
+    expect(trigger?.getAttribute("aria-expanded")).toBe("false");
+    await act(async () => {
+      trigger?.click();
+    });
+    expect(
+      container
+        .querySelector('[data-testid="conversation-roster"]')
+        ?.getAttribute("aria-expanded"),
+    ).toBe("true");
   });
 
   it("keeps the trigger ambient: no panel background, border, shadow or blur", async () => {
