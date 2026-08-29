@@ -513,6 +513,13 @@ fn hosted_runtime_billing_idempotency_key(runtime_id: Uuid, lease_id: Uuid, buck
     format!("hosted_runtime:{runtime_id}:{lease_id}:{bucket}")
 }
 
+pub(crate) fn is_transient_hosted_runtime_credit_sweep_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let message = cause.to_string().to_ascii_lowercase();
+        message.contains("timed out in bb8") || message.contains("pool is closed")
+    })
+}
+
 fn should_request_runtime_recovery(requeued_jobs: usize) -> bool {
     requeued_jobs > 0
 }
