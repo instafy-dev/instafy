@@ -56,6 +56,35 @@ test("trusted boundary is restricted to main PR target events", () => {
   assert.doesNotMatch(source, /^  workflow_dispatch:$/mu);
 });
 
+test("trusted boundary token carries the pulls scope the wait step needs", () => {
+  const source = readWorkflow("public-boundary.yml");
+  // The wait step polls GET /pulls with the workflow token. On an installation
+  // token that REQUIRES the explicit pull-requests scope: contents alone 403s,
+  // which once burned the whole poll budget and failed every pull request.
+  // Job-level permissions override workflow-level, so pin the scope at both.
+  const workflowPermissions = source.slice(0, source.indexOf("jobs:"));
+  assert.match(workflowPermissions, /pull-requests: read/u);
+  const jobPermissions = source.slice(source.indexOf("jobs:"), source.indexOf("steps:"));
+  assert.match(jobPermissions, /pull-requests: read/u);
+});
+
+test("trusted boundary wait step fails open when the pulls API is inaccessible", () => {
+  const source = readWorkflow("public-boundary.yml");
+  const wait = stepSection(
+    source,
+    "Wait for the event-bound merge candidate to be minted",
+    "Checkout trusted base controls",
+  );
+  // The wait is availability-only; the parent verification below is the
+  // enforced property. An inaccessible pulls API (permissions regression, API
+  // outage) must skip the wait with a warning — never fail the check for
+  // every pull request.
+  assert.match(wait, /if ! api_body=/u);
+  assert.match(wait, /::warning::pulls API not accessible/u);
+  const failOpen = wait.slice(wait.indexOf("::warning::pulls API not accessible"));
+  assert.match(failOpen.slice(0, failOpen.indexOf("candidate_oid=")), /exit 0/u);
+});
+
 test("trusted boundary waits for a fresh merge candidate before any checkout", () => {
   const source = readWorkflow("public-boundary.yml");
   const wait = stepSection(
