@@ -58,6 +58,10 @@ struct ControllerState {
     jwks_body: Arc<Value>,
     key_id: String,
     project_id: Uuid,
+    /// When set, `/runtime/register` rejects any other bearer with the
+    /// production-observed 401 body, so tests can exercise the stale-token
+    /// recovery path.
+    register_requires_bearer: Option<String>,
 }
 
 async fn agent_login_handler(
@@ -138,6 +142,19 @@ async fn runtime_register_handler(
         .unwrap()
         .register
         .push(RecordedRequest::new(&headers, payload));
+
+    if let Some(required) = state.register_requires_bearer.as_deref() {
+        let expected = format!("Bearer {required}");
+        let presented = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok());
+        if presented != Some(expected.as_str()) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"message": "access token expired"})),
+            );
+        }
+    }
 
     let runtime_id = Uuid::new_v4();
     let issued_at = Utc::now();
@@ -357,6 +374,7 @@ async fn controller_client_registers_and_leases() {
         jwks_body: Arc::new(jwks),
         key_id,
         project_id,
+        register_requires_bearer: None,
     };
     let addr = spawn_controller(state).await;
 
@@ -486,6 +504,7 @@ async fn renewal_register_presents_the_renewed_runtime_token() {
         jwks_body: Arc::new(jwks),
         key_id,
         project_id,
+        register_requires_bearer: None,
     };
     let addr = spawn_controller(state).await;
     let workspace_root = tempfile::tempdir().expect("temp workspace root");
@@ -530,6 +549,106 @@ async fn renewal_register_presents_the_renewed_runtime_token() {
     );
 }
 
+/// Reproduces instafy-dev/instafy#104: the agent keeps presenting a stale
+/// spawn-time token after another process rotated the shared CLI session.
+/// Registration must self-heal by re-reading the persisted session, and keep
+/// the plain retry behavior when the file token is no better. The scenarios
+/// share one test because they contend on the INSTAFY_CLI_CONFIG env var.
+#[tokio::test]
+async fn register_recovers_by_rereading_the_persisted_cli_session() {
+    let shared = Arc::new(Mutex::new(ReceivedRequests::default()));
+    let project_id = Uuid::new_v4();
+    let key_id = "test-agent-key".to_string();
+    let jwks = build_jwks(test_origin_public_key(), &key_id);
+    let state = ControllerState {
+        requests: shared.clone(),
+        private_key_pem: Arc::new(test_origin_private_key().to_string()),
+        jwks_body: Arc::new(jwks),
+        key_id,
+        project_id,
+        register_requires_bearer: Some("rotated-session-token".to_string()),
+    };
+    let addr = spawn_controller(state).await;
+
+    let session_dir = tempfile::tempdir().expect("session dir");
+    let session_path = session_dir.path().join("config.json");
+    std::fs::write(
+        &session_path,
+        r#"{"accessToken":"rotated-session-token","refreshToken":"rotated-refresh-token"}"#,
+    )
+    .expect("write session fixture");
+    unsafe { std::env::set_var("INSTAFY_CLI_CONFIG", &session_path) };
+
+    let workspace_root = tempfile::tempdir().expect("temp workspace root");
+
+    // Scenario 1: the spawn-time token is expired but the persisted session
+    // holds a rotated, valid token — registration recovers without a restart.
+    let mut config = test_config(addr, project_id, workspace_root.path());
+    config.runtime_access_token = Some("expired-user-token".into());
+    let client = ControllerClient::new(&config).expect("client init");
+    let registration = client
+        .register_runtime(&config)
+        .await
+        .expect("register recovers with the re-read session token");
+    assert_eq!(
+        registration.runtime_token.as_deref(),
+        Some("fresh-runtime-token")
+    );
+
+    // Scenario 2: the persisted token is also expired — the error surfaces so
+    // the existing registration retry loop keeps its cadence.
+    std::fs::write(&session_path, r#"{"accessToken":"still-stale-token"}"#)
+        .expect("rewrite session fixture");
+    let mut config = test_config(addr, project_id, workspace_root.path());
+    config.runtime_access_token = Some("expired-user-token-2".into());
+    let client = ControllerClient::new(&config).expect("client init");
+    let error = client
+        .register_runtime(&config)
+        .await
+        .expect_err("register still fails when the file token is stale too");
+    assert!(
+        format!("{error:#}").contains("access token expired"),
+        "unexpected error: {error:#}"
+    );
+
+    // Scenario 3: the persisted token matches the one already rejected — no
+    // pointless extra register call is made.
+    std::fs::write(&session_path, r#"{"accessToken":"expired-user-token-3"}"#)
+        .expect("rewrite session fixture");
+    let mut config = test_config(addr, project_id, workspace_root.path());
+    config.runtime_access_token = Some("expired-user-token-3".into());
+    let client = ControllerClient::new(&config).expect("client init");
+    client
+        .register_runtime(&config)
+        .await
+        .expect_err("register fails without retrying an already-rejected token");
+
+    unsafe { std::env::remove_var("INSTAFY_CLI_CONFIG") };
+
+    let captured = shared.lock().unwrap();
+    let bearer = |request: &RecordedRequest| {
+        request
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .map(|(_, value)| value.clone())
+    };
+    let bearers: Vec<Option<String>> = captured.register.iter().map(bearer).collect();
+    assert_eq!(
+        bearers,
+        vec![
+            // Scenario 1: stale spawn-time token, then the re-read session token.
+            Some("Bearer expired-user-token".to_string()),
+            Some("Bearer rotated-session-token".to_string()),
+            // Scenario 2: stale spawn-time token, then the (also stale) file token.
+            Some("Bearer expired-user-token-2".to_string()),
+            Some("Bearer still-stale-token".to_string()),
+            // Scenario 3: the file token was already tried, so no second call.
+            Some("Bearer expired-user-token-3".to_string()),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn tunnel_request_prefers_fresh_runtime_token() {
     let shared = Arc::new(Mutex::new(ReceivedRequests::default()));
@@ -542,6 +661,7 @@ async fn tunnel_request_prefers_fresh_runtime_token() {
         jwks_body: Arc::new(jwks),
         key_id,
         project_id,
+        register_requires_bearer: None,
     };
     let addr = spawn_controller(state).await;
     let workspace_root = tempfile::tempdir().expect("temp workspace root");
