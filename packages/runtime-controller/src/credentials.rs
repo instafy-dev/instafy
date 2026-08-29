@@ -2968,7 +2968,7 @@ mod provider_metadata_tests {
 
     #[test]
     fn provider_defaults_use_latest_general_openai_model_for_api_keys() {
-        assert_eq!(default_model_for_provider(PROVIDER_OPENAI), "gpt-5.5");
+        assert_eq!(default_model_for_provider(PROVIDER_OPENAI), "gpt-5.6-sol");
     }
 
     #[test]
