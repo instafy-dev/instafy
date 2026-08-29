@@ -10,15 +10,6 @@ import {
   type ChatParticipantsSnapshot,
 } from "../chatParticipantsStore";
 
-const creditsMock = {
-  billing: { creditBalance: 162, creditLimit: 200 },
-  hasLoaded: true,
-  controllerEnabled: true,
-};
-vi.mock("../../../../credits/useCredits", () => ({
-  useCredits: () => creditsMock,
-}));
-
 function snapshot(overrides: Partial<ChatParticipantsSnapshot> = {}): ChatParticipantsSnapshot {
   return {
     conversationId: "conv-1",
@@ -35,18 +26,19 @@ function snapshot(overrides: Partial<ChatParticipantsSnapshot> = {}): ChatPartic
         providerLabel: "OpenAI",
         credentialId: "cred-1",
         credentialLabel: "My ChatGPT",
+        credentialKind: "codex_auth_json",
         credentialState: "default",
         subscriptionUsage: {
           windows: [
             {
               kind: "primary",
-              usedPercent: 12,
+              usedPercent: 12, // 88% left — plentiful, so the roster stays silent
               windowMinutes: 300,
               resetAt: Math.floor(Date.parse("2026-08-28T12:10:00Z") / 1000),
             },
             {
               kind: "secondary",
-              usedPercent: 40,
+              usedPercent: 40, // 60% left — also not news
               windowMinutes: 10080,
               resetAt: Math.floor(Date.parse("2026-09-02T09:00:00Z") / 1000),
             },
@@ -105,7 +97,7 @@ describe("ParticipantsDrawer", () => {
     return onClose;
   }
 
-  it("shows people, agents with model/provider/credential, summary, and credit pool", async () => {
+  it("shows people and agents, staying silent about healthy defaults", async () => {
     await act(async () => {
       publishChatParticipants(snapshot());
     });
@@ -115,144 +107,140 @@ describe("ParticipantsDrawer", () => {
     expect(drawer).not.toBeNull();
     expect(drawer?.textContent).toContain("Taylor");
     expect(drawer?.textContent).toContain("@octo");
-    expect(drawer?.textContent).toContain("gpt-5.5 · OpenAI");
-    // Default credential leads with just the account name (no "Using default").
-    expect(drawer?.textContent).toContain("My ChatGPT");
-    expect(drawer?.textContent).not.toContain("Using default");
+    expect(drawer?.textContent).toContain("gpt-5.5");
+    // Silence rules: the healthy default credential says nothing, the reset
+    // detail stays hidden while headroom is plentiful, and team credits are
+    // not this panel's business.
+    expect(drawer?.textContent).not.toContain("ChatGPT subscription");
+    expect(drawer?.textContent).not.toContain("My ChatGPT");
+    expect(container.querySelector('[data-testid="participants-usage"]')).toBeNull();
+    // ...but the headline headroom (tightest window) rides the row for
+    // at-a-glance comparison: min(88, 60) = 60.
+    expect(
+      container.querySelector('[data-testid="participants-agent-headroom"]')?.textContent,
+    ).toContain("60% left");
+    expect(container.querySelector('[data-testid="participants-drawer-credits"]')).toBeNull();
+    // Problems still speak: pixel's revoked credential.
     expect(drawer?.textContent).toContain("Its credential was revoked");
     expect(drawer?.textContent).toContain("Running");
     expect(
       container.querySelector('[data-testid="participants-drawer-summary"]')?.textContent,
     ).toBe("1 running · 2 messages queued");
-    const credits = container.querySelector('[data-testid="participants-drawer-credits"]');
-    expect(credits?.textContent).toContain("162 / 200");
-    expect(credits?.querySelector('[role="meter"]')).not.toBeNull();
   });
 
-  it("renders subscription usage meters: 5h + weekly, remaining %, relative reset when close", async () => {
+  it("surfaces only the windows that are running low, with reset times", async () => {
+    const agents = snapshot().agents.map((agent) =>
+      agent.handle === "octo"
+        ? {
+            ...agent,
+            subscriptionUsage: {
+              windows: [
+                {
+                  kind: "primary" as const,
+                  usedPercent: 91, // 9% left → red, shown
+                  windowMinutes: 300,
+                  resetAt: Math.floor(Date.parse("2026-08-28T12:10:00Z") / 1000),
+                },
+                {
+                  kind: "secondary" as const,
+                  usedPercent: 40, // 60% left → silent
+                  windowMinutes: 10080,
+                  resetAt: Math.floor(Date.parse("2026-09-02T09:00:00Z") / 1000),
+                },
+              ],
+              planName: null,
+              capturedAt: Math.floor(Date.parse("2026-08-28T09:55:00Z") / 1000),
+            },
+          }
+        : agent,
+    );
     await act(async () => {
-      publishChatParticipants(snapshot());
+      publishChatParticipants(snapshot({ agents }));
     });
     await render();
 
     const usage = container.querySelector('[data-testid="participants-usage"]');
     expect(usage).not.toBeNull();
     const windows = container.querySelectorAll('[data-testid="participants-usage-window"]');
-    expect(windows.length).toBe(2);
+    expect(windows.length).toBe(1); // only the low 5h window, not the healthy weekly
     const text = usage?.textContent ?? "";
-    // 5h window first (sorted by length), used 12% → 88% left, reset ~2h out → relative.
     expect(text).toContain("5h");
-    expect(text).toContain("88% left");
+    expect(text).toContain("9% left");
     expect(text).toContain("resets in 2h 10m");
-    // Weekly window, used 40% → 60% left; reset is days out so it isn't relative.
-    expect(text).toContain("Weekly");
-    expect(text).toContain("60% left");
-    expect(text).not.toContain("Weekly · resets in");
-    // Usage rows are text-only now; the only meter left is the team-credits bar.
-    expect(container.querySelectorAll('[role="meter"]').length).toBe(1);
+    expect(text).not.toContain("60% left");
   });
 
-  it("presents a lapsed window as refreshed, not drained", async () => {
+  it("treats a lapsed window as rolled over — nothing to warn about", async () => {
+    const agents = [
+      {
+        ...snapshot().agents[0],
+        subscriptionUsage: {
+          windows: [
+            {
+              kind: "primary" as const,
+              usedPercent: 90, // was nearly exhausted...
+              windowMinutes: 300,
+              // ...but the reset time passed an hour ago (pinned clock 10:00Z).
+              resetAt: Math.floor(Date.parse("2026-08-28T09:00:00Z") / 1000),
+            },
+          ],
+          planName: null,
+          capturedAt: Math.floor(Date.parse("2026-08-28T03:00:00Z") / 1000),
+        },
+      },
+    ];
+    await act(async () => {
+      publishChatParticipants(snapshot({ agents, runningAgentHandles: [], totalQueuedCount: 0 }));
+    });
+    await render();
+    // Rolled over → full allowance again → silent, not "10% left".
+    expect(container.querySelector('[data-testid="participants-usage"]')).toBeNull();
+  });
+
+  it("warns once when agents share a low credential", async () => {
+    const lowUsage = {
+      windows: [
+        {
+          kind: "primary" as const,
+          usedPercent: 90,
+          windowMinutes: 300,
+          resetAt: Math.floor(Date.parse("2026-08-28T12:00:00Z") / 1000),
+        },
+      ],
+      planName: null,
+      capturedAt: Math.floor(Date.parse("2026-08-28T09:55:00Z") / 1000),
+    };
+    const shared = (handle: string, avatarSeed: string) => ({
+      handle,
+      displayName: handle,
+      avatarSeed,
+      model: "gpt-5.5",
+      providerLabel: "OpenAI",
+      credentialId: "cred-shared",
+      credentialLabel: "My ChatGPT",
+      credentialState: "default" as const,
+      subscriptionUsage: lowUsage,
+    });
     await act(async () => {
       publishChatParticipants(
         snapshot({
-          agents: [
-            {
-              handle: "octo",
-              displayName: "Octo",
-              avatarSeed: "octo",
-              model: "gpt-5.5",
-              providerLabel: "OpenAI",
-              credentialId: "cred-1",
-              credentialLabel: "My ChatGPT",
-              credentialState: "default",
-              subscriptionUsage: {
-                windows: [
-                  {
-                    kind: "primary",
-                    usedPercent: 90, // was nearly exhausted...
-                    windowMinutes: 300,
-                    // ...but the reset time is an hour in the PAST relative to
-                    // the pinned clock (10:00Z), with no newer snapshot.
-                    resetAt: Math.floor(Date.parse("2026-08-28T09:00:00Z") / 1000),
-                  },
-                ],
-                planName: null,
-                capturedAt: Math.floor(Date.parse("2026-08-28T03:00:00Z") / 1000),
-              },
-            },
-          ],
+          agents: [shared("octo", "octo"), shared("pixel", "pixel")],
           runningAgentHandles: [],
           totalQueuedCount: 0,
         }),
       );
     });
     await render();
-    const usage = container.querySelector('[data-testid="participants-usage"]');
-    const text = usage?.textContent ?? "";
-    expect(text).toContain("just reset");
-    expect(text).toContain("100% left"); // rolled over → full, not "10% left"
-    expect(text).not.toContain("10% left");
-  });
-
-  it("shows one set of meters when agents share a credential", async () => {
-    await act(async () => {
-      publishChatParticipants(
-        snapshot({
-          agents: [
-            {
-              handle: "octo",
-              displayName: "Octo",
-              avatarSeed: "octo",
-              model: "gpt-5.5",
-              providerLabel: "OpenAI",
-              credentialId: "cred-shared",
-              credentialLabel: "My ChatGPT",
-              credentialState: "default",
-              subscriptionUsage: {
-                windows: [
-                  {
-                    kind: "primary",
-                    usedPercent: 20,
-                    windowMinutes: 300,
-                    resetAt: Math.floor(Date.parse("2026-08-28T12:00:00Z") / 1000),
-                  },
-                ],
-                planName: null,
-                capturedAt: Math.floor(Date.parse("2026-08-28T09:55:00Z") / 1000),
-              },
-            },
-            {
-              handle: "pixel",
-              displayName: "Pixel",
-              avatarSeed: "pixel",
-              model: "gpt-5.5",
-              providerLabel: "OpenAI",
-              credentialId: "cred-shared",
-              credentialLabel: "My ChatGPT",
-              credentialState: "default",
-              subscriptionUsage: {
-                windows: [
-                  {
-                    kind: "primary",
-                    usedPercent: 20,
-                    windowMinutes: 300,
-                    resetAt: Math.floor(Date.parse("2026-08-28T12:00:00Z") / 1000),
-                  },
-                ],
-                planName: null,
-                capturedAt: Math.floor(Date.parse("2026-08-28T09:55:00Z") / 1000),
-              },
-            },
-          ],
-          runningAgentHandles: [],
-          totalQueuedCount: 0,
-        }),
-      );
-    });
-    await render();
-    // Both agents draw on "cred-shared" → meters render once, not twice.
+    // Both agents draw on "cred-shared" → the reset-detail renders once, not
+    // twice — but the headline % rides BOTH rows, so neither sibling looks
+    // deceptively fine on a drained shared account.
     expect(container.querySelectorAll('[data-testid="participants-usage"]').length).toBe(1);
+    const headrooms = container.querySelectorAll(
+      '[data-testid="participants-agent-headroom"]',
+    );
+    expect(headrooms.length).toBe(2);
+    expect(headrooms[0]?.textContent).toContain("10% left");
+    expect(headrooms[1]?.textContent).toContain("10% left");
   });
 
   it("statuses stay conversation-scoped: idle agents show no marker", async () => {
@@ -262,9 +250,7 @@ describe("ParticipantsDrawer", () => {
     await render();
     const drawer = container.querySelector('[data-testid="participants-drawer"]');
     expect(drawer?.textContent).not.toContain("Running");
-    expect(
-      container.querySelector('[data-testid="participants-drawer-summary"]'),
-    ).toBeNull();
+    expect(container.querySelector('[data-testid="participants-drawer-summary"]')).toBeNull();
   });
 
   it("closes via the header button and Escape", async () => {
@@ -295,30 +281,27 @@ describe("ParticipantsDrawer", () => {
     const onClose = await render();
 
     const drawer = container.querySelector('[data-testid="participants-drawer"]');
-    // A click inside the drawer must not close it.
     await act(async () => {
       drawer?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
     });
     expect(onClose).not.toHaveBeenCalled();
 
-    // A click anywhere outside closes it.
     await act(async () => {
       document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
     });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("stays read-only (no edit affordance) without an editing context", async () => {
+  it("stays read-only (no inline controls) without an editing context", async () => {
     await act(async () => {
       publishChatParticipants(snapshot());
     });
     await render();
-    expect(
-      container.querySelector('[data-testid="participants-agent-expand-octo"]'),
-    ).toBeNull();
+    expect(container.querySelector('[data-testid="participants-agent-controls"]')).toBeNull();
+    expect(container.querySelector('[data-testid="drawer-agent-model-select-octo"]')).toBeNull();
   });
 
-  it("reveals inline model + reasoning controls when an editing context is present", async () => {
+  it("renders model + reasoning as inline editable tokens with an editing context", async () => {
     const saveAgent = vi.fn().mockResolvedValue(true);
     await act(async () => {
       publishChatParticipants(
@@ -332,10 +315,11 @@ describe("ParticipantsDrawer", () => {
               agentId: "agent-1",
               providerId: "openai",
               model: "gpt-5.5",
-              reasoningEffort: null,
+              reasoningEffort: "high",
               providerLabel: "OpenAI",
               credentialId: "cred-1",
               credentialLabel: "My ChatGPT",
+              credentialKind: "codex_auth_json",
               credentialState: "default",
               subscriptionUsage: null,
             },
@@ -347,23 +331,151 @@ describe("ParticipantsDrawer", () => {
     });
     await render();
 
-    const expand = container.querySelector<HTMLButtonElement>(
-      '[data-testid="participants-agent-expand-octo"]',
+    // No expand affordance — the tokens are present immediately.
+    expect(container.querySelector('[data-testid="participants-agent-expand-octo"]')).toBeNull();
+    const controls = container.querySelector('[data-testid="participants-agent-controls"]');
+    expect(controls).not.toBeNull();
+    const model = container.querySelector('[data-testid="drawer-agent-model-select-octo"]');
+    const reasoning = container.querySelector(
+      '[data-testid="drawer-agent-reasoning-select-octo"]',
     );
-    expect(expand).not.toBeNull();
-    // Collapsed by default — no controls yet.
-    expect(container.querySelector('[data-testid="participants-agent-edit"]')).toBeNull();
+    expect(model?.textContent).toContain("gpt-5.5");
+    expect(reasoning?.textContent).toContain("High");
+  });
 
+  it("pinned credentials speak; default ones stay silent", async () => {
+    const base = snapshot().agents[0];
     await act(async () => {
-      expand?.click();
+      publishChatParticipants(
+        snapshot({
+          agents: [
+            { ...base, subscriptionUsage: null },
+            {
+              ...base,
+              handle: "scout",
+              avatarSeed: "scout",
+              credentialState: "pinned",
+              subscriptionUsage: null,
+            },
+          ],
+          runningAgentHandles: [],
+          totalQueuedCount: 0,
+        }),
+      );
     });
-    // Expanded: the model + reasoning pickers appear.
-    expect(container.querySelector('[data-testid="participants-agent-edit"]')).not.toBeNull();
-    expect(
-      container.querySelector('[data-testid="drawer-agent-model-select-octo"]'),
-    ).not.toBeNull();
-    expect(
-      container.querySelector('[data-testid="drawer-agent-reasoning-select-octo"]'),
-    ).not.toBeNull();
+    await render();
+    const text =
+      container.querySelector('[data-testid="participants-drawer"]')?.textContent ?? "";
+    expect(text).toContain("ChatGPT subscription · pinned"); // scout, non-default
+    expect(text).not.toMatch(/ChatGPT subscription(?! · pinned)/); // octo's default is silent
+  });
+
+  it("shows one quiet footer when every agent shares one machine", async () => {
+    const cloudRuntime = {
+      id: "rt-cloud",
+      label: "Instafy Cloud",
+      kind: "shared" as const,
+      status: "online",
+      resourcesSummary: "2 vCPU · 4 GB",
+    };
+    const agents = snapshot().agents.map((agent) => ({
+      ...agent,
+      credentialState: "default" as const,
+      credentialId: "cred-1",
+      subscriptionUsage: null,
+      runtime: cloudRuntime,
+    }));
+    await act(async () => {
+      publishChatParticipants(snapshot({ agents, runningAgentHandles: [], totalQueuedCount: 0 }));
+    });
+    await render();
+
+    // No per-machine headers, no indent rail — just the footer.
+    expect(container.querySelectorAll('[data-testid="participants-runtime-group"]').length).toBe(
+      0,
+    );
+    const footer = container.querySelector('[data-testid="participants-machine-footer"]');
+    expect(footer).not.toBeNull();
+    expect(footer?.textContent).toContain("All on Instafy Cloud · shared");
+    // Healthy machine → no status word.
+    expect(footer?.textContent).not.toContain("online");
+    const section = container.querySelector('section[aria-label="Agents"]');
+    expect(section?.textContent).toContain("Agents");
+    expect(section?.textContent).not.toContain("Runtimes & agents");
+  });
+
+  it("groups agents under machine headers only when machines differ", async () => {
+    const cloudRuntime = {
+      id: "rt-cloud",
+      label: "Instafy Cloud",
+      kind: "shared" as const,
+      status: "ready",
+      resourcesSummary: "2 vCPU · 4 GB",
+    };
+    const baseAgent = {
+      displayName: "",
+      providerLabel: "OpenAI",
+      credentialState: "default" as const,
+      subscriptionUsage: null,
+    };
+    await act(async () => {
+      publishChatParticipants(
+        snapshot({
+          agents: [
+            {
+              ...baseAgent,
+              handle: "octo",
+              avatarSeed: "octo",
+              model: "gpt-5.5",
+              credentialId: "c1",
+              credentialLabel: "My ChatGPT",
+              runtime: cloudRuntime,
+            },
+            {
+              ...baseAgent,
+              handle: "scout",
+              avatarSeed: "scout",
+              model: "o4-mini",
+              credentialId: "c1",
+              credentialLabel: "My ChatGPT",
+              runtime: cloudRuntime,
+            },
+            {
+              ...baseAgent,
+              handle: "pixel",
+              avatarSeed: "pixel",
+              model: "gpt-5.5",
+              credentialId: "c2",
+              credentialLabel: "Local",
+              runtime: {
+                id: "rt-mac",
+                label: "Your Mac",
+                kind: "native" as const,
+                status: "booting",
+                resourcesSummary: null,
+              },
+            },
+          ],
+          runningAgentHandles: [],
+          totalQueuedCount: 0,
+        }),
+      );
+    });
+    await render();
+
+    const groups = container.querySelectorAll('[data-testid="participants-runtime-group"]');
+    expect(groups.length).toBe(2);
+    expect(container.querySelector('[data-testid="participants-machine-footer"]')).toBeNull();
+    const text = container.querySelector('section[aria-label="Agents"]')?.textContent ?? "";
+    expect(text).toContain("Runtimes & agents");
+    expect(text).toContain("Instafy Cloud");
+    expect(text).toContain("Shared · 2");
+    expect(text).toContain("Your Mac");
+    expect(text).toContain("Native");
+    expect(text).toContain("this machine");
+    expect(text).toContain("booting"); // unhealthy status is spelled out
+    expect(text).toContain("@octo");
+    expect(text).toContain("@scout");
+    expect(text).toContain("@pixel");
   });
 });
