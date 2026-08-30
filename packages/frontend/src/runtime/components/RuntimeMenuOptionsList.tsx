@@ -120,7 +120,7 @@ function RuntimeValueRow({
 }: RuntimeValueRowProps) {
   return (
     <>
-      <Text as="span" variant="caption" tone="muted" className="text-xxs">
+      <Text as="span" variant="caption" tone="muted" className="text-right text-xxs">
         {label}
       </Text>
       <span className="flex min-w-0 items-center gap-1.5">
@@ -228,7 +228,7 @@ function RuntimeSizePickerRow() {
   // block. Specs and cost stay visible in the menu BEFORE choosing.
   return (
     <div className="flex items-center gap-3" data-testid="runtime-size-picker">
-      <Text as="span" variant="caption" tone="muted" className="w-14 shrink-0 text-xxs">
+      <Text as="span" variant="caption" tone="muted" className="w-14 shrink-0 text-right text-xxs">
         Size
       </Text>
       <MenuTrigger isOpen={sizeMenuOpen} onOpenChange={setSizeMenuOpen}>
@@ -556,11 +556,11 @@ export function RuntimeMenuOptionsList({
               ) : null}
             </div>
             {hasActions && isExpanded ? (
-              // pl-6 lines the details up under the option label: it clears
-              // the state-indicator column (indicator + gap-2) inside the
-              // header's px-2.5.
+              // pl-4.5 = the state indicator (w-2.5) + the header's gap-2, so
+              // the details sit exactly flush with the title text: a hanging
+              // indent with the dot alone in the gutter.
               <div
-                className={`mx-2.5 mt-1 flex flex-col gap-2.5 border-t border-slate-200/70 pb-1 pl-6 pt-2.5 text-xs text-slate-600 dark:text-slate-300 ${DARK_DIVIDER_BORDER_CLASS}`}
+                className={`mx-2.5 mt-1 flex flex-col gap-2.5 border-t border-slate-200/70 pb-1 pl-4.5 pt-2.5 text-xs text-slate-600 dark:text-slate-300 ${DARK_DIVIDER_BORDER_CLASS}`}
               >
                 {shouldShowDetailText ? (
                   <Text as="p" variant="caption" tone="muted" className="break-words text-xxs">

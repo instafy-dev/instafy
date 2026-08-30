@@ -5,17 +5,26 @@ import { ChatMessageAvatar } from "./ChatMessageAvatar";
 import { SettingsShell } from "./SettingsShell";
 import { Button } from "../../../components/Button";
 import { Text } from "../../../components/Text";
-import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
+import {
+  StudioMenu,
+  StudioMenuItem,
+} from "../../../components/aria/StudioMenu";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { RuntimeMenuPanel } from "../../../runtime/components/RuntimeMenuPanel";
-import { useRuntimeMenuOptions, type RuntimeMenuOption } from "../../../runtime/useRuntimeMenu";
+import {
+  useRuntimeMenuOptions,
+  type RuntimeMenuOption,
+} from "../../../runtime/useRuntimeMenu";
 import { useProjects } from "../../../projects/useProjects";
 import {
   listMyAgents,
   updateMyAgent,
   type ControllerAgentProfile,
 } from "../../../services/runtimeController/agents";
-import { useMachinesPanelFocus, setMachinesPanelFocus } from "./machinesPanelStore";
+import {
+  useMachinesPanelFocus,
+  setMachinesPanelFocus,
+} from "./machinesPanelStore";
 
 /**
  * The canonical machines surface: every runtime this workspace can reach, with
@@ -218,7 +227,8 @@ export function MachinesPanel() {
   // This is a stats page: the first (or deep-link-focused) machine starts with
   // its details — sparklines, facts, agents — open, no click required.
   const firstConcreteId =
-    runtimeOptions.find((option) => Boolean(option.id) && !option.isAuto)?.id ?? null;
+    runtimeOptions.find((option) => Boolean(option.id) && !option.isAuto)?.id ??
+    null;
   const defaultExpandedOptionId = focusRuntimeId ?? firstConcreteId;
 
   // Agents + pinning render INSIDE each machine's card (no separate section —
@@ -232,62 +242,81 @@ export function MachinesPanel() {
     );
     if (machineAgents.length === 0 && candidates.length === 0) return null;
     return (
-      <div data-testid={`machines-card-agents-${machineId}`}>
-        <span className="flex min-w-0 flex-wrap items-center gap-1">
-          {machineAgents.map((agent) => {
-            const pinnedHere = (agent.runtimeId?.trim() || null) === machineId;
-            return (
-              <span
-                key={agent.id}
-                className="inline-flex items-center gap-1 rounded-full bg-slate-100 py-0.5 pl-0.5 pr-2 text-xxs text-slate-600 dark:bg-white/[0.07] dark:text-slate-300"
-                data-testid={`machines-agent-chip-${agent.handle}`}
-                title={
-                  pinnedHere
-                    ? `@${agent.handle} is pinned to this machine`
-                    : `@${agent.handle} rides the shared machine (default)`
-                }
-              >
-                <ChatMessageAvatar
-                  kind="assistant"
-                  agent={{ handle: agent.handle, avatarSeed: agent.avatarSeed }}
-                  size="2xs"
-                />
-                <span className="max-w-[9rem] truncate">@{agent.handle}</span>
-                {pinnedHere ? (
-                  // Only an explicit pin can be removed; shared riders aren't
-                  // pinned, so they carry no unpin control.
-                  <button
-                    type="button"
-                    aria-label={`Unpin @${agent.handle} (back to shared)`}
-                    disabled={savingAgentId === agent.id}
-                    onClick={() => saveAgentRuntime(agent.id, null)}
-                    data-testid={`machines-unpin-${agent.handle}`}
-                    className="ml-0.5 inline-flex text-slate-400 hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300"
-                  >
-                    <Xmark className="h-3 w-3" aria-hidden="true" />
-                  </button>
-                ) : null}
-              </span>
-            );
-          })}
-          <AssignAgentMenu
-            machine={option}
-            candidates={candidates}
-            disabledReason={pinDisabledReason}
-            onAssign={(agentId) => saveAgentRuntime(agentId, machineId)}
-          />
-        </span>
-        {pinError ? (
-          <Text
-            as="p"
-            variant="caption"
-            tone="danger"
-            className="pt-1 text-xxs"
-            data-testid="machines-pin-error"
-          >
-            {pinError}
-          </Text>
-        ) : null}
+      // Labeled like the metric rows so the chips start on the card's shared
+      // content edge instead of hanging in the label column.
+      <div
+        className="flex items-start gap-3"
+        data-testid={`machines-card-agents-${machineId}`}
+      >
+        <Text
+          as="span"
+          variant="caption"
+          tone="muted"
+          className="w-14 shrink-0 pt-1 text-right text-xxs"
+        >
+          Agents
+        </Text>
+        <div className="min-w-0 flex-1">
+          <span className="flex min-w-0 flex-wrap items-center gap-1">
+            {machineAgents.map((agent) => {
+              const pinnedHere =
+                (agent.runtimeId?.trim() || null) === machineId;
+              return (
+                <span
+                  key={agent.id}
+                  className="inline-flex items-center gap-1 rounded-full bg-slate-100 py-0.5 pl-0.5 pr-2 text-xxs text-slate-600 dark:bg-white/[0.07] dark:text-slate-300"
+                  data-testid={`machines-agent-chip-${agent.handle}`}
+                  title={
+                    pinnedHere
+                      ? `@${agent.handle} is pinned to this machine`
+                      : `@${agent.handle} rides the shared machine (default)`
+                  }
+                >
+                  <ChatMessageAvatar
+                    kind="assistant"
+                    agent={{
+                      handle: agent.handle,
+                      avatarSeed: agent.avatarSeed,
+                    }}
+                    size="2xs"
+                  />
+                  <span className="max-w-[9rem] truncate">@{agent.handle}</span>
+                  {pinnedHere ? (
+                    // Only an explicit pin can be removed; shared riders aren't
+                    // pinned, so they carry no unpin control.
+                    <button
+                      type="button"
+                      aria-label={`Unpin @${agent.handle} (back to shared)`}
+                      disabled={savingAgentId === agent.id}
+                      onClick={() => saveAgentRuntime(agent.id, null)}
+                      data-testid={`machines-unpin-${agent.handle}`}
+                      className="ml-0.5 inline-flex text-slate-400 hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300"
+                    >
+                      <Xmark className="h-3 w-3" aria-hidden="true" />
+                    </button>
+                  ) : null}
+                </span>
+              );
+            })}
+            <AssignAgentMenu
+              machine={option}
+              candidates={candidates}
+              disabledReason={pinDisabledReason}
+              onAssign={(agentId) => saveAgentRuntime(agentId, machineId)}
+            />
+          </span>
+          {pinError ? (
+            <Text
+              as="p"
+              variant="caption"
+              tone="danger"
+              className="pt-1 text-xxs"
+              data-testid="machines-pin-error"
+            >
+              {pinError}
+            </Text>
+          ) : null}
+        </div>
       </div>
     );
   };
@@ -321,7 +350,6 @@ export function MachinesPanel() {
         sparklineVariant="page"
         headerActions
       />
-
     </SettingsShell>
   );
 }
