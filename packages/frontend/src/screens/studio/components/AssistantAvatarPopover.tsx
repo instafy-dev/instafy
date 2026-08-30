@@ -40,6 +40,11 @@ export interface AgentProfileCardProps {
   resourcesSummary: string | null;
   runtimeLabel: string;
   runtimeState: string;
+  /**
+   * Close hook for hosts that render the card in a CONTROLLED overlay (no
+   * DialogTrigger above it, so OverlayTriggerStateContext is absent there).
+   */
+  onRequestClose?: () => void;
 }
 
 function ActivityRow({
@@ -95,13 +100,14 @@ function ActivityRow({
   );
 }
 
-function AgentProfileCardContent({
+export function AgentProfileCardContent({
   agentAvatarSeed,
   agentHandle,
   agentId = null,
   displayName,
   metadata,
   onOpenSettings,
+  onRequestClose,
   pinnedRuntimeId,
   resourcesSummary,
   runtimeLabel,
@@ -130,6 +136,7 @@ function AgentProfileCardContent({
     requestUrlPush();
     openConversationTab(localId);
     overlayState?.close();
+    onRequestClose?.();
     // The tab switch unmounts the trigger, so the popover's focus restore has
     // nowhere to land. Hand focus to the composer once the conversation
     // surface has mounted and registered its listener (two frames).
@@ -150,6 +157,7 @@ function AgentProfileCardContent({
       openPanelTab("ai", { activate: true });
     }
     overlayState?.close();
+    onRequestClose?.();
   };
 
   return (
