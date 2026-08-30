@@ -48,6 +48,13 @@ describe("RuntimeMenuOptionsList", () => {
 
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    // jsdom has no CSS.escape; react-aria's popover positioning needs it when
+    // the size menu opens.
+    if (typeof globalThis.CSS === "undefined") {
+      (globalThis as { CSS?: { escape: (value: string) => string } }).CSS = {
+        escape: (value: string) => value,
+      };
+    }
     resetRuntimeResourceHistory();
     showStatusMock.mockClear();
     container = document.createElement("div");
@@ -231,11 +238,25 @@ describe("RuntimeMenuOptionsList", () => {
     await renderList({ options: [hostedOption({ id: longId })] });
     await expandDetails();
 
+    // Size is a compact dropdown row now: the trigger shows the current
+    // choice; the options (with specs + cost) live in the portaled menu.
     expect(
       container.querySelector('[data-testid="runtime-size-picker"]'),
     ).not.toBeNull();
-    expect(container.querySelector('[data-testid="runtime-size-standard"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="runtime-size-boost"]')).not.toBeNull();
+    const sizeTrigger = container.querySelector<HTMLButtonElement>(
+      '[data-testid="runtime-size-trigger"]',
+    );
+    expect(sizeTrigger).not.toBeNull();
+    expect(sizeTrigger?.textContent).toContain("Standard");
+    await act(async () => {
+      sizeTrigger?.click();
+    });
+    expect(document.querySelector('[data-testid="runtime-size-standard"]')).not.toBeNull();
+    expect(document.querySelector('[data-testid="runtime-size-boost"]')).not.toBeNull();
+    expect(document.body.textContent).toContain("2× credits");
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    });
 
     const sparklines = container.querySelector('[data-testid="runtime-resource-sparklines"]');
     expect(sparklines).not.toBeNull();

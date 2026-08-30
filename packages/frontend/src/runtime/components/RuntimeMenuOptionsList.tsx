@@ -1,5 +1,8 @@
-import { useState, type ReactNode } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { Copy, NavArrowDown, Play, Square, Trash } from "iconoir-react";
+import { MenuTrigger } from "react-aria-components";
+import { StudioMenu, StudioMenuItem } from "../../components/aria/StudioMenu";
+import { StudioPopover } from "../../components/aria/StudioPopover";
 import { useProjects } from "../../projects/useProjects";
 import { useStatus } from "../../status/useStatus";
 import {
@@ -24,7 +27,6 @@ import type { RuntimeMenuOption } from "../useRuntimeMenu";
 import type { TunnelCopyMode } from "./RuntimeTunnelDetails";
 import { Button, IconButton } from "../../components/Button";
 import { Card } from "../../components/Card";
-import { SegmentedControl } from "../../components/SegmentedControl";
 import { Text } from "../../components/Text";
 import { DARK_DIVIDER_BORDER_CLASS } from "../../theme/darkSurfaces";
 
@@ -179,7 +181,8 @@ interface RuntimeMenuOptionsListProps {
  * Machine size choice for the hosted runtime. The selection is a per-project
  * preference validated server-side; it applies the next time the machine
  * starts, and a boosted machine burns credits at the shown multiple. Each
- * segment carries its own specs/cost so the price is visible BEFORE choosing.
+ * menu option carries its own specs/cost so the price is visible BEFORE
+ * choosing.
  */
 function RuntimeSizePickerRow() {
   const { activeProjectId } = useProjects();
@@ -187,6 +190,8 @@ function RuntimeSizePickerRow() {
   const [selected, setSelected] = useState<RuntimeSizeId>(() =>
     getRuntimeSizePreference(activeProjectId),
   );
+  const sizeTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const [sizeMenuOpen, setSizeMenuOpen] = useState(false);
 
   if (!activeProjectId) {
     return null;
@@ -207,33 +212,71 @@ function RuntimeSizePickerRow() {
     );
   };
 
+  const selectedChoice = RUNTIME_SIZE_CHOICES.find((entry) => entry.id === selected);
+  const triggerLabel = [selectedChoice?.label ?? selected, selectedChoice?.specs]
+    .filter(Boolean)
+    .join(" · ");
+
+  // A row like everything else in the card — "Size" in the shared label
+  // column, a compact dropdown as the value — instead of a two-cell segmented
+  // block. Specs and cost stay visible in the menu BEFORE choosing.
   return (
-    <div data-testid="runtime-size-picker">
-      <SegmentedControl
-        label="Machine size"
-        size="xs"
-        width="fit"
-        value={selected}
-        onChange={choose}
-        options={RUNTIME_SIZE_CHOICES.map((choice) => {
-          const detail = [choice.specs, choice.costNote].filter(Boolean).join(" · ");
-          return {
-            value: choice.id,
-            label: (
-              <span className="flex flex-col items-center leading-tight">
-                <span>{choice.label}</span>
-                <span className="whitespace-nowrap text-3xs font-normal text-slate-500 dark:text-slate-400">
-                  {detail}
+    <div className="flex items-center gap-3" data-testid="runtime-size-picker">
+      <Text as="span" variant="caption" tone="muted" className="w-14 shrink-0 text-xxs">
+        Size
+      </Text>
+      <MenuTrigger isOpen={sizeMenuOpen} onOpenChange={setSizeMenuOpen}>
+        <Button
+          ref={sizeTriggerRef}
+          type="button"
+          variant="outline"
+          size="xs"
+          radius="lg"
+          aria-label="Machine size"
+          aria-haspopup="menu"
+          data-testid="runtime-size-trigger"
+          onPress={() => {
+            if (!sizeMenuOpen) setSizeMenuOpen(true);
+          }}
+          className="justify-between gap-1 bg-slate-50 px-2 text-xxs shadow-none hover:bg-slate-100 data-[hovered]:bg-slate-100 dark:bg-[var(--color-studio-dark-raised-control)] dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)]"
+        >
+          <span className="min-w-0 truncate">{triggerLabel}</span>
+          <NavArrowDown className="shrink-0 text-xs text-slate-400" aria-hidden="true" />
+        </Button>
+        <StudioPopover
+          triggerRef={sizeTriggerRef}
+          isNonModal
+          placement="bottom start"
+          offset={4}
+          className="min-w-[13rem] p-2"
+        >
+          <StudioMenu
+            aria-label="Machine size"
+            selectionMode="single"
+            selectedKeys={new Set([selected])}
+            onAction={(key) => {
+              choose(String(key) as RuntimeSizeId);
+              setSizeMenuOpen(false);
+            }}
+            className="space-y-1"
+          >
+            {RUNTIME_SIZE_CHOICES.map((choice) => (
+              <StudioMenuItem
+                key={choice.id}
+                id={choice.id}
+                data-testid={`runtime-size-${choice.id}`}
+              >
+                <span className="flex min-w-0 flex-col leading-tight">
+                  <span>{choice.label}</span>
+                  <span className="text-3xs font-normal text-slate-500 dark:text-slate-400">
+                    {[choice.specs, choice.costNote].filter(Boolean).join(" · ")}
+                  </span>
                 </span>
-              </span>
-            ),
-            ariaLabel: [choice.label, choice.specs, choice.costNote]
-              .filter(Boolean)
-              .join(", "),
-            testId: `runtime-size-${choice.id}`,
-          };
-        })}
-      />
+              </StudioMenuItem>
+            ))}
+          </StudioMenu>
+        </StudioPopover>
+      </MenuTrigger>
     </div>
   );
 }
