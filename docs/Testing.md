@@ -78,7 +78,10 @@ contributions do not require that manual security review.
 The JavaScript job performs a frozen install, validates and applies the public
 migration track to an empty database, checks the self-host contract, lints and
 builds the frontend, runs frontend units, proves the CLI package artifact, and
-builds/tests the Desktop app and its runtime helper. The Go and Rust jobs test
+builds/tests the Desktop app and its runtime helper. The empty-database test
+prefetches its digest-pinned Postgres image with bounded retry/backoff and then
+disables implicit pulls; image acquisition may retry, while container, SQL, and
+schema-verification failures remain fatal. The Go and Rust jobs test
 the public service packages directly. Full-stack Playwright suites remain
 available to contributors and downstream distributions, but are not required
 public-branch checks because they depend on a larger local/deployment fixture.
