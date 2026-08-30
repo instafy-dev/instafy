@@ -1101,9 +1101,16 @@ export function StudioSidebar({
 
     };
 
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeWorkspaceSwitcher();
+      }
+    };
     document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("keydown", handleKeyDown);
     return () => {
       document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("keydown", handleKeyDown);
     };
   }, [closeWorkspaceSwitcher, workspaceMenuOpen]);
 

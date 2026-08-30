@@ -162,6 +162,24 @@ export function SourceControlDrawer({
   const showDesktopRollingDiffPreview = isLargeScreen && dirtyCount > 0 && reviewMode === "all";
   const showMobileDiffPreview = !isLargeScreen && previewIndex >= 0 && reviewMode === "focused";
   const showMobileRollingDiffPreview = !isLargeScreen && dirtyCount > 0 && reviewMode === "all";
+  // The mobile sheets dismiss on backdrop tap; Escape must work too.
+  useEffect(() => {
+    if (!showMobileRollingDiffPreview && !showMobileDiffPreview) {
+      return;
+    }
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      if (showMobileRollingDiffPreview) {
+        setReviewMode("focused");
+      } else {
+        setPreviewPath(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [showMobileDiffPreview, showMobileRollingDiffPreview]);
   const toggleHistoryEntry = useCallback((commit: string) => {
     setExpandedHistoryCommits((previous) => {
       const next = new Set(previous);

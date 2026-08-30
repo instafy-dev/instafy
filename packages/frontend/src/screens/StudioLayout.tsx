@@ -1156,6 +1156,20 @@ function StudioLayoutInner() {
     setMobileGitReviewSheet(null);
   }, [isLargeScreen, mobileGitReviewSheet, openGitReviewTab, requestHistoryPush, setMobileGitReviewSheet]);
 
+  // The sheet dismisses on backdrop tap; Escape must work too.
+  useEffect(() => {
+    if (isLargeScreen || !mobileGitReviewSheet) {
+      return;
+    }
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMobileGitReviewSheet(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isLargeScreen, mobileGitReviewSheet, setMobileGitReviewSheet]);
+
   const handleToggleSidebar = useCallback(() => {
     if (isLargeScreen) {
       setSidebarCollapsed((previous) => !previous);
@@ -2196,6 +2210,20 @@ function DesktopRuntimeHelpDialog() {
     typeof window.instafyDesktop?.startDesktopRuntime === "function" &&
     typeof window.instafyDesktop?.desktopRuntimeStatus === "function";
 
+  // The dialog otherwise only closes via its (x); Escape must work too.
+  useEffect(() => {
+    if (!isDesktopRuntimeHelpVisible) {
+      return;
+    }
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        hideDesktopRuntimeHelp();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [hideDesktopRuntimeHelp, isDesktopRuntimeHelpVisible]);
+
   useEffect(() => {
     if (!isDesktopRuntimeHelpVisible || !canUseDesktopApp) {
       setDesktopRuntimeStatus(null);
@@ -2331,7 +2359,7 @@ function DesktopRuntimeHelpDialog() {
             aria-label="Close"
             onPress={hideDesktopRuntimeHelp}
           >
-            <Xmark className="h-5 w-5" aria-hidden="true" />
+            <Xmark className="h-4 w-4" aria-hidden="true" />
           </IconButton>
         </div>
 
