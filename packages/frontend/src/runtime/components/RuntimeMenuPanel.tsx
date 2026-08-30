@@ -39,6 +39,8 @@ interface RuntimeMenuPanelProps {
   renderOptionExtras?: (option: RuntimeMenuOption) => ReactNode;
   /** Trend size: compact mini-sparklines (menus) or full-row plots (pages). */
   sparklineVariant?: "compact" | "page";
+  /** Lifecycle controls as header icon buttons (page-style hosts). */
+  headerActions?: boolean;
 }
 
 export function RuntimeMenuPanel({
@@ -65,6 +67,7 @@ export function RuntimeMenuPanel({
   defaultExpandedOptionId = null,
   renderOptionExtras,
   sparklineVariant = "compact",
+  headerActions = false,
 }: RuntimeMenuPanelProps) {
   const [showErrorDetails, setShowErrorDetails] = useState(false);
   const [cachedRuntimeEnsureError, setCachedRuntimeEnsureError] = useState<string | null>(null);
@@ -389,6 +392,7 @@ export function RuntimeMenuPanel({
           defaultExpandedOptionId={defaultExpandedOptionId}
           renderOptionExtras={renderOptionExtras}
           sparklineVariant={sparklineVariant}
+          headerActions={headerActions}
         />
       ) : (
         <Card

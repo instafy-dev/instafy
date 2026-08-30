@@ -48,6 +48,13 @@ describe("RuntimeMenuOptionsList", () => {
 
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    // jsdom has no CSS.escape; react-aria's popover positioning needs it when
+    // the size menu opens.
+    if (typeof globalThis.CSS === "undefined") {
+      (globalThis as { CSS?: { escape: (value: string) => string } }).CSS = {
+        escape: (value: string) => value,
+      };
+    }
     resetRuntimeResourceHistory();
     showStatusMock.mockClear();
     container = document.createElement("div");
@@ -175,18 +182,20 @@ describe("RuntimeMenuOptionsList", () => {
     expect(onSelectOption).not.toHaveBeenCalled();
   });
 
-  it("acknowledges a copied id with a visible confirmation toast", async () => {
+  it("acknowledges a copied value with a visible confirmation toast", async () => {
     // Plain "success" toasts are gated off by StatusProvider; the copy ack
     // must request the confirmation presentation or it never renders.
     Object.defineProperty(navigator, "clipboard", {
       value: { writeText: vi.fn().mockResolvedValue(undefined) },
       configurable: true,
     });
-    await renderList();
+    await renderList({
+      options: [hostedOption({ endpoint: "http://runtime.example.test:1234" })],
+    });
     await expandDetails();
 
     const copyButton = container.querySelector<HTMLButtonElement>(
-      '[data-testid="runtime-copy-id-cloud-runtime-1"]',
+      '[data-testid="runtime-copy-endpoint-cloud-runtime-1"]',
     );
     expect(copyButton).not.toBeNull();
     await act(async () => {
@@ -194,7 +203,7 @@ describe("RuntimeMenuOptionsList", () => {
     });
 
     expect(showStatusMock).toHaveBeenCalledWith(
-      "Runtime id copied",
+      "Endpoint copied",
       "success",
       expect.any(Number),
       expect.objectContaining({ presentation: "confirmation" }),
@@ -229,11 +238,25 @@ describe("RuntimeMenuOptionsList", () => {
     await renderList({ options: [hostedOption({ id: longId })] });
     await expandDetails();
 
+    // Size is a compact dropdown row now: the trigger shows the current
+    // choice; the options (with specs + cost) live in the portaled menu.
     expect(
       container.querySelector('[data-testid="runtime-size-picker"]'),
     ).not.toBeNull();
-    expect(container.querySelector('[data-testid="runtime-size-standard"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="runtime-size-boost"]')).not.toBeNull();
+    const sizeTrigger = container.querySelector<HTMLButtonElement>(
+      '[data-testid="runtime-size-trigger"]',
+    );
+    expect(sizeTrigger).not.toBeNull();
+    expect(sizeTrigger?.textContent).toContain("Standard");
+    await act(async () => {
+      sizeTrigger?.click();
+    });
+    expect(document.querySelector('[data-testid="runtime-size-standard"]')).not.toBeNull();
+    expect(document.querySelector('[data-testid="runtime-size-boost"]')).not.toBeNull();
+    expect(document.body.textContent).toContain("2× credits");
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    });
 
     const sparklines = container.querySelector('[data-testid="runtime-resource-sparklines"]');
     expect(sparklines).not.toBeNull();
@@ -242,9 +265,9 @@ describe("RuntimeMenuOptionsList", () => {
     expect(sparklines?.textContent).toContain("RAM");
     expect(sparklines?.textContent).toContain("512 MB / 2 GB");
 
-    // The full id is progressive disclosure: compact in the grid, complete in
-    // the value's title attribute for hover/copy.
-    expect(container.textContent).toContain("24f91e92…edc3");
+    // The machine's identity lives in the header badge only — compact rt:
+    // text, full id revealed by the badge's title. No separate ID grid row.
+    expect(container.textContent).toContain("rt:24f91e92");
     expect(container.textContent).not.toContain(longId);
     expect(container.querySelector(`[title="${longId}"]`)).not.toBeNull();
   });
