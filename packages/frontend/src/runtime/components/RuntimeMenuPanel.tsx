@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Play, Refresh, WarningTriangle, Xmark } from "iconoir-react";
 import type { RuntimeMenuOption } from "../useRuntimeMenu";
 import { RuntimeMenuOptionsList } from "./RuntimeMenuOptionsList";
@@ -33,6 +33,12 @@ interface RuntimeMenuPanelProps {
   onCopyTunnel?: (mode: TunnelCopyMode, runtimeId?: string | null) => void;
   listClassName?: string;
   emptyStateMessage?: string;
+  /** Option whose details start expanded (page-style hosts). */
+  defaultExpandedOptionId?: string | null;
+  /** Extra host content rendered inside an option's expanded details. */
+  renderOptionExtras?: (option: RuntimeMenuOption) => ReactNode;
+  /** Trend size: compact mini-sparklines (menus) or full-row plots (pages). */
+  sparklineVariant?: "compact" | "page";
 }
 
 export function RuntimeMenuPanel({
@@ -56,6 +62,9 @@ export function RuntimeMenuPanel({
   onCopyTunnel,
   listClassName = "mt-2 max-h-60 overflow-auto",
   emptyStateMessage = "No runtimes available yet.",
+  defaultExpandedOptionId = null,
+  renderOptionExtras,
+  sparklineVariant = "compact",
 }: RuntimeMenuPanelProps) {
   const [showErrorDetails, setShowErrorDetails] = useState(false);
   const [cachedRuntimeEnsureError, setCachedRuntimeEnsureError] = useState<string | null>(null);
@@ -377,6 +386,9 @@ export function RuntimeMenuPanel({
           emptyStateMessage={emptyStateMessage}
           onCopyTunnel={onCopyTunnel}
           copyDisabled={false}
+          defaultExpandedOptionId={defaultExpandedOptionId}
+          renderOptionExtras={renderOptionExtras}
+          sparklineVariant={sparklineVariant}
         />
       ) : (
         <Card
