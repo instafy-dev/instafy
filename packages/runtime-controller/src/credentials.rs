@@ -503,7 +503,7 @@ pub(crate) async fn ensure_managed_ai_proxy_ready(
         if requirements.error.is_none() && !requirements.requires_user_credentials {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(managed_ai_startup_retry_delay(attempt)).await;
         requirements =
             fetch_proxy_credential_requirements(client, proxy_base_url, Duration::from_secs(2))
                 .await;
@@ -528,6 +528,10 @@ pub(crate) async fn ensure_managed_ai_proxy_ready(
     }
 
     Ok(())
+}
+
+fn managed_ai_startup_retry_delay(attempt: u32) -> Duration {
+    Duration::from_millis(500 * 2_u64.pow(attempt.min(4)))
 }
 
 pub(crate) async fn count_recent_managed_ai_prompts(
@@ -3652,6 +3656,22 @@ mod requirement_tests {
                 .contains("proxy reports requiresCredential=true"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn managed_ai_startup_retries_back_off_for_slow_proxy_dns() {
+        let delays = (0..14)
+            .map(super::managed_ai_startup_retry_delay)
+            .collect::<Vec<_>>();
+
+        assert_eq!(delays[0], std::time::Duration::from_millis(500));
+        assert_eq!(delays[1], std::time::Duration::from_secs(1));
+        assert_eq!(delays[2], std::time::Duration::from_secs(2));
+        assert_eq!(delays[3], std::time::Duration::from_secs(4));
+        assert!(delays[4..]
+            .iter()
+            .all(|delay| *delay == std::time::Duration::from_secs(8)));
+        assert_eq!(delays.iter().sum::<std::time::Duration>().as_secs(), 87);
     }
 }
 
