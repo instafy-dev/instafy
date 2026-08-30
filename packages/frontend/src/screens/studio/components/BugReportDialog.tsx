@@ -365,7 +365,7 @@ export function BugReportDialog({
                         radius="full"
                         aria-label={`Remove ${screenshot.fileName}`}
                       >
-                        <Xmark className="h-4 w-4" />
+                        <Xmark className="h-4 w-4" aria-hidden="true" />
                       </IconButton>
                     </div>
                   </Card>

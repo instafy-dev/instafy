@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { ChatBubble, GitBranch, QuoteMessage } from "iconoir-react";
+import { requestAgentProfile } from "./agentProfileOpen";
 import { useConversations } from "../../../conversations/ConversationsProvider";
 import { useConversation } from "../../../conversations/useConversation";
 import {
@@ -875,9 +876,18 @@ function WorkspaceFileReferenceChip({
       }
       setPreviewOpen(false);
     };
+    // Escape mirrors the action-menu sibling below — every dismissible
+    // floating surface answers the keyboard.
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPreviewOpen(false);
+      }
+    };
     document.addEventListener("pointerdown", handlePointerDownOutside, true);
+    document.addEventListener("keydown", handleKeyDown);
     return () => {
       document.removeEventListener("pointerdown", handlePointerDownOutside, true);
+      document.removeEventListener("keydown", handleKeyDown);
     };
   }, [previewOpen]);
 
@@ -1512,18 +1522,24 @@ export function MessageContent({
           </a>
         );
       }
-      if (token.type === "assistant-mention") {
+      if (token.type === "assistant-mention" || token.type === "agent-mention") {
+        // A mention is the agent's name — clicking it opens the agent's
+        // profile (ChatPanel hosts the card for these anchor-less opens).
+        const mentionClass =
+          token.type === "assistant-mention"
+            ? getAssistantMentionClass(token.value)
+            : agentMentionClass;
         return (
-          <span key={`${keyPrefix}-${token.value}-${tokenIndex}`} className={getAssistantMentionClass(token.value)}>
+          <button
+            key={`${keyPrefix}-${token.value}-${tokenIndex}`}
+            type="button"
+            onClick={() => requestAgentProfile(token.value)}
+            className={`${mentionClass} cursor-pointer text-left align-baseline [font:inherit] hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40`}
+            title={`View profile for ${token.value}`}
+            data-testid="chat-agent-mention"
+          >
             {token.value}
-          </span>
-        );
-      }
-      if (token.type === "agent-mention") {
-        return (
-          <span key={`${keyPrefix}-${token.value}-${tokenIndex}`} className={agentMentionClass}>
-            {token.value}
-          </span>
+          </button>
         );
       }
       if (token.type === "conversation-reference") {

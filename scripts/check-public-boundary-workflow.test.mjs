@@ -58,21 +58,131 @@ function runScriptFromStep(source, name, nextName, env) {
   return childProcess.spawnSync("bash", ["-c", script], {
     encoding: "utf8",
     env,
-    timeout: 5_000,
+    timeout: 10_000,
   });
 }
 
-test("trusted boundary is restricted to main PR target events", () => {
+test("trusted boundary is restricted to main PR targets and protected-main pushes", () => {
   const source = readWorkflow("public-boundary.yml");
 
   assert.match(source, /^name: Trusted Public Boundary$/mu);
   assert.match(
     source,
-    /^  pull_request_target:\n    branches:\n      - main\n    types:\n      - opened\n      - synchronize\n      - reopened\n      - ready_for_review\n      - edited\n\nconcurrency:$/mu,
+    /^  pull_request_target:\n    branches:\n      - main\n    types:\n      - opened\n      - synchronize\n      - reopened\n      - ready_for_review\n      - edited\n  push:\n    branches:\n      - main\n\nconcurrency:$/mu,
   );
   assert.doesNotMatch(source, /^  pull_request:$/mu);
-  assert.doesNotMatch(source, /^  push:$/mu);
   assert.doesNotMatch(source, /^  workflow_dispatch:$/mu);
+  assert.match(
+    source,
+    /group: trusted-public-boundary-\$\{\{ github\.event_name \}\}-\$\{\{ github\.event\.pull_request\.number \|\| github\.sha \}\}/u,
+  );
+});
+
+test("protected-main boundary binds and scans the exact pushed commit", () => {
+  const source = readWorkflow("public-boundary.yml");
+  const job = jobSection(source, "boundary");
+  const trustedCheckout = stepSection(
+    source,
+    "Checkout trusted base controls",
+    "Checkout server-generated merge candidate as data",
+  );
+  const candidateCheckout = stepSection(
+    source,
+    "Checkout server-generated merge candidate as data",
+    "Verify the event-bound merge object and parents",
+  );
+  const verifyPullRequest = stepSection(
+    source,
+    "Verify the event-bound merge object and parents",
+    "Verify the exact protected-main object",
+  );
+  const verifyMain = stepSection(
+    source,
+    "Verify the exact protected-main object",
+    "Install pinned Gitleaks",
+  );
+
+  assert.match(
+    job,
+    /TRUSTED_ROOT: \$\{\{ github\.workspace \}\}\/trusted/u,
+  );
+  assert.match(
+    job,
+    /CANDIDATE_ROOT: \$\{\{ github\.event_name == 'push' && format\('\{0\}\/trusted', github\.workspace\) \|\| format\('\{0\}\/candidate', github\.workspace\) \}\}/u,
+  );
+  assert.match(
+    trustedCheckout,
+    /ref: \$\{\{ github\.event_name == 'pull_request_target' && github\.event\.pull_request\.base\.sha \|\| github\.sha \}\}/u,
+  );
+  assert.match(
+    candidateCheckout,
+    /if: github\.event_name == 'pull_request_target'/u,
+  );
+  assert.match(
+    verifyPullRequest,
+    /if: github\.event_name == 'pull_request_target'/u,
+  );
+  assert.match(verifyMain, /if: github\.event_name == 'push'/u);
+  assert.match(verifyMain, /EXPECTED_REF: refs\/heads\/main/u);
+  assert.match(verifyMain, /EXPECTED_SHA: \$\{\{ github\.sha \}\}/u);
+  assert.match(verifyMain, /test "\$GITHUB_REF" = "\$EXPECTED_REF"/u);
+  assert.match(
+    verifyMain,
+    /if \[\[ ! "\$EXPECTED_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\]; then[\s\S]*exit 1/u,
+  );
+  assert.match(
+    verifyMain,
+    /actual_sha="\$\(git -C "\$TRUSTED_ROOT" rev-parse --verify "HEAD\^\{commit\}"\)"/u,
+  );
+  assert.match(verifyMain, /test "\$actual_sha" = "\$EXPECTED_SHA"/u);
+  assertOrdered(
+    source,
+    "Verify the exact protected-main object",
+    "Run trusted public boundary regression tests",
+    "Enforce trusted public boundary policy",
+    "Scan candidate tree with path-aware Gitleaks rules",
+    "Scan every tracked file without path allowlists",
+  );
+});
+
+test("protected-main verifier accepts only the event ref and exact checkout SHA", () => {
+  const source = readWorkflow("public-boundary.yml");
+  const exactSha = childProcess
+    .execFileSync("git", ["-C", repositoryRoot, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    })
+    .trim();
+  const baseEnv = {
+    ...process.env,
+    EXPECTED_REF: "refs/heads/main",
+    EXPECTED_SHA: exactSha,
+    GITHUB_REF: "refs/heads/main",
+    TRUSTED_ROOT: repositoryRoot,
+  };
+
+  const accepted = runScriptFromStep(
+    source,
+    "Verify the exact protected-main object",
+    "Install pinned Gitleaks",
+    baseEnv,
+  );
+  assert.equal(accepted.status, 0, `${accepted.stdout}\n${accepted.stderr}`);
+
+  const wrongSha = runScriptFromStep(
+    source,
+    "Verify the exact protected-main object",
+    "Install pinned Gitleaks",
+    { ...baseEnv, EXPECTED_SHA: "f".repeat(40) },
+  );
+  assert.notEqual(wrongSha.status, 0);
+
+  const wrongRef = runScriptFromStep(
+    source,
+    "Verify the exact protected-main object",
+    "Install pinned Gitleaks",
+    { ...baseEnv, GITHUB_REF: "refs/heads/not-main" },
+  );
+  assert.notEqual(wrongRef.status, 0);
 });
 
 test("trusted boundary token carries the pulls scope the wait step needs", () => {
@@ -331,7 +441,7 @@ test("trusted boundary checkouts are separate, pinned, and non-persistent", () =
 
   assert.match(
     trustedCheckout,
-    /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/u,
+    /ref: \$\{\{ github\.event_name == 'pull_request_target' && github\.event\.pull_request\.base\.sha \|\| github\.sha \}\}/u,
   );
   assert.match(trustedCheckout, /path: trusted/u);
   assert.match(trustedCheckout, /persist-credentials: false/u);
@@ -340,6 +450,10 @@ test("trusted boundary checkouts are separate, pinned, and non-persistent", () =
   assert.doesNotMatch(trustedCheckout, /allow-unsafe-pr-checkout/u);
 
   assert.match(candidateCheckout, /repository: \$\{\{ github\.repository \}\}/u);
+  assert.match(
+    candidateCheckout,
+    /if: github\.event_name == 'pull_request_target'/u,
+  );
   assert.match(
     candidateCheckout,
     /ref: refs\/pull\/\$\{\{ github\.event\.pull_request\.number \}\}\/merge/u,

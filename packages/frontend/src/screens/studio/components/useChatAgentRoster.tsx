@@ -20,7 +20,10 @@ import {
   type ControllerAgentProfile,
   controllerClient,
 } from "../../../sdk/instafy";
-import { AssistantAvatarPopover } from "./AssistantAvatarPopover";
+import {
+  AssistantAvatarPopover,
+  type AgentProfileCardProps,
+} from "./AssistantAvatarPopover";
 import {
   type AssistantAgentIdentity,
   type AssistantAvatarRenderOptions,
@@ -245,6 +248,46 @@ export function useChatAgentRoster({
     stickyMentionedAgentByConversationRef,
   ]);
 
+  // One resolution for the profile card wherever it opens — the transcript
+  // popover and the by-handle modal (mention chips, narrow speaker labels)
+  // must describe the agent identically.
+  const resolveAgentProfileCardProps = useCallback(
+    (agentHandle: string): AgentProfileCardProps => {
+      const agent = agentByHandle.get(agentHandle) ?? null;
+      const agentAvatarSeed =
+        typeof agent?.avatarSeed === "string" && agent.avatarSeed.trim().length > 0
+          ? agent.avatarSeed.trim()
+          : agentHandle;
+      const displayName =
+        getBuiltInAssistantDisplayName(agentHandle) ??
+        (agent?.displayName?.trim() ? agent.displayName.trim() : `@${agentHandle}`);
+      const pinnedRuntimeId = agent?.runtimeId ?? null;
+      const runtimeOption = pinnedRuntimeId ? runtimeOptionsById.get(pinnedRuntimeId) ?? null : null;
+      return {
+        agentHandle,
+        agentId: agent?.id ?? null,
+        agentAvatarSeed,
+        displayName,
+        pinnedRuntimeId,
+        runtimeLabel: runtimeOption?.label ?? preferredRuntimeLabel ?? currentRuntime.label,
+        runtimeState: runtimeOption?.state ?? currentRuntime.state,
+        resourcesSummary:
+          formatRuntimeResourcesSummary(runtimeOption?.resources ?? null) ??
+          formatRuntimeResourcesSummary(currentRuntime.resources ?? null),
+        onOpenSettings: onOpenAgentProfileSettings,
+      };
+    },
+    [
+      agentByHandle,
+      currentRuntime.label,
+      currentRuntime.resources,
+      currentRuntime.state,
+      onOpenAgentProfileSettings,
+      preferredRuntimeLabel,
+      runtimeOptionsById,
+    ],
+  );
+
   const renderAssistantAvatar = useCallback(
     (
       metadata?: Record<string, unknown> | null,
@@ -257,48 +300,26 @@ export function useChatAgentRoster({
       const resolvedAgentIdentity = messageAgentIdentity ?? metadataAgentIdentity ?? runAgentIdentity;
       const agentHandle =
         resolvedAgentIdentity?.handle ?? primaryAgentHandleForPopover ?? getDefaultAssistantHandle();
-      const agent = agentByHandle.get(agentHandle) ?? null;
+      const cardProps = resolveAgentProfileCardProps(agentHandle);
       const agentAvatarSeed =
-        typeof agent?.avatarSeed === "string" && agent.avatarSeed.trim().length > 0
-          ? agent.avatarSeed.trim()
-          : resolvedAgentIdentity?.avatarSeed ?? agentHandle;
-      const displayName =
-        getBuiltInAssistantDisplayName(agentHandle) ??
-        (agent?.displayName?.trim() ? agent.displayName.trim() : `@${agentHandle}`);
-      const pinnedRuntimeId = agent?.runtimeId ?? null;
-      const runtimeOption = pinnedRuntimeId ? runtimeOptionsById.get(pinnedRuntimeId) ?? null : null;
-      const runtimeLabel = runtimeOption?.label ?? preferredRuntimeLabel ?? currentRuntime.label;
-      const runtimeState = runtimeOption?.state ?? currentRuntime.state;
-      const resourcesSummary =
-        formatRuntimeResourcesSummary(runtimeOption?.resources ?? null) ??
-        formatRuntimeResourcesSummary(currentRuntime.resources ?? null);
+        agentByHandle.get(agentHandle)?.avatarSeed?.trim() ||
+        (resolvedAgentIdentity?.avatarSeed ?? agentHandle);
 
       return (
         <AssistantAvatarPopover
+          {...cardProps}
           metadata={metadata ?? null}
-          agentHandle={agentHandle}
           agentAvatarSeed={agentAvatarSeed}
-          displayName={displayName}
           motion={options?.motion}
           scrollReactive={options?.scrollReactive}
-          pinnedRuntimeId={pinnedRuntimeId}
-          runtimeLabel={runtimeLabel}
-          runtimeState={runtimeState}
-          resourcesSummary={resourcesSummary}
-          onOpenSettings={onOpenAgentProfileSettings}
         />
       );
     },
     [
       agentByHandle,
-      currentRuntime.label,
-      currentRuntime.resources,
-      currentRuntime.state,
-      onOpenAgentProfileSettings,
-      preferredRuntimeLabel,
       primaryAgentHandleForPopover,
+      resolveAgentProfileCardProps,
       runAgentIdentityByRunId,
-      runtimeOptionsById,
     ],
   );
 
@@ -309,6 +330,7 @@ export function useChatAgentRoster({
     primaryAgentHandleForPopover,
     refreshAvailableAgents,
     renderAssistantAvatar,
+    resolveAgentProfileCardProps,
     runAgentHandleByRunId,
     runAgentIdentityByRunId,
   };

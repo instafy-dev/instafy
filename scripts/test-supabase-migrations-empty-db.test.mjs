@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { validatePublicMigrationTrack } from "./check-supabase-migrations.mjs";
 import {
   POSTGRES_IMAGE,
   REQUIRED_PUBLIC_RELATIONS,
+  resolveRunnableImage,
   validateMigrationPlan,
 } from "./test-supabase-migrations-empty-db.mjs";
 
@@ -43,4 +45,41 @@ test("empty-database plans reject malformed and duplicate entries", () => {
     () => validateMigrationPlan([valid, { ...valid, fileName: "20260000000064_again.sql" }]),
     /duplicate version/u,
   );
+});
+
+test("direct migration runs explicitly acquire the pinned image", () => {
+  const inspectCalls = [];
+  const pullCalls = [];
+  const image = resolveRunnableImage("fake-docker", {
+    spawnCommand(command, args) {
+      inspectCalls.push([command, ...args]);
+      return { status: 1 };
+    },
+    pullImage(reference, options) {
+      pullCalls.push({ reference, options });
+      return reference;
+    },
+  });
+
+  assert.equal(image, POSTGRES_IMAGE);
+  assert.deepEqual(inspectCalls, [
+    ["fake-docker", "image", "inspect", POSTGRES_IMAGE],
+    [
+      "fake-docker",
+      "image",
+      "inspect",
+      `instafy-ci/supabase-postgres:sha256-${POSTGRES_IMAGE.split(":").at(-1)}`,
+    ],
+  ]);
+  assert.deepEqual(pullCalls, [
+    { reference: POSTGRES_IMAGE, options: { docker: "fake-docker" } },
+  ]);
+});
+
+test("container startup cannot perform an implicit registry pull", () => {
+  const source = readFileSync(
+    new URL("./test-supabase-migrations-empty-db.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /"run",\s*"--pull",\s*"never"/u);
 });

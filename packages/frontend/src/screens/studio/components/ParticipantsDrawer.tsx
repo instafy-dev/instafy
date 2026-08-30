@@ -1,10 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { Cpu, Cube, NavArrowRight, Xmark } from "iconoir-react";
-import { MenuTrigger } from "react-aria-components";
+import {
+  Button as AriaButton,
+  DialogTrigger,
+  MenuTrigger,
+} from "react-aria-components";
+import { AgentProfilePopoverCard } from "./AssistantAvatarPopover";
 import { Button, IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import { Toggle } from "../../../components/Toggle";
-import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
+import {
+  StudioMenu,
+  StudioMenuItem,
+} from "../../../components/aria/StudioMenu";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
 import {
   resolveAgentAvatarGradient,
@@ -45,7 +53,7 @@ function humanInitials(label: string): string {
   const parts = label.trim().split(/\s+/).filter(Boolean);
   if (parts.length === 0) return "?";
   const first = parts[0]?.[0] ?? "";
-  const last = parts.length > 1 ? parts[parts.length - 1]?.[0] ?? "" : "";
+  const last = parts.length > 1 ? (parts[parts.length - 1]?.[0] ?? "") : "";
   return `${first}${last}`.toUpperCase() || first.toUpperCase();
 }
 
@@ -56,7 +64,10 @@ function AgentAvatar({ agent }: { agent: ParticipantAgent }) {
       className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-3xs font-semibold text-white ring-1 ring-black/5 dark:ring-white/10"
       style={{ backgroundImage: resolveAgentAvatarGradient(agent.avatarSeed) }}
     >
-      {resolveAgentAvatarText({ handle: agent.handle, displayName: agent.displayName })}
+      {resolveAgentAvatarText({
+        handle: agent.handle,
+        displayName: agent.displayName,
+      })}
     </span>
   );
 }
@@ -89,7 +100,9 @@ function notableCredentialLine(
   agent: ParticipantAgent,
 ): { text: string; tone: "muted" | "warning" | "danger" } | null {
   const descriptor =
-    friendlyCredentialKind(agent.credentialKind) ?? agent.credentialLabel ?? "credential";
+    friendlyCredentialKind(agent.credentialKind) ??
+    agent.credentialLabel ??
+    "credential";
   switch (agent.credentialState) {
     case "missing":
       return { text: "Its credential is missing", tone: "danger" };
@@ -130,9 +143,14 @@ function lowUsageWindows(
 
 // The tightest window's remaining % — the number that answers "how much can I
 // still lean on this agent". Null when the credential reports no windows.
-function lowestRemaining(usage: ParticipantSubscriptionUsage, nowMs: number): number | null {
+function lowestRemaining(
+  usage: ParticipantSubscriptionUsage,
+  nowMs: number,
+): number | null {
   if (usage.windows.length === 0) return null;
-  return Math.min(...usage.windows.map((window) => windowRemaining(window, nowMs)));
+  return Math.min(
+    ...usage.windows.map((window) => windowRemaining(window, nowMs)),
+  );
 }
 
 // One compact line per low window: "<label> · <reset>" left, "<n>% left" right.
@@ -145,14 +163,20 @@ function UsageWindowRow({
 }) {
   const label = windowLabel(window.windowMinutes);
   const remaining = windowRemaining(window, nowMs);
-  const remainingTone: "warning" | "danger" = remaining <= 10 ? "danger" : "warning";
+  const remainingTone: "warning" | "danger" =
+    remaining <= 10 ? "danger" : "warning";
   const reset = formatReset(window.resetAt, nowMs);
   return (
     <div
       className="flex items-baseline justify-between gap-2 pt-0.5"
       data-testid="participants-usage-window"
     >
-      <Text as="span" variant="caption" tone="muted" className="min-w-0 truncate text-xxs">
+      <Text
+        as="span"
+        variant="caption"
+        tone="muted"
+        className="min-w-0 truncate text-xxs"
+      >
         {label}
         {reset ? ` · ${reset}` : ""}
       </Text>
@@ -278,7 +302,10 @@ function AgentInlineControls({
   const reasoningValue = normalizeReasoningEffort(agent.reasoningEffort);
   const showReasoning = providerId === "openai";
 
-  const save = (patch: { model?: string | null; reasoningEffort?: AiReasoningEffort | null }) => {
+  const save = (patch: {
+    model?: string | null;
+    reasoningEffort?: AiReasoningEffort | null;
+  }) => {
     setSaving(true);
     void editing.saveAgent(agentId, patch).finally(() => setSaving(false));
   };
@@ -289,7 +316,10 @@ function AgentInlineControls({
   ];
   const reasoningMenuOptions = [
     { key: DEFAULT_MENU_KEY, label: "Default" },
-    ...REASONING_EFFORT_OPTIONS.map((option) => ({ key: option.id, label: option.label })),
+    ...REASONING_EFFORT_OPTIONS.map((option) => ({
+      key: option.id,
+      label: option.label,
+    })),
   ];
 
   return (
@@ -304,26 +334,36 @@ function AgentInlineControls({
           options={modelMenuOptions}
           ariaLabel={`Model for @${agent.handle}`}
           disabled={saving}
-          onSelect={(key) => save({ model: key === DEFAULT_MENU_KEY ? null : key })}
+          onSelect={(key) =>
+            save({ model: key === DEFAULT_MENU_KEY ? null : key })
+          }
           triggerTestId={`drawer-agent-model-select-${agent.handle}`}
         />
       ) : null}
       {modelOptions.length > 0 && showReasoning ? (
-        <span aria-hidden="true" className="text-xxs text-slate-400 dark:text-slate-500">
+        <span
+          aria-hidden="true"
+          className="text-xxs text-slate-400 dark:text-slate-500"
+        >
           ·
         </span>
       ) : null}
       {showReasoning ? (
         <InlineMenuSelect
           displayLabel={
-            reasoningValue ? reasoningEffortLabel(reasoningValue) : "Default reasoning"
+            reasoningValue
+              ? reasoningEffortLabel(reasoningValue)
+              : "Default reasoning"
           }
           selectedKey={reasoningValue ?? DEFAULT_MENU_KEY}
           options={reasoningMenuOptions}
           ariaLabel={`Reasoning for @${agent.handle}`}
           disabled={saving}
           onSelect={(key) =>
-            save({ reasoningEffort: key === DEFAULT_MENU_KEY ? null : (key as AiReasoningEffort) })
+            save({
+              reasoningEffort:
+                key === DEFAULT_MENU_KEY ? null : (key as AiReasoningEffort),
+            })
           }
           triggerTestId={`drawer-agent-reasoning-select-${agent.handle}`}
         />
@@ -354,7 +394,11 @@ function runtimeStatusMeta(rawStatus: string): {
 }
 
 function runtimeKindLabel(kind: ParticipantRuntimeInfo["kind"]): string {
-  return kind === "native" ? "Native" : kind === "dedicated" ? "Dedicated" : "Shared";
+  return kind === "native"
+    ? "Native"
+    : kind === "dedicated"
+      ? "Dedicated"
+      : "Shared";
 }
 
 // Header for a runtime group — rendered only when the conversation spans more
@@ -371,7 +415,8 @@ function RuntimeGroupHeader({
 }) {
   const Icon = runtime.kind === "native" ? Cpu : Cube;
   const { status, healthy, dotColor } = runtimeStatusMeta(runtime.status);
-  const detail = runtime.kind === "native" ? "this machine" : runtime.resourcesSummary;
+  const detail =
+    runtime.kind === "native" ? "this machine" : runtime.resourcesSummary;
   const Container: "button" | "div" = onOpen ? "button" : "div";
   return (
     <Container
@@ -405,7 +450,9 @@ function RuntimeGroupHeader({
           </Text>
           <span className="shrink-0 rounded bg-slate-200/70 px-1.5 py-px text-3xs font-medium text-slate-600 dark:bg-white/10 dark:text-slate-300">
             {runtimeKindLabel(runtime.kind)}
-            {runtime.kind === "shared" && agentCount > 1 ? ` · ${agentCount}` : ""}
+            {runtime.kind === "shared" && agentCount > 1
+              ? ` · ${agentCount}`
+              : ""}
           </span>
           <span
             aria-hidden="true"
@@ -413,7 +460,12 @@ function RuntimeGroupHeader({
             style={{ backgroundColor: dotColor }}
           />
           {!healthy && status !== "unknown" ? (
-            <Text as="span" variant="caption" tone="muted" className="shrink-0 text-3xs">
+            <Text
+              as="span"
+              variant="caption"
+              tone="muted"
+              className="shrink-0 text-3xs"
+            >
               {status}
             </Text>
           ) : null}
@@ -425,7 +477,12 @@ function RuntimeGroupHeader({
           ) : null}
         </div>
         {detail ? (
-          <Text as="div" variant="caption" tone="muted" className="truncate text-3xs">
+          <Text
+            as="div"
+            variant="caption"
+            tone="muted"
+            className="truncate text-3xs"
+          >
             {detail}
           </Text>
         ) : null}
@@ -482,7 +539,12 @@ function MachineFooter({
         {runtime.kind === "native" ? " · this machine" : ""}
       </Text>
       {!healthy && status !== "unknown" ? (
-        <Text as="span" variant="caption" tone="warning" className="shrink-0 text-xxs">
+        <Text
+          as="span"
+          variant="caption"
+          tone="warning"
+          className="shrink-0 text-xxs"
+        >
           {status}
         </Text>
       ) : null}
@@ -516,9 +578,11 @@ export function ParticipantsDrawer({
 
   // Escape closes; the panel is docked-style (no backdrop), so this is the
   // keyboard exit alongside the header close button and the facepile toggle.
+  // Deferring to defaultPrevented lets inner surfaces (menus, inputs) consume
+  // Escape without also dropping the drawer.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape" && !event.defaultPrevented) onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -526,7 +590,8 @@ export function ParticipantsDrawer({
 
   // Clicking anywhere outside the drawer closes it. Skip clicks on the roster
   // facepile — it toggles on its own, so closing here would race its toggle and
-  // reopen the drawer. Uses mousedown so it settles before the click lands.
+  // reopen the drawer. Capture-phase pointerdown is the app-wide click-away
+  // event (touch included), settling before any click handler fires.
   useEffect(() => {
     const onPointerDown = (event: MouseEvent) => {
       const target = event.target as Element | null;
@@ -538,17 +603,28 @@ export function ParticipantsDrawer({
       if (target.closest("[data-studio-popover]")) return;
       onClose();
     };
-    window.addEventListener("mousedown", onPointerDown);
-    return () => window.removeEventListener("mousedown", onPointerDown);
+    window.addEventListener("pointerdown", onPointerDown, true);
+    return () => window.removeEventListener("pointerdown", onPointerDown, true);
   }, [onClose]);
 
-  const { humans, agents, runningAgentHandles, totalQueuedCount, editing, assistant } = snapshot;
+  const {
+    humans,
+    agents,
+    runningAgentHandles,
+    totalQueuedCount,
+    editing,
+    assistant,
+  } = snapshot;
   const runningSet = new Set(runningAgentHandles);
-  const runningCount = agents.filter((agent) => runningSet.has(agent.handle)).length;
+  const runningCount = agents.filter((agent) =>
+    runningSet.has(agent.handle),
+  ).length;
   const summaryParts: string[] = [];
   if (runningCount > 0) summaryParts.push(`${runningCount} running`);
   if (totalQueuedCount > 0) {
-    summaryParts.push(`${totalQueuedCount} message${totalQueuedCount === 1 ? "" : "s"} queued`);
+    summaryParts.push(
+      `${totalQueuedCount} message${totalQueuedCount === 1 ? "" : "s"} queued`,
+    );
   }
 
   // Usage is a property of the credential, not the agent — when several agents
@@ -568,14 +644,19 @@ export function ParticipantsDrawer({
     const existing = runtimeGroupIndex.get(key);
     if (existing === undefined) {
       runtimeGroupIndex.set(key, runtimeGroups.length);
-      runtimeGroups.push({ key, runtime: agent.runtime ?? null, agents: [agent] });
+      runtimeGroups.push({
+        key,
+        runtime: agent.runtime ?? null,
+        agents: [agent],
+      });
     } else {
       runtimeGroups[existing].agents.push(agent);
     }
   }
   // Structure grows with the situation: one shared machine → a quiet footer;
   // several machines → per-machine group headers.
-  const singleMachine = runtimeGroups.length === 1 && runtimeGroups[0]?.runtime != null;
+  const singleMachine =
+    runtimeGroups.length === 1 && runtimeGroups[0]?.runtime != null;
   const showGroupHeaders =
     !singleMachine && runtimeGroups.some((group) => group.runtime != null);
 
@@ -614,7 +695,12 @@ export function ParticipantsDrawer({
 
       <div className="min-h-0 flex-1 overflow-y-auto px-3.5 pb-3">
         {humans.length === 0 && agents.length === 0 ? (
-          <Text as="p" variant="caption" tone="muted" className="pt-6 text-center text-xs">
+          <Text
+            as="p"
+            variant="caption"
+            tone="muted"
+            className="pt-6 text-center text-xs"
+          >
             No one here yet.
           </Text>
         ) : null}
@@ -630,7 +716,10 @@ export function ParticipantsDrawer({
               People
             </Text>
             {humans.map((human) => (
-              <div key={human.userId} className="flex items-center gap-2.5 py-1.5">
+              <div
+                key={human.userId}
+                className="flex items-center gap-2.5 py-1.5"
+              >
                 <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-slate-500 text-3xs font-semibold text-white dark:bg-slate-600">
                   {humanInitials(human.label)}
                 </span>
@@ -686,7 +775,9 @@ export function ParticipantsDrawer({
                       agent.model,
                       normalizeReasoningEffort(agent.reasoningEffort)
                         ? reasoningEffortLabel(
-                            normalizeReasoningEffort(agent.reasoningEffort) as AiReasoningEffort,
+                            normalizeReasoningEffort(
+                              agent.reasoningEffort,
+                            ) as AiReasoningEffort,
                           )
                         : null,
                     ]
@@ -700,7 +791,10 @@ export function ParticipantsDrawer({
                     // be compared at a glance — and a sibling on a shared, drained
                     // credential can't look deceptively fine.
                     const remaining = usageLive
-                      ? lowestRemaining(agent.subscriptionUsage as ParticipantSubscriptionUsage, nowMs)
+                      ? lowestRemaining(
+                          agent.subscriptionUsage as ParticipantSubscriptionUsage,
+                          nowMs,
+                        )
                       : null;
                     // The reset-time detail rows appear only when low — and once
                     // per shared credential, on the first agent that uses it.
@@ -717,8 +811,39 @@ export function ParticipantsDrawer({
                       usageShownFor.add(agent.credentialId);
                     }
                     return (
-                      <div key={agent.handle} className="flex items-start gap-2.5 py-1.5">
-                        <AgentAvatar agent={agent} />
+                      <div
+                        key={agent.handle}
+                        className="flex items-start gap-2.5 py-1.5"
+                      >
+                        {/* The avatar is the agent's profile: activity + machine. */}
+                        <DialogTrigger>
+                          <AriaButton
+                            aria-label={`View profile for @${agent.handle}`}
+                            data-testid={`participants-agent-profile-${agent.handle}`}
+                            className="shrink-0 rounded-full outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+                          >
+                            <AgentAvatar agent={agent} />
+                          </AriaButton>
+                          <AgentProfilePopoverCard
+                            placement="bottom start"
+                            agentHandle={agent.handle}
+                            agentId={agent.agentId}
+                            agentAvatarSeed={agent.avatarSeed}
+                            displayName={agent.displayName}
+                            pinnedRuntimeId={
+                              agent.runtime?.kind === "dedicated"
+                                ? agent.runtime.id
+                                : null
+                            }
+                            runtimeLabel={
+                              agent.runtime?.label ?? "Instafy Cloud"
+                            }
+                            runtimeState={agent.runtime?.status ?? "unknown"}
+                            resourcesSummary={
+                              agent.runtime?.resourcesSummary ?? null
+                            }
+                          />
+                        </DialogTrigger>
                         <div className="min-w-0 flex-1">
                           <div className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
                             <Text
@@ -730,7 +855,10 @@ export function ParticipantsDrawer({
                               @{agent.handle}
                             </Text>
                             {isEditable && editing ? (
-                              <AgentInlineControls agent={agent} editing={editing} />
+                              <AgentInlineControls
+                                agent={agent}
+                                editing={editing}
+                              />
                             ) : readOnlyMeta ? (
                               <Text
                                 as="span"
