@@ -277,6 +277,7 @@ export function useChatAgentRoster({
         <AssistantAvatarPopover
           metadata={metadata ?? null}
           agentHandle={agentHandle}
+          agentId={agent?.id ?? null}
           agentAvatarSeed={agentAvatarSeed}
           displayName={displayName}
           motion={options?.motion}
