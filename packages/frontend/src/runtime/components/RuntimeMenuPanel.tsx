@@ -213,7 +213,7 @@ export function RuntimeMenuPanel({
               radius="full"
               onPress={onClose}
               aria-label="Close runtimes menu"
-              className="text-slate-400 hover:text-slate-700 data-[hovered]:text-slate-700"
+              className="text-slate-400 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-500 dark:hover:text-slate-200 dark:data-[hovered]:text-slate-200"
             >
               <Xmark className="h-4 w-4" aria-hidden="true" />
             </IconButton>

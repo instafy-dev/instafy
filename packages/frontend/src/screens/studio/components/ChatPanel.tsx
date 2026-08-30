@@ -3698,6 +3698,22 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     showStatus,
   });
 
+  // The invite prompt dismisses on backdrop tap; Escape must work too.
+  useEffect(() => {
+    if (!invitePrompt || invitePromptBusy) {
+      return;
+    }
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        handleInvitePromptClose();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [handleInvitePromptClose, invitePrompt, invitePromptBusy]);
+
   useEffect(() => {
     if (typeof window === "undefined") {
       return;
