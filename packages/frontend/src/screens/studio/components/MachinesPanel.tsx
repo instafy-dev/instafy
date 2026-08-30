@@ -319,6 +319,7 @@ export function MachinesPanel() {
         defaultExpandedOptionId={defaultExpandedOptionId}
         renderOptionExtras={renderMachineAgents}
         sparklineVariant="page"
+        headerActions
       />
 
     </SettingsShell>
