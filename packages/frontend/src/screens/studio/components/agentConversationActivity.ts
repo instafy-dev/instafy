@@ -1,4 +1,3 @@
-import { getDefaultAssistantHandle } from "../../../assistants/localBuiltInAssistantCatalog";
 import type { ConversationState } from "../../../conversations/conversationState";
 import { isRunActivelyProgressing } from "../../../conversations/runLiveness";
 import type { RunRecord } from "../../../types";
@@ -13,8 +12,11 @@ import { extractAgentHandleFromMetadata } from "./chatAssistantIdentity";
  *
  * Participation signals, in the order they were persisted: a live or recent
  * run attributed to the agent (`run.metadata.agent`), a thread it owns, an
- * invitation from the current user (extra handles / the default assistant
- * toggle), or a thread it delegated.
+ * explicit invitation from the current user, or a thread it delegated. The
+ * default assistant's `assistantEnabled` toggle is deliberately NOT a signal:
+ * it defaults to true on every conversation, so it asserts availability, not
+ * interaction — the runs feed already lists everywhere the assistant actually
+ * spoke.
  */
 
 export interface AgentConversationActivityEntry {
@@ -84,7 +86,6 @@ export function deriveAgentConversationActivity({
     }
   }
 
-  const isDefaultAssistant = handle === getDefaultAssistantHandle();
   const candidates: Array<AgentConversationActivityEntry & { sortAt: number }> =
     [];
   for (const conversation of conversations) {
@@ -98,7 +99,6 @@ export function deriveAgentConversationActivity({
       conversation.extraAgentHandles.some(
         (entry) => normalizeHandle(entry) === handle,
       ) ||
-      (isDefaultAssistant && conversation.assistantEnabled) ||
       (agentId != null && conversation.delegatedByAgentId === agentId);
     if (!participates) continue;
     candidates.push({

@@ -58,7 +58,7 @@ function ActivityRow({
     >
       {entry.workingNow ? (
         <span className="relative flex h-2 w-2 flex-none" aria-hidden="true">
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-30 [animation-duration:2.5s]" />
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-30 [animation-duration:2.5s] motion-reduce:animate-none" />
           <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
         </span>
       ) : (
@@ -76,10 +76,13 @@ function ActivityRow({
         {entry.title}
       </Text>
       {entry.isPrivate ? (
-        <Lock
-          className="h-3 w-3 flex-none text-slate-400 dark:text-slate-500"
-          aria-hidden="true"
-        />
+        <>
+          <Lock
+            className="h-3 w-3 flex-none text-slate-400 dark:text-slate-500"
+            aria-hidden="true"
+          />
+          <span className="sr-only">private</span>
+        </>
       ) : null}
       {entry.workingNow ? (
         <Text
@@ -130,11 +133,22 @@ function AgentProfileCardContent({
     requestUrlPush();
     openConversationTab(localId);
     overlayState?.close();
+    // The tab switch unmounts the trigger, so the popover's focus restore has
+    // nowhere to land. Hand focus to the composer once the conversation
+    // surface has mounted and registered its listener (two frames).
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        window.dispatchEvent(new CustomEvent("instafy:focus-composer"));
+      });
+    });
   };
   const openSettings = () => {
     if (onOpenSettings) {
       onOpenSettings(agentHandle);
     } else {
+      // The push is load-bearing here too — without it the URL still names the
+      // current panel and the reconciliation effect reverts the AI panel.
+      requestUrlPush();
       setPendingAgentProfileTarget(agentHandle);
       openPanelTab("ai", { activate: true });
     }

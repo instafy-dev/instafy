@@ -96,16 +96,39 @@ describe("deriveAgentConversationActivity", () => {
     expect(activity.entries.map((entry) => entry.localId)).toEqual(["invited"]);
   });
 
-  it("lists assistant-enabled conversations only for the default assistant", () => {
+  it("never treats the default-on assistant toggle as participation", () => {
+    // assistantEnabled defaults to true on every conversation — availability,
+    // not interaction — so even the default assistant must not list on it.
     const conversations = [
       makeConversation({ localId: "default-on", assistantEnabled: true }),
     ];
     expect(derive(conversations).entries).toEqual([]);
-    const defaultActivity = derive(conversations, [], {
-      agentHandle: getDefaultAssistantHandle(),
-    });
-    expect(defaultActivity.entries.map((entry) => entry.localId)).toEqual([
-      "default-on",
+    expect(
+      derive(conversations, [], { agentHandle: getDefaultAssistantHandle() })
+        .entries,
+    ).toEqual([]);
+  });
+
+  it("lists the default assistant where it actually ran", () => {
+    const activity = derive(
+      [
+        makeConversation({
+          localId: "spoke-here",
+          controllerId: "conv-a",
+          assistantEnabled: true,
+        }),
+        makeConversation({ localId: "silent", assistantEnabled: true }),
+      ],
+      [
+        makeRun({
+          conversationId: "conv-a",
+          metadata: { agent: { handle: getDefaultAssistantHandle() } },
+        }),
+      ],
+      { agentHandle: getDefaultAssistantHandle() },
+    );
+    expect(activity.entries.map((entry) => entry.localId)).toEqual([
+      "spoke-here",
     ]);
   });
 
