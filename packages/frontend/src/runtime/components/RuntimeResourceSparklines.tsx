@@ -173,7 +173,14 @@ export function RuntimeResourceSparklines({
                 ? { preserveAspectRatio: "none" }
                 : { width: SPARK_WIDTH, height: SPARK_HEIGHT })}
               viewBox={`0 0 ${SPARK_WIDTH} ${SPARK_HEIGHT}`}
-              className={`${isPage ? "h-8 min-w-0 flex-1" : "shrink-0"} ${metric.strokeClass}`}
+              // The faint track keeps an idle plot (line hugging the bottom at
+              // ~0%) reading as a chart instead of empty space; 28px matches
+              // the Size row's height for a uniform row pitch.
+              className={`${
+                isPage
+                  ? "h-7 min-w-0 flex-1 rounded-md bg-slate-500/[0.06] dark:bg-white/[0.04]"
+                  : "shrink-0"
+              } ${metric.strokeClass}`}
               aria-hidden="true"
             >
               {area ? <path d={area} fill="currentColor" opacity="0.12" /> : null}

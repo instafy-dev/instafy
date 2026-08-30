@@ -175,6 +175,12 @@ interface RuntimeMenuOptionsListProps {
   renderOptionExtras?: (option: RuntimeMenuOption) => ReactNode;
   /** Trend size: compact mini-sparklines (menus) or full-row plots (pages). */
   sparklineVariant?: "compact" | "page";
+  /**
+   * Lifecycle controls (start/stop/remove) as header icon buttons instead of a
+   * row at the bottom of the details — for page-style hosts where the card can
+   * be tall. Remove still routes through the in-details confirm strip.
+   */
+  headerActions?: boolean;
 }
 
 /**
@@ -300,6 +306,7 @@ export function RuntimeMenuOptionsList({
   defaultExpandedOptionId = null,
   renderOptionExtras,
   sparklineVariant = "compact",
+  headerActions = false,
 }: RuntimeMenuOptionsListProps) {
   const { showStatus } = useStatus();
   const [expandedOptionId, setExpandedOptionId] = useState<string | null>(null);
@@ -484,6 +491,50 @@ export function RuntimeMenuOptionsList({
                   ) : null}
                 </div>
               </div>
+              {headerActions && canStart ? (
+                <IconButton
+                  variant="ghost"
+                  size="xs"
+                  radius="full"
+                  aria-label={`Start ${option.label}`}
+                  title="Start"
+                  onPress={() => onStartRuntime?.(option.id ?? null)}
+                  className="mt-1 shrink-0 text-primary-500 hover:text-primary-600 data-[hovered]:text-primary-600 dark:text-primary-400"
+                >
+                  <Play className="h-4 w-4" aria-hidden="true" />
+                </IconButton>
+              ) : null}
+              {headerActions && canTerminate && !canStart ? (
+                <IconButton
+                  variant="ghost"
+                  size="xs"
+                  radius="full"
+                  aria-label={`Stop ${option.label}`}
+                  title="Stop"
+                  onPress={() => onTerminateRuntime?.(option.id ?? null)}
+                  className="mt-1 shrink-0 text-slate-500 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-300 dark:hover:text-slate-100 dark:data-[hovered]:text-slate-100"
+                >
+                  <Square className="h-4 w-4" aria-hidden="true" />
+                </IconButton>
+              ) : null}
+              {headerActions && canRemove ? (
+                <IconButton
+                  variant="ghost"
+                  size="xs"
+                  radius="full"
+                  aria-label={`Remove ${option.label}`}
+                  title="Remove"
+                  onPress={() => {
+                    // Destructive stays deliberate: the header button only ARMS
+                    // the in-details confirm strip (expanding if needed).
+                    setExpandedOptionId(optionKey);
+                    setRemoveConfirmOptionId(optionKey);
+                  }}
+                  className="mt-1 shrink-0 text-rose-500 hover:text-rose-600 data-[hovered]:text-rose-600 dark:text-rose-400"
+                >
+                  <Trash className="h-4 w-4" aria-hidden="true" />
+                </IconButton>
+              ) : null}
               {hasActions ? (
                 <IconButton
                   variant="ghost"
@@ -583,7 +634,7 @@ export function RuntimeMenuOptionsList({
                     ) : null}
                   </div>
                 ) : null}
-                {canStart || canTerminate || canRemove ? (
+                {!headerActions && (canStart || canTerminate || canRemove) ? (
                   <div className="flex flex-wrap items-center gap-2">
                     {canStart ? (
                       <Button
