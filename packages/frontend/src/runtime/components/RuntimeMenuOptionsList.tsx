@@ -420,10 +420,14 @@ export function RuntimeMenuOptionsList({
                     option={option}
                     showDetail={false}
                     showProviderBadge={false}
-                    showRuntimeIdBadge
+                    // Expanded details carry the full ID row (with copy), so the
+                    // header badge would say the same thing twice.
+                    showRuntimeIdBadge={!isExpanded}
                     className="flex min-w-0 flex-col gap-0.5"
                   />
-                  {resources ? (
+                  {/* The one-line stats summary is the COLLAPSED view; expanded,
+                      the trend rows below show the same numbers. */}
+                  {resources && !isExpanded ? (
                     <Text
                       as="span"
                       variant="caption"
@@ -470,11 +474,13 @@ export function RuntimeMenuOptionsList({
                 ) : null}
                 {isHostedOption ? (
                   <div className="space-y-2" data-testid="runtime-hosted-machine-facts">
+                    <RuntimeSizePickerRow />
+                    {/* Static environment facts read as fine print — after the
+                        control, not above it, so live content leads. */}
                     <Text as="p" variant="caption" tone="muted" className="text-xxs">
                       Node, Python, and browsers preinstalled. Project files and
                       caches survive pauses; everything else resets.
                     </Text>
-                    <RuntimeSizePickerRow />
                   </div>
                 ) : null}
                 {resourceHistory.length > 0 ? (
