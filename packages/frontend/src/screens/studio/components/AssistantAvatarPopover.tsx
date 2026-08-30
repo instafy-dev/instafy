@@ -8,9 +8,8 @@ import {
 } from "react-aria-components";
 import { Badge } from "../../../components/Badge";
 import { Button } from "../../../components/Button";
-import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
-import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
+import { ResponsiveDialogSurface } from "../../../components/aria/ResponsiveDialogSurface";
 import { useConversations } from "../../../conversations/ConversationsProvider";
 import { useRuntime } from "../../../runtime/useRuntime";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
@@ -50,23 +49,15 @@ function ActivityRow({
   entry: AgentConversationActivityEntry;
   onOpen: (localId: string) => void;
 }) {
+  // Silence is the default: an idle row is just its title on the card's
+  // content edge — only live work earns a mark, and status lives on the right.
+  // Taller targets below lg, where the card presents as a touch modal.
   return (
     <AriaButton
       onPress={() => onOpen(entry.localId)}
-      className="flex min-w-0 items-center gap-2 rounded-lg px-1.5 py-1 text-left outline-none hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-primary-500/40 dark:hover:bg-white/[0.06]"
+      className="-mx-2 flex min-h-11 min-w-0 items-center gap-2 rounded-lg px-2 text-left outline-none hover:bg-slate-100 focus-visible:ring-2 focus-visible:ring-primary-500/40 lg:min-h-0 lg:py-1.5 dark:hover:bg-white/[0.06]"
       data-testid={`agent-profile-conversation-${entry.localId}`}
     >
-      {entry.workingNow ? (
-        <span className="relative flex h-2 w-2 flex-none" aria-hidden="true">
-          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-30 [animation-duration:2.5s] motion-reduce:animate-none" />
-          <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
-        </span>
-      ) : (
-        <span
-          className="mx-0.5 h-1 w-1 flex-none rounded-full bg-slate-300 dark:bg-slate-600"
-          aria-hidden="true"
-        />
-      )}
       <Text
         as="span"
         variant="caption"
@@ -85,14 +76,20 @@ function ActivityRow({
         </>
       ) : null}
       {entry.workingNow ? (
-        <Text
-          as="span"
-          variant="caption"
-          tone="inherit"
-          className="flex-none text-xxs font-medium text-emerald-600 dark:text-emerald-400"
-        >
-          now
-        </Text>
+        <>
+          <span className="relative flex h-2 w-2 flex-none" aria-hidden="true">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-30 [animation-duration:2.5s] motion-reduce:animate-none" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+          </span>
+          <Text
+            as="span"
+            variant="caption"
+            tone="inherit"
+            className="flex-none text-xxs font-medium text-emerald-600 dark:text-emerald-400"
+          >
+            now
+          </Text>
+        </>
       ) : null}
     </AriaButton>
   );
@@ -203,16 +200,6 @@ function AgentProfileCardContent({
               </Button>
             </div>
           </div>
-          <Text
-            as="div"
-            variant="caption"
-            tone="secondary"
-            className="mt-1 text-xs leading-5"
-          >
-            {pinnedRuntimeId
-              ? "Replies with the runtime pinned to this agent."
-              : "Replies with the best available runtime in this space."}
-          </Text>
         </div>
       </div>
       <div className="space-y-1" data-testid="agent-profile-activity">
@@ -224,7 +211,7 @@ function AgentProfileCardContent({
             No conversations you can see yet.
           </Text>
         ) : (
-          <div className="-mx-1.5 flex flex-col">
+          <div className="flex flex-col">
             {activity.entries.map((entry) => (
               <ActivityRow
                 key={entry.localId}
@@ -237,7 +224,7 @@ function AgentProfileCardContent({
                 as="div"
                 variant="caption"
                 tone="muted"
-                className="px-1.5 pt-0.5 text-xxs"
+                className="pt-0.5 text-xxs"
               >
                 +{activity.overflowCount} more in history
               </Text>
@@ -245,12 +232,9 @@ function AgentProfileCardContent({
           </div>
         )}
       </div>
-      <Surface
-        tone="muted"
-        radius="xl"
-        shadow="none"
-        className="space-y-1.5 px-3 py-2.5"
-      >
+      {/* Flat, like every other section — a nested box would start a second
+          content edge inside a card this small. */}
+      <div className="space-y-1">
         <div className="flex items-center justify-between gap-2">
           <Text as="div" variant="label" tone="subtle">
             Runtime
@@ -282,7 +266,7 @@ function AgentProfileCardContent({
             {resourcesSummary}
           </Text>
         ) : null}
-      </Surface>
+      </div>
     </div>
   );
 }
@@ -291,14 +275,19 @@ export function AgentProfilePopoverCard({
   placement = "top",
   ...cardProps
 }: AgentProfileCardProps & { placement?: PopoverProps["placement"] }) {
+  // Anchored popovers are a pointer pattern; below lg the card presents as a
+  // centered dismissable modal instead of a 320px island floating mid-screen.
   return (
-    <StudioDialogPopover
-      placement={placement}
-      offset={8}
-      className="w-80 overflow-hidden p-0"
+    <ResponsiveDialogSurface
+      desktop={{ placement, offset: 8, className: "w-80 overflow-hidden p-0" }}
+      mobile={{
+        modalClassName: "max-w-sm",
+        dialogAriaLabel: `Agent profile: ${cardProps.displayName}`,
+      }}
+      mobileFullScreen={false}
     >
       <AgentProfileCardContent {...cardProps} />
-    </StudioDialogPopover>
+    </ResponsiveDialogSurface>
   );
 }
 
