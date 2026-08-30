@@ -37,6 +37,13 @@ repository or deployment secrets. Its candidate checkout is the one deliberate
 the trusted checkout does not opt out. Before public visibility, require this
 check in addition to the four Public Build names.
 
+The same workflow emits that exact check name for every push to protected
+`main`. The push lane binds its checkout to `github.sha`, treats that protected
+commit as both the trusted controls and scanned tree, and repeats the policy and
+Gitleaks gates without secrets or write permission. This gives release tooling
+an exact-main attestation while the pull-request lane remains base-owned and
+continues to treat candidate bytes only as unexecuted data.
+
 The trusted gate rejects unreviewed environment templates, live
 environment/auth files, private-only package/product markers, personal paths,
 private hosts/networks, browser-exposed service-role names, token prefixes,

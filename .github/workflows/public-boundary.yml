@@ -10,9 +10,12 @@ on:
       - reopened
       - ready_for_review
       - edited
+  push:
+    branches:
+      - main
 
 concurrency:
-  group: trusted-public-boundary-${{ github.event.pull_request.number }}
+  group: trusted-public-boundary-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 permissions:
@@ -30,9 +33,16 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    env:
+      TRUSTED_ROOT: ${{ github.workspace }}/trusted
+      # A protected-main push is already trusted input. Reusing its exact
+      # checkout as candidate data gives that SHA the same named boundary
+      # attestation without adding a second checkout or touching PR isolation.
+      CANDIDATE_ROOT: ${{ github.event_name == 'push' && format('{0}/trusted', github.workspace) || format('{0}/candidate', github.workspace) }}
 
     steps:
       - name: Wait for the event-bound merge candidate to be minted
+        if: github.event_name == 'pull_request_target'
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -125,7 +135,9 @@ jobs:
       - name: Checkout trusted base controls
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          # PRs execute base-owned controls; protected-main pushes execute only
+          # the exact pushed commit. Neither path accepts an author-supplied ref.
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.sha || github.sha }}
           path: trusted
           fetch-depth: 1
           persist-credentials: false
@@ -135,6 +147,7 @@ jobs:
           show-progress: false
 
       - name: Checkout server-generated merge candidate as data
+        if: github.event_name == 'pull_request_target'
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: ${{ github.repository }}
@@ -150,6 +163,7 @@ jobs:
           show-progress: false
 
       - name: Verify the event-bound merge object and parents
+        if: github.event_name == 'pull_request_target'
         env:
           CANDIDATE_ROOT: ${{ github.workspace }}/candidate
           EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -228,6 +242,21 @@ jobs:
             fi
           fi
 
+      - name: Verify the exact protected-main object
+        if: github.event_name == 'push'
+        env:
+          EXPECTED_REF: refs/heads/main
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "$EXPECTED_REF"
+          if [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Protected-main event SHA is not a full commit OID."
+            exit 1
+          fi
+          actual_sha="$(git -C "$TRUSTED_ROOT" rev-parse --verify "HEAD^{commit}")"
+          test "$actual_sha" = "$EXPECTED_SHA"
+
       - name: Install pinned Gitleaks
         env:
           GITLEAKS_VERSION: "8.30.1"
@@ -243,8 +272,6 @@ jobs:
           test "$("$RUNNER_TEMP/gitleaks" version)" = "$GITLEAKS_VERSION"
 
       - name: Run trusted public boundary regression tests
-        env:
-          TRUSTED_ROOT: ${{ github.workspace }}/trusted
         run: |
           set -euo pipefail
           node --test \
@@ -252,9 +279,6 @@ jobs:
             "$TRUSTED_ROOT/scripts/check-public-boundary-workflow.test.mjs"
 
       - name: Enforce trusted public boundary policy
-        env:
-          CANDIDATE_ROOT: ${{ github.workspace }}/candidate
-          TRUSTED_ROOT: ${{ github.workspace }}/trusted
         run: |
           set -euo pipefail
           node "$TRUSTED_ROOT/scripts/check-public-boundary.mjs" \
@@ -267,8 +291,6 @@ jobs:
           : > "$RUNNER_TEMP/gitleaks-public-boundary.empty-ignore"
 
       - name: Prove encoded private marker detection
-        env:
-          TRUSTED_ROOT: ${{ github.workspace }}/trusted
         run: |
           set -euo pipefail
           encoded_private_marker="$(
@@ -289,9 +311,6 @@ jobs:
           fi
 
       - name: Scan candidate tree with path-aware Gitleaks rules
-        env:
-          CANDIDATE_ROOT: ${{ github.workspace }}/candidate
-          TRUSTED_ROOT: ${{ github.workspace }}/trusted
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/gitleaks" dir \
@@ -309,9 +328,6 @@ jobs:
             "$CANDIDATE_ROOT"
 
       - name: Scan every tracked file without path allowlists
-        env:
-          CANDIDATE_ROOT: ${{ github.workspace }}/candidate
-          TRUSTED_ROOT: ${{ github.workspace }}/trusted
         run: |
           set -euo pipefail
           candidate_inventory="$RUNNER_TEMP/public-boundary-candidate-files.zlist"
