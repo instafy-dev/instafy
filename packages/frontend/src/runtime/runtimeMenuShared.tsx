@@ -90,7 +90,7 @@ export function RuntimeStateIndicator({
         aria-hidden="true"
       >
         <span
-          className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-30 [animation-duration:2.5s] ${styles.indicatorClass}`}
+          className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-30 [animation-duration:2.5s] motion-reduce:animate-none ${styles.indicatorClass}`}
         />
         <span
           className={`relative inline-flex h-2.5 w-2.5 rounded-full ${styles.indicatorClass}`}
