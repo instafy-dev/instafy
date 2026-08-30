@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Plus, Xmark } from "iconoir-react";
-import { MenuTrigger } from "react-aria-components";
+import {
+  Button as AriaButton,
+  DialogTrigger,
+  MenuTrigger,
+} from "react-aria-components";
+import { AgentProfilePopoverCard } from "./AssistantAvatarPopover";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
+import { formatRuntimeResourcesSummary } from "./chatRuntimeResources";
+import { getBuiltInAssistantDisplayName } from "../../../assistants/localBuiltInAssistantCatalog";
 import { SettingsShell } from "./SettingsShell";
 import { Button } from "../../../components/Button";
 import { Text } from "../../../components/Text";
@@ -272,15 +279,45 @@ export function MachinesPanel() {
                       : `@${agent.handle} rides the shared machine (default)`
                   }
                 >
-                  <ChatMessageAvatar
-                    kind="assistant"
-                    agent={{
-                      handle: agent.handle,
-                      avatarSeed: agent.avatarSeed,
-                    }}
-                    size="2xs"
-                  />
-                  <span className="max-w-[9rem] truncate">@{agent.handle}</span>
+                  {/* Avatar + handle open the agent's profile; the unpin
+                      control stays a sibling so no buttons nest. */}
+                  <DialogTrigger>
+                    <AriaButton
+                      aria-label={`View profile for @${agent.handle}`}
+                      data-testid={`machines-agent-profile-${agent.handle}`}
+                      className="inline-flex min-w-0 items-center gap-1 rounded-full outline-none hover:opacity-80 focus-visible:ring-2 focus-visible:ring-primary-500/40"
+                    >
+                      <ChatMessageAvatar
+                        kind="assistant"
+                        agent={{
+                          handle: agent.handle,
+                          avatarSeed: agent.avatarSeed,
+                        }}
+                        size="2xs"
+                      />
+                      <span className="max-w-[9rem] truncate">
+                        @{agent.handle}
+                      </span>
+                    </AriaButton>
+                    <AgentProfilePopoverCard
+                      placement="bottom start"
+                      agentHandle={agent.handle}
+                      agentId={agent.id}
+                      agentAvatarSeed={agent.avatarSeed || agent.handle}
+                      displayName={
+                        getBuiltInAssistantDisplayName(agent.handle) ??
+                        (agent.displayName?.trim()
+                          ? agent.displayName.trim()
+                          : `@${agent.handle}`)
+                      }
+                      pinnedRuntimeId={agent.runtimeId ?? null}
+                      runtimeLabel={option.label}
+                      runtimeState={String(option.state ?? "unknown")}
+                      resourcesSummary={formatRuntimeResourcesSummary(
+                        option.resources ?? null,
+                      )}
+                    />
+                  </DialogTrigger>
                   {pinnedHere ? (
                     // Only an explicit pin can be removed; shared riders aren't
                     // pinned, so they carry no unpin control.
