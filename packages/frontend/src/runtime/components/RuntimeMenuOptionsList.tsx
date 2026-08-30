@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Copy, NavArrowDown, Play, Square, Trash } from "iconoir-react";
 import { useProjects } from "../../projects/useProjects";
 import { useStatus } from "../../status/useStatus";
@@ -165,6 +165,13 @@ interface RuntimeMenuOptionsListProps {
   emptyStateMessage?: string;
   onCopyTunnel?: (mode: TunnelCopyMode, runtimeId: string | null) => void;
   copyDisabled?: boolean;
+  /**
+   * Option whose details start expanded (page-style hosts want stats visible
+   * without a click). The user can still collapse it; absent = all collapsed.
+   */
+  defaultExpandedOptionId?: string | null;
+  /** Extra host-supplied content rendered inside an option's expanded details. */
+  renderOptionExtras?: (option: RuntimeMenuOption) => ReactNode;
 }
 
 /**
@@ -246,6 +253,8 @@ export function RuntimeMenuOptionsList({
   emptyStateMessage = "No runtimes connected.",
   onCopyTunnel,
   copyDisabled = false,
+  defaultExpandedOptionId = null,
+  renderOptionExtras,
 }: RuntimeMenuOptionsListProps) {
   const { showStatus } = useStatus();
   const [expandedOptionId, setExpandedOptionId] = useState<string | null>(null);
@@ -285,9 +294,15 @@ export function RuntimeMenuOptionsList({
       {options.map((option) => {
         const optionKey = option.id ?? option.label;
         const isSelected = option.id === selectedRuntimeId;
-        const isExpanded = expandedOptionId === optionKey;
+        // "__none__" marks a deliberate collapse of the default-open option;
+        // plain null still means "nothing toggled yet" so the default applies.
+        const effectiveExpandedId =
+          expandedOptionId === "__none__"
+            ? null
+            : expandedOptionId ?? defaultExpandedOptionId;
+        const isExpanded = effectiveExpandedId === optionKey;
         const toggleDetails = () => {
-          setExpandedOptionId((current) => (current === optionKey ? null : optionKey));
+          setExpandedOptionId(() => (isExpanded ? "__none__" : optionKey));
           // Collapsing must disarm a pending remove confirmation, otherwise a
           // later re-expand re-mounts the confirm strip.
           setRemoveConfirmOptionId((current) => (current === optionKey ? null : current));
@@ -444,6 +459,7 @@ export function RuntimeMenuOptionsList({
                 {resourceHistory.length > 0 ? (
                   <RuntimeResourceSparklines history={resourceHistory} />
                 ) : null}
+                {renderOptionExtras ? renderOptionExtras(option) : null}
                 {runtimeIdValue || runtimeImageValue || shouldShowEndpoint || shouldShowHost || lifecycleRow ? (
                   <div className="grid grid-cols-[max-content_minmax(0,1fr)] items-center gap-x-3 gap-y-1">
                     {runtimeIdValue ? (
