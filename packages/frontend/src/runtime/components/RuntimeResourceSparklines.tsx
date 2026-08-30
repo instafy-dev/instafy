@@ -164,7 +164,9 @@ export function RuntimeResourceSparklines({
               as="span"
               variant="caption"
               tone="muted"
-              className={`${isPage ? "w-14" : "w-7"} shrink-0 text-xxs`}
+              // Right-aligned like every label column in the card, so each
+              // label ends the same fixed gap short of the shared content edge.
+              className={`${isPage ? "w-14" : "w-7"} shrink-0 text-right text-xxs`}
             >
               {metric.label}
             </Text>
