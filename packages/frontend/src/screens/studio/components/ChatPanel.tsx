@@ -1619,6 +1619,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const clearInputEditor = useCallback(() => {
     chatInputRef.current?.clear();
   }, []);
+  // Surfaces outside the chat tree (the agent profile card, panels) hand
+  // keyboard focus to the composer after navigating here — without this the
+  // popover's focus restore lands on <body> once its trigger unmounts.
+  useEffect(() => {
+    const handler = () => focusInput({ force: true });
+    window.addEventListener("instafy:focus-composer", handler);
+    return () => window.removeEventListener("instafy:focus-composer", handler);
+  }, [focusInput]);
   // This identity belongs to one mounted Shared Browser surface. Keeping it in
   // memory avoids duplicate tabs or side-by-side surfaces replacing each other,
   // while remaining stable across transport and network reconnects.

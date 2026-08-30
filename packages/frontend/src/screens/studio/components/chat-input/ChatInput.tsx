@@ -136,6 +136,13 @@ function ChatInputEditor(
           $getRoot().selectEnd();
         });
         editor.focus();
+        // Lexical routes focus() through its async update loop and can no-op
+        // on an editor that has never held focus; the DOM fallback guarantees
+        // the caret actually lands for programmatic callers.
+        const rootElement = editor.getRootElement();
+        if (rootElement && document.activeElement !== rootElement) {
+          rootElement.focus();
+        }
       },
       focusAfterValueSync: () => {
         pendingSelectEndAfterSyncRef.current = true;
