@@ -172,6 +172,8 @@ interface RuntimeMenuOptionsListProps {
   defaultExpandedOptionId?: string | null;
   /** Extra host-supplied content rendered inside an option's expanded details. */
   renderOptionExtras?: (option: RuntimeMenuOption) => ReactNode;
+  /** Trend size: compact mini-sparklines (menus) or full-row plots (pages). */
+  sparklineVariant?: "compact" | "page";
 }
 
 /**
@@ -255,6 +257,7 @@ export function RuntimeMenuOptionsList({
   copyDisabled = false,
   defaultExpandedOptionId = null,
   renderOptionExtras,
+  sparklineVariant = "compact",
 }: RuntimeMenuOptionsListProps) {
   const { showStatus } = useStatus();
   const [expandedOptionId, setExpandedOptionId] = useState<string | null>(null);
@@ -342,10 +345,28 @@ export function RuntimeMenuOptionsList({
         const resourceHistory = getRuntimeResourceHistory(option.id);
         // Lifecycle collapses to one line: recency when we have it, launch
         // time as the fallback.
-        const lifecycleRow = formattedLastSeen
-          ? { label: "Last seen", value: formattedLastSeen }
-          : formattedLaunch
-            ? { label: "Launched", value: formattedLaunch }
+        // A healthy machine's most useful lifecycle fact is how long it's been
+        // up; fall back to recency/launch time otherwise.
+        const uptimeValue = (() => {
+          if (!["ready", "online", "healthy"].includes(String(option.state ?? "").toLowerCase())) {
+            return null;
+          }
+          const launched = Date.parse(option.launchedAt ?? "");
+          if (!Number.isFinite(launched)) return null;
+          const totalMinutes = Math.max(0, Math.floor((Date.now() - launched) / 60000));
+          const days = Math.floor(totalMinutes / 1440);
+          const hours = Math.floor((totalMinutes % 1440) / 60);
+          const minutes = totalMinutes % 60;
+          if (days > 0) return `${days}d ${hours}h`;
+          if (hours > 0) return `${hours}h ${minutes}m`;
+          return `${minutes}m`;
+        })();
+        const lifecycleRow = uptimeValue
+          ? { label: "Uptime", value: uptimeValue }
+          : formattedLastSeen
+            ? { label: "Last seen", value: formattedLastSeen }
+            : formattedLaunch
+              ? { label: "Launched", value: formattedLaunch }
             : null;
         const hasDetails =
           Boolean(runtimeIdValue) ||
@@ -457,7 +478,10 @@ export function RuntimeMenuOptionsList({
                   </div>
                 ) : null}
                 {resourceHistory.length > 0 ? (
-                  <RuntimeResourceSparklines history={resourceHistory} />
+                  <RuntimeResourceSparklines
+                    history={resourceHistory}
+                    variant={sparklineVariant}
+                  />
                 ) : null}
                 {renderOptionExtras ? renderOptionExtras(option) : null}
                 {runtimeIdValue || runtimeImageValue || shouldShowEndpoint || shouldShowHost || lifecycleRow ? (

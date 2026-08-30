@@ -37,6 +37,8 @@ interface RuntimeMenuPanelProps {
   defaultExpandedOptionId?: string | null;
   /** Extra host content rendered inside an option's expanded details. */
   renderOptionExtras?: (option: RuntimeMenuOption) => ReactNode;
+  /** Trend size: compact mini-sparklines (menus) or full-row plots (pages). */
+  sparklineVariant?: "compact" | "page";
 }
 
 export function RuntimeMenuPanel({
@@ -62,6 +64,7 @@ export function RuntimeMenuPanel({
   emptyStateMessage = "No runtimes available yet.",
   defaultExpandedOptionId = null,
   renderOptionExtras,
+  sparklineVariant = "compact",
 }: RuntimeMenuPanelProps) {
   const [showErrorDetails, setShowErrorDetails] = useState(false);
   const [cachedRuntimeEnsureError, setCachedRuntimeEnsureError] = useState<string | null>(null);
@@ -385,6 +388,7 @@ export function RuntimeMenuPanel({
           copyDisabled={false}
           defaultExpandedOptionId={defaultExpandedOptionId}
           renderOptionExtras={renderOptionExtras}
+          sparklineVariant={sparklineVariant}
         />
       ) : (
         <Card

@@ -315,6 +315,7 @@ export function MachinesPanel() {
         emptyStateMessage="No machines are connected yet — send an agent a message and the shared cloud runtime boots on demand."
         defaultExpandedOptionId={defaultExpandedOptionId}
         renderOptionExtras={renderMachineAgents}
+        sparklineVariant="page"
       />
 
     </SettingsShell>
