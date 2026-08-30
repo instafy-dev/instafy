@@ -8,7 +8,10 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { validatePublicMigrationTrack } from "./check-supabase-migrations.mjs";
-import { cacheTagFor } from "./ensure-supabase-postgres-image.mjs";
+import {
+  cacheTagFor,
+  pullPinnedImage,
+} from "./ensure-supabase-postgres-image.mjs";
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(MODULE_DIR, "..");
@@ -19,10 +22,15 @@ const POSTGRES_IMAGE =
 // not restore RepoDigests), so ensure-supabase-postgres-image.mjs tags it with
 // a digest-derived local name at pull time. Prefer the exact digest reference
 // when the daemon can resolve it; fall back to the cache tag, whose name binds
-// the same digest; otherwise hand docker the digest reference and let it pull.
-function resolveRunnableImage(dockerCommand) {
+// the same digest. When neither is present, explicitly pull the exact digest
+// with bounded retries. The later `docker run --pull never` cannot make an
+// unbounded implicit registry request of its own.
+function resolveRunnableImage(
+  dockerCommand,
+  { spawnCommand = spawnSync, pullImage = pullPinnedImage } = {},
+) {
   for (const candidate of [POSTGRES_IMAGE, cacheTagFor(POSTGRES_IMAGE)]) {
-    const inspect = spawnSync(dockerCommand, ["image", "inspect", candidate], {
+    const inspect = spawnCommand(dockerCommand, ["image", "inspect", candidate], {
       encoding: "utf8",
       stdio: ["ignore", "ignore", "ignore"],
     });
@@ -30,6 +38,7 @@ function resolveRunnableImage(dockerCommand) {
       return candidate;
     }
   }
+  pullImage(POSTGRES_IMAGE, { docker: dockerCommand });
   return POSTGRES_IMAGE;
 }
 const START_ATTEMPTS = 90;
@@ -109,6 +118,8 @@ function runEmptyDatabaseMigrationTest({
   try {
     commandResult(dockerCommand, [
       "run",
+      "--pull",
+      "never",
       "--detach",
       "--rm",
       "--name",
@@ -258,6 +269,7 @@ if (isDirectExecution) {
 export {
   POSTGRES_IMAGE,
   REQUIRED_PUBLIC_RELATIONS,
+  resolveRunnableImage,
   runEmptyDatabaseMigrationTest,
   validateMigrationPlan,
 };
