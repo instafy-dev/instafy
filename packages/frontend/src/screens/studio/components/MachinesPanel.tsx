@@ -59,7 +59,10 @@ function AssignAgentMenu({
         isDisabled={disabledReason != null}
         aria-label={`Pin an agent to ${machine.label}`}
         aria-haspopup="menu"
-        title={disabledReason ?? undefined}
+        title={
+          disabledReason ??
+          "Pinned agents always run on this machine; unpinned ones ride the shared machine."
+        }
         data-testid={`machines-assign-agent-${machine.id ?? "unknown"}`}
         onPress={() => {
           if (!open) setOpen(true);
@@ -249,7 +252,7 @@ export function MachinesPanel() {
                   agent={{ handle: agent.handle, avatarSeed: agent.avatarSeed }}
                   size="2xs"
                 />
-                @{agent.handle}
+                <span className="max-w-[9rem] truncate">@{agent.handle}</span>
                 {pinnedHere ? (
                   // Only an explicit pin can be removed; shared riders aren't
                   // pinned, so they carry no unpin control.
@@ -293,7 +296,7 @@ export function MachinesPanel() {
     <SettingsShell
       testId="machines-panel"
       title="Machines"
-      subtitle="The runtimes your agents run in — status, size, resource history, and controls."
+      subtitle="Status, size, resource history, and controls for the machines your agents run on."
     >
       <RuntimeMenuPanel
         showHeader={false}
