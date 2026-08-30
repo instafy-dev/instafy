@@ -1,3 +1,4 @@
+import { Xmark } from "iconoir-react";
 import type { StatusIntent, StatusToast } from "./StatusProvider";
 import { UNSTABLE_Toast, UNSTABLE_ToastContent, UNSTABLE_ToastList, UNSTABLE_ToastRegion } from "react-aria-components";
 import { Button } from "../components/Button";
@@ -82,7 +83,7 @@ export function Status() {
                     className="ml-2 text-xs hover:border-slate-200 hover:bg-white/50 data-[hovered]:bg-white/50 dark:hover:border-slate-700 dark:hover:bg-slate-950/70 dark:data-[hovered]:bg-slate-950/70"
                     aria-label="Dismiss notification"
                   >
-                    ✕
+                    <Xmark className="h-3.5 w-3.5" aria-hidden="true" />
                   </Button>
                 ) : null}
               </UNSTABLE_ToastContent>

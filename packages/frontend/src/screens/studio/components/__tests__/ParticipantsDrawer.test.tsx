@@ -282,12 +282,12 @@ describe("ParticipantsDrawer", () => {
 
     const drawer = container.querySelector('[data-testid="participants-drawer"]');
     await act(async () => {
-      drawer?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      drawer?.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
     });
     expect(onClose).not.toHaveBeenCalled();
 
     await act(async () => {
-      document.body.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
     });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
