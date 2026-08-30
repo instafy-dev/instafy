@@ -411,7 +411,9 @@ export function RuntimeMenuOptionsList({
                 }}
                 className={optionClasses}
               >
-                <span className="flex h-7 flex-none items-center" aria-hidden="true">
+                {/* h-5 = the title's 20px line box, so the dot's midline sits
+                    on the title's midline (h-7 floated it 4px low). */}
+                <span className="flex h-5 flex-none items-center" aria-hidden="true">
                   <RuntimeStateIndicator option={option} />
                 </span>
                 <div className="flex min-w-0 flex-col gap-0.5">
