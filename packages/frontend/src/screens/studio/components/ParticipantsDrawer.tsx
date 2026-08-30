@@ -578,9 +578,11 @@ export function ParticipantsDrawer({
 
   // Escape closes; the panel is docked-style (no backdrop), so this is the
   // keyboard exit alongside the header close button and the facepile toggle.
+  // Deferring to defaultPrevented lets inner surfaces (menus, inputs) consume
+  // Escape without also dropping the drawer.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape" && !event.defaultPrevented) onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -588,7 +590,8 @@ export function ParticipantsDrawer({
 
   // Clicking anywhere outside the drawer closes it. Skip clicks on the roster
   // facepile — it toggles on its own, so closing here would race its toggle and
-  // reopen the drawer. Uses mousedown so it settles before the click lands.
+  // reopen the drawer. Capture-phase pointerdown is the app-wide click-away
+  // event (touch included), settling before any click handler fires.
   useEffect(() => {
     const onPointerDown = (event: MouseEvent) => {
       const target = event.target as Element | null;
@@ -600,8 +603,8 @@ export function ParticipantsDrawer({
       if (target.closest("[data-studio-popover]")) return;
       onClose();
     };
-    window.addEventListener("mousedown", onPointerDown);
-    return () => window.removeEventListener("mousedown", onPointerDown);
+    window.addEventListener("pointerdown", onPointerDown, true);
+    return () => window.removeEventListener("pointerdown", onPointerDown, true);
   }, [onClose]);
 
   const {

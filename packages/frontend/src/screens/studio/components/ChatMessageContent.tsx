@@ -876,9 +876,18 @@ function WorkspaceFileReferenceChip({
       }
       setPreviewOpen(false);
     };
+    // Escape mirrors the action-menu sibling below — every dismissible
+    // floating surface answers the keyboard.
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPreviewOpen(false);
+      }
+    };
     document.addEventListener("pointerdown", handlePointerDownOutside, true);
+    document.addEventListener("keydown", handleKeyDown);
     return () => {
       document.removeEventListener("pointerdown", handlePointerDownOutside, true);
+      document.removeEventListener("keydown", handleKeyDown);
     };
   }, [previewOpen]);
 
