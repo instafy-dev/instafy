@@ -16,9 +16,14 @@ export interface RuntimeResourceSample {
   memPct: number | null;
   memUsedBytes: number | null;
   memLimitBytes: number | null;
+  diskPct: number | null;
+  diskUsedBytes: number | null;
+  diskLimitBytes: number | null;
 }
 
-const MAX_SAMPLES = 60;
+// ~1 hour of trend at the Machines page's 10s poll cadence; still tiny memory
+// (360 samples × a few numbers × ≤32 runtimes).
+const MAX_SAMPLES = 360;
 const MAX_RUNTIMES = 32;
 
 const histories = new Map<string, RuntimeResourceSample[]>();
@@ -47,7 +52,13 @@ export function recordRuntimeResourceSample(
     memUsedBytes !== null && memLimitBytes !== null && memLimitBytes > 0
       ? Math.min(100, (memUsedBytes / memLimitBytes) * 100)
       : null;
-  if (cpuPct === null && memPct === null) {
+  const diskUsedBytes = finiteOrNull(resources.diskUsedBytes);
+  const diskLimitBytes = finiteOrNull(resources.diskLimitBytes);
+  const diskPct =
+    diskUsedBytes !== null && diskLimitBytes !== null && diskLimitBytes > 0
+      ? Math.min(100, (diskUsedBytes / diskLimitBytes) * 100)
+      : null;
+  if (cpuPct === null && memPct === null && diskPct === null) {
     return;
   }
 
@@ -55,7 +66,13 @@ export function recordRuntimeResourceSample(
   const last = samples[samples.length - 1] ?? null;
   // Snapshots without a timestamp can repeat across refreshes; skip exact
   // repeats so the trend reflects reported changes, not refresh cadence.
-  if (!stamp && last && last.cpuPct === cpuPct && last.memUsedBytes === memUsedBytes) {
+  if (
+    !stamp &&
+    last &&
+    last.cpuPct === cpuPct &&
+    last.memUsedBytes === memUsedBytes &&
+    last.diskUsedBytes === diskUsedBytes
+  ) {
     return;
   }
 
@@ -67,7 +84,16 @@ export function recordRuntimeResourceSample(
     at = last.at + 1;
   }
 
-  samples.push({ at, cpuPct, memPct, memUsedBytes, memLimitBytes });
+  samples.push({
+    at,
+    cpuPct,
+    memPct,
+    memUsedBytes,
+    memLimitBytes,
+    diskPct,
+    diskUsedBytes,
+    diskLimitBytes,
+  });
   if (samples.length > MAX_SAMPLES) {
     samples.splice(0, samples.length - MAX_SAMPLES);
   }
