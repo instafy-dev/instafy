@@ -27,7 +27,6 @@ import { Card } from "../../components/Card";
 import { SegmentedControl } from "../../components/SegmentedControl";
 import { Text } from "../../components/Text";
 import { DARK_DIVIDER_BORDER_CLASS } from "../../theme/darkSurfaces";
-import { compactIdentifier } from "../../utils/compactIdentifier";
 
 function formatRuntimeTimestamp(value?: string | null): string | null {
   if (!value) return null;
@@ -420,9 +419,9 @@ export function RuntimeMenuOptionsList({
                     option={option}
                     showDetail={false}
                     showProviderBadge={false}
-                    // Expanded details carry the full ID row (with copy), so the
-                    // header badge would say the same thing twice.
-                    showRuntimeIdBadge={!isExpanded}
+                    // The header badge IS the machine's id (full value on
+                    // hover); the details grid carries no separate ID row.
+                    showRuntimeIdBadge
                     className="flex min-w-0 flex-col gap-0.5"
                   />
                   {/* The one-line stats summary is the COLLAPSED view; expanded,
@@ -473,14 +472,8 @@ export function RuntimeMenuOptionsList({
                   </Text>
                 ) : null}
                 {isHostedOption ? (
-                  <div className="space-y-2" data-testid="runtime-hosted-machine-facts">
+                  <div data-testid="runtime-hosted-machine-facts">
                     <RuntimeSizePickerRow />
-                    {/* Static environment facts read as fine print — after the
-                        control, not above it, so live content leads. */}
-                    <Text as="p" variant="caption" tone="muted" className="text-xxs">
-                      Node, Python, and browsers preinstalled. Project files and
-                      caches survive pauses; everything else resets.
-                    </Text>
                   </div>
                 ) : null}
                 {resourceHistory.length > 0 ? (
@@ -490,21 +483,11 @@ export function RuntimeMenuOptionsList({
                   />
                 ) : null}
                 {renderOptionExtras ? renderOptionExtras(option) : null}
-                {runtimeIdValue || runtimeImageValue || shouldShowEndpoint || shouldShowHost || lifecycleRow ? (
-                  <div className="grid grid-cols-[max-content_minmax(0,1fr)] items-center gap-x-3 gap-y-1">
-                    {runtimeIdValue ? (
-                      <RuntimeValueRow
-                        label="ID"
-                        value={runtimeIdValue}
-                        displayValue={compactIdentifier(runtimeIdValue)}
-                        mono
-                        copyLabel="Copy runtime id"
-                        copyTestId={option.id ? `runtime-copy-id-${option.id}` : undefined}
-                        onCopy={() => {
-                          copyWithFeedback(runtimeIdValue, "Runtime id copied");
-                        }}
-                      />
-                    ) : null}
+                {runtimeImageValue || shouldShowEndpoint || shouldShowHost || lifecycleRow ? (
+                  // Fixed label column so these rows share a content edge with
+                  // the trend plots above (page variant sizes its labels to
+                  // match); the machine id lives in the header badge only.
+                  <div className="grid grid-cols-[3.5rem_minmax(0,1fr)] items-center gap-x-3 gap-y-1">
                     {runtimeImageValue ? (
                       <RuntimeValueRow
                         label="Image"

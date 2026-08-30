@@ -154,7 +154,9 @@ export function RuntimeResourceSparklines({
         return (
           <div
             key={metric.key}
-            className="flex min-w-0 items-center gap-2"
+            // Page rows share the facts grid's label column (3.5rem + gap-3)
+            // so plots and values sit on the same content edge.
+            className={`flex min-w-0 items-center ${isPage ? "gap-3" : "gap-2"}`}
             title={metricTitle(metric)}
             data-testid={`runtime-sparkline-${metric.key}`}
           >
@@ -162,7 +164,7 @@ export function RuntimeResourceSparklines({
               as="span"
               variant="caption"
               tone="muted"
-              className={`${isPage ? "w-9" : "w-7"} shrink-0 text-xxs`}
+              className={`${isPage ? "w-14" : "w-7"} shrink-0 text-xxs`}
             >
               {metric.label}
             </Text>

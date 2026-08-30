@@ -175,18 +175,20 @@ describe("RuntimeMenuOptionsList", () => {
     expect(onSelectOption).not.toHaveBeenCalled();
   });
 
-  it("acknowledges a copied id with a visible confirmation toast", async () => {
+  it("acknowledges a copied value with a visible confirmation toast", async () => {
     // Plain "success" toasts are gated off by StatusProvider; the copy ack
     // must request the confirmation presentation or it never renders.
     Object.defineProperty(navigator, "clipboard", {
       value: { writeText: vi.fn().mockResolvedValue(undefined) },
       configurable: true,
     });
-    await renderList();
+    await renderList({
+      options: [hostedOption({ endpoint: "http://runtime.example.test:1234" })],
+    });
     await expandDetails();
 
     const copyButton = container.querySelector<HTMLButtonElement>(
-      '[data-testid="runtime-copy-id-cloud-runtime-1"]',
+      '[data-testid="runtime-copy-endpoint-cloud-runtime-1"]',
     );
     expect(copyButton).not.toBeNull();
     await act(async () => {
@@ -194,7 +196,7 @@ describe("RuntimeMenuOptionsList", () => {
     });
 
     expect(showStatusMock).toHaveBeenCalledWith(
-      "Runtime id copied",
+      "Endpoint copied",
       "success",
       expect.any(Number),
       expect.objectContaining({ presentation: "confirmation" }),
@@ -242,9 +244,9 @@ describe("RuntimeMenuOptionsList", () => {
     expect(sparklines?.textContent).toContain("RAM");
     expect(sparklines?.textContent).toContain("512 MB / 2 GB");
 
-    // The full id is progressive disclosure: compact in the grid, complete in
-    // the value's title attribute for hover/copy.
-    expect(container.textContent).toContain("24f91e92…edc3");
+    // The machine's identity lives in the header badge only — compact rt:
+    // text, full id revealed by the badge's title. No separate ID grid row.
+    expect(container.textContent).toContain("rt:24f91e92");
     expect(container.textContent).not.toContain(longId);
     expect(container.querySelector(`[title="${longId}"]`)).not.toBeNull();
   });
