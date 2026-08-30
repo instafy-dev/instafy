@@ -174,6 +174,12 @@ import { useChatCredentialGate } from "./useChatCredentialGate";
 import { useAmbientCredentialGatePresentation } from "./useAmbientCredentialGatePresentation";
 import { canUseDesktopCodexAuthJson } from "./desktopCodexAuthJson";
 import { CredentialsConnectModal } from "./CredentialsConnectModal";
+import { StudioDialogModal } from "../../../components/aria/StudioModal";
+import { AgentProfileCardContent } from "./AssistantAvatarPopover";
+import {
+  OPEN_AGENT_PROFILE_EVENT,
+  type OpenAgentProfileDetail,
+} from "./agentProfileOpen";
 import { emitAiConfigChanged } from "./aiConfigEvents";
 import { formatProxyUpstreamErrorSummary } from "./proxyError";
 import { useCredentialsConnectFlow } from "./useCredentialsConnectFlow";
@@ -1538,6 +1544,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     primaryAgentHandleForPopover,
     refreshAvailableAgents,
     renderAssistantAvatar,
+    resolveAgentProfileCardProps,
     runAgentHandleByRunId,
     runAgentIdentityByRunId,
   } = useChatAgentRoster({
@@ -1627,6 +1634,19 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     window.addEventListener("instafy:focus-composer", handler);
     return () => window.removeEventListener("instafy:focus-composer", handler);
   }, [focusInput]);
+  // Anchor-less profile opens: inline mention chips and narrow speaker labels
+  // dispatch a handle; this panel owns agent resolution, so it hosts the card.
+  const [agentProfileModalHandle, setAgentProfileModalHandle] = useState<string | null>(null);
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const handle = (event as CustomEvent<OpenAgentProfileDetail>).detail?.handle;
+      if (typeof handle === "string" && handle) {
+        setAgentProfileModalHandle(handle);
+      }
+    };
+    window.addEventListener(OPEN_AGENT_PROFILE_EVENT, handler);
+    return () => window.removeEventListener(OPEN_AGENT_PROFILE_EVENT, handler);
+  }, []);
   // This identity belongs to one mounted Shared Browser surface. Keeping it in
   // memory avoids duplicate tabs or side-by-side surfaces replacing each other,
   // while remaining stable across transport and network reconnects.
@@ -5691,6 +5711,25 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           onOpenProjectSettings,
         }}
       />
+      {agentProfileModalHandle ? (
+        // By-handle profile opens (mention chips, narrow speaker labels) have
+        // no anchor, so the card presents as a centered modal at every width.
+        <StudioDialogModal
+          isOpen
+          isDismissable
+          onOpenChange={(open) => {
+            if (!open) setAgentProfileModalHandle(null);
+          }}
+          className="h-[100dvh] min-h-0 overflow-hidden"
+          modalClassName="min-h-0 max-h-full w-full max-w-sm overflow-y-auto overscroll-contain"
+          dialogAriaLabel={`Agent profile: @${agentProfileModalHandle}`}
+        >
+          <AgentProfileCardContent
+            {...resolveAgentProfileCardProps(agentProfileModalHandle)}
+            onRequestClose={() => setAgentProfileModalHandle(null)}
+          />
+        </StudioDialogModal>
+      ) : null}
         </div>
     </ChatRuntimeActivityContext.Provider>
     </RunFailureRetryProvider>
