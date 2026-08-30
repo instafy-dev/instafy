@@ -20,6 +20,9 @@ const SPARK_PAD_Y = 1.5;
 
 const CPU_STROKE_CLASS = "text-primary-500";
 const MEM_STROKE_CLASS = "text-[#a9761f] dark:text-[#b8862f]";
+// Disk moves slowly; a neutral mark keeps it legible without competing with
+// the live CPU/RAM hues.
+const DISK_STROKE_CLASS = "text-slate-400 dark:text-slate-500";
 
 interface MetricSeries {
   key: string;
@@ -32,8 +35,10 @@ interface MetricSeries {
 function buildMetrics(history: RuntimeResourceSample[]): MetricSeries[] {
   const cpuPoints: number[] = [];
   const memPoints: number[] = [];
+  const diskPoints: number[] = [];
   let lastCpu: number | null = null;
   let lastMemSample: RuntimeResourceSample | null = null;
+  let lastDiskSample: RuntimeResourceSample | null = null;
   for (const sample of history) {
     if (sample.cpuPct !== null) {
       cpuPoints.push(sample.cpuPct);
@@ -42,6 +47,10 @@ function buildMetrics(history: RuntimeResourceSample[]): MetricSeries[] {
     if (sample.memPct !== null) {
       memPoints.push(sample.memPct);
       lastMemSample = sample;
+    }
+    if (sample.diskPct !== null) {
+      diskPoints.push(sample.diskPct);
+      lastDiskSample = sample;
     }
   }
 
@@ -66,6 +75,18 @@ function buildMetrics(history: RuntimeResourceSample[]): MetricSeries[] {
       strokeClass: MEM_STROKE_CLASS,
       points: memPoints,
       valueLabel: memLabel,
+    });
+  }
+  const diskLabel = lastDiskSample
+    ? formatUsagePair(lastDiskSample.diskUsedBytes, lastDiskSample.diskLimitBytes)
+    : null;
+  if (diskPoints.length > 0 && diskLabel) {
+    metrics.push({
+      key: "disk",
+      label: "Disk",
+      strokeClass: DISK_STROKE_CLASS,
+      points: diskPoints,
+      valueLabel: diskLabel,
     });
   }
   return metrics;
@@ -106,16 +127,28 @@ function metricTitle(metric: MetricSeries): string {
 
 interface RuntimeResourceSparklinesProps {
   history: RuntimeResourceSample[];
+  /**
+   * "compact" keeps the fixed-width mini trend for dense menus; "page"
+   * stretches each series to the full row (the Machines page draft) with a
+   * taller plot. Strokes stay uniform under the non-uniform stretch via
+   * vector-effect; the end dot is dropped there (it would smear into an
+   * ellipse, and the line's end is obvious at full width).
+   */
+  variant?: "compact" | "page";
 }
 
-export function RuntimeResourceSparklines({ history }: RuntimeResourceSparklinesProps) {
+export function RuntimeResourceSparklines({
+  history,
+  variant = "compact",
+}: RuntimeResourceSparklinesProps) {
   const metrics = buildMetrics(history);
   if (metrics.length === 0) {
     return null;
   }
+  const isPage = variant === "page";
 
   return (
-    <div className="space-y-1" data-testid="runtime-resource-sparklines">
+    <div className={isPage ? "space-y-1.5" : "space-y-1"} data-testid="runtime-resource-sparklines">
       {metrics.map((metric) => {
         const { line, area, endX, endY } = sparkPath(metric.points);
         return (
@@ -129,15 +162,16 @@ export function RuntimeResourceSparklines({ history }: RuntimeResourceSparklines
               as="span"
               variant="caption"
               tone="muted"
-              className="w-7 shrink-0 text-xxs"
+              className={`${isPage ? "w-9" : "w-7"} shrink-0 text-xxs`}
             >
               {metric.label}
             </Text>
             <svg
-              width={SPARK_WIDTH}
-              height={SPARK_HEIGHT}
+              {...(isPage
+                ? { preserveAspectRatio: "none" }
+                : { width: SPARK_WIDTH, height: SPARK_HEIGHT })}
               viewBox={`0 0 ${SPARK_WIDTH} ${SPARK_HEIGHT}`}
-              className={`shrink-0 ${metric.strokeClass}`}
+              className={`${isPage ? "h-8 min-w-0 flex-1" : "shrink-0"} ${metric.strokeClass}`}
               aria-hidden="true"
             >
               {area ? <path d={area} fill="currentColor" opacity="0.12" /> : null}
@@ -149,15 +183,16 @@ export function RuntimeResourceSparklines({ history }: RuntimeResourceSparklines
                   strokeWidth="1.5"
                   strokeLinejoin="round"
                   strokeLinecap="round"
+                  {...(isPage ? { vectorEffect: "non-scaling-stroke" } : {})}
                 />
               ) : null}
-              <circle cx={endX} cy={endY} r="2" fill="currentColor" />
+              {!isPage ? <circle cx={endX} cy={endY} r="2" fill="currentColor" /> : null}
             </svg>
             <Text
               as="span"
               variant="caption"
               tone="secondary"
-              className="min-w-0 flex-1 truncate text-right text-xxs tabular-nums"
+              className={`${isPage ? "w-24 shrink-0" : "min-w-0 flex-1"} truncate text-right text-xxs tabular-nums`}
             >
               {metric.valueLabel}
             </Text>
