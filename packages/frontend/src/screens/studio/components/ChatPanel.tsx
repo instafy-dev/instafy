@@ -5298,14 +5298,18 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           plain "open participants" icon when no one has joined, so the
           participants/config panel is reachable even on a brand-new chat. */}
       <div
-        className="flex flex-none items-center justify-end px-3 pt-2 sm:px-4"
+        className="flex-none px-3 pt-2 sm:px-4"
         data-testid="chat-conversation-roster-row"
       >
-        <ConversationRoster
-          agents={conversationRosterAgents}
-          humans={conversationRosterHumans}
-          hasCredentialWarning={participantAgentsHaveCredentialWarning}
-        />
+        {/* Constrain to the shared 56rem chat column so the roster's right
+            edge lands on the message column, not the panel edge. */}
+        <ChatColumn className="flex items-center justify-end">
+          <ConversationRoster
+            agents={conversationRosterAgents}
+            humans={conversationRosterHumans}
+            hasCredentialWarning={participantAgentsHaveCredentialWarning}
+          />
+        </ChatColumn>
       </div>
       <div
         className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 pb-4 pt-2 sm:px-4 sm:pb-2"
