@@ -4342,8 +4342,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         !providerRaw || providerRaw === "assistant"
           ? defaultCredentialProviderId
           : normalizeAiProviderId(providerRaw);
-      // Explicit model, or the provider's default (what "Default (gpt-5.5)"
-      // resolves to) when the agent pins none.
+      // Explicit model, or the provider's default (the first option in
+      // modelOptionsForProvider) when the agent pins none.
       const model =
         normalizeAiModelId(providerId, profile?.model) ??
         modelOptionsForProvider(providerId)[0]?.id ??
