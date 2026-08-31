@@ -3962,6 +3962,16 @@ impl JobProcessor {
         cards
     }
 
+    /// True when the job workspace is the working copy of an origin hosted by
+    /// this runtime process: origin hosting is configured and the job's
+    /// project is the runtime's own project, so `prepare_workspace` and the
+    /// origin server resolve to the same directory. Jobs only run after
+    /// `OriginService::try_start` succeeded (registration fails otherwise), so
+    /// a configured origin is a listening origin.
+    fn workspace_is_local_origin_root(&self, project_id: &Uuid) -> bool {
+        self.config.origin.is_some() && *project_id == self.config.project_id
+    }
+
     fn prepare_workspace(&self, project_id: &Uuid) -> Result<PathBuf> {
         let path = self.config.project_workspace_dir(project_id);
         fs::create_dir_all(&path)
@@ -6297,6 +6307,7 @@ impl JobProcessor {
                             progress_sender
                                 .as_ref()
                                 .map(|progress| progress.sender.clone()),
+                            self.workspace_is_local_origin_root(&project_id),
                         )
                         .await
                         {
@@ -6487,6 +6498,7 @@ impl JobProcessor {
                         progress_sender
                             .as_ref()
                             .map(|progress| progress.sender.clone()),
+                        self.workspace_is_local_origin_root(&project_id),
                     )
                     .await
                     {
