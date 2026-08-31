@@ -317,9 +317,17 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
+      # Hosted runners keep ~14GB free on /; five crates of test builds plus
+      # the restored cache need headroom. Drop toolchains this job never uses.
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
       # Test builds are much heavier than the check job's; cache the registry
       # and the shared target dir keyed on the lockfiles so warm runs skip
-      # most of the compile.
+      # most of the compile. v2 namespace: the v1 cache carried the full
+      # controller build and ENOSPC'd the runner during restore.
       - name: Restore cargo cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -327,9 +335,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             .cargo-target
-          key: rust-tests-${{ runner.os }}-${{ hashFiles('packages/*/Cargo.lock') }}
+          key: rust-tests-v2-${{ runner.os }}-${{ hashFiles('packages/*/Cargo.lock') }}
           restore-keys: |
-            rust-tests-${{ runner.os }}-
+            rust-tests-v2-${{ runner.os }}-
 
       - name: Run database-free Rust test suites
         run: |
