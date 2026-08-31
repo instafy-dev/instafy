@@ -318,53 +318,6 @@ pub(crate) async fn git_sync_only(
     outcome
 }
 
-/// Reports whether every candidate sync path is clean against the origin
-/// state this runtime already holds locally (the canonical `.instafy/.git`
-/// working copy that the co-hosted origin server serves). Only meaningful when
-/// the caller has established that the workspace IS the locally hosted
-/// origin's working copy; callers must not use this for origins hosted
-/// elsewhere, whose canonical state we cannot observe cheaply.
-async fn workspace_unchanged_against_local_origin(
-    workspace_dir: &std::path::Path,
-    changed_paths: &[String],
-) -> bool {
-    if !workspace_dir.join(".instafy").join(".git").exists() {
-        return false;
-    }
-
-    let dirty_check_root = workspace_dir.to_path_buf();
-    let dirty = tokio::task::spawn_blocking(move || {
-        origin_http_server::git::list_dirty_files(dirty_check_root.as_path(), None)
-    })
-    .await;
-
-    match dirty {
-        Ok(Ok(entries)) => {
-            let candidates = changed_paths
-                .iter()
-                .map(String::as_str)
-                .collect::<BTreeSet<&str>>();
-            !entries
-                .iter()
-                .any(|entry| candidates.contains(entry.path.as_str()))
-        }
-        Ok(Err(error)) => {
-            warn!(
-                ?error,
-                "workspace unchanged check failed; proceeding with origin apply"
-            );
-            false
-        }
-        Err(join_error) => {
-            warn!(
-                ?join_error,
-                "workspace unchanged check task failed; proceeding with origin apply"
-            );
-            false
-        }
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn commit_to_hosted_origin(
     controller_base_url: &Url,
@@ -377,7 +330,6 @@ pub(crate) async fn commit_to_hosted_origin(
     files: &[CodexFileDescriptor],
     auto_sync_after_apply_override: Option<bool>,
     progress_sender: Option<JobMessageSender>,
-    workspace_holds_origin_state: bool,
     local_origin: Option<LocalOriginSync>,
 ) -> Result<Option<CommitToOriginResult>> {
     let mut uploads = BTreeMap::<String, UploadEntry>::new();
@@ -460,26 +412,6 @@ pub(crate) async fn commit_to_hosted_origin(
     let changed_paths: Vec<String> = changed_paths.into_iter().collect();
 
     if uploads.is_empty() && deletes.is_empty() {
-        return Ok(None);
-    }
-
-    // End-of-run flush fast path (#154): when this runtime hosts the origin
-    // for this workspace, the canonical origin state is already on local disk.
-    // If none of the candidate paths differ from it, the apply would be a
-    // byte-for-byte no-op — skip the whole controller round-trip (workspace
-    // lease, fs.write token mint, tunnel apply, git sync). Origins hosted
-    // elsewhere keep the unconditional apply: we cannot verify their state
-    // cheaply, so skipping there could silently drop a sync.
-    if workspace_holds_origin_state
-        && workspace_unchanged_against_local_origin(workspace_dir, &changed_paths).await
-    {
-        info!(
-            project_id = %project_id,
-            job_id = %job_id,
-            run_id = ?run_id,
-            candidate_paths = changed_paths.len(),
-            "shutdown flush skipped: workspace unchanged"
-        );
         return Ok(None);
     }
 
@@ -1000,49 +932,13 @@ mod tests {
     use reqwest::StatusCode;
 
     use std::net::SocketAddr;
-    use std::path::Path;
-    use std::process::Command as StdCommand;
 
     use anyhow::{Context, Result, ensure};
     use uuid::Uuid;
 
     use super::super::{CodexFileDescriptor, FileChangeDescriptor, FileChangeKind};
-    use super::{
-        commit_to_hosted_origin, resolve_origin_sync_endpoint,
-        workspace_unchanged_against_local_origin,
-    };
+    use super::{commit_to_hosted_origin, resolve_origin_sync_endpoint};
     use crate::origin::LocalOriginSync;
-
-    fn run_git(repo: &Path, args: &[&str]) -> Result<()> {
-        let output = StdCommand::new("git")
-            .args(args)
-            .current_dir(repo)
-            .output()?;
-        ensure!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
-        Ok(())
-    }
-
-    /// Build a workspace in the canonical origin layout (`.instafy/.git`) with
-    /// one committed file at `notes/status.md`.
-    fn init_canonical_origin_workspace(workspace: &Path) -> Result<()> {
-        std::fs::create_dir_all(workspace)?;
-        run_git(workspace, &["init", "-b", "main"])?;
-        run_git(workspace, &["config", "user.name", "Instafy Test"])?;
-        run_git(workspace, &["config", "user.email", "test@instafy.dev"])?;
-        std::fs::create_dir_all(workspace.join("notes"))?;
-        std::fs::write(workspace.join("notes/status.md"), "all quiet\n")?;
-        run_git(workspace, &["add", "."])?;
-        run_git(workspace, &["commit", "-m", "baseline"])?;
-        let canonical_git_dir = workspace.join(".instafy").join(".git");
-        std::fs::create_dir_all(canonical_git_dir.parent().context("canonical parent")?)?;
-        std::fs::rename(workspace.join(".git"), &canonical_git_dir)?;
-        Ok(())
-    }
 
     fn changed_file_descriptor(path: &str) -> CodexFileDescriptor {
         CodexFileDescriptor {
@@ -1059,132 +955,6 @@ mod tests {
                 raw: serde_json::json!({ "type": "changed" }),
             }),
         }
-    }
-
-    /// A controller stand-in that counts every request it receives and fails
-    /// them all, so any contact is both observable and terminal.
-    async fn spawn_counting_controller() -> (SocketAddr, Arc<AtomicUsize>) {
-        use axum::routing::any;
-
-        async fn count(State(hits): State<Arc<AtomicUsize>>) -> (AxumStatusCode, &'static str) {
-            hits.fetch_add(1, Ordering::SeqCst);
-            (AxumStatusCode::INTERNAL_SERVER_ERROR, "unexpected call")
-        }
-
-        let hits = Arc::new(AtomicUsize::new(0));
-        let app = Router::new()
-            .route("/*path", any(count))
-            .with_state(hits.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        (address, hits)
-    }
-
-    #[tokio::test]
-    async fn empty_flush_skips_apply_and_token_mint_when_local_origin_state_is_clean() -> Result<()>
-    {
-        let temp = tempfile::tempdir()?;
-        let workspace = temp.path().join("workspace");
-        init_canonical_origin_workspace(&workspace)?;
-
-        let (controller_address, controller_hits) = spawn_counting_controller().await;
-        let controller_base_url = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
-
-        let result = commit_to_hosted_origin(
-            &controller_base_url,
-            "controller-token",
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            None,
-            &workspace,
-            &[changed_file_descriptor("notes/status.md")],
-            Some(false),
-            None,
-            true,
-            None,
-        )
-        .await?;
-
-        ensure!(result.is_none(), "expected the flush to be skipped");
-        ensure!(
-            controller_hits.load(Ordering::SeqCst) == 0,
-            "skip must not contact the controller (no lease, no token mint)"
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn empty_flush_skip_does_not_engage_when_candidate_paths_are_dirty() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let workspace = temp.path().join("workspace");
-        init_canonical_origin_workspace(&workspace)?;
-        std::fs::write(workspace.join("notes/status.md"), "changed contents\n")?;
-
-        let (controller_address, controller_hits) = spawn_counting_controller().await;
-        let controller_base_url = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
-
-        let result = commit_to_hosted_origin(
-            &controller_base_url,
-            "controller-token",
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            None,
-            &workspace,
-            &[changed_file_descriptor("notes/status.md")],
-            Some(false),
-            None,
-            true,
-            None,
-        )
-        .await;
-
-        ensure!(result.is_err(), "dirty workspace must attempt the sync");
-        ensure!(
-            controller_hits.load(Ordering::SeqCst) > 0,
-            "dirty workspace must reach the controller lease acquire"
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn empty_flush_skip_never_engages_for_origins_hosted_elsewhere() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let workspace = temp.path().join("workspace");
-        init_canonical_origin_workspace(&workspace)?;
-
-        let (controller_address, controller_hits) = spawn_counting_controller().await;
-        let controller_base_url = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
-
-        let result = commit_to_hosted_origin(
-            &controller_base_url,
-            "controller-token",
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            Uuid::new_v4(),
-            None,
-            &workspace,
-            &[changed_file_descriptor("notes/status.md")],
-            Some(false),
-            None,
-            false,
-            None,
-        )
-        .await;
-
-        ensure!(
-            result.is_err(),
-            "remote-origin flush must run unconditionally"
-        );
-        ensure!(
-            controller_hits.load(Ordering::SeqCst) > 0,
-            "remote-origin flush must keep contacting the controller"
-        );
-        Ok(())
     }
 
     /// Origin stand-in serving /apply and /git/sync, counting apply hits.
@@ -1351,7 +1121,6 @@ mod tests {
             &[changed_file_descriptor("notes/status.md")],
             Some(true),
             None,
-            false,
             Some(LocalOriginSync {
                 origin_id,
                 endpoint: format!("http://{local_origin_address}"),
@@ -1403,7 +1172,6 @@ mod tests {
             &[changed_file_descriptor("notes/status.md")],
             Some(false),
             None,
-            false,
             Some(LocalOriginSync {
                 origin_id: Uuid::new_v4(),
                 endpoint: format!("http://{local_origin_address}"),
@@ -1419,20 +1187,6 @@ mod tests {
         );
         ensure!(local_apply_hits.load(Ordering::SeqCst) == 0);
         ensure!(token_mints.load(Ordering::SeqCst) == 1);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn workspace_unchanged_check_requires_the_canonical_git_layout() -> Result<()> {
-        let temp = tempfile::tempdir()?;
-        let workspace = temp.path().join("workspace");
-        std::fs::create_dir_all(&workspace)?;
-        std::fs::write(workspace.join("plain.txt"), "no git here\n")?;
-
-        ensure!(
-            !workspace_unchanged_against_local_origin(&workspace, &["plain.txt".to_string()]).await,
-            "without canonical git state the check must not report unchanged"
-        );
         Ok(())
     }
 
