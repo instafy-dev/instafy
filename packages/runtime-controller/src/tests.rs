@@ -3209,7 +3209,10 @@ async fn bug_report_creation_authorizes_project_and_linked_resources() -> anyhow
         .token;
     let state = build_test_state(pool.clone(), config);
     let mut events_rx = state.events.subscribe();
-    let app = crate::bug_reports::router().with_state(state);
+    // Keep `state` (and with it the events sender) alive past the final
+    // request: the closed-channel error from a dropped sender would satisfy
+    // the "no broadcast" timeout check below without proving anything.
+    let app = crate::bug_reports::router().with_state(state.clone());
 
     for (body, expected_status) in [
         (
@@ -9976,6 +9979,9 @@ async fn lease_next_agent_job_leases_queued_work() -> anyhow::Result<()> {
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );",
@@ -10068,6 +10074,9 @@ async fn lease_next_agent_job_can_filter_for_read_only_batches() -> anyhow::Resu
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );",
@@ -10172,6 +10181,9 @@ async fn lease_next_agent_job_scopes_read_only_batch_to_same_team_group() -> any
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );",
@@ -10275,6 +10287,9 @@ async fn lease_next_agent_job_can_lease_runtime_spread_jobs_when_preference_pinn
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );",
@@ -10377,6 +10392,9 @@ async fn lease_next_agent_job_never_spreads_personal_browser_work_off_target() -
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );",
@@ -10522,6 +10540,9 @@ async fn lease_next_agent_job_never_spreads_shared_browser_work_off_target() -> 
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );",
@@ -10625,6 +10646,9 @@ async fn lease_next_agent_job_scopes_grouped_runtime_spread_to_plan_runtimes() -
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );
@@ -10770,6 +10794,9 @@ async fn lease_next_agent_job_yields_spread_group_to_unused_group_runtime() -> a
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );",
@@ -10906,6 +10933,9 @@ async fn lease_next_agent_job_batches_exact_write_scoped_siblings() -> anyhow::R
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );",
@@ -11040,6 +11070,9 @@ async fn lease_next_agent_job_excludes_runtime_spread_jobs_from_secondary_batch_
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );",
@@ -11118,6 +11151,9 @@ async fn lease_next_agent_job_skips_runtime_spread_when_runtime_is_busy() -> any
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );",
@@ -19643,6 +19679,34 @@ async fn create_runtime_tables(client: &mut tokio_postgres::Client) -> anyhow::R
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 completed_at timestamptz,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                updated_at timestamptz NOT NULL DEFAULT now()
+            );
+            CREATE TEMP TABLE agent_job_inputs (
+                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                project_id uuid NOT NULL,
+                conversation_id uuid NOT NULL,
+                job_id uuid NOT NULL,
+                run_id uuid,
+                message_id uuid,
+                created_by uuid,
+                client_send_id text NOT NULL,
+                lease_attempt integer NOT NULL,
+                target_turn_id text NOT NULL,
+                sequence bigint NOT NULL,
+                kind text NOT NULL DEFAULT 'active_turn_input',
+                request jsonb NOT NULL,
+                status text NOT NULL DEFAULT 'pending',
+                claimed_by_runtime_id uuid,
+                claimed_at timestamptz,
+                applied_at timestamptz,
+                rejected_at timestamptz,
+                rejected_by text,
+                codex_turn_id text,
+                error_message text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );
