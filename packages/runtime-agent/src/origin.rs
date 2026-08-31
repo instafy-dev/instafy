@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -36,9 +36,21 @@ pub struct OriginLaunchOverrides {
     pub controller_token_source: Option<SharedControllerToken>,
 }
 
+/// Identity and loopback endpoint of the origin HTTP server hosted inside
+/// this runtime process, captured from the actual listener at startup. Used
+/// by the job lifecycle to keep workspace-sync byte transfers on the local
+/// listener instead of round-tripping through the controller's tunnel proxy
+/// when the sync targets the very origin this process serves (#153).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalOriginSync {
+    pub origin_id: Uuid,
+    pub endpoint: String,
+}
+
 pub struct OriginService {
     server: Option<OriginHttpServer>,
     presence_metadata: Option<Arc<RwLock<Value>>>,
+    local_sync: Option<LocalOriginSync>,
 }
 
 impl OriginService {
@@ -182,7 +194,17 @@ impl OriginService {
         Ok(Some(Self {
             server: Some(server),
             presence_metadata: Some(presence_handle),
+            local_sync: Some(LocalOriginSync {
+                origin_id: settings.origin_id,
+                endpoint: Self::derive_endpoint(start.address),
+            }),
         }))
+    }
+
+    /// The locally listening origin's identity and loopback endpoint, or None
+    /// once the server has been shut down.
+    pub fn local_sync(&self) -> Option<LocalOriginSync> {
+        self.local_sync.clone()
     }
 
     pub async fn shutdown(&mut self) {
@@ -200,6 +222,7 @@ impl OriginService {
         }
         self.server = None;
         self.presence_metadata = None;
+        self.local_sync = None;
     }
 
     pub fn presence_metadata_handle(&self) -> Option<Arc<RwLock<Value>>> {
@@ -214,13 +237,20 @@ impl OriginService {
         Ok(folder)
     }
 
-    fn derive_endpoint(address: std::net::SocketAddr) -> String {
+    /// The loopback URL for a listener bound to `address`.
+    ///
+    /// A wildcard bind (`0.0.0.0` / `::`) is rewritten to the matching
+    /// loopback address, since the wildcard is not a routable destination.
+    /// The URL authority is rendered through `SocketAddr`'s own `Display`,
+    /// which brackets IPv6 hosts (`[::1]:54332`); formatting the bare IP would
+    /// emit `http://::1:54332`, which is not a parseable URL.
+    fn derive_endpoint(address: SocketAddr) -> String {
         let host = match address.ip() {
-            IpAddr::V4(ipv4) if ipv4.is_unspecified() => "127.0.0.1".to_string(),
-            IpAddr::V6(ipv6) if ipv6.is_unspecified() => "::1".to_string(),
-            ip => ip.to_string(),
+            IpAddr::V4(ipv4) if ipv4.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(ipv6) if ipv6.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ip => ip,
         };
-        format!("http://{}:{}", host, address.port())
+        format!("http://{}", SocketAddr::new(host, address.port()))
     }
 
     async fn register_with_controller(
@@ -365,4 +395,57 @@ fn compose_presence_metadata(settings: &OriginSettings) -> Value {
     }
 
     Value::Object(root_map)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derive_endpoint_maps_the_ipv4_wildcard_to_loopback() {
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 54332);
+        assert_eq!(
+            OriginService::derive_endpoint(address),
+            "http://127.0.0.1:54332"
+        );
+    }
+
+    #[test]
+    fn derive_endpoint_keeps_an_explicit_ipv4_host() {
+        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)), 61232);
+        assert_eq!(
+            OriginService::derive_endpoint(address),
+            "http://10.0.0.5:61232"
+        );
+    }
+
+    /// `ORIGIN_BIND_HOST=::` must not yield the unparseable
+    /// `http://::1:54332`: an IPv6 authority has to be bracketed.
+    #[test]
+    fn derive_endpoint_brackets_ipv6_hosts() {
+        let wildcard = SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 54332);
+        assert_eq!(
+            OriginService::derive_endpoint(wildcard),
+            "http://[::1]:54332"
+        );
+
+        let explicit =
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 7)), 8080);
+        assert_eq!(
+            OriginService::derive_endpoint(explicit),
+            "http://[fd00::7]:8080"
+        );
+    }
+
+    #[test]
+    fn derived_ipv6_endpoints_parse_as_urls() {
+        let address = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 54332);
+        let endpoint = OriginService::derive_endpoint(address);
+        let url = Url::parse(&endpoint).expect("derived endpoint must be a parseable URL");
+        assert_eq!(url.port(), Some(54332));
+        assert_eq!(
+            url.join("/apply").unwrap().as_str(),
+            "http://[::1]:54332/apply"
+        );
+    }
 }

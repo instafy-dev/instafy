@@ -753,6 +753,17 @@ impl RuntimeAgent {
             origin_service = OriginService::try_start(config.clone(), token_only_overrides).await?;
         }
 
+        // Tell the job pipeline which origin this process is serving (and
+        // where it listens) so workspace sync for that origin can use the
+        // local listener instead of round-tripping through the controller
+        // proxy and the tunnel (#153). Published only while the server is up;
+        // cleared again below when it stops.
+        executor.set_local_origin_sync(
+            origin_service
+                .as_ref()
+                .and_then(|service| service.local_sync()),
+        );
+
         let tunnel_refresh = tunnel_lifecycle
             .as_ref()
             .map(|lifecycle| lifecycle.refresh_notifier());
@@ -783,7 +794,7 @@ impl RuntimeAgent {
 
         let lease_result = Self::lease_loop(
             client.clone(),
-            executor,
+            executor.clone(),
             &registration,
             shutdown.clone(),
             tunnel_refresh,
@@ -791,6 +802,10 @@ impl RuntimeAgent {
             secret_env_keys,
         )
         .await;
+
+        // No more jobs run in this cycle; stop advertising the local origin
+        // listener before it is torn down below.
+        executor.set_local_origin_sync(None);
 
         // Stop periodic snapshots before the clean shutdown snapshot so they do
         // not read/upload the live profile concurrently, and so an error path
