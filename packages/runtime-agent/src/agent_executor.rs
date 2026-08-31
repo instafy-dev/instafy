@@ -11,6 +11,7 @@ use crate::config::Config;
 use crate::controller::{ControllerClient, LeaseJob, Registration};
 use crate::job_cancel::JobCancelSignal;
 use crate::jobs::{JobExecution, JobMessage, JobProcessor, JobProgress};
+use crate::origin::LocalOriginSync;
 
 /// Shared agent execution helper that can be reused by hosted and self-hosted runtimes.
 /// It owns a JobProcessor and wraps the progress/streaming plumbing.
@@ -28,6 +29,13 @@ impl AgentExecutor {
 
     pub fn processor(&self) -> Arc<JobProcessor> {
         self.processor.clone()
+    }
+
+    /// Publish (or clear, with None) the locally hosted origin's identity and
+    /// loopback endpoint so workspace sync can bypass the tunnel data path
+    /// when a job's origin is served by this very process (#153).
+    pub fn set_local_origin_sync(&self, value: Option<LocalOriginSync>) {
+        self.processor.set_local_origin_sync(value);
     }
 
     pub async fn run_apply_with_progress(
