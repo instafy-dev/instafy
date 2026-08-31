@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::pending;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
@@ -436,6 +436,12 @@ const MIN_REGISTRATION_RENEWAL_DELAY: Duration = Duration::from_secs(30);
 const MAX_REGISTRATION_RENEWAL_DELAY: Duration = Duration::from_secs(6 * 60 * 60);
 /// Retry cadence after a failed renewal attempt while the token is still valid.
 const REGISTRATION_RENEWAL_RETRY_DELAY: Duration = Duration::from_secs(60);
+/// Floor between two consumer-triggered (on-401) re-registrations. Consumers
+/// that are all holding the same rejected credential fire at once; each
+/// registration wakes every waiter, so this only bounds how fast a *repeatedly*
+/// failing credential can drive register calls — it is not the coalescing
+/// mechanism, the shared generation bump is.
+const MIN_ON_DEMAND_RENEWAL_INTERVAL: Duration = Duration::from_secs(15);
 
 /// Re-registers with the controller before the agent token expires so the
 /// renewed runtime token (stored inside `ControllerClient` by
@@ -458,20 +464,28 @@ impl RegistrationRenewalTask {
         shutdown: ShutdownSignal,
         renewed: watch::Sender<Option<Registration>>,
     ) -> Self {
+        let token_store = client.runtime_token_handle();
         let handle = tokio::spawn(async move {
             let mut current = registration;
             let mut last_attempt_failed = false;
+            let mut last_on_demand_renewal: Option<Instant> = None;
             loop {
                 let remaining = agent_token_remaining_lifetime(
                     current.agent_token_expires_at.as_deref(),
                     Utc::now(),
                 );
-                let Some(mut delay) = registration_renewal_delay(remaining) else {
-                    warn!(
-                        runtime_id = %current.runtime_id,
-                        "agent token expiry unknown; proactive registration renewal disabled"
-                    );
-                    return;
+                // An unknown expiry disables the *timer*, not the task: a
+                // consumer rejected with 401 must still be able to pull a
+                // renewal through (#144).
+                let mut delay = match registration_renewal_delay(remaining) {
+                    Some(delay) => delay,
+                    None => {
+                        warn!(
+                            runtime_id = %current.runtime_id,
+                            "agent token expiry unknown; proactive registration renewal disabled (on-demand renewal still available)"
+                        );
+                        MAX_REGISTRATION_RENEWAL_DELAY
+                    }
                 };
                 if last_attempt_failed {
                     delay = delay.min(REGISTRATION_RENEWAL_RETRY_DELAY);
@@ -486,6 +500,25 @@ impl RegistrationRenewalTask {
                 tokio::select! {
                     _ = shutdown.cancelled() => return,
                     _ = sleep(delay) => {}
+                    // A consumer (presence beat, job secrets, heartbeat) was
+                    // rejected with 401 and is waiting for fresh credentials.
+                    _ = token_store.refresh_requested() => {
+                        if let Some(wait) = on_demand_renewal_backoff(last_on_demand_renewal, Instant::now()) {
+                            debug!(
+                                wait_ms = wait.as_millis() as u64,
+                                "on-demand credential renewal requested again; pacing the register call"
+                            );
+                            tokio::select! {
+                                _ = shutdown.cancelled() => return,
+                                _ = sleep(wait) => {}
+                            }
+                        }
+                        last_on_demand_renewal = Some(Instant::now());
+                        info!(
+                            runtime_id = %current.runtime_id,
+                            "controller credential rejected by a consumer; re-registering on demand"
+                        );
+                    }
                 }
 
                 match client.register_runtime(&config).await {
@@ -558,6 +591,14 @@ fn registration_renewal_delay(remaining: Option<Duration>) -> Option<Duration> {
                 MAX_REGISTRATION_RENEWAL_DELAY,
             ),
     )
+}
+
+/// How long to hold off before honouring another consumer-triggered renewal.
+/// `None` means "go now". Keeps a credential the controller keeps rejecting
+/// from turning every rejected request into a register call.
+fn on_demand_renewal_backoff(last: Option<Instant>, now: Instant) -> Option<Duration> {
+    let elapsed = now.saturating_duration_since(last?);
+    MIN_ON_DEMAND_RENEWAL_INTERVAL.checked_sub(elapsed)
 }
 
 /// Why `register_and_process` returned control to the registration loop.
@@ -718,8 +759,13 @@ impl RuntimeAgent {
 
         let mut tunnel_lifecycle = match tunnel_assignment.clone() {
             Some(assignment) => {
-                match TunnelLifecycle::start(config.clone(), assignment, presence_metadata.clone())
-                    .await
+                match TunnelLifecycle::start(
+                    config.clone(),
+                    assignment,
+                    presence_metadata.clone(),
+                    Some(client.runtime_token_handle()),
+                )
+                .await
                 {
                     Ok(handle) => Some(handle),
                     Err(error) => {
@@ -2059,6 +2105,33 @@ mod tests {
         );
         assert!(MIN_REGISTRATION_RENEWAL_DELAY <= REGISTRATION_RENEWAL_RETRY_DELAY);
         assert!(REGISTRATION_RENEWAL_RETRY_DELAY < MAX_REGISTRATION_RENEWAL_DELAY);
+    }
+
+    /// The first consumer to report a rejected credential must be served
+    /// immediately — a paused first renewal would keep the runtime invisible to
+    /// the controller for exactly as long as the pause (#144).
+    #[test]
+    fn the_first_on_demand_renewal_is_not_paced() {
+        assert_eq!(on_demand_renewal_backoff(None, Instant::now()), None);
+    }
+
+    /// A credential the controller keeps rejecting must not turn every rejected
+    /// request into a register call.
+    #[test]
+    fn a_rapid_second_on_demand_renewal_waits_out_the_floor() {
+        let now = Instant::now();
+        let last = now - Duration::from_secs(5);
+        assert_eq!(
+            on_demand_renewal_backoff(Some(last), now),
+            Some(MIN_ON_DEMAND_RENEWAL_INTERVAL - Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn an_on_demand_renewal_after_the_floor_runs_immediately() {
+        let now = Instant::now();
+        let last = now - (MIN_ON_DEMAND_RENEWAL_INTERVAL + Duration::from_secs(1));
+        assert_eq!(on_demand_renewal_backoff(Some(last), now), None);
     }
 
     #[test]
