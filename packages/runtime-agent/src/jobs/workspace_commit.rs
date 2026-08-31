@@ -18,6 +18,7 @@ use zip::CompressionMethod;
 use zip::write::{FileOptions, ZipWriter};
 
 use super::{CodexFileDescriptor, FileChangeKind, JobMessage, JobMessageSender};
+use crate::origin::LocalOriginSync;
 
 #[derive(Debug, Clone)]
 pub(crate) struct CommitToOriginResult {
@@ -208,6 +209,39 @@ pub(super) fn normalize_origin_endpoint_for_runtime(endpoint: &str) -> String {
     normalize_origin_endpoint_for_runtime_with_flag(endpoint, should_rewrite_host_docker_internal())
 }
 
+/// Pick the endpoint for origin byte transfers (`/apply`, `/git/sync`).
+///
+/// When the controller-selected origin (`token_origin_id`, from the
+/// controller's `/access_token` response) is the origin hosted inside this
+/// runtime process, use the local listener directly: routing the transfer
+/// through the controller proxy and the public tunnel back into this same
+/// process only adds two network hops and every tunnel failure mode (#153).
+/// The local endpoint is used verbatim — it points at this process, so the
+/// Docker host rewrites for controller-provided endpoints must not apply.
+///
+/// Authorization is unchanged either way: the caller still acquires the
+/// workspace lease and mints the fs.write token from the controller, and the
+/// origin server validates that token identically on the loopback listener
+/// (same axum middleware, same JWKS, audience = origin id).
+///
+/// Any other origin keeps the controller-provided endpoint, normalized
+/// exactly as before. Returns the endpoint and whether it is local.
+fn resolve_origin_sync_endpoint(
+    token_origin_id: Uuid,
+    token_endpoint: &str,
+    local_origin: Option<&LocalOriginSync>,
+) -> (String, bool) {
+    if let Some(local) = local_origin {
+        if local.origin_id == token_origin_id {
+            let endpoint = local.endpoint.trim().trim_end_matches('/').to_string();
+            if !endpoint.is_empty() {
+                return (endpoint, true);
+            }
+        }
+    }
+    (normalize_origin_endpoint_for_runtime(token_endpoint), false)
+}
+
 fn git_sync_enabled() -> bool {
     parse_env_bool("RUNTIME_GIT_SYNC_AFTER_APPLY").unwrap_or(true)
 }
@@ -220,6 +254,7 @@ fn should_retry_origin_apply(status: StatusCode, response_body: &str) -> bool {
             .contains("connection refused")
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn git_sync_only(
     controller_base_url: &Url,
     controller_token: &str,
@@ -228,6 +263,7 @@ pub(crate) async fn git_sync_only(
     job_id: Uuid,
     run_id: Option<Uuid>,
     message: &str,
+    local_origin: Option<&LocalOriginSync>,
 ) -> Result<GitSyncOutcome> {
     let has_remote = std::env::var("ORIGIN_GIT_REMOTE_URL")
         .ok()
@@ -262,6 +298,7 @@ pub(crate) async fn git_sync_only(
         runtime_id,
         lease_id,
         message,
+        local_origin,
     )
     .await;
 
@@ -341,6 +378,7 @@ pub(crate) async fn commit_to_hosted_origin(
     auto_sync_after_apply_override: Option<bool>,
     progress_sender: Option<JobMessageSender>,
     workspace_holds_origin_state: bool,
+    local_origin: Option<LocalOriginSync>,
 ) -> Result<Option<CommitToOriginResult>> {
     let mut uploads = BTreeMap::<String, UploadEntry>::new();
     let mut deletes = BTreeSet::<String>::new();
@@ -475,6 +513,7 @@ pub(crate) async fn commit_to_hosted_origin(
         &changed_paths,
         auto_sync_after_apply,
         progress_sender,
+        local_origin.as_ref(),
     )
     .await;
 
@@ -590,6 +629,7 @@ async fn release_workspace_lease(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn git_sync_with_lease(
     client: &reqwest::Client,
     controller_base_url: &Url,
@@ -598,6 +638,7 @@ async fn git_sync_with_lease(
     runtime_id: Uuid,
     lease_id: Uuid,
     message: &str,
+    local_origin: Option<&LocalOriginSync>,
 ) -> Result<GitSyncOutcome> {
     let access_token_url = controller_base_url
         .join("/access_token")
@@ -627,9 +668,17 @@ async fn git_sync_with_lease(
     let token: OriginAccessTokenResponse =
         serde_json::from_str(&text).context("failed to parse origin access token response")?;
 
-    let endpoint = normalize_origin_endpoint_for_runtime(token.endpoint.as_str());
+    let (endpoint, endpoint_is_local) =
+        resolve_origin_sync_endpoint(token.origin_id, token.endpoint.as_str(), local_origin);
     if endpoint.is_empty() {
         bail!("origin access token response missing endpoint");
+    }
+    if endpoint_is_local {
+        info!(
+            origin_id = %token.origin_id,
+            endpoint = %endpoint,
+            "git sync targeting the origin hosted by this runtime; using the local listener instead of the tunnel"
+        );
     }
 
     let url = format!("{}/git/sync", endpoint);
@@ -668,6 +717,7 @@ async fn git_sync_with_lease(
     Ok(GitSyncOutcome::Synced { rev: parsed.rev })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn commit_with_lease(
     client: &reqwest::Client,
     controller_base_url: &Url,
@@ -680,6 +730,7 @@ async fn commit_with_lease(
     paths: &[String],
     auto_sync_after_apply: bool,
     progress_sender: Option<JobMessageSender>,
+    local_origin: Option<&LocalOriginSync>,
 ) -> Result<CommitToOriginResult> {
     let access_token_url = controller_base_url
         .join("/access_token")
@@ -709,9 +760,17 @@ async fn commit_with_lease(
     let token: OriginAccessTokenResponse =
         serde_json::from_str(&text).context("failed to parse origin access token response")?;
 
-    let endpoint = normalize_origin_endpoint_for_runtime(token.endpoint.as_str());
+    let (endpoint, endpoint_is_local) =
+        resolve_origin_sync_endpoint(token.origin_id, token.endpoint.as_str(), local_origin);
     if endpoint.is_empty() {
         bail!("origin access token response missing endpoint");
+    }
+    if endpoint_is_local {
+        info!(
+            origin_id = %token.origin_id,
+            endpoint = %endpoint,
+            "workspace apply targeting the origin hosted by this runtime; using the local listener instead of the tunnel"
+        );
     }
 
     if let Some(sender) = progress_sender.as_ref() {
@@ -948,7 +1007,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::super::{CodexFileDescriptor, FileChangeDescriptor, FileChangeKind};
-    use super::{commit_to_hosted_origin, workspace_unchanged_against_local_origin};
+    use super::{
+        commit_to_hosted_origin, resolve_origin_sync_endpoint,
+        workspace_unchanged_against_local_origin,
+    };
+    use crate::origin::LocalOriginSync;
 
     fn run_git(repo: &Path, args: &[&str]) -> Result<()> {
         let output = StdCommand::new("git")
@@ -1042,6 +1105,7 @@ mod tests {
             Some(false),
             None,
             true,
+            None,
         )
         .await?;
 
@@ -1075,6 +1139,7 @@ mod tests {
             Some(false),
             None,
             true,
+            None,
         )
         .await;
 
@@ -1107,6 +1172,7 @@ mod tests {
             Some(false),
             None,
             false,
+            None,
         )
         .await;
 
@@ -1118,6 +1184,241 @@ mod tests {
             controller_hits.load(Ordering::SeqCst) > 0,
             "remote-origin flush must keep contacting the controller"
         );
+        Ok(())
+    }
+
+    /// Origin stand-in serving /apply and /git/sync, counting apply hits.
+    async fn spawn_origin_server(rev: &'static str) -> (SocketAddr, Arc<AtomicUsize>) {
+        async fn git_sync() -> (AxumStatusCode, &'static str) {
+            (
+                AxumStatusCode::OK,
+                r#"{"rev":"gitrev","baseRev":"gitbase"}"#,
+            )
+        }
+
+        let apply_hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_apply = apply_hits.clone();
+        let app = Router::new()
+            .route(
+                "/apply",
+                post(move || {
+                    let hits = hits_for_apply.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        (
+                            AxumStatusCode::OK,
+                            format!(r#"{{"rev":"{rev}","baseRev":"base"}}"#),
+                        )
+                    }
+                }),
+            )
+            .route("/git/sync", post(git_sync));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (address, apply_hits)
+    }
+
+    /// Controller stand-in: grants the workspace lease and mints the origin
+    /// access token (naming `origin_id` and pointing at `origin_endpoint`),
+    /// counting token mints.
+    async fn spawn_stub_controller(
+        origin_id: Uuid,
+        origin_endpoint: String,
+    ) -> (SocketAddr, Arc<AtomicUsize>) {
+        #[derive(Clone)]
+        struct ControllerState {
+            origin_id: Uuid,
+            origin_endpoint: String,
+            token_mints: Arc<AtomicUsize>,
+        }
+
+        async fn lease_acquire() -> (AxumStatusCode, String) {
+            (
+                AxumStatusCode::OK,
+                format!(r#"{{"leaseId":"{}"}}"#, Uuid::new_v4()),
+            )
+        }
+
+        async fn lease_release() -> (AxumStatusCode, &'static str) {
+            (AxumStatusCode::OK, "{}")
+        }
+
+        async fn access_token(State(state): State<ControllerState>) -> (AxumStatusCode, String) {
+            state.token_mints.fetch_add(1, Ordering::SeqCst);
+            (
+                AxumStatusCode::OK,
+                format!(
+                    r#"{{"originId":"{}","endpoint":"{}","mode":"hosted","token":"origin-token"}}"#,
+                    state.origin_id, state.origin_endpoint
+                ),
+            )
+        }
+
+        let token_mints = Arc::new(AtomicUsize::new(0));
+        let state = ControllerState {
+            origin_id,
+            origin_endpoint,
+            token_mints: token_mints.clone(),
+        };
+        let app = Router::new()
+            .route("/lease/acquire", post(lease_acquire))
+            .route("/lease/release", post(lease_release))
+            .route("/access_token", post(access_token))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (address, token_mints)
+    }
+
+    #[test]
+    fn resolve_origin_sync_endpoint_prefers_the_local_listener_for_the_hosted_origin() {
+        let origin_id = Uuid::new_v4();
+        let local = LocalOriginSync {
+            origin_id,
+            endpoint: "http://127.0.0.1:54332/".to_string(),
+        };
+
+        let (endpoint, is_local) =
+            resolve_origin_sync_endpoint(origin_id, "https://abc123.rt.instafy.dev", Some(&local));
+        assert!(is_local);
+        assert_eq!(endpoint, "http://127.0.0.1:54332");
+    }
+
+    #[test]
+    fn resolve_origin_sync_endpoint_keeps_the_controller_endpoint_for_other_origins() {
+        let local = LocalOriginSync {
+            origin_id: Uuid::new_v4(),
+            endpoint: "http://127.0.0.1:54332".to_string(),
+        };
+
+        let (endpoint, is_local) = resolve_origin_sync_endpoint(
+            Uuid::new_v4(),
+            "https://abc123.rt.instafy.dev/",
+            Some(&local),
+        );
+        assert!(!is_local);
+        assert_eq!(endpoint, "https://abc123.rt.instafy.dev");
+
+        let (endpoint, is_local) =
+            resolve_origin_sync_endpoint(Uuid::new_v4(), "https://abc123.rt.instafy.dev", None);
+        assert!(!is_local);
+        assert_eq!(endpoint, "https://abc123.rt.instafy.dev");
+    }
+
+    #[test]
+    fn resolve_origin_sync_endpoint_ignores_an_empty_local_endpoint() {
+        let origin_id = Uuid::new_v4();
+        let local = LocalOriginSync {
+            origin_id,
+            endpoint: "   ".to_string(),
+        };
+
+        let (endpoint, is_local) =
+            resolve_origin_sync_endpoint(origin_id, "https://abc123.rt.instafy.dev", Some(&local));
+        assert!(!is_local);
+        assert_eq!(endpoint, "https://abc123.rt.instafy.dev");
+    }
+
+    #[tokio::test]
+    async fn local_origin_apply_bypasses_the_tunnel_but_keeps_the_controller_token_mint()
+    -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("notes"))?;
+        std::fs::write(workspace.join("notes/status.md"), "fresh contents\n")?;
+
+        let origin_id = Uuid::new_v4();
+        let (local_origin_address, local_apply_hits) = spawn_origin_server("localrev").await;
+        let (tunnel_address, tunnel_apply_hits) = spawn_origin_server("tunnelrev").await;
+        let (controller_address, token_mints) =
+            spawn_stub_controller(origin_id, format!("http://{tunnel_address}")).await;
+        let controller_base_url = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
+
+        let result = commit_to_hosted_origin(
+            &controller_base_url,
+            "controller-token",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            &workspace,
+            &[changed_file_descriptor("notes/status.md")],
+            Some(true),
+            None,
+            false,
+            Some(LocalOriginSync {
+                origin_id,
+                endpoint: format!("http://{local_origin_address}"),
+            }),
+        )
+        .await?
+        .context("expected a commit result")?;
+
+        ensure!(result.apply_rev.as_deref() == Some("localrev"));
+        ensure!(result.origin_id == origin_id);
+        ensure!(result.git_sync_attempted);
+        ensure!(result.git_rev.as_deref() == Some("gitrev"));
+        ensure!(
+            local_apply_hits.load(Ordering::SeqCst) == 1,
+            "apply must hit the local origin listener"
+        );
+        ensure!(
+            tunnel_apply_hits.load(Ordering::SeqCst) == 0,
+            "apply must not travel through the controller-provided tunnel endpoint"
+        );
+        ensure!(
+            token_mints.load(Ordering::SeqCst) == 1,
+            "the controller token mint is the authorization gate and must be kept"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remote_origin_apply_still_uses_the_controller_provided_endpoint() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("notes"))?;
+        std::fs::write(workspace.join("notes/status.md"), "fresh contents\n")?;
+
+        let (local_origin_address, local_apply_hits) = spawn_origin_server("localrev").await;
+        let (tunnel_address, tunnel_apply_hits) = spawn_origin_server("tunnelrev").await;
+        let (controller_address, token_mints) =
+            spawn_stub_controller(Uuid::new_v4(), format!("http://{tunnel_address}")).await;
+        let controller_base_url = reqwest::Url::parse(&format!("http://{controller_address}/"))?;
+
+        let result = commit_to_hosted_origin(
+            &controller_base_url,
+            "controller-token",
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            None,
+            &workspace,
+            &[changed_file_descriptor("notes/status.md")],
+            Some(false),
+            None,
+            false,
+            Some(LocalOriginSync {
+                origin_id: Uuid::new_v4(),
+                endpoint: format!("http://{local_origin_address}"),
+            }),
+        )
+        .await?
+        .context("expected a commit result")?;
+
+        ensure!(result.apply_rev.as_deref() == Some("tunnelrev"));
+        ensure!(
+            tunnel_apply_hits.load(Ordering::SeqCst) == 1,
+            "an origin hosted elsewhere must keep the controller-provided endpoint"
+        );
+        ensure!(local_apply_hits.load(Ordering::SeqCst) == 0);
+        ensure!(token_mints.load(Ordering::SeqCst) == 1);
         Ok(())
     }
 

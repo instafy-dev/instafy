@@ -36,9 +36,21 @@ pub struct OriginLaunchOverrides {
     pub controller_token_source: Option<SharedControllerToken>,
 }
 
+/// Identity and loopback endpoint of the origin HTTP server hosted inside
+/// this runtime process, captured from the actual listener at startup. Used
+/// by the job lifecycle to keep workspace-sync byte transfers on the local
+/// listener instead of round-tripping through the controller's tunnel proxy
+/// when the sync targets the very origin this process serves (#153).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalOriginSync {
+    pub origin_id: Uuid,
+    pub endpoint: String,
+}
+
 pub struct OriginService {
     server: Option<OriginHttpServer>,
     presence_metadata: Option<Arc<RwLock<Value>>>,
+    local_sync: Option<LocalOriginSync>,
 }
 
 impl OriginService {
@@ -182,7 +194,17 @@ impl OriginService {
         Ok(Some(Self {
             server: Some(server),
             presence_metadata: Some(presence_handle),
+            local_sync: Some(LocalOriginSync {
+                origin_id: settings.origin_id,
+                endpoint: Self::derive_endpoint(start.address),
+            }),
         }))
+    }
+
+    /// The locally listening origin's identity and loopback endpoint, or None
+    /// once the server has been shut down.
+    pub fn local_sync(&self) -> Option<LocalOriginSync> {
+        self.local_sync.clone()
     }
 
     pub async fn shutdown(&mut self) {
@@ -200,6 +222,7 @@ impl OriginService {
         }
         self.server = None;
         self.presence_metadata = None;
+        self.local_sync = None;
     }
 
     pub fn presence_metadata_handle(&self) -> Option<Arc<RwLock<Value>>> {
