@@ -20,6 +20,7 @@ use crate::job_cancel::JobCancelSignal;
 use crate::model_environment::{
     INTERNAL_CREDENTIAL_ENV_KEYS, TERMINAL_HELPER_ENV_KEYS, apply_allowlisted_tokio_environment,
 };
+use crate::origin::LocalOriginSync;
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -105,6 +106,11 @@ pub struct JobProcessor {
     context_cache: Mutex<HashMap<Uuid, HashSet<String>>>,
     terminal_sessions: Mutex<HashMap<String, TerminalSession>>,
     controller_tokens: ControllerTokenVerifier,
+    /// Identity + loopback endpoint of the origin server hosted by this
+    /// runtime process, set by the agent loop while that server is listening.
+    /// Workspace sync uses it to keep byte transfers off the tunnel when the
+    /// controller-selected origin is the one this process hosts (#153).
+    local_origin_sync: Mutex<Option<LocalOriginSync>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3638,7 +3644,19 @@ impl JobProcessor {
             context_cache: Mutex::new(HashMap::new()),
             terminal_sessions: Mutex::new(HashMap::new()),
             controller_tokens,
+            local_origin_sync: Mutex::new(None),
         }
+    }
+
+    /// Publish (or clear, with None) the locally hosted origin's identity and
+    /// loopback endpoint. Called by the agent loop when the origin HTTP
+    /// server starts listening and when it shuts down.
+    pub fn set_local_origin_sync(&self, value: Option<LocalOriginSync>) {
+        *self.local_origin_sync.lock() = value;
+    }
+
+    fn local_origin_sync(&self) -> Option<LocalOriginSync> {
+        self.local_origin_sync.lock().clone()
     }
 
     fn project_id_for_job(&self, job: &LeaseJob) -> Result<Uuid> {
@@ -4848,6 +4866,7 @@ impl JobProcessor {
                 job_id: job.id,
                 run_id: job.run_id,
                 request,
+                local_origin: self.local_origin_sync(),
             })
             .await;
         }
@@ -6297,6 +6316,7 @@ impl JobProcessor {
                             progress_sender
                                 .as_ref()
                                 .map(|progress| progress.sender.clone()),
+                            self.local_origin_sync(),
                         )
                         .await
                         {
@@ -6487,6 +6507,7 @@ impl JobProcessor {
                         progress_sender
                             .as_ref()
                             .map(|progress| progress.sender.clone()),
+                        self.local_origin_sync(),
                     )
                     .await
                     {
