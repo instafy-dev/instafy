@@ -83,6 +83,9 @@ jobs:
       - authorize
       - release-approval
     runs-on: ${{ matrix.runner }}
+    # Normal cells finish in under 15 minutes. Bound a wedged BuildKit worker
+    # so one matrix cannot consume the hosted-runner allowance for six hours.
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write

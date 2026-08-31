@@ -110,6 +110,36 @@ test("one protected approval covers the whole exact-SHA service release", () => 
   );
 });
 
+test("image publication bounds every BuildKit matrix cell", () => {
+  const serviceSource = readWorkflow();
+  const runtimeSource = readRuntimeWorkflow();
+  const serviceStart = serviceSource.indexOf("  publish:\n");
+  const runtimeStart = runtimeSource.indexOf("  build-scan-push:\n");
+  assert.notEqual(serviceStart, -1);
+  assert.notEqual(runtimeStart, -1);
+
+  const serviceSection = serviceSource.slice(
+    serviceStart,
+    serviceSource.indexOf("  manifest:\n", serviceStart),
+  );
+  const runtimeSection = runtimeSource.slice(
+    runtimeStart,
+    runtimeSource.indexOf("  assemble-release-manifest:\n", runtimeStart),
+  );
+
+  for (const [name, section] of [
+    ["production service", serviceSection],
+    ["runtime agent", runtimeSection],
+  ]) {
+    assert.match(section, /timeout-minutes: 30/u, `${name} build timeout`);
+    assert.equal(
+      [...section.matchAll(/timeout-minutes:/gu)].length,
+      1,
+      `${name} build matrix must have exactly one job-level timeout`,
+    );
+  }
+});
+
 test("every service is scanned before registry login and publication", () => {
   const source = readWorkflow();
   assertOrdered(
