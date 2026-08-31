@@ -1,0 +1,80 @@
+name: Controller DB Tests
+
+on:
+  pull_request:
+    paths:
+      - "packages/runtime-controller/**"
+      - "supabase/**"
+      - "scripts/test-controller.mjs"
+      - "scripts/supabase-stack.mjs"
+      - "scripts/lib/localSupabaseEnv.mjs"
+      - "scripts/lib/supabaseStartMode.mjs"
+      - "scripts/lib/supabaseEmailTemplateMounts.mjs"
+      - ".github/workflows/controller-db-tests.yml"
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: controller-db-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  controller-db-tests:
+    name: Controller database tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      # scripts/test-controller.mjs prefers an explicit TEST_DATABASE_URL and
+      # exports it (plus DATABASE_URL and RUST_TEST_THREADS=1) to cargo test.
+      # 54322 is the database port pinned in supabase/supabase/config.toml.
+      TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Set up stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      # The lockfile pins the supabase CLI (devDependency), so the stack
+      # helper below always runs the reviewed CLI version.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Same entrypoint developers use, restricted to the Postgres service:
+      # `supabase db start` boots the Supabase Postgres image (auth schema,
+      # roles, extensions included) and the helper then applies every
+      # supabase/migrations file via `supabase migration up --local`.
+      - name: Start Supabase Postgres and apply migrations
+        env:
+          SUPABASE_DATABASE_ONLY: "1"
+        run: pnpm supabase:up
+
+      # Runs the full runtime-controller test binary: the DB-gated suites
+      # plus every non-DB unit test in the same package. One controller test
+      # sleeps ~90s by design, so no per-step timeout is set here.
+      - name: Run controller test suite
+        run: pnpm test:controller
