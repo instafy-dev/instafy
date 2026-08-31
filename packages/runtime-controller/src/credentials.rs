@@ -503,7 +503,7 @@ pub(crate) async fn ensure_managed_ai_proxy_ready(
         if requirements.error.is_none() && !requirements.requires_user_credentials {
             break;
         }
-        tokio::time::sleep(managed_ai_startup_retry_delay(attempt)).await;
+        sleep_managed_ai_startup_retry(attempt).await;
         requirements =
             fetch_proxy_credential_requirements(client, proxy_base_url, Duration::from_secs(2))
                 .await;
@@ -532,6 +532,16 @@ pub(crate) async fn ensure_managed_ai_proxy_ready(
 
 fn managed_ai_startup_retry_delay(attempt: u32) -> Duration {
     Duration::from_millis(500 * 2_u64.pow(attempt.min(4)))
+}
+
+async fn sleep_managed_ai_startup_retry(attempt: u32) {
+    #[cfg(not(test))]
+    tokio::time::sleep(managed_ai_startup_retry_delay(attempt)).await;
+
+    #[cfg(test)]
+    let _ = attempt;
+    #[cfg(test)]
+    tokio::task::yield_now().await;
 }
 
 pub(crate) async fn count_recent_managed_ai_prompts(
@@ -3656,6 +3666,7 @@ mod requirement_tests {
                 .contains("proxy reports requiresCredential=true"),
             "unexpected error: {error}"
         );
+        assert_eq!(mock.hits_async().await, 15);
     }
 
     #[test]
