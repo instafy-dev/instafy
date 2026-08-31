@@ -652,7 +652,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(requestRetry).not.toHaveBeenCalled();
   });
 
-  it("keeps generic failed-run summaries calm when metadata marks the run failed", async () => {
+  it("surfaces the real reason inline for a generic failed run (#145)", async () => {
     await act(async () => {
       root.render(
         <AgentJobThreadPreviewLayout
@@ -668,8 +668,14 @@ describe("AgentJobThreadPreviewLayout", () => {
       );
     });
 
-    expect(container.textContent).toContain("Something went wrong finishing this run.");
-    expect(container.textContent).not.toContain("Codex run hit an unexpected internal state.");
+    // The uninformative canned sentence is gone; the actual failure reason is
+    // shown inline instead of only behind Details.
+    expect(container.textContent).toContain("Codex run hit an unexpected internal state.");
+    expect(container.textContent).not.toContain("Something went wrong finishing this run.");
+    // Status stays present as the entry-level header.
+    expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')?.textContent).toBe(
+      "Run failed",
+    );
   });
 
   it("keeps reconnect guidance for a terminal credential-refresh failure", async () => {
