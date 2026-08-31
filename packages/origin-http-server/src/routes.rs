@@ -2571,6 +2571,7 @@ mod tests {
             bind_port: 0,
             controller_base_url: "http://127.0.0.1:1".parse().unwrap(),
             controller_internal_token: None,
+            controller_token_source: None,
             jwks_url: "http://127.0.0.1:1/jwks".parse().unwrap(),
             skip_auth: true,
             enable_presence_heartbeat: false,
@@ -2712,6 +2713,7 @@ mod tests {
             bind_port: 0,
             controller_base_url: "http://127.0.0.1:1".parse().expect("controller url"),
             controller_internal_token: None,
+            controller_token_source: None,
             jwks_url: "http://127.0.0.1:1/jwks".parse().expect("jwks url"),
             skip_auth: true,
             enable_presence_heartbeat: false,
@@ -2958,6 +2960,7 @@ mod tests {
             bind_port: 0,
             controller_base_url: controller_base_url.clone(),
             controller_internal_token: None,
+            controller_token_source: None,
             jwks_url: controller_base_url,
             skip_auth,
             enable_presence_heartbeat: false,
@@ -3231,6 +3234,7 @@ mod tests {
             bind_port: 0,
             controller_base_url: controller_base_url.clone(),
             controller_internal_token: None,
+            controller_token_source: None,
             jwks_url: controller_base_url.join("jwks").expect("jwks url"),
             skip_auth: false,
             enable_presence_heartbeat: false,
@@ -3367,6 +3371,7 @@ mod tests {
                 .parse()
                 .expect("controller url"),
             controller_internal_token: None,
+            controller_token_source: None,
             jwks_url: format!("http://{jwks_address}/jwks")
                 .parse()
                 .expect("jwks url"),
