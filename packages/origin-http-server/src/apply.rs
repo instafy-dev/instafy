@@ -1360,6 +1360,7 @@ mod tests {
             bind_port: 54332,
             controller_base_url: Url::parse("http://127.0.0.1:8788").unwrap(),
             controller_internal_token: None,
+            controller_token_source: None,
             jwks_url: Url::parse("http://127.0.0.1:8788/.well-known/jwks.json").unwrap(),
             skip_auth: true,
             enable_presence_heartbeat: false,
