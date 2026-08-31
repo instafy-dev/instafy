@@ -149,7 +149,7 @@ promotion, and production migration procedures are maintained separately.
 - Broader GitHub workflow automation is still out of scope for this release. Issue/PR/release automation should not be treated as shipped repo sync.
 
 ### AI Providers
-- Managed AI turns are served by OpenAI (the controller pins `CODEX_MODEL_PROVIDER=openai`; the model comes from `MANAGED_AI_MODEL_ID`, default `gpt-5.5`).
+- Managed AI turns are served by OpenAI (the controller pins `CODEX_MODEL_PROVIDER=openai`; the model comes from `MANAGED_AI_MODEL_ID`, default `gpt-5.6-sol`).
 - BYOC lets users bring their own provider instead: an OpenAI API key or ChatGPT device-code login, DeepSeek, z.ai, or Gemini.
 - All controller-driven automation **must route through the Instafy AI proxy**. Set `PROXY_BASE_URL` and `PROXY_SIGNING_SECRET` in your environment, and ensure any CLI agents (including the Codex runner inside dev containers) call the proxy endpoint instead of OpenAI directly so credit debits and BYO keys are enforced.
 

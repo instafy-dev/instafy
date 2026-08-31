@@ -37,20 +37,33 @@ describe("conversation roster placement", () => {
     expect(chatPanel).toContain("<ConversationRoster");
   });
 
-  it("keeps the roster row a right-aligned flow row, never an overlay", () => {
+  it("keeps the roster row a flow row, never an overlay", () => {
     const rowClass = /className="([^"]*)"\s*\n\s*data-testid="chat-conversation-roster-row"/.exec(
       chatPanel,
     )?.[1];
 
     expect(rowClass).toBeDefined();
-    expect(rowClass).toContain("flex");
     expect(rowClass).toContain("flex-none");
-    expect(rowClass).toContain("justify-end");
     // Same horizontal padding as the scroll container beneath it.
     expect(rowClass).toContain("px-3");
     expect(rowClass).toContain("sm:px-4");
     expect(rowClass).not.toContain("absolute");
     expect(rowClass).not.toContain("fixed");
+  });
+
+  it("aligns the roster to the shared chat column, not the panel edge", () => {
+    // The roster is right-aligned *inside* the 56rem ChatColumn so its edge
+    // lands on the message column instead of the panel edge. Grab the source
+    // between the roster row and its ConversationRoster and assert the column
+    // wrapper is present and right-aligns its content.
+    const rowStart = chatPanel.indexOf('data-testid="chat-conversation-roster-row"');
+    const rosterTag = chatPanel.indexOf("<ConversationRoster", rowStart);
+    const wrapper = chatPanel.slice(rowStart, rosterTag);
+
+    expect(rowStart).toBeGreaterThan(-1);
+    expect(rosterTag).toBeGreaterThan(rowStart);
+    expect(wrapper).toContain("<ChatColumn");
+    expect(wrapper).toContain("justify-end");
   });
 
   it("shows the roster at every viewport width", () => {

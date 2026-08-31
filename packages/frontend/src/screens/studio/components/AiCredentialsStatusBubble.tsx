@@ -27,6 +27,7 @@ import {
   AccessSectionLabel,
 } from "./AccessDecisionCard";
 import { ChatGptDeviceCodePrerequisite } from "./ChatGptDeviceCodePrerequisite";
+import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
 import { ChatActivityBubble } from "./ChatActivityBubble";
 import {
   isLikelyDesktopDevice,
@@ -557,7 +558,7 @@ export function AiCredentialsStatusBubble({
         radius="2xl"
         shadow="sm"
         data-testid="credentials-status-indicator"
-        className="max-w-[min(85%,30rem)] px-3 py-2.5 text-sm"
+        className={`${CHAT_BUBBLE_MAX_WIDTH.status} px-3 py-2.5 text-sm`}
         aria-live="polite"
       >
         <div className="flex min-w-0 flex-wrap items-center gap-3">

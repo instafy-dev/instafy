@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use super::workspace_commit::{GitSyncOutcome, git_sync_only};
 use super::{JobExecution, JobMessage};
+use crate::origin::LocalOriginSync;
 
 #[derive(Debug, Clone)]
 pub struct GitSyncRequest {
@@ -59,6 +60,7 @@ pub async fn build_git_sync_execution(params: GitSyncExecutionParams<'_>) -> Res
         params.job_id,
         params.run_id,
         &message,
+        params.local_origin.as_ref(),
     )
     .await
     {
@@ -91,6 +93,7 @@ pub struct GitSyncExecutionParams<'a> {
     pub job_id: Uuid,
     pub run_id: Option<Uuid>,
     pub request: &'a GitSyncRequest,
+    pub local_origin: Option<LocalOriginSync>,
 }
 
 fn build_messages_from_outcome(outcome: &GitSyncOutcome) -> (String, Vec<JobMessage>) {

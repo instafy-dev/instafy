@@ -152,6 +152,8 @@ fn load_config() -> Result<ServerConfig> {
         bind_port,
         controller_base_url,
         controller_internal_token,
+        // The standalone binary has no embedding agent to feed renewals.
+        controller_token_source: None,
         jwks_url,
         skip_auth,
         enable_presence_heartbeat,

@@ -22,6 +22,7 @@ import {
   AccessPill,
   AccessSectionLabel,
 } from "./AccessDecisionCard";
+import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
 import { useDeviceAuthFlow } from "./device-auth/useDeviceAuthFlow";
 import {
   executeGithubProjectImport,
@@ -283,7 +284,7 @@ export function SecretRequestEntry({
       shadow="sm"
       data-testid="secret-request-card"
       data-message-type="secret_request"
-      className="max-w-[min(80%,42rem)] px-3 py-2.5 text-sm text-slate-700"
+      className={`${CHAT_BUBBLE_MAX_WIDTH.alert} px-3 py-2.5 text-sm text-slate-700`}
     >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
@@ -931,7 +932,7 @@ export function IntegrationRequestEntry({
         data-testid="integration-request-card"
         data-message-type="integration_request"
         resolved
-        className="!max-w-[min(100%,38rem)] px-4 py-3 text-slate-700 dark:text-slate-200"
+        className={`${CHAT_BUBBLE_MAX_WIDTH.card} px-4 py-3 text-slate-700 dark:text-slate-200`}
       >
         <div className="flex min-w-0 items-center gap-3">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-950 shadow-sm shadow-slate-950/10 dark:border-white/15 dark:bg-white dark:text-slate-950 dark:shadow-black/30">
@@ -966,7 +967,7 @@ export function IntegrationRequestEntry({
         data-testid="integration-request-card"
         data-message-type="integration_request"
         resolved
-        className="!max-w-[min(100%,38rem)] px-4 py-3 text-slate-700 dark:text-slate-200"
+        className={`${CHAT_BUBBLE_MAX_WIDTH.card} px-4 py-3 text-slate-700 dark:text-slate-200`}
       >
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex min-w-0 items-center gap-3">
