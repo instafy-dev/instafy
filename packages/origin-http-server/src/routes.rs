@@ -1620,16 +1620,17 @@ async fn active_lease_blocks_sync(
     claims_lease_id: Option<&str>,
     fallback_token: Option<&str>,
 ) -> Option<String> {
+    // Live, not the spawn-time snapshot (issue #144).
     let token = state
         .config
-        .controller_internal_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .current_controller_token()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
         .or_else(|| {
             fallback_token
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
+                .map(str::to_string)
         })?;
 
     let mut url = state.config.controller_base_url.clone();
@@ -1998,7 +1999,8 @@ async fn post_commit_receipt(
     user_id: Option<String>,
     summary: ApplySummary,
 ) {
-    let Some(token) = config.controller_internal_token.clone() else {
+    // Live, not the spawn-time snapshot (issue #144).
+    let Some(token) = config.current_controller_token() else {
         return;
     };
 

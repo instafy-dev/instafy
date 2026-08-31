@@ -20,6 +20,8 @@ use tokio::time::sleep;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use origin_http_server::config::SharedControllerToken;
+
 use crate::config::{Config, OriginSettings};
 use crate::controller::Registration;
 use crate::model_environment::apply_allowlisted_tokio_environment;
@@ -242,6 +244,7 @@ impl TunnelLifecycle {
         config: Arc<Config>,
         assignment: TunnelAssignment,
         presence_metadata: Option<Arc<RwLock<JsonValue>>>,
+        token_source: Option<SharedControllerToken>,
     ) -> Result<Self> {
         let origin_settings = config
             .origin
@@ -263,7 +266,7 @@ impl TunnelLifecycle {
         let refresh_notify = Arc::new(Notify::new());
         let shutdown_flag = Arc::new(AtomicBool::new(false));
         let assignment_state = Arc::new(Mutex::new(assignment.clone()));
-        let status_reporter = tunnel_status_reporter(&config, origin_settings);
+        let status_reporter = tunnel_status_reporter(&config, origin_settings, token_source);
         let status_emitter = Arc::new(TunnelStatusEmitter::new(
             assignment_state.clone(),
             presence_metadata,
@@ -821,20 +824,50 @@ struct TunnelStatusReporter {
     client: reqwest::Client,
     controller_base_url: reqwest::Url,
     project_id: Uuid,
-    internal_token: String,
+    /// Live credential shared with the registration path. The status loop runs
+    /// for the whole life of the tunnel, so a token captured at spawn would go
+    /// stale exactly like the presence beat did (#144).
+    token_source: Option<SharedControllerToken>,
+    fallback_token: Option<String>,
 }
 
 impl TunnelStatusReporter {
-    fn new(controller_base_url: reqwest::Url, project_id: Uuid, internal_token: String) -> Self {
+    fn new(
+        controller_base_url: reqwest::Url,
+        project_id: Uuid,
+        token_source: Option<SharedControllerToken>,
+        fallback_token: Option<String>,
+    ) -> Self {
         Self {
             client: reqwest::Client::new(),
             controller_base_url,
             project_id,
-            internal_token,
+            token_source,
+            fallback_token,
         }
     }
 
+    fn bearer(&self) -> Option<String> {
+        if let Some(source) = &self.token_source {
+            if let Some(token) = source
+                .current()
+                .map(|token| token.trim().to_string())
+                .filter(|token| !token.is_empty())
+            {
+                return Some(token);
+            }
+        }
+        self.fallback_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string)
+    }
+
     async fn report(&self, tunnel_id: &str, status: &str) -> Result<()> {
+        let Some(bearer) = self.bearer() else {
+            return Err(anyhow!("no controller token available for tunnel status"));
+        };
         let mut url = self.controller_base_url.clone();
         url.path_segments_mut()
             .map_err(|_| anyhow!("controller base URL invalid for tunnel status update"))?
@@ -848,7 +881,7 @@ impl TunnelStatusReporter {
 
         self.client
             .post(url)
-            .bearer_auth(&self.internal_token)
+            .bearer_auth(bearer)
             .json(&json!({
                 "status": status,
             }))
@@ -864,15 +897,22 @@ impl TunnelStatusReporter {
 fn tunnel_status_reporter(
     config: &Arc<Config>,
     origin_settings: &OriginSettings,
+    token_source: Option<SharedControllerToken>,
 ) -> Option<TunnelStatusReporter> {
-    let token = origin_settings.controller_internal_token.clone()?;
-    if token.trim().is_empty() {
+    let fallback = origin_settings
+        .controller_internal_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string);
+    if token_source.is_none() && fallback.is_none() {
         return None;
     }
     Some(TunnelStatusReporter::new(
         config.controller_base_url.clone(),
         config.project_id,
-        token,
+        token_source,
+        fallback,
     ))
 }
 
