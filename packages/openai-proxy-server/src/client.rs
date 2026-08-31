@@ -14,6 +14,9 @@ const APPLY_PATCH_GRAMMAR: &str = include_str!(concat!(
     "/../../codex/codex-rs/core/src/tools/handlers/apply_patch.lark"
 ));
 
+/// Last-resort model for requests that carry no model AND resolve against a
+/// credential with no default (local/dev auth.json paths). NOT a sentinel:
+/// requests that name this id explicitly are served exactly this model.
 pub const DEFAULT_MODEL: &str = "gpt-5.5";
 pub const DEFAULT_INSTRUCTIONS: &str = include_str!("../prompt_gpt5_codex.md");
 
