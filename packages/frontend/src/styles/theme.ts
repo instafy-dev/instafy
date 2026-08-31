@@ -3,7 +3,7 @@ export const theme = {
     gradient: "bg-gradient-to-br from-primary-50 via-white to-secondary-100",
   },
   surface: {
-    card: "rounded-3xl border border-slate-200 bg-white/95 shadow-xl shadow-slate-200/70",
+    card: "rounded-3xl border border-slate-200 bg-white/95 shadow-xl shadow-slate-200/70 dark:border-slate-800 dark:bg-slate-950/60 dark:shadow-none",
   },
   text: {
     primary: "text-slate-900",

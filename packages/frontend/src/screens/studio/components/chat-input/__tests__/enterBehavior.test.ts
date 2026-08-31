@@ -13,6 +13,7 @@ function resolve(
     isComposing: false,
     hasOpenMenu: false,
     hasActiveMatchingAgent: false,
+    touchLikeInput: false,
     ...overrides,
   });
 }
@@ -57,5 +58,19 @@ describe("resolveComposerEnterAction", () => {
   it("does not depend on whether a draft is single-line or multiline", () => {
     expect(resolve({ hasActiveMatchingAgent: true })).toBe("steer");
     expect(resolve({ hasActiveMatchingAgent: false })).toBe("send");
+  });
+
+  it("newlines with plain Enter on touch-like input (soft keyboards)", () => {
+    expect(resolve({ touchLikeInput: true })).toBe("newline");
+    expect(resolve({ touchLikeInput: true, hasActiveMatchingAgent: true })).toBe(
+      "newline",
+    );
+  });
+
+  it("keeps modifier sends on touch devices with hardware keyboards", () => {
+    expect(resolve({ touchLikeInput: true, metaKey: true })).toBe("queue");
+    expect(resolve({ touchLikeInput: true, metaKey: true, shiftKey: true })).toBe(
+      "stash",
+    );
   });
 });
