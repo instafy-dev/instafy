@@ -184,7 +184,7 @@ export function InviteAcceptPage() {
           : error ?? "This invite link is invalid or has expired.";
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900" data-testid="invite-accept-page">
+    <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-[var(--color-studio-dark-canvas)] dark:text-slate-100" data-testid="invite-accept-page">
       <div className="relative mx-auto flex min-h-screen max-w-5xl flex-col items-center justify-center px-6 py-16">
         <div className={`w-full max-w-xl p-10 ${theme.surface.card}`}>
           <header className="flex flex-col items-center text-center">
