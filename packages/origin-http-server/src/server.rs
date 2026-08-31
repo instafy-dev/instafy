@@ -16,6 +16,7 @@ use tracing::{info, warn};
 
 use crate::auth::TokenValidator;
 use crate::config::ServerConfig;
+use crate::config::CONTROLLER_TOKEN_REFRESH_TIMEOUT;
 use crate::config::MAX_APPLY_MANIFEST_BYTES;
 use crate::git;
 use crate::git_tokens;
@@ -308,7 +309,7 @@ impl OriginHttpServer {
         }
 
         if let Some(url) = self.presence_url.clone() {
-            if let Err(error) = send_presence_beat(
+            if let Err(error) = beat_with_recovery(
                 &self.http_client,
                 &url,
                 &self.config,
@@ -373,7 +374,7 @@ impl OriginHttpServer {
             let mut ticker = time::interval(interval);
             ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-            if let Err(error) = send_presence_beat(
+            if let Err(error) = beat_with_recovery(
                 &client,
                 &presence_url_clone,
                 &config,
@@ -382,34 +383,13 @@ impl OriginHttpServer {
             )
             .await
             {
-                // Retry immediately on 404 to smooth startup races (register → beat ordering)
-                let maybe_404 = error
-                    .downcast_ref::<reqwest::Error>()
-                    .and_then(|e| e.status())
-                    .map(|s| s == reqwest::StatusCode::NOT_FOUND)
-                    .unwrap_or(false);
-                if maybe_404 {
-                    time::sleep(std::time::Duration::from_millis(250)).await;
-                    if let Err(retry_err) = send_presence_beat(
-                        &client,
-                        &presence_url_clone,
-                        &config,
-                        "online",
-                        metadata.clone(),
-                    )
-                    .await
-                    {
-                        warn!(?retry_err, "presence heartbeat retry failed");
-                    }
-                } else {
-                    warn!(?error, "presence heartbeat failed");
-                }
+                warn!(?error, "presence heartbeat failed");
             }
 
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {
-                        if let Err(error) = send_presence_beat(
+                        if let Err(error) = beat_with_recovery(
                             &client,
                             &presence_url_clone,
                             &config,
@@ -433,13 +413,95 @@ impl OriginHttpServer {
     }
 }
 
-async fn send_presence_beat(
+/// How the controller answered a single presence beat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BeatOutcome {
+    Accepted,
+    Rejected(reqwest::StatusCode),
+}
+
+/// One beat, plus the two recoveries a long-lived presence loop needs:
+///
+/// * 404 — a startup race between `origin/register` and the first beat; retried
+///   once after a short pause, as before;
+/// * 401/403 — the controller credential lapsed. Ask the runtime agent to renew
+///   it (issue #144) and retry exactly once with whatever it publishes. When no
+///   renewal arrives we return the error and let the next tick try again, so a
+///   dead credential costs one extra request per interval instead of a spin.
+async fn beat_with_recovery(
     client: &reqwest::Client,
     url: &Url,
     config: &ServerConfig,
     status: &str,
     metadata: Arc<RwLock<JsonValue>>,
 ) -> Result<()> {
+    beat_with_recovery_within(
+        client,
+        url,
+        config,
+        status,
+        metadata,
+        CONTROLLER_TOKEN_REFRESH_TIMEOUT,
+    )
+    .await
+}
+
+async fn beat_with_recovery_within(
+    client: &reqwest::Client,
+    url: &Url,
+    config: &ServerConfig,
+    status: &str,
+    metadata: Arc<RwLock<JsonValue>>,
+    refresh_timeout: Duration,
+) -> Result<()> {
+    match send_presence_beat(client, url, config, status, metadata.clone()).await? {
+        BeatOutcome::Accepted => Ok(()),
+        BeatOutcome::Rejected(rejected)
+            if rejected == reqwest::StatusCode::UNAUTHORIZED
+                || rejected == reqwest::StatusCode::FORBIDDEN =>
+        {
+            warn!(
+                %rejected,
+                "presence beat rejected; requesting a controller token renewal"
+            );
+            if !config.refresh_controller_token(refresh_timeout).await {
+                anyhow::bail!(
+                    "presence beat rejected with {rejected} and no renewed controller token arrived"
+                );
+            }
+            match send_presence_beat(client, url, config, status, metadata).await? {
+                BeatOutcome::Accepted => {
+                    info!("presence heartbeat recovered with a renewed controller token");
+                    Ok(())
+                }
+                BeatOutcome::Rejected(retried) => anyhow::bail!(
+                    "presence beat still rejected after a controller token renewal: status={retried}"
+                ),
+            }
+        }
+        BeatOutcome::Rejected(reqwest::StatusCode::NOT_FOUND) => {
+            // Smooth the startup race (register -> beat ordering).
+            time::sleep(Duration::from_millis(250)).await;
+            match send_presence_beat(client, url, config, status, metadata).await? {
+                BeatOutcome::Accepted => Ok(()),
+                BeatOutcome::Rejected(retried) => {
+                    anyhow::bail!("presence beat returned error status {retried}")
+                }
+            }
+        }
+        BeatOutcome::Rejected(rejected) => {
+            anyhow::bail!("presence beat returned error status {rejected}")
+        }
+    }
+}
+
+async fn send_presence_beat(
+    client: &reqwest::Client,
+    url: &Url,
+    config: &ServerConfig,
+    status: &str,
+    metadata: Arc<RwLock<JsonValue>>,
+) -> Result<BeatOutcome> {
     // Resolved per beat: registration renewals in the embedding runtime agent
     // update the shared source, and a spawn-time snapshot would 401 forever
     // once the original token expires (issue #144).
@@ -457,17 +519,20 @@ async fn send_presence_beat(
         "metadata": current_metadata,
     });
 
-    client
+    let response = client
         .post(url.clone())
         .bearer_auth(token)
         .json(&payload)
         .send()
         .await
-        .context("presence heartbeat request failed")?
-        .error_for_status()
-        .context("presence heartbeat returned error status")?;
+        .context("presence heartbeat request failed")?;
 
-    Ok(())
+    let status_code = response.status();
+    if status_code.is_success() {
+        Ok(BeatOutcome::Accepted)
+    } else {
+        Ok(BeatOutcome::Rejected(status_code))
+    }
 }
 
 impl OriginHttpServer {
@@ -481,5 +546,317 @@ impl OriginHttpServer {
 
     pub fn presence_metadata_handle(&self) -> Arc<RwLock<JsonValue>> {
         self.presence_metadata.clone()
+    }
+}
+
+#[cfg(test)]
+mod presence_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use axum::extract::State;
+    use axum::http::{HeaderMap, StatusCode as AxumStatus};
+    use axum::routing::post;
+    use axum::Router;
+    use tokio::net::TcpListener;
+
+    use crate::config::ControllerTokenStore;
+
+    use super::*;
+
+    const REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+    const NO_OWNER_TIMEOUT: Duration = Duration::from_millis(50);
+
+    #[derive(Clone)]
+    struct MockController {
+        /// Only this bearer is accepted; everything else gets the production
+        /// 401 the runtime saw on `origin/presence/beat`.
+        accepted: Arc<std::sync::RwLock<String>>,
+        bearers: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    async fn beat_handler(
+        State(state): State<MockController>,
+        headers: HeaderMap,
+        body: String,
+    ) -> (AxumStatus, String) {
+        let _ = body;
+        state.calls.fetch_add(1, Ordering::SeqCst);
+        let presented = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        state.bearers.lock().unwrap().push(presented.clone());
+
+        let expected = format!(
+            "Bearer {}",
+            state.accepted.read().unwrap_or_else(|p| p.into_inner())
+        );
+        if presented.as_deref() == Some(expected.as_str()) {
+            (AxumStatus::OK, "{}".to_string())
+        } else {
+            (
+                AxumStatus::UNAUTHORIZED,
+                r#"{"message":"agent token expired"}"#.to_string(),
+            )
+        }
+    }
+
+    async fn spawn_mock_controller(state: MockController) -> Url {
+        let router = Router::new()
+            .route("/presence/beat", post(beat_handler))
+            .with_state(state);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock controller");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve");
+        });
+        format!("http://{addr}/presence/beat")
+            .parse()
+            .expect("presence url")
+    }
+
+    fn presence_config(source: Option<crate::config::SharedControllerToken>) -> ServerConfig {
+        ServerConfig {
+            project_id: uuid::Uuid::new_v4(),
+            origin_id: uuid::Uuid::new_v4(),
+            workspace_root: PathBuf::from("/tmp"),
+            git_remote_url: None,
+            git_remote_base_url: None,
+            git_branch: "main".into(),
+            git_remote_name: "origin".into(),
+            git_author_name: "Instafy".into(),
+            git_author_email: "instafy@example.invalid".into(),
+            bind_host: "127.0.0.1".into(),
+            bind_port: 0,
+            controller_base_url: "http://127.0.0.1:1/".parse().expect("base url"),
+            controller_internal_token: Some("spawn-time-token".into()),
+            controller_token_source: source,
+            jwks_url: "http://127.0.0.1:1/jwks".parse().expect("jwks url"),
+            skip_auth: false,
+            enable_presence_heartbeat: true,
+            presence_interval: Duration::from_secs(30),
+            max_archive_bytes: 1024,
+            staging_base: None,
+            multi_tenant: false,
+        }
+    }
+
+    fn metadata() -> Arc<RwLock<JsonValue>> {
+        Arc::new(RwLock::new(serde_json::json!({"source": "test"})))
+    }
+
+    fn mock(accepted: &str) -> MockController {
+        MockController {
+            accepted: Arc::new(std::sync::RwLock::new(accepted.to_string())),
+            bearers: Arc::new(std::sync::Mutex::new(Vec::new())),
+            calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// A beat the controller accepts must not touch the renewal machinery at
+    /// all: one request, no refresh request raised.
+    #[tokio::test]
+    async fn an_accepted_beat_sends_exactly_one_request() {
+        let store: crate::config::SharedControllerToken =
+            Arc::new(ControllerTokenStore::new(Some("good-token".into())));
+        let controller = mock("good-token");
+        let url = spawn_mock_controller(controller.clone()).await;
+        let config = presence_config(Some(store.clone()));
+
+        beat_with_recovery_within(
+            &reqwest::Client::new(),
+            &url,
+            &config,
+            "online",
+            metadata(),
+            REFRESH_TIMEOUT,
+        )
+        .await
+        .expect("beat accepted");
+
+        assert_eq!(controller.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store.generation(), 0, "no renewal should have been needed");
+    }
+
+    /// Reproduces instafy-dev/instafy#144: the presence loop 401s because the
+    /// credential it is handed has lapsed. It must pull a renewal through the
+    /// shared source and retry with the token the renewal published — without
+    /// the process restarting.
+    #[tokio::test]
+    async fn a_rejected_beat_renews_and_retries_once() {
+        let store: crate::config::SharedControllerToken =
+            Arc::new(ControllerTokenStore::new(Some("expired-token".into())));
+        let controller = mock("renewed-token");
+        let url = spawn_mock_controller(controller.clone()).await;
+        let config = presence_config(Some(store.clone()));
+
+        // Stands in for the runtime agent's registration/renewal task.
+        let owner = store.clone();
+        let registrations = Arc::new(AtomicUsize::new(0));
+        let counter = registrations.clone();
+        tokio::spawn(async move {
+            loop {
+                owner.refresh_requested().await;
+                counter.fetch_add(1, Ordering::SeqCst);
+                owner.store("renewed-token".into());
+            }
+        });
+
+        beat_with_recovery_within(
+            &reqwest::Client::new(),
+            &url,
+            &config,
+            "online",
+            metadata(),
+            REFRESH_TIMEOUT,
+        )
+        .await
+        .expect("beat recovers after the renewal");
+
+        assert_eq!(
+            controller.calls.load(Ordering::SeqCst),
+            2,
+            "one rejected beat plus exactly one retry"
+        );
+        assert_eq!(registrations.load(Ordering::SeqCst), 1);
+        let bearers = controller.bearers.lock().unwrap().clone();
+        assert_eq!(
+            bearers,
+            vec![
+                Some("Bearer expired-token".to_string()),
+                Some("Bearer renewed-token".to_string()),
+            ]
+        );
+    }
+
+    /// The other half of "exactly once": when a renewal never lands, the beat
+    /// must fail out to the caller rather than retrying. The loop's own tick is
+    /// the only thing that may try again.
+    #[tokio::test]
+    async fn a_rejected_beat_does_not_retry_when_no_renewal_arrives() {
+        let store: crate::config::SharedControllerToken =
+            Arc::new(ControllerTokenStore::new(Some("expired-token".into())));
+        let controller = mock("renewed-token");
+        let url = spawn_mock_controller(controller.clone()).await;
+        let config = presence_config(Some(store));
+
+        let error = beat_with_recovery_within(
+            &reqwest::Client::new(),
+            &url,
+            &config,
+            "online",
+            metadata(),
+            NO_OWNER_TIMEOUT,
+        )
+        .await
+        .expect_err("no renewal, so the beat fails");
+
+        assert!(
+            format!("{error:#}").contains("no renewed controller token arrived"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(
+            controller.calls.load(Ordering::SeqCst),
+            1,
+            "the rejected beat must not be retried without a fresh credential"
+        );
+    }
+
+    /// A renewal that lands but is still rejected must stop after that single
+    /// retry instead of asking for renewal again.
+    #[tokio::test]
+    async fn a_beat_rejected_after_renewal_stops_retrying() {
+        let store: crate::config::SharedControllerToken =
+            Arc::new(ControllerTokenStore::new(Some("expired-token".into())));
+        let controller = mock("never-issued-token");
+        let url = spawn_mock_controller(controller.clone()).await;
+        let config = presence_config(Some(store.clone()));
+
+        let owner = store.clone();
+        let registrations = Arc::new(AtomicUsize::new(0));
+        let counter = registrations.clone();
+        tokio::spawn(async move {
+            loop {
+                owner.refresh_requested().await;
+                counter.fetch_add(1, Ordering::SeqCst);
+                owner.store("still-wrong-token".into());
+            }
+        });
+
+        let error = beat_with_recovery_within(
+            &reqwest::Client::new(),
+            &url,
+            &config,
+            "online",
+            metadata(),
+            REFRESH_TIMEOUT,
+        )
+        .await
+        .expect_err("the renewed token is rejected too");
+
+        assert!(
+            format!("{error:#}").contains("still rejected after a controller token renewal"),
+            "unexpected error: {error:#}"
+        );
+        assert_eq!(controller.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            registrations.load(Ordering::SeqCst),
+            1,
+            "one renewal per beat, not a renewal loop"
+        );
+    }
+
+    /// Guards the pre-existing startup-race behavior: a 404 is still retried
+    /// once after a short pause, and does not consume a token renewal.
+    #[tokio::test]
+    async fn a_404_beat_is_retried_without_requesting_a_renewal() {
+        #[derive(Clone)]
+        struct NotFoundThenOk {
+            calls: Arc<AtomicUsize>,
+        }
+        async fn handler(State(state): State<NotFoundThenOk>, body: String) -> AxumStatus {
+            let _ = body;
+            if state.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                AxumStatus::NOT_FOUND
+            } else {
+                AxumStatus::OK
+            }
+        }
+
+        let state = NotFoundThenOk {
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let router = Router::new()
+            .route("/presence/beat", post(handler))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.expect("serve");
+        });
+        let url: Url = format!("http://{addr}/presence/beat")
+            .parse()
+            .expect("presence url");
+
+        let store: crate::config::SharedControllerToken =
+            Arc::new(ControllerTokenStore::new(Some("token".into())));
+        let config = presence_config(Some(store.clone()));
+
+        beat_with_recovery_within(
+            &reqwest::Client::new(),
+            &url,
+            &config,
+            "online",
+            metadata(),
+            NO_OWNER_TIMEOUT,
+        )
+        .await
+        .expect("the 404 retry still succeeds");
+
+        assert_eq!(state.calls.load(Ordering::SeqCst), 2);
+        assert_eq!(store.generation(), 0, "a 404 is not a credential problem");
     }
 }

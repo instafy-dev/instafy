@@ -10,7 +10,9 @@ use std::collections::HashMap;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use origin_http_server::config::SharedControllerToken;
+use origin_http_server::config::{
+    CONTROLLER_TOKEN_REFRESH_TIMEOUT, ControllerTokenStore, SharedControllerToken,
+};
 
 use crate::agent_tokens::AgentTokenVerifier;
 use crate::config::Config;
@@ -214,7 +216,7 @@ impl ControllerClient {
         Ok(Self {
             http,
             base_url: config.controller_base_url.clone(),
-            runtime_access_token: std::sync::Arc::new(std::sync::RwLock::new(
+            runtime_access_token: std::sync::Arc::new(ControllerTokenStore::new(
                 config.runtime_access_token.clone(),
             )),
             current_agent_token: Mutex::new(None),
@@ -250,23 +252,31 @@ impl ControllerClient {
     }
 
     fn read_runtime_access_token(&self) -> Option<String> {
-        self.runtime_access_token
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        self.runtime_access_token.current()
     }
 
     fn store_runtime_access_token(&self, token: String) {
-        *self
-            .runtime_access_token
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(token);
+        self.runtime_access_token.store(token);
     }
 
     /// Live handle to the runtime token for the origin server's presence
     /// loop; registration renewals keep it fresh (#144).
     pub fn runtime_token_handle(&self) -> SharedControllerToken {
         self.runtime_access_token.clone()
+    }
+
+    /// Resolves once a re-registration has published fresh credentials, or the
+    /// wait times out. Callers use it to recover from a single 401 without
+    /// growing their own renewal logic: registration mints the runtime token
+    /// and the agent token together, so one bump covers both.
+    ///
+    /// Returns false when no renewal landed — the caller must surface the
+    /// original failure instead of retrying, so a genuinely dead credential
+    /// cannot turn into a retry loop.
+    async fn refresh_credentials_once(&self) -> bool {
+        self.runtime_access_token
+            .refresh_once(CONTROLLER_TOKEN_REFRESH_TIMEOUT)
+            .await
     }
 
     /// The freshest agent token when a renewal has landed, else the
@@ -339,8 +349,7 @@ impl ControllerClient {
         };
 
         let url = self.base_url.join(path)?;
-        let mut token_candidates: Vec<Option<String>> =
-            vec![self.read_runtime_access_token()];
+        let mut token_candidates: Vec<Option<String>> = vec![self.read_runtime_access_token()];
         if let Ok(value) = std::env::var("SUPABASE_SERVICE_ROLE_KEY") {
             let trimmed = value.trim();
             if !trimmed.is_empty() {
@@ -478,19 +487,28 @@ impl ControllerClient {
             DateTime::<Utc>::from_timestamp(claims.exp, 0).map(|expires_at| expires_at.to_rfc3339())
         });
 
-        if let Some(renewed_runtime_token) = parsed
+        // Per-job tasks clone `Registration` at spawn and would otherwise
+        // present the register-time agent token forever; requests resolve
+        // their bearer through `bearer_for_agent` so renewals land (#144).
+        // Published before the runtime token so a consumer woken by the
+        // generation bump below already sees both fresh credentials.
+        *self.current_agent_token.lock() = Some(parsed.agent_token.clone());
+
+        match parsed
             .runtime_token
             .as_ref()
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
         {
-            self.store_runtime_access_token(renewed_runtime_token.to_string());
+            Some(renewed_runtime_token) => {
+                self.store_runtime_access_token(renewed_runtime_token.to_string())
+            }
+            // No new runtime token this round, but a renewal did complete.
+            // Waiters are blocked on "a refresh happened", so releasing them
+            // here is what keeps a rejected consumer from waiting out its
+            // whole timeout for a value that is never going to change.
+            None => self.runtime_access_token.note_refreshed(),
         }
-
-        // Per-job tasks clone `Registration` at spawn and would otherwise
-        // present the register-time agent token forever; requests resolve
-        // their bearer through `bearer_for_agent` so renewals land (#144).
-        *self.current_agent_token.lock() = Some(parsed.agent_token.clone());
 
         Ok(Registration {
             runtime_id: parsed.runtime_id,
@@ -561,12 +579,6 @@ impl ControllerClient {
     }
 
     pub async fn heartbeat(&self, reg: &Registration, job_id: Uuid) -> Result<()> {
-        let request = self
-            .http
-            .post(reg.heartbeat_url.clone())
-            .header("content-type", "application/json")
-            .bearer_auth(self.bearer_for_agent(reg));
-
         let resources = self.resources.lock().sample();
         let mut payload = json!({
             "job_id": job_id,
@@ -588,11 +600,39 @@ impl ControllerClient {
             }
         }
 
-        let response = request
-            .json(&payload)
-            .send()
+        let send = |bearer: String| {
+            self.http
+                .post(reg.heartbeat_url.clone())
+                .header("content-type", "application/json")
+                .bearer_auth(bearer)
+                .json(&payload)
+                .send()
+        };
+
+        let mut response = send(self.bearer_for_agent(reg))
             .await
             .context("heartbeat request failed")?;
+
+        // A job long enough to outlive its agent token would otherwise
+        // heartbeat itself to death. One renewal-and-retry, never a loop
+        // (#144); a lost lease (409) is a different failure and is not
+        // retried.
+        if response.status() == StatusCode::UNAUTHORIZED
+            || response.status() == StatusCode::FORBIDDEN
+        {
+            warn!(
+                status = %response.status(),
+                "heartbeat rejected; requesting a credential renewal"
+            );
+            if self.refresh_credentials_once().await {
+                response = send(self.bearer_for_agent(reg))
+                    .await
+                    .context("heartbeat retry request failed")?;
+                if response.status().is_success() {
+                    info!("heartbeat recovered with a renewed agent token");
+                }
+            }
+        }
 
         let status = response.status();
         if status == reqwest::StatusCode::CONFLICT {
@@ -876,21 +916,48 @@ impl ControllerClient {
             "touch": touch,
         });
 
-        let response = self
-            .http
-            .post(url)
-            .bearer_auth(self.bearer_for_agent(registration))
-            .header("content-type", "application/json")
-            .json(&payload)
-            .send()
+        let send = |bearer: String| {
+            self.http
+                .post(url.clone())
+                .bearer_auth(bearer)
+                .header("content-type", "application/json")
+                .json(&payload)
+                .send()
+        };
+
+        let response = send(self.bearer_for_agent(registration))
             .await
             .context("agent secrets request failed")?;
 
-        let status = response.status();
-        let text = response
+        let mut status = response.status();
+        let mut text = response
             .text()
             .await
             .unwrap_or_else(|_| "<unable to read response body>".to_string());
+
+        // The refresh loop that runs alongside a long job outlives the agent
+        // token it started with. One renewal-and-retry, never a loop: if no
+        // fresh credential lands the original failure is surfaced and the
+        // caller's own cadence decides when to try again (#144).
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            warn!(
+                %status,
+                "agent secrets request rejected; requesting a credential renewal"
+            );
+            if self.refresh_credentials_once().await {
+                let retried = send(self.bearer_for_agent(registration))
+                    .await
+                    .context("agent secrets retry request failed")?;
+                status = retried.status();
+                text = retried
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "<unable to read response body>".to_string());
+                if status.is_success() {
+                    info!("agent secrets recovered with a renewed agent token");
+                }
+            }
+        }
 
         if !status.is_success() {
             return Err(anyhow!(

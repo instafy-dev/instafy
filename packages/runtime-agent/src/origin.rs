@@ -118,6 +118,7 @@ impl OriginService {
             multi_tenant: false,
         };
 
+        let register_token_source = server_config.controller_token_source.clone();
         let mut server = OriginHttpServer::new(server_config)?;
         let presence_metadata = compose_presence_metadata(&settings);
         server.set_presence_metadata(presence_metadata).await;
@@ -165,9 +166,20 @@ impl OriginService {
 
         let enriched_metadata = compose_origin_metadata(&settings);
 
+        // Resolved here rather than reusing the value captured above: a
+        // registration renewal may have landed while the server was starting,
+        // and origin register must not present a credential the presence loop
+        // has already moved past (#144).
+        let register_token = register_token_source
+            .as_ref()
+            .and_then(|source| source.current())
+            .map(|token| token.trim().to_string())
+            .filter(|token| !token.is_empty())
+            .unwrap_or_else(|| controller_token.clone());
+
         if let Err(error) = Self::register_with_controller(
             &config.controller_base_url,
-            &controller_token,
+            &register_token,
             RegisterOriginPayload {
                 project_id: config.project_id,
                 origin_id: settings.origin_id,
