@@ -202,6 +202,7 @@ mod tests {
             bind_port: 0,
             controller_base_url: controller_base_url.clone(),
             controller_internal_token: Some("internal-token".to_string()),
+            controller_token_source: None,
             jwks_url: controller_base_url,
             skip_auth: true,
             enable_presence_heartbeat: false,
