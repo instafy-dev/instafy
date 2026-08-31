@@ -29,8 +29,36 @@ const RUN_FAILURE_FRIENDLY_TEXT: Record<RunFailureKind, string> = {
   missing_verification: "The run ended before it could verify its work.",
   needs_ai:
     "I couldn't find a connected AI credential for this run. Connect or reconnect a provider, then try again.",
+  // Only used as a last-resort fallback now: an unclassified failure surfaces
+  // its real reason inline (see inlineGenericFailureText) rather than this
+  // uninformative sentence.
   generic: "Something went wrong finishing this run.",
 };
+
+/** Longest inline failure reason before it is truncated (…) with the full text
+ * kept behind the Details disclosure. */
+const GENERIC_INLINE_FAILURE_MAX_LENGTH = 240;
+
+/**
+ * For an unclassified ("generic") failure there is no friendlier summary than
+ * the real reason, so surface it inline instead of a canned sentence (#145):
+ * the first meaningful line, bounded in length. The full raw text stays
+ * available behind the Details disclosure.
+ */
+function inlineGenericFailureText(rawText: string): string {
+  const firstLine =
+    rawText
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.length > 0) ?? rawText.trim();
+  if (!firstLine) {
+    return RUN_FAILURE_FRIENDLY_TEXT.generic;
+  }
+  if (firstLine.length <= GENERIC_INLINE_FAILURE_MAX_LENGTH) {
+    return firstLine;
+  }
+  return `${firstLine.slice(0, GENERIC_INLINE_FAILURE_MAX_LENGTH - 1).trimEnd()}…`;
+}
 
 export const RETRYING_STATUS_DISPLAY_TEXT = "Taking another pass…";
 
@@ -181,7 +209,9 @@ export function resolveRunFailurePresentation(params: {
   if (!kind) {
     return null;
   }
-  return { kind, friendlyText: RUN_FAILURE_FRIENDLY_TEXT[kind], rawText };
+  const friendlyText =
+    kind === "generic" ? inlineGenericFailureText(rawText) : RUN_FAILURE_FRIENDLY_TEXT[kind];
+  return { kind, friendlyText, rawText };
 }
 
 export type RetryingStatusPresentation = {

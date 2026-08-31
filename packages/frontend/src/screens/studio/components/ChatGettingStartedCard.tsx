@@ -8,6 +8,7 @@ import { Text } from "../../../components/Text";
 import { INSTAFY_DESKTOP_INSTALL_URL } from "../../../desktop/install";
 import { controllerClient } from "../../../sdk/instafy";
 import { openExternalUrl } from "../../../utils/openExternalUrl";
+import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
 import type { GettingStartedAiViewState } from "./gettingStartedAiChoices";
 import { ONBOARDING_PATHS, type OnboardingAction } from "./onboardingPlaybook";
 
@@ -159,7 +160,7 @@ export function ChatGettingStartedCard({
       tone="default"
       radius="2xl"
       shadow="sm"
-      className="@container w-full max-w-none px-3 py-3 sm:max-w-[min(560px,90%)] sm:px-4"
+      className={`@container w-full ${CHAT_BUBBLE_MAX_WIDTH.intro} px-3 py-3 sm:px-4`}
       data-testid="onboarding-getting-started"
     >
       {mode === "root" ? (

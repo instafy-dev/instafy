@@ -19,6 +19,7 @@ import { controllerClient } from "../../../sdk/instafy";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import type { ChatMessage } from "../types";
 import { ActionRequestEntry } from "./ActionRequestEntry";
+import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
 import {
   LocalCapabilityInlineEntry,
   ReasoningEntry,
@@ -92,7 +93,10 @@ export function NotchedMessageShell({
   onClickCapture,
   children,
 }: NotchedMessageShellProps) {
-  const widthClassName = width === "full" ? "w-full max-w-[56rem]" : "w-fit max-w-[min(92%,56rem)]";
+  const widthClassName =
+    width === "full"
+      ? `w-full ${CHAT_BUBBLE_MAX_WIDTH.messageFull}`
+      : `w-fit ${CHAT_BUBBLE_MAX_WIDTH.message}`;
   const paddingClassName = padding === "none" ? "" : "px-1.5 py-1";
 
   return (
@@ -465,13 +469,13 @@ function ControllerConversationNoticeEntry({
       />
       {superseded ? (
         <div
-          className="max-w-[min(100%,42rem)] px-1 py-0.5 text-xs text-slate-500 dark:text-slate-400"
+          className={`${CHAT_BUBBLE_MAX_WIDTH.notice} px-1 py-0.5 text-xs text-slate-500 dark:text-slate-400`}
           data-runtime-alert-superseded="true"
         >
           Earlier: {label.toLowerCase()}. A new workspace start is in progress below.
         </div>
       ) : (
-        <div className={`max-w-[min(100%,42rem)] rounded-xl border px-3 py-2 text-sm ${noticeClassName}`}>
+        <div className={`${CHAT_BUBBLE_MAX_WIDTH.notice} rounded-xl border px-3 py-2 text-sm ${noticeClassName}`}>
           <div className="flex items-center gap-1.5 text-xs font-semibold">
             <WarningTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
             {label}
@@ -895,7 +899,7 @@ export function AssistantMessageEntry({
         shadow="sm"
         data-testid="chat-bubble-assistant"
         data-message-type={messageType ?? undefined}
-        className="max-w-[min(80%,42rem)] px-4 py-3 text-sm text-rose-700"
+        className={`${CHAT_BUBBLE_MAX_WIDTH.alert} px-4 py-3 text-sm text-rose-700`}
       >
         {runFailurePresentation ? (
           <RunFailureMessageBody message={message} presentation={runFailurePresentation} />
