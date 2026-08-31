@@ -14,6 +14,7 @@ import type {
   ChatMessageCommitRange,
   ChatMessageFileChange,
 } from "../types";
+import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
 import { extractMessageDetails } from "./chatMessageMetadata";
 import { resolveTimelineStatusBadge } from "./chatMessageDetailHelpers";
 import { normalizeActivityText, splitActivityLeadAndDetails, truncate } from "./chatContentHelpers";
@@ -94,7 +95,7 @@ export function ReasoningEntry({
     <div
       data-testid="chat-bubble-assistant"
       data-message-type="reasoning"
-      className="max-w-[min(100%,42rem)] px-1.5 py-1 text-sm text-slate-600 dark:text-slate-300"
+      className={`${CHAT_BUBBLE_MAX_WIDTH.notice} px-1.5 py-1 text-sm text-slate-600 dark:text-slate-300`}
     >
       <div className="flex flex-wrap items-center gap-1.5">
         {hasLongContent ? (
@@ -358,7 +359,7 @@ export function StatusActivityEntry({
         shadow="sm"
         data-testid="chat-bubble-assistant"
         data-message-type="status"
-        className="max-w-[min(100%,42rem)] px-3 py-2.5 text-sm text-slate-600"
+        className={`${CHAT_BUBBLE_MAX_WIDTH.notice} px-3 py-2.5 text-sm text-slate-600`}
       >
         <div className="flex flex-wrap items-center gap-1.5">
           {hasLongContent ? (
