@@ -9125,15 +9125,23 @@ async fn tunnel_request_rejects_insufficient_credits_without_reporting_a_burn_fa
         Some("insufficient credits available for requested burn")
     );
 
-    let org_id = {
+    {
         let connection = pool.get().await?;
-        let row = connection
-            .query_one("SELECT org_id FROM projects WHERE id = $1", &[&project_id])
-            .await?;
-        row.get::<_, Option<Uuid>>("org_id")
-            .expect("project org_id should be set by ensure_project_org")
-    };
-    cleanup_org(&pool, &org_id).await?;
+        let report_count: i64 = connection
+            .query_one(
+                "SELECT count(*)
+                 FROM bug_reports
+                 WHERE project_id = $1
+                   AND runtime_id = $2
+                   AND message = 'Tunnel credit burn failed'",
+                &[&project_id, &runtime_id],
+            )
+            .await?
+            .get(0);
+        assert_eq!(report_count, 0);
+    }
+
+    cleanup_origin_project(&pool, &project_id).await?;
     Ok(())
 }
 
