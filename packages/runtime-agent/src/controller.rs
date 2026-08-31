@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use origin_http_server::config::SharedControllerToken;
+
 use crate::agent_tokens::AgentTokenVerifier;
 use crate::config::Config;
 use crate::resources::ResourceSampler;
@@ -32,7 +34,12 @@ const MAX_AGENT_METADATA_DEPTH: usize = 8;
 pub struct ControllerClient {
     http: reqwest::Client,
     base_url: Url,
-    runtime_access_token: Mutex<Option<String>>,
+    // Shared with the origin server's presence loop (#144): registration
+    // renewals write here and every reader sees the freshest token.
+    runtime_access_token: SharedControllerToken,
+    // Freshest controller-minted agent JWT; per-job tasks clone Registration
+    // at spawn, so requests resolve their bearer from here first (#144).
+    current_agent_token: Mutex<Option<String>>,
     poll_interval: Duration,
     lease_max_jobs: u32,
     lease_seconds: u32,
@@ -207,7 +214,10 @@ impl ControllerClient {
         Ok(Self {
             http,
             base_url: config.controller_base_url.clone(),
-            runtime_access_token: Mutex::new(config.runtime_access_token.clone()),
+            runtime_access_token: std::sync::Arc::new(std::sync::RwLock::new(
+                config.runtime_access_token.clone(),
+            )),
+            current_agent_token: Mutex::new(None),
             poll_interval: config.poll_interval,
             lease_max_jobs: config.lease_max_jobs,
             lease_seconds: config.lease_seconds,
@@ -237,6 +247,35 @@ impl ControllerClient {
         let status = response.status();
         let text = response.text().await.context("register runtime body")?;
         Ok((status, text))
+    }
+
+    fn read_runtime_access_token(&self) -> Option<String> {
+        self.runtime_access_token
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn store_runtime_access_token(&self, token: String) {
+        *self
+            .runtime_access_token
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(token);
+    }
+
+    /// Live handle to the runtime token for the origin server's presence
+    /// loop; registration renewals keep it fresh (#144).
+    pub fn runtime_token_handle(&self) -> SharedControllerToken {
+        self.runtime_access_token.clone()
+    }
+
+    /// The freshest agent token when a renewal has landed, else the
+    /// spawn-time one captured in the registration snapshot.
+    fn bearer_for_agent(&self, registration: &Registration) -> String {
+        self.current_agent_token
+            .lock()
+            .clone()
+            .unwrap_or_else(|| registration.agent_token.clone())
     }
 
     pub async fn register_runtime(&self, config: &Config) -> Result<Registration> {
@@ -301,7 +340,7 @@ impl ControllerClient {
 
         let url = self.base_url.join(path)?;
         let mut token_candidates: Vec<Option<String>> =
-            vec![self.runtime_access_token.lock().clone()];
+            vec![self.read_runtime_access_token()];
         if let Ok(value) = std::env::var("SUPABASE_SERVICE_ROLE_KEY") {
             let trimmed = value.trim();
             if !trimmed.is_empty() {
@@ -377,7 +416,7 @@ impl ControllerClient {
                         // refresh) must present the recovered token instead of
                         // the stale spawn-time one. A renewed runtime_token in
                         // the response still overrides this below.
-                        *self.runtime_access_token.lock() = Some(reloaded_token);
+                        self.store_runtime_access_token(reloaded_token);
                         parsed = Some(serde_json::from_str(&text).with_context(|| {
                             format!("failed to parse register response: {}", text)
                         })?);
@@ -445,8 +484,13 @@ impl ControllerClient {
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
         {
-            *self.runtime_access_token.lock() = Some(renewed_runtime_token.to_string());
+            self.store_runtime_access_token(renewed_runtime_token.to_string());
         }
+
+        // Per-job tasks clone `Registration` at spawn and would otherwise
+        // present the register-time agent token forever; requests resolve
+        // their bearer through `bearer_for_agent` so renewals land (#144).
+        *self.current_agent_token.lock() = Some(parsed.agent_token.clone());
 
         Ok(Registration {
             runtime_id: parsed.runtime_id,
@@ -473,7 +517,7 @@ impl ControllerClient {
             .http
             .post(reg.lease_url.clone())
             .header("content-type", "application/json")
-            .bearer_auth(&reg.agent_token);
+            .bearer_auth(self.bearer_for_agent(reg));
 
         let resources = self.resources.lock().sample();
         let payload = json!({
@@ -521,7 +565,7 @@ impl ControllerClient {
             .http
             .post(reg.heartbeat_url.clone())
             .header("content-type", "application/json")
-            .bearer_auth(&reg.agent_token);
+            .bearer_auth(self.bearer_for_agent(reg));
 
         let resources = self.resources.lock().sample();
         let mut payload = json!({
@@ -579,7 +623,7 @@ impl ControllerClient {
         let response = self
             .http
             .post(url)
-            .bearer_auth(&registration.agent_token)
+            .bearer_auth(self.bearer_for_agent(registration))
             .json(&AgentJobInputPollRequest { active_turn_id })
             .send()
             .await
@@ -612,7 +656,7 @@ impl ControllerClient {
         let response = self
             .http
             .delete(url)
-            .bearer_auth(&registration.agent_token)
+            .bearer_auth(self.bearer_for_agent(registration))
             .send()
             .await
             .context("active-turn input readiness clear failed")?;
@@ -643,7 +687,7 @@ impl ControllerClient {
         let response = self
             .http
             .post(url)
-            .bearer_auth(&registration.agent_token)
+            .bearer_auth(self.bearer_for_agent(registration))
             .header("content-type", "application/json")
             .json(&AgentJobInputAckRequest {
                 outcome,
@@ -697,7 +741,7 @@ impl ControllerClient {
             .http
             .post(stop_url)
             .header("content-type", "application/json")
-            .bearer_auth(&registration.agent_token)
+            .bearer_auth(self.bearer_for_agent(registration))
             .json(&payload)
             .send()
             .await
@@ -741,7 +785,7 @@ impl ControllerClient {
             payload["proxy_metadata"] = compact_agent_payload_json(&metadata, 0);
         }
 
-        self.post_agent(url, &registration.agent_token, payload)
+        self.post_agent(url, &self.bearer_for_agent(registration), payload)
             .await
     }
 
@@ -780,7 +824,7 @@ impl ControllerClient {
             payload["proxy_metadata"] = compact_agent_payload_json(&metadata, 0);
         }
 
-        self.post_agent(url, &registration.agent_token, payload)
+        self.post_agent(url, &self.bearer_for_agent(registration), payload)
             .await
     }
 
@@ -816,7 +860,7 @@ impl ControllerClient {
             payload["metadata"] = compact_agent_payload_json(meta, 0);
         }
 
-        self.post_agent(url, &registration.agent_token, payload)
+        self.post_agent(url, &self.bearer_for_agent(registration), payload)
             .await
     }
 
@@ -835,7 +879,7 @@ impl ControllerClient {
         let response = self
             .http
             .post(url)
-            .bearer_auth(&registration.agent_token)
+            .bearer_auth(self.bearer_for_agent(registration))
             .header("content-type", "application/json")
             .json(&payload)
             .send()
@@ -908,7 +952,7 @@ impl ControllerClient {
         let response = self
             .http
             .get(url)
-            .bearer_auth(&registration.agent_token)
+            .bearer_auth(self.bearer_for_agent(registration))
             .send()
             .await
             .context("browser profile fetch request failed")?;
@@ -944,7 +988,7 @@ impl ControllerClient {
         let response = self
             .http
             .put(url)
-            .bearer_auth(&registration.agent_token)
+            .bearer_auth(self.bearer_for_agent(registration))
             .header("content-type", "application/octet-stream")
             .body(body)
             .send()
@@ -971,7 +1015,7 @@ impl ControllerClient {
             .header("content-type", "application/json")
             .json(&payload);
 
-        if let Some(token) = self.runtime_access_token.lock().clone() {
+        if let Some(token) = self.read_runtime_access_token() {
             request = request.bearer_auth(token);
         }
 

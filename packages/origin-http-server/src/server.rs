@@ -307,15 +307,11 @@ impl OriginHttpServer {
             }
         }
 
-        if let (Some(url), Some(token)) = (
-            self.presence_url.clone(),
-            self.config.controller_internal_token.clone(),
-        ) {
+        if let Some(url) = self.presence_url.clone() {
             if let Err(error) = send_presence_beat(
                 &self.http_client,
                 &url,
                 &self.config,
-                &token,
                 "offline",
                 self.presence_metadata.clone(),
             )
@@ -351,9 +347,9 @@ impl OriginHttpServer {
             return Ok(());
         }
 
-        let Some(token) = self.config.controller_internal_token.clone() else {
+        if self.config.current_controller_token().is_none() {
             return Ok(());
-        };
+        }
 
         let presence_url = match self.config.controller_presence_url() {
             Ok(url) => url,
@@ -370,7 +366,6 @@ impl OriginHttpServer {
         let config = self.config.clone();
         let client = self.http_client.clone();
         let presence_url_clone = presence_url.clone();
-        let token_clone = token.clone();
         let metadata = self.presence_metadata.clone();
 
         let interval = self.config.presence_interval;
@@ -382,7 +377,6 @@ impl OriginHttpServer {
                 &client,
                 &presence_url_clone,
                 &config,
-                &token_clone,
                 "online",
                 metadata.clone(),
             )
@@ -400,7 +394,6 @@ impl OriginHttpServer {
                         &client,
                         &presence_url_clone,
                         &config,
-                        &token_clone,
                         "online",
                         metadata.clone(),
                     )
@@ -420,7 +413,6 @@ impl OriginHttpServer {
                             &client,
                             &presence_url_clone,
                             &config,
-                            &token_clone,
                             "online",
                             metadata.clone(),
                         )
@@ -445,10 +437,15 @@ async fn send_presence_beat(
     client: &reqwest::Client,
     url: &Url,
     config: &ServerConfig,
-    token: &str,
     status: &str,
     metadata: Arc<RwLock<JsonValue>>,
 ) -> Result<()> {
+    // Resolved per beat: registration renewals in the embedding runtime agent
+    // update the shared source, and a spawn-time snapshot would 401 forever
+    // once the original token expires (issue #144).
+    let Some(token) = config.current_controller_token() else {
+        anyhow::bail!("presence beat skipped: no controller token available");
+    };
     let current_metadata = {
         let guard = metadata.read().await;
         guard.clone()

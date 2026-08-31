@@ -5,7 +5,7 @@ use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
-use origin_http_server::config::ServerConfig;
+use origin_http_server::config::{ServerConfig, SharedControllerToken};
 use origin_http_server::server::OriginHttpServer;
 use reqwest::Url;
 use serde::Serialize;
@@ -31,6 +31,9 @@ pub struct OriginTunnelSnapshot {
 pub struct OriginLaunchOverrides {
     pub tunnel: Option<OriginTunnelSnapshot>,
     pub controller_token: Option<String>,
+    /// Live token handle so origin loops (presence) follow registration
+    /// renewals instead of beating with the spawn-time token forever (#144).
+    pub controller_token_source: Option<SharedControllerToken>,
 }
 
 pub struct OriginService {
@@ -48,6 +51,10 @@ impl OriginService {
             None => return Ok(None),
         };
 
+        let mut controller_token_source = None;
+        if let Some(overrides) = &overrides {
+            controller_token_source = overrides.controller_token_source.clone();
+        }
         if let Some(overrides) = overrides {
             if let Some(token) = overrides
                 .controller_token
@@ -89,6 +96,7 @@ impl OriginService {
             bind_port: settings.bind_port,
             controller_base_url: config.controller_base_url.clone(),
             controller_internal_token: Some(controller_token.clone()),
+            controller_token_source,
             jwks_url: settings.jwks_url.clone(),
             skip_auth: settings.skip_auth,
             enable_presence_heartbeat: settings.enable_presence_heartbeat,

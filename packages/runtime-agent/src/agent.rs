@@ -697,16 +697,18 @@ impl RuntimeAgent {
             .map(|token| token.trim())
             .filter(|token| !token.is_empty())
             .map(ToOwned::to_owned);
-        let origin_overrides = if tunnel_assignment.is_some() || origin_controller_token.is_some() {
-            Some(OriginLaunchOverrides {
-                tunnel: tunnel_assignment
-                    .as_ref()
-                    .map(|assignment| assignment.snapshot()),
-                controller_token: origin_controller_token.clone(),
-            })
-        } else {
-            None
-        };
+        // Always pass overrides so the live token handle reaches the origin
+        // server even when there is no tunnel and no per-registration token —
+        // the presence loop must follow renewals either way (#144).
+        let had_token_or_tunnel_overrides =
+            tunnel_assignment.is_some() || origin_controller_token.is_some();
+        let origin_overrides = Some(OriginLaunchOverrides {
+            tunnel: tunnel_assignment
+                .as_ref()
+                .map(|assignment| assignment.snapshot()),
+            controller_token: origin_controller_token.clone(),
+            controller_token_source: Some(client.runtime_token_handle()),
+        });
 
         let mut origin_service =
             OriginService::try_start(config.clone(), origin_overrides.clone()).await?;
@@ -738,18 +740,16 @@ impl RuntimeAgent {
         if should_restart_origin_after_failed_tunnel(
             tunnel_assignment.is_some(),
             tunnel_lifecycle.is_some(),
-            origin_overrides.is_some(),
+            had_token_or_tunnel_overrides,
         ) {
             if let Some(service) = origin_service.as_mut() {
                 service.shutdown().await;
             }
-            let token_only_overrides =
-                origin_controller_token
-                    .clone()
-                    .map(|token| OriginLaunchOverrides {
-                        tunnel: None,
-                        controller_token: Some(token),
-                    });
+            let token_only_overrides = Some(OriginLaunchOverrides {
+                tunnel: None,
+                controller_token: origin_controller_token.clone(),
+                controller_token_source: Some(client.runtime_token_handle()),
+            });
             origin_service = OriginService::try_start(config.clone(), token_only_overrides).await?;
         }
 
