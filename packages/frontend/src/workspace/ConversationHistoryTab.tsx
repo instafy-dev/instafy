@@ -477,7 +477,7 @@ export function ConversationHistoryTab({
                   leadingAccessory={leadingMarker}
                   title={conversation.title}
                   pressable
-                  surface={isActive ? "plain" : undefined}
+                  selected={isActive}
                   density={touchDrawer ? "rich" : "dense"}
                   onPress={() => openConversation()}
                   isDisabled={isDeleted}
@@ -487,7 +487,6 @@ export function ConversationHistoryTab({
                   className={
                     [
                       "pl-0",
-                      isActive ? "bg-slate-50/85 dark:bg-[var(--color-studio-dark-active)]" : "",
                       touchDrawer ? "rounded-2xl" : "",
                       isDeleted ? "opacity-70" : "",
                     ]

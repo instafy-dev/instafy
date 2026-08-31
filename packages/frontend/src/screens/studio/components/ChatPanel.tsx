@@ -2266,6 +2266,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       isComposing: event.nativeEvent.isComposing,
       hasOpenMenu: hasOpenComposerMenu,
       hasActiveMatchingAgent: composerPrimaryActionRef.current.mode === "steer",
+      touchLikeInput,
     });
     if (enterAction === "menu") {
       if (acceptOpenComposerMenuSelection()) {

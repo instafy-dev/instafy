@@ -39,6 +39,8 @@ export type ResolveComposerEnterActionInput = {
   isComposing: boolean;
   hasOpenMenu: boolean;
   hasActiveMatchingAgent: boolean;
+  /** Coarse-pointer/no-hover input: soft keyboards' Enter must newline. */
+  touchLikeInput: boolean;
 };
 
 /**
@@ -55,6 +57,7 @@ export function resolveComposerEnterAction({
   isComposing,
   hasOpenMenu,
   hasActiveMatchingAgent,
+  touchLikeInput,
 }: ResolveComposerEnterActionInput): ComposerEnterAction {
   if (key !== "Enter" || isComposing) {
     return "ignore";
@@ -73,6 +76,12 @@ export function resolveComposerEnterAction({
     return sendModifierAction;
   }
   if (shiftKey || altKey) {
+    return "newline";
+  }
+  // Mobile convention (and every major chat app): the soft keyboard's Enter
+  // inserts a newline; sending is the button's job. Hardware keyboards on
+  // touch devices keep the modifier sends above.
+  if (touchLikeInput) {
     return "newline";
   }
   return hasActiveMatchingAgent ? "steer" : "send";
