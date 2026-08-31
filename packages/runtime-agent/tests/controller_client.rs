@@ -47,6 +47,7 @@ struct ReceivedRequests {
     lease: Vec<RecordedRequest>,
     heartbeat: Vec<RecordedRequest>,
     tunnel: Vec<RecordedRequest>,
+    secrets: Vec<RecordedRequest>,
 }
 
 type Shared = Arc<Mutex<ReceivedRequests>>;
@@ -293,6 +294,20 @@ async fn tunnel_request_handler(
     )
 }
 
+async fn agent_secrets_handler(
+    State(state): State<ControllerState>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Json<Value> {
+    state
+        .requests
+        .lock()
+        .unwrap()
+        .secrets
+        .push(RecordedRequest::new(&headers, payload));
+    Json(serde_json::json!({ "env": {}, "inventory": [] }))
+}
+
 async fn jwks_handler(State(state): State<ControllerState>) -> Json<Value> {
     Json((*state.jwks_body).clone())
 }
@@ -303,6 +318,7 @@ async fn spawn_controller(state: ControllerState) -> SocketAddr {
         .route("/agent/login", post(agent_login_handler))
         .route("/agent/lease", post(lease_handler))
         .route("/agent/heartbeat", post(heartbeat_handler))
+        .route("/agent/secrets", post(agent_secrets_handler))
         .route(
             "/projects/:project_id/tunnels/request",
             post(tunnel_request_handler),
@@ -804,4 +820,60 @@ fn build_jwks(public_pem: &str, key_id: &str) -> Value {
             }
         ]
     })
+}
+
+/// Reproduces instafy-dev/instafy#144: per-job tasks clone `Registration` at
+/// spawn, so after a proactive renewal the secrets-refresh loop kept
+/// presenting the register-time agent token until it expired (401 loop).
+/// Requests must resolve their bearer from the client's freshest token.
+#[tokio::test]
+async fn job_secrets_present_the_renewed_agent_token() {
+    let shared = Arc::new(Mutex::new(ReceivedRequests::default()));
+    let project_id = Uuid::new_v4();
+    let key_id = "test-agent-key".to_string();
+    let jwks = build_jwks(test_origin_public_key(), &key_id);
+    let state = ControllerState {
+        requests: shared.clone(),
+        private_key_pem: Arc::new(test_origin_private_key().to_string()),
+        jwks_body: Arc::new(jwks),
+        key_id,
+        project_id,
+        register_requires_bearer: None,
+    };
+    let addr = spawn_controller(state).await;
+    let workspace_root = tempfile::tempdir().expect("temp workspace root");
+    let config = test_config(addr, project_id, workspace_root.path());
+
+    let client = ControllerClient::new(&config).expect("client init");
+    let initial = client
+        .register_runtime(&config)
+        .await
+        .expect("initial register");
+    let renewed = client
+        .register_runtime(&config)
+        .await
+        .expect("renewal register");
+    assert_ne!(
+        initial.agent_token, renewed.agent_token,
+        "mock mints a distinct agent token per registration"
+    );
+
+    // The stale spawn-time snapshot: what a long-lived SecretsRefreshTask holds.
+    client
+        .fetch_job_secrets(&initial, Uuid::new_v4(), false)
+        .await
+        .expect("fetch job secrets");
+
+    let captured = shared.lock().unwrap();
+    assert_eq!(captured.secrets.len(), 1);
+    let bearer = captured.secrets[0]
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        .map(|(_, value)| value.clone());
+    assert_eq!(
+        bearer.as_deref(),
+        Some(format!("Bearer {}", renewed.agent_token).as_str()),
+        "secrets refresh must present the renewed agent token, not the spawn-time snapshot"
+    );
 }
