@@ -1,5 +1,6 @@
 import type { ComponentProps, ReactNode } from "react";
 import { Surface } from "../../../components/Surface";
+import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
 
 type ChatActivityDotSize = "sm" | "md";
 type ChatActivityDensity = "compact" | "comfortable";
@@ -16,8 +17,8 @@ const DENSITY_CLASS_NAMES: Record<ChatActivityDensity, string> = {
 };
 
 const WIDTH_CLASS_NAMES: Record<ChatActivityWidth, string> = {
-  assistant: "w-fit max-w-full sm:max-w-[26rem]",
-  peer: "w-fit max-w-[60%]",
+  assistant: `w-fit ${CHAT_BUBBLE_MAX_WIDTH.activity}`,
+  peer: `w-fit ${CHAT_BUBBLE_MAX_WIDTH.activityPeer}`,
 };
 
 export function ChatActivityDots({ size = "sm" }: { size?: ChatActivityDotSize }) {
