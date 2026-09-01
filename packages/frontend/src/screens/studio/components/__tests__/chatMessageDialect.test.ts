@@ -10,8 +10,77 @@ describe("chatMessageDialect", () => {
   it("groups paragraphs and compact markdown-style lists into explicit blocks", () => {
     expect(parseMessageContentBlocks("Summary:\n- Inspect `TODO.md`\n- Run checks\n\n2. Second\n3. Third")).toEqual([
       { kind: "paragraph", line: "Summary:" },
-      { kind: "list", ordered: false, items: ["Inspect `TODO.md`", "Run checks"] },
-      { kind: "list", ordered: true, start: 2, items: ["Second", "Third"] },
+      {
+        kind: "list",
+        ordered: false,
+        items: [
+          { text: "Inspect `TODO.md`", depth: 0, ordered: false },
+          { text: "Run checks", depth: 0, ordered: false },
+        ],
+      },
+      {
+        kind: "list",
+        ordered: true,
+        start: 2,
+        items: [
+          { text: "Second", depth: 0, ordered: true },
+          { text: "Third", depth: 0, ordered: true },
+        ],
+      },
+    ]);
+  });
+
+  it("nests indented bulleted sublists inside an ordered list block", () => {
+    expect(
+      parseMessageContentBlocks(
+        "1. First step\n   - detail a\n   - detail b\n2. Second step",
+      ),
+    ).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [
+          { text: "First step", depth: 0, ordered: true },
+          { text: "detail a", depth: 1, ordered: false },
+          { text: "detail b", depth: 1, ordered: false },
+          { text: "Second step", depth: 0, ordered: true },
+        ],
+      },
+    ]);
+  });
+
+  it("keeps an unindented bulleted list after an ordered list as a sibling block", () => {
+    expect(parseMessageContentBlocks("1. First\n- flat bullet")).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [{ text: "First", depth: 0, ordered: true }],
+      },
+      {
+        kind: "list",
+        ordered: false,
+        items: [{ text: "flat bullet", depth: 0, ordered: false }],
+      },
+    ]);
+  });
+
+  it("returns to the parent level when a nested sublist dedents", () => {
+    expect(
+      parseMessageContentBlocks("- top\n  - nested\n    - deeper\n  - nested again\n- top again"),
+    ).toEqual([
+      {
+        kind: "list",
+        ordered: false,
+        items: [
+          { text: "top", depth: 0, ordered: false },
+          { text: "nested", depth: 1, ordered: false },
+          { text: "deeper", depth: 2, ordered: false },
+          { text: "nested again", depth: 1, ordered: false },
+          { text: "top again", depth: 0, ordered: false },
+        ],
+      },
     ]);
   });
 
@@ -26,16 +95,26 @@ describe("chatMessageDialect", () => {
     expect(
       parseMessageContentBlocks("3) Command output:\n```text\nmarcuspousette\nd3fdb3f\n```\n\nBOX OK"),
     ).toEqual([
-      { kind: "list", ordered: true, start: 3, items: ["Command output:"] },
-      { kind: "code", language: "text", lines: ["marcuspousette", "d3fdb3f"] },
+      {
+        kind: "list",
+        ordered: true,
+        start: 3,
+        items: [{ text: "Command output:", depth: 0, ordered: true }],
+      },
+      { kind: "code", language: "text", lines: ["marcuspousette", "d3fdb3f"], inListItem: true },
       { kind: "paragraph", line: "BOX OK" },
     ]);
   });
 
   it("opens a fenced code block after an ordered-list item with dot delimiters", () => {
     expect(parseMessageContentBlocks("1. Command output:\n```sh\npnpm test\n```")).toEqual([
-      { kind: "list", ordered: true, start: 1, items: ["Command output:"] },
-      { kind: "code", language: "sh", lines: ["pnpm test"] },
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [{ text: "Command output:", depth: 0, ordered: true }],
+      },
+      { kind: "code", language: "sh", lines: ["pnpm test"], inListItem: true },
     ]);
   });
 
@@ -53,9 +132,19 @@ describe("chatMessageDialect", () => {
     expect(
       parseMessageContentBlocks("1. Run the check:\n   ```sh\n   pnpm test\n   ```\n2. Ship it"),
     ).toEqual([
-      { kind: "list", ordered: true, start: 1, items: ["Run the check:"] },
-      { kind: "code", language: "sh", lines: ["pnpm test"] },
-      { kind: "list", ordered: true, start: 2, items: ["Ship it"] },
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [{ text: "Run the check:", depth: 0, ordered: true }],
+      },
+      { kind: "code", language: "sh", lines: ["pnpm test"], inListItem: true },
+      {
+        kind: "list",
+        ordered: true,
+        start: 2,
+        items: [{ text: "Ship it", depth: 0, ordered: true }],
+      },
     ]);
   });
 

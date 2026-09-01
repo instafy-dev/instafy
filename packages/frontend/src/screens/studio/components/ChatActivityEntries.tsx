@@ -97,7 +97,7 @@ export function ReasoningEntry({
     <div
       data-testid="chat-bubble-assistant"
       data-message-type="reasoning"
-      className={`${CHAT_BUBBLE_MAX_WIDTH.notice} px-1.5 py-1 text-sm text-slate-600 dark:text-slate-300`}
+      className={`${CHAT_BUBBLE_MAX_WIDTH.notice} py-1 text-sm text-slate-600 dark:text-slate-300`}
     >
       <div className="flex flex-wrap items-center gap-1.5">
         {hasLongContent ? (

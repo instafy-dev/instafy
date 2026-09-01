@@ -528,6 +528,50 @@ describe("ChatMessageContent", () => {
     expect(fileRef?.getAttribute("title")).toBe("TODO.md");
   });
 
+  it("renders bulleted sublists nested inside their ordered parent item", async () => {
+    await act(async () => {
+      root.render(
+        <MessageContent
+          content={"1. First step\n   - detail a\n   - detail b\n2. Second step"}
+          projectId="project-1"
+        />,
+      );
+    });
+
+    const list = container.querySelector('[data-testid="chat-message-list"]');
+    expect(list?.tagName).toBe("OL");
+    // Ordered markers carry sequence, so they read a shade darker than bullets.
+    expect(list?.className).toContain("marker:text-slate-500");
+    const topLevelItems = Array.from(list?.children ?? []);
+    expect(topLevelItems).toHaveLength(2);
+
+    const sublist = topLevelItems[0]?.querySelector('[data-testid="chat-message-sublist"]');
+    expect(sublist?.tagName).toBe("UL");
+    expect(sublist?.getAttribute("data-list-depth")).toBe("1");
+    // Nested bullets step to circle and indent one fixed step under the item.
+    expect(sublist?.className).toContain("[list-style-type:circle]");
+    expect(sublist?.className).toContain("pl-5");
+    expect(sublist?.className).toContain("mt-1");
+    expect(Array.from(sublist?.querySelectorAll("li") ?? []).map((item) => item.textContent)).toEqual([
+      "detail a",
+      "detail b",
+    ]);
+    expect(topLevelItems[1]?.querySelector('[data-testid="chat-message-sublist"]')).toBeNull();
+  });
+
+  it("keeps a fenced block inside a list item on the item's indent", async () => {
+    await act(async () => {
+      root.render(
+        <MessageContent content={"1. Run the check:\n   ```sh\n   pnpm test\n   ```\n2. Ship it"} />,
+      );
+    });
+
+    const codeBlock = container.querySelector('[data-testid="chat-message-code-block"]');
+    expect(codeBlock?.getAttribute("data-in-list-item")).toBe("true");
+    expect(codeBlock?.className).toContain("ml-5");
+    expect(codeBlock?.textContent).toBe("pnpm test");
+  });
+
   it("keeps long reference labels compact and reports refs that cannot be resolved", async () => {
     resolveConversationByController.mockReturnValue(null);
     const longLabel = "The very long linked agent thread title that should not stretch the chat bubble indefinitely";

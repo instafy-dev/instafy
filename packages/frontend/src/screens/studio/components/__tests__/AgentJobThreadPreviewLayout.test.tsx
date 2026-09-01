@@ -549,6 +549,112 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(container.querySelector('[data-testid="thread-spine"]')).toBeNull();
   });
 
+  it("folds the terminal status into the preview header when the header renders", async () => {
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createProps({
+            finalSpineTone: "danger",
+            hiddenUpdateCount: 1,
+            finalSummaryMessage: createMessage({
+              id: "error-summary",
+              content: "Codex completed without returning a final assistant message after retry.",
+            }),
+          })}
+        />,
+      );
+    });
+
+    const statusMarkers = container.querySelectorAll('[data-testid="agent-thread-terminal-status"]');
+    expect(statusMarkers).toHaveLength(1);
+    expect(statusMarkers[0]?.textContent).toBe("Run failed");
+    expect(
+      container
+        .querySelector('[data-testid="agent-thread-preview-header"]')
+        ?.querySelector('[data-testid="agent-thread-terminal-status"]'),
+    ).not.toBeNull();
+  });
+
+  it("skips the duplicate status caption when the entry header already carries run status", async () => {
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createProps({
+            finalSpineTone: "danger",
+            runStatusShownInEntryHeader: true,
+            finalSummaryMessage: createMessage({
+              id: "error-summary",
+              content: "Codex completed without returning a final assistant message after retry.",
+            }),
+          })}
+        />,
+      );
+    });
+
+    expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')).toBeNull();
+    expect(container.textContent).toContain(
+      "The reply didn't come through — this is usually a temporary provider hiccup.",
+    );
+  });
+
+  it("anchors the in-flight indicator at the newest end of the compact rail", async () => {
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createProps({
+            isCompleted: false,
+            isThreadUnresolved: true,
+            showCompactRailWaitingSpinner: true,
+            showSummaryBody: false,
+            hasPreview: false,
+            previewText: "",
+            finalSummaryMessage: null,
+            visibleCompactEvents: [
+              { id: "older", kind: "thinking", actorHandle: "@octo" },
+              { id: "newest", kind: "command", actorHandle: "@octo" },
+            ],
+            latestCompactEventId: "newest",
+          })}
+        />,
+      );
+    });
+
+    const pills = Array.from(container.querySelectorAll(".instafy-compact-event-pill"));
+    expect(pills.length).toBe(3);
+    const lastPill = pills[pills.length - 1];
+    // The spinner pill sits at the newest (right) end and is the single live
+    // indicator; older chips stay static so ordering is unambiguous (#176).
+    expect(lastPill?.getAttribute("aria-label")).toBe("Run in progress");
+    expect(lastPill?.classList.contains("instafy-compact-event-pill-live")).toBe(true);
+    for (const pill of pills.slice(0, -1)) {
+      expect(pill.classList.contains("instafy-compact-event-pill-live")).toBe(false);
+    }
+  });
+
+  it("labels the in-flight pill as a starting run before any update chips exist", async () => {
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createProps({
+            isCompleted: false,
+            isThreadUnresolved: true,
+            showCompactRailWaitingSpinner: true,
+            showSummaryBody: false,
+            hasPreview: false,
+            previewText: "",
+            finalSummaryMessage: null,
+            visibleCompactEvents: [],
+            latestCompactEventId: null,
+          })}
+        />,
+      );
+    });
+
+    const pills = Array.from(container.querySelectorAll(".instafy-compact-event-pill"));
+    expect(pills.length).toBe(1);
+    expect(pills[0]?.getAttribute("aria-label")).toBe("Starting run");
+  });
+
   it("collapses the raw failure text behind the quiet details toggle", async () => {
     await act(async () => {
       root.render(
