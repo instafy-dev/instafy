@@ -14,6 +14,7 @@ import type {
   ChatMessageFileLineRange,
 } from "../types";
 import { truncateMultiline } from "./chatContentHelpers";
+import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "./messageUndoRequest";
 
 const {
   fetchDiff: fetchWorkspaceGitDiffFromController,
@@ -73,6 +74,10 @@ type ResolvedChatFileChange = {
 };
 
 const MAX_FILES_EXPANDED_BY_DEFAULT = 4;
+
+// Brief lockout after dispatching a conversational undo request so a double
+// click cannot fire two requests; the composer chain serializes the rest.
+const UNDO_REQUEST_COOLDOWN_MS = 2500;
 
 const chipBaseClass =
   "inline-flex h-7 max-w-full items-center gap-1.5 rounded-full border px-2.5 text-xs transition focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-primary-300/80 dark:focus-visible:ring-offset-slate-950 disabled:pointer-events-none disabled:opacity-45";
@@ -276,12 +281,20 @@ export function ChatFileChangeList({
   files,
   projectId,
   commitRange,
+  messageId,
+  messageTimestamp,
 }: {
   files: ChatMessageFileChange[];
   projectId?: string | null;
   // The run's base..head commits: pins diffs to what that run changed (real
   // edit diffs on snapshot-history origins, stable after later edits).
   commitRange?: ChatMessageCommitRange | null;
+  // Identity of the chat message these changes belong to. When present, the
+  // Undo chip becomes a conversational affordance (#165): it asks the agent to
+  // undo that message's change instead of silently reverting files. Without it
+  // the chip falls back to the legacy file revert.
+  messageId?: string | null;
+  messageTimestamp?: number | null;
 }) {
   const { openPanelTab, requestUrlPush, openGitDiffTab } = useWorkspaceTabs();
   const { showStatus } = useStatus();
@@ -291,6 +304,7 @@ export function ChatFileChangeList({
     projectAccess?.projectCapabilitiesResolved === true &&
     projectAccess.canWriteProject === true;
   const [undoing, setUndoing] = useState(false);
+  const [undoRequestPending, setUndoRequestPending] = useState(false);
   const [expandedDiffByPath, setExpandedDiffByPath] = useState<Record<string, boolean>>({});
   const [statsByPath, setStatsByPath] = useState<Record<string, ChatFileDiffStat>>({});
   const [gitSupported, setGitSupported] = useState<boolean | null>(null);
@@ -714,6 +728,37 @@ export function ChatFileChangeList({
     ],
   );
 
+  // Conversational undo (#165): ask the agent to undo this message's change
+  // rather than silently reverting files. ChatPanel listens, fills the
+  // composer, and sends — the request lands in the thread like any user turn.
+  const handleUndoRequest = useCallback(() => {
+    if (!messageId || undoRequestPending || typeof window === "undefined") {
+      return;
+    }
+    setUndoRequestPending(true);
+    const detail: MessageUndoRequestDetail = {
+      messageId,
+      messageTimestamp: messageTimestamp ?? null,
+      // A refused send (busy gate, missing credentials, no credits) shows its
+      // own status message; end the double-click cooldown right away so the
+      // chip is clickable again instead of looking like the request landed.
+      onSettled: (submitted) => {
+        if (!submitted) {
+          setUndoRequestPending(false);
+        }
+      },
+    };
+    window.dispatchEvent(new CustomEvent(REQUEST_MESSAGE_UNDO_EVENT, { detail }));
+  }, [messageId, messageTimestamp, undoRequestPending]);
+
+  useEffect(() => {
+    if (!undoRequestPending || typeof window === "undefined") {
+      return;
+    }
+    const timer = window.setTimeout(() => setUndoRequestPending(false), UNDO_REQUEST_COOLDOWN_MS);
+    return () => window.clearTimeout(timer);
+  }, [undoRequestPending]);
+
   return (
     <div className="mt-2 text-sm" data-testid="chat-file-change-summary">
       {/* Chips and their actions flow as one row: actions follow the chips after a thin
@@ -806,16 +851,32 @@ export function ChatFileChangeList({
               <span>Review changes</span>
             </button>
             {projectWriteEnabled ? (
-              <button
-                type="button"
-                className={actionUndoChipClass}
-                onClick={() => handleUndo()}
-                disabled={!runtimeReady || undoing || gitSupported === false}
-                data-testid="chat-file-change-undo"
-              >
-                <Undo className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
-                <span>{undoing ? "Undo…" : "Undo"}</span>
-              </button>
+              messageId ? (
+                <button
+                  type="button"
+                  className={actionUndoChipClass}
+                  onClick={handleUndoRequest}
+                  disabled={undoRequestPending}
+                  title="Ask the agent to undo this change"
+                  data-testid="chat-file-change-undo"
+                >
+                  <Undo className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
+                  <span>{undoRequestPending ? "Undo…" : "Undo"}</span>
+                </button>
+              ) : (
+                // Legacy fallback for surfaces that render changes without a
+                // message identity: reverting files is all "undo" can mean here.
+                <button
+                  type="button"
+                  className={actionUndoChipClass}
+                  onClick={() => handleUndo()}
+                  disabled={!runtimeReady || undoing || gitSupported === false}
+                  data-testid="chat-file-change-undo"
+                >
+                  <Undo className="h-3 w-3 shrink-0 opacity-70" aria-hidden="true" />
+                  <span>{undoing ? "Undo…" : "Undo"}</span>
+                </button>
+              )
             ) : null}
           </>
         ) : null}
@@ -905,8 +966,13 @@ export function ChatFileChangeList({
                 {!isReverted && projectWriteEnabled ? (
                   <>
                     <span className="mx-0.5 h-3.5 w-px shrink-0 bg-slate-200 dark:bg-white/[0.08]" aria-hidden="true" />
+                    {/* Direct file revert stays available from the file card,
+                        where its scope (this file's workspace changes) is
+                        unambiguous — the chip-row Undo is the conversational
+                        affordance. */}
                     <IconButton
-                      aria-label={`Undo changes to ${workspacePath}`}
+                      aria-label={`Revert file changes to ${workspacePath}`}
+                      title={`Revert files: restore ${workspacePath}`}
                       variant="ghost"
                       size="xs"
                       radius="full"
