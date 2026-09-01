@@ -61,6 +61,7 @@ import {
   THREAD_SPINE_END_SEGMENT_TOP_PX,
   type ThreadCompactEvent,
 } from "./threadPreviewHelpers";
+import { ThreadRailChipButton, type ThreadRailHoverCardContent } from "./ThreadRailHoverCard";
 import { ThreadSpine, type ThreadSpineTone } from "./ThreadSpine";
 import {
   formatProxyUpstreamErrorSummary,
@@ -134,6 +135,27 @@ function resolveCompactEventLabel(
     ? resolveThreadCompactUpdateLabel(event.kind)
     : resolveThreadCompactUpdateHistoryLabel(event.kind);
 }
+
+// The hover card previews what the step is/was doing: header = the step's
+// history label plus the actor handle when present, body = the excerpt the
+// assembly derived (#179). No excerpt → no card; the chip keeps its title.
+function resolveCompactEventHoverCard(event: ThreadCompactEvent): ThreadRailHoverCardContent | null {
+  const previewText = typeof event.previewText === "string" ? event.previewText.trim() : "";
+  if (!previewText) {
+    return null;
+  }
+  return {
+    header: resolveThreadCompactUpdateHistoryLabel(event.kind),
+    headerDetail: normalizeAgentHandle(event.actorHandle),
+    bodyText: previewText,
+    mono: Boolean(event.previewMono),
+  };
+}
+
+// Chips are focusable buttons; the same ring vocabulary as the chat's other
+// chip rows (ChatFileChangeList).
+const COMPACT_EVENT_PILL_FOCUS_CLASS =
+  "focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-primary-300/80 dark:focus-visible:ring-offset-slate-950";
 
 function renderCompactEventContent(event: ThreadCompactEvent, ownerBadge: string | null) {
   const actor = normalizeAgentHandle(event.actorHandle);
@@ -273,6 +295,12 @@ export type AgentJobThreadPreviewLayoutProps = {
   isThreadPreviewExpanded: boolean;
   visibleCompactEvents: ThreadCompactEvent[];
   overflowCompactCount: number;
+  /**
+   * The steps elided behind the "+N" chip, oldest first; its hover card lists
+   * their history labels (#179). May be empty even when overflowCompactCount
+   * is set (legacy callers) — the chip then keeps its plain title tooltip.
+   */
+  overflowCompactEvents?: ThreadCompactEvent[];
   latestCompactEventId: string | null;
   showCompactRailWaitingSpinner: boolean;
   isThreadUnresolved: boolean;
@@ -345,6 +373,7 @@ export function AgentJobThreadPreviewLayout({
   isThreadPreviewExpanded,
   visibleCompactEvents,
   overflowCompactCount,
+  overflowCompactEvents = [],
   latestCompactEventId,
   showCompactRailWaitingSpinner,
   isThreadUnresolved,
@@ -780,12 +809,14 @@ export function AgentJobThreadPreviewLayout({
           <div className="group relative py-1">
             {renderThreadPreviewNotch(THREAD_SPINE_COMPACT_NOTCH_OFFSET_PX)}
             <div className="flex min-w-0 w-full items-center gap-2 rounded-lg py-0.5 pr-1">
-              <button
-                type="button"
+              {/* Chip buttons are the keyboard path into the rail; the row
+                  itself stays a mouse-only convenience target for the same
+                  toggle. Chip clicks bubble here, so the chips carry no
+                  onClick of their own. */}
+              <div
                 onClick={onToggleThreadPreview}
-                className="flex min-w-0 flex-1 items-center rounded-lg py-0.5 text-left"
-                aria-label="Run updates"
-                title="Run updates"
+                className="flex min-w-0 flex-1 cursor-pointer items-center rounded-lg py-0.5 text-left"
+                data-testid="agent-thread-compact-rail"
               >
                 <div className="flex min-w-0 flex-1 justify-start overflow-visible">
                   {/* The rail reads oldest → newest, left → right: the dashed
@@ -794,16 +825,24 @@ export function AgentJobThreadPreviewLayout({
                       which chip is current (#176). */}
                   <div className="flex shrink-0 items-center -space-x-2 pl-0.5 py-0.5">
                     {overflowCompactCount > 0 ? (
-                      <span
-                        className="instafy-compact-overflow-indicator relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-dashed border-slate-200 bg-white text-slate-400 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-500"
-                        data-count={String(overflowCompactCount)}
-                        title={formatHiddenUpdateLabel(overflowCompactCount, "earlier run update")}
-                        aria-label={formatHiddenUpdateLabel(overflowCompactCount, "earlier run update")}
-                        role="note"
+                      <ThreadRailChipButton
+                        card={
+                          overflowCompactEvents.length > 0
+                            ? {
+                                header: formatHiddenUpdateLabel(overflowCompactCount, "earlier run update"),
+                                bodyLines: overflowCompactEvents.map((event) =>
+                                  resolveCompactEventLabel(event, ownerBadge, false),
+                                ),
+                              }
+                            : null
+                        }
+                        ariaLabel={formatHiddenUpdateLabel(overflowCompactCount, "earlier run update")}
+                        className={`instafy-compact-overflow-indicator relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-dashed border-slate-200 bg-white text-slate-400 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-500 ${COMPACT_EVENT_PILL_FOCUS_CLASS}`}
+                        dataCount={String(overflowCompactCount)}
                         style={{ animationDelay: "0ms" }}
                       >
                         <Activity aria-hidden="true" className="h-3 w-3" />
-                      </span>
+                      </ThreadRailChipButton>
                     ) : null}
                     {visibleCompactEvents.map((event, index) => {
                       const badgeLabel = resolveCompactEventLabel(event, ownerBadge, isThreadUnresolved);
@@ -815,17 +854,18 @@ export function AgentJobThreadPreviewLayout({
                         !showCompactRailWaitingSpinner &&
                         latestCompactEventId === event.id;
                       return (
-                        <span
+                        <ThreadRailChipButton
                           key={`compact-event-${event.id}`}
+                          card={resolveCompactEventHoverCard(event)}
+                          ariaLabel={badgeLabel}
                           title={badgeLabel}
-                          aria-label={badgeLabel}
                           className={`instafy-compact-event-pill ${
                             isLiveEventPill ? "instafy-compact-event-pill-live" : ""
-                          } inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300`}
+                          } inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 ${COMPACT_EVENT_PILL_FOCUS_CLASS}`}
                           style={{ animationDelay: `${Math.min(index + (overflowCompactCount > 0 ? 1 : 0), 16) * 36}ms` }}
                         >
                           {renderCompactEventContent(event, ownerBadge)}
-                        </span>
+                        </ThreadRailChipButton>
                       );
                     })}
                     {showCompactRailWaitingSpinner ? (
@@ -847,7 +887,7 @@ export function AgentJobThreadPreviewLayout({
                     ) : null}
                   </div>
                 </div>
-              </button>
+              </div>
               <div className="ml-auto flex flex-none items-center gap-1">
                 <IconButton
                   aria-label={isThreadPreviewExpanded ? "Collapse run updates" : "Expand run updates"}
