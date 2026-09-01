@@ -336,7 +336,7 @@ export function UserMessageBubble({
       ) : null}
       {hasFileChanges ? (
         <div className="mt-2">
-          <ChatFileChangeList files={fileChanges} projectId={projectId} commitRange={message.commitRange ?? null} />
+          <ChatFileChangeList files={fileChanges} projectId={projectId} commitRange={message.commitRange ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
         </div>
       ) : null}
     </NotchedMessageShell>
@@ -855,7 +855,7 @@ export function AssistantMessageEntry({
           />
           {message.files && message.files.length > 0 ? (
             <div className="mt-2">
-              <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} />
+              <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
             </div>
           ) : null}
         </div>
@@ -913,7 +913,7 @@ export function AssistantMessageEntry({
         )}
         {message.files && message.files.length > 0 ? (
           <div className="mt-2">
-            <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} />
+            <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
           </div>
         ) : null}
       </Surface>

@@ -69,6 +69,7 @@ vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
 }));
 
 import { ChatFileChangeList, resolveUniqueChatFileChanges } from "../ChatFileChangeList";
+import { REQUEST_MESSAGE_UNDO_EVENT, type MessageUndoRequestDetail } from "../messageUndoRequest";
 import type { ChatMessageFileChange } from "../../types";
 
 function fileChange(path: string, workspacePath = path): ChatMessageFileChange {
@@ -380,6 +381,160 @@ describe("ChatFileChangeList", () => {
     expect(container.querySelector('[data-testid="chat-file-change-undo"]')).toBeNull();
     expect(container.querySelector('[data-testid="chat-file-change-review"]')).not.toBeNull();
     expect(revertWorkspaceGitPaths).not.toHaveBeenCalled();
+  });
+
+  it("turns Undo into a conversational request when the message identity is known", async () => {
+    // Conversational undo (#165): the chip asks the agent to undo the change
+    // instead of silently reverting files.
+    runtimeState.runtimeReady = true;
+    runtimeState.effectiveRuntimeId = "runtime-1";
+    fetchWorkspaceGitDiff.mockResolvedValue({ supported: true, diff: "", truncated: false });
+    const receivedDetails: MessageUndoRequestDetail[] = [];
+    const listener = (event: Event) => {
+      receivedDetails.push((event as CustomEvent<MessageUndoRequestDetail>).detail);
+    };
+    window.addEventListener(REQUEST_MESSAGE_UNDO_EVENT, listener);
+
+    try {
+      await act(async () => {
+        root.render(
+          createElement(ChatFileChangeList, {
+            files: [fileChange("src/app.ts")],
+            projectId: "p1",
+            messageId: "msg-42",
+            messageTimestamp: 1_756_600_000_000,
+          }),
+        );
+      });
+
+      const undoButton = container.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-undo"]');
+      expect(undoButton).not.toBeNull();
+      // The label stays "Undo"; the tooltip explains the conversational act.
+      expect(undoButton?.textContent).toBe("Undo");
+      expect(undoButton?.title).toBe("Ask the agent to undo this change");
+
+      await act(async () => {
+        undoButton?.click();
+      });
+
+      expect(receivedDetails).toHaveLength(1);
+      expect(receivedDetails[0]).toMatchObject({
+        messageId: "msg-42",
+        messageTimestamp: 1_756_600_000_000,
+      });
+      // The conversational path never touches the file-revert API.
+      expect(revertWorkspaceGitPaths).not.toHaveBeenCalled();
+
+      // The chip disables itself after the click, so a rapid second click
+      // cannot dispatch a duplicate request.
+      expect(undoButton?.disabled).toBe(true);
+      await act(async () => {
+        undoButton?.click();
+      });
+      expect(receivedDetails).toHaveLength(1);
+    } finally {
+      window.removeEventListener(REQUEST_MESSAGE_UNDO_EVENT, listener);
+    }
+  });
+
+  it("re-enables the Undo chip immediately when the request was not sent", async () => {
+    // Review finding 7a: without a result signal the chip stayed disabled for
+    // the full cooldown after a submit that never sent anything, so the click
+    // looked like it had landed. The listener reports the refusal back.
+    runtimeState.runtimeReady = true;
+    runtimeState.effectiveRuntimeId = "runtime-1";
+    fetchWorkspaceGitDiff.mockResolvedValue({ supported: true, diff: "", truncated: false });
+    const listener = (event: Event) => {
+      (event as CustomEvent<MessageUndoRequestDetail>).detail.onSettled?.(false);
+    };
+    window.addEventListener(REQUEST_MESSAGE_UNDO_EVENT, listener);
+
+    try {
+      await act(async () => {
+        root.render(
+          createElement(ChatFileChangeList, {
+            files: [fileChange("src/app.ts")],
+            projectId: "p1",
+            messageId: "msg-42",
+          }),
+        );
+      });
+
+      const undoButton = container.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-undo"]');
+      await act(async () => {
+        undoButton?.click();
+      });
+
+      // Still clickable, without waiting out the 2.5s double-click cooldown.
+      expect(undoButton?.disabled).toBe(false);
+      expect(undoButton?.textContent).toBe("Undo");
+    } finally {
+      window.removeEventListener(REQUEST_MESSAGE_UNDO_EVENT, listener);
+    }
+  });
+
+  it("keeps the legacy file revert when no message identity is available", async () => {
+    runtimeState.runtimeReady = true;
+    runtimeState.effectiveRuntimeId = "runtime-1";
+    fetchWorkspaceGitDiff.mockResolvedValue({ supported: true, diff: "", truncated: false });
+    revertWorkspaceGitPaths.mockResolvedValue({ ok: true, removed: [] });
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const dispatched: Event[] = [];
+    const listener = (event: Event) => dispatched.push(event);
+    window.addEventListener(REQUEST_MESSAGE_UNDO_EVENT, listener);
+
+    try {
+      await act(async () => {
+        root.render(createElement(ChatFileChangeList, { files: [fileChange("src/app.ts")], projectId: "p1" }));
+      });
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      const undoButton = container.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-undo"]');
+      await act(async () => {
+        undoButton?.click();
+      });
+
+      expect(revertWorkspaceGitPaths).toHaveBeenCalledWith(
+        expect.objectContaining({ projectId: "p1", paths: ["src/app.ts"] }),
+      );
+      expect(dispatched).toHaveLength(0);
+    } finally {
+      window.removeEventListener(REQUEST_MESSAGE_UNDO_EVENT, listener);
+      confirmSpy.mockRestore();
+    }
+  });
+
+  it("keeps the direct per-file revert in the detail card alongside conversational undo", async () => {
+    // The file-revert capability must remain reachable (clearly labeled) even
+    // when the chip-row Undo has become a conversational affordance.
+    runtimeState.runtimeReady = true;
+    runtimeState.effectiveRuntimeId = "runtime-1";
+    fetchWorkspaceGitDiff.mockResolvedValue({ supported: true, diff: "", truncated: false });
+
+    await act(async () => {
+      root.render(
+        createElement(ChatFileChangeList, {
+          files: [fileChange("src/app.ts")],
+          projectId: "p1",
+          messageId: "msg-42",
+        }),
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    const chip = container.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-file-chip"]');
+    await act(async () => {
+      chip?.click();
+    });
+
+    const revertButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Revert file changes to src/app.ts"]',
+    );
+    expect(revertButton).not.toBeNull();
   });
 
   it("middle-truncates long chip labels so the extension stays visible", async () => {

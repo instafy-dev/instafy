@@ -455,7 +455,13 @@ export function ConversationMessageRows({
                 handle: assistantHandleForMessage,
                 avatarSeed: messageAgentIdentity?.avatarSeed ?? assistantHandleForMessage,
               }
-            : { kind: "boundary" };
+            : message.role === "user" && humanIdentity
+              ? {
+                  kind: "human",
+                  label: humanIdentity.label,
+                  avatarSeed: humanIdentity.avatarSeed,
+                }
+              : { kind: "boundary" };
 
         rows.push(
           <ChatBubbleRow

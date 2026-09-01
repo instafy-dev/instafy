@@ -22,6 +22,56 @@ describe("chatMessageDialect", () => {
     ]);
   });
 
+  it("opens a fenced code block after an ordered-list item with paren delimiters", () => {
+    expect(
+      parseMessageContentBlocks("3) Command output:\n```text\nexample-user\nd3fdb3f\n```\n\nBOX OK"),
+    ).toEqual([
+      { kind: "list", ordered: true, start: 3, items: ["Command output:"] },
+      { kind: "code", language: "text", lines: ["example-user", "d3fdb3f"] },
+      { kind: "paragraph", line: "BOX OK" },
+    ]);
+  });
+
+  it("opens a fenced code block after an ordered-list item with dot delimiters", () => {
+    expect(parseMessageContentBlocks("1. Command output:\n```sh\npnpm test\n```")).toEqual([
+      { kind: "list", ordered: true, start: 1, items: ["Command output:"] },
+      { kind: "code", language: "sh", lines: ["pnpm test"] },
+    ]);
+  });
+
+  it("keeps list-like and quote-like lines literal inside a fenced code block", () => {
+    expect(
+      parseMessageContentBlocks("Before\n```\n1) not a list\n\n- not a bullet\n> not a quote\n```\nAfter"),
+    ).toEqual([
+      { kind: "paragraph", line: "Before" },
+      { kind: "code", language: null, lines: ["1) not a list", "", "- not a bullet", "> not a quote"] },
+      { kind: "paragraph", line: "After" },
+    ]);
+  });
+
+  it("dedents a fenced code block indented inside a list item", () => {
+    expect(
+      parseMessageContentBlocks("1. Run the check:\n   ```sh\n   pnpm test\n   ```\n2. Ship it"),
+    ).toEqual([
+      { kind: "list", ordered: true, start: 1, items: ["Run the check:"] },
+      { kind: "code", language: "sh", lines: ["pnpm test"] },
+      { kind: "list", ordered: true, start: 2, items: ["Ship it"] },
+    ]);
+  });
+
+  it("runs an unclosed fence to the end of the message", () => {
+    expect(parseMessageContentBlocks("Output:\n```text\nstill code\n- still code")).toEqual([
+      { kind: "paragraph", line: "Output:" },
+      { kind: "code", language: "text", lines: ["still code", "- still code"] },
+    ]);
+  });
+
+  it("keeps a triple-backtick inline code span on one line out of fence parsing", () => {
+    expect(parseMessageContentBlocks("Run ```pnpm test``` now")).toEqual([
+      { kind: "paragraph", line: "Run ```pnpm test``` now" },
+    ]);
+  });
+
   it("tokenizes the supported chat dialect without rendering dependencies", () => {
     const tokens = tokenizeChatLine(
       "See **Findings** in [[thread:thread-controller-123|@octo lane]], docs/README.md:12, [docs](https://example.com/docs), https://example.com/raw), @api and @octo.",

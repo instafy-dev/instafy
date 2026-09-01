@@ -111,8 +111,9 @@ import { ChatBubbleRow } from "./ChatBubbleRow";
 import {
   CHAT_SPEAKER_MARKER_SELECTOR,
   isAssistantSpeakerMarker,
-  readStickyAssistantSpeakerMarker,
-  type StickyAssistantSpeaker,
+  isHumanSpeakerMarker,
+  readStickyChatSpeakerMarker,
+  type StickyChatSpeaker,
 } from "./chatSpeakerMarker";
 import { ChatColumn } from "./ChatColumn";
 import { useOctoSilenceHint } from "./useOctoSilenceHint";
@@ -262,6 +263,10 @@ import {
   type MessageSelectionReplyContext,
 } from "./messageSelectionReply";
 import {
+  createMessageUndoRequestHandler,
+  REQUEST_MESSAGE_UNDO_EVENT,
+} from "./messageUndoRequest";
+import {
   collapseLifecycleMessages,
   extractAgentJobId,
   runMatchesThreadJobId,
@@ -279,6 +284,7 @@ import {
 } from "./chatMessageDetailHelpers";
 import {
   HumanSpeakerIdentityLabel,
+  HumanSpeakerIdentityPill,
   resolveHumanChatIdentity,
 } from "./chatHumanIdentity";
 import { ChatComposerSurface } from "./ChatComposerSurface";
@@ -402,14 +408,28 @@ const SPEAKER_OVERLAY_SELECTOR = '[data-chat-speaker-overlay="true"]';
 const NARROW_SPEAKER_INLINE_SELECTOR = '[data-chat-speaker-inline="true"]';
 const SPEAKER_STICKY_FALLBACK_TOP_PX = 8;
 
-function speakersEqual(left: StickyAssistantSpeaker | null, right: StickyAssistantSpeaker | null): boolean {
-  return left?.handle === right?.handle && left?.avatarSeed === right?.avatarSeed;
+function speakersEqual(left: StickyChatSpeaker | null, right: StickyChatSpeaker | null): boolean {
+  if (left === null || right === null) {
+    return left === right;
+  }
+  if (left.kind === "assistant") {
+    return (
+      right.kind === "assistant" &&
+      left.handle === right.handle &&
+      left.avatarSeed === right.avatarSeed
+    );
+  }
+  return (
+    right.kind === "human" &&
+    left.label === right.label &&
+    left.avatarSeed === right.avatarSeed
+  );
 }
 
-function AssistantSpeakerStickyOverlay({
+function ChatSpeakerStickyOverlay({
   speaker,
 }: {
-  speaker: StickyAssistantSpeaker | null;
+  speaker: StickyChatSpeaker | null;
 }) {
   return (
     <div
@@ -424,10 +444,14 @@ function AssistantSpeakerStickyOverlay({
         ].join(" ")}
       >
         {speaker ? (
-          <AssistantSpeakerIdentityPill
-            handle={speaker.handle}
-            agentIdentity={{ handle: speaker.handle, avatarSeed: speaker.avatarSeed }}
-          />
+          speaker.kind === "assistant" ? (
+            <AssistantSpeakerIdentityPill
+              handle={speaker.handle}
+              agentIdentity={{ handle: speaker.handle, avatarSeed: speaker.avatarSeed }}
+            />
+          ) : (
+            <HumanSpeakerIdentityPill avatarSeed={speaker.avatarSeed} label={speaker.label} />
+          )
         ) : null}
       </div>
     </div>
@@ -1813,7 +1837,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     autoScrollSuspendedRef,
     autoScrollPendingRef,
     handleScrollContentRef,
-    historyWindowUnderfilled,
     lastComposerScrollTopRef,
     lastScrollHeightRef,
     recordScrollPosition,
@@ -1822,6 +1845,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     scrollToBottom,
     setAutoScrollSuspended,
     shouldAutoScrollRef,
+    showHistoryLoadButton,
   } = useChatScrollController({
     activeConversationId,
     hasMoreHistory,
@@ -1829,7 +1853,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     loadOlderMessages,
     messages,
   });
-  const showHistoryLoadButton = hasMoreHistory && !historyWindowUnderfilled;
 
   const activeConversation = useMemo(
     () => conversations.find((conversation) => conversation.localId === activeConversationId) ?? null,
@@ -2029,6 +2052,20 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     return submitted;
   }, [ensureProjectWriteAccess, removeServerMessageStash, restoredMessageStash]);
+
+  // Conversational undo (#165): the Undo chip on an agent message dispatches a
+  // window event; this panel owns the composer, so it turns the request into a
+  // normal user message (with the target-message reference in metadata) and
+  // sends it. The handler serializes rapid requests, and the standard submit
+  // preflight queues the message when the assistant is busy — the intent is
+  // never dropped and never double-sent.
+  useEffect(() => {
+    const handler = createMessageUndoRequestHandler(async ({ message, metadata }) =>
+      invokeSubmitMessage({ message, editorState: null, metadata }),
+    );
+    window.addEventListener(REQUEST_MESSAGE_UNDO_EVENT, handler);
+    return () => window.removeEventListener(REQUEST_MESSAGE_UNDO_EVENT, handler);
+  }, [invokeSubmitMessage]);
 
   const invokeComposerPrimaryAction = useCallback<SubmitMessageFn>(
     async (override, options) => {
@@ -3066,13 +3103,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     setIsThinkingLabelExpanded(false);
   }, [typingIndicatorState?.label, isAssistantTyping]);
 
-  const [stickyAssistantSpeaker, setStickyAssistantSpeaker] =
-    useState<StickyAssistantSpeaker | null>(null);
+  const [stickyChatSpeaker, setStickyChatSpeaker] =
+    useState<StickyChatSpeaker | null>(null);
 
   useLayoutEffect(() => {
     const scrollContainer = scrollContainerRef.current;
     if (!scrollContainer) {
-      setStickyAssistantSpeaker(null);
+      setStickyChatSpeaker(null);
       return;
     }
 
@@ -3087,13 +3124,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       const markers = Array.from(
         scrollContainer.querySelectorAll(CHAT_SPEAKER_MARKER_SELECTOR),
       );
-      let nextSpeaker: StickyAssistantSpeaker | null = null;
+      let nextSpeaker: StickyChatSpeaker | null = null;
       for (const marker of markers) {
         const markerTop = marker.getBoundingClientRect().top;
         const hasReachedStickyLine = markerTop <= thresholdTop;
-        const inlineSpeaker = isAssistantSpeakerMarker(marker)
-          ? marker.nextElementSibling
-          : null;
+        const inlineSpeaker =
+          isAssistantSpeakerMarker(marker) || isHumanSpeakerMarker(marker)
+            ? marker.nextElementSibling
+            : null;
         if (inlineSpeaker instanceof HTMLElement && inlineSpeaker.matches(NARROW_SPEAKER_INLINE_SELECTOR)) {
           if (hasReachedStickyLine) {
             inlineSpeaker.dataset.chatSpeakerCovered = "true";
@@ -3102,10 +3140,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           }
         }
         if (hasReachedStickyLine) {
-          nextSpeaker = readStickyAssistantSpeakerMarker(marker);
+          nextSpeaker = readStickyChatSpeakerMarker(marker);
         }
       }
-      setStickyAssistantSpeaker((currentSpeaker) =>
+      setStickyChatSpeaker((currentSpeaker) =>
         speakersEqual(currentSpeaker, nextSpeaker) ? currentSpeaker : nextSpeaker,
       );
     };
@@ -5326,11 +5364,18 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           resetKey={activeConversationId ?? "no-conversation"}
         >
           <ChatColumn className="pointer-events-none sticky top-0 z-30 h-0">
-            <AssistantSpeakerStickyOverlay speaker={stickyAssistantSpeaker} />
+            <ChatSpeakerStickyOverlay speaker={stickyChatSpeaker} />
           </ChatColumn>
           <div ref={handleScrollContentRef} className="flex min-h-full flex-col gap-2.5">
+          {pinChatMessagesToBottom && !gettingStartedTopAnchorActive ? (
+            <div className="flex-1" />
+          ) : null}
+          {/* Sits after the bottom-anchoring spacer so it rides directly above
+              the oldest rendered message. Placed before it, an underfilled
+              thread reads as [button][empty void][messages] and looks like it
+              is asking for a click that the visible room says is unnecessary. */}
           {showHistoryLoadButton ? (
-            <div className="flex justify-center pt-1">
+            <div className="flex justify-center">
               <Button
                 onPress={requestOlderMessages}
                 isDisabled={isHistoryLoading}
@@ -5349,9 +5394,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 )}
               </Button>
             </div>
-          ) : null}
-          {pinChatMessagesToBottom && !gettingStartedTopAnchorActive ? (
-            <div className="flex-1" />
           ) : null}
           <ChatColumn className="space-y-2.5">
             {shouldShowGettingStarted ? (
