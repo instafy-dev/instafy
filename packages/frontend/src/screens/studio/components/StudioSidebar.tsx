@@ -1759,8 +1759,7 @@ export function StudioSidebar({
         data-testid="sidebar-dev-diagnostics-modal"
         modalClassName="max-h-[min(90dvh,42rem)] max-w-xl overflow-hidden p-0"
       >
-        <div className="max-h-[min(90dvh,42rem)] overflow-y-auto p-4">
-          <DevDiagnosticsMenu
+        <DevDiagnosticsMenu
             onClose={() => setDevMenuOpen(false)}
             onShowLogs={onShowLogs}
             hasLogs={hasLogs}
@@ -1791,7 +1790,6 @@ export function StudioSidebar({
             runtimeOptions={runtimeOptions}
             onCopyTunnel={handleCopyTunnel}
           />
-        </div>
       </StudioDialogModal>
       {appLogsOverlayOpen ? (
         <BuildLogOverlay
