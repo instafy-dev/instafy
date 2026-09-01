@@ -16021,6 +16021,415 @@ async fn automation_result_visibility_controls_team_thread_access() -> anyhow::R
 }
 
 #[tokio::test]
+async fn automation_list_and_get_are_space_scoped_for_team_visible_automations(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping automation space scoping test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let owner_user_id = Uuid::new_v4();
+    let teammate_user_id = Uuid::new_v4();
+    let outsider_user_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
+    ensure_test_user(&pool, &teammate_user_id).await?;
+    ensure_test_user(&pool, &outsider_user_id).await?;
+    seed_group_participation_project(
+        &pool,
+        &org_id,
+        &project_id,
+        &owner_user_id,
+        &teammate_user_id,
+        "Automation space scoping",
+    )
+    .await?;
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "automation-space-scoping",
+    );
+    let owner_token = crate::auth::issue_controller_token(&config, &owner_user_id)
+        .map_err(|error| controller_error("issue owner token", error))?
+        .token;
+    let teammate_token = crate::auth::issue_controller_token(&config, &teammate_user_id)
+        .map_err(|error| controller_error("issue teammate token", error))?
+        .token;
+    let outsider_token = crate::auth::issue_controller_token(&config, &outsider_user_id)
+        .map_err(|error| controller_error("issue outsider token", error))?
+        .token;
+    let app = automations::router().with_state(build_test_state(pool.clone(), config));
+    let list_path = format!("/projects/{project_id}/automations");
+
+    let (status, team_json) = automation_json_request(
+        &app,
+        "POST",
+        &list_path,
+        &owner_token,
+        json!({
+            "name": "Team hourly check",
+            "promptText": "Check the space hourly.",
+            "scheduleKind": "hourly",
+            "intervalHours": 1,
+            "timezone": "UTC",
+            "runtimeMode": "existing",
+            "resultVisibility": "team",
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "team create failed: {team_json}");
+    let team_automation_id = team_json["id"].as_str().expect("team id").to_string();
+
+    let (status, private_json) = automation_json_request(
+        &app,
+        "POST",
+        &list_path,
+        &owner_token,
+        json!({
+            "name": "Private hourly check",
+            "promptText": "Check privately.",
+            "scheduleKind": "hourly",
+            "intervalHours": 1,
+            "timezone": "UTC",
+            "runtimeMode": "existing",
+        }),
+    )
+    .await?;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "private create failed: {private_json}"
+    );
+    let private_automation_id = private_json["id"].as_str().expect("private id").to_string();
+
+    let list_ids = |payload: &serde_json::Value| -> Vec<String> {
+        payload
+            .as_array()
+            .expect("automation list array")
+            .iter()
+            .filter_map(|entry| entry["id"].as_str().map(str::to_string))
+            .collect()
+    };
+
+    // The creator keeps seeing everything they created.
+    let (status, owner_list) =
+        automation_json_request(&app, "GET", &list_path, &owner_token, json!({})).await?;
+    assert_eq!(status, StatusCode::OK, "owner list failed: {owner_list}");
+    let owner_ids = list_ids(&owner_list);
+    assert!(owner_ids.contains(&team_automation_id));
+    assert!(owner_ids.contains(&private_automation_id));
+
+    // A space member sees the space's team-visible automations even though a
+    // different user created them; private automations stay creator-only.
+    let (status, teammate_list) =
+        automation_json_request(&app, "GET", &list_path, &teammate_token, json!({})).await?;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "teammate list failed: {teammate_list}"
+    );
+    let teammate_ids = list_ids(&teammate_list);
+    assert!(
+        teammate_ids.contains(&team_automation_id),
+        "space member must see the team-visible automation: {teammate_list}"
+    );
+    assert!(
+        !teammate_ids.contains(&private_automation_id),
+        "private automations must stay creator-only: {teammate_list}"
+    );
+
+    // A non-member cannot list the space's automations at all.
+    let (status, outsider_list) =
+        automation_json_request(&app, "GET", &list_path, &outsider_token, json!({})).await?;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "outsider list: {outsider_list}"
+    );
+
+    // Direct reads follow the same scoping.
+    let team_path = format!("/automations/{team_automation_id}");
+    let private_path = format!("/automations/{private_automation_id}");
+    let (status, teammate_get) =
+        automation_json_request(&app, "GET", &team_path, &teammate_token, json!({})).await?;
+    assert_eq!(status, StatusCode::OK, "teammate get: {teammate_get}");
+    assert_eq!(teammate_get["name"], json!("Team hourly check"));
+    let (status, denied_get) =
+        automation_json_request(&app, "GET", &private_path, &teammate_token, json!({})).await?;
+    assert_eq!(status, StatusCode::FORBIDDEN, "private get: {denied_get}");
+    let (status, outsider_get) =
+        automation_json_request(&app, "GET", &team_path, &outsider_token, json!({})).await?;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "outsider get: {outsider_get}"
+    );
+
+    // No enumeration oracle: a non-member probing automation ids must receive
+    // the exact same project-access denial (status AND body) whether the
+    // automation is private or team-visible, so responses cannot be used to
+    // learn an automation's visibility.
+    let (outsider_private_status, outsider_private_get) =
+        automation_json_request(&app, "GET", &private_path, &outsider_token, json!({})).await?;
+    assert_eq!(
+        outsider_private_status,
+        StatusCode::FORBIDDEN,
+        "outsider private get: {outsider_private_get}"
+    );
+    assert_eq!(
+        (outsider_private_status, &outsider_private_get),
+        (status, &outsider_get),
+        "non-members must get identical denials for private and team-visible ids"
+    );
+    assert_eq!(
+        outsider_get["message"],
+        json!("You do not have access to this project"),
+        "non-member denial must be the project-access error, not the visibility error"
+    );
+
+    // Visibility does not grant mutation rights: pause/edit stay gated on the
+    // creator (can_access_owned_automation), matching the pre-existing
+    // mutation authorization.
+    let (status, teammate_pause) = automation_json_request(
+        &app,
+        "PATCH",
+        &team_path,
+        &teammate_token,
+        json!({ "status": "paused" }),
+    )
+    .await?;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "teammate pause: {teammate_pause}"
+    );
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_org(&pool, &org_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
+    cleanup_test_user(&pool, &teammate_user_id).await?;
+    cleanup_test_user(&pool, &outsider_user_id).await?;
+    Ok(())
+}
+
+/// Pins `include_team_visible = active_job.is_none()` in the list route: an
+/// active-job token stays scoped to the automations its subject user owns and
+/// must never receive another creator's team-visible automation, even though
+/// a human member of the same space does. Forcing team visibility on for job
+/// tokens previously survived the whole suite (adversarial authz review nit 1
+/// on instafy-dev/instafy#181).
+#[tokio::test]
+async fn automation_list_with_active_job_token_excludes_team_visible_siblings() -> anyhow::Result<()>
+{
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping automation job token scoping test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    ensure_conversation_event_test_tables(&pool).await?;
+
+    let owner_user_id = Uuid::new_v4();
+    let subject_user_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let runtime_id = Uuid::new_v4();
+    let runtime_lease_id = Uuid::new_v4();
+    let conversation_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    let job_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
+    ensure_test_user(&pool, &subject_user_id).await?;
+    seed_group_participation_project(
+        &pool,
+        &org_id,
+        &project_id,
+        &owner_user_id,
+        &subject_user_id,
+        "Automation job token scoping",
+    )
+    .await?;
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "automation-job-token-scoping",
+    );
+    let owner_token = crate::auth::issue_controller_token(&config, &owner_user_id)
+        .map_err(|error| controller_error("issue owner token", error))?
+        .token;
+    let subject_token = crate::auth::issue_controller_token(&config, &subject_user_id)
+        .map_err(|error| controller_error("issue subject token", error))?
+        .token;
+    let app = automations::router().with_state(build_test_state(pool.clone(), config.clone()));
+    let list_path = format!("/projects/{project_id}/automations");
+
+    let (status, sibling_json) = automation_json_request(
+        &app,
+        "POST",
+        &list_path,
+        &owner_token,
+        json!({
+            "name": "Team sibling check",
+            "promptText": "Check the space hourly.",
+            "scheduleKind": "hourly",
+            "intervalHours": 1,
+            "timezone": "UTC",
+            "runtimeMode": "existing",
+            "resultVisibility": "team",
+        }),
+    )
+    .await?;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "sibling create failed: {sibling_json}"
+    );
+    let sibling_automation_id = sibling_json["id"].as_str().expect("sibling id").to_string();
+
+    let (status, own_json) = automation_json_request(
+        &app,
+        "POST",
+        &list_path,
+        &subject_token,
+        json!({
+            "name": "Subject-owned check",
+            "promptText": "Check my own automation hourly.",
+            "scheduleKind": "hourly",
+            "intervalHours": 1,
+            "timezone": "UTC",
+            "runtimeMode": "existing",
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "own create failed: {own_json}");
+    let own_automation_id = own_json["id"].as_str().expect("own id").to_string();
+
+    let list_ids = |payload: &serde_json::Value| -> Vec<String> {
+        payload
+            .as_array()
+            .expect("automation list array")
+            .iter()
+            .filter_map(|entry| entry["id"].as_str().map(str::to_string))
+            .collect()
+    };
+
+    // Sanity: as a plain space member the subject user DOES see the sibling
+    // team-visible automation, so the exclusion below is attributable to the
+    // active-job token, not to a broken seed.
+    let (status, member_list) =
+        automation_json_request(&app, "GET", &list_path, &subject_token, json!({})).await?;
+    assert_eq!(status, StatusCode::OK, "member list failed: {member_list}");
+    let member_ids = list_ids(&member_list);
+    assert!(member_ids.contains(&own_automation_id));
+    assert!(member_ids.contains(&sibling_automation_id));
+
+    // Seed a live leased job for the subject user and mint its prompt token.
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into runtimes (id, project_id, provider, status)
+                 values ($1, $2, 'default', 'running')",
+                &[&runtime_id, &project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runtime_leases (id, project_id, runtime_id, status, launched_at)
+                 values ($1, $2, $3, 'active', now())",
+                &[&runtime_lease_id, &project_id, &runtime_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "update runtimes set active_lease_id = $2 where id = $1",
+                &[&runtime_id, &runtime_lease_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into conversations (id, project_id, created_by, metadata, visibility)
+                 values ($1, $2, $3, '{}'::jsonb, 'public')",
+                &[&conversation_id, &project_id, &subject_user_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runs (id, project_id, conversation_id, run_type, status)
+                 values ($1, $2, $3, 'prompt', 'in_progress')",
+                &[&run_id, &project_id, &conversation_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into agent_jobs (
+                    id, project_id, run_id, conversation_id, status, payload,
+                    leased_by_runtime_id, leased_at, lease_expires_at
+                 ) values ($1, $2, $3, $4, 'leased', $5, $6,
+                           now(), now() + interval '5 minutes')",
+                &[
+                    &job_id,
+                    &project_id,
+                    &run_id,
+                    &conversation_id,
+                    &PgJson(json!({ "user_id": subject_user_id })),
+                    &runtime_id,
+                ],
+            )
+            .await?;
+    }
+    let job_token = mint_scoped_token(
+        &config,
+        ScopedTokenRequest {
+            audience: runtime_id.to_string(),
+            subject: subject_user_id.to_string(),
+            project_id: project_id.to_string(),
+            origin_id: None,
+            runtime_id: Some(runtime_id.to_string()),
+            protocol: None,
+            scopes: vec![
+                "prompt.execute".to_string(),
+                "job.token.workspace-separated".to_string(),
+            ],
+            lease_id: Some(runtime_lease_id.to_string()),
+            run_id: Some(run_id.to_string()),
+            prefer_runtime: None,
+            ttl_seconds: Some(300),
+        },
+    )
+    .map_err(|error| controller_error("mint active job token", error))?
+    .token;
+
+    // The active-job token keeps its subject's own automation (current
+    // behavior) but must not receive the other creator's team-visible row.
+    let (status, job_list) =
+        automation_json_request(&app, "GET", &list_path, &job_token, json!({})).await?;
+    assert_eq!(status, StatusCode::OK, "job token list failed: {job_list}");
+    let job_ids = list_ids(&job_list);
+    assert!(
+        job_ids.contains(&own_automation_id),
+        "job token must keep listing its subject's own automations: {job_list}"
+    );
+    assert!(
+        !job_ids.contains(&sibling_automation_id),
+        "job token must not receive another creator's team-visible automation: {job_list}"
+    );
+
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute("delete from runs where id = $1", &[&run_id])
+            .await?;
+    }
+    cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_org(&pool, &org_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
+    cleanup_test_user(&pool, &subject_user_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn skill_mode_ambient_turn_dispatches_evaluation_and_swallows_decline() -> anyhow::Result<()>
 {
     let Some(pool) = setup_origin_test_pool().await? else {
@@ -25716,7 +26125,8 @@ async fn credential_usage_report_follows_revoked_credential_fallback() -> anyhow
 
     // Usage reported against the revoked pinned id must land on the same
     // effective credential the lease fallback serves, not be dropped.
-    let snapshot = json!({ "planName": "Codex", "windows": [{ "window": "weekly", "leftPercent": 42 }] });
+    let snapshot =
+        json!({ "planName": "Codex", "windows": [{ "window": "weekly", "leftPercent": 42 }] });
     let response = post_usage(pinned_id, snapshot.clone()).await?;
     assert_eq!(
         response.status(),
