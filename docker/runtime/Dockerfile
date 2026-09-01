@@ -203,7 +203,8 @@ ARG IP_ADDRESS_VERSION
 ARG IP_ADDRESS_SHA256
 
 COPY --from=node-runtime /usr/local/ /usr/local/
-RUN apt-get update && \
+RUN test -n "${CHROMIUM_MIN_VERSION}" && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
       bash \
       bsdutils \

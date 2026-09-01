@@ -93,6 +93,11 @@ test("one protected approval covers the whole exact-SHA service release", () => 
   );
   assert.doesNotMatch(authorizeSection, /packages: write/u);
   assert.doesNotMatch(authorizeSection, /environment:/u);
+  assert.match(authorizeSection, /actions: read/u);
+  assert.match(authorizeSection, /Refuse duplicate exact-SHA publication/u);
+  assert.match(authorizeSection, /GITHUB_RUN_ATTEMPT" != "1"/u);
+  assert.match(authorizeSection, /actions\/workflows\/\$\{RELEASE_WORKFLOW\}\/runs/u);
+  assert.match(authorizeSection, /\.conclusion == "success"/u);
 
   // Trivy pinning must be enforced in the services workflow too.
   assert.match(
