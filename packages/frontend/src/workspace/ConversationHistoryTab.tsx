@@ -570,7 +570,8 @@ export function ConversationHistoryTab({
                 </TreeRowMarkerSlot>
               ) : null;
               // Without the gutter, the active dot rides the row's own edge so
-              // it costs no width.
+              // it costs no width. The row's left padding (below) is sized so
+              // the title glyphs keep a clear ~6px gap from the dot.
               const overlayActiveDot = !showMarkerGutter && isActive ? (
                 <span
                   className={[
@@ -636,7 +637,7 @@ export function ConversationHistoryTab({
                   titleClassName={isDeleted ? "line-through text-slate-400 dark:text-slate-500" : ""}
                   className={
                     [
-                      showMarkerGutter ? "pl-0" : "relative pl-3.5",
+                      showMarkerGutter ? "pl-0" : touchDrawer ? "relative pl-[1.125rem]" : "relative pl-4",
                       touchDrawer ? "rounded-2xl" : "",
                       isDeleted ? "opacity-70" : "",
                     ]
