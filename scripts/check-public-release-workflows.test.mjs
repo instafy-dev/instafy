@@ -72,7 +72,29 @@ test("protected main publishes both exact image manifests only after CI", () => 
   assert.match(source, /runtime-agent-release-manifest/u);
   assert.match(source, /Check exact manifest freshness/u);
   assert.match(source, /14 \* 24 \* 60 \* 60/u);
+  assert.match(source, /services_publish=\$services_publish/u);
+  assert.match(source, /runtime_publish=\$runtime_publish/u);
   assert.match(source, /steps\.freshness\.outputs\.publish == 'true'/u);
+  assert.match(source, /PUBLISH_SERVICES: \$\{\{ steps\.freshness\.outputs\.services_publish \}\}/u);
+  assert.match(source, /PUBLISH_RUNTIME: \$\{\{ steps\.freshness\.outputs\.runtime_publish \}\}/u);
+  const dispatchStart = source.indexOf(
+    "      - name: Dispatch stale immutable image publishers\n",
+  );
+  const dispatchEnd = source.indexOf(
+    "      - name: Require both exact image manifests\n",
+  );
+  assert.ok(dispatchStart >= 0 && dispatchEnd > dispatchStart);
+  const dispatch = source.slice(dispatchStart, dispatchEnd);
+  assert.equal([...dispatch.matchAll(/publish-production-services\.yml/gu)].length, 1);
+  assert.equal([...dispatch.matchAll(/publish-runtime-agent\.yml/gu)].length, 1);
+  assert.match(
+    dispatch,
+    /if \[\[ "\$PUBLISH_SERVICES" == "true" \]\]; then\n\s+services="\$\([\s\S]*?publish-production-services\.yml/u,
+  );
+  assert.match(
+    dispatch,
+    /if \[\[ "\$PUBLISH_RUNTIME" == "true" \]\]; then\n\s+runtime="\$\([\s\S]*?publish-runtime-agent\.yml/u,
+  );
   assert.match(source, /Report fresh immutable manifests/u);
   assert.match(source, /\\"update_channel_tags\\":false/u);
   assert.doesNotMatch(source, /\bsecrets\./u);
@@ -91,7 +113,7 @@ test("protected main publishes both exact image manifests only after CI", () => 
     "Wait for exact protected-main CI",
     "Recheck protected main before publication",
     "Check exact manifest freshness",
-    "Dispatch both immutable image publishers",
+    "Dispatch stale immutable image publishers",
     "Require both exact image manifests",
   );
 });
@@ -215,6 +237,11 @@ test("runtime images publish only exact protected main from a fixed namespace", 
   assert.match(authorize, /GITHUB_REF" != "refs\/heads\/main"/u);
   assert.match(authorize, /\^\[0-9a-f\]\{40\}\$/u);
   assert.match(authorize, /REQUESTED_COMMIT" != "\$GITHUB_SHA"/u);
+  assert.match(authorize, /actions: read/u);
+  assert.match(authorize, /Refuse duplicate exact-SHA publication/u);
+  assert.match(authorize, /GITHUB_RUN_ATTEMPT" != "1"/u);
+  assert.match(authorize, /actions\/workflows\/\$\{RELEASE_WORKFLOW\}\/runs/u);
+  assert.match(authorize, /\.conclusion == "success"/u);
   assert.doesNotMatch(authorize, /packages: write/u);
 
   // Exactly one protected-environment approval gates the whole release.
