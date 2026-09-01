@@ -129,6 +129,10 @@ const CODE_BLOCK_CLASS = [
   "block max-w-full overflow-x-auto whitespace-pre rounded-xl bg-slate-950/[0.035] px-3 py-2 font-mono text-[0.85em] leading-normal text-slate-700 ring-1 ring-inset ring-slate-900/10 shadow-[inset_0_-1px_0_rgba(15,23,42,0.07)]",
   "dark:bg-white/[0.055] dark:text-slate-200 dark:ring-white/[0.08] dark:shadow-[inset_0_-1px_0_rgba(255,255,255,0.045)]",
 ].join(" ");
+const GITHUB_REFERENCE_TOKEN_CLASS = [
+  "inline-flex items-center gap-1 rounded-[0.34rem] bg-slate-950/[0.035] px-1.5 py-[0.08em] font-mono text-[0.92em] leading-[1.18] text-slate-700 no-underline ring-1 ring-inset ring-slate-900/10 shadow-[inset_0_-1px_0_rgba(15,23,42,0.07)] align-baseline transition hover:bg-slate-950/[0.06] hover:text-slate-900",
+  "dark:bg-white/[0.055] dark:text-slate-200 dark:ring-white/[0.08] dark:shadow-[inset_0_-1px_0_rgba(255,255,255,0.045)] dark:hover:bg-white/[0.09] dark:hover:text-slate-50",
+].join(" ");
 const WORKSPACE_FILE_REFERENCE_TOKEN_CLASS = [
   "inline-flex min-w-0 max-w-[14rem] items-center overflow-hidden rounded-[0.34rem] bg-primary-50/70 px-1.5 py-[0.08em] font-mono text-[0.92em] leading-[1.18] text-primary-700 ring-1 ring-inset ring-primary-200/80 shadow-[inset_0_-1px_0_rgba(0,122,204,0.08)] align-baseline sm:max-w-[24rem]",
   "dark:bg-primary-300/10 dark:text-primary-200 dark:ring-primary-300/20 dark:shadow-[inset_0_-1px_0_rgba(255,255,255,0.035)]",
@@ -1276,6 +1280,28 @@ function WorkspaceFileReferenceChip({
   );
 }
 
+// Octicon-style glyphs (git-pull-request / issue-opened) inlined so the chip
+// needs no icon-font or remote asset; the paths inherit the chip's text color.
+function GitHubReferenceGlyph({ kind }: { kind: "pull" | "issue" }) {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      data-testid="chat-message-github-reference-glyph"
+      className="h-[0.92em] w-[0.92em] flex-none fill-current opacity-75"
+    >
+      {kind === "pull" ? (
+        <path d="M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z" />
+      ) : (
+        <>
+          <path d="M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z" />
+          <path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z" />
+        </>
+      )}
+    </svg>
+  );
+}
+
 export type MessageContentProps = {
   content: string;
   className?: string;
@@ -1508,6 +1534,26 @@ export function MessageContent({
           >
             {token.value}
           </code>
+        );
+      }
+      if (token.type === "github-reference") {
+        const reference = token.value;
+        const label = `${reference.owner}/${reference.repo}#${reference.number}`;
+        return (
+          <a
+            key={`${keyPrefix}-${reference.url}-${tokenIndex}`}
+            href={reference.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={reference.url}
+            aria-label={`Open GitHub ${reference.kind === "pull" ? "pull request" : "issue"} ${label}`}
+            data-testid="chat-message-github-reference"
+            data-github-ref-kind={reference.kind}
+            className={GITHUB_REFERENCE_TOKEN_CLASS}
+          >
+            <GitHubReferenceGlyph kind={reference.kind} />
+            <span className="whitespace-nowrap">{label}</span>
+          </a>
         );
       }
       if (token.type === "link") {
