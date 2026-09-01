@@ -517,7 +517,7 @@ fn build_system_issue_from_telemetry(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("Runtime telemetry error");
-    if is_expected_provider_limit(message) {
+    if is_expected_provider_limit(message) || is_reconnectable_credential_failure(message) {
         return None;
     }
     let upstream_ai_failure = is_upstream_ai_failure(message);
@@ -578,6 +578,18 @@ fn is_expected_provider_limit(message: &str) -> bool {
         || normalized.contains("insufficient_quota")
         || normalized.contains("rate_limit_error")
         || normalized.contains("rate limit reached")
+}
+
+fn is_reconnectable_credential_failure(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("codex oauth refresh failed")
+        && (normalized.contains("session has ended")
+            || normalized.contains("log in again")
+            || normalized.contains("sign in again")
+            || normalized.contains("signing in again")
+            || normalized.contains("signin again")
+            || normalized.contains("already been used")
+            || normalized.contains("could not validate your refresh token"))
 }
 
 fn is_upstream_ai_failure(message: &str) -> bool {
@@ -964,6 +976,40 @@ mod tests {
             )
             .is_none());
         }
+    }
+
+    #[test]
+    fn telemetry_system_issue_ignores_reconnectable_credential_failures() {
+        for message in [
+            r#"unexpected status 401 Unauthorized: controller credential fetch failed: controller credentials returned 500 Internal Server Error: {\"message\":\"Codex OAuth refresh failed: Could not validate your refresh token. Please try signing in again.\"}"#,
+            r#"unexpected status 502 Bad Gateway: controller forced credential refresh failed: {\"message\":\"Codex OAuth refresh failed: Your session has ended. Please log in again.\"}"#,
+            r#"unexpected status 401 Unauthorized: {\"message\":\"Codex OAuth refresh failed: Your refresh token has already been used. Please try signing in again.\"}"#,
+            r#"unexpected status 401 Unauthorized: {\"message\":\"Codex OAuth refresh failed: Authentication failed. Please signin again.\"}"#,
+        ] {
+            assert!(build_system_issue_from_telemetry(
+                "telemetry.error",
+                "error",
+                Some(message),
+                None,
+                None,
+                None,
+                None,
+                &JsonValue::Null,
+            )
+            .is_none());
+        }
+
+        assert!(build_system_issue_from_telemetry(
+            "telemetry.error",
+            "error",
+            Some("Codex OAuth refresh failed: refresh endpoint timed out"),
+            None,
+            None,
+            None,
+            None,
+            &JsonValue::Null,
+        )
+        .is_some());
     }
 
     #[test]
