@@ -3673,7 +3673,7 @@ async fn load_conversation_history_for_agent(
     let clamped_limit = limit.clamp(1, 200);
     let rows = transaction
         .query(
-            "select role, content, metadata, created_at
+            "select id, role, content, metadata, created_at
              from conversation_messages
              where conversation_id = $1
              order by created_at desc
@@ -3686,6 +3686,7 @@ async fn load_conversation_history_for_agent(
     let mut entries: Vec<JsonValue> = rows
         .into_iter()
         .filter_map(|row| {
+            let message_id: Uuid = row.get("id");
             let role: String = row.get("role");
             let mut content: String = row.get("content");
             let metadata: JsonValue = row.get("metadata");
@@ -3716,6 +3717,10 @@ async fn load_conversation_history_for_agent(
                     content.push_str(&attachment_context);
                 }
             }
+            // The message id lets the runtime resolve structured message
+            // references (e.g. the undo affordance's `undoTargetMessageId`
+            // metadata) against this history instead of text heuristics.
+            map.insert("id".to_string(), JsonValue::String(message_id.to_string()));
             map.insert("role".to_string(), JsonValue::String(role));
             map.insert("content".to_string(), JsonValue::String(content));
             map.insert(
