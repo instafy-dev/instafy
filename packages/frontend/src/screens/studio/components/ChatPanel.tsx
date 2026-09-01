@@ -1833,7 +1833,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     autoScrollSuspendedRef,
     autoScrollPendingRef,
     handleScrollContentRef,
-    historyWindowUnderfilled,
     lastComposerScrollTopRef,
     lastScrollHeightRef,
     recordScrollPosition,
@@ -1842,6 +1841,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     scrollToBottom,
     setAutoScrollSuspended,
     shouldAutoScrollRef,
+    showHistoryLoadButton,
   } = useChatScrollController({
     activeConversationId,
     hasMoreHistory,
@@ -1849,7 +1849,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     loadOlderMessages,
     messages,
   });
-  const showHistoryLoadButton = hasMoreHistory && !historyWindowUnderfilled;
 
   const activeConversation = useMemo(
     () => conversations.find((conversation) => conversation.localId === activeConversationId) ?? null,
@@ -5350,8 +5349,15 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             <ChatSpeakerStickyOverlay speaker={stickyChatSpeaker} />
           </ChatColumn>
           <div ref={handleScrollContentRef} className="flex min-h-full flex-col gap-2.5">
+          {pinChatMessagesToBottom && !gettingStartedTopAnchorActive ? (
+            <div className="flex-1" />
+          ) : null}
+          {/* Sits after the bottom-anchoring spacer so it rides directly above
+              the oldest rendered message. Placed before it, an underfilled
+              thread reads as [button][empty void][messages] and looks like it
+              is asking for a click that the visible room says is unnecessary. */}
           {showHistoryLoadButton ? (
-            <div className="flex justify-center pt-1">
+            <div className="flex justify-center">
               <Button
                 onPress={requestOlderMessages}
                 isDisabled={isHistoryLoading}
@@ -5370,9 +5376,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 )}
               </Button>
             </div>
-          ) : null}
-          {pinChatMessagesToBottom && !gettingStartedTopAnchorActive ? (
-            <div className="flex-1" />
           ) : null}
           <ChatColumn className="space-y-2.5">
             {shouldShowGettingStarted ? (
