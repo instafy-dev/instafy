@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use chrono::{DateTime, Utc};
 use serde_json::json;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -53,6 +54,33 @@ const RUNTIME_EVENT_CLEANUP_BATCH_SIZE: i64 = 5000;
 /// run; on a several-minute ticker a multi-million-row backlog clears within a
 /// few hours while steady state deletes only the day's trickle.
 const RUNTIME_EVENT_CLEANUP_MAX_BATCHES_PER_RUN: u32 = 20;
+const HOSTED_RUNTIME_BILLING_POOL_PRESSURE_REPORT_AFTER: Duration = Duration::from_secs(15 * 60);
+
+pub(crate) fn should_report_hosted_runtime_credit_sweep_error(
+    error: &anyhow::Error,
+    transient_failure_started_at: &mut Option<Instant>,
+    now: Instant,
+) -> bool {
+    let is_pool_timeout = error.chain().any(|cause| {
+        cause
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("timed out in bb8")
+    });
+    if !is_pool_timeout {
+        *transient_failure_started_at = None;
+        return true;
+    }
+
+    let started_at = transient_failure_started_at.get_or_insert(now);
+    now.saturating_duration_since(*started_at) >= HOSTED_RUNTIME_BILLING_POOL_PRESSURE_REPORT_AFTER
+}
+
+pub(crate) fn reset_hosted_runtime_credit_sweep_pool_pressure(
+    transient_failure_started_at: &mut Option<Instant>,
+) {
+    *transient_failure_started_at = None;
+}
 
 pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
     resume_expired_runtime_drains(state).await?;
