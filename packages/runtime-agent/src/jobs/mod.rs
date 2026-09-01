@@ -7342,6 +7342,17 @@ Avoid creating dependency caches or stores in the canonical workspace root when 
             &conversation_section,
         );
 
+        if let Some(section) =
+            format_undo_target_context_section(job.payload.get("metadata"), conversation_history)
+        {
+            append_prompt_section(
+                &mut prompt,
+                &mut prompt_section_metrics,
+                "undoTargetContext",
+                &section,
+            );
+        }
+
         let latest_request_section = format!("\n\nLatest user request:\n{trimmed_prompt}");
         append_prompt_section(
             &mut prompt,
@@ -13687,6 +13698,136 @@ fn metadata_requests_plain_text_report(metadata: Option<&JsonValue>) -> bool {
     )
 }
 
+/// Conversational undo (#165/#174): the Undo affordance sends
+/// `{ undoTargetMessageId }` metadata alongside the request (the same verbatim
+/// metadata pass-through `replyContext` rides). Reading it here turns
+/// undo-target resolution from a text heuristic ("id <first-8>" in the
+/// request) into a structural lookup against the job's conversation history.
+fn undo_target_message_id_from_metadata(metadata: Option<&JsonValue>) -> Option<String> {
+    let map = metadata.and_then(JsonValue::as_object)?;
+    map.get("undoTargetMessageId")
+        .or_else(|| map.get("undo_target_message_id"))
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+/// Cap for the quoted undo-target excerpt: the target is usually a short
+/// file-change or summary message, but a long assistant answer must not
+/// balloon the prompt.
+const UNDO_TARGET_QUOTE_MAX_CHARS: usize = 1_500;
+
+/// Builds the explicit undo-target context block when the job metadata carries
+/// `undoTargetMessageId`. A resolvable target is quoted inline (with its
+/// reported file changes when the history entry's metadata carries the
+/// `apply/files` artifact); an unresolvable one — the known preview-surface
+/// scope leak, where the referenced message lives in another thread — yields a
+/// labeled note so the agent knows it is flying on the text reference alone.
+fn format_undo_target_context_section(
+    metadata: Option<&JsonValue>,
+    conversation_history: Option<&JsonValue>,
+) -> Option<String> {
+    let target_id = undo_target_message_id_from_metadata(metadata)?;
+    let target_entry = conversation_history
+        .and_then(JsonValue::as_array)
+        .and_then(|entries| {
+            entries.iter().find(|entry| {
+                entry
+                    .get("id")
+                    .and_then(JsonValue::as_str)
+                    .is_some_and(|id| id.trim().eq_ignore_ascii_case(target_id.as_str()))
+            })
+        });
+
+    let mut section = String::from("\nUndo target message:\n");
+    let Some(entry) = target_entry else {
+        let _ = writeln!(
+            section,
+            "The latest user request asks to undo the change from a specific earlier assistant message (id {target_id}), but that message could not be resolved from this conversation's history — it may belong to a different thread surface. Rely on the human-readable reference in the latest user request, and say so explicitly if the target remains ambiguous."
+        );
+        return Some(section);
+    };
+
+    let _ = writeln!(
+        section,
+        "The latest user request asks to undo the change from a specific earlier assistant message. Structured metadata resolves it to message id {target_id}, quoted below:"
+    );
+    let content = entry
+        .get("content")
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if content.is_empty() {
+        section.push_str("> (the referenced message has no text content)\n");
+    } else {
+        for line in truncate_undo_target_quote(content).lines() {
+            section.push_str("> ");
+            section.push_str(line);
+            section.push('\n');
+        }
+    }
+    if let Some(lines) = undo_target_file_change_lines(entry.get("metadata")) {
+        section.push_str("File changes reported by that message:\n");
+        for line in lines {
+            section.push_str(&line);
+            section.push('\n');
+        }
+    }
+    Some(section)
+}
+
+fn truncate_undo_target_quote(content: &str) -> String {
+    if content.chars().count() <= UNDO_TARGET_QUOTE_MAX_CHARS {
+        return content.to_string();
+    }
+    let truncated: String = content
+        .chars()
+        .take(UNDO_TARGET_QUOTE_MAX_CHARS.saturating_sub(1))
+        .collect();
+    format!("{}…", truncated.trim_end())
+}
+
+/// Cheap file-change summary for the undo target: the history entry's metadata
+/// already carries the run's `apply/files` artifact (the same shape the chat
+/// file-change cards read), so no extra lookup is needed.
+fn undo_target_file_change_lines(metadata: Option<&JsonValue>) -> Option<Vec<String>> {
+    let artifacts = metadata
+        .and_then(JsonValue::as_object)?
+        .get("artifacts")
+        .and_then(JsonValue::as_array)?;
+    let files = artifacts
+        .iter()
+        .find(|artifact| artifact.get("kind").and_then(JsonValue::as_str) == Some("apply/files"))?
+        .get("files")
+        .and_then(JsonValue::as_array)?;
+
+    let mut lines = Vec::new();
+    for file in files {
+        let Some(path) = file
+            .get("workspacePath")
+            .or_else(|| file.get("path"))
+            .and_then(JsonValue::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        let change = file
+            .get("change")
+            .and_then(|change| change.get("type").or_else(|| change.get("kind")))
+            .and_then(JsonValue::as_str)
+            .or_else(|| file.get("changeType").and_then(JsonValue::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        match change {
+            Some(change) => lines.push(format!("- {change}: {path}")),
+            None => lines.push(format!("- {path}")),
+        }
+    }
+    (!lines.is_empty()).then_some(lines)
+}
+
 fn direct_owned_write_scopes(
     workspace_dir: &Path,
     job: &LeaseJob,
@@ -18747,6 +18888,128 @@ mod tests {
         assert!(!plain_text_final_allowed_on_recovery_retry(
             RuntimeFinalOutputMode::StrictStructured
         ));
+    }
+
+    #[test]
+    fn undo_target_context_quotes_a_resolvable_target() {
+        let metadata = json!({
+            "undoTargetMessageId": "aaaaaaaa-1111-2222-3333-444455556666"
+        });
+        let history = json!([
+            {
+                "id": "00000000-0000-0000-0000-000000000001",
+                "role": "user",
+                "content": "Create a build plan."
+            },
+            {
+                "id": "AAAAAAAA-1111-2222-3333-444455556666",
+                "role": "assistant",
+                "content": "Created BUILD_PLAN.md with the phased rollout.",
+                "metadata": {
+                    "artifacts": [
+                        {
+                            "kind": "apply/files",
+                            "files": [
+                                {
+                                    "path": "BUILD_PLAN.md",
+                                    "workspacePath": "BUILD_PLAN.md",
+                                    "change": { "type": "created" }
+                                },
+                                {
+                                    "path": "README.md",
+                                    "changeType": "changed"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        ]);
+
+        let section = format_undo_target_context_section(Some(&metadata), Some(&history))
+            .expect("resolvable undo target must produce a context block");
+
+        assert!(section.contains("Undo target message:"));
+        assert!(section.contains("message id aaaaaaaa-1111-2222-3333-444455556666"));
+        assert!(section.contains("> Created BUILD_PLAN.md with the phased rollout."));
+        assert!(section.contains("File changes reported by that message:"));
+        assert!(section.contains("- created: BUILD_PLAN.md"));
+        assert!(section.contains("- changed: README.md"));
+        assert!(!section.contains("could not be resolved"));
+    }
+
+    #[test]
+    fn undo_target_context_notes_an_unresolvable_target() {
+        // The preview-surface scope leak: the referenced message id lives in a
+        // child job thread, not in the parent conversation's history. The agent
+        // must be told the structural lookup failed instead of silently falling
+        // back to the text heuristic.
+        let metadata = json!({
+            "undo_target_message_id": "bbbbbbbb-1111-2222-3333-444455556666"
+        });
+        let history = json!([
+            {
+                "id": "00000000-0000-0000-0000-000000000001",
+                "role": "assistant",
+                "content": "Unrelated earlier answer."
+            }
+        ]);
+
+        let section = format_undo_target_context_section(Some(&metadata), Some(&history))
+            .expect("unresolvable undo target must produce a labeled note");
+
+        assert!(section.contains("Undo target message:"));
+        assert!(section.contains("id bbbbbbbb-1111-2222-3333-444455556666"));
+        assert!(section.contains("could not be resolved"));
+        assert!(!section.contains("quoted below"));
+
+        // Missing history entirely is the same unresolvable case.
+        let without_history = format_undo_target_context_section(Some(&metadata), None)
+            .expect("missing history must still produce the labeled note");
+        assert!(without_history.contains("could not be resolved"));
+    }
+
+    #[test]
+    fn undo_target_context_is_absent_without_the_metadata_key() {
+        let history = json!([
+            {
+                "id": "00000000-0000-0000-0000-000000000001",
+                "role": "assistant",
+                "content": "Some answer."
+            }
+        ]);
+
+        assert!(format_undo_target_context_section(None, Some(&history)).is_none());
+        assert!(format_undo_target_context_section(Some(&json!({})), Some(&history)).is_none());
+        assert!(
+            format_undo_target_context_section(
+                Some(&json!({ "replyContext": { "kind": "message_selection" } })),
+                Some(&history)
+            )
+            .is_none()
+        );
+        assert!(
+            format_undo_target_context_section(
+                Some(&json!({ "undoTargetMessageId": "   " })),
+                Some(&history)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn undo_target_quote_is_truncated_for_very_long_targets() {
+        let long_content = "x".repeat(UNDO_TARGET_QUOTE_MAX_CHARS * 2);
+        let metadata = json!({ "undoTargetMessageId": "msg-1" });
+        let history = json!([
+            { "id": "msg-1", "role": "assistant", "content": long_content }
+        ]);
+
+        let section = format_undo_target_context_section(Some(&metadata), Some(&history))
+            .expect("resolvable undo target must produce a context block");
+
+        assert!(section.contains('…'));
+        assert!(section.len() < UNDO_TARGET_QUOTE_MAX_CHARS + 600);
     }
 
     #[test]
