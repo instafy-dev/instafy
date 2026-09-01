@@ -9061,6 +9061,139 @@ async fn tunnel_request_burns_credits_when_not_using_broker_hook() -> anyhow::Re
 }
 
 #[tokio::test]
+async fn tunnel_request_rejects_insufficient_credits_without_reporting_a_burn_failure(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping tunnel entitlement billing test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let project_id = Uuid::new_v4();
+    let runtime_id = Uuid::new_v4();
+    let lease_id = Uuid::new_v4();
+    let burn_amount: i32 = 1_000_000_000;
+
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "INSERT INTO projects (id, project_type, status) VALUES ($1, 'customer', 'active')",
+                &[&project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "INSERT INTO runtimes (
+                     id, project_id, provider, status, idle_ttl_seconds, last_seen_at
+                 ) VALUES ($1, $2, 'self-hosted', 'ready', 600, now())",
+                &[&runtime_id, &project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "INSERT INTO runtime_leases (
+                     id, project_id, runtime_id, status, requested_at, launched_at
+                 ) VALUES ($1, $2, $3, 'active', now() - interval '1 minute', now())",
+                &[&lease_id, &project_id, &runtime_id],
+            )
+            .await?;
+    }
+
+    let mut config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "test-origin-key",
+    );
+    config.tunnel_credit_burn_amount = burn_amount;
+    config.tunnel_broker_hook_secret = None;
+
+    let mut provider_configs = HashMap::new();
+    provider_configs.insert(
+        "default".to_string(),
+        RuntimeProviderConfig {
+            id: "default".to_string(),
+            display_name: "Default".to_string(),
+            kind: "noop".to_string(),
+            owner_org_id: None,
+            allowed_org_ids: vec![],
+            endpoint: None,
+            auth_token: None,
+            metadata: None,
+        },
+    );
+    let provider_registry =
+        crate::state::ProviderRegistry::new(provider_configs, "default".to_string());
+    let ota_registry = test_ota_registry(&config);
+    let tunnel_broker: DynTunnelBroker = Arc::new(StubTunnelBroker::default());
+    let state = AppState {
+        config,
+        pool: pool.clone(),
+        rate_limiter: RateLimiter::new(),
+        connection_limiter: ConnectionLimiter::new(),
+        events: crate::state::EventHub::new(),
+        http_client: reqwest::Client::new(),
+        origin_proxy_client: reqwest::Client::new(),
+        runtime_activity: crate::state::RuntimeActivityTracker::new(150),
+        local_workspaces: crate::state::LocalWorkspaceRegistry::new(),
+        runtime_preferences: crate::state::RuntimePreferenceRegistry::new(),
+        runtime_resource_usage: crate::state::RuntimeResourceUsageRegistry::new(),
+        provider_registry,
+        tunnel_broker: Some(tunnel_broker.clone()),
+        device_auth_sessions: crate::device_auth::DeviceAuthRegistry::new(),
+        ota_registry,
+        desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
+        credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
+    };
+
+    let request_body = json!({
+        "runtimeId": runtime_id.to_string(),
+        "runtimeLeaseId": lease_id.to_string()
+    });
+    let response = tunnels::router()
+        .with_state(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/projects/{project_id}/tunnels/request"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    "Bearer service-role-token",
+                )
+                .body(Body::from(request_body.to_string()))?,
+        )
+        .await?;
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+    let body: serde_json::Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(
+        body["message"].as_str(),
+        Some("insufficient credits available for requested burn")
+    );
+
+    {
+        let connection = pool.get().await?;
+        let report_count: i64 = connection
+            .query_one(
+                "SELECT count(*)
+                 FROM bug_reports
+                 WHERE project_id = $1
+                   AND runtime_id = $2
+                   AND message = 'Tunnel credit burn failed'",
+                &[&project_id, &runtime_id],
+            )
+            .await?
+            .get(0);
+        assert_eq!(report_count, 0);
+    }
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn post_commit_receipt_emits_workspace_commit_event() -> anyhow::Result<()> {
     use axum::http::{HeaderMap, HeaderValue};
 
