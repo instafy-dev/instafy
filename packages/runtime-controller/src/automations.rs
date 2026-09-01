@@ -1274,6 +1274,17 @@ async fn get_automation(
     if let Some(active_job) = active_job.as_ref() {
         active_job.ensure_project_id(&record.project_id)?;
     }
+    // Plain user callers must clear project membership before any visibility
+    // logic runs, matching the list route's order. Answering visibility first
+    // would let a non-member probing automation ids distinguish a private
+    // automation ("automation not found") from a team-visible one (the
+    // project-access denial) — an enumeration oracle. Service-role and
+    // active-job callers keep the pre-existing check order unchanged.
+    let plain_user_caller = !access_context.is_service_role && active_job.is_none();
+    if plain_user_caller {
+        let project = crate::load_project_record(&transaction, &record.project_id).await?;
+        crate::ensure_project_access(&transaction, &project, &access_context, None).await?;
+    }
     if !can_view_automation(
         record.result_visibility.as_str(),
         record.user_id,
@@ -1283,9 +1294,10 @@ async fn get_automation(
     ) {
         return Err(crate::forbidden("automation not found"));
     }
-
-    let project = crate::load_project_record(&transaction, &record.project_id).await?;
-    crate::ensure_project_access(&transaction, &project, &access_context, None).await?;
+    if !plain_user_caller {
+        let project = crate::load_project_record(&transaction, &record.project_id).await?;
+        crate::ensure_project_access(&transaction, &project, &access_context, None).await?;
+    }
 
     transaction
         .commit()
