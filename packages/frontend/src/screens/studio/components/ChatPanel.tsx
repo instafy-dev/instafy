@@ -262,6 +262,10 @@ import {
   type MessageSelectionReplyContext,
 } from "./messageSelectionReply";
 import {
+  createMessageUndoRequestHandler,
+  REQUEST_MESSAGE_UNDO_EVENT,
+} from "./messageUndoRequest";
+import {
   collapseLifecycleMessages,
   extractAgentJobId,
   runMatchesThreadJobId,
@@ -2029,6 +2033,20 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     return submitted;
   }, [ensureProjectWriteAccess, removeServerMessageStash, restoredMessageStash]);
+
+  // Conversational undo (#165): the Undo chip on an agent message dispatches a
+  // window event; this panel owns the composer, so it turns the request into a
+  // normal user message (with the target-message reference in metadata) and
+  // sends it. The handler serializes rapid requests, and the standard submit
+  // preflight queues the message when the assistant is busy — the intent is
+  // never dropped and never double-sent.
+  useEffect(() => {
+    const handler = createMessageUndoRequestHandler(async ({ message, metadata }) =>
+      invokeSubmitMessage({ message, editorState: null, metadata }),
+    );
+    window.addEventListener(REQUEST_MESSAGE_UNDO_EVENT, handler);
+    return () => window.removeEventListener(REQUEST_MESSAGE_UNDO_EVENT, handler);
+  }, [invokeSubmitMessage]);
 
   const invokeComposerPrimaryAction = useCallback<SubmitMessageFn>(
     async (override, options) => {

@@ -244,6 +244,8 @@ export type ChatFileChangeListProps = {
   files: ChatMessageFileChange[];
   projectId?: string | null;
   commitRange?: ChatMessageCommitRange | null;
+  messageId?: string | null;
+  messageTimestamp?: number | null;
 };
 
 export type CommandExecutionPreview = {
@@ -298,6 +300,8 @@ export type AgentJobThreadPreviewLayoutProps = {
   runningPreviewHasOverflow: boolean;
   latestFiles: ChatMessageFileChange[] | null;
   latestCommitRange?: ChatMessageCommitRange | null;
+  latestFilesMessageId?: string | null;
+  latestFilesMessageTimestamp?: number | null;
   isRunning: boolean;
   finalSpineTone: ThreadSpineTone;
   threadPreviewRootRef: MutableRefObject<HTMLDivElement | null>;
@@ -367,6 +371,8 @@ export function AgentJobThreadPreviewLayout({
   runningPreviewHasOverflow,
   latestFiles,
   latestCommitRange,
+  latestFilesMessageId,
+  latestFilesMessageTimestamp,
   isRunning,
   finalSpineTone,
   threadPreviewRootRef,
@@ -1337,7 +1343,13 @@ export function AgentJobThreadPreviewLayout({
         {isCompleted && latestFiles ? (
           <div className="relative pt-1">
             <div className="min-w-0">
-              <ChatFileChangeList files={latestFiles} projectId={projectId} commitRange={latestCommitRange ?? null} />
+              <ChatFileChangeList
+                files={latestFiles}
+                projectId={projectId}
+                commitRange={latestCommitRange ?? null}
+                messageId={latestFilesMessageId ?? null}
+                messageTimestamp={latestFilesMessageTimestamp ?? null}
+              />
             </div>
           </div>
         ) : null}

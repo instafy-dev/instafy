@@ -35,6 +35,8 @@ type ChatFileChangeListProps = {
   files: ChatMessageFileChange[];
   projectId?: string | null;
   commitRange?: ChatMessageCommitRange | null;
+  messageId?: string | null;
+  messageTimestamp?: number | null;
 };
 
 export function TimelineEntry({
@@ -306,7 +308,7 @@ export function TimelineEntry({
       ) : null}
       {message.files && message.files.length > 0 ? (
         <div className="mt-3">
-          <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} />
+          <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
         </div>
       ) : null}
     </Surface>
