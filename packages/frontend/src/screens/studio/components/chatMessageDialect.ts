@@ -41,7 +41,8 @@ export type ChatLineTokenChunk =
 export type MessageContentBlock =
   | { kind: "paragraph"; line: string }
   | { kind: "list"; ordered: boolean; start?: number; items: string[] }
-  | { kind: "quote"; lines: string[] };
+  | { kind: "quote"; lines: string[] }
+  | { kind: "code"; language: string | null; lines: string[] };
 
 const WORKSPACE_FILE_REFERENCE_REGEX =
   /^((?:\/workspace\/[^/\s<>"'`()]+\/)?[0-9A-Za-z_.-]+(?:\/[0-9A-Za-z_.-]+)*\.(?:markdown|md|json|tsx?|jsx?|ya?ml|toml|py|rs|css|html|txt|sh|sql))(?:#L(\d+)|:(\d+))?/;
@@ -472,10 +473,58 @@ export function parseTeamFlowLine(line: string): TeamFlowLineDescriptor | null {
   return { label: "Workstreams", references };
 }
 
+type PendingCodeFence = {
+  block: Extract<MessageContentBlock, { kind: "code" }>;
+  marker: "`" | "~";
+  markerLength: number;
+  indent: number;
+};
+
+// CommonMark: the info string of a backtick fence may not contain backticks —
+// a line like "```echo `hi` done```" is an inline code span, not a fence.
+function parseCodeFenceOpening(line: string): PendingCodeFence | null {
+  const match = line.match(/^(\s*)(`{3,}|~{3,})(.*)$/);
+  if (!match) {
+    return null;
+  }
+  const marker = (match[2]?.charAt(0) ?? "`") as "`" | "~";
+  const info = match[3] ?? "";
+  if (marker === "`" && info.includes("`")) {
+    return null;
+  }
+  const language = info.trim().split(/\s+/)[0] || null;
+  return {
+    block: { kind: "code", language, lines: [] },
+    marker,
+    markerLength: match[2]?.length ?? 3,
+    indent: match[1]?.length ?? 0,
+  };
+}
+
+function isCodeFenceClosing(line: string, fence: PendingCodeFence): boolean {
+  const match = line.match(/^\s*(`{3,}|~{3,})\s*$/);
+  if (!match) {
+    return false;
+  }
+  const run = match[1] ?? "";
+  return run.charAt(0) === fence.marker && run.length >= fence.markerLength;
+}
+
+// CommonMark strips up to the opening fence's indentation from content lines,
+// so a fence indented inside a list item still yields unindented code.
+function stripCodeFenceIndent(line: string, indent: number): string {
+  let removed = 0;
+  while (removed < indent && line.charAt(removed) === " ") {
+    removed += 1;
+  }
+  return line.slice(removed);
+}
+
 export function parseMessageContentBlocks(content: string): MessageContentBlock[] {
   const blocks: MessageContentBlock[] = [];
   let pendingList: Extract<MessageContentBlock, { kind: "list" }> | null = null;
   let pendingQuote: Extract<MessageContentBlock, { kind: "quote" }> | null = null;
+  let pendingCode: PendingCodeFence | null = null;
 
   const flushList = () => {
     if (pendingList) {
@@ -489,12 +538,35 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
       pendingQuote = null;
     }
   };
+  const flushCode = () => {
+    if (pendingCode) {
+      blocks.push(pendingCode.block);
+      pendingCode = null;
+    }
+  };
 
   for (const rawLine of content.split(/\n/)) {
     const line = rawLine.trimEnd();
+    if (pendingCode) {
+      if (isCodeFenceClosing(line, pendingCode)) {
+        flushCode();
+      } else {
+        pendingCode.block.lines.push(stripCodeFenceIndent(line, pendingCode.indent));
+      }
+      continue;
+    }
+
     if (!line.trim()) {
       flushList();
       flushQuote();
+      continue;
+    }
+
+    const fenceOpening = parseCodeFenceOpening(line);
+    if (fenceOpening) {
+      flushList();
+      flushQuote();
+      pendingCode = fenceOpening;
       continue;
     }
 
@@ -535,5 +607,7 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
 
   flushList();
   flushQuote();
+  // An unclosed fence runs to the end of the message, per CommonMark.
+  flushCode();
   return blocks.length > 0 ? blocks : [{ kind: "paragraph", line: "" }];
 }

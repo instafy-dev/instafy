@@ -42,6 +42,8 @@ type ChatFileChangeListProps = {
   files: ChatMessageFileChange[];
   projectId?: string | null;
   commitRange?: ChatMessageCommitRange | null;
+  messageId?: string | null;
+  messageTimestamp?: number | null;
 };
 
 type SharedRenderProps = {
@@ -142,7 +144,7 @@ export function ReasoningEntry({
         {display}
       </Text>
       {message.files && message.files.length > 0 ? (
-        <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} />
+        <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
       ) : null}
     </div>
   );
@@ -236,7 +238,7 @@ export function LocalCapabilityInlineEntry({
           ) : null}
           {message.files && message.files.length > 0 ? (
             <div className="mt-2">
-              <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} />
+              <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
             </div>
           ) : null}
         </div>
@@ -440,7 +442,7 @@ export function StatusActivityEntry({
         ) : null}
         {message.files && message.files.length > 0 ? (
           <div className="mt-3">
-            <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} />
+            <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
           </div>
         ) : null}
       </Surface>

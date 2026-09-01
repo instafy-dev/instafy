@@ -918,6 +918,8 @@ export function useAgentJobThreadPreviewState({
     runningPreviewHasOverflow,
     latestFiles,
     latestCommitRange,
+    latestFilesMessageId: latestFileMessage?.id ?? null,
+    latestFilesMessageTimestamp: latestFileMessage?.timestamp ?? null,
     isRunning,
     finalSpineTone,
     threadPreviewRootRef,
