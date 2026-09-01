@@ -125,6 +125,10 @@ const INLINE_CODE_TOKEN_CLASS = [
   "inline-flex items-center rounded-[0.34rem] bg-slate-950/[0.035] px-1.5 py-[0.08em] font-mono text-[0.92em] leading-[1.18] text-slate-700 ring-1 ring-inset ring-slate-900/10 shadow-[inset_0_-1px_0_rgba(15,23,42,0.07)] align-baseline",
   "dark:bg-white/[0.055] dark:text-slate-200 dark:ring-white/[0.08] dark:shadow-[inset_0_-1px_0_rgba(255,255,255,0.045)]",
 ].join(" ");
+const CODE_BLOCK_CLASS = [
+  "block max-w-full overflow-x-auto whitespace-pre rounded-xl bg-slate-950/[0.035] px-3 py-2 font-mono text-[0.85em] leading-normal text-slate-700 ring-1 ring-inset ring-slate-900/10 shadow-[inset_0_-1px_0_rgba(15,23,42,0.07)]",
+  "dark:bg-white/[0.055] dark:text-slate-200 dark:ring-white/[0.08] dark:shadow-[inset_0_-1px_0_rgba(255,255,255,0.045)]",
+].join(" ");
 const WORKSPACE_FILE_REFERENCE_TOKEN_CLASS = [
   "inline-flex min-w-0 max-w-[14rem] items-center overflow-hidden rounded-[0.34rem] bg-primary-50/70 px-1.5 py-[0.08em] font-mono text-[0.92em] leading-[1.18] text-primary-700 ring-1 ring-inset ring-primary-200/80 shadow-[inset_0_-1px_0_rgba(0,122,204,0.08)] align-baseline sm:max-w-[24rem]",
   "dark:bg-primary-300/10 dark:text-primary-200 dark:ring-primary-300/20 dark:shadow-[inset_0_-1px_0_rgba(255,255,255,0.035)]",
@@ -1622,6 +1626,18 @@ export function MessageContent({
                 </p>
               ))}
             </blockquote>
+          );
+        }
+        if (block.kind === "code") {
+          return (
+            <pre
+              key={`code-${blockIndex}`}
+              data-testid="chat-message-code-block"
+              data-code-language={block.language ?? undefined}
+              className={[blockSpacingClassName, CODE_BLOCK_CLASS].filter(Boolean).join(" ")}
+            >
+              <code>{block.lines.join("\n")}</code>
+            </pre>
           );
         }
         if (block.kind === "list") {

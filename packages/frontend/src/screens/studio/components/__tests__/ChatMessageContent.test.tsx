@@ -428,6 +428,40 @@ describe("ChatMessageContent", () => {
     });
   });
 
+  it("renders a fenced code block after a paren-delimited ordered-list item", async () => {
+    await act(async () => {
+      root.render(
+        <MessageContent content={"3) Command output:\n```text\nmarcuspousette\nd3fdb3f\n```\n\nBOX OK"} />,
+      );
+    });
+
+    const list = container.querySelector('[data-testid="chat-message-list"]');
+    expect(list?.tagName).toBe("OL");
+    expect(list?.getAttribute("start")).toBe("3");
+    expect(list?.textContent?.trim()).toBe("Command output:");
+
+    const codeBlock = container.querySelector('[data-testid="chat-message-code-block"]');
+    expect(codeBlock?.tagName).toBe("PRE");
+    expect(codeBlock?.getAttribute("data-code-language")).toBe("text");
+    expect(codeBlock?.textContent).toBe("marcuspousette\nd3fdb3f");
+
+    expect(container.textContent).not.toContain("`");
+    expect(container.textContent).toContain("BOX OK");
+  });
+
+  it("renders a fenced code block outside any list without regressions", async () => {
+    await act(async () => {
+      root.render(<MessageContent content={"Before\n```json\n{ \"ok\": true }\n```\nAfter"} />);
+    });
+
+    const codeBlock = container.querySelector('[data-testid="chat-message-code-block"]');
+    expect(codeBlock?.getAttribute("data-code-language")).toBe("json");
+    expect(codeBlock?.textContent).toBe('{ "ok": true }');
+    expect(container.textContent).not.toContain("```");
+    expect(container.textContent).toContain("Before");
+    expect(container.textContent).toContain("After");
+  });
+
   it("renders strong markdown without leaking markers outside inline code", async () => {
     await act(async () => {
       root.render(
