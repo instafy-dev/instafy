@@ -12,11 +12,21 @@ describe("parseMessageUndoRequestDetail", () => {
     expect(parseMessageUndoRequestDetail({ messageId: "msg-1", messageTimestamp: 123 })).toEqual({
       messageId: "msg-1",
       messageTimestamp: 123,
+      onSettled: null,
     });
     expect(parseMessageUndoRequestDetail({ messageId: "msg-1", messageTimestamp: Number.NaN })).toEqual({
       messageId: "msg-1",
       messageTimestamp: null,
+      onSettled: null,
     });
+  });
+
+  it("keeps a callable result callback and drops a non-callable one", () => {
+    const onSettled = vi.fn();
+    expect(parseMessageUndoRequestDetail({ messageId: "msg-1", onSettled })?.onSettled).toBe(onSettled);
+    expect(
+      parseMessageUndoRequestDetail({ messageId: "msg-1", onSettled: "nope" })?.onSettled,
+    ).toBeNull();
   });
 
   it("rejects malformed details", () => {
@@ -124,5 +134,54 @@ describe("createMessageUndoRequestHandler", () => {
 
     expect(submit).toHaveBeenCalledTimes(2);
     expect(submit.mock.calls[1]?.[0]?.metadata).toEqual({ undoTargetMessageId: "recovers" });
+  });
+
+  it("reports a refused or failed submit back to the dispatcher", async () => {
+    // A submit that returns false was gated before it could send (busy lane,
+    // credentials, credits). The chip must learn that so its click is not a
+    // silent no-op that merely waits out the double-click cooldown.
+    const submit = vi
+      .fn()
+      .mockResolvedValueOnce(false)
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValue(true);
+    const handler = createMessageUndoRequestHandler(submit);
+
+    const refused = vi.fn();
+    handler(undoEvent({ messageId: "refused", onSettled: refused }));
+    await flushChain();
+    expect(refused).toHaveBeenCalledWith(false);
+
+    const threw = vi.fn();
+    handler(undoEvent({ messageId: "threw", onSettled: threw }));
+    await flushChain();
+    expect(threw).toHaveBeenCalledTimes(1);
+    expect(threw).toHaveBeenCalledWith(false);
+
+    const accepted = vi.fn();
+    handler(undoEvent({ messageId: "accepted", onSettled: accepted }));
+    await flushChain();
+    expect(accepted).toHaveBeenCalledWith(true);
+  });
+
+  it("keeps serializing after a result callback throws", async () => {
+    const submit = vi.fn().mockResolvedValue(true);
+    const handler = createMessageUndoRequestHandler(submit);
+
+    handler(
+      undoEvent({
+        messageId: "first",
+        onSettled: () => {
+          throw new Error("listener fault");
+        },
+      }),
+    );
+    await flushChain();
+
+    handler(undoEvent({ messageId: "second" }));
+    await flushChain();
+
+    expect(submit).toHaveBeenCalledTimes(2);
+    expect(submit.mock.calls[1]?.[0]?.metadata).toEqual({ undoTargetMessageId: "second" });
   });
 });

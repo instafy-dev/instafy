@@ -739,6 +739,14 @@ export function ChatFileChangeList({
     const detail: MessageUndoRequestDetail = {
       messageId,
       messageTimestamp: messageTimestamp ?? null,
+      // A refused send (busy gate, missing credentials, no credits) shows its
+      // own status message; end the double-click cooldown right away so the
+      // chip is clickable again instead of looking like the request landed.
+      onSettled: (submitted) => {
+        if (!submitted) {
+          setUndoRequestPending(false);
+        }
+      },
     };
     window.dispatchEvent(new CustomEvent(REQUEST_MESSAGE_UNDO_EVENT, { detail }));
   }, [messageId, messageTimestamp, undoRequestPending]);

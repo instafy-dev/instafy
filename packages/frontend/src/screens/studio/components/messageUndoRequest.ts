@@ -16,6 +16,14 @@ export type MessageUndoRequestDetail = {
   messageId: string;
   /** The message's timestamp (ms), for a human-readable reference in the text. */
   messageTimestamp?: number | null;
+  /**
+   * Result callback for the dispatching chip. A refused send (busy gate,
+   * missing credentials, no credits) already surfaces its own status message,
+   * so the chip only needs to know that nothing was sent — it drops its
+   * double-click cooldown instead of sitting disabled after a click that did
+   * nothing.
+   */
+  onSettled?: ((submitted: boolean) => void) | null;
 };
 
 export type MessageUndoRequestSubmission = {
@@ -37,7 +45,11 @@ export function parseMessageUndoRequestDetail(value: unknown): MessageUndoReques
     typeof rawTimestamp === "number" && Number.isFinite(rawTimestamp) && rawTimestamp > 0
       ? rawTimestamp
       : null;
-  return { messageId, messageTimestamp };
+  const onSettled =
+    typeof record.onSettled === "function"
+      ? (record.onSettled as (submitted: boolean) => void)
+      : null;
+  return { messageId, messageTimestamp, onSettled };
 }
 
 export function formatUndoTargetShortId(messageId: string): string {
@@ -76,7 +88,9 @@ export function buildUndoRequestSubmission(
  * through a local promise chain: the composer's submitMessage drops concurrent
  * calls while one is in flight, so chaining guarantees a rapid second click is
  * queued behind the first instead of being dropped — and a single click can
- * never double-send. Failures break out of the chain without poisoning it.
+ * never double-send. Failures break out of the chain without poisoning it, and
+ * are reported back to the dispatcher through the detail's onSettled callback
+ * so a refused send does not look like a silent success.
  */
 export function createMessageUndoRequestHandler(
   submit: (submission: MessageUndoRequestSubmission) => Promise<boolean>,
@@ -88,6 +102,15 @@ export function createMessageUndoRequestHandler(
       return;
     }
     const submission = buildUndoRequestSubmission(detail);
-    chain = chain.then(() => submit(submission)).catch(() => undefined);
+    chain = chain
+      .then(() => submit(submission))
+      .catch(() => false)
+      .then((submitted) => {
+        try {
+          detail.onSettled?.(submitted === true);
+        } catch {
+          // A listener fault must not poison the serialization chain.
+        }
+      });
   };
 }

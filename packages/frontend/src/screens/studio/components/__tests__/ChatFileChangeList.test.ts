@@ -417,7 +417,11 @@ describe("ChatFileChangeList", () => {
         undoButton?.click();
       });
 
-      expect(receivedDetails).toEqual([{ messageId: "msg-42", messageTimestamp: 1_756_600_000_000 }]);
+      expect(receivedDetails).toHaveLength(1);
+      expect(receivedDetails[0]).toMatchObject({
+        messageId: "msg-42",
+        messageTimestamp: 1_756_600_000_000,
+      });
       // The conversational path never touches the file-revert API.
       expect(revertWorkspaceGitPaths).not.toHaveBeenCalled();
 
@@ -428,6 +432,42 @@ describe("ChatFileChangeList", () => {
         undoButton?.click();
       });
       expect(receivedDetails).toHaveLength(1);
+    } finally {
+      window.removeEventListener(REQUEST_MESSAGE_UNDO_EVENT, listener);
+    }
+  });
+
+  it("re-enables the Undo chip immediately when the request was not sent", async () => {
+    // Review finding 7a: without a result signal the chip stayed disabled for
+    // the full cooldown after a submit that never sent anything, so the click
+    // looked like it had landed. The listener reports the refusal back.
+    runtimeState.runtimeReady = true;
+    runtimeState.effectiveRuntimeId = "runtime-1";
+    fetchWorkspaceGitDiff.mockResolvedValue({ supported: true, diff: "", truncated: false });
+    const listener = (event: Event) => {
+      (event as CustomEvent<MessageUndoRequestDetail>).detail.onSettled?.(false);
+    };
+    window.addEventListener(REQUEST_MESSAGE_UNDO_EVENT, listener);
+
+    try {
+      await act(async () => {
+        root.render(
+          createElement(ChatFileChangeList, {
+            files: [fileChange("src/app.ts")],
+            projectId: "p1",
+            messageId: "msg-42",
+          }),
+        );
+      });
+
+      const undoButton = container.querySelector<HTMLButtonElement>('[data-testid="chat-file-change-undo"]');
+      await act(async () => {
+        undoButton?.click();
+      });
+
+      // Still clickable, without waiting out the 2.5s double-click cooldown.
+      expect(undoButton?.disabled).toBe(false);
+      expect(undoButton?.textContent).toBe("Undo");
     } finally {
       window.removeEventListener(REQUEST_MESSAGE_UNDO_EVENT, listener);
     }

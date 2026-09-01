@@ -431,7 +431,7 @@ export function useChatSubmitFlow({
       consumeBrowserComposerTarget();
       if (activeConversationId) {
         if (effectiveIntent === "queue") {
-          clearComposerAfterQueue(activeConversationId, inputValue);
+          clearComposerAfterQueue(activeConversationId, messageToSend);
         } else {
           clearComposerIfUnchanged(activeConversationId, messageToSend);
         }
@@ -546,9 +546,15 @@ export function useChatSubmitFlow({
       allowWhileBusy: allowWhileBusy || participationBypassesBusySerialization,
       appendMessages,
       attachedImageCount: imageFiles.length,
+      // Clearing is conditional on the composer still holding the text that was
+      // queued — the same match performSubmit and the steer path make. Passing
+      // the live composer value instead would always match itself and so wipe
+      // whatever the user had typed when the queued message came from somewhere
+      // else (a programmatic send like the conversational-undo request, whose
+      // text never came from the composer).
       clearQueuedComposerDraft: () => {
         if (activeConversationId) {
-          clearComposerAfterQueue(activeConversationId, inputValue);
+          clearComposerAfterQueue(activeConversationId, messageToSend);
         }
       },
       clearSubmittedComposerDraft: () => {
