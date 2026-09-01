@@ -65,6 +65,7 @@ export function useChatScrollController({
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const [scrollContentNode, setScrollContentNode] = useState<HTMLDivElement | null>(null);
   const [historyWindowUnderfilled, setHistoryWindowUnderfilled] = useState(false);
+  const [historyAutoFillExhausted, setHistoryAutoFillExhausted] = useState(false);
   const autoScrollSuspendedRef = useRef(false);
   const shouldAutoScrollRef = useRef(true);
   const autoScrollPendingRef = useRef(false);
@@ -464,6 +465,7 @@ export function useChatScrollController({
       return;
     }
     historyAutoFillRef.current = { conversationId: activeConversationId, attempts: 0 };
+    setHistoryAutoFillExhausted(false);
   }, [activeConversationId]);
 
   useLayoutEffect(() => {
@@ -473,14 +475,18 @@ export function useChatScrollController({
     if (historyPaginationRef.current.pending) {
       return;
     }
-    if (historyAutoFillRef.current.attempts >= HISTORY_AUTO_FILL_MAX_PAGES) {
-      return;
-    }
     const node = scrollContainerRef.current;
     if (!node) {
       return;
     }
     if (!measureHistoryWindowUnderfill()) {
+      return;
+    }
+    if (historyAutoFillRef.current.attempts >= HISTORY_AUTO_FILL_MAX_PAGES) {
+      // Auto-fill has hit its page cap while the window is still underfilled
+      // (a transcript dominated by collapsed lifecycle messages can stay short
+      // for many pages). Surface the manual affordance instead of dead-ending.
+      setHistoryAutoFillExhausted(true);
       return;
     }
 
@@ -495,6 +501,12 @@ export function useChatScrollController({
     requestOlderMessages,
   ]);
 
+  // Hide the manual affordance while auto-fill is still expected to satisfy an
+  // underfilled window, but never once auto-fill has given up with history
+  // remaining — at that point the button is the only way left to reach it.
+  const showHistoryLoadButton =
+    hasMoreHistory && (!historyWindowUnderfilled || historyAutoFillExhausted);
+
   return {
     autoScrollSuspendedRef,
     autoScrollPendingRef,
@@ -508,6 +520,7 @@ export function useChatScrollController({
     scrollToBottom,
     setAutoScrollSuspended,
     shouldAutoScrollRef,
+    showHistoryLoadButton,
   };
 }
 

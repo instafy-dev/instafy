@@ -16,6 +16,17 @@ function createMessage(id: string): ChatMessage {
   };
 }
 
+function createCommandExecutionMessage(id: string): ChatMessage {
+  return {
+    id,
+    role: "assistant",
+    content: "",
+    timestamp: 0,
+    messageType: "command_execution",
+    metadata: { messageType: "command_execution" },
+  };
+}
+
 type HarnessProps = {
   autoScrollSuspended?: boolean;
   hasMoreHistory?: boolean;
@@ -56,6 +67,7 @@ function ScrollHarness({
     scrollContainerRef,
     scrollToBottom,
     setAutoScrollSuspended,
+    showHistoryLoadButton,
   } = useChatScrollController({
     activeConversationId: "conv-test",
     hasMoreHistory,
@@ -80,9 +92,11 @@ function ScrollHarness({
       >
         <div ref={handleScrollContentRef} />
       </div>
-      <button type="button" onClick={requestOlderMessages}>
-        View earlier messages
-      </button>
+      {showHistoryLoadButton ? (
+        <button type="button" onClick={requestOlderMessages}>
+          View earlier messages
+        </button>
+      ) : null}
       <button type="button" data-testid="scroll-bottom" onClick={() => scrollToBottom()}>
         Scroll to bottom
       </button>
@@ -228,6 +242,76 @@ describe("useChatScrollController", () => {
     });
 
     expect(loadOlderMessages).toHaveBeenCalledTimes(3);
+  });
+
+  it("offers the manual history affordance once auto-fill exhausts on a command-execution-heavy thread", async () => {
+    const loadOlderMessages = vi.fn();
+    const findLoadButton = () =>
+      Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent === "View earlier messages",
+      ) ?? null;
+
+    // An automation thread's pages are dominated by command_execution run
+    // updates that collapse to almost no rendered height, so the viewport
+    // stays underfilled no matter how many pages auto-fill loads.
+    const pages: ChatMessage[][] = [
+      [createCommandExecutionMessage("run-4"), createMessage("newest")],
+      [createCommandExecutionMessage("run-3")],
+      [createCommandExecutionMessage("run-2")],
+      [createCommandExecutionMessage("run-1")],
+    ];
+    let messages: ChatMessage[] = pages[0];
+
+    await act(async () => {
+      root.render(
+        <ScrollHarness loadOlderMessages={loadOlderMessages} messages={messages} scrollHeight={200} />,
+      );
+    });
+    expect(loadOlderMessages).toHaveBeenCalledTimes(1);
+    expect(findLoadButton()).toBeNull();
+
+    for (const page of pages.slice(1)) {
+      messages = [...page, ...messages];
+      await act(async () => {
+        root.render(
+          <ScrollHarness loadOlderMessages={loadOlderMessages} messages={messages} scrollHeight={200} />,
+        );
+      });
+    }
+
+    // Auto-fill has spent its page budget, the window is still underfilled and
+    // the server still reports more history: the manual button must appear.
+    expect(loadOlderMessages).toHaveBeenCalledTimes(3);
+    expect(container.querySelector('[data-testid="history-underfilled"]')?.textContent).toBe("underfilled");
+    const loadButton = findLoadButton();
+    expect(loadButton).not.toBeNull();
+
+    await act(async () => {
+      loadButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(loadOlderMessages).toHaveBeenCalledTimes(4);
+  });
+
+  it("hides the manual history affordance while a filled window has no more history", async () => {
+    const loadOlderMessages = vi.fn();
+
+    await act(async () => {
+      root.render(
+        <ScrollHarness
+          hasMoreHistory={false}
+          loadOlderMessages={loadOlderMessages}
+          messages={[createMessage("newest")]}
+          scrollHeight={500}
+        />,
+      );
+    });
+
+    expect(loadOlderMessages).not.toHaveBeenCalled();
+    expect(
+      Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent === "View earlier messages",
+      ),
+    ).toBeUndefined();
   });
 
   it("keeps automatic bottom scrolling suspended through late content growth", async () => {

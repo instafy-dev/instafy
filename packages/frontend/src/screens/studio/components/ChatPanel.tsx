@@ -1813,7 +1813,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     autoScrollSuspendedRef,
     autoScrollPendingRef,
     handleScrollContentRef,
-    historyWindowUnderfilled,
     lastComposerScrollTopRef,
     lastScrollHeightRef,
     recordScrollPosition,
@@ -1822,6 +1821,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     scrollToBottom,
     setAutoScrollSuspended,
     shouldAutoScrollRef,
+    showHistoryLoadButton,
   } = useChatScrollController({
     activeConversationId,
     hasMoreHistory,
@@ -1829,7 +1829,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     loadOlderMessages,
     messages,
   });
-  const showHistoryLoadButton = hasMoreHistory && !historyWindowUnderfilled;
 
   const activeConversation = useMemo(
     () => conversations.find((conversation) => conversation.localId === activeConversationId) ?? null,
