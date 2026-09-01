@@ -132,6 +132,66 @@ function assertNoClientServiceRoleEnv(mode: string): void {
   }
 }
 
+// Dev-only client env (the guest-login credentials and any future VITE_DEV_*)
+// must never reach a production bundle: Vite inlines VITE_* values from both
+// the process env and .env files, so both sources are checked. Same stance as
+// the service-role guard above — fail the build naming the variable, not the
+// value.
+function assertNoClientDevEnvInProductionBuild(mode: string, command: string): void {
+  if (command !== "build" || mode !== "production") {
+    return;
+  }
+  const loadedEnv = loadEnv(mode, frontendPackageRoot, "");
+  const devClientKeys = Array.from(
+    new Set([...Object.keys(loadedEnv), ...Object.keys(process.env)]),
+  )
+    .filter((key) => key.startsWith("VITE_DEV_"))
+    .sort();
+  if (devClientKeys.length > 0) {
+    throw new Error(
+      `Production builds refuse dev-only client env: unset ${devClientKeys.join(", ")}.`,
+    );
+  }
+}
+
+// The hardcoded dev-guest fallback (AuthProvider.resolveDevGuestCredentials)
+// is compile-time gated behind import.meta.env.DEV and relies on minification
+// dropping the dead branch. This guard asserts on the ARTIFACT instead of the
+// inputs: a canary string surviving into a production chunk fails the build,
+// whatever refactor let it through.
+const PRODUCTION_BUNDLE_CANARIES = ["playwright@instafy.dev", "Playwright123!"];
+
+function productionBundleCanaryGuardPlugin(): Plugin {
+  let enforced = false;
+  return {
+    name: "instafy:production-bundle-canary-guard",
+    apply: "build",
+    configResolved(config) {
+      enforced = config.mode === "production";
+    },
+    generateBundle(_options, bundle) {
+      if (!enforced) {
+        return;
+      }
+      for (const [fileName, output] of Object.entries(bundle)) {
+        const content =
+          output.type === "chunk"
+            ? output.code
+            : typeof output.source === "string"
+              ? output.source
+              : "";
+        for (const canary of PRODUCTION_BUNDLE_CANARIES) {
+          if (content.includes(canary)) {
+            throw new Error(
+              `Production bundle contains the dev-only canary "${canary}" in ${fileName} — a development-only code path leaked past its import.meta.env.DEV gate.`,
+            );
+          }
+        }
+      }
+    },
+  };
+}
+
 const frontendFeatureManifestPath = resolveFrontendFeatureManifest({
   packageRoot: frontendPackageRoot,
   configuredManifestPath: process.env[FRONTEND_FEATURE_MANIFEST_ENV],
@@ -264,10 +324,11 @@ function devCodexAuthJsonPlugin(): Plugin {
   };
 }
 
-export default defineConfig(({ mode }) => {
+export default defineConfig(({ mode, command }) => {
   assertNoClientServiceRoleEnv(mode);
+  assertNoClientDevEnvInProductionBuild(mode, command);
   return {
-  plugins: [react(), devCodexAuthJsonPlugin()],
+  plugins: [react(), devCodexAuthJsonPlugin(), productionBundleCanaryGuardPlugin()],
   resolve: {
     alias: [
       {
