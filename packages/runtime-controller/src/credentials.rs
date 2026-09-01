@@ -114,6 +114,11 @@ struct CredentialListItem {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct InternalCredentialResponse {
+    /// The credential that actually backs this lease. Differs from the
+    /// requested (pinned) id when the revoked-credential fallback served the
+    /// owner's current default instead — consumers that attribute usage or
+    /// telemetry should key on this id, not the id they asked for.
+    credential_id: String,
     kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     access_token: Option<String>,
@@ -1991,7 +1996,8 @@ async fn get_internal_credential(
         parsed = updated_auth_json;
     }
 
-    let response = materialize_internal_credential(&kind, &parsed, &metadata)?;
+    let response =
+        materialize_internal_credential(effective_credential_id, &kind, &parsed, &metadata)?;
 
     transaction
         .execute(
@@ -2139,14 +2145,19 @@ async fn set_internal_credential_usage(
     let credential_id = Uuid::from_str(credential_id_raw.trim())
         .map_err(|_| bad_request("credentialId must be a valid UUID"))?;
 
-    let connection = state
+    let mut connection = state
         .pool
         .get()
         .await
         .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+    let transaction = connection.transaction().await.map_err(|error| {
+        internal_error(format!(
+            "failed to start credential usage transaction: {error}"
+        ))
+    })?;
 
     let usage_param = PgJson(&usage);
-    let updated = connection
+    let updated = transaction
         .execute(
             "update user_credentials
              set subscription_usage = $1, subscription_usage_updated_at = now()
@@ -2161,8 +2172,35 @@ async fn set_internal_credential_usage(
         })?;
 
     if updated == 0 {
-        return Err(not_found("credential not found"));
+        // The reported id is revoked (or gone). The lease path serves such
+        // requests through resolve_revoked_credential_fallback, so the
+        // snapshot in hand was produced by that same effective credential —
+        // attribute it there instead of dropping it (issue #115).
+        let (effective_credential_id, _row) =
+            resolve_revoked_credential_fallback(&transaction, credential_id).await?;
+        let redirected = transaction
+            .execute(
+                "update user_credentials
+                 set subscription_usage = $1, subscription_usage_updated_at = now()
+                 where id = $2 and revoked_at is null",
+                &[&usage_param, &effective_credential_id],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!(
+                    "failed to persist redirected credential subscription usage: {error}"
+                ))
+            })?;
+        if redirected == 0 {
+            return Err(not_found("credential not found"));
+        }
     }
+
+    transaction.commit().await.map_err(|error| {
+        internal_error(format!(
+            "failed to commit credential usage transaction: {error}"
+        ))
+    })?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2722,6 +2760,7 @@ fn classify_auth_json(
 }
 
 fn materialize_internal_credential(
+    effective_credential_id: Uuid,
     kind: &str,
     auth_json: &JsonValue,
     metadata: &JsonValue,
@@ -2777,6 +2816,7 @@ fn materialize_internal_credential(
             .ok_or_else(|| internal_error("credential missing OPENAI_API_KEY"))?;
 
         return Ok(InternalCredentialResponse {
+            credential_id: effective_credential_id.to_string(),
             kind: CREDENTIAL_KIND_OPENAI_API_KEY.to_string(),
             access_token: None,
             account_id: None,
@@ -2810,6 +2850,7 @@ fn materialize_internal_credential(
         .filter(|value| !value.is_empty());
 
     Ok(InternalCredentialResponse {
+        credential_id: effective_credential_id.to_string(),
         kind: CREDENTIAL_KIND_CODEX_AUTH_JSON.to_string(),
         access_token: Some(access_token),
         account_id,
@@ -3320,6 +3361,7 @@ mod credential_lease_contract_tests {
     };
     use axum::http::{HeaderMap, HeaderValue};
     use serde_json::{json, Value};
+    use uuid::Uuid;
 
     use crate::tests::build_app_config;
 
@@ -3380,7 +3422,9 @@ mod credential_lease_contract_tests {
 
     #[test]
     fn delegated_lease_is_short_lived_and_keeps_renewal_in_controller() {
+        let effective_id = Uuid::new_v4();
         let response = materialize_internal_credential(
+            effective_id,
             CREDENTIAL_KIND_CODEX_AUTH_JSON,
             &json!({
                 "tokens": {
@@ -3402,13 +3446,21 @@ mod credential_lease_contract_tests {
             wire.get("renewalAuthority").and_then(Value::as_str),
             Some("controller")
         );
+        // The wire names the credential that actually backs the lease so a
+        // consumer can attribute usage after a revoked-credential fallback.
+        assert_eq!(
+            wire.get("credentialId").and_then(Value::as_str),
+            Some(effective_id.to_string().as_str())
+        );
         assert!(wire.get("accessToken").is_some());
         assert!(wire.get("refreshToken").is_none());
     }
 
     #[test]
     fn api_key_lease_preserves_api_key_material_and_routing_summary() {
+        let effective_id = Uuid::new_v4();
         let response = materialize_internal_credential(
+            effective_id,
             CREDENTIAL_KIND_OPENAI_API_KEY,
             &json!({ "OPENAI_API_KEY": "test-api-key" }),
             &json!({
@@ -3420,6 +3472,10 @@ mod credential_lease_contract_tests {
         .expect("credential should materialize");
         let wire = serde_json::to_value(response).expect("response should serialize");
 
+        assert_eq!(
+            wire.get("credentialId").and_then(Value::as_str),
+            Some(effective_id.to_string().as_str())
+        );
         assert!(wire.get("openaiApiKey").is_some());
         assert_eq!(wire.get("provider").and_then(Value::as_str), Some("openai"));
         assert_eq!(

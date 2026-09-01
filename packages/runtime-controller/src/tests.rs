@@ -25481,3 +25481,115 @@ mod billing_service_tests {
         Ok(())
     }
 }
+
+#[tokio::test]
+async fn credential_usage_report_follows_revoked_credential_fallback() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping credential usage fallback test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let user_id = Uuid::new_v4();
+    ensure_test_user(&pool, &user_id).await?;
+
+    // A rotated-away pinned credential and the live default that replaced it
+    // (same provider). The usage path never decrypts, so placeholder
+    // ciphertext is enough.
+    let pinned_id = Uuid::new_v4();
+    let default_id = Uuid::new_v4();
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into user_credentials
+                   (id, user_id, kind, nonce_b64, ciphertext_b64, metadata, is_default, revoked_at)
+                 values
+                   ($1, $3, 'codex_auth_json', 'nonce', 'ciphertext', '{}'::jsonb, false, now()),
+                   ($2, $3, 'codex_auth_json', 'nonce', 'ciphertext', '{}'::jsonb, true, null)",
+                &[&pinned_id, &default_id, &user_id],
+            )
+            .await?;
+    }
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "credential-usage-fallback-test",
+    );
+    let state = build_test_state(pool.clone(), config);
+
+    let post_usage = |target: Uuid, snapshot: serde_json::Value| {
+        let state = state.clone();
+        async move {
+            crate::credentials::router()
+                .with_state(state)
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(format!("/internal/credentials/{target}/usage"))
+                        .header("authorization", "Bearer credential-lease")
+                        .header("content-type", "application/json")
+                        .body(Body::from(snapshot.to_string()))?,
+                )
+                .await
+                .map_err(anyhow::Error::from)
+        }
+    };
+
+    // Usage reported against the revoked pinned id must land on the same
+    // effective credential the lease fallback serves, not be dropped.
+    let snapshot = json!({ "planName": "Codex", "windows": [{ "window": "weekly", "leftPercent": 42 }] });
+    let response = post_usage(pinned_id, snapshot.clone()).await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::NO_CONTENT,
+        "usage for a revoked pinned credential must redirect to the fallback default"
+    );
+
+    {
+        let connection = pool.get().await?;
+        let default_row = connection
+            .query_one(
+                "select subscription_usage from user_credentials where id = $1",
+                &[&default_id],
+            )
+            .await?;
+        let stored: Option<PgJson<serde_json::Value>> = default_row.get("subscription_usage");
+        assert_eq!(
+            stored.map(|value| value.0),
+            Some(snapshot),
+            "snapshot must be stored on the fallback default credential"
+        );
+
+        let pinned_row = connection
+            .query_one(
+                "select subscription_usage from user_credentials where id = $1",
+                &[&pinned_id],
+            )
+            .await?;
+        let pinned_usage: Option<PgJson<serde_json::Value>> = pinned_row.get("subscription_usage");
+        assert!(
+            pinned_usage.is_none(),
+            "the revoked pinned credential must not accumulate usage"
+        );
+
+        // With the default revoked too there is no authorized replacement:
+        // the report must 404 exactly like before the fallback existed.
+        connection
+            .execute(
+                "update user_credentials set revoked_at = now() where id = $1",
+                &[&default_id],
+            )
+            .await?;
+    }
+
+    let dropped = post_usage(pinned_id, json!({ "planName": "Codex" })).await?;
+    assert_eq!(
+        dropped.status(),
+        StatusCode::NOT_FOUND,
+        "no live same-provider replacement means the usage report is refused"
+    );
+
+    cleanup_test_user(&pool, &user_id).await?;
+    Ok(())
+}
