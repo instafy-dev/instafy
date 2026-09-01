@@ -111,8 +111,9 @@ import { ChatBubbleRow } from "./ChatBubbleRow";
 import {
   CHAT_SPEAKER_MARKER_SELECTOR,
   isAssistantSpeakerMarker,
-  readStickyAssistantSpeakerMarker,
-  type StickyAssistantSpeaker,
+  isHumanSpeakerMarker,
+  readStickyChatSpeakerMarker,
+  type StickyChatSpeaker,
 } from "./chatSpeakerMarker";
 import { ChatColumn } from "./ChatColumn";
 import { useOctoSilenceHint } from "./useOctoSilenceHint";
@@ -279,6 +280,7 @@ import {
 } from "./chatMessageDetailHelpers";
 import {
   HumanSpeakerIdentityLabel,
+  HumanSpeakerIdentityPill,
   resolveHumanChatIdentity,
 } from "./chatHumanIdentity";
 import { ChatComposerSurface } from "./ChatComposerSurface";
@@ -402,14 +404,28 @@ const SPEAKER_OVERLAY_SELECTOR = '[data-chat-speaker-overlay="true"]';
 const NARROW_SPEAKER_INLINE_SELECTOR = '[data-chat-speaker-inline="true"]';
 const SPEAKER_STICKY_FALLBACK_TOP_PX = 8;
 
-function speakersEqual(left: StickyAssistantSpeaker | null, right: StickyAssistantSpeaker | null): boolean {
-  return left?.handle === right?.handle && left?.avatarSeed === right?.avatarSeed;
+function speakersEqual(left: StickyChatSpeaker | null, right: StickyChatSpeaker | null): boolean {
+  if (left === null || right === null) {
+    return left === right;
+  }
+  if (left.kind === "assistant") {
+    return (
+      right.kind === "assistant" &&
+      left.handle === right.handle &&
+      left.avatarSeed === right.avatarSeed
+    );
+  }
+  return (
+    right.kind === "human" &&
+    left.label === right.label &&
+    left.avatarSeed === right.avatarSeed
+  );
 }
 
-function AssistantSpeakerStickyOverlay({
+function ChatSpeakerStickyOverlay({
   speaker,
 }: {
-  speaker: StickyAssistantSpeaker | null;
+  speaker: StickyChatSpeaker | null;
 }) {
   return (
     <div
@@ -424,10 +440,14 @@ function AssistantSpeakerStickyOverlay({
         ].join(" ")}
       >
         {speaker ? (
-          <AssistantSpeakerIdentityPill
-            handle={speaker.handle}
-            agentIdentity={{ handle: speaker.handle, avatarSeed: speaker.avatarSeed }}
-          />
+          speaker.kind === "assistant" ? (
+            <AssistantSpeakerIdentityPill
+              handle={speaker.handle}
+              agentIdentity={{ handle: speaker.handle, avatarSeed: speaker.avatarSeed }}
+            />
+          ) : (
+            <HumanSpeakerIdentityPill avatarSeed={speaker.avatarSeed} label={speaker.label} />
+          )
         ) : null}
       </div>
     </div>
@@ -3065,13 +3085,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     setIsThinkingLabelExpanded(false);
   }, [typingIndicatorState?.label, isAssistantTyping]);
 
-  const [stickyAssistantSpeaker, setStickyAssistantSpeaker] =
-    useState<StickyAssistantSpeaker | null>(null);
+  const [stickyChatSpeaker, setStickyChatSpeaker] =
+    useState<StickyChatSpeaker | null>(null);
 
   useLayoutEffect(() => {
     const scrollContainer = scrollContainerRef.current;
     if (!scrollContainer) {
-      setStickyAssistantSpeaker(null);
+      setStickyChatSpeaker(null);
       return;
     }
 
@@ -3086,13 +3106,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       const markers = Array.from(
         scrollContainer.querySelectorAll(CHAT_SPEAKER_MARKER_SELECTOR),
       );
-      let nextSpeaker: StickyAssistantSpeaker | null = null;
+      let nextSpeaker: StickyChatSpeaker | null = null;
       for (const marker of markers) {
         const markerTop = marker.getBoundingClientRect().top;
         const hasReachedStickyLine = markerTop <= thresholdTop;
-        const inlineSpeaker = isAssistantSpeakerMarker(marker)
-          ? marker.nextElementSibling
-          : null;
+        const inlineSpeaker =
+          isAssistantSpeakerMarker(marker) || isHumanSpeakerMarker(marker)
+            ? marker.nextElementSibling
+            : null;
         if (inlineSpeaker instanceof HTMLElement && inlineSpeaker.matches(NARROW_SPEAKER_INLINE_SELECTOR)) {
           if (hasReachedStickyLine) {
             inlineSpeaker.dataset.chatSpeakerCovered = "true";
@@ -3101,10 +3122,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           }
         }
         if (hasReachedStickyLine) {
-          nextSpeaker = readStickyAssistantSpeakerMarker(marker);
+          nextSpeaker = readStickyChatSpeakerMarker(marker);
         }
       }
-      setStickyAssistantSpeaker((currentSpeaker) =>
+      setStickyChatSpeaker((currentSpeaker) =>
         speakersEqual(currentSpeaker, nextSpeaker) ? currentSpeaker : nextSpeaker,
       );
     };
@@ -5325,7 +5346,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           resetKey={activeConversationId ?? "no-conversation"}
         >
           <ChatColumn className="pointer-events-none sticky top-0 z-30 h-0">
-            <AssistantSpeakerStickyOverlay speaker={stickyAssistantSpeaker} />
+            <ChatSpeakerStickyOverlay speaker={stickyChatSpeaker} />
           </ChatColumn>
           <div ref={handleScrollContentRef} className="flex min-h-full flex-col gap-2.5">
           {pinChatMessagesToBottom && !gettingStartedTopAnchorActive ? (

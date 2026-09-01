@@ -8,8 +8,8 @@ import { ConversationMessageRows } from "../ConversationMessageRows";
 import { RunFailureRetryProvider } from "../RunFailureNotice";
 import {
   CHAT_SPEAKER_MARKER_SELECTOR,
-  readStickyAssistantSpeakerMarker,
-  type StickyAssistantSpeaker,
+  readStickyChatSpeakerMarker,
+  type StickyChatSpeaker,
 } from "../chatSpeakerMarker";
 
 const workspaceTabsMocks = vi.hoisted(() => ({
@@ -82,9 +82,9 @@ function findTextNode(root: Node, value: string): Text {
   throw new Error(`Text node not found: ${value}`);
 }
 
-function resolveReachedStickySpeaker(markers: Element[]): StickyAssistantSpeaker | null {
-  return markers.reduce<StickyAssistantSpeaker | null>(
-    (_speaker, marker) => readStickyAssistantSpeakerMarker(marker),
+function resolveReachedStickySpeaker(markers: Element[]): StickyChatSpeaker | null {
+  return markers.reduce<StickyChatSpeaker | null>(
+    (_speaker, marker) => readStickyChatSpeakerMarker(marker),
     null,
   );
 }
@@ -259,7 +259,7 @@ describe("ConversationMessageRows", () => {
     expect(speakerIdentityNodes).toEqual(["chat-speaker-marker", "chat-speaker-inline"]);
   });
 
-  it("clears the sticky assistant speaker at an assistant-to-human boundary", async () => {
+  it("hands the sticky speaker to the human author at an assistant-to-human boundary", async () => {
     const assistantMessage = createMessage({
       id: "assistant-response",
       role: "assistant",
@@ -280,14 +280,111 @@ describe("ConversationMessageRows", () => {
     const markers = Array.from(container.querySelectorAll(CHAT_SPEAKER_MARKER_SELECTOR));
     expect(markers.map((marker) => marker.getAttribute("data-chat-speaker-kind"))).toEqual([
       "assistant",
-      "boundary",
+      "human",
     ]);
-    expect(markers[1]?.getAttribute("data-testid")).toBe("chat-speaker-boundary");
-    expect(readStickyAssistantSpeakerMarker(markers[0] ?? null)).toEqual({
+    expect(markers[1]?.getAttribute("data-testid")).toBe("chat-speaker-human-marker");
+    expect(readStickyChatSpeakerMarker(markers[0] ?? null)).toEqual({
+      kind: "assistant",
       handle: "octo",
       avatarSeed: "octo-seed",
     });
-    expect(resolveReachedStickySpeaker(markers)).toBeNull();
+    expect(resolveReachedStickySpeaker(markers)).toEqual({
+      kind: "human",
+      label: "Teammate",
+      avatarSeed: "user-1",
+    });
+  });
+
+  it("renders a sticky human speaker marker for a user-authored long message", async () => {
+    const ownerPrompt = createMessage({
+      id: "owner-runbook-prompt",
+      role: "user",
+      authorId: "user-2",
+      content: [
+        "Inspect the demo files for the no-hardware preparatory patch.",
+        "Stay read-only and do not edit files.",
+        "Return the smallest patch plan, test, stop condition, and any reason not to implement this now.",
+      ].join("\n\n"),
+      timestamp: 1,
+    });
+
+    await act(async () => {
+      root.render(
+        <ConversationMessageRows
+          messages={[ownerPrompt]}
+          currentUserId="user-1"
+          chatClientSessionId="session-1"
+          projectId="project-1"
+          runtimeId={null}
+          conversationLocalId="conversation-local"
+          conversationControllerId="conversation-controller"
+          firstPlanMessageId={null}
+          humanLabelByUserId={new Map([["user-2", "Owner"]])}
+          runAgentIdentityByRunId={new Map()}
+          runAgentHandleByRunId={new Map()}
+          renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
+          assistantAvatarPlaceholder={<span aria-hidden="true" className="h-8 w-8" />}
+          onRequestActions={vi.fn()}
+          onRequestActionsAtPoint={vi.fn()}
+          onCancelTerminalCommand={null}
+          onMessageContextMenu={vi.fn()}
+        />,
+      );
+    });
+
+    const marker = container.querySelector('[data-testid="chat-speaker-human-marker"]');
+    expect(marker).toBeInstanceOf(HTMLElement);
+    expect(marker?.getAttribute("data-chat-speaker-kind")).toBe("human");
+    expect(marker?.getAttribute("data-human-label")).toBe("Owner");
+    expect(marker?.getAttribute("data-human-avatar-seed")).toBe("user-2");
+    expect(readStickyChatSpeakerMarker(marker)).toEqual({
+      kind: "human",
+      label: "Owner",
+      avatarSeed: "user-2",
+    });
+  });
+
+  it("renders a sticky human speaker marker for the current user's own long message", async () => {
+    const ownPrompt = createMessage({
+      id: "own-long-prompt",
+      role: "user",
+      authorId: "user-1",
+      content:
+        "Now inspect the exact Demo files for the no-hardware preparatory patch. Stay read-only and do not edit files.",
+      timestamp: 1,
+    });
+
+    await act(async () => {
+      root.render(
+        <ConversationMessageRows
+          messages={[ownPrompt]}
+          currentUserId="user-1"
+          chatClientSessionId="session-1"
+          projectId="project-1"
+          runtimeId={null}
+          conversationLocalId="conversation-local"
+          conversationControllerId="conversation-controller"
+          firstPlanMessageId={null}
+          humanLabelByUserId={new Map([["user-1", "Owner"]])}
+          runAgentIdentityByRunId={new Map()}
+          runAgentHandleByRunId={new Map()}
+          renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
+          assistantAvatarPlaceholder={<span aria-hidden="true" className="h-8 w-8" />}
+          onRequestActions={vi.fn()}
+          onRequestActionsAtPoint={vi.fn()}
+          onCancelTerminalCommand={null}
+          onMessageContextMenu={vi.fn()}
+        />,
+      );
+    });
+
+    const marker = container.querySelector('[data-testid="chat-speaker-human-marker"]');
+    expect(marker).toBeInstanceOf(HTMLElement);
+    expect(readStickyChatSpeakerMarker(marker)).toEqual({
+      kind: "human",
+      label: "Owner",
+      avatarSeed: "user-1",
+    });
   });
 
   it("clears the sticky assistant speaker at an assistant-to-controller boundary", async () => {
