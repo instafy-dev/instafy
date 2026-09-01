@@ -206,30 +206,36 @@ jobs:
           }
 
           services_fresh=false
+          services_publish=true
           if manifest_is_fresh \
             publish-production-services.yml \
             production-service-release-manifest; then
             services_fresh=true
+            services_publish=false
           else
             status=$?
             [[ "$status" == "1" ]] || exit "$status"
           fi
           runtime_fresh=false
+          runtime_publish=true
           if manifest_is_fresh \
             publish-runtime-agent.yml \
             runtime-agent-release-manifest; then
             runtime_fresh=true
+            runtime_publish=false
           else
             status=$?
             [[ "$status" == "1" ]] || exit "$status"
           fi
+          echo "services_publish=$services_publish" >> "$GITHUB_OUTPUT"
+          echo "runtime_publish=$runtime_publish" >> "$GITHUB_OUTPUT"
           if [[ "$services_fresh" == "true" && "$runtime_fresh" == "true" ]]; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
           else
             echo "publish=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Dispatch both immutable image publishers
+      - name: Dispatch stale immutable image publishers
         if: >-
           steps.recheck.outputs.current == 'true' &&
           steps.freshness.outputs.publish == 'true'
@@ -238,6 +244,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_COMMIT: ${{ steps.source.outputs.commit_sha }}
+          PUBLISH_SERVICES: ${{ steps.freshness.outputs.services_publish }}
+          PUBLISH_RUNTIME: ${{ steps.freshness.outputs.runtime_publish }}
         run: |
           set -euo pipefail
           dispatch() {
@@ -253,27 +261,36 @@ jobs:
           JSON
           }
 
-          services="$(
-            dispatch \
-              publish-production-services.yml \
-              "{\"commit_sha\":\"${RELEASE_COMMIT}\"}"
-          )"
-          runtime="$(
-            dispatch \
-              publish-runtime-agent.yml \
-              "{\"commit_sha\":\"${RELEASE_COMMIT}\",\"update_channel_tags\":false}"
-          )"
-          services_run_id="$(jq -er '.workflow_run_id' <<<"$services")"
-          runtime_run_id="$(jq -er '.workflow_run_id' <<<"$runtime")"
-          services_url="$(jq -er '.html_url' <<<"$services")"
-          runtime_url="$(jq -er '.html_url' <<<"$runtime")"
+          services_run_id=""
+          services_url=""
+          runtime_run_id=""
+          runtime_url=""
+          if [[ "$PUBLISH_SERVICES" == "true" ]]; then
+            services="$(
+              dispatch \
+                publish-production-services.yml \
+                "{\"commit_sha\":\"${RELEASE_COMMIT}\"}"
+            )"
+            services_run_id="$(jq -er '.workflow_run_id' <<<"$services")"
+            services_url="$(jq -er '.html_url' <<<"$services")"
+          fi
+          if [[ "$PUBLISH_RUNTIME" == "true" ]]; then
+            runtime="$(
+              dispatch \
+                publish-runtime-agent.yml \
+                "{\"commit_sha\":\"${RELEASE_COMMIT}\",\"update_channel_tags\":false}"
+            )"
+            runtime_run_id="$(jq -er '.workflow_run_id' <<<"$runtime")"
+            runtime_url="$(jq -er '.html_url' <<<"$runtime")"
+          fi
           for run_id in "$services_run_id" "$runtime_run_id"; do
+            [[ -n "$run_id" ]] || continue
             if [[ ! "$run_id" =~ ^[1-9][0-9]*$ ]]; then
               echo "::error::GitHub did not return an exact child workflow run ID."
               exit 1
             fi
           done
-          if [[ "$services_run_id" == "$runtime_run_id" ]]; then
+          if [[ -n "$services_run_id" && "$services_run_id" == "$runtime_run_id" ]]; then
             echo "::error::The two image publishers returned the same run ID."
             exit 1
           fi
@@ -292,6 +309,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_COMMIT: ${{ steps.source.outputs.commit_sha }}
+          PUBLISH_SERVICES: ${{ steps.freshness.outputs.services_publish }}
+          PUBLISH_RUNTIME: ${{ steps.freshness.outputs.runtime_publish }}
           SERVICES_RUN_ID: ${{ steps.dispatch.outputs.services_run_id }}
           RUNTIME_RUN_ID: ${{ steps.dispatch.outputs.runtime_run_id }}
         run: |
@@ -349,14 +368,18 @@ jobs:
             fi
           }
 
-          wait_for_run \
-            "$SERVICES_RUN_ID" \
-            publish-production-services.yml \
-            production-service-release-manifest
-          wait_for_run \
-            "$RUNTIME_RUN_ID" \
-            publish-runtime-agent.yml \
-            runtime-agent-release-manifest
+          if [[ "$PUBLISH_SERVICES" == "true" ]]; then
+            wait_for_run \
+              "$SERVICES_RUN_ID" \
+              publish-production-services.yml \
+              production-service-release-manifest
+          fi
+          if [[ "$PUBLISH_RUNTIME" == "true" ]]; then
+            wait_for_run \
+              "$RUNTIME_RUN_ID" \
+              publish-runtime-agent.yml \
+              runtime-agent-release-manifest
+          fi
 
       - name: Report immutable image publication
         if: >-
@@ -365,6 +388,8 @@ jobs:
         shell: bash
         env:
           RELEASE_COMMIT: ${{ steps.source.outputs.commit_sha }}
+          PUBLISH_SERVICES: ${{ steps.freshness.outputs.services_publish }}
+          PUBLISH_RUNTIME: ${{ steps.freshness.outputs.runtime_publish }}
           SERVICES_RUN_ID: ${{ steps.dispatch.outputs.services_run_id }}
           SERVICES_URL: ${{ steps.dispatch.outputs.services_url }}
           RUNTIME_RUN_ID: ${{ steps.dispatch.outputs.runtime_run_id }}
@@ -374,8 +399,16 @@ jobs:
             echo "### Immutable production images published"
             echo
             echo "- Public core: \`${RELEASE_COMMIT}\`"
-            echo "- Production services: [run ${SERVICES_RUN_ID}](${SERVICES_URL})"
-            echo "- Runtime agent: [run ${RUNTIME_RUN_ID}](${RUNTIME_URL})"
+            if [[ "$PUBLISH_SERVICES" == "true" ]]; then
+              echo "- Production services: [run ${SERVICES_RUN_ID}](${SERVICES_URL})"
+            else
+              echo "- Production services: retained the existing fresh manifest"
+            fi
+            if [[ "$PUBLISH_RUNTIME" == "true" ]]; then
+              echo "- Runtime agent: [run ${RUNTIME_RUN_ID}](${RUNTIME_URL})"
+            else
+              echo "- Runtime agent: retained the existing fresh manifest"
+            fi
             echo "- Mutable channel tags were not moved."
           } >> "$GITHUB_STEP_SUMMARY"
 

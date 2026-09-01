@@ -320,46 +320,27 @@ async fn main() -> anyhow::Result<()> {
     let billing_state = state.clone();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
+        let mut transient_failure_started_at = None;
         loop {
             ticker.tick().await;
-            if let Err(error) = runtime::sweep_hosted_runtime_credit_usage(&billing_state).await {
+            let error = runtime::sweep_hosted_runtime_credit_usage(&billing_state)
+                .await
+                .err();
+            if let Some(error) = error {
                 let error_message = error.to_string();
                 tracing::warn!(error = %error_message, "hosted runtime credit sweep failed");
-                if let Err(report_error) = bug_reports::record_system_bug_report(
-                    &billing_state,
-                    bug_reports::SystemBugReportInput {
-                        message: "Hosted runtime credit sweep failed".to_string(),
-                        details: Some(error_message.clone()),
-                        project_id: None,
-                        runtime_id: None,
-                        run_id: None,
-                        conversation_id: None,
-                        priority: "high".to_string(),
-                        labels: vec![
-                            "billing".to_string(),
-                            "runtime".to_string(),
-                            "monitoring".to_string(),
-                        ],
-                        metadata: json!({
-                            "source": "runtime.credit_sweep",
-                        }),
-                        logs: json!([
-                            {
-                                "kind": "runtime.credit_sweep.failed",
-                                "error": error_message,
-                            }
-                        ]),
-                        fingerprint: Some("runtime.credit_sweep.failed".to_string()),
-                        dedupe_window_seconds: Some(15 * 60),
-                    },
-                )
-                .await
-                {
-                    tracing::warn!(
-                        %report_error,
-                        "failed to record hosted runtime credit sweep issue"
-                    );
+                if !runtime::should_report_hosted_runtime_credit_sweep_error(
+                    &error,
+                    &mut transient_failure_started_at,
+                    std::time::Instant::now(),
+                ) {
+                    continue;
                 }
+                record_hosted_runtime_credit_sweep_failure(&billing_state, error_message).await;
+            } else {
+                runtime::reset_hosted_runtime_credit_sweep_pool_pressure(
+                    &mut transient_failure_started_at,
+                );
             }
         }
     });
@@ -545,4 +526,42 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn record_hosted_runtime_credit_sweep_failure(state: &AppState, error_message: String) {
+    if let Err(report_error) = bug_reports::record_system_bug_report(
+        state,
+        bug_reports::SystemBugReportInput {
+            message: "Hosted runtime credit sweep failed".to_string(),
+            details: Some(error_message.clone()),
+            project_id: None,
+            runtime_id: None,
+            run_id: None,
+            conversation_id: None,
+            priority: "high".to_string(),
+            labels: vec![
+                "billing".to_string(),
+                "runtime".to_string(),
+                "monitoring".to_string(),
+            ],
+            metadata: json!({
+                "source": "runtime.credit_sweep",
+            }),
+            logs: json!([
+                {
+                    "kind": "runtime.credit_sweep.failed",
+                    "error": error_message,
+                }
+            ]),
+            fingerprint: Some("runtime.credit_sweep.failed".to_string()),
+            dedupe_window_seconds: Some(15 * 60),
+        },
+    )
+    .await
+    {
+        tracing::warn!(
+            %report_error,
+            "failed to record hosted runtime credit sweep issue"
+        );
+    }
 }

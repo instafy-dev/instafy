@@ -130,6 +130,8 @@ export function ChatBubbleRow({
     anchoredWorkflowSpineNotchOffsetPx ?? defaultWorkflowSpineNotchOffsetPx;
   const assistantSpeakerMarker =
     speakerMarker?.kind === "assistant" ? speakerMarker : null;
+  const humanSpeakerMarker =
+    speakerMarker?.kind === "human" ? speakerMarker : null;
   return (
     <div
       ref={rowRef}
@@ -165,8 +167,14 @@ export function ChatBubbleRow({
               data-chat-speaker-kind={speakerMarker.kind}
               data-agent-avatar-seed={assistantSpeakerMarker?.avatarSeed}
               data-agent-handle={assistantSpeakerMarker?.handle}
+              data-human-avatar-seed={humanSpeakerMarker?.avatarSeed ?? undefined}
+              data-human-label={humanSpeakerMarker?.label}
               data-testid={
-                assistantSpeakerMarker ? "chat-speaker-marker" : "chat-speaker-boundary"
+                assistantSpeakerMarker
+                  ? "chat-speaker-marker"
+                  : humanSpeakerMarker
+                    ? "chat-speaker-human-marker"
+                    : "chat-speaker-boundary"
               }
             />
           ) : null}

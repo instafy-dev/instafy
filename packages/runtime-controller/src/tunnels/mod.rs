@@ -2467,8 +2467,10 @@ async fn ensure_tunnel_entitlement(
                     .execute("release savepoint tunnel_credit_burn", &[])
                     .await;
 
-                if status == StatusCode::PAYMENT_REQUIRED {
-                    return Err((status, payload));
+                if status == StatusCode::BAD_REQUEST
+                    && error_message == "insufficient credits available for requested burn"
+                {
+                    return Err((StatusCode::PAYMENT_REQUIRED, payload));
                 }
 
                 warn!(
