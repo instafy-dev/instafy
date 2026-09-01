@@ -129,6 +129,14 @@ test("runtime image inputs reject the vulnerable Chromium and Go crypto baseline
   );
   assert.match(
     dockerfileStage(runtimeSource, "runtime"),
+    /^ARG CHROMIUM_MIN_VERSION$/mu,
+  );
+  assert.match(
+    dockerfileStage(runtimeSource, "runtime"),
+    /test -n "\$\{CHROMIUM_MIN_VERSION\}"/u,
+  );
+  assert.match(
+    dockerfileStage(runtimeSource, "runtime"),
     /dpkg --compare-versions[\s\S]*chromium\)" ge "\$\{CHROMIUM_MIN_VERSION\}"/u,
   );
 
