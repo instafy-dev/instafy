@@ -517,10 +517,13 @@ fn build_system_issue_from_telemetry(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("Runtime telemetry error");
-    if is_expected_provider_limit(message) || is_reconnectable_credential_failure(message) {
+    if is_expected_provider_limit(message) {
         return None;
     }
     let upstream_ai_failure = is_upstream_ai_failure(message);
+    let credential_reconnect_required = is_reconnectable_credential_failure(message)
+        && !is_reused_credential_refresh_token(message)
+        && !upstream_ai_failure;
     let labels = if upstream_ai_failure {
         vec![
             "managed-ai".to_string(),
@@ -537,6 +540,8 @@ fn build_system_issue_from_telemetry(
     };
     let fingerprint = if upstream_ai_failure {
         Some("runtime.agent.upstream_ai_failure".to_string())
+    } else if credential_reconnect_required {
+        Some("runtime.agent.credential_reconnect_required".to_string())
     } else {
         Some("runtime.agent.telemetry_error".to_string())
     };
@@ -544,6 +549,8 @@ fn build_system_issue_from_telemetry(
     Some(SystemBugReportInput {
         message: if upstream_ai_failure {
             "Runtime AI upstream request failed".to_string()
+        } else if credential_reconnect_required {
+            "Runtime credential reconnect required".to_string()
         } else {
             "Runtime telemetry error".to_string()
         },
@@ -552,7 +559,11 @@ fn build_system_issue_from_telemetry(
         runtime_id,
         run_id,
         conversation_id,
-        priority: "high".to_string(),
+        priority: if credential_reconnect_required {
+            "low".to_string()
+        } else {
+            "high".to_string()
+        },
         labels,
         metadata: json!({
             "source": "runtime_telemetry",
@@ -590,6 +601,11 @@ fn is_reconnectable_credential_failure(message: &str) -> bool {
             || normalized.contains("signin again")
             || normalized.contains("already been used")
             || normalized.contains("could not validate your refresh token"))
+}
+
+fn is_reused_credential_refresh_token(message: &str) -> bool {
+    let normalized = message.to_ascii_lowercase();
+    normalized.contains("codex oauth refresh failed") && normalized.contains("already been used")
 }
 
 fn is_upstream_ai_failure(message: &str) -> bool {
@@ -979,14 +995,13 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_system_issue_ignores_reconnectable_credential_failures() {
+    fn telemetry_system_issue_downgrades_reconnectable_credential_failures() {
         for message in [
             r#"unexpected status 401 Unauthorized: controller credential fetch failed: controller credentials returned 500 Internal Server Error: {\"message\":\"Codex OAuth refresh failed: Could not validate your refresh token. Please try signing in again.\"}"#,
-            r#"unexpected status 502 Bad Gateway: controller forced credential refresh failed: {\"message\":\"Codex OAuth refresh failed: Your session has ended. Please log in again.\"}"#,
-            r#"unexpected status 401 Unauthorized: {\"message\":\"Codex OAuth refresh failed: Your refresh token has already been used. Please try signing in again.\"}"#,
+            r#"unexpected status 401 Unauthorized: controller forced credential refresh failed: {\"message\":\"Codex OAuth refresh failed: Your session has ended. Please log in again.\"}"#,
             r#"unexpected status 401 Unauthorized: {\"message\":\"Codex OAuth refresh failed: Authentication failed. Please signin again.\"}"#,
         ] {
-            assert!(build_system_issue_from_telemetry(
+            let input = build_system_issue_from_telemetry(
                 "telemetry.error",
                 "error",
                 Some(message),
@@ -996,7 +1011,12 @@ mod tests {
                 None,
                 &JsonValue::Null,
             )
-            .is_none());
+            .expect("reconnect issue");
+            assert_eq!(input.priority, "low");
+            assert_eq!(
+                input.fingerprint.as_deref(),
+                Some("runtime.agent.credential_reconnect_required")
+            );
         }
 
         assert!(build_system_issue_from_telemetry(
@@ -1010,6 +1030,54 @@ mod tests {
             &JsonValue::Null,
         )
         .is_some());
+    }
+
+    #[test]
+    fn telemetry_system_issue_keeps_reused_refresh_tokens_high_priority() {
+        let input = build_system_issue_from_telemetry(
+            "telemetry.error",
+            "error",
+            Some(
+                r#"unexpected status 401 Unauthorized: {\"message\":\"Codex OAuth refresh failed: Your refresh token has already been used. Please try signing in again.\"}"#,
+            ),
+            None,
+            None,
+            None,
+            None,
+            &JsonValue::Null,
+        )
+        .expect("refresh-token reuse issue");
+
+        assert_eq!(input.priority, "high");
+        assert_eq!(
+            input.fingerprint.as_deref(),
+            Some("runtime.agent.telemetry_error")
+        );
+    }
+
+    #[test]
+    fn telemetry_system_issue_keeps_proxy_classification_for_credential_failures() {
+        let input = build_system_issue_from_telemetry(
+            "telemetry.error",
+            "error",
+            Some(
+                r#"unexpected status 502 Bad Gateway: upstream request failed: Codex OAuth refresh failed: Your session has ended. Please log in again."#,
+            ),
+            None,
+            None,
+            None,
+            None,
+            &JsonValue::Null,
+        )
+        .expect("upstream issue");
+
+        assert_eq!(input.priority, "high");
+        assert_eq!(
+            input.fingerprint.as_deref(),
+            Some("runtime.agent.upstream_ai_failure")
+        );
+        assert!(input.labels.iter().any(|label| label == "managed-ai"));
+        assert!(input.labels.iter().any(|label| label == "proxy"));
     }
 
     #[test]
