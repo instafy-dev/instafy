@@ -16021,6 +16021,178 @@ async fn automation_result_visibility_controls_team_thread_access() -> anyhow::R
 }
 
 #[tokio::test]
+async fn automation_list_and_get_are_space_scoped_for_team_visible_automations(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping automation space scoping test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let owner_user_id = Uuid::new_v4();
+    let teammate_user_id = Uuid::new_v4();
+    let outsider_user_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
+    ensure_test_user(&pool, &teammate_user_id).await?;
+    ensure_test_user(&pool, &outsider_user_id).await?;
+    seed_group_participation_project(
+        &pool,
+        &org_id,
+        &project_id,
+        &owner_user_id,
+        &teammate_user_id,
+        "Automation space scoping",
+    )
+    .await?;
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "automation-space-scoping",
+    );
+    let owner_token = crate::auth::issue_controller_token(&config, &owner_user_id)
+        .map_err(|error| controller_error("issue owner token", error))?
+        .token;
+    let teammate_token = crate::auth::issue_controller_token(&config, &teammate_user_id)
+        .map_err(|error| controller_error("issue teammate token", error))?
+        .token;
+    let outsider_token = crate::auth::issue_controller_token(&config, &outsider_user_id)
+        .map_err(|error| controller_error("issue outsider token", error))?
+        .token;
+    let app = automations::router().with_state(build_test_state(pool.clone(), config));
+    let list_path = format!("/projects/{project_id}/automations");
+
+    let (status, team_json) = automation_json_request(
+        &app,
+        "POST",
+        &list_path,
+        &owner_token,
+        json!({
+            "name": "Team hourly check",
+            "promptText": "Check the space hourly.",
+            "scheduleKind": "hourly",
+            "intervalHours": 1,
+            "timezone": "UTC",
+            "runtimeMode": "existing",
+            "resultVisibility": "team",
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "team create failed: {team_json}");
+    let team_automation_id = team_json["id"].as_str().expect("team id").to_string();
+
+    let (status, private_json) = automation_json_request(
+        &app,
+        "POST",
+        &list_path,
+        &owner_token,
+        json!({
+            "name": "Private hourly check",
+            "promptText": "Check privately.",
+            "scheduleKind": "hourly",
+            "intervalHours": 1,
+            "timezone": "UTC",
+            "runtimeMode": "existing",
+        }),
+    )
+    .await?;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "private create failed: {private_json}"
+    );
+    let private_automation_id = private_json["id"].as_str().expect("private id").to_string();
+
+    let list_ids = |payload: &serde_json::Value| -> Vec<String> {
+        payload
+            .as_array()
+            .expect("automation list array")
+            .iter()
+            .filter_map(|entry| entry["id"].as_str().map(str::to_string))
+            .collect()
+    };
+
+    // The creator keeps seeing everything they created.
+    let (status, owner_list) =
+        automation_json_request(&app, "GET", &list_path, &owner_token, json!({})).await?;
+    assert_eq!(status, StatusCode::OK, "owner list failed: {owner_list}");
+    let owner_ids = list_ids(&owner_list);
+    assert!(owner_ids.contains(&team_automation_id));
+    assert!(owner_ids.contains(&private_automation_id));
+
+    // A space member sees the space's team-visible automations even though a
+    // different user created them; private automations stay creator-only.
+    let (status, teammate_list) =
+        automation_json_request(&app, "GET", &list_path, &teammate_token, json!({})).await?;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "teammate list failed: {teammate_list}"
+    );
+    let teammate_ids = list_ids(&teammate_list);
+    assert!(
+        teammate_ids.contains(&team_automation_id),
+        "space member must see the team-visible automation: {teammate_list}"
+    );
+    assert!(
+        !teammate_ids.contains(&private_automation_id),
+        "private automations must stay creator-only: {teammate_list}"
+    );
+
+    // A non-member cannot list the space's automations at all.
+    let (status, outsider_list) =
+        automation_json_request(&app, "GET", &list_path, &outsider_token, json!({})).await?;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "outsider list: {outsider_list}"
+    );
+
+    // Direct reads follow the same scoping.
+    let team_path = format!("/automations/{team_automation_id}");
+    let private_path = format!("/automations/{private_automation_id}");
+    let (status, teammate_get) =
+        automation_json_request(&app, "GET", &team_path, &teammate_token, json!({})).await?;
+    assert_eq!(status, StatusCode::OK, "teammate get: {teammate_get}");
+    assert_eq!(teammate_get["name"], json!("Team hourly check"));
+    let (status, denied_get) =
+        automation_json_request(&app, "GET", &private_path, &teammate_token, json!({})).await?;
+    assert_eq!(status, StatusCode::FORBIDDEN, "private get: {denied_get}");
+    let (status, outsider_get) =
+        automation_json_request(&app, "GET", &team_path, &outsider_token, json!({})).await?;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "outsider get: {outsider_get}"
+    );
+
+    // Visibility does not grant mutation rights: pause/edit stay gated on the
+    // creator (can_access_owned_automation), matching the pre-existing
+    // mutation authorization.
+    let (status, teammate_pause) = automation_json_request(
+        &app,
+        "PATCH",
+        &team_path,
+        &teammate_token,
+        json!({ "status": "paused" }),
+    )
+    .await?;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "teammate pause: {teammate_pause}"
+    );
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_org(&pool, &org_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
+    cleanup_test_user(&pool, &teammate_user_id).await?;
+    cleanup_test_user(&pool, &outsider_user_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn skill_mode_ambient_turn_dispatches_evaluation_and_swallows_decline() -> anyhow::Result<()>
 {
     let Some(pool) = setup_origin_test_pool().await? else {
@@ -25716,7 +25888,8 @@ async fn credential_usage_report_follows_revoked_credential_fallback() -> anyhow
 
     // Usage reported against the revoked pinned id must land on the same
     // effective credential the lease fallback serves, not be dropped.
-    let snapshot = json!({ "planName": "Codex", "windows": [{ "window": "weekly", "leftPercent": 42 }] });
+    let snapshot =
+        json!({ "planName": "Codex", "windows": [{ "window": "weekly", "leftPercent": 42 }] });
     let response = post_usage(pinned_id, snapshot.clone()).await?;
     assert_eq!(
         response.status(),
