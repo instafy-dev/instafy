@@ -105,7 +105,10 @@ export function StudioDialogPopover({
 }: PopoverProps & { children: ReactNode }) {
   return (
     <StudioPopover {...props}>
-      <Dialog className="outline-none">{children}</Dialog>
+      {/* react-aria clamps the popover to the available space via an inline
+          max-height; inheriting it here makes tall content scroll instead of
+          being clipped by the popover's overflow. */}
+      <Dialog className="max-h-[inherit] overflow-y-auto outline-none">{children}</Dialog>
     </StudioPopover>
   );
 }

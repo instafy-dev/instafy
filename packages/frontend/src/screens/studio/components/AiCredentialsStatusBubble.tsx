@@ -27,6 +27,7 @@ import {
   AccessSectionLabel,
 } from "./AccessDecisionCard";
 import { ChatGptDeviceCodePrerequisite } from "./ChatGptDeviceCodePrerequisite";
+import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
 import { ChatActivityBubble } from "./ChatActivityBubble";
 import {
   isLikelyDesktopDevice,
@@ -557,7 +558,7 @@ export function AiCredentialsStatusBubble({
         radius="2xl"
         shadow="sm"
         data-testid="credentials-status-indicator"
-        className="max-w-[min(85%,30rem)] px-3 py-2.5 text-sm"
+        className={`${CHAT_BUBBLE_MAX_WIDTH.status} px-3 py-2.5 text-sm`}
         aria-live="polite"
       >
         <div className="flex min-w-0 flex-wrap items-center gap-3">
@@ -640,7 +641,7 @@ export function AiCredentialsStatusBubble({
             aria-label="Close AI connect"
             onPress={() => void handleClose()}
             isDisabled={wizardBusy}
-            className="text-slate-400 hover:text-slate-700 data-[hovered]:text-slate-700"
+            className="text-slate-400 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-500 dark:hover:text-slate-200 dark:data-[hovered]:text-slate-200"
           >
             <Xmark className="h-4 w-4" aria-hidden="true" />
           </IconButton>

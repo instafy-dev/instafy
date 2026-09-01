@@ -30,7 +30,8 @@ ARG BUILD_PROFILE=dev
 # Cargo's dev profile outputs to target/debug.
 ARG BUILD_ARTIFACT_DIR=debug
 # Runtime base should have glibc >= the builder image; Debian trixie is newer than bookworm.
-ARG RUNTIME_BASE=debian:trixie-slim@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258
+ARG RUNTIME_BASE=debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+ARG CHROMIUM_MIN_VERSION=151.0.7922.173-1~deb13u1
 ARG WEBDEV_BASE=mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
 
 ########################
@@ -186,6 +187,7 @@ COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandb
 ########################
 FROM ${RUNTIME_BASE} AS runtime
 
+ARG CHROMIUM_MIN_VERSION
 ARG RATHOLE_VERSION=0.5.0
 ARG RATHOLE_SHA256_AMD64
 ARG RATHOLE_SHA256_ARM64
@@ -201,7 +203,8 @@ ARG IP_ADDRESS_VERSION
 ARG IP_ADDRESS_SHA256
 
 COPY --from=node-runtime /usr/local/ /usr/local/
-RUN apt-get update && \
+RUN test -n "${CHROMIUM_MIN_VERSION}" && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
       bash \
       bsdutils \
@@ -220,6 +223,8 @@ RUN apt-get update && \
       python3 \
       python3-pip \
       util-linux \
+    && dpkg --compare-versions \
+      "$(dpkg-query -W -f='${Version}' chromium)" ge "${CHROMIUM_MIN_VERSION}" \
     && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g "npm@${NPM_VERSION}" && \

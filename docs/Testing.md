@@ -37,6 +37,13 @@ repository or deployment secrets. Its candidate checkout is the one deliberate
 the trusted checkout does not opt out. Before public visibility, require this
 check in addition to the four Public Build names.
 
+The same workflow emits that exact check name for every push to protected
+`main`. The push lane binds its checkout to `github.sha`, treats that protected
+commit as both the trusted controls and scanned tree, and repeats the policy and
+Gitleaks gates without secrets or write permission. This gives release tooling
+an exact-main attestation while the pull-request lane remains base-owned and
+continues to treat candidate bytes only as unexecuted data.
+
 The trusted gate rejects unreviewed environment templates, live
 environment/auth files, private-only package/product markers, personal paths,
 private hosts/networks, browser-exposed service-role names, token prefixes,
@@ -71,7 +78,10 @@ contributions do not require that manual security review.
 The JavaScript job performs a frozen install, validates and applies the public
 migration track to an empty database, checks the self-host contract, lints and
 builds the frontend, runs frontend units, proves the CLI package artifact, and
-builds/tests the Desktop app and its runtime helper. The Go and Rust jobs test
+builds/tests the Desktop app and its runtime helper. The empty-database test
+prefetches its digest-pinned Postgres image with bounded retry/backoff and then
+disables implicit pulls; image acquisition may retry, while container, SQL, and
+schema-verification failures remain fatal. The Go and Rust jobs test
 the public service packages directly. Full-stack Playwright suites remain
 available to contributors and downstream distributions, but are not required
 public-branch checks because they depend on a larger local/deployment fixture.

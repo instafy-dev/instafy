@@ -10,9 +10,12 @@ on:
       - reopened
       - ready_for_review
       - edited
+  push:
+    branches:
+      - main
 
 concurrency:
-  group: trusted-public-boundary-${{ github.event.pull_request.number }}
+  group: trusted-public-boundary-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 permissions:
@@ -30,30 +33,43 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
+    env:
+      TRUSTED_ROOT: ${{ github.workspace }}/trusted
+      # A protected-main push is already trusted input. Reusing its exact
+      # checkout as candidate data gives that SHA the same named boundary
+      # attestation without adding a second checkout or touching PR isolation.
+      CANDIDATE_ROOT: ${{ github.event_name == 'push' && format('{0}/trusted', github.workspace) || format('{0}/candidate', github.workspace) }}
 
     steps:
       - name: Wait for the event-bound merge candidate to be minted
+        if: github.event_name == 'pull_request_target'
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
           # Read-only: watches the pulls API until the server-minted merge
-          # candidate binds this event's head. Never fetches candidate code.
+          # candidate binds this event's head and real base history. Never
+          # fetches candidate code.
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]
+          [[ "$EXPECTED_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$EXPECTED_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$BASE_REF" == "main" ]]
           # refs/pull/N/merge is minted asynchronously. After a push — and
-          # especially after a long-unmergeable spell — the ref can lag this
-          # event by minutes, so a checkout taken immediately can bind the
-          # PREVIOUS head; the parent verification below then rejects that
-          # stale candidate with a failure indistinguishable from a real
-          # boundary violation, and a rerun fails again until the re-mint
-          # lands (observed 4x on PR #90, issue #99). Polling the read-only
-          # pulls API also schedules the recompute, so this loop both waits
-          # for and accelerates the fresh candidate. Only the wait moves
-          # here: the checkout still binds nothing, and the verification
-          # step below remains the enforced security property.
+          # especially after a long-unmergeable spell or a stacked-branch
+          # retarget — the ref can lag this event by minutes. The head parent
+          # can already match while the base parent still names the previous
+          # target, as observed on PR #125 after issue #99's head-only wait.
+          # A checkout taken then fails the later parent verification even
+          # though GitHub is still re-minting the candidate. Polling the
+          # read-only pulls API also schedules the recompute, so this loop
+          # waits for both the exact event head and genuine target-branch
+          # history. Only the wait moves here: the checkout still binds
+          # nothing, and the verification step below remains the enforced
+          # security property.
           candidate_oid=""
           for attempt in $(seq 1 32); do
             if [[ "$attempt" -gt 1 ]]; then
@@ -73,16 +89,43 @@ jobs:
             fi
             candidate_oid="$api_body"
             if [[ "$candidate_oid" =~ ^[0-9a-f]{40}$ ]]; then
-              head_parent="$(
+              parent_pair="$(
                 gh api "repos/${GITHUB_REPOSITORY}/git/commits/${candidate_oid}" \
-                  --jq '.parents[1].sha // empty' 2>/dev/null || true
+                  --jq 'if (.parents | length) == 2 then [.parents[0].sha, .parents[1].sha] | @tsv else empty end' \
+                  2>/dev/null || true
               )"
-              if [[ "$head_parent" == "$EXPECTED_HEAD_SHA" ]]; then
+              base_parent=""
+              head_parent=""
+              IFS=$'\t' read -r base_parent head_parent <<< "$parent_pair" || true
+              if [[ "$head_parent" != "$EXPECTED_HEAD_SHA" ]]; then
+                continue
+              fi
+              if [[ ! "$base_parent" =~ ^[0-9a-f]{40}$ ]]; then
+                continue
+              fi
+              if [[ "$base_parent" == "$EXPECTED_BASE_SHA" ]]; then
                 exit 0
               fi
+              base_relation="$(
+                gh api \
+                  "repos/${GITHUB_REPOSITORY}/compare/${base_parent}...${BASE_REF}" \
+                  --jq '.status // empty' 2>/dev/null || true
+              )"
+              case "$base_relation" in
+                identical|ahead)
+                  exit 0
+                  ;;
+                behind|diverged)
+                  continue
+                  ;;
+                *)
+                  continue
+                  ;;
+              esac
             fi
           done
           echo "::error::No merge candidate bound to head ${EXPECTED_HEAD_SHA}" \
+            "and ${BASE_REF} history" \
             "after 8 minutes (last candidate: ${candidate_oid:-none}). Either" \
             "the pull request is unmergeable right now, or GitHub's" \
             "mergeability job is delayed — re-run this check once the pull" \
@@ -92,7 +135,9 @@ jobs:
       - name: Checkout trusted base controls
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          # PRs execute base-owned controls; protected-main pushes execute only
+          # the exact pushed commit. Neither path accepts an author-supplied ref.
+          ref: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.base.sha || github.sha }}
           path: trusted
           fetch-depth: 1
           persist-credentials: false
@@ -102,6 +147,7 @@ jobs:
           show-progress: false
 
       - name: Checkout server-generated merge candidate as data
+        if: github.event_name == 'pull_request_target'
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           repository: ${{ github.repository }}
@@ -117,6 +163,7 @@ jobs:
           show-progress: false
 
       - name: Verify the event-bound merge object and parents
+        if: github.event_name == 'pull_request_target'
         env:
           CANDIDATE_ROOT: ${{ github.workspace }}/candidate
           EXPECTED_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -195,6 +242,21 @@ jobs:
             fi
           fi
 
+      - name: Verify the exact protected-main object
+        if: github.event_name == 'push'
+        env:
+          EXPECTED_REF: refs/heads/main
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "$EXPECTED_REF"
+          if [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Protected-main event SHA is not a full commit OID."
+            exit 1
+          fi
+          actual_sha="$(git -C "$TRUSTED_ROOT" rev-parse --verify "HEAD^{commit}")"
+          test "$actual_sha" = "$EXPECTED_SHA"
+
       - name: Install pinned Gitleaks
         env:
           GITLEAKS_VERSION: "8.30.1"
@@ -210,8 +272,6 @@ jobs:
           test "$("$RUNNER_TEMP/gitleaks" version)" = "$GITLEAKS_VERSION"
 
       - name: Run trusted public boundary regression tests
-        env:
-          TRUSTED_ROOT: ${{ github.workspace }}/trusted
         run: |
           set -euo pipefail
           node --test \
@@ -219,9 +279,6 @@ jobs:
             "$TRUSTED_ROOT/scripts/check-public-boundary-workflow.test.mjs"
 
       - name: Enforce trusted public boundary policy
-        env:
-          CANDIDATE_ROOT: ${{ github.workspace }}/candidate
-          TRUSTED_ROOT: ${{ github.workspace }}/trusted
         run: |
           set -euo pipefail
           node "$TRUSTED_ROOT/scripts/check-public-boundary.mjs" \
@@ -234,8 +291,6 @@ jobs:
           : > "$RUNNER_TEMP/gitleaks-public-boundary.empty-ignore"
 
       - name: Prove encoded private marker detection
-        env:
-          TRUSTED_ROOT: ${{ github.workspace }}/trusted
         run: |
           set -euo pipefail
           encoded_private_marker="$(
@@ -256,9 +311,6 @@ jobs:
           fi
 
       - name: Scan candidate tree with path-aware Gitleaks rules
-        env:
-          CANDIDATE_ROOT: ${{ github.workspace }}/candidate
-          TRUSTED_ROOT: ${{ github.workspace }}/trusted
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/gitleaks" dir \
@@ -276,9 +328,6 @@ jobs:
             "$CANDIDATE_ROOT"
 
       - name: Scan every tracked file without path allowlists
-        env:
-          CANDIDATE_ROOT: ${{ github.workspace }}/candidate
-          TRUSTED_ROOT: ${{ github.workspace }}/trusted
         run: |
           set -euo pipefail
           candidate_inventory="$RUNNER_TEMP/public-boundary-candidate-files.zlist"

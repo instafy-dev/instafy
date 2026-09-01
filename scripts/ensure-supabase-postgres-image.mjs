@@ -80,6 +80,48 @@ function wait(milliseconds) {
   );
 }
 
+export function pullPinnedImage(
+  image,
+  {
+    docker = "docker",
+    attempts = PULL_ATTEMPTS,
+    backoffBaseMs = PULL_BACKOFF_BASE_MS,
+    runCommand = run,
+    waitFor = wait,
+    logger = console,
+  } = {},
+) {
+  cacheTagFor(image);
+  if (!Number.isSafeInteger(attempts) || attempts < 1) {
+    throw new Error("pull attempts must be a positive integer");
+  }
+  if (!Number.isSafeInteger(backoffBaseMs) || backoffBaseMs < 0) {
+    throw new Error("pull backoff must be a non-negative integer");
+  }
+
+  let lastDetail = "";
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    logger.log(`Pulling pinned Postgres image (attempt ${attempt}/${attempts})...`);
+    const pull = runCommand(docker, ["pull", image], { timeout: 600_000 });
+    if (!pull.error && pull.status === 0) {
+      return image;
+    }
+    lastDetail = String(
+      pull.stderr || pull.stdout || pull.error?.message || "",
+    )
+      .trim()
+      .slice(-400);
+    if (attempt < attempts) {
+      const backoff = backoffBaseMs * 2 ** (attempt - 1);
+      logger.warn(`Pull failed; retrying in ${backoff / 1000}s.`);
+      waitFor(backoff);
+    }
+  }
+  throw new Error(
+    `failed to pull ${image} after ${attempts} attempts${lastDetail ? `: ${lastDetail}` : ""}`,
+  );
+}
+
 function main() {
   const image = resolvePinnedPostgresImage(readFileSync(MIGRATION_SCRIPT, "utf8"));
   const docker = process.env.DOCKER || "docker";
@@ -107,37 +149,21 @@ function main() {
     console.warn("Cache tarball did not yield the pinned image; falling back to pull.");
   }
 
-  let lastDetail = "";
-  for (let attempt = 1; attempt <= PULL_ATTEMPTS; attempt += 1) {
-    console.log(`Pulling pinned Postgres image (attempt ${attempt}/${PULL_ATTEMPTS})...`);
-    const pull = run(docker, ["pull", image], { timeout: 600_000 });
-    if (pull.status === 0) {
-      const tag = run(docker, ["tag", image, cacheTag]);
-      if (tag.status !== 0) {
-        throw new Error(`failed to apply cache tag ${cacheTag}`);
-      }
-      mkdirSync(CACHE_DIR, { recursive: true });
-      console.log("Saving image tarball for the cache step...");
-      const save = run(docker, ["save", "--output", CACHE_TAR, cacheTag], {
-        timeout: 600_000,
-      });
-      if (save.status !== 0) {
-        // The build only needs the image in the daemon; a failed save just
-        // means the next run pulls again.
-        console.warn("docker save failed; continuing without refreshing the cache.");
-      }
-      return;
-    }
-    lastDetail = String(pull.stderr || pull.stdout || "").trim().slice(-400);
-    if (attempt < PULL_ATTEMPTS) {
-      const backoff = PULL_BACKOFF_BASE_MS * 2 ** (attempt - 1);
-      console.warn(`Pull failed; retrying in ${backoff / 1000}s.`);
-      wait(backoff);
-    }
+  pullPinnedImage(image, { docker });
+  const tag = run(docker, ["tag", image, cacheTag]);
+  if (tag.status !== 0) {
+    throw new Error(`failed to apply cache tag ${cacheTag}`);
   }
-  throw new Error(
-    `failed to pull ${image} after ${PULL_ATTEMPTS} attempts${lastDetail ? `: ${lastDetail}` : ""}`,
-  );
+  mkdirSync(CACHE_DIR, { recursive: true });
+  console.log("Saving image tarball for the cache step...");
+  const save = run(docker, ["save", "--output", CACHE_TAR, cacheTag], {
+    timeout: 600_000,
+  });
+  if (save.status !== 0) {
+    // The build only needs the image in the daemon; a failed save just
+    // means the next run pulls again.
+    console.warn("docker save failed; continuing without refreshing the cache.");
+  }
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

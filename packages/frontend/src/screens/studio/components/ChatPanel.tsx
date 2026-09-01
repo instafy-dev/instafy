@@ -174,6 +174,12 @@ import { useChatCredentialGate } from "./useChatCredentialGate";
 import { useAmbientCredentialGatePresentation } from "./useAmbientCredentialGatePresentation";
 import { canUseDesktopCodexAuthJson } from "./desktopCodexAuthJson";
 import { CredentialsConnectModal } from "./CredentialsConnectModal";
+import { StudioDialogModal } from "../../../components/aria/StudioModal";
+import { AgentProfileCardContent } from "./AssistantAvatarPopover";
+import {
+  OPEN_AGENT_PROFILE_EVENT,
+  type OpenAgentProfileDetail,
+} from "./agentProfileOpen";
 import { emitAiConfigChanged } from "./aiConfigEvents";
 import { formatProxyUpstreamErrorSummary } from "./proxyError";
 import { useCredentialsConnectFlow } from "./useCredentialsConnectFlow";
@@ -1538,6 +1544,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     primaryAgentHandleForPopover,
     refreshAvailableAgents,
     renderAssistantAvatar,
+    resolveAgentProfileCardProps,
     runAgentHandleByRunId,
     runAgentIdentityByRunId,
   } = useChatAgentRoster({
@@ -1618,6 +1625,27 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   );
   const clearInputEditor = useCallback(() => {
     chatInputRef.current?.clear();
+  }, []);
+  // Surfaces outside the chat tree (the agent profile card, panels) hand
+  // keyboard focus to the composer after navigating here — without this the
+  // popover's focus restore lands on <body> once its trigger unmounts.
+  useEffect(() => {
+    const handler = () => focusInput({ force: true });
+    window.addEventListener("instafy:focus-composer", handler);
+    return () => window.removeEventListener("instafy:focus-composer", handler);
+  }, [focusInput]);
+  // Anchor-less profile opens: inline mention chips and narrow speaker labels
+  // dispatch a handle; this panel owns agent resolution, so it hosts the card.
+  const [agentProfileModalHandle, setAgentProfileModalHandle] = useState<string | null>(null);
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const handle = (event as CustomEvent<OpenAgentProfileDetail>).detail?.handle;
+      if (typeof handle === "string" && handle) {
+        setAgentProfileModalHandle(handle);
+      }
+    };
+    window.addEventListener(OPEN_AGENT_PROFILE_EVENT, handler);
+    return () => window.removeEventListener(OPEN_AGENT_PROFILE_EVENT, handler);
   }, []);
   // This identity belongs to one mounted Shared Browser surface. Keeping it in
   // memory avoids duplicate tabs or side-by-side surfaces replacing each other,
@@ -2238,6 +2266,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       isComposing: event.nativeEvent.isComposing,
       hasOpenMenu: hasOpenComposerMenu,
       hasActiveMatchingAgent: composerPrimaryActionRef.current.mode === "steer",
+      touchLikeInput,
     });
     if (enterAction === "menu") {
       if (acceptOpenComposerMenuSelection()) {
@@ -3670,6 +3699,22 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     showStatus,
   });
 
+  // The invite prompt dismisses on backdrop tap; Escape must work too.
+  useEffect(() => {
+    if (!invitePrompt || invitePromptBusy) {
+      return;
+    }
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        handleInvitePromptClose();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [handleInvitePromptClose, invitePrompt, invitePromptBusy]);
+
   useEffect(() => {
     if (typeof window === "undefined") {
       return;
@@ -4297,8 +4342,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         !providerRaw || providerRaw === "assistant"
           ? defaultCredentialProviderId
           : normalizeAiProviderId(providerRaw);
-      // Explicit model, or the provider's default (what "Default (gpt-5.5)"
-      // resolves to) when the agent pins none.
+      // Explicit model, or the provider's default (the first option in
+      // modelOptionsForProvider) when the agent pins none.
       const model =
         normalizeAiModelId(providerId, profile?.model) ??
         modelOptionsForProvider(providerId)[0]?.id ??
@@ -5253,14 +5298,18 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           plain "open participants" icon when no one has joined, so the
           participants/config panel is reachable even on a brand-new chat. */}
       <div
-        className="flex flex-none items-center justify-end px-3 pt-2 sm:px-4"
+        className="flex-none px-3 pt-2 sm:px-4"
         data-testid="chat-conversation-roster-row"
       >
-        <ConversationRoster
-          agents={conversationRosterAgents}
-          humans={conversationRosterHumans}
-          hasCredentialWarning={participantAgentsHaveCredentialWarning}
-        />
+        {/* Constrain to the shared 56rem chat column so the roster's right
+            edge lands on the message column, not the panel edge. */}
+        <ChatColumn className="flex items-center justify-end">
+          <ConversationRoster
+            agents={conversationRosterAgents}
+            humans={conversationRosterHumans}
+            hasCredentialWarning={participantAgentsHaveCredentialWarning}
+          />
+        </ChatColumn>
       </div>
       <div
         className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 pb-4 pt-2 sm:px-4 sm:pb-2"
@@ -5683,6 +5732,25 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           onOpenProjectSettings,
         }}
       />
+      {agentProfileModalHandle ? (
+        // By-handle profile opens (mention chips, narrow speaker labels) have
+        // no anchor, so the card presents as a centered modal at every width.
+        <StudioDialogModal
+          isOpen
+          isDismissable
+          onOpenChange={(open) => {
+            if (!open) setAgentProfileModalHandle(null);
+          }}
+          className="h-[100dvh] min-h-0 overflow-hidden"
+          modalClassName="min-h-0 max-h-full w-full max-w-sm overflow-y-auto overscroll-contain"
+          dialogAriaLabel={`Agent profile: @${agentProfileModalHandle}`}
+        >
+          <AgentProfileCardContent
+            {...resolveAgentProfileCardProps(agentProfileModalHandle)}
+            onRequestClose={() => setAgentProfileModalHandle(null)}
+          />
+        </StudioDialogModal>
+      ) : null}
         </div>
     </ChatRuntimeActivityContext.Provider>
     </RunFailureRetryProvider>

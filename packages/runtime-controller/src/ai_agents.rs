@@ -66,24 +66,38 @@ pub(crate) struct CreateAgentBody {
     reasoning_effort: Option<String>,
 }
 
+/// Distinguish "field absent" (keep) from "field: null" (clear) for PATCH
+/// bodies. A bare `Option<Option<T>>` with `#[serde(default)]` collapses JSON
+/// null into the OUTER None — identical to an absent field — which made every
+/// nullable clear (unpin runtime, reset model/credential to default) a silent
+/// no-op: the `Some(None)` clear branches below were unreachable. With this
+/// deserializer, present-but-null becomes `Some(None)` as the handlers expect.
+fn double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Deserialize::deserialize(deserializer).map(Some)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct UpdateAgentBody {
     handle: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "double_option")]
     display_name: Option<Option<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "double_option")]
     description: Option<Option<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "double_option")]
     avatar_seed: Option<Option<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "double_option")]
     credential_id: Option<Option<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "double_option")]
     model: Option<Option<String>>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "double_option")]
     reasoning_effort: Option<Option<String>>,
     project_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "double_option")]
     runtime_id: Option<Option<String>>,
 }
 
@@ -1115,6 +1129,7 @@ async fn delete_my_agent(
 #[cfg(test)]
 mod tests {
     use super::agent_runtime_is_selectable;
+    use super::UpdateAgentBody;
     use serde_json::json;
     use uuid::Uuid;
 
@@ -1159,5 +1174,22 @@ mod tests {
             owner,
             false,
         ));
+    }
+
+    #[test]
+    fn update_body_distinguishes_null_from_absent() {
+        // present-but-null must clear (Some(None)); absent must keep (None).
+        let cleared: UpdateAgentBody =
+            serde_json::from_str(r#"{"runtimeId": null, "model": null}"#).expect("parse");
+        assert_eq!(cleared.runtime_id, Some(None));
+        assert_eq!(cleared.model, Some(None));
+
+        let absent: UpdateAgentBody = serde_json::from_str(r#"{}"#).expect("parse");
+        assert_eq!(absent.runtime_id, None);
+        assert_eq!(absent.model, None);
+
+        let set: UpdateAgentBody = serde_json::from_str(r#"{"model": "gpt-5.5"}"#).expect("parse");
+        assert_eq!(set.model, Some(Some("gpt-5.5".to_string())));
+        assert_eq!(set.runtime_id, None);
     }
 }

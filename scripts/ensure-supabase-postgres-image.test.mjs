@@ -4,7 +4,11 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { cacheTagFor, resolvePinnedPostgresImage } from "./ensure-supabase-postgres-image.mjs";
+import {
+  cacheTagFor,
+  pullPinnedImage,
+  resolvePinnedPostgresImage,
+} from "./ensure-supabase-postgres-image.mjs";
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
@@ -66,4 +70,57 @@ test("cache tag binds the digest and rejects unpinned references", () => {
   assert.equal(tag, `instafy-ci/supabase-postgres:sha256-${"a".repeat(64)}`);
   assert.throws(() => cacheTagFor("public.ecr.aws/supabase/postgres:15.1"));
   assert.throws(() => cacheTagFor("public.ecr.aws/supabase/postgres@sha256:short"));
+});
+
+test("pinned image pulls retry with bounded exponential backoff", () => {
+  const image = `public.ecr.aws/supabase/postgres@sha256:${"b".repeat(64)}`;
+  const calls = [];
+  const waits = [];
+  const statuses = [1, 1, 0];
+  const result = pullPinnedImage(image, {
+    docker: "fake-docker",
+    attempts: statuses.length,
+    backoffBaseMs: 25,
+    runCommand(command, args, options) {
+      calls.push({ command, args, options });
+      return { status: statuses.shift(), stderr: "rate limited" };
+    },
+    waitFor(milliseconds) {
+      waits.push(milliseconds);
+    },
+    logger: { log() {}, warn() {} },
+  });
+
+  assert.equal(result, image);
+  assert.deepEqual(
+    calls.map(({ command, args }) => [command, ...args]),
+    Array.from({ length: 3 }, () => ["fake-docker", "pull", image]),
+  );
+  assert.ok(calls.every(({ options }) => options.timeout === 600_000));
+  assert.deepEqual(waits, [25, 50]);
+});
+
+test("pinned image pulls fail after the configured attempt budget", () => {
+  const image = `public.ecr.aws/supabase/postgres@sha256:${"c".repeat(64)}`;
+  const calls = [];
+  const waits = [];
+
+  assert.throws(
+    () =>
+      pullPinnedImage(image, {
+        attempts: 3,
+        backoffBaseMs: 10,
+        runCommand(command, args) {
+          calls.push([command, ...args]);
+          return { status: 1, stderr: `rate limit ${calls.length}` };
+        },
+        waitFor(milliseconds) {
+          waits.push(milliseconds);
+        },
+        logger: { log() {}, warn() {} },
+      }),
+    /after 3 attempts: rate limit 3/u,
+  );
+  assert.equal(calls.length, 3);
+  assert.deepEqual(waits, [10, 20]);
 });

@@ -1620,16 +1620,17 @@ async fn active_lease_blocks_sync(
     claims_lease_id: Option<&str>,
     fallback_token: Option<&str>,
 ) -> Option<String> {
+    // Live, not the spawn-time snapshot (issue #144).
     let token = state
         .config
-        .controller_internal_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .current_controller_token()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty())
         .or_else(|| {
             fallback_token
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
+                .map(str::to_string)
         })?;
 
     let mut url = state.config.controller_base_url.clone();
@@ -1998,7 +1999,8 @@ async fn post_commit_receipt(
     user_id: Option<String>,
     summary: ApplySummary,
 ) {
-    let Some(token) = config.controller_internal_token.clone() else {
+    // Live, not the spawn-time snapshot (issue #144).
+    let Some(token) = config.current_controller_token() else {
         return;
     };
 
@@ -2571,6 +2573,7 @@ mod tests {
             bind_port: 0,
             controller_base_url: "http://127.0.0.1:1".parse().unwrap(),
             controller_internal_token: None,
+            controller_token_source: None,
             jwks_url: "http://127.0.0.1:1/jwks".parse().unwrap(),
             skip_auth: true,
             enable_presence_heartbeat: false,
@@ -2712,6 +2715,7 @@ mod tests {
             bind_port: 0,
             controller_base_url: "http://127.0.0.1:1".parse().expect("controller url"),
             controller_internal_token: None,
+            controller_token_source: None,
             jwks_url: "http://127.0.0.1:1/jwks".parse().expect("jwks url"),
             skip_auth: true,
             enable_presence_heartbeat: false,
@@ -2958,6 +2962,7 @@ mod tests {
             bind_port: 0,
             controller_base_url: controller_base_url.clone(),
             controller_internal_token: None,
+            controller_token_source: None,
             jwks_url: controller_base_url,
             skip_auth,
             enable_presence_heartbeat: false,
@@ -3231,6 +3236,7 @@ mod tests {
             bind_port: 0,
             controller_base_url: controller_base_url.clone(),
             controller_internal_token: None,
+            controller_token_source: None,
             jwks_url: controller_base_url.join("jwks").expect("jwks url"),
             skip_auth: false,
             enable_presence_heartbeat: false,
@@ -3367,6 +3373,7 @@ mod tests {
                 .parse()
                 .expect("controller url"),
             controller_internal_token: None,
+            controller_token_source: None,
             jwks_url: format!("http://{jwks_address}/jwks")
                 .parse()
                 .expect("jwks url"),

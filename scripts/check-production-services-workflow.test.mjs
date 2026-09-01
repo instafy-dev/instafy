@@ -93,6 +93,11 @@ test("one protected approval covers the whole exact-SHA service release", () => 
   );
   assert.doesNotMatch(authorizeSection, /packages: write/u);
   assert.doesNotMatch(authorizeSection, /environment:/u);
+  assert.match(authorizeSection, /actions: read/u);
+  assert.match(authorizeSection, /Refuse duplicate exact-SHA publication/u);
+  assert.match(authorizeSection, /GITHUB_RUN_ATTEMPT" != "1"/u);
+  assert.match(authorizeSection, /actions\/workflows\/\$\{RELEASE_WORKFLOW\}\/runs/u);
+  assert.match(authorizeSection, /\.conclusion == "success"/u);
 
   // Trivy pinning must be enforced in the services workflow too.
   assert.match(
@@ -108,6 +113,36 @@ test("one protected approval covers the whole exact-SHA service release", () => 
     "tar -xzf",
     'test "$(trivy --version',
   );
+});
+
+test("image publication bounds every BuildKit matrix cell", () => {
+  const serviceSource = readWorkflow();
+  const runtimeSource = readRuntimeWorkflow();
+  const serviceStart = serviceSource.indexOf("  publish:\n");
+  const runtimeStart = runtimeSource.indexOf("  build-scan-push:\n");
+  assert.notEqual(serviceStart, -1);
+  assert.notEqual(runtimeStart, -1);
+
+  const serviceSection = serviceSource.slice(
+    serviceStart,
+    serviceSource.indexOf("  manifest:\n", serviceStart),
+  );
+  const runtimeSection = runtimeSource.slice(
+    runtimeStart,
+    runtimeSource.indexOf("  assemble-release-manifest:\n", runtimeStart),
+  );
+
+  for (const [name, section] of [
+    ["production service", serviceSection],
+    ["runtime agent", runtimeSection],
+  ]) {
+    assert.match(section, /timeout-minutes: 30/u, `${name} build timeout`);
+    assert.equal(
+      [...section.matchAll(/timeout-minutes:/gu)].length,
+      1,
+      `${name} build matrix must have exactly one job-level timeout`,
+    );
+  }
 });
 
 test("every service is scanned before registry login and publication", () => {

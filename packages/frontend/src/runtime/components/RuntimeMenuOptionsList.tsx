@@ -1,5 +1,8 @@
-import { useState } from "react";
+import { useRef, useState, type ReactNode } from "react";
 import { Copy, NavArrowDown, Play, Square, Trash } from "iconoir-react";
+import { MenuTrigger } from "react-aria-components";
+import { StudioMenu, StudioMenuItem } from "../../components/aria/StudioMenu";
+import { StudioPopover } from "../../components/aria/StudioPopover";
 import { useProjects } from "../../projects/useProjects";
 import { useStatus } from "../../status/useStatus";
 import {
@@ -24,10 +27,8 @@ import type { RuntimeMenuOption } from "../useRuntimeMenu";
 import type { TunnelCopyMode } from "./RuntimeTunnelDetails";
 import { Button, IconButton } from "../../components/Button";
 import { Card } from "../../components/Card";
-import { SegmentedControl } from "../../components/SegmentedControl";
 import { Text } from "../../components/Text";
 import { DARK_DIVIDER_BORDER_CLASS } from "../../theme/darkSurfaces";
-import { compactIdentifier } from "../../utils/compactIdentifier";
 
 function formatRuntimeTimestamp(value?: string | null): string | null {
   if (!value) return null;
@@ -119,7 +120,7 @@ function RuntimeValueRow({
 }: RuntimeValueRowProps) {
   return (
     <>
-      <Text as="span" variant="caption" tone="muted" className="text-xxs">
+      <Text as="span" variant="caption" tone="muted" className="text-right text-xxs">
         {label}
       </Text>
       <span className="flex min-w-0 items-center gap-1.5">
@@ -165,13 +166,29 @@ interface RuntimeMenuOptionsListProps {
   emptyStateMessage?: string;
   onCopyTunnel?: (mode: TunnelCopyMode, runtimeId: string | null) => void;
   copyDisabled?: boolean;
+  /**
+   * Option whose details start expanded (page-style hosts want stats visible
+   * without a click). The user can still collapse it; absent = all collapsed.
+   */
+  defaultExpandedOptionId?: string | null;
+  /** Extra host-supplied content rendered inside an option's expanded details. */
+  renderOptionExtras?: (option: RuntimeMenuOption) => ReactNode;
+  /** Trend size: compact mini-sparklines (menus) or full-row plots (pages). */
+  sparklineVariant?: "compact" | "page";
+  /**
+   * Lifecycle controls (start/stop/remove) as header icon buttons instead of a
+   * row at the bottom of the details — for page-style hosts where the card can
+   * be tall. Remove still routes through the in-details confirm strip.
+   */
+  headerActions?: boolean;
 }
 
 /**
  * Machine size choice for the hosted runtime. The selection is a per-project
  * preference validated server-side; it applies the next time the machine
  * starts, and a boosted machine burns credits at the shown multiple. Each
- * segment carries its own specs/cost so the price is visible BEFORE choosing.
+ * menu option carries its own specs/cost so the price is visible BEFORE
+ * choosing.
  */
 function RuntimeSizePickerRow() {
   const { activeProjectId } = useProjects();
@@ -179,6 +196,8 @@ function RuntimeSizePickerRow() {
   const [selected, setSelected] = useState<RuntimeSizeId>(() =>
     getRuntimeSizePreference(activeProjectId),
   );
+  const sizeTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const [sizeMenuOpen, setSizeMenuOpen] = useState(false);
 
   if (!activeProjectId) {
     return null;
@@ -199,33 +218,71 @@ function RuntimeSizePickerRow() {
     );
   };
 
+  const selectedChoice = RUNTIME_SIZE_CHOICES.find((entry) => entry.id === selected);
+  const triggerLabel = [selectedChoice?.label ?? selected, selectedChoice?.specs]
+    .filter(Boolean)
+    .join(" · ");
+
+  // A row like everything else in the card — "Size" in the shared label
+  // column, a compact dropdown as the value — instead of a two-cell segmented
+  // block. Specs and cost stay visible in the menu BEFORE choosing.
   return (
-    <div data-testid="runtime-size-picker">
-      <SegmentedControl
-        label="Machine size"
-        size="xs"
-        width="fit"
-        value={selected}
-        onChange={choose}
-        options={RUNTIME_SIZE_CHOICES.map((choice) => {
-          const detail = [choice.specs, choice.costNote].filter(Boolean).join(" · ");
-          return {
-            value: choice.id,
-            label: (
-              <span className="flex flex-col items-center leading-tight">
-                <span>{choice.label}</span>
-                <span className="whitespace-nowrap text-3xs font-normal text-slate-500 dark:text-slate-400">
-                  {detail}
+    <div className="flex items-center gap-3" data-testid="runtime-size-picker">
+      <Text as="span" variant="caption" tone="muted" className="w-14 shrink-0 text-right text-xxs">
+        Size
+      </Text>
+      <MenuTrigger isOpen={sizeMenuOpen} onOpenChange={setSizeMenuOpen}>
+        <Button
+          ref={sizeTriggerRef}
+          type="button"
+          variant="outline"
+          size="xs"
+          radius="lg"
+          aria-label="Machine size"
+          aria-haspopup="menu"
+          data-testid="runtime-size-trigger"
+          onPress={() => {
+            if (!sizeMenuOpen) setSizeMenuOpen(true);
+          }}
+          className="justify-between gap-1 bg-slate-50 px-2 text-xxs shadow-none hover:bg-slate-100 data-[hovered]:bg-slate-100 dark:bg-[var(--color-studio-dark-raised-control)] dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)]"
+        >
+          <span className="min-w-0 truncate">{triggerLabel}</span>
+          <NavArrowDown className="shrink-0 text-xs text-slate-400" aria-hidden="true" />
+        </Button>
+        <StudioPopover
+          triggerRef={sizeTriggerRef}
+          isNonModal
+          placement="bottom start"
+          offset={4}
+          className="min-w-[13rem] p-2"
+        >
+          <StudioMenu
+            aria-label="Machine size"
+            selectionMode="single"
+            selectedKeys={new Set([selected])}
+            onAction={(key) => {
+              choose(String(key) as RuntimeSizeId);
+              setSizeMenuOpen(false);
+            }}
+            className="space-y-1"
+          >
+            {RUNTIME_SIZE_CHOICES.map((choice) => (
+              <StudioMenuItem
+                key={choice.id}
+                id={choice.id}
+                data-testid={`runtime-size-${choice.id}`}
+              >
+                <span className="flex min-w-0 flex-col leading-tight">
+                  <span>{choice.label}</span>
+                  <span className="text-3xs font-normal text-slate-500 dark:text-slate-400">
+                    {[choice.specs, choice.costNote].filter(Boolean).join(" · ")}
+                  </span>
                 </span>
-              </span>
-            ),
-            ariaLabel: [choice.label, choice.specs, choice.costNote]
-              .filter(Boolean)
-              .join(", "),
-            testId: `runtime-size-${choice.id}`,
-          };
-        })}
-      />
+              </StudioMenuItem>
+            ))}
+          </StudioMenu>
+        </StudioPopover>
+      </MenuTrigger>
     </div>
   );
 }
@@ -246,6 +303,10 @@ export function RuntimeMenuOptionsList({
   emptyStateMessage = "No runtimes connected.",
   onCopyTunnel,
   copyDisabled = false,
+  defaultExpandedOptionId = null,
+  renderOptionExtras,
+  sparklineVariant = "compact",
+  headerActions = false,
 }: RuntimeMenuOptionsListProps) {
   const { showStatus } = useStatus();
   const [expandedOptionId, setExpandedOptionId] = useState<string | null>(null);
@@ -285,9 +346,15 @@ export function RuntimeMenuOptionsList({
       {options.map((option) => {
         const optionKey = option.id ?? option.label;
         const isSelected = option.id === selectedRuntimeId;
-        const isExpanded = expandedOptionId === optionKey;
+        // "__none__" marks a deliberate collapse of the default-open option;
+        // plain null still means "nothing toggled yet" so the default applies.
+        const effectiveExpandedId =
+          expandedOptionId === "__none__"
+            ? null
+            : expandedOptionId ?? defaultExpandedOptionId;
+        const isExpanded = effectiveExpandedId === optionKey;
         const toggleDetails = () => {
-          setExpandedOptionId((current) => (current === optionKey ? null : optionKey));
+          setExpandedOptionId(() => (isExpanded ? "__none__" : optionKey));
           // Collapsing must disarm a pending remove confirmation, otherwise a
           // later re-expand re-mounts the confirm strip.
           setRemoveConfirmOptionId((current) => (current === optionKey ? null : current));
@@ -327,10 +394,28 @@ export function RuntimeMenuOptionsList({
         const resourceHistory = getRuntimeResourceHistory(option.id);
         // Lifecycle collapses to one line: recency when we have it, launch
         // time as the fallback.
-        const lifecycleRow = formattedLastSeen
-          ? { label: "Last seen", value: formattedLastSeen }
-          : formattedLaunch
-            ? { label: "Launched", value: formattedLaunch }
+        // A healthy machine's most useful lifecycle fact is how long it's been
+        // up; fall back to recency/launch time otherwise.
+        const uptimeValue = (() => {
+          if (!["ready", "online", "healthy"].includes(String(option.state ?? "").toLowerCase())) {
+            return null;
+          }
+          const launched = Date.parse(option.launchedAt ?? "");
+          if (!Number.isFinite(launched)) return null;
+          const totalMinutes = Math.max(0, Math.floor((Date.now() - launched) / 60000));
+          const days = Math.floor(totalMinutes / 1440);
+          const hours = Math.floor((totalMinutes % 1440) / 60);
+          const minutes = totalMinutes % 60;
+          if (days > 0) return `${days}d ${hours}h`;
+          if (hours > 0) return `${hours}h ${minutes}m`;
+          return `${minutes}m`;
+        })();
+        const lifecycleRow = uptimeValue
+          ? { label: "Uptime", value: uptimeValue }
+          : formattedLastSeen
+            ? { label: "Last seen", value: formattedLastSeen }
+            : formattedLaunch
+              ? { label: "Launched", value: formattedLaunch }
             : null;
         const hasDetails =
           Boolean(runtimeIdValue) ||
@@ -376,7 +461,9 @@ export function RuntimeMenuOptionsList({
                 }}
                 className={optionClasses}
               >
-                <span className="flex h-7 flex-none items-center" aria-hidden="true">
+                {/* h-5 = the title's 20px line box, so the dot's midline sits
+                    on the title's midline (h-7 floated it 4px low). */}
+                <span className="flex h-5 flex-none items-center" aria-hidden="true">
                   <RuntimeStateIndicator option={option} />
                 </span>
                 <div className="flex min-w-0 flex-col gap-0.5">
@@ -384,10 +471,14 @@ export function RuntimeMenuOptionsList({
                     option={option}
                     showDetail={false}
                     showProviderBadge={false}
+                    // The header badge IS the machine's id (full value on
+                    // hover); the details grid carries no separate ID row.
                     showRuntimeIdBadge
                     className="flex min-w-0 flex-col gap-0.5"
                   />
-                  {resources ? (
+                  {/* The one-line stats summary is the COLLAPSED view; expanded,
+                      the trend rows below show the same numbers. */}
+                  {resources && !isExpanded ? (
                     <Text
                       as="span"
                       variant="caption"
@@ -400,6 +491,50 @@ export function RuntimeMenuOptionsList({
                   ) : null}
                 </div>
               </div>
+              {headerActions && canStart ? (
+                <IconButton
+                  variant="ghost"
+                  size="xs"
+                  radius="full"
+                  aria-label={`Start ${option.label}`}
+                  title="Start"
+                  onPress={() => onStartRuntime?.(option.id ?? null)}
+                  className="mt-1 shrink-0 text-primary-500 hover:text-primary-600 data-[hovered]:text-primary-600 dark:text-primary-400"
+                >
+                  <Play className="h-4 w-4" aria-hidden="true" />
+                </IconButton>
+              ) : null}
+              {headerActions && canTerminate && !canStart ? (
+                <IconButton
+                  variant="ghost"
+                  size="xs"
+                  radius="full"
+                  aria-label={`Stop ${option.label}`}
+                  title="Stop"
+                  onPress={() => onTerminateRuntime?.(option.id ?? null)}
+                  className="mt-1 shrink-0 text-slate-500 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-300 dark:hover:text-slate-100 dark:data-[hovered]:text-slate-100"
+                >
+                  <Square className="h-4 w-4" aria-hidden="true" />
+                </IconButton>
+              ) : null}
+              {headerActions && canRemove ? (
+                <IconButton
+                  variant="ghost"
+                  size="xs"
+                  radius="full"
+                  aria-label={`Remove ${option.label}`}
+                  title="Remove"
+                  onPress={() => {
+                    // Destructive stays deliberate: the header button only ARMS
+                    // the in-details confirm strip (expanding if needed).
+                    setExpandedOptionId(optionKey);
+                    setRemoveConfirmOptionId(optionKey);
+                  }}
+                  className="mt-1 shrink-0 text-rose-500 hover:text-rose-600 data-[hovered]:text-rose-600 dark:text-rose-400"
+                >
+                  <Trash className="h-4 w-4" aria-hidden="true" />
+                </IconButton>
+              ) : null}
               {hasActions ? (
                 <IconButton
                   variant="ghost"
@@ -421,11 +556,11 @@ export function RuntimeMenuOptionsList({
               ) : null}
             </div>
             {hasActions && isExpanded ? (
-              // pl-6 lines the details up under the option label: it clears
-              // the state-indicator column (indicator + gap-2) inside the
-              // header's px-2.5.
+              // pl-4.5 = the state indicator (w-2.5) + the header's gap-2, so
+              // the details sit exactly flush with the title text: a hanging
+              // indent with the dot alone in the gutter.
               <div
-                className={`mx-2.5 mt-1 flex flex-col gap-2.5 border-t border-slate-200/70 pb-1 pl-6 pt-2.5 text-xs text-slate-600 dark:text-slate-300 ${DARK_DIVIDER_BORDER_CLASS}`}
+                className={`mx-2.5 mt-1 flex flex-col gap-2.5 border-t border-slate-200/70 pb-1 pl-4.5 pt-2.5 text-xs text-slate-600 dark:text-slate-300 ${DARK_DIVIDER_BORDER_CLASS}`}
               >
                 {shouldShowDetailText ? (
                   <Text as="p" variant="caption" tone="muted" className="break-words text-xxs">
@@ -433,32 +568,22 @@ export function RuntimeMenuOptionsList({
                   </Text>
                 ) : null}
                 {isHostedOption ? (
-                  <div className="space-y-2" data-testid="runtime-hosted-machine-facts">
-                    <Text as="p" variant="caption" tone="muted" className="text-xxs">
-                      Node, Python, and browsers preinstalled. Project files and
-                      caches survive pauses; everything else resets.
-                    </Text>
+                  <div data-testid="runtime-hosted-machine-facts">
                     <RuntimeSizePickerRow />
                   </div>
                 ) : null}
                 {resourceHistory.length > 0 ? (
-                  <RuntimeResourceSparklines history={resourceHistory} />
+                  <RuntimeResourceSparklines
+                    history={resourceHistory}
+                    variant={sparklineVariant}
+                  />
                 ) : null}
-                {runtimeIdValue || runtimeImageValue || shouldShowEndpoint || shouldShowHost || lifecycleRow ? (
-                  <div className="grid grid-cols-[max-content_minmax(0,1fr)] items-center gap-x-3 gap-y-1">
-                    {runtimeIdValue ? (
-                      <RuntimeValueRow
-                        label="ID"
-                        value={runtimeIdValue}
-                        displayValue={compactIdentifier(runtimeIdValue)}
-                        mono
-                        copyLabel="Copy runtime id"
-                        copyTestId={option.id ? `runtime-copy-id-${option.id}` : undefined}
-                        onCopy={() => {
-                          copyWithFeedback(runtimeIdValue, "Runtime id copied");
-                        }}
-                      />
-                    ) : null}
+                {renderOptionExtras ? renderOptionExtras(option) : null}
+                {runtimeImageValue || shouldShowEndpoint || shouldShowHost || lifecycleRow ? (
+                  // Fixed label column so these rows share a content edge with
+                  // the trend plots above (page variant sizes its labels to
+                  // match); the machine id lives in the header badge only.
+                  <div className="grid grid-cols-[3.5rem_minmax(0,1fr)] items-center gap-x-3 gap-y-1">
                     {runtimeImageValue ? (
                       <RuntimeValueRow
                         label="Image"
@@ -509,7 +634,7 @@ export function RuntimeMenuOptionsList({
                     ) : null}
                   </div>
                 ) : null}
-                {canStart || canTerminate || canRemove ? (
+                {!headerActions && (canStart || canTerminate || canRemove) ? (
                   <div className="flex flex-wrap items-center gap-2">
                     {canStart ? (
                       <Button

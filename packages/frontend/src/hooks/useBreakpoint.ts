@@ -12,13 +12,17 @@ const BREAKPOINT_VALUES: Record<BreakpointKey, number> = {
 
 export function useBreakpoint(minBreakpoint: BreakpointKey): boolean {
   const minWidth = BREAKPOINT_VALUES[minBreakpoint];
+  // matchMedia can be absent (jsdom, stripped-down webviews); fall back to
+  // "not matched" — the mobile-first presentation — instead of throwing.
+  const canMatch = () =>
+    typeof window !== "undefined" && typeof window.matchMedia === "function";
   const getMatches = () =>
-    typeof window !== "undefined" ? window.matchMedia(`(min-width: ${minWidth}px)`).matches : false;
+    canMatch() ? window.matchMedia(`(min-width: ${minWidth}px)`).matches : false;
 
   const [matches, setMatches] = useState<boolean>(getMatches);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
+    if (!canMatch()) {
       return;
     }
     const mediaQuery = window.matchMedia(`(min-width: ${minWidth}px)`);

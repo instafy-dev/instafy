@@ -183,16 +183,32 @@ describe("resolveRunFailurePresentation", () => {
     expect(presentation?.rawText).toBe(NO_WORKSPACE_CHANGES);
   });
 
-  it("falls back to the generic sentence only with failed-run metadata", () => {
-    expect(
-      resolveRunFailurePresentation({
-        metadata: { source: "agent", outcome: "failed", jobId: "job-1" },
-        content: "Codex run timed out",
-      })?.friendlyText,
-    ).toBe("Something went wrong finishing this run.");
+  it("surfaces the real reason inline for an unclassified failure, only with failed-run metadata", () => {
+    const presentation = resolveRunFailurePresentation({
+      metadata: { source: "agent", outcome: "failed", jobId: "job-1" },
+      content: "Codex run timed out",
+    });
+    // #145: the actual reason belongs inline, not the uninformative canned sentence.
+    expect(presentation?.kind).toBe("generic");
+    expect(presentation?.friendlyText).toBe("Codex run timed out");
+    expect(presentation?.rawText).toBe("Codex run timed out");
+    // A generic failure still requires failed-run metadata; assumeFailed alone
+    // must never rewrite ordinary assistant text.
     expect(
       resolveRunFailurePresentation({ content: "Codex run timed out", assumeFailed: true }),
     ).toBeNull();
+  });
+
+  it("keeps the inline generic reason to the first line and bounds its length", () => {
+    const longFirstLine = `Boot failed: ${"x".repeat(400)}`;
+    const presentation = resolveRunFailurePresentation({
+      metadata: { source: "agent", outcome: "failed", jobId: "job-1" },
+      content: `${longFirstLine}\nstack frame 1\nstack frame 2`,
+    });
+    expect(presentation?.friendlyText.length).toBeLessThanOrEqual(240);
+    expect(presentation?.friendlyText.endsWith("…")).toBe(true);
+    // The full multi-line text stays available (Details disclosure renders rawText).
+    expect(presentation?.rawText).toContain("stack frame 2");
   });
 
   it("returns null without a failure signal or content", () => {

@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import type { ControllerRuntimeStatusEntry } from "../../sdk/instafy";
 import { Button } from "../../components/Button";
 import { Card } from "../../components/Card";
@@ -17,6 +18,17 @@ export function HostedRuntimePromptDialog({
   onLaunchNew,
   onCancel,
 }: HostedRuntimePromptDialogProps) {
+  // A dialog that dismisses on backdrop click must answer Escape too.
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onCancel();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onCancel]);
+
   return (
     <div
       className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-900/40 pb-[max(var(--instafy-safe-area-inset-bottom),1rem)] pl-[max(var(--instafy-safe-area-inset-left),1rem)] pr-[max(var(--instafy-safe-area-inset-right),1rem)] pt-[max(var(--instafy-safe-area-inset-top),1rem)]"

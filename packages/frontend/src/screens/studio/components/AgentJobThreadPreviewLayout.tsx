@@ -49,7 +49,6 @@ import { extractAgentJobId, shouldRenderLocalCapabilityStatusAsTimeline } from "
 import { RunFailureMessageBody } from "./RunFailureNotice";
 import { isCompactionStatusText } from "./assistantStatusHeuristics";
 import type { AgentThreadBranchParticipant, AgentThreadBranchRow } from "./agentThreadBranchRows";
-import { StatusPill } from "./StatusPill";
 import {
   resolveThreadCompactUpdateHistoryLabel,
   resolveThreadCompactUpdateLabel,
@@ -1251,16 +1250,36 @@ export function AgentJobThreadPreviewLayout({
             {renderThreadPreviewNotch()}
             <div className="min-w-0">
               {isCompleted ? (
-                <div className="space-y-1.5">
+                <div
+                  className={
+                    terminalStatusMarker
+                      ? `space-y-1.5 border-l-2 pl-3 ${
+                          finalSpineTone === "danger"
+                            ? "border-rose-200 dark:border-rose-400/30"
+                            : "border-secondary-200 dark:border-secondary-400/30"
+                        }`
+                      : "space-y-1.5"
+                  }
+                >
                   {terminalStatusMarker ? (
-                    <StatusPill
+                    // Run status is the failure block's header — an entry-level
+                    // state label set off by a tone-tinted left rule, not a
+                    // filled chip competing with the separate changes section
+                    // below. (#145)
+                    <div
                       data-testid="agent-thread-terminal-status"
-                      tone={finalSpineTone === "danger" ? "danger" : "warning"}
-                      icon={WarningTriangle}
-                      iconClassName={terminalStatusMarker.iconClassName}
+                      className={`flex items-center gap-1.5 text-xs font-semibold ${
+                        finalSpineTone === "danger"
+                          ? "text-rose-700 dark:text-rose-200"
+                          : "text-secondary-800 dark:text-secondary-100"
+                      }`}
                     >
-                      {terminalStatusMarker.label}
-                    </StatusPill>
+                      <WarningTriangle
+                        aria-hidden="true"
+                        className={`h-3.5 w-3.5 flex-none ${terminalStatusMarker.iconClassName}`}
+                      />
+                      <span className="min-w-0 truncate">{terminalStatusMarker.label}</span>
+                    </div>
                   ) : null}
                   {runFailurePresentation && finalSummaryMessage ? (
                     <RunFailureMessageBody

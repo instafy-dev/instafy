@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import childProcess from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
@@ -43,17 +45,144 @@ function assertOrdered(source, ...needles) {
   }
 }
 
-test("trusted boundary is restricted to main PR target events", () => {
+function runScriptFromStep(source, name, nextName, env) {
+  const section = stepSection(source, name, nextName);
+  const marker = "        run: |\n";
+  const start = section.indexOf(marker);
+  assert.notEqual(start, -1, `missing run script: ${name}`);
+  const script = section
+    .slice(start + marker.length)
+    .split("\n")
+    .map((line) => (line.startsWith("          ") ? line.slice(10) : line))
+    .join("\n");
+  return childProcess.spawnSync("bash", ["-c", script], {
+    encoding: "utf8",
+    env,
+    timeout: 10_000,
+  });
+}
+
+test("trusted boundary is restricted to main PR targets and protected-main pushes", () => {
   const source = readWorkflow("public-boundary.yml");
 
   assert.match(source, /^name: Trusted Public Boundary$/mu);
   assert.match(
     source,
-    /^  pull_request_target:\n    branches:\n      - main\n    types:\n      - opened\n      - synchronize\n      - reopened\n      - ready_for_review\n      - edited\n\nconcurrency:$/mu,
+    /^  pull_request_target:\n    branches:\n      - main\n    types:\n      - opened\n      - synchronize\n      - reopened\n      - ready_for_review\n      - edited\n  push:\n    branches:\n      - main\n\nconcurrency:$/mu,
   );
   assert.doesNotMatch(source, /^  pull_request:$/mu);
-  assert.doesNotMatch(source, /^  push:$/mu);
   assert.doesNotMatch(source, /^  workflow_dispatch:$/mu);
+  assert.match(
+    source,
+    /group: trusted-public-boundary-\$\{\{ github\.event_name \}\}-\$\{\{ github\.event\.pull_request\.number \|\| github\.sha \}\}/u,
+  );
+});
+
+test("protected-main boundary binds and scans the exact pushed commit", () => {
+  const source = readWorkflow("public-boundary.yml");
+  const job = jobSection(source, "boundary");
+  const trustedCheckout = stepSection(
+    source,
+    "Checkout trusted base controls",
+    "Checkout server-generated merge candidate as data",
+  );
+  const candidateCheckout = stepSection(
+    source,
+    "Checkout server-generated merge candidate as data",
+    "Verify the event-bound merge object and parents",
+  );
+  const verifyPullRequest = stepSection(
+    source,
+    "Verify the event-bound merge object and parents",
+    "Verify the exact protected-main object",
+  );
+  const verifyMain = stepSection(
+    source,
+    "Verify the exact protected-main object",
+    "Install pinned Gitleaks",
+  );
+
+  assert.match(
+    job,
+    /TRUSTED_ROOT: \$\{\{ github\.workspace \}\}\/trusted/u,
+  );
+  assert.match(
+    job,
+    /CANDIDATE_ROOT: \$\{\{ github\.event_name == 'push' && format\('\{0\}\/trusted', github\.workspace\) \|\| format\('\{0\}\/candidate', github\.workspace\) \}\}/u,
+  );
+  assert.match(
+    trustedCheckout,
+    /ref: \$\{\{ github\.event_name == 'pull_request_target' && github\.event\.pull_request\.base\.sha \|\| github\.sha \}\}/u,
+  );
+  assert.match(
+    candidateCheckout,
+    /if: github\.event_name == 'pull_request_target'/u,
+  );
+  assert.match(
+    verifyPullRequest,
+    /if: github\.event_name == 'pull_request_target'/u,
+  );
+  assert.match(verifyMain, /if: github\.event_name == 'push'/u);
+  assert.match(verifyMain, /EXPECTED_REF: refs\/heads\/main/u);
+  assert.match(verifyMain, /EXPECTED_SHA: \$\{\{ github\.sha \}\}/u);
+  assert.match(verifyMain, /test "\$GITHUB_REF" = "\$EXPECTED_REF"/u);
+  assert.match(
+    verifyMain,
+    /if \[\[ ! "\$EXPECTED_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\]; then[\s\S]*exit 1/u,
+  );
+  assert.match(
+    verifyMain,
+    /actual_sha="\$\(git -C "\$TRUSTED_ROOT" rev-parse --verify "HEAD\^\{commit\}"\)"/u,
+  );
+  assert.match(verifyMain, /test "\$actual_sha" = "\$EXPECTED_SHA"/u);
+  assertOrdered(
+    source,
+    "Verify the exact protected-main object",
+    "Run trusted public boundary regression tests",
+    "Enforce trusted public boundary policy",
+    "Scan candidate tree with path-aware Gitleaks rules",
+    "Scan every tracked file without path allowlists",
+  );
+});
+
+test("protected-main verifier accepts only the event ref and exact checkout SHA", () => {
+  const source = readWorkflow("public-boundary.yml");
+  const exactSha = childProcess
+    .execFileSync("git", ["-C", repositoryRoot, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    })
+    .trim();
+  const baseEnv = {
+    ...process.env,
+    EXPECTED_REF: "refs/heads/main",
+    EXPECTED_SHA: exactSha,
+    GITHUB_REF: "refs/heads/main",
+    TRUSTED_ROOT: repositoryRoot,
+  };
+
+  const accepted = runScriptFromStep(
+    source,
+    "Verify the exact protected-main object",
+    "Install pinned Gitleaks",
+    baseEnv,
+  );
+  assert.equal(accepted.status, 0, `${accepted.stdout}\n${accepted.stderr}`);
+
+  const wrongSha = runScriptFromStep(
+    source,
+    "Verify the exact protected-main object",
+    "Install pinned Gitleaks",
+    { ...baseEnv, EXPECTED_SHA: "f".repeat(40) },
+  );
+  assert.notEqual(wrongSha.status, 0);
+
+  const wrongRef = runScriptFromStep(
+    source,
+    "Verify the exact protected-main object",
+    "Install pinned Gitleaks",
+    { ...baseEnv, GITHUB_REF: "refs/heads/not-main" },
+  );
+  assert.notEqual(wrongRef.status, 0);
 });
 
 test("trusted boundary token carries the pulls scope the wait step needs", () => {
@@ -111,17 +240,32 @@ test("trusted boundary waits for a fresh merge candidate before any checkout", (
   );
   assert.match(
     wait,
+    /EXPECTED_BASE_SHA: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/u,
+  );
+  assert.match(
+    wait,
     /EXPECTED_HEAD_SHA: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/u,
+  );
+  assert.match(
+    wait,
+    /BASE_REF: \$\{\{ github\.event\.pull_request\.base\.ref \}\}/u,
   );
   assert.match(wait, /GH_TOKEN: \$\{\{ github\.token \}\}/u);
   assert.match(wait, /\[\[ "\$PR_NUMBER" =~ \^\[0-9\]\+\$ \]\]/u);
+  assert.match(wait, /\[\[ "\$EXPECTED_BASE_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\]/u);
   assert.match(wait, /\[\[ "\$EXPECTED_HEAD_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\]/u);
   assert.match(wait, /pulls\/\$\{PR_NUMBER\}/u);
   assert.match(wait, /git\/commits\/\$\{candidate_oid\}/u);
-  // The head parent is parents[1]: parents[0] is the base tip. Polling the
-  // wrong parent would wait on a condition that never becomes true.
+  // Both parents must dominate the decision. A retargeted stacked PR can have
+  // the exact event head while GitHub's candidate still names the old target
+  // as parent[0]; accepting the head alone recreates issue #99 after retarget.
+  assert.match(wait, /\.parents\[0\]\.sha/u);
   assert.match(wait, /\.parents\[1\]\.sha/u);
-  assert.match(wait, /"\$head_parent" == "\$EXPECTED_HEAD_SHA"/u);
+  assert.match(wait, /"\$head_parent" != "\$EXPECTED_HEAD_SHA"/u);
+  assert.match(wait, /"\$base_parent" == "\$EXPECTED_BASE_SHA"/u);
+  assert.match(wait, /compare\/\$\{base_parent\}\.\.\.\$\{BASE_REF\}/u);
+  assert.match(wait, /identical\|ahead\)/u);
+  assert.match(wait, /behind\|diverged\)[\s\S]*continue/u);
   // The loop must be bounded and end in an explicit, actionable error.
   assert.match(wait, /seq 1 \d+/u);
   assert.match(wait, /::error::No merge candidate bound to head/u);
@@ -129,6 +273,142 @@ test("trusted boundary waits for a fresh merge candidate before any checkout", (
   // two-checkout inventory asserted below stays exhaustive.
   assert.doesNotMatch(wait, /uses:/u);
   assert.doesNotMatch(wait, /checkout@/u);
+});
+
+test("trusted boundary wait rejects each stale retarget parent independently", (t) => {
+  const source = readWorkflow("public-boundary.yml");
+  const fixtureRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), "instafy-public-boundary-wait-"),
+  );
+  t.after(() => fs.rmSync(fixtureRoot, { recursive: true, force: true }));
+
+  const expectedBase = "a".repeat(40);
+  const expectedHead = "b".repeat(40);
+  const staleTargetBase = "c".repeat(40);
+  const staleHead = "d".repeat(40);
+  const candidates = [
+    {
+      oid: "1".repeat(40),
+      base: staleTargetBase,
+      head: expectedHead,
+      relation: "diverged",
+    },
+    {
+      oid: "2".repeat(40),
+      base: expectedBase,
+      head: staleHead,
+      relation: "identical",
+    },
+    {
+      oid: "3".repeat(40),
+      base: expectedBase,
+      head: expectedHead,
+      relation: "identical",
+    },
+  ];
+  const statePath = path.join(fixtureRoot, "state.json");
+  fs.writeFileSync(
+    statePath,
+    `${JSON.stringify({ candidates, pullCalls: 0, compares: [] })}\n`,
+  );
+  const ghPath = path.join(fixtureRoot, "gh");
+  fs.writeFileSync(
+    ghPath,
+    `#!/usr/bin/env node
+import fs from "node:fs";
+const statePath = process.env.MOCK_GH_STATE;
+const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
+const endpoint = process.argv.find((argument) => argument.startsWith("repos/"));
+if (endpoint.includes("/pulls/")) {
+  const candidate = state.candidates[Math.min(state.pullCalls, state.candidates.length - 1)];
+  state.pullCalls += 1;
+  fs.writeFileSync(statePath, JSON.stringify(state));
+  process.stdout.write(candidate.oid);
+} else if (endpoint.includes("/git/commits/")) {
+  const oid = endpoint.split("/").at(-1);
+  const candidate = state.candidates.find((entry) => entry.oid === oid);
+  process.stdout.write(\`${"${candidate.base}"}\\t${"${candidate.head}"}\`);
+} else if (endpoint.includes("/compare/")) {
+  const base = endpoint.split("/compare/")[1].split("...")[0];
+  const candidate = state.candidates.find((entry) => entry.base === base);
+  state.compares.push({ base, relation: candidate.relation });
+  fs.writeFileSync(statePath, JSON.stringify(state));
+  process.stdout.write(candidate.relation);
+} else {
+  process.exitCode = 2;
+}
+`,
+  );
+  fs.chmodSync(ghPath, 0o755);
+  const sleepPath = path.join(fixtureRoot, "sleep");
+  fs.writeFileSync(sleepPath, "#!/usr/bin/env bash\nexit 0\n");
+  fs.chmodSync(sleepPath, 0o755);
+
+  const result = runScriptFromStep(
+    source,
+    "Wait for the event-bound merge candidate to be minted",
+    "Checkout trusted base controls",
+    {
+      ...process.env,
+      PATH: `${fixtureRoot}:${process.env.PATH}`,
+      GITHUB_REPOSITORY: "instafy-dev/instafy",
+      PR_NUMBER: "125",
+      EXPECTED_BASE_SHA: expectedBase,
+      EXPECTED_HEAD_SHA: expectedHead,
+      BASE_REF: "main",
+      GH_TOKEN: "inert-test-token",
+      MOCK_GH_STATE: statePath,
+    },
+  );
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const finalState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+  assert.equal(finalState.pullCalls, 3);
+  assert.deepEqual(finalState.compares, [
+    { base: staleTargetBase, relation: "diverged" },
+  ]);
+
+  for (const [index, relation] of ["identical", "ahead"].entries()) {
+    const currentBase = `${index + 4}`.repeat(40);
+    fs.writeFileSync(
+      statePath,
+      `${JSON.stringify({
+        candidates: [
+          {
+            oid: `${index + 6}`.repeat(40),
+            base: currentBase,
+            head: expectedHead,
+            relation,
+          },
+        ],
+        pullCalls: 0,
+        compares: [],
+      })}\n`,
+    );
+    const currentResult = runScriptFromStep(
+      source,
+      "Wait for the event-bound merge candidate to be minted",
+      "Checkout trusted base controls",
+      {
+        ...process.env,
+        PATH: `${fixtureRoot}:${process.env.PATH}`,
+        GITHUB_REPOSITORY: "instafy-dev/instafy",
+        PR_NUMBER: "125",
+        EXPECTED_BASE_SHA: expectedBase,
+        EXPECTED_HEAD_SHA: expectedHead,
+        BASE_REF: "main",
+        GH_TOKEN: "inert-test-token",
+        MOCK_GH_STATE: statePath,
+      },
+    );
+    assert.equal(
+      currentResult.status,
+      0,
+      `${currentResult.stdout}\n${currentResult.stderr}`,
+    );
+    const currentState = JSON.parse(fs.readFileSync(statePath, "utf8"));
+    assert.equal(currentState.pullCalls, 1);
+    assert.deepEqual(currentState.compares, [{ base: currentBase, relation }]);
+  }
 });
 
 test("trusted boundary checkouts are separate, pinned, and non-persistent", () => {
@@ -161,7 +441,7 @@ test("trusted boundary checkouts are separate, pinned, and non-persistent", () =
 
   assert.match(
     trustedCheckout,
-    /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/u,
+    /ref: \$\{\{ github\.event_name == 'pull_request_target' && github\.event\.pull_request\.base\.sha \|\| github\.sha \}\}/u,
   );
   assert.match(trustedCheckout, /path: trusted/u);
   assert.match(trustedCheckout, /persist-credentials: false/u);
@@ -170,6 +450,10 @@ test("trusted boundary checkouts are separate, pinned, and non-persistent", () =
   assert.doesNotMatch(trustedCheckout, /allow-unsafe-pr-checkout/u);
 
   assert.match(candidateCheckout, /repository: \$\{\{ github\.repository \}\}/u);
+  assert.match(
+    candidateCheckout,
+    /if: github\.event_name == 'pull_request_target'/u,
+  );
   assert.match(
     candidateCheckout,
     /ref: refs\/pull\/\$\{\{ github\.event\.pull_request\.number \}\}\/merge/u,
