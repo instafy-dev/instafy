@@ -263,6 +263,12 @@ export type AgentJobThreadPreviewLayoutProps = {
   assistantAvatarMotion: AssistantAvatarMotion;
   showHeaderIdentity?: boolean;
   hiddenUpdateCount: number;
+  /**
+   * True when the surrounding row's speaker header already shows the terminal
+   * run-status marker; the preview then skips its own status caption so run
+   * state reads exactly once, at entry-header level (#145).
+   */
+  runStatusShownInEntryHeader?: boolean;
   isHybridCompactionActive: boolean;
   isThreadPreviewExpanded: boolean;
   visibleCompactEvents: ThreadCompactEvent[];
@@ -334,6 +340,7 @@ export function AgentJobThreadPreviewLayout({
   assistantAvatarMotion,
   showHeaderIdentity = true,
   hiddenUpdateCount,
+  runStatusShownInEntryHeader = false,
   isHybridCompactionActive,
   isThreadPreviewExpanded,
   visibleCompactEvents,
@@ -439,6 +446,12 @@ export function AgentJobThreadPreviewLayout({
     visibleCompactEvents.length === 1 &&
     overflowCompactCount === 0 &&
     !showCompactRailWaitingSpinner;
+  // The in-flight pill sits at the rail's newest end; before any update chips
+  // exist it reads as the run starting, afterwards as work continuing (#176).
+  const compactRailInFlightLabel =
+    visibleCompactEvents.length === 0 && overflowCompactCount === 0
+      ? "Starting run"
+      : "Run in progress";
   const terminalStatusMarker = resolveTerminalStatusMarker(finalSpineTone, isCompleted);
   const hasCompactRailVisualContent =
     showCompactRailWaitingSpinner || visibleCompactEvents.length > 0 || overflowCompactCount > 0;
@@ -561,6 +574,17 @@ export function AgentJobThreadPreviewLayout({
     ? false
     : headerIdentityVisible || (!useTightCompletedSummaryLayout && hasThreadPreviewHeaderContent);
   const showThreadPreviewSpine = !hideThreadSpine && !useTightThreadPreviewLayout;
+  // Run status reads exactly once, at header level: the preview's own header
+  // row when it renders, else the outer row's speaker header when that
+  // carries it; the content-level caption is the fallback for headerless
+  // continuation entries (#145).
+  const showTerminalStatusInHeader = terminalStatusMarker !== null && showThreadPreviewHeader;
+  const showTerminalStatusCaption =
+    terminalStatusMarker !== null && !showTerminalStatusInHeader && !runStatusShownInEntryHeader;
+  const terminalStatusTextClassName =
+    finalSpineTone === "danger"
+      ? "text-rose-700 dark:text-rose-200"
+      : "text-secondary-800 dark:text-secondary-100";
   const threadPreviewRailRenderStyle = {
     ...threadPreviewRailStyle,
     top: showThreadPreviewHeader ? threadPreviewRailStyle.top : "0px",
@@ -698,6 +722,18 @@ export function AgentJobThreadPreviewLayout({
                   <span className="truncate">{ownerBadge}</span>
                 </span>
               ) : null}
+              {showTerminalStatusInHeader && terminalStatusMarker ? (
+                <span
+                  data-testid="agent-thread-terminal-status"
+                  className={`inline-flex min-w-0 items-center gap-1 text-xxs font-semibold leading-none ${terminalStatusTextClassName}`}
+                >
+                  <WarningTriangle
+                    aria-hidden="true"
+                    className={`h-3 w-3 flex-none ${terminalStatusMarker.iconClassName}`}
+                  />
+                  <span className="min-w-0 truncate">{terminalStatusMarker.label}</span>
+                </span>
+              ) : null}
             </div>
           </div>
         ) : null}
@@ -752,19 +788,11 @@ export function AgentJobThreadPreviewLayout({
                 title="Run updates"
               >
                 <div className="flex min-w-0 flex-1 justify-start overflow-visible">
+                  {/* The rail reads oldest → newest, left → right: the dashed
+                      "earlier updates" pill anchors the old end and any live
+                      indicator anchors the new end, so a glance always tells
+                      which chip is current (#176). */}
                   <div className="flex shrink-0 items-center -space-x-2 pl-0.5 py-0.5">
-                    {showCompactRailWaitingSpinner ? (
-                      <span
-                        className={`instafy-compact-event-pill ${
-                          isThreadUnresolved ? "instafy-compact-event-pill-live" : ""
-                        } inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300`}
-                        title="Starting run"
-                        aria-label="Starting run"
-                        style={{ animationDelay: "0ms" }}
-                      >
-                        <Spinner size="xs" tone="slate" className="h-3.5 w-3.5" />
-                      </span>
-                    ) : null}
                     {overflowCompactCount > 0 ? (
                       <span
                         className="instafy-compact-overflow-indicator relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-dashed border-slate-200 bg-white text-slate-400 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-500"
@@ -779,15 +807,20 @@ export function AgentJobThreadPreviewLayout({
                     ) : null}
                     {visibleCompactEvents.map((event, index) => {
                       const badgeLabel = resolveCompactEventLabel(event, ownerBadge, isThreadUnresolved);
+                      // While a command is in flight the trailing spinner pill
+                      // is the single live indicator; otherwise the newest chip
+                      // carries the subtle running ring.
+                      const isLiveEventPill =
+                        isThreadUnresolved &&
+                        !showCompactRailWaitingSpinner &&
+                        latestCompactEventId === event.id;
                       return (
                         <span
                           key={`compact-event-${event.id}`}
                           title={badgeLabel}
                           aria-label={badgeLabel}
                           className={`instafy-compact-event-pill ${
-                            isThreadUnresolved && latestCompactEventId === event.id
-                              ? "instafy-compact-event-pill-live"
-                              : ""
+                            isLiveEventPill ? "instafy-compact-event-pill-live" : ""
                           } inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300`}
                           style={{ animationDelay: `${Math.min(index + (overflowCompactCount > 0 ? 1 : 0), 16) * 36}ms` }}
                         >
@@ -795,6 +828,23 @@ export function AgentJobThreadPreviewLayout({
                         </span>
                       );
                     })}
+                    {showCompactRailWaitingSpinner ? (
+                      <span
+                        className={`instafy-compact-event-pill ${
+                          isThreadUnresolved ? "instafy-compact-event-pill-live" : ""
+                        } inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-500 shadow-sm dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300`}
+                        title={compactRailInFlightLabel}
+                        aria-label={compactRailInFlightLabel}
+                        style={{
+                          animationDelay: `${Math.min(
+                            visibleCompactEvents.length + (overflowCompactCount > 0 ? 1 : 0),
+                            16,
+                          ) * 36}ms`,
+                        }}
+                      >
+                        <Spinner size="xs" tone="slate" className="h-3.5 w-3.5" />
+                      </span>
+                    ) : null}
                   </div>
                 </div>
               </button>
@@ -1267,18 +1317,15 @@ export function AgentJobThreadPreviewLayout({
                       : "space-y-1.5"
                   }
                 >
-                  {terminalStatusMarker ? (
-                    // Run status is the failure block's header — an entry-level
-                    // state label set off by a tone-tinted left rule, not a
-                    // filled chip competing with the separate changes section
-                    // below. (#145)
+                  {showTerminalStatusCaption && terminalStatusMarker ? (
+                    // Headerless fallback: when neither the preview header nor
+                    // the outer speaker header carries the run status, it opens
+                    // the failure block — an entry-level state label set off by
+                    // a tone-tinted left rule, not a filled chip competing with
+                    // the separate changes section below. (#145)
                     <div
                       data-testid="agent-thread-terminal-status"
-                      className={`flex items-center gap-1.5 text-xs font-semibold ${
-                        finalSpineTone === "danger"
-                          ? "text-rose-700 dark:text-rose-200"
-                          : "text-secondary-800 dark:text-secondary-100"
-                      }`}
+                      className={`flex items-center gap-1.5 text-xs font-semibold ${terminalStatusTextClassName}`}
                     >
                       <WarningTriangle
                         aria-hidden="true"

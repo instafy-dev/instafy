@@ -31,6 +31,7 @@ import {
   parseTeamFlowLine,
   tokenizeChatLine,
   type ConversationReferenceDescriptor,
+  type MessageListItem,
   type WorkspaceFileReferenceDescriptor,
 } from "./chatMessageDialect";
 import { resolveProxyUpstreamErrorGuidance } from "./proxyError";
@@ -1564,6 +1565,69 @@ export function MessageContent({
       );
     });
 
+  // One list grammar at every depth (#167): a fixed 1.25rem indent step,
+  // ordered markers a shade darker than bullets (they carry sequence), bullet
+  // glyphs stepping disc → circle → square so levels read distinctly, and a
+  // small gap between an item's own text and its sublist.
+  const renderListLevel = (
+    items: MessageListItem[],
+    depth: number,
+    keyPrefix: string,
+    start: number | undefined,
+    spacingClassName: string,
+  ): ReactNode => {
+    const ordered = items[0]?.ordered ?? false;
+    const ListElement = ordered ? "ol" : "ul";
+    const renderedItems: ReactNode[] = [];
+    let index = 0;
+    while (index < items.length) {
+      const item = items[index];
+      if (!item || item.depth < depth) {
+        break;
+      }
+      const itemKey = `${keyPrefix}-item-${index}`;
+      let nextIndex = index + 1;
+      while (nextIndex < items.length && (items[nextIndex]?.depth ?? 0) > depth) {
+        nextIndex += 1;
+      }
+      const nestedItems = items.slice(index + 1, nextIndex);
+      renderedItems.push(
+        <li
+          key={itemKey}
+          className="pl-1 whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
+        >
+          {renderInlineTokens(item.text, itemKey)}
+          {nestedItems.length > 0
+            ? renderListLevel(nestedItems, depth + 1, `${itemKey}-sub`, undefined, "mt-1")
+            : null}
+        </li>,
+      );
+      index = nextIndex;
+    }
+    const markerClassName = ordered
+      ? "list-decimal marker:font-medium marker:text-slate-500 dark:marker:text-slate-400"
+      : `${
+          depth === 0
+            ? "list-disc"
+            : depth === 1
+              ? "[list-style-type:circle]"
+              : "[list-style-type:square]"
+        } marker:text-slate-400 dark:marker:text-slate-500`;
+    return (
+      <ListElement
+        key={keyPrefix}
+        start={ordered ? start : undefined}
+        data-testid={depth === 0 ? "chat-message-list" : "chat-message-sublist"}
+        data-list-depth={depth}
+        className={[spacingClassName, markerClassName, "space-y-0.5 pl-5"]
+          .filter(Boolean)
+          .join(" ")}
+      >
+        {renderedItems}
+      </ListElement>
+    );
+  };
+
   return (
     <div className={className ?? "text-sm leading-relaxed break-words [overflow-wrap:anywhere]"}>
       {contentBlocks.map((block, blockIndex) => {
@@ -1629,41 +1693,35 @@ export function MessageContent({
           );
         }
         if (block.kind === "code") {
+          // A fence that opened inside a list item keeps the item's content
+          // indent and sits closer to the line that introduced it (#167).
+          const codeSpacingClassName =
+            blockIndex > 0 ? (block.inListItem ? "mt-1.5" : "mt-2") : "";
           return (
             <pre
               key={`code-${blockIndex}`}
               data-testid="chat-message-code-block"
               data-code-language={block.language ?? undefined}
-              className={[blockSpacingClassName, CODE_BLOCK_CLASS].filter(Boolean).join(" ")}
+              data-in-list-item={block.inListItem ? "true" : undefined}
+              className={[
+                codeSpacingClassName,
+                block.inListItem ? "ml-5" : "",
+                CODE_BLOCK_CLASS,
+              ]
+                .filter(Boolean)
+                .join(" ")}
             >
               <code>{block.lines.join("\n")}</code>
             </pre>
           );
         }
         if (block.kind === "list") {
-          const ListElement = block.ordered ? "ol" : "ul";
-          return (
-            <ListElement
-              key={`list-${blockIndex}`}
-              start={block.ordered ? block.start : undefined}
-              data-testid="chat-message-list"
-              className={[
-                blockSpacingClassName,
-                block.ordered ? "list-decimal" : "list-disc",
-                "space-y-0.5 pl-5 marker:text-slate-400 dark:marker:text-slate-500",
-              ]
-                .filter(Boolean)
-                .join(" ")}
-            >
-              {block.items.map((item, itemIndex) => (
-                <li
-                  key={`list-${blockIndex}-item-${itemIndex}`}
-                  className="pl-1 whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
-                >
-                  {renderInlineTokens(item, `list-${blockIndex}-item-${itemIndex}`)}
-                </li>
-              ))}
-            </ListElement>
+          return renderListLevel(
+            block.items,
+            0,
+            `list-${blockIndex}`,
+            block.ordered ? block.start : undefined,
+            blockSpacingClassName,
           );
         }
 

@@ -38,11 +38,25 @@ export type ChatLineTokenChunk =
   | { type: "conversation-reference"; value: ConversationReferenceDescriptor }
   | { type: "link"; value: UrlReferenceDescriptor };
 
+export type MessageListItem = {
+  text: string;
+  /** Nesting level: 0 for top-level items, 1 for their sublists, and so on. */
+  depth: number;
+  /** Marker style of THIS item's level (an ordered list may nest bullets). */
+  ordered: boolean;
+};
+
 export type MessageContentBlock =
   | { kind: "paragraph"; line: string }
-  | { kind: "list"; ordered: boolean; start?: number; items: string[] }
+  | { kind: "list"; ordered: boolean; start?: number; items: MessageListItem[] }
   | { kind: "quote"; lines: string[] }
-  | { kind: "code"; language: string | null; lines: string[] };
+  | {
+      kind: "code";
+      language: string | null;
+      lines: string[];
+      /** Set when the fence opened inside a list item's content, so the renderer can keep the item's indent. */
+      inListItem?: boolean;
+    };
 
 const WORKSPACE_FILE_REFERENCE_REGEX =
   /^((?:\/workspace\/[^/\s<>"'`()]+\/)?[0-9A-Za-z_.-]+(?:\/[0-9A-Za-z_.-]+)*\.(?:markdown|md|json|tsx?|jsx?|ya?ml|toml|py|rs|css|html|txt|sh|sql))(?:#L(\d+)|:(\d+))?/;
@@ -523,6 +537,9 @@ function stripCodeFenceIndent(line: string, indent: number): string {
 export function parseMessageContentBlocks(content: string): MessageContentBlock[] {
   const blocks: MessageContentBlock[] = [];
   let pendingList: Extract<MessageContentBlock, { kind: "list" }> | null = null;
+  // Indentation of each open list level, innermost last; a deeper-indented
+  // item opens a sublist, a shallower one returns to the matching ancestor.
+  let pendingListIndentStack: number[] = [];
   let pendingQuote: Extract<MessageContentBlock, { kind: "quote" }> | null = null;
   let pendingCode: PendingCodeFence | null = null;
 
@@ -530,6 +547,7 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
     if (pendingList) {
       blocks.push(pendingList);
       pendingList = null;
+      pendingListIndentStack = [];
     }
   };
   const flushQuote = () => {
@@ -564,6 +582,11 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
 
     const fenceOpening = parseCodeFenceOpening(line);
     if (fenceOpening) {
+      // A fence opened while a list is still pending (or indented like list
+      // content) belongs to that item; the renderer keeps the item's indent.
+      if (pendingList !== null || fenceOpening.indent >= 2) {
+        fenceOpening.block.inListItem = true;
+      }
       flushList();
       flushQuote();
       pendingCode = fenceOpening;
@@ -580,14 +603,22 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
       continue;
     }
 
-    const unorderedMatch = line.match(/^\s*[-*]\s+(.+)$/);
-    const orderedMatch = line.match(/^\s*(\d+)[.)]\s+(.+)$/);
+    const unorderedMatch = line.match(/^(\s*)[-*]\s+(.+)$/);
+    const orderedMatch = line.match(/^(\s*)(\d+)[.)]\s+(.+)$/);
     if (unorderedMatch || orderedMatch) {
       flushQuote();
       const ordered = Boolean(orderedMatch);
-      const item = (orderedMatch?.[2] ?? unorderedMatch?.[1] ?? "").trim();
-      const start = orderedMatch ? Number.parseInt(orderedMatch[1] ?? "1", 10) : undefined;
-      if (!pendingList || pendingList.ordered !== ordered) {
+      const indent = (orderedMatch?.[1] ?? unorderedMatch?.[1] ?? "").length;
+      const item = (orderedMatch?.[3] ?? unorderedMatch?.[2] ?? "").trim();
+      const start = orderedMatch ? Number.parseInt(orderedMatch[2] ?? "1", 10) : undefined;
+      // Indented items nest inside the pending list instead of starting a
+      // sibling block, so "1. step" followed by "   - detail" renders as an
+      // ordered item with a bulleted sublist.
+      const nestsInPendingList =
+        pendingList !== null &&
+        pendingListIndentStack.length > 0 &&
+        indent >= (pendingListIndentStack[0] ?? 0) + 2;
+      if (!pendingList || (!nestsInPendingList && pendingList.ordered !== ordered)) {
         flushList();
         pendingList = {
           kind: "list",
@@ -595,8 +626,23 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
           start: ordered ? start : undefined,
           items: [],
         };
+        pendingListIndentStack = [indent];
+      } else {
+        while (
+          pendingListIndentStack.length > 1 &&
+          indent < (pendingListIndentStack[pendingListIndentStack.length - 1] ?? 0)
+        ) {
+          pendingListIndentStack.pop();
+        }
+        if (indent >= (pendingListIndentStack[pendingListIndentStack.length - 1] ?? 0) + 2) {
+          pendingListIndentStack.push(indent);
+        }
       }
-      pendingList.items.push(item);
+      pendingList.items.push({
+        text: item,
+        depth: pendingListIndentStack.length - 1,
+        ordered,
+      });
       continue;
     }
 
