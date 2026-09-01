@@ -72,7 +72,13 @@ test("protected main publishes both exact image manifests only after CI", () => 
   assert.match(source, /runtime-agent-release-manifest/u);
   assert.match(source, /Check exact manifest freshness/u);
   assert.match(source, /14 \* 24 \* 60 \* 60/u);
+  assert.match(source, /services_publish=\$services_publish/u);
+  assert.match(source, /runtime_publish=\$runtime_publish/u);
   assert.match(source, /steps\.freshness\.outputs\.publish == 'true'/u);
+  assert.match(source, /PUBLISH_SERVICES: \$\{\{ steps\.freshness\.outputs\.services_publish \}\}/u);
+  assert.match(source, /PUBLISH_RUNTIME: \$\{\{ steps\.freshness\.outputs\.runtime_publish \}\}/u);
+  assert.match(source, /if \[\[ "\$PUBLISH_SERVICES" == "true" \]\]; then[\s\S]*publish-production-services\.yml/u);
+  assert.match(source, /if \[\[ "\$PUBLISH_RUNTIME" == "true" \]\]; then[\s\S]*publish-runtime-agent\.yml/u);
   assert.match(source, /Report fresh immutable manifests/u);
   assert.match(source, /\\"update_channel_tags\\":false/u);
   assert.doesNotMatch(source, /\bsecrets\./u);
@@ -91,7 +97,7 @@ test("protected main publishes both exact image manifests only after CI", () => 
     "Wait for exact protected-main CI",
     "Recheck protected main before publication",
     "Check exact manifest freshness",
-    "Dispatch both immutable image publishers",
+    "Dispatch stale immutable image publishers",
     "Require both exact image manifests",
   );
 });

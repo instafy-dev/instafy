@@ -114,6 +114,30 @@ test("every repository Dockerfile pins external base images by digest", () => {
   }
 });
 
+test("runtime image inputs reject the vulnerable Chromium and Go crypto baselines", () => {
+  const runtimePath = "docker/runtime/Dockerfile";
+  const runtimeSource = read(runtimePath);
+  const runtimeDefaults = argumentDefaults(runtimeSource);
+
+  assert.equal(
+    runtimeDefaults.get("RUNTIME_BASE"),
+    "debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132",
+  );
+  assert.equal(
+    runtimeDefaults.get("CHROMIUM_MIN_VERSION"),
+    "151.0.7922.173-1~deb13u1",
+  );
+  assert.match(
+    dockerfileStage(runtimeSource, "runtime"),
+    /dpkg --compare-versions[\s\S]*chromium\)" ge "\$\{CHROMIUM_MIN_VERSION\}"/u,
+  );
+
+  assert.match(
+    read("packages/browser-webrtc-sender/go.mod"),
+    /^\s*golang\.org\/x\/crypto v0\.55\.0 \/\/ indirect$/mu,
+  );
+});
+
 test("affected runtime images refresh every util-linux security binary", () => {
   const expectedStages = new Map([
     ["docker/git-edge/Dockerfile", ["runtime"]],
