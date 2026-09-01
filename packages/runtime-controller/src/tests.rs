@@ -8689,6 +8689,51 @@ async fn hosted_runtime_sweep_burns_credits() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn hosted_runtime_sweep_pool_pressure_escalates_after_sustained_failure() {
+    let timeout = anyhow::anyhow!("Timed out in bb8")
+        .context("failed to acquire connection for hosted runtime billing");
+    let started_at = std::time::Instant::now();
+    let mut transient_failure_started_at = None;
+
+    assert!(!runtime::should_report_hosted_runtime_credit_sweep_error(
+        &timeout,
+        &mut transient_failure_started_at,
+        started_at,
+    ));
+    assert!(!runtime::should_report_hosted_runtime_credit_sweep_error(
+        &timeout,
+        &mut transient_failure_started_at,
+        started_at + std::time::Duration::from_secs(14 * 60),
+    ));
+    assert!(runtime::should_report_hosted_runtime_credit_sweep_error(
+        &timeout,
+        &mut transient_failure_started_at,
+        started_at + std::time::Duration::from_secs(15 * 60),
+    ));
+
+    let persistent_error = anyhow::anyhow!("relation does not exist")
+        .context("failed to select active hosted runtimes for billing");
+    assert!(runtime::should_report_hosted_runtime_credit_sweep_error(
+        &persistent_error,
+        &mut transient_failure_started_at,
+        started_at,
+    ));
+    assert!(transient_failure_started_at.is_none());
+
+    assert!(!runtime::should_report_hosted_runtime_credit_sweep_error(
+        &timeout,
+        &mut transient_failure_started_at,
+        started_at,
+    ));
+    runtime::reset_hosted_runtime_credit_sweep_pool_pressure(&mut transient_failure_started_at);
+    assert!(!runtime::should_report_hosted_runtime_credit_sweep_error(
+        &timeout,
+        &mut transient_failure_started_at,
+        started_at + std::time::Duration::from_secs(16 * 60),
+    ));
+}
+
 #[tokio::test]
 async fn tunnel_broker_acl_hook_burns_credits() -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {
