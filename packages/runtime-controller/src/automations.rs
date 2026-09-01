@@ -143,6 +143,27 @@ fn can_access_owned_automation(
     owner_user_id == actor_user_id || (is_service_role && !is_active_job)
 }
 
+/// Read visibility for an automation record. Mirrors the conversation-list
+/// gate (#90): the creator always sees their own automation, service-role
+/// callers see everything, and a `team`-result automation is shared with the
+/// whole space — project membership itself is enforced separately via
+/// `ensure_project_access`, so this never widens visibility beyond space
+/// members. Active job tokens stay pinned to the automation they run for.
+/// Mutations (edit/pause/delete/run) deliberately keep the stricter
+/// `can_access_owned_automation` creator gate.
+fn can_view_automation(
+    result_visibility: &str,
+    owner_user_id: Uuid,
+    actor_user_id: Uuid,
+    is_service_role: bool,
+    is_active_job: bool,
+) -> bool {
+    if can_access_owned_automation(owner_user_id, actor_user_id, is_service_role, is_active_job) {
+        return true;
+    }
+    !is_active_job && result_visibility == RESULT_VISIBILITY_TEAM
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct AutomationPayload {
@@ -1125,6 +1146,11 @@ async fn list_project_automations(
     let project = crate::load_project_record(&transaction, &project_id).await?;
     crate::ensure_project_access(&transaction, &project, &access_context, None).await?;
 
+    // Automations are a property of the space: every space member sees the
+    // team-visible ones alongside their own, matching how the conversation
+    // list already shares non-private automation threads (#90). Active job
+    // tokens stay scoped to the automations their subject user owns.
+    let include_team_visible = active_job.is_none();
     let rows = transaction
         .query(
             "select id,
@@ -1153,9 +1179,10 @@ async fn list_project_automations(
                     created_at,
                     updated_at
              from automations
-             where project_id = $1 and user_id = $2
+             where project_id = $1
+               and (user_id = $2 or ($3 and result_visibility = 'team'))
              order by created_at desc",
-            &[&project_id, &user_id],
+            &[&project_id, &user_id, &include_team_visible],
         )
         .await
         .map_err(|error| internal_error(format!("failed to list automations: {error}")))?;
@@ -1247,7 +1274,8 @@ async fn get_automation(
     if let Some(active_job) = active_job.as_ref() {
         active_job.ensure_project_id(&record.project_id)?;
     }
-    if !can_access_owned_automation(
+    if !can_view_automation(
+        record.result_visibility.as_str(),
         record.user_id,
         user_id,
         access_context.is_service_role,
@@ -2088,7 +2116,7 @@ async fn run_automation_now(
 #[cfg(test)]
 mod tests {
     use super::{
-        automation_runtime_is_selectable, can_access_owned_automation,
+        automation_runtime_is_selectable, can_access_owned_automation, can_view_automation,
         conversation_visibility_for_result_visibility, hosted_automation_provider_is_managed,
         no_live_self_hosted_runtime_error, normalize_result_visibility, UpdateAutomationBody,
     };
@@ -2103,6 +2131,29 @@ mod tests {
         assert!(!can_access_owned_automation(owner, actor, true, true));
         assert!(can_access_owned_automation(owner, actor, true, false));
         assert!(can_access_owned_automation(owner, owner, false, true));
+    }
+
+    #[test]
+    fn team_automations_are_viewable_by_non_owners_but_private_ones_are_not() {
+        let owner = Uuid::new_v4();
+        let teammate = Uuid::new_v4();
+
+        // A team-visible automation is readable by any authenticated caller
+        // that also passes the project membership gate.
+        assert!(can_view_automation("team", owner, teammate, false, false));
+        // Private automations stay creator-only.
+        assert!(!can_view_automation(
+            "private", owner, teammate, false, false
+        ));
+        // The creator always sees their own automation.
+        assert!(can_view_automation("private", owner, owner, false, false));
+        // Active job tokens stay pinned to their own automation even for
+        // team-visible records.
+        assert!(!can_view_automation("team", owner, teammate, false, true));
+        assert!(!can_view_automation("team", owner, teammate, true, true));
+        assert!(can_view_automation("team", owner, owner, false, true));
+        // Service role (non-job) retains full read access.
+        assert!(can_view_automation("private", owner, teammate, true, false));
     }
 
     #[test]
