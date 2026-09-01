@@ -153,6 +153,55 @@ describe("InviteAcceptPage", () => {
     expect(mocks.acceptInvitation).not.toHaveBeenCalled();
   });
 
+  it("keeps the post-join waiting state on the theme-aware shell and card", async () => {
+    // #137 regression: the shell and card must carry dark-mode tokens in every
+    // state — the founder hit the waiting interstitial (right after "Join
+    // workspace") rendered on a hardcoded light card in dark mode.
+    const pendingAccept = deferred<{ orgName: string; projectId: string }>();
+    mocks.acceptInvitation.mockReturnValue(pendingAccept.promise);
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/invite?token=waiting-token"]}>
+          <TestRoutes />
+        </MemoryRouter>,
+      );
+    });
+    await flushAsyncWork();
+
+    const assertThemedShell = () => {
+      const page = document.querySelector('[data-testid="invite-accept-page"]');
+      const card = document.querySelector('[data-testid="invite-accept-card"]');
+      expect(page).not.toBeNull();
+      expect(card).not.toBeNull();
+      // Light-mode ground and dark-mode counterparts must both be declared.
+      expect(page?.className).toContain("bg-slate-50");
+      expect(page?.className).toContain("dark:bg-[var(--color-studio-dark-canvas)]");
+      expect(page?.className).toContain("dark:text-slate-100");
+      expect(card?.className).toContain("bg-white/95");
+      expect(card?.className).toContain("dark:bg-slate-950/60");
+    };
+
+    // Consent card first…
+    expect(document.body.textContent).toContain("You're invited");
+    assertThemedShell();
+
+    await act(async () => {
+      document.querySelector<HTMLElement>('[data-testid="invite-accept-join"]')?.click();
+      await Promise.resolve();
+    });
+
+    // …then the waiting interstitial, on the same themed card.
+    expect(document.body.textContent).toContain("Accepting invitation…");
+    expect(
+      document.querySelector('[data-testid="invite-accept-card"]')?.textContent,
+    ).toContain("Just a moment while we connect your account.");
+    assertThemedShell();
+
+    pendingAccept.resolve({ orgName: "Waiting team", projectId: "project-waiting" });
+    await flushAsyncWork();
+  });
+
   it("ignores a stale response when the invite token changes", async () => {
     const first = deferred<{
       orgName: string;
