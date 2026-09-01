@@ -26,6 +26,29 @@ export function resolveHumanChatIdentity(
   };
 }
 
+export function HumanSpeakerIdentityPill({
+  avatarSeed,
+  label,
+}: {
+  avatarSeed: string | null;
+  label: string;
+}) {
+  return (
+    <div
+      className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-slate-200/70 bg-white/95 py-0 pl-0.5 pr-2 text-xs font-semibold text-slate-700 shadow-sm backdrop-blur dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel)] dark:text-slate-200"
+      data-testid="chat-human-speaker-pill"
+    >
+      <ChatMessageAvatar
+        kind="human"
+        seed={avatarSeed}
+        label={label}
+        size="xs"
+      />
+      <span className="min-w-0 truncate">{label}</span>
+    </div>
+  );
+}
+
 export function HumanSpeakerIdentityLabel({
   avatarSeed,
   label,
