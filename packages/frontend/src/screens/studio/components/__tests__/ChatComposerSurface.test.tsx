@@ -26,6 +26,7 @@ vi.mock("../ComposerActionMenu", () => ({
       data-testid="mock-composer-action-menu"
       data-upload-image={String(typeof props.onUploadImage === "function")}
       data-insert-suggestion={String(typeof props.onInsertSuggestion === "function")}
+      data-trigger-class={String(props.triggerClassName ?? "")}
     >
       <button type="button" aria-label="Open composer actions" className="mock-menu-trigger" />
       {typeof props.onUploadImage === "function" ? (
@@ -48,13 +49,17 @@ vi.mock("../ConversationRoster", () => ({
 }));
 
 // The mock exposes the two props the surface used to flip with the draft so
-// the geometry snapshots can prove they no longer move.
+// the geometry snapshots can prove they no longer move, and the dress it was
+// handed so the rest-row dress can be checked from one place.
 vi.mock("../VoiceConversationActionStrip", () => ({
   VoiceConversationActionStrip: (props: Record<string, unknown>) => (
     <div
       data-testid="mock-voice-action-strip"
       data-voice-input-testid={String(props.voiceInputTestId ?? "chat-voice-input-button")}
       data-voice-replies-toggle={String(props.showVoiceRepliesToggle === true)}
+      data-ghost-class={String(props.ghostActionClassName ?? "")}
+      data-primary-class={String(props.primaryActionClassName ?? "")}
+      data-icon-class={String(props.actionIconClassName ?? "")}
     />
   ),
 }));
@@ -228,10 +233,9 @@ function createProps(
     sendButtonDisabled: false,
     sendButtonVariant: "primary",
     onSendButtonPress: () => undefined,
-    composerOutlinedActionClass: "outline",
+    composerGhostActionClass: "ghost",
     composerPrimaryActionClass: "primary",
     composerActionIconClass: "icon",
-    composerActionButtonClass: "action",
     inviteModalProps: {} as never,
     ...overrides,
   };
@@ -379,8 +383,27 @@ describe("ChatComposerSurface", () => {
     );
   }
 
+  // Read the class attribute rather than `className` so the helper also works
+  // on the SVG icons, whose `className` is an SVGAnimatedString.
   function classTokens(node: Element | null | undefined) {
-    return new Set((node?.className ?? "").split(/\s+/).filter(Boolean));
+    return new Set((node?.getAttribute("class") ?? "").split(/\s+/).filter(Boolean));
+  }
+
+  // The tokens that define a control's surface — its box, radius, fill, edge
+  // and shadow — in either theme and any interaction state. Bracket contents
+  // are blanked first so an arbitrary value such as `border-[color:var(--x)]`
+  // cannot read as a variant prefix.
+  const SURFACE_TOKEN_PATTERN = /(?:^|:)(?:border|bg|shadow|ring|rounded|h|w)-/;
+  function surfaceTokens(node: Element | null | undefined) {
+    return new Set(
+      Array.from(classTokens(node)).filter((token) =>
+        SURFACE_TOKEN_PATTERN.test(token.replace(/\[[^\]]*\]/g, "[]")),
+      ),
+    );
+  }
+
+  function sortedTokens(tokens: Set<string>) {
+    return Array.from(tokens).sort();
   }
 
   function symmetricDifference(left: Set<string>, right: Set<string>) {
@@ -395,10 +418,10 @@ describe("ChatComposerSurface", () => {
   }
 
   // Send is the one control allowed to change its dress with the draft: its
-  // IconButton variant (primary vs outline, probed from a bare IconButton so
-  // the test follows the design system) and the composer's own primary / rest
-  // classes. Everything else on it — the shared action class, size, radius —
-  // must survive typing untouched.
+  // IconButton variant (primary vs ghost, probed from bare IconButtons so the
+  // test follows the design system) and the composer's own two dresses — the
+  // muted ghost rest dress and the primary dress it lights up into. Everything
+  // else on it — size, radius, the ghost box — must survive typing untouched.
   async function allowedSendDressTokens() {
     const probe = document.createElement("div");
     document.body.appendChild(probe);
@@ -407,7 +430,7 @@ describe("ChatComposerSurface", () => {
       probeRoot.render(
         <>
           <IconButton variant="primary" size="md" radius="xl" data-testid="probe-primary" />
-          <IconButton variant="outline" size="md" radius="xl" data-testid="probe-outline" />
+          <IconButton variant="ghost" size="md" radius="xl" data-testid="probe-outline" />
         </>,
       ),
     );
@@ -508,6 +531,45 @@ describe("ChatComposerSurface", () => {
     expect(sendDelta.filter((token) => !sendDress.has(token))).toEqual([]);
   }
 
+  // One dress for the rest row: the card is the only surface. "+" (whose
+  // trigger the surface dresses), the mic (dressed by the surface too), image
+  // and home all wear the ghost family; Send wears the same ghost box with a
+  // muted glyph. On the buttons the surface renders itself the
+  // surface-defining tokens (box, radius, fill, edge, shadow) are identical,
+  // and Send differs from its siblings by nothing beyond the family's tone
+  // versus its own muting. The real "+" and mic are checked end to end in
+  // ChatComposerRestRowDress.test.tsx. The editor wrapper carries no surface
+  // of its own.
+  function expectOneRestRowDress(geometry: ControlGeometry) {
+    const { composerGhostActionClass, composerActionIconClass } = createProps();
+    const nodes = layoutNodes();
+    expect(nodes.menu?.getAttribute("data-trigger-class")).toBe(composerGhostActionClass);
+    if (nodes.voice) {
+      expect(nodes.voice.getAttribute("data-ghost-class")).toBe(composerGhostActionClass);
+      expect(nodes.voice.getAttribute("data-icon-class")).toBe(composerActionIconClass);
+    }
+    const siblings = [nodes.home, nodes.image].filter((node): node is Element => node !== null);
+    for (const button of siblings) {
+      expect(classTokens(button).has(composerGhostActionClass)).toBe(true);
+    }
+    expect(nodes.send).not.toBeNull();
+    expect(geometry.sendRest).toBe("true");
+    const reference = siblings[0] ?? nodes.send;
+    const toneTokens = new Set([
+      ...composerGhostActionClass.split(/\s+/),
+      ...COMPOSER_SEND_REST_CLASS.split(/\s+/),
+    ]);
+    for (const button of [...siblings, nodes.send]) {
+      expect(sortedTokens(surfaceTokens(button))).toEqual(sortedTokens(surfaceTokens(reference)));
+      const delta = Array.from(symmetricDifference(classTokens(button), classTokens(reference)));
+      expect(delta.filter((token) => !toneTokens.has(token))).toEqual([]);
+    }
+    for (const token of COMPOSER_SEND_REST_CLASS.split(/\s+/)) {
+      expect(classTokens(nodes.send).has(token)).toBe(true);
+    }
+    expect(sortedTokens(surfaceTokens(geometry.editorWrapper))).toEqual([]);
+  }
+
   // Every accessible action offered by the composer, whether rendered inline
   // or folded into the "+" menu, plus the file input's presence.
   function reachableActionLabels() {
@@ -526,7 +588,7 @@ describe("ChatComposerSurface", () => {
   }
 
   it("rests as one row at sm+ with + and image leading, mic and quiet send trailing beside the input", async () => {
-    await act(async () => renderLayout({ sendButtonVariant: "outline" }));
+    await act(async () => renderLayout({ sendButtonVariant: "ghost" }));
 
     const nodes = layoutNodes();
     expect(nodes.textRow?.className.split(" ")).toContain("items-end");
@@ -535,7 +597,7 @@ describe("ChatComposerSurface", () => {
     expect(nodes.menu?.getAttribute("data-insert-suggestion")).toBe("false");
     expect(nodes.leading?.contains(nodes.image)).toBe(true);
     expect(precedes(nodes.menu, nodes.image)).toBe(true);
-    expect(nodes.image?.className.split(" ")).toContain("outline");
+    expect(nodes.image?.className.split(" ")).toContain("ghost");
     expect(nodes.trailing?.contains(nodes.image)).toBe(false);
     expect(nodes.trailing?.contains(nodes.voice)).toBe(true);
     expect(nodes.trailing?.contains(nodes.send)).toBe(true);
@@ -543,7 +605,7 @@ describe("ChatComposerSurface", () => {
     expect(nodes.wand).toBeNull();
     expect(nodes.send?.getAttribute("data-send-rest")).toBe("true");
     expect(nodes.send?.className.split(" ")).not.toContain("primary");
-    expect(nodes.send?.className.split(" ")).toContain("bg-transparent");
+    expectOneRestRowDress(controlGeometry());
     expect(container.querySelector('[data-testid="chat-input"]')?.getAttribute("data-compact-viewport")).toBe(
       "false",
     );
@@ -552,7 +614,7 @@ describe("ChatComposerSurface", () => {
 
   it("rests as one row below sm with only mic and send inline, folding image upload into the + menu", async () => {
     await act(async () =>
-      renderLayout({ compactBrowserViewport: true, sendButtonVariant: "outline" }),
+      renderLayout({ compactBrowserViewport: true, sendButtonVariant: "ghost" }),
     );
 
     const nodes = layoutNodes();
@@ -598,7 +660,7 @@ describe("ChatComposerSurface", () => {
               homeAttentionCount: 1,
               homeAttentionBadge: "1",
               chatInputProps: { value } as never,
-              sendButtonVariant: value ? "primary" : "outline",
+              sendButtonVariant: value ? "primary" : "ghost",
             },
             { voiceInputSupported },
           );
@@ -615,8 +677,8 @@ describe("ChatComposerSurface", () => {
         ]);
         expect(rest.sendInTrailing).toBe(true);
         expect(rest.sendRest).toBe("true");
-        expect(rest.sendTokens.has("bg-transparent")).toBe(true);
         expect(rest.sendTokens.has("primary")).toBe(false);
+        expectOneRestRowDress(rest);
         expect(rest.voiceInputTestId).toBe(voiceInputSupported ? "chat-voice-input-button" : null);
         expect(container.querySelectorAll('[data-testid="chat-send-button"]')).toHaveLength(1);
         expect(container.querySelectorAll('[data-testid="mock-voice-action-strip"]')).toHaveLength(
@@ -631,7 +693,10 @@ describe("ChatComposerSurface", () => {
         expectSameGeometry(rest, oneCharacter, sendDress);
         expect(oneCharacter.sendRest).toBe("false");
         expect(oneCharacter.sendTokens.has("primary")).toBe(true);
-        expect(oneCharacter.sendTokens.has("bg-transparent")).toBe(false);
+        // Lit, Send sheds its muting: the primary dress is the whole delta.
+        for (const token of COMPOSER_SEND_REST_CLASS.split(/\s+/)) {
+          expect(oneCharacter.sendTokens.has(token)).toBe(false);
+        }
         expect(container.querySelector('[data-testid="chat-input"]')).toBe(inputNode);
         expect(container.querySelector('[data-testid="chat-composer-toolbar"]')).toBeNull();
         expect(container.querySelectorAll('[data-testid="chat-send-button"]')).toHaveLength(1);
@@ -650,6 +715,7 @@ describe("ChatComposerSurface", () => {
         expectSameGeometry(rest, cleared, sendDress);
         expect(cleared.sendRest).toBe("true");
         expect(cleared.sendTokens).toEqual(rest.sendTokens);
+        expectOneRestRowDress(cleared);
       },
     );
   });
@@ -673,7 +739,7 @@ describe("ChatComposerSurface", () => {
 
     // At sm+: image stays inline, the wand is in the menu, nothing inline
     // appeared or disappeared for the suggestion.
-    await act(async () => renderLayout({ sendButtonVariant: "outline" }));
+    await act(async () => renderLayout({ sendButtonVariant: "ghost" }));
     const restGeometry = controlGeometry();
     await act(async () =>
       renderLayout({
@@ -733,7 +799,7 @@ describe("ChatComposerSurface", () => {
           voiceActionActive: capture,
         } as never,
         chatInputProps: { value } as never,
-        sendButtonVariant: value ? "primary" : "outline",
+        sendButtonVariant: value ? "primary" : "ghost",
       });
 
     await act(async () => renderHold("existing draft", false));
@@ -773,14 +839,14 @@ describe("ChatComposerSurface", () => {
     expect(controlGeometry().controlClasses).toEqual(geometry.controlClasses);
   });
 
-  it("renders the composer home button once, outlined, first in the row, regardless of the draft", async () => {
+  it("renders the composer home button once, as a ghost, first in the row, regardless of the draft", async () => {
     const renderHome = (value: string) =>
       renderLayout({
         showComposerHomeButton: true,
         homeAttentionCount: 2,
         homeAttentionBadge: "2",
         chatInputProps: { value } as never,
-        sendButtonVariant: value ? "primary" : "outline",
+        sendButtonVariant: value ? "primary" : "ghost",
       });
 
     await act(async () => renderHome(""));
@@ -788,7 +854,7 @@ describe("ChatComposerSurface", () => {
     expect(layoutNodes().leading?.contains(home)).toBe(true);
     expect(layoutNodes().leading?.firstElementChild).toBe(home);
     expect(home?.getAttribute("aria-label")).toBe("Open home");
-    expect(home?.className.split(" ")).toContain("outline");
+    expect(home?.className.split(" ")).toContain("ghost");
     expect(home?.querySelector('[data-testid="chat-home-badge-mobile"]')?.textContent).toBe("2");
     const homeClass = home?.className;
 
@@ -842,7 +908,7 @@ describe("ChatComposerSurface", () => {
           {...createProps({
             showVoicePrimaryAction: true,
             showVoiceStatus: false,
-            sendButtonVariant: "outline",
+            sendButtonVariant: "ghost",
           })}
         />,
       );

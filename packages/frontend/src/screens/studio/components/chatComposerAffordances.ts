@@ -70,29 +70,27 @@ export function resolveChatComposerAffordances({
     voiceHoldActive ||
     (synchronouslyGateAiIntent && !credentialsReady) ||
     (synchronouslyGateAiIntent && outOfCredits);
-  const sendButtonVariant: "primary" | "outline" =
-    composerHasSendPayload && !sendButtonDisabled ? "primary" : "outline";
-  const composerActionButtonClass = "h-11 w-11 rounded-[1.25rem]";
-  const composerActionSurfaceClass =
-    "border-transparent bg-white/95 text-slate-700 ring-1 ring-slate-900/[0.035] hover:bg-slate-50 data-[hovered]:bg-slate-50 dark:border-transparent dark:bg-white/[0.06] dark:text-slate-100 dark:shadow-none dark:ring-0 dark:hover:bg-white/[0.1] dark:data-[hovered]:bg-white/[0.1]";
-  const composerSquareShadowClass =
-    "shadow-[0_12px_26px_-10px_rgba(15,23,42,0.38)] hover:shadow-[0_14px_30px_-10px_rgba(15,23,42,0.44)] data-[hovered]:shadow-[0_14px_30px_-10px_rgba(15,23,42,0.44)]";
-  const composerPillShadowClass =
-    "shadow-[0_7px_16px_-14px_rgba(15,23,42,0.3)] hover:shadow-[0_9px_20px_-15px_rgba(15,23,42,0.38)] data-[hovered]:shadow-[0_9px_20px_-15px_rgba(15,23,42,0.38)]";
-  const composerOutlinedActionClass =
-    `${composerActionButtonClass} ${composerActionSurfaceClass} ${composerSquareShadowClass}`;
-  const composerRuntimeTriggerClass =
-    `h-11 min-w-[3.5rem] rounded-[1.25rem] px-3.5 text-sm ${composerActionSurfaceClass} ${composerPillShadowClass}`;
-  const composerPrimaryActionClass =
-    `${composerActionButtonClass} shadow-[0_10px_24px_-14px_rgba(59,130,246,0.95)]`;
+  const sendButtonVariant: "primary" | "ghost" =
+    composerHasSendPayload && !sendButtonDisabled ? "primary" : "ghost";
+  // One dress for the rest row: the composer card is the only surface. At
+  // rest "+", image, mic and Send are icon-only ghost IconButtons — no fill,
+  // no border, no shadow — with the ghost variant's own quiet hover surface
+  // and its own box (44px on coarse pointers, md on fine ones). Nothing here
+  // may add a box, a radius or a size of its own; the family only tones the
+  // glyph. It tones the svg rather than the button because Button
+  // concatenates classes without merging, so a button-level text colour
+  // would fight the ghost variant's own and win or lose by stylesheet order.
+  const composerGhostActionClass = "[&_svg]:text-slate-600 dark:[&_svg]:text-slate-300";
+  // The accent dress Send takes once there is a payload (and the mic while it
+  // captures): the primary variant's fill plus a soft glow. It shares the
+  // ghost box, so lighting up changes colour and nothing else.
+  const composerPrimaryActionClass = "shadow-[0_10px_24px_-14px_rgba(59,130,246,0.95)]";
   const composerActionIconClass = "h-[22px] w-[22px]";
 
   return {
-    composerActionButtonClass,
     composerActionIconClass,
-    composerOutlinedActionClass,
+    composerGhostActionClass,
     composerPrimaryActionClass,
-    composerRuntimeTriggerClass,
     queueCanSendNow,
     sendButtonDisabled,
     sendButtonVariant,

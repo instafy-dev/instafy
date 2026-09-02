@@ -144,7 +144,7 @@ export function ComposerActionMenu({
     <DialogTrigger isOpen={open} onOpenChange={handleOpenChange}>
       <IconButton
         type="button"
-        variant="outline"
+        variant="ghost"
         size="md"
         radius="xl"
         aria-label="Open composer actions"
