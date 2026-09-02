@@ -368,6 +368,10 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(surface?.className).toContain("dark:bg-white/[0.035]");
     // Collapsed, the surface holds just the header row.
     expect(surface?.querySelector('[data-testid="agent-thread-command-output-toggle"]')).toBeNull();
+    expect(surface?.querySelector('[data-testid="agent-thread-command-panel-body"]')).toBeNull();
+    expect(surface?.querySelector('button[aria-label="Copy output"]')).toBeNull();
+    // Still running: no result hint yet.
+    expect(surface?.querySelector('[data-testid="agent-thread-command-result-hint"]')).toBeNull();
 
     const toggle = container.querySelector<HTMLButtonElement>('button[aria-label="Expand run updates"]');
     expect(toggle?.className).toContain("font-mono");
@@ -378,13 +382,21 @@ describe("AgentJobThreadPreviewLayout", () => {
     ).find((button) => button !== toggle);
     expect(chevron?.className).toContain("opacity-100");
     expect(chevron?.className).not.toContain("opacity-0");
-    // The chevron is a glyph, not a second surface inside the surface.
+    // The chevron is a glyph, not a second surface inside the surface — and
+    // no hover circle tint inside the surface either.
     expect(chevron?.className).not.toContain("ring-1");
     expect(chevron?.className).not.toContain("bg-white");
     expect(chevron?.className).not.toMatch(/(^|\s)bg-(?!transparent)/);
+    expect(chevron?.className).toContain("hover:bg-transparent");
+    expect(chevron?.className).toContain("data-[hovered]:bg-transparent");
+    expect(chevron?.className).toContain("dark:hover:bg-transparent");
   });
 
-  it("expands a command run inside its own surface with the result line, not the command", async () => {
+  function countOccurrences(haystack: string, needle: string): number {
+    return haystack.split(needle).length - 1;
+  }
+
+  it("expands a command run to exactly the header plus the output body: two states, no toggle, no nested card", async () => {
     const onToggleCommandOutput = vi.fn();
     await act(async () => {
       root.render(
@@ -395,49 +407,63 @@ describe("AgentJobThreadPreviewLayout", () => {
             isThreadUnresolved: false,
             isThreadPreviewExpanded: true,
             showCollapsedCommandToggle: true,
-            latestCommandExecution: { command: RAW_COMMAND, output: "octo\n220a9ff\n", status: "completed" },
-            latestCommandPreview: `${COMMAND_LABEL} -> 220a9ff`,
+            latestCommandExecution: { command: RAW_COMMAND, output: "example-user\nd1d070f\n", status: "completed" },
+            latestCommandPreview: `${COMMAND_LABEL} -> d1d070f`,
             onToggleCommandOutput,
           })}
         />,
       );
     });
 
-    const surface = container.querySelector('[data-testid="agent-thread-command-surface"]');
+    const surface = container.querySelector<HTMLElement>('[data-testid="agent-thread-command-surface"]');
     expect(surface?.getAttribute("data-expanded")).toBe("true");
     const row = container.querySelector('[data-testid="agent-thread-single-update-row"]');
     expect(row?.closest('[data-testid="agent-thread-command-surface"]')).toBe(surface);
 
-    // The output toggle renders INSIDE the surfaced container, under a hairline divider.
-    const outputToggle = container.querySelector<HTMLButtonElement>(
-      '[data-testid="agent-thread-command-output-toggle"]',
-    );
-    expect(outputToggle).not.toBeNull();
-    expect(outputToggle?.closest('[data-testid="agent-thread-command-surface"]')).toBe(surface);
-    const section = outputToggle?.parentElement?.parentElement;
-    expect(section?.className).toContain("border-t border-slate-900/10");
-    expect(section?.className).toContain("dark:border-white/[0.08]");
+    // No View/Hide toggle row inside the panel: expanded means output shown.
+    expect(container.querySelector('[data-testid="agent-thread-command-output-toggle"]')).toBeNull();
+    expect(surface?.textContent).not.toContain("View");
+    expect(surface?.textContent).not.toContain("Hide");
+    expect(surface?.querySelector('button[aria-label="View full output"]')).toBeNull();
+    expect(surface?.querySelector('button[aria-label="Copy full output"]')).toBeNull();
 
-    // Result line: the output, never the command the header already shows.
-    expect(outputToggle?.textContent).toContain("220a9ff");
-    expect(outputToggle?.textContent).not.toContain("whoami");
-    expect(outputToggle?.textContent).not.toContain("bash -lc");
-    expect(outputToggle?.textContent).toContain("View");
-    expect(outputToggle?.getAttribute("title")).toBe(RAW_COMMAND);
+    // The output body sits inside the surface under the hairline divider.
+    const body = surface?.querySelector<HTMLElement>('[data-testid="agent-thread-command-panel-body"]');
+    expect(body).not.toBeNull();
+    expect(body?.className).toContain("border-t border-slate-900/10");
+    expect(body?.className).toContain("dark:border-white/[0.08]");
+    expect(body?.textContent).toContain("example-user");
+    expect(body?.textContent).toContain("d1d070f");
+    // Headerless, unframed: no nested card restating the command.
+    const outputBlock = body?.querySelector<HTMLElement>('[data-testid="chat-command-output"]');
+    expect(outputBlock?.getAttribute("data-body-only")).toBe("true");
+    expect(outputBlock?.className).not.toContain("border");
+    expect(outputBlock?.className).not.toContain("rounded-xl");
+    expect(outputBlock?.querySelector("pre")?.className).toContain("overflow-x-auto");
+    expect(outputBlock?.querySelector("pre")?.className).toContain("font-mono");
 
-    // Header keeps the command, shell wrapper stripped, raw command in the title.
+    // The command appears exactly once in the surface, shell wrapper stripped.
+    expect(surface?.textContent).not.toContain("bash -lc");
+    expect(countOccurrences(surface?.textContent ?? "", COMMAND_LABEL)).toBe(1);
     const header = container.querySelector<HTMLButtonElement>('button[aria-label="Collapse run updates"]');
     expect(header?.textContent).toContain(COMMAND_LABEL);
-    expect(header?.textContent).not.toContain("bash -lc");
     expect(header?.getAttribute("title")).toBe(RAW_COMMAND);
 
-    await act(async () => {
-      outputToggle?.click();
-    });
-    expect(onToggleCommandOutput).toHaveBeenCalledTimes(1);
+    // Copy lives in the header's trailing cluster while expanded, as a ghost glyph.
+    const copyButton = surface?.querySelector<HTMLButtonElement>('button[aria-label="Copy output"]');
+    expect(copyButton).not.toBeNull();
+    expect(copyButton?.closest('[data-testid="agent-thread-single-update-row"]')).toBe(row);
+    expect(copyButton?.className).toContain("hover:bg-transparent");
+    expect(copyButton?.className).toContain("data-[hovered]:bg-transparent");
+    expect(copyButton?.className).not.toContain("ring-1");
+
+    // Nothing in the panel path uses the output toggle handler.
+    expect(onToggleCommandOutput).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="agent-thread-command-result-hint"]')).toBeNull();
   });
 
-  it("falls back to the exit state on the result line when the command produced no output", async () => {
+  it("caps the expanded output body at twelve lines behind an inline show-all control", async () => {
+    const output = Array.from({ length: 30 }, (_, index) => `line ${index + 1}`).join("\n");
     await act(async () => {
       root.render(
         <AgentJobThreadPreviewLayout
@@ -447,19 +473,177 @@ describe("AgentJobThreadPreviewLayout", () => {
             isThreadUnresolved: false,
             isThreadPreviewExpanded: true,
             showCollapsedCommandToggle: true,
-            latestCommandExecution: { command: RAW_COMMAND, output: "", status: "failed" },
+            latestCommandExecution: { command: RAW_COMMAND, output, status: "completed" },
             latestCommandPreview: COMMAND_LABEL,
           })}
         />,
       );
     });
 
-    const outputToggle = container.querySelector('[data-testid="agent-thread-command-output-toggle"]');
-    expect(outputToggle?.textContent).toContain("Failed");
-    expect(outputToggle?.textContent).not.toContain("whoami");
+    const body = container.querySelector<HTMLElement>('[data-testid="agent-thread-command-panel-body"]');
+    expect(body?.textContent).toContain("line 30");
+    expect(body?.textContent).not.toContain("line 1\n");
+    const showAll = Array.from(body?.querySelectorAll("button") ?? []).find((button) =>
+      button.textContent?.includes("Show all 30 lines"),
+    );
+    expect(showAll).not.toBeUndefined();
+
+    await act(async () => {
+      showAll?.click();
+    });
+    expect(body?.textContent).toContain("line 1\n");
+    expect(body?.textContent).not.toContain("Show all");
+  });
+
+  it.each([
+    ["completed", "Completed with no output"],
+    ["failed", "Failed"],
+    ["error", "Failed"],
+    ["cancelled", "Cancelled"],
+    ["canceled", "Cancelled"],
+  ])("renders one muted status line for a finished command with no output (%s)", async (status, label) => {
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createCommandRunProps({
+            isCompleted: true,
+            isRunning: false,
+            isThreadUnresolved: false,
+            isThreadPreviewExpanded: true,
+            latestCommandExecution: { command: RAW_COMMAND, output: "", status },
+            latestCommandPreview: COMMAND_LABEL,
+          })}
+        />,
+      );
+    });
+
+    const surface = container.querySelector<HTMLElement>('[data-testid="agent-thread-command-surface"]');
+    const statusLine = surface?.querySelector<HTMLElement>('[data-testid="agent-thread-command-panel-status"]');
+    expect(statusLine?.textContent).toBe(label);
+    expect(statusLine?.className).toContain("border-t border-slate-900/10");
+    expect(surface?.querySelector('[data-testid="agent-thread-command-panel-body"]')).toBeNull();
+    expect(surface?.querySelector('[data-testid="agent-thread-command-output-toggle"]')).toBeNull();
+    // Nothing to copy, so no copy glyph.
+    expect(surface?.querySelector('button[aria-label="Copy output"]')).toBeNull();
+    expect(countOccurrences(surface?.textContent ?? "", COMMAND_LABEL)).toBe(1);
+  });
+
+  it("shows a running status line in the expanded panel before any output arrives", async () => {
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createCommandRunProps({
+            isThreadPreviewExpanded: true,
+            showLiveCommandPlaceholder: true,
+            latestCommandExecution: { command: RAW_COMMAND, output: "", status: "running" },
+            latestCommandPreview: COMMAND_LABEL,
+          })}
+        />,
+      );
+    });
+
+    const surface = container.querySelector<HTMLElement>('[data-testid="agent-thread-command-surface"]');
+    expect(surface?.querySelector('[data-testid="agent-thread-command-panel-status"]')?.textContent).toBe(
+      "Running…",
+    );
+    expect(countOccurrences(surface?.textContent ?? "", COMMAND_LABEL)).toBe(1);
+  });
+
+  it("streams live output into the expanded panel body and keeps the stop control", async () => {
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createCommandRunProps({
+            isThreadPreviewExpanded: true,
+            showLiveCommandOutput: true,
+            canCancelTerminalRun: true,
+            onCancelTerminalCommand: vi.fn(),
+            latestCommandExecution: { command: RAW_COMMAND, output: "example-user\n", status: "running" },
+            latestCommandPreview: COMMAND_LABEL,
+          })}
+        />,
+      );
+    });
+
+    const surface = container.querySelector<HTMLElement>('[data-testid="agent-thread-command-surface"]');
+    const body = surface?.querySelector<HTMLElement>('[data-testid="agent-thread-command-panel-body"]');
+    expect(body?.textContent).toContain("example-user");
+    expect(body?.querySelector('[data-testid="chat-command-output"]')?.getAttribute("data-streaming")).toBe(
+      "true",
+    );
+    expect(surface?.querySelectorAll('[data-testid="chat-command-stop-button"]')).toHaveLength(1);
+    expect(surface?.textContent).not.toContain("bash -lc");
+    expect(countOccurrences(surface?.textContent ?? "", COMMAND_LABEL)).toBe(1);
+    // Streaming output is not a nested card either.
+    expect(surface?.querySelector('button[aria-label="View full output"]')).toBeNull();
+  });
+
+  it("trails a short result hint on the collapsed row once the command has finished", async () => {
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createCommandRunProps({
+            isCompleted: true,
+            isRunning: false,
+            isThreadUnresolved: false,
+            isThreadPreviewExpanded: false,
+            showCollapsedCommandToggle: true,
+            latestCommandExecution: { command: RAW_COMMAND, output: "example-user\n220a9ff\n", status: "completed" },
+            latestCommandPreview: `${COMMAND_LABEL} -> 220a9ff`,
+          })}
+        />,
+      );
+    });
+
+    const surface = container.querySelector<HTMLElement>('[data-testid="agent-thread-command-surface"]');
+    expect(surface?.getAttribute("data-expanded")).toBe("false");
+    const hint = surface?.querySelector<HTMLElement>('[data-testid="agent-thread-command-result-hint"]');
+    expect(hint?.textContent).toBe("→ 220a9ff");
+    expect(hint?.className).toContain("hidden");
+    expect(hint?.className).toContain("sm:inline-block");
+    expect(hint?.className).toContain("font-mono");
+    expect(hint?.className).toContain("dark:text-slate-500");
+    // The hint sits in the header row, before the chevron.
+    const row = container.querySelector('[data-testid="agent-thread-single-update-row"]');
+    expect(hint?.closest('[data-testid="agent-thread-single-update-row"]')).toBe(row);
+    const chevron = Array.from(row?.querySelectorAll('button[aria-label="Expand run updates"]') ?? []).at(-1);
+    expect(hint && chevron ? hint.compareDocumentPosition(chevron) & Node.DOCUMENT_POSITION_FOLLOWING : 0).toBeTruthy();
+    // Collapsed is still just the header row: no body, no toggle, no copy.
+    expect(surface?.querySelector('[data-testid="agent-thread-command-panel-body"]')).toBeNull();
+    expect(surface?.querySelector('[data-testid="agent-thread-command-output-toggle"]')).toBeNull();
+    expect(surface?.querySelector('button[aria-label="Copy output"]')).toBeNull();
+    expect(surface?.textContent).not.toContain("example-user");
+  });
+
+  it.each([
+    ["a long result line", "https://example.com/some/really/long/path/that/never/fits", "completed", false],
+    ["no output", "", "failed", false],
+    ["a running command", "220a9ff\n", "running", true],
+  ])("omits the collapsed result hint for %s", async (_label, output, status, isRunning) => {
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createCommandRunProps({
+            isCompleted: !isRunning,
+            isRunning,
+            isThreadUnresolved: isRunning,
+            isThreadPreviewExpanded: false,
+            showCollapsedCommandToggle: !isRunning && Boolean(output),
+            showLiveCommandOutput: isRunning && Boolean(output),
+            latestCommandExecution: { command: RAW_COMMAND, output, status },
+            latestCommandPreview: COMMAND_LABEL,
+          })}
+        />,
+      );
+    });
+
+    const surface = container.querySelector<HTMLElement>('[data-testid="agent-thread-command-surface"]');
+    expect(surface).not.toBeNull();
+    expect(surface?.querySelector('[data-testid="agent-thread-command-result-hint"]')).toBeNull();
   });
 
   it("keeps the command text on the output toggle under an icon rail, without the shell wrapper", async () => {
+    const onToggleCommandOutput = vi.fn();
     await act(async () => {
       root.render(
         <AgentJobThreadPreviewLayout
@@ -477,15 +661,62 @@ describe("AgentJobThreadPreviewLayout", () => {
             showCollapsedCommandToggle: true,
             latestCommandExecution: { command: RAW_COMMAND, output: "220a9ff\n", status: "completed" },
             latestCommandPreview: `${RAW_COMMAND} -> 220a9ff`,
+            onToggleCommandOutput,
           })}
         />,
       );
     });
 
+    // Regression pin: the icon-rail path keeps its toggle row (the panel path
+    // is the only one that dropped it).
     expect(container.querySelector('[data-testid="agent-thread-command-surface"]')).toBeNull();
-    const outputToggle = container.querySelector('[data-testid="agent-thread-command-output-toggle"]');
+    const outputToggle = container.querySelector<HTMLButtonElement>(
+      '[data-testid="agent-thread-command-output-toggle"]',
+    );
+    expect(outputToggle).not.toBeNull();
     expect(outputToggle?.textContent).toContain(`${COMMAND_LABEL} -> 220a9ff`);
     expect(outputToggle?.textContent).not.toContain("bash -lc");
+    expect(outputToggle?.textContent).toContain("View");
+    expect(container.querySelector('[data-testid="agent-thread-command-panel-body"]')).toBeNull();
+
+    await act(async () => {
+      outputToggle?.click();
+    });
+    expect(onToggleCommandOutput).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the framed output block with its own header under an icon rail once viewed", async () => {
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createCommandRunProps({
+            isCompleted: true,
+            isRunning: false,
+            isThreadUnresolved: false,
+            isThreadPreviewExpanded: true,
+            visibleCompactEvents: [
+              { id: "thinking", kind: "thinking", actorHandle: "@octo" },
+              { id: "command", kind: "command", actorHandle: "@octo" },
+            ],
+            singleCompactEvent: null,
+            singleCompactEventLabel: "",
+            showCollapsedCommandToggle: true,
+            showCollapsedCommandOutput: true,
+            latestCommandExecution: { command: RAW_COMMAND, output: "220a9ff\n", status: "completed" },
+            latestCommandPreview: `${RAW_COMMAND} -> 220a9ff`,
+          })}
+        />,
+      );
+    });
+
+    const outputToggle = container.querySelector('[data-testid="agent-thread-command-output-toggle"]');
+    expect(outputToggle?.textContent).toContain("Hide");
+    const block = container.querySelector<HTMLElement>('[data-testid="chat-command-output"]');
+    expect(block?.getAttribute("data-body-only")).toBeNull();
+    expect(block?.className).toContain("rounded-xl border");
+    expect(block?.textContent).toContain(RAW_COMMAND);
+    expect(block?.querySelector('button[aria-label="Copy full output"]')).not.toBeNull();
+    expect(block?.querySelector('button[aria-label="View full output"]')).not.toBeNull();
   });
 
   it("keeps non-command single update rows on the plain row treatment", async () => {
