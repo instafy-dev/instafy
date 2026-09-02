@@ -224,6 +224,9 @@ function statusSubtitle(event: HomeFeedEvent, viewerUserId: string | null): stri
       if (event.source.type !== "activity") {
         return null;
       }
+      if (event.source.item.data.threadKind === "automation") {
+        return "Scheduled conversation";
+      }
       const actorId = event.source.item.actor.userId;
       return actorId && actorId === viewerUserId ? "You started a conversation" : "Started a conversation";
     }
@@ -625,8 +628,16 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
           ? `${event.group.newCount} new of ${event.group.count} updates`
           : `${event.group.count} updates`
         : null;
+    // A scheduled conversation says so once, ahead of its state.
+    const scheduled =
+      event.source.type === "activity" &&
+      event.source.item.conversation?.threadKind === "automation" &&
+      event.kind !== "conversation"
+        ? "Scheduled"
+        : null;
     const rest =
-      [updates, statusSubtitle(event, viewerUserId), usablePreview(event.preview)].filter(Boolean).join(" · ") || null;
+      [scheduled, updates, statusSubtitle(event, viewerUserId), usablePreview(event.preview)].filter(Boolean).join(" · ") ||
+      null;
     return (
       <div key={event.key} className={[ROW_HOVER_CLASS, options.divider ? ROW_DIVIDER_CLASS : ""].filter(Boolean).join(" ")}>
         <FeedRow

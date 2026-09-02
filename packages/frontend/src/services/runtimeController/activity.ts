@@ -30,6 +30,8 @@ export interface ActivityConversationRef {
   id: string;
   title: string | null;
   visibility: string | null;
+  /** "automation" for a scheduled conversation; null for an ordinary one. */
+  threadKind: string | null;
 }
 
 export interface ActivityRunRef {
@@ -139,6 +141,7 @@ export function normalizeActivityItem(value: unknown): ActivityItem | null {
             id: conversationId,
             title: asString(conversation.title),
             visibility: asString(conversation.visibility),
+            threadKind: asString(conversation.threadKind),
           }
         : null,
     run:
