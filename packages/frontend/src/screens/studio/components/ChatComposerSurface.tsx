@@ -1330,18 +1330,23 @@ export function ChatComposerSurface({
                 the editor wrapper is as tall as the controls and centres the
                 editor, whose own padding keeps the last line centred as it
                 grows (COMPOSER_EDITOR_WRAPPER_CLASS, chatInputGrowth.ts); and
-                the row's own gap is 4px — the text starts 4px after the last
-                leading box and ends 4px before the first trailing one — while
-                the groups keep the button rhythm (gap-1.5 sm:gap-2). With the
-                glyphs inset 7px in their boxes, 4px reads as glyph-to-text
-                11px against a glyph-to-glyph 25px; the previous 8px read as
-                15px and pushed the text away from the image icon.
+                the row keeps ONE glyph-edge rhythm, ≈16px, on both sides.
+                The gaps are chosen between glyph edges, not box edges: the
+                22px glyphs sit inset 7px in their 36px boxes, so inside a
+                group gap-0.5 (2px) reads as 7+2+7 = 16px glyph-to-glyph, and
+                between a group and the editor gap-2 (8px) reads as 7+8 = 15px
+                glyph-to-text. Coarse pointers (44px boxes, 11px insets) keep
+                the same relative rhythm: 24px glyph-to-glyph, 19px
+                glyph-to-text. Before (8px inside a group, 4px to the editor)
+                the icons read 22px apart but the text only 11px from the
+                image icon — founder: "the text is too close to the picture
+                icon or the icon spacing is too large".
               */}
               <div
                 className={
                   browserComposerCondensed
                     ? "relative pb-0"
-                    : `relative flex items-end gap-1 ${
+                    : `relative flex items-end gap-2 ${
                         composerInlineControlsInTextRow &&
                         !(browserModeActive || compactBrowserViewport)
                           ? "pb-1.5"
@@ -1354,7 +1359,7 @@ export function ChatComposerSurface({
               >
                 {composerInlineControlsInTextRow ? (
                   <div
-                    className="flex flex-none items-center gap-1.5 sm:gap-2"
+                    className="flex flex-none items-center gap-0.5"
                     data-testid="chat-composer-leading-controls"
                   >
                     {homeButtonNode}
@@ -1380,7 +1385,7 @@ export function ChatComposerSurface({
                 </div>
                 {composerInlineControlsInTextRow ? (
                   <div
-                    className="flex flex-none items-center justify-end gap-1.5 sm:gap-2"
+                    className="flex flex-none items-center justify-end gap-0.5"
                     data-testid="chat-composer-trailing-controls"
                   >
                     {voiceStripNode}

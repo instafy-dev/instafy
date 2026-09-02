@@ -430,19 +430,22 @@ describe("ChatComposerSurface rest-row dress", () => {
     { viewport: "at sm+", compactBrowserViewport: false },
     { viewport: "below sm", compactBrowserViewport: true },
   ])(
-    "sizes the editor wrapper to the controls and gives the text a 4px gutter $viewport",
+    "sizes the editor wrapper to the controls and keeps one glyph rhythm across the row $viewport",
     async ({ compactBrowserViewport }) => {
       // Measured: every button box 36px centred at y=685 while the editor's
       // single-line box was 24px centred at y=681 — its wrapper was min-h-11
       // (44px) on every pointer, centred in a 36px row, so the text sat 4px
-      // above the icon centres. And box-to-text was 8px, the inter-button
-      // gap; with the glyphs inset 7px in their boxes that read as 15px
-      // glyph-to-text against a 25px glyph rhythm — the text looked pushed
-      // away from the image icon. Rules: the wrapper is exactly as tall as
+      // above the icon centres. Then the spacing: with 8px between boxes in
+      // a group and 4px between a group and the editor, the 22px glyphs
+      // (inset 7px in their boxes) read 22px apart but only 11px from the
+      // text — founder: "the text is too close to the picture icon or the
+      // icon spacing is too large". Rules: the wrapper is exactly as tall as
       // the controls, fine and coarse, and centres the editor (the editor
       // itself pads to the same height and folds that padding into its line
-      // cap — chatInputGrowth.test.ts, ChatInput.test.tsx); the row's own
-      // gap is 4px while the groups keep the button rhythm.
+      // cap — chatInputGrowth.test.ts, ChatInput.test.tsx); and the row keeps
+      // one glyph-edge rhythm — gap-0.5 inside a group (7+2+7 = 16px
+      // glyph-to-glyph) and gap-2 between a group and the editor (7+8 = 15px
+      // glyph-to-text), the same tokens on every viewport.
       await renderRow("", compactBrowserViewport);
       const { ghost } = await probeIconButtons();
       const wrapper = classTokens(container.querySelector('[data-testid="chat-input"]')?.parentElement);
@@ -472,8 +475,8 @@ describe("ChatComposerSurface rest-row dress", () => {
       const gapTokens = (tokens: Set<string>) =>
         sortedTokens(new Set(Array.from(tokens).filter((token) => utilityRoot(token).startsWith("gap-"))));
       expect(row.has("items-end")).toBe(true);
-      expect(gapTokens(row)).toEqual(["gap-1"]);
-      for (const group of groups) expect(gapTokens(group)).toEqual(["gap-1.5", "sm:gap-2"]);
+      expect(gapTokens(row)).toEqual(["gap-2"]);
+      for (const group of groups) expect(gapTokens(group)).toEqual(["gap-0.5"]);
     },
   );
 });
