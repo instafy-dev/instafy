@@ -27,6 +27,7 @@ vi.mock("../ComposerActionMenu", () => ({
       data-upload-image={String(typeof props.onUploadImage === "function")}
       data-insert-suggestion={String(typeof props.onInsertSuggestion === "function")}
       data-trigger-class={String(props.triggerClassName ?? "")}
+      data-trigger-icon-class={String(props.triggerIconClassName ?? "")}
     >
       <button type="button" aria-label="Open composer actions" className="mock-menu-trigger" />
       {typeof props.onUploadImage === "function" ? (
@@ -544,6 +545,7 @@ describe("ChatComposerSurface", () => {
     const { composerGhostActionClass, composerActionIconClass } = createProps();
     const nodes = layoutNodes();
     expect(nodes.menu?.getAttribute("data-trigger-class")).toBe(composerGhostActionClass);
+    expect(nodes.menu?.getAttribute("data-trigger-icon-class")).toBe(composerActionIconClass);
     if (nodes.voice) {
       expect(nodes.voice.getAttribute("data-ghost-class")).toBe(composerGhostActionClass);
       expect(nodes.voice.getAttribute("data-icon-class")).toBe(composerActionIconClass);

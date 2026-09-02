@@ -86,6 +86,7 @@ export function ComposerActionMenu({
   uploadImageDisabled = false,
   onInsertSuggestion,
   triggerClassName,
+  triggerIconClassName,
   mutationDisabled = false,
   inviteActionLabel = "Invite teammates",
 }: {
@@ -111,6 +112,10 @@ export function ComposerActionMenu({
   uploadImageDisabled?: boolean;
   onInsertSuggestion?: () => void;
   triggerClassName?: string;
+  // The trigger's glyph is sized by the composer, the same class it hands
+  // image, mic and Send, so "+" is one of four identical controls; the
+  // menu never picks a glyph size of its own.
+  triggerIconClassName: string;
   mutationDisabled?: boolean;
   inviteActionLabel?: string;
 }) {
@@ -152,7 +157,7 @@ export function ComposerActionMenu({
         data-testid="composer-action-menu-trigger"
         className={triggerClassName}
       >
-        <Plus className="h-4 w-4" aria-hidden="true" />
+        <Plus className={triggerIconClassName} aria-hidden="true" />
       </IconButton>
       <StudioDialogPopover
         placement="top start"

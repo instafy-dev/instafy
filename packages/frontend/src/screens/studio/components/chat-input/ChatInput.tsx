@@ -16,7 +16,13 @@ import { AssistantMentionsPlugin, type MentionAgentProfile } from "./AssistantMe
 import { formatGhostSuggestionRemainderForDisplay } from "./ghostSuggestionDisplay";
 import { SlashCommandsPlugin } from "./SlashCommandsPlugin";
 import { UserMentionNode } from "./UserMentionNode";
-import { resolveChatInputMaxHeightPx } from "./chatInputGrowth";
+import {
+  CHAT_INPUT_CONTROL_HEIGHT_CLASS,
+  CHAT_INPUT_OVERLAY_TOP_CLASS,
+  CHAT_INPUT_VERTICAL_PADDING_CLASS,
+  resolveChatInputMaxHeightPx,
+} from "./chatInputGrowth";
+import { useCoarsePointer } from "../../../../hooks/useCoarsePointer";
 import type { ControllerProjectMember } from "../../../../sdk/instafy";
 import { installBrowserUseVirtualClipboardForAutomation } from "./browserUseVirtualClipboard";
 
@@ -118,6 +124,19 @@ function ChatInputEditor(
   const pendingLocalChangeRef = useRef<{ value: string; editorState: string } | null>(null);
   const pendingSelectEndAfterSyncRef = useRef(false);
   const showRecordingIndicator = recordingIndicatorActive === true;
+  const coarsePointer = useCoarsePointer();
+  // The editor's box in the one-row composer: the row controls' height as
+  // its minimum and (control − line) / 2 of padding on each side, so a
+  // single line — and the last line of a wrapped draft, since the row is
+  // items-end — centres on the controls (see chatInputGrowth.ts). The
+  // Browser-session condensed bar (compact) keeps its own tighter box. The
+  // overlays sit on the first line, so they carry the same top offset.
+  const editorBoxClass = compact
+    ? "min-h-7 max-h-24 py-0.5"
+    : `${CHAT_INPUT_CONTROL_HEIGHT_CLASS} ${CHAT_INPUT_VERTICAL_PADDING_CLASS}`;
+  const overlayTopClass = compact ? "top-1 sm:top-0.5" : CHAT_INPUT_OVERLAY_TOP_CLASS;
+  const overlayPaddingClass = compact ? "py-1 sm:py-0.5" : CHAT_INPUT_VERTICAL_PADDING_CLASS;
+  const maxHeightPx = compact ? null : resolveChatInputMaxHeightPx({ compactViewport, coarsePointer });
   const showGhostSuggestion = !showRecordingIndicator && Boolean(ghostSuggestionRemainder && ghostSuggestionRemainder.length > 0);
   const displayedGhostSuggestionRemainder = showGhostSuggestion
     ? formatGhostSuggestionRemainderForDisplay(ghostSuggestionRemainder ?? "")
@@ -262,7 +281,7 @@ function ChatInputEditor(
         <div
           aria-hidden="true"
           data-testid="chat-input-ghost-suggestion"
-          className="pointer-events-none absolute inset-x-0 bottom-0 top-1 z-10 overflow-hidden whitespace-pre-wrap break-words pr-2 text-base leading-5 text-slate-400 sm:top-0.5 sm:text-sm dark:text-slate-600"
+          className={`pointer-events-none absolute inset-x-0 bottom-0 z-10 overflow-hidden whitespace-pre-wrap break-words pr-2 text-base leading-5 text-slate-400 sm:text-sm dark:text-slate-600 ${overlayTopClass}`}
         >
           <span className="invisible">{value}</span>
           <span className="opacity-70 dark:opacity-45">{displayedGhostSuggestionRemainder}</span>
@@ -271,7 +290,7 @@ function ChatInputEditor(
       {showRecordingIndicator ? (
         <div
           aria-hidden="true"
-          className="pointer-events-none absolute inset-0 z-10 overflow-hidden py-1 text-base leading-5 sm:py-0.5 sm:text-sm"
+          className={`pointer-events-none absolute inset-0 z-10 overflow-hidden text-base leading-5 sm:text-sm ${overlayPaddingClass}`}
         >
           {value.length > 0 ? (
             <span className="whitespace-pre-wrap break-words text-transparent">{value}</span>
@@ -311,17 +330,17 @@ function ChatInputEditor(
             // until the per-viewport line cap, then scrolls inside. The cap is
             // an inline style so the line count stays the single source of
             // truth (see chatInputGrowth.ts).
-            style={compact ? undefined : { maxHeight: `${resolveChatInputMaxHeightPx({ compactViewport })}px` }}
-            data-max-height-px={compact ? undefined : resolveChatInputMaxHeightPx({ compactViewport })}
-            className={`relative z-0 w-full overflow-auto whitespace-pre-wrap break-words text-base leading-5 text-slate-900 outline-none sm:text-sm dark:text-slate-100 ${
-              compact ? "min-h-7 max-h-24 py-0.5" : "min-h-7 py-1 sm:min-h-6 sm:py-0.5"
-            } ${readOnly ? "cursor-not-allowed opacity-60" : ""}`}
+            style={maxHeightPx === null ? undefined : { maxHeight: `${maxHeightPx}px` }}
+            data-max-height-px={maxHeightPx ?? undefined}
+            className={`relative z-0 w-full overflow-auto whitespace-pre-wrap break-words text-base leading-5 text-slate-900 outline-none sm:text-sm dark:text-slate-100 ${editorBoxClass} ${
+              readOnly ? "cursor-not-allowed opacity-60" : ""
+            }`}
           />
         }
         placeholder={
           showGhostSuggestion || showRecordingIndicator ? null : (
             <div
-              className={`pointer-events-none absolute inset-x-0 top-1 z-10 block overflow-hidden text-ellipsis whitespace-nowrap pr-2 text-base leading-5 text-slate-400 sm:top-0.5 sm:text-sm dark:text-slate-500 ${
+              className={`pointer-events-none absolute inset-x-0 z-10 block overflow-hidden text-ellipsis whitespace-nowrap pr-2 text-base leading-5 text-slate-400 sm:text-sm dark:text-slate-500 ${overlayTopClass} ${
                 readOnly ? "opacity-60" : ""
               }`}
             >

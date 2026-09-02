@@ -248,7 +248,7 @@ export function VoiceConversationActionStrip({
               : "Turn on spoken assistant replies"}
           </span>
           {replySpeaking ? (
-            <Spinner aria-hidden="true" tone="primary" size="xs" className="h-[22px] w-[22px]" />
+            <Spinner aria-hidden="true" tone="primary" size="xs" className={actionIconClassName} />
           ) : voiceRepliesEnabled ? (
             <SoundHigh className={actionIconClassName} aria-hidden="true" />
           ) : (
