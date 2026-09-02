@@ -66,9 +66,9 @@ type StudioSidebarWorkspaceSwitcherProps = {
 };
 
 /**
- * The spaces panel. Teams are a flat chip strip (mirroring the sidebar team
- * rail) rather than a nested dropdown — one interaction language, no popover
- * inside a popover. Everything below is a single spaces list with the active
+ * The spaces panel. Teams are a flat chip strip (this is the picker the
+ * sidebar's org deck opens) rather than a nested dropdown — one interaction
+ * language, no popover inside a popover. Everything below is a single spaces list with the active
  * space as its first, selected row.
  */
 export function StudioSidebarWorkspaceSwitcher({
