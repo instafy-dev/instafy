@@ -284,7 +284,6 @@ import {
 } from "./chatMessageDetailHelpers";
 import {
   HumanSpeakerIdentityLabel,
-  HumanSpeakerIdentityPill,
   resolveHumanChatIdentity,
 } from "./chatHumanIdentity";
 import { ChatComposerSurface } from "./ChatComposerSurface";
@@ -323,9 +322,7 @@ import {
   readBrowserTransportPreference,
   writeBrowserTransportPreference,
 } from "./browserTransportPreference";
-import {
-  AssistantSpeakerIdentityPill,
-} from "./AssistantSpeakerIdentityPill";
+import { ChatTranscriptViewport } from "./ChatTranscriptViewport";
 import { resolveSharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import { useSharedBrowserApprovalTransport } from "./useSharedBrowserApprovalTransport";
 
@@ -404,7 +401,6 @@ function formatCredentialConnectionFailure(raw: string | null | undefined): stri
     : `${compact.slice(0, maxChars - 1).trimEnd()}…`;
 }
 
-const SPEAKER_OVERLAY_SELECTOR = '[data-chat-speaker-overlay="true"]';
 const NARROW_SPEAKER_INLINE_SELECTOR = '[data-chat-speaker-inline="true"]';
 const SPEAKER_STICKY_FALLBACK_TOP_PX = 8;
 
@@ -423,54 +419,6 @@ function speakersEqual(left: StickyChatSpeaker | null, right: StickyChatSpeaker 
     right.kind === "human" &&
     left.label === right.label &&
     left.avatarSeed === right.avatarSeed
-  );
-}
-
-function ChatSpeakerStickyOverlay({
-  speaker,
-}: {
-  speaker: StickyChatSpeaker | null;
-}) {
-  return (
-    <div
-      aria-hidden={speaker ? undefined : "true"}
-      data-chat-speaker-overlay="true"
-      data-testid="chat-speaker-sticky-overlay"
-      className="relative"
-    >
-      {/* Backdrop (#191): the pill rides over whatever scrolls under it, so the
-          transcript frosts out beneath the top edge — a tapered backdrop blur
-          plus a tint from the surface colour, both masked to nothing across
-          the band, so a line passing through reads as glass, not as greyed-out
-          text. Never a solid hold (a held band reads as a strip stamped over
-          the text) and never `transparent` (oklab ramps to black). It spans
-          the scroll container's horizontal inset and fades with the pill. */}
-      <div
-        aria-hidden="true"
-        data-testid="chat-speaker-sticky-backdrop"
-        className={[
-          "pointer-events-none absolute -inset-x-3 -top-2 h-12 bg-gradient-to-b from-white/90 to-white/0 backdrop-blur-[6px] [mask-image:linear-gradient(to_bottom,black_20%,transparent)] transition-opacity duration-150 ease-out dark:from-[var(--color-studio-dark-panel)]/90 dark:to-[var(--color-studio-dark-panel)]/0 sm:-inset-x-4",
-          speaker ? "opacity-100" : "opacity-0",
-        ].join(" ")}
-      />
-      <div
-        className={[
-          "relative w-fit max-w-full transition-[opacity,transform] duration-150 ease-out",
-          speaker ? "translate-y-0 opacity-100" : "-translate-y-1 opacity-0",
-        ].join(" ")}
-      >
-        {speaker ? (
-          speaker.kind === "assistant" ? (
-            <AssistantSpeakerIdentityPill
-              handle={speaker.handle}
-              agentIdentity={{ handle: speaker.handle, avatarSeed: speaker.avatarSeed }}
-            />
-          ) : (
-            <HumanSpeakerIdentityPill avatarSeed={speaker.avatarSeed} label={speaker.label} />
-          )
-        ) : null}
-      </div>
-    </div>
   );
 }
 
@@ -3121,6 +3069,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   const [stickyChatSpeaker, setStickyChatSpeaker] =
     useState<StickyChatSpeaker | null>(null);
+  // The pill floats over the scroller's top edge as a sibling of the scroller
+  // (never inside it, so the transcript's top-edge fade cannot touch it); its
+  // top edge is the line a speaker marker has to cross to become sticky.
+  const stickySpeakerOverlayRef = useRef<HTMLDivElement>(null);
 
   useLayoutEffect(() => {
     const scrollContainer = scrollContainerRef.current;
@@ -3132,8 +3084,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     let animationFrameId: number | null = null;
     const readAndApplySpeaker = () => {
       const containerRect = scrollContainer.getBoundingClientRect();
-      const overlay = scrollContainer.querySelector(SPEAKER_OVERLAY_SELECTOR);
-      const overlayRect = overlay?.getBoundingClientRect();
+      const overlayRect = stickySpeakerOverlayRef.current?.getBoundingClientRect();
       const thresholdTop = overlayRect
         ? overlayRect.top
         : containerRect.top + SPEAKER_STICKY_FALLBACK_TOP_PX;
@@ -5365,23 +5316,19 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           />
         </ChatColumn>
       </div>
-      <div
-        className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 pb-4 pt-2 sm:px-4 sm:pb-2"
-        data-testid="chat-message-scroll"
-        aria-label={conversationLabel}
-        role="log"
+      <ChatTranscriptViewport
+        ariaLabel={conversationLabel}
         onScroll={handleScroll}
         onContextMenu={handleConversationContextMenu}
-        ref={scrollContainerRef}
-        style={chatScrollPaddingBottom ? { paddingBottom: chatScrollPaddingBottom } : undefined}
+        scrollContainerRef={scrollContainerRef}
+        scrollPaddingBottom={chatScrollPaddingBottom}
+        stickySpeaker={stickyChatSpeaker}
+        stickySpeakerOverlayRef={stickySpeakerOverlayRef}
       >
         <OctoScrollMotionScope
           sourceRef={scrollContainerRef}
           resetKey={activeConversationId ?? "no-conversation"}
         >
-          <ChatColumn className="pointer-events-none sticky top-0 z-30 h-0">
-            <ChatSpeakerStickyOverlay speaker={stickyChatSpeaker} />
-          </ChatColumn>
           <div ref={handleScrollContentRef} className="flex min-h-full flex-col gap-2.5">
           {pinChatMessagesToBottom && !gettingStartedTopAnchorActive ? (
             <div className="flex-1" />
@@ -5547,7 +5494,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           </ChatColumn>
           </div>
         </OctoScrollMotionScope>
-      </div>
+      </ChatTranscriptViewport>
       </div>
 
       <ChatMessageMenuOverlay
