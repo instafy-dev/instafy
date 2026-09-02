@@ -1,104 +1,53 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import {
-  Bell,
-  ChatLines,
-  Clock,
-  NavArrowRight,
-  Sparks,
-  Xmark,
-} from "iconoir-react";
+import { ChatLines, Clock, Group, Plus, Xmark } from "iconoir-react";
+import { AttentionBadge } from "../../../components/AttentionBadge";
+import { Badge } from "../../../components/Badge";
 import { Button, IconButton } from "../../../components/Button";
 import { FeedRow } from "../../../components/FeedRow";
+import { Heading } from "../../../components/Heading";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
 import {
   useConversations,
   type ConversationState,
 } from "../../../conversations/ConversationsProvider";
-import { getOrgDisplayName } from "../../../org/orgNaming";
 import { useProjects } from "../../../projects/useProjects";
 import {
   controllerClient,
-  type ControllerAutomation,
   type ControllerProjectConversation,
   type NotificationInboxItem,
 } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
+import { DARK_DIVIDER_BORDER_CLASS } from "../../../theme/darkSurfaces";
 import { isUUID } from "../../../utils/uuid";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import { buildHomeAttentionEntries, type HomeAttentionEntry } from "../homeAttention";
-import { HOME_STARTERS, type PromptOnboardingAction } from "./onboardingPlaybook";
-import { SettingsShell } from "./SettingsShell";
 import {
-  StudioListGroupHeader,
-  StudioListRow,
-  StudioListSection,
-  StudioListSurface,
-} from "./StudioListSection";
+  HOME_PERSONAL_TEAM_KEY,
+  HOME_TEAM_FILTER_ALL,
+  buildHomeFeed,
+  formatRelativeTimestamp,
+  getSpaceLabel,
+  readHomeLastSeen,
+  resolveConversationActor,
+  writeHomeLastSeen,
+  type HomeFeedEvent,
+  type HomeFeedOrganizationRef,
+  type HomeFeedRecentConversation,
+} from "../homeFeed";
+import { useWorkspaceControls } from "../workspaceControls";
+import { ChatMessageAvatar } from "./ChatMessageAvatar";
+import { SettingsShell } from "./SettingsShell";
 import { resolveHomeRecentConversationNavigationTarget } from "./homeRecentConversationNavigation";
 
-const HOME_SUGGESTIONS = HOME_STARTERS.slice(0, 4);
-const HOME_ROW_CLASS_NAME =
-  "rounded-none border-0 px-3 py-3 hover:bg-slate-50 dark:hover:bg-slate-900/45";
-// One icon shell for every Home row; status/tone comes from the icon color,
-// not from per-row shell sizes or tinted backgrounds.
-const HOME_ROW_ICON_CLASS_NAME =
-  "h-8 w-8 rounded-lg bg-transparent text-slate-400 dark:text-slate-500";
-const HOME_SUGGESTION_ICON_CLASS_NAME =
-  "h-8 w-8 rounded-lg bg-slate-100 text-slate-600 dark:bg-slate-900 dark:text-slate-300";
-
-function formatCountSummary(count: number, singular: string, plural: string): string {
-  return count === 1 ? `1 ${singular}` : `${count} ${plural}`;
-}
-
-function formatRelativeTimestamp(raw: string | null | undefined): string | null {
-  if (!raw) {
-    return null;
-  }
-  const timestamp = new Date(raw).getTime();
-  if (!Number.isFinite(timestamp)) {
-    return null;
-  }
-  const diffMs = Date.now() - timestamp;
-  const diffMinutes = Math.max(0, Math.round(diffMs / 60000));
-  if (diffMinutes < 1) {
-    return "just now";
-  }
-  if (diffMinutes < 60) {
-    return `${diffMinutes}m ago`;
-  }
-  const diffHours = Math.round(diffMinutes / 60);
-  if (diffHours < 24) {
-    return `${diffHours}h ago`;
-  }
-  const diffDays = Math.round(diffHours / 24);
-  return `${diffDays}d ago`;
-}
-
-function formatNextAutomationLabel(automation: ControllerAutomation | null): string | null {
-  if (!automation) {
-    return null;
-  }
-  const source = automation.nextRunAt ?? automation.runAt ?? null;
-  if (!source) {
-    return null;
-  }
-  try {
-    const date = new Date(source);
-    if (Number.isNaN(date.getTime())) {
-      return null;
-    }
-    return new Intl.DateTimeFormat(undefined, {
-      month: "short",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    }).format(date);
-  } catch {
-    return null;
-  }
-}
+// Flat rows separated by a hairline: Home is a plain panel, so a lane is a
+// section with rows, never a card inside it (darkSurfaces rule 5).
+const ROW_SEPARATOR_CLASS = `border-t border-slate-200/70 first:border-t-0 ${DARK_DIVIDER_BORDER_CLASS}`;
+const ROW_ICON_CLASS = "h-8 w-8 rounded-full bg-transparent";
+const RECENT_SPACE_FAN_OUT = 8;
+const RECENT_PER_SPACE = 3;
+const RECENT_LIMIT = 24;
 
 function extractConversationTitle(conversation: ControllerProjectConversation): string {
   const metadata =
@@ -116,50 +65,13 @@ function extractConversationTitle(conversation: ControllerProjectConversation): 
   return "Conversation";
 }
 
-function getSpaceLabel(value: string | null | undefined): string {
-  const trimmed = value?.trim() ?? "";
-  return trimmed.length > 0 ? trimmed : "Untitled Space";
-}
-
-function getProjectGroupLabel(projectName: string | null | undefined, orgName: string | null | undefined): string {
-  const normalizedProjectName = getSpaceLabel(projectName);
-  const orgLabel = getOrgDisplayName(orgName ?? null);
-  return [normalizedProjectName, orgLabel].filter(Boolean).join(" · ");
-}
-
 function getConversationPreview(conversation: ConversationState): string | null {
-  const candidate = [...conversation.messages]
-    .reverse()
-    .find((message) => message.content.trim().length > 0);
+  const candidate = [...conversation.messages].reverse().find((message) => message.content.trim().length > 0);
   return candidate?.content.trim() ?? null;
 }
 
-function findConversationByAnyId(conversations: ConversationState[], id: string): ConversationState | null {
-  return conversations.find((conversation) => conversation.localId === id || conversation.controllerId === id) ?? null;
-}
-
-function buildConversationPathLabel(
-  conversation: ConversationState,
-  conversations: ConversationState[],
-): string | null {
-  const labels: string[] = [];
-  const seenIds = new Set<string>([conversation.localId]);
-  let parentId = conversation.parentConversationId?.trim() ?? "";
-
-  while (parentId && !seenIds.has(parentId)) {
-    seenIds.add(parentId);
-    const parent = findConversationByAnyId(conversations, parentId);
-    if (!parent) {
-      break;
-    }
-    labels.unshift(parent.title || "Conversation");
-    parentId = parent.parentConversationId?.trim() ?? "";
-  }
-
-  return labels.length > 0 ? labels.join(" / ") : null;
-}
-
-function getHomeRowPreview(value: string | null): string | null {
+// Bare run counters ("3") leak in as previews; they say nothing on a row.
+function usablePreview(value: string | null | undefined): string | null {
   const trimmed = value?.trim() ?? "";
   if (!trimmed) {
     return null;
@@ -167,41 +79,100 @@ function getHomeRowPreview(value: string | null): string | null {
   return /^\d{1,3}$/.test(trimmed) ? null : trimmed;
 }
 
-interface HomeRecentConversation {
-  projectId: string;
-  projectName: string;
-  orgName: string;
-  conversationId: string | null;
-  localConversationId: string | null;
-  title: string;
-  preview: string | null;
-  threadPath: string | null;
-  updatedAt: string;
+function buildRouteToConversation(projectId: string, conversationControllerId: string | null): string {
+  try {
+    const url = new URL(window.location.href);
+    url.pathname = "/studio";
+    url.searchParams.set("projectId", projectId);
+    if (conversationControllerId) {
+      url.searchParams.set("conversationControllerId", conversationControllerId);
+    } else {
+      url.searchParams.delete("conversationControllerId");
+    }
+    url.searchParams.delete("conversationId");
+    url.searchParams.set("panel", "chat");
+    const search = url.searchParams.toString();
+    return `${url.pathname}${search ? `?${search}` : ""}`;
+  } catch {
+    return `/studio?projectId=${encodeURIComponent(projectId)}${
+      conversationControllerId ? `&conversationControllerId=${encodeURIComponent(conversationControllerId)}` : ""
+    }&panel=chat`;
+  }
 }
 
-interface HomeRecentConversationGroup {
-  key: string;
+function TeamChip({
+  label,
+  count,
+  selected,
+  onPress,
+  testId,
+}: {
   label: string;
-  entries: HomeRecentConversation[];
-}
-
-interface HomeAttentionItem {
-  key: string;
-  title: string;
-  subtitle: string;
-  groupLabel: string;
-  meta: string | null;
-  preview: string | null;
-  kind: "running" | "queued" | "reply";
+  count: number;
+  selected: boolean;
   onPress: () => void;
-  onDismiss?: () => void;
   testId: string;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={selected}
+      data-testid={testId}
+      onClick={onPress}
+      className={[
+        "inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-400/60",
+        selected
+          ? "border-primary-200 bg-primary-50 text-primary-700 dark:border-primary-500/40 dark:bg-primary-500/10 dark:text-primary-200"
+          : "border-slate-200/70 text-slate-600 hover:bg-slate-100 dark:border-[color:var(--color-studio-dark-divider)] dark:text-slate-300 dark:hover:bg-[var(--color-studio-dark-active)]",
+      ].join(" ")}
+    >
+      {label}
+      <AttentionBadge count={count} aria-hidden className="shrink-0" />
+    </button>
+  );
 }
 
-interface HomeAttentionItemGroup {
-  key: string;
-  label: string;
-  entries: HomeAttentionItem[];
+function LaneHeader({ label, action }: { label: string; action?: ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-3 px-1 pb-1.5">
+      <Text as="h2" variant="overline" tone="subtle">
+        {label}
+      </Text>
+      {action}
+    </div>
+  );
+}
+
+function EventIcon({ event }: { event: HomeFeedEvent }) {
+  if (event.actor?.handle) {
+    return (
+      <ChatMessageAvatar
+        kind="assistant"
+        agent={{ handle: event.actor.handle, avatarSeed: event.actor.avatarSeed }}
+        size="xs"
+      />
+    );
+  }
+  if (event.kind === "running") {
+    return <Spinner size="xs" />;
+  }
+  if (event.kind === "queued") {
+    return <Clock className="h-4 w-4 text-amber-600 dark:text-amber-300" aria-hidden="true" />;
+  }
+  if (event.kind === "reply") {
+    return <span className="block h-2 w-2 rounded-full bg-rose-500 dark:bg-rose-300" aria-hidden="true" />;
+  }
+  return <ChatLines className="h-4 w-4 text-slate-400 dark:text-slate-500" aria-hidden="true" />;
+}
+
+function statusSubtitle(event: HomeFeedEvent): string | null {
+  if (event.kind === "running") {
+    return "Run in progress";
+  }
+  if (event.kind === "queued") {
+    return "Waiting for a runtime";
+  }
+  return null;
 }
 
 interface HomePanelProps {
@@ -216,17 +187,49 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
     createConversation,
     markConversationRead,
     setConversationControllerId,
-    setConversationDraft,
   } = useConversations();
   const { showStatus } = useStatus();
   const { requestUrlPush, openConversationTab } = useWorkspaceTabs();
+  const { userEmail, onStartNewProject, onOpenOrgSettings } = useWorkspaceControls();
   const navigate = useNavigate();
-  const [automations, setAutomations] = useState<ControllerAutomation[]>([]);
-  const [recentConversations, setRecentConversations] = useState<HomeRecentConversation[]>([]);
+  const [recentConversations, setRecentConversations] = useState<HomeFeedRecentConversation[]>([]);
   const [recentLoading, setRecentLoading] = useState(false);
-  const [pendingStarterConversationId, setPendingStarterConversationId] = useState<string | null>(null);
-  const [locallyDismissedAttentionKeys, setLocallyDismissedAttentionKeys] = useState<string[]>([]);
-  const [collapsedGroupKeys, setCollapsedGroupKeys] = useState<string[]>([]);
+  const [locallyDismissedKeys, setLocallyDismissedKeys] = useState<string[]>([]);
+  const [teamFilter, setTeamFilter] = useState(HOME_TEAM_FILTER_ALL);
+  // The cut is where the previous visit ended; this visit becomes the next cut.
+  const [lastSeenAt] = useState(() => readHomeLastSeen(userEmail));
+  useEffect(() => {
+    writeHomeLastSeen(userEmail, Date.now());
+  }, [userEmail]);
+
+  // Membership, not spaces, decides which teams get a chip: a team you just
+  // joined (or created) has no space yet but still belongs on Home.
+  const [organizations, setOrganizations] = useState<HomeFeedOrganizationRef[]>([]);
+  const [orgsEpoch, setOrgsEpoch] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    controllerClient.organizations
+      .list()
+      .then((orgs) => {
+        if (!cancelled) {
+          setOrganizations(orgs.map((org) => ({ id: org.id, name: org.name })));
+        }
+      })
+      .catch(() => {
+        // Keep the previous list; a failed refresh must not drop chips.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [orgsEpoch, userEmail]);
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    const bump = () => setOrgsEpoch((epoch) => epoch + 1);
+    window.addEventListener("instafy:orgs-updated", bump);
+    return () => window.removeEventListener("instafy:orgs-updated", bump);
+  }, []);
 
   const currentProject = useMemo(
     () => projectList.find((project) => project.id === activeProjectId) ?? null,
@@ -245,49 +248,26 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
     return () => window.clearInterval(timer);
   }, [refreshInbox]);
 
-  useEffect(() => {
-    if (!activeProjectId) {
-      setAutomations([]);
-      return;
-    }
-    let cancelled = false;
-    controllerClient.automations.listForProject({ projectId: activeProjectId })
-      .then((items) => {
-        if (!cancelled) {
-          setAutomations(items ?? []);
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setAutomations([]);
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [activeProjectId]);
-
-  const localRecentConversations = useMemo<HomeRecentConversation[]>(() => {
+  // The active space's conversations are already in memory; every other space
+  // is fetched (a bounded fan-out — Phase 2 replaces this with a user-level
+  // activity feed so nothing depends on which spaces this device has opened).
+  const localRecentConversations = useMemo<HomeFeedRecentConversation[]>(() => {
     if (!activeProjectId || !currentProject) {
       return [];
     }
-    return [...conversations]
-      .sort((a, b) => {
-        const aTimestamp = a.messages.at(-1)?.timestamp ?? a.createdAt;
-        const bTimestamp = b.messages.at(-1)?.timestamp ?? b.createdAt;
-        return bTimestamp - aTimestamp;
-      })
-      .slice(0, 5)
+    return conversations
+      .filter((conversation) => conversation.lifecycleStatus === "active")
       .map((conversation) => ({
         projectId: activeProjectId,
         projectName: getSpaceLabel(currentProject.name),
+        orgId: currentProject.orgId,
         orgName: currentProject.orgName || "",
         conversationId: conversation.controllerId ?? null,
         localConversationId: conversation.localId,
         title: conversation.title || "Conversation",
-        preview: getHomeRowPreview(getConversationPreview(conversation)),
-        threadPath: buildConversationPathLabel(conversation, conversations),
+        preview: usablePreview(getConversationPreview(conversation)),
         updatedAt: new Date(conversation.messages.at(-1)?.timestamp ?? conversation.createdAt).toISOString(),
+        actor: resolveConversationActor(conversation),
       }));
   }, [activeProjectId, conversations, currentProject]);
 
@@ -297,62 +277,44 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
       return;
     }
     let cancelled = false;
-    const loadRecentConversations = async () => {
+    const load = async () => {
       setRecentLoading(true);
       try {
-        const prioritizedProjects = [...projectList].sort((a, b) => {
-          if (a.id === activeProjectId) {
-            return -1;
-          }
-          if (b.id === activeProjectId) {
-            return 1;
-          }
+        const prioritized = [...projectList].sort((a, b) => {
+          if (a.id === activeProjectId) return -1;
+          if (b.id === activeProjectId) return 1;
           return getSpaceLabel(a.name).localeCompare(getSpaceLabel(b.name));
         });
-        const perProject = await Promise.all(
-          prioritizedProjects.slice(0, 8).map(async (project) => {
-            const conversationsForProject =
+        const perSpace = await Promise.all(
+          prioritized.slice(0, RECENT_SPACE_FAN_OUT).map(async (project) => {
+            const rows =
               (await controllerClient.conversations.listForProject({
                 projectId: project.id,
                 rootsOnly: true,
-                limit: 3,
+                limit: RECENT_PER_SPACE,
               })) ?? [];
-            return conversationsForProject.map((conversation) => ({
+            return rows.map<HomeFeedRecentConversation>((conversation) => ({
               projectId: project.id,
               projectName: getSpaceLabel(project.name),
+              orgId: project.orgId,
               orgName: project.orgName,
               conversationId: conversation.id,
               localConversationId: null,
               title: extractConversationTitle(conversation),
-              preview: getHomeRowPreview(conversation.lastMessagePreview?.trim() || null),
-              threadPath: null,
-              updatedAt:
-                conversation.updatedAt || conversation.lastMessageAt || conversation.createdAt,
+              preview: usablePreview(conversation.lastMessagePreview),
+              updatedAt: conversation.updatedAt || conversation.lastMessageAt || conversation.createdAt,
             }));
           }),
         );
-        const merged = [...perProject.flat(), ...localRecentConversations]
-          .filter((entry, index, entries) => {
-            const dedupeKey =
-              entry.conversationId?.trim() ||
-              `${entry.projectId}:${entry.localConversationId?.trim() || entry.title}`;
-            return (
-              entries.findIndex((candidate) => {
-                const candidateKey =
-                  candidate.conversationId?.trim() ||
-                  `${candidate.projectId}:${candidate.localConversationId?.trim() || candidate.title}`;
-                return candidateKey === dedupeKey;
-              }) === index
-            );
-          })
-          .sort((a, b) => {
-            const aTime = Date.parse(a.updatedAt);
-            const bTime = Date.parse(b.updatedAt);
-            return (Number.isFinite(bTime) ? bTime : 0) - (Number.isFinite(aTime) ? aTime : 0);
-          })
-          .slice(0, 8);
+        const seen = new Set<string>();
+        const merged = [...perSpace.flat(), ...localRecentConversations].filter((entry) => {
+          const key = entry.conversationId?.trim().toLowerCase() || `${entry.projectId}:${entry.localConversationId ?? entry.title}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
         if (!cancelled) {
-          setRecentConversations(merged);
+          setRecentConversations(merged.slice(0, RECENT_LIMIT * 2));
         }
       } finally {
         if (!cancelled) {
@@ -360,617 +322,358 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
         }
       }
     };
-    void loadRecentConversations();
+    void load();
     return () => {
       cancelled = true;
     };
   }, [activeProjectId, localRecentConversations, projectList]);
 
-  const nextAutomation = useMemo(() => {
-    return [...automations]
-      .filter((entry) => entry.status === "active")
-      .sort((a, b) => (a.nextRunAt ?? a.runAt ?? "").localeCompare(b.nextRunAt ?? b.runAt ?? ""))[0] ?? null;
-  }, [automations]);
-
-  const latestInboxItem = sharedInboxItems[0] ?? null;
-
-  const handleOpenInboxItem = useCallback(
-    (item: NotificationInboxItem) => {
-      const projectId = item.projectId.trim();
-      const conversationId = item.conversationId.trim();
-      if (!projectId || !conversationId) {
-        return;
-      }
-      requestUrlPush();
-      if (projectId === activeProjectId) {
-        const localMatch =
-          conversations.find(
-            (conversation) => (conversation.controllerId ?? "").trim() === conversationId,
-          ) ?? null;
-        if (localMatch) {
-          openConversationTab(localMatch.localId);
-          void controllerClient.notifications
-            .acknowledgeInboxItem({ conversationId })
-            .then((result) => {
-            if (!result.success) {
-              showStatus(result.error ?? "Unable to acknowledge inbox item.", "error", 4000);
-              return;
-            }
-            void refreshInbox?.({ force: true });
-          });
-          return;
-        }
-      }
-      void controllerClient.notifications
-        .acknowledgeInboxItem({ conversationId })
-        .then((result) => {
-        if (!result.success) {
-          showStatus(result.error ?? "Unable to acknowledge inbox item.", "error", 4000);
-          return;
-        }
-        void refreshInbox?.({ force: true });
-      });
-      try {
-        const url = new URL(window.location.href);
-        url.pathname = "/studio";
-        url.searchParams.set("projectId", projectId);
-        url.searchParams.set("conversationControllerId", conversationId);
-        url.searchParams.delete("conversationId");
-        url.searchParams.set("panel", "chat");
-        const search = url.searchParams.toString();
-        navigate(`${url.pathname}${search ? `?${search}` : ""}`);
-      } catch {
-        navigate(
-          `/studio?projectId=${encodeURIComponent(projectId)}&conversationControllerId=${encodeURIComponent(conversationId)}&panel=chat`,
-        );
-      }
-    },
-    [activeProjectId, conversations, navigate, openConversationTab, refreshInbox, requestUrlPush, showStatus],
+  const attentionEntries = useMemo(
+    () => buildHomeAttentionEntries({ conversations, inboxItems: sharedInboxItems, currentSpaceName }),
+    [conversations, currentSpaceName, sharedInboxItems],
+  );
+  useEffect(() => {
+    setLocallyDismissedKeys((current) => {
+      if (current.length === 0) return current;
+      const live = new Set(attentionEntries.map((entry) => entry.key));
+      const next = current.filter((key) => live.has(key));
+      return next.length === current.length ? current : next;
+    });
+  }, [attentionEntries]);
+  const visibleAttentionEntries = useMemo(
+    () => attentionEntries.filter((entry) => !locallyDismissedKeys.includes(entry.key)),
+    [attentionEntries, locallyDismissedKeys],
   );
 
-  const handleOpenConversation = useCallback(
-    (entry: HomeRecentConversation) => {
-      const navigationTarget = resolveHomeRecentConversationNavigationTarget({
-        activeProjectId,
+  const feed = useMemo(
+    () =>
+      buildHomeFeed({
+        attentionEntries: visibleAttentionEntries,
+        recentConversations,
+        organizations,
+        projects: projectList,
+        activeProject: currentProject,
         conversations,
-        entry,
-      });
-
-      requestUrlPush();
-      if (navigationTarget.kind === "local") {
-        openConversationTab(navigationTarget.localConversationId);
-        return;
-      }
-      try {
-        const url = new URL(window.location.href);
-        url.pathname = "/studio";
-        url.searchParams.set("projectId", navigationTarget.projectId);
-        if (navigationTarget.conversationControllerId) {
-          url.searchParams.set("conversationControllerId", navigationTarget.conversationControllerId);
-        } else {
-          url.searchParams.delete("conversationControllerId");
-        }
-        url.searchParams.delete("conversationId");
-        url.searchParams.set("panel", "chat");
-        const search = url.searchParams.toString();
-        navigate(`${url.pathname}${search ? `?${search}` : ""}`);
-      } catch {
-        navigate(
-          `/studio?projectId=${encodeURIComponent(navigationTarget.projectId)}${
-            navigationTarget.conversationControllerId
-              ? `&conversationControllerId=${encodeURIComponent(navigationTarget.conversationControllerId)}`
-              : ""
-          }&panel=chat`,
-        );
-      }
-    },
-    [activeProjectId, conversations, navigate, openConversationTab, requestUrlPush],
+        teamFilter,
+        lastSeenAt,
+      }),
+    [conversations, currentProject, lastSeenAt, organizations, projectList, recentConversations, teamFilter, visibleAttentionEntries],
   );
+  const activityEvents = useMemo(() => feed.activity.flatMap((day) => day.events).slice(0, RECENT_LIMIT), [feed.activity]);
 
-  const handleOpenLocalConversation = useCallback(
-    (conversationId: string) => {
-      requestUrlPush();
-      openConversationTab(conversationId);
-    },
-    [openConversationTab, requestUrlPush],
-  );
-
-  const handleDismissAttentionItem = useCallback(
-    (entry: HomeAttentionEntry) => {
-      setLocallyDismissedAttentionKeys((current) =>
-        current.includes(entry.key) ? current : [...current, entry.key],
-      );
-      if (entry.source === "conversation") {
-        markConversationRead(entry.localConversationId);
-        return;
-      }
-      const conversationId = entry.inboxItem.conversationId.trim();
-      if (!conversationId) {
-        return;
-      }
-      void controllerClient.notifications
-        .acknowledgeInboxItem({ conversationId })
-        .then((result) => {
-        if (!result.success) {
-          setLocallyDismissedAttentionKeys((current) => current.filter((key) => key !== entry.key));
-          showStatus(result.error ?? "Unable to clear attention item.", "error", 4000);
-          return;
-        }
-        void refreshInbox?.({ force: true });
-      });
-    },
-    [markConversationRead, refreshInbox, showStatus],
-  );
-
-  const clearAttentionEntry = useCallback(
-    async (entry: HomeAttentionEntry): Promise<boolean> => {
-      setLocallyDismissedAttentionKeys((current) =>
-        current.includes(entry.key) ? current : [...current, entry.key],
-      );
-      if (entry.source === "conversation") {
-        markConversationRead(entry.localConversationId);
-        return true;
-      }
-      const conversationId = entry.inboxItem.conversationId.trim();
-      if (!conversationId) {
-        return true;
-      }
-      const result = await controllerClient.notifications.acknowledgeInboxItem({
-        conversationId,
-      });
+  const acknowledgeInbox = useCallback(
+    async (conversationId: string): Promise<boolean> => {
+      const result = await controllerClient.notifications.acknowledgeInboxItem({ conversationId });
       if (!result.success) {
-        setLocallyDismissedAttentionKeys((current) => current.filter((key) => key !== entry.key));
-        showStatus(result.error ?? "Unable to clear attention item.", "error", 4000);
+        showStatus(result.error ?? "Unable to mark this as read.", "error", 4000);
         return false;
       }
       return true;
     },
-    [markConversationRead, showStatus],
+    [showStatus],
   );
 
-  const handleStartStarterConversation = useCallback(
-    (starter: PromptOnboardingAction) => {
-      const conversation = createConversation({
-        title: starter.title,
-        select: true,
-      });
-      markConversationRead(conversation.localId);
-      setConversationDraft(conversation.localId, starter.prompt);
-      setPendingStarterConversationId(conversation.localId);
+  const openEvent = useCallback(
+    (event: HomeFeedEvent) => {
       requestUrlPush();
-      openConversationTab(conversation.localId, { fallbackConversation: conversation });
-      if (activeProjectId && isUUID(activeProjectId)) {
-        void controllerClient.conversations.createBlank({
-          projectId: activeProjectId,
-          metadata: { title: starter.title, localId: conversation.localId },
-        }).then((response) => {
-          if (!response?.conversationId) {
+      if (event.source.type === "conversation") {
+        openConversationTab(event.source.localConversationId);
+        return;
+      }
+      if (event.source.type === "inbox" && event.source.entry.source === "inbox") {
+        const item = event.source.entry.inboxItem;
+        const projectId = item.projectId.trim();
+        const conversationId = item.conversationId.trim();
+        if (!projectId || !conversationId) return;
+        void acknowledgeInbox(conversationId).then((ok) => {
+          if (ok) void refreshInbox?.({ force: true });
+        });
+        if (projectId === activeProjectId) {
+          const local = conversations.find((conversation) => (conversation.controllerId ?? "").trim() === conversationId);
+          if (local) {
+            openConversationTab(local.localId);
             return;
           }
-          setConversationControllerId(conversation.localId, response.conversationId);
+        }
+        navigate(buildRouteToConversation(projectId, conversationId));
+        return;
+      }
+      if (event.source.type === "recent") {
+        const target = resolveHomeRecentConversationNavigationTarget({
+          activeProjectId,
+          conversations,
+          entry: event.source.recent,
         });
+        if (target.kind === "local") {
+          openConversationTab(target.localConversationId);
+          return;
+        }
+        navigate(buildRouteToConversation(target.projectId, target.conversationControllerId));
       }
     },
-    [
-      activeProjectId,
-      createConversation,
-      markConversationRead,
-      openConversationTab,
-      requestUrlPush,
-      setConversationControllerId,
-      setConversationDraft,
-    ],
+    [acknowledgeInbox, activeProjectId, conversations, navigate, openConversationTab, refreshInbox, requestUrlPush],
   );
 
-  // Start a fresh, empty chat — for a new user this lands on the guided
-  // getting-started card (it shows on an empty conversation).
-  const handleStartBlankChat = useCallback(() => {
+  const dismissEvent = useCallback(
+    async (event: HomeFeedEvent): Promise<boolean> => {
+      if (event.source.type === "recent") return false;
+      const entry: HomeAttentionEntry = event.source.entry;
+      setLocallyDismissedKeys((current) => (current.includes(entry.key) ? current : [...current, entry.key]));
+      if (entry.source === "conversation") {
+        markConversationRead(entry.localConversationId);
+        return true;
+      }
+      const conversationId = entry.inboxItem.conversationId.trim();
+      if (!conversationId) return true;
+      const ok = await acknowledgeInbox(conversationId);
+      if (!ok) {
+        setLocallyDismissedKeys((current) => current.filter((key) => key !== entry.key));
+      }
+      return ok;
+    },
+    [acknowledgeInbox, markConversationRead],
+  );
+
+  const dismissibleNeeds = useMemo(() => feed.needs.filter((event) => event.dismissible), [feed.needs]);
+  const handleMarkAllRead = useCallback(() => {
+    void (async () => {
+      const results = await Promise.all(dismissibleNeeds.map((event) => dismissEvent(event)));
+      if (results.some(Boolean)) {
+        await refreshInbox?.({ force: true });
+      }
+    })();
+  }, [dismissEvent, dismissibleNeeds, refreshInbox]);
+
+  // A fresh, empty chat — for a new user this lands on the guided
+  // getting-started card, which is where starter prompts live.
+  const handleStartChat = useCallback(() => {
     const conversation = createConversation({ title: "New chat", select: true });
     markConversationRead(conversation.localId);
     requestUrlPush();
     openConversationTab(conversation.localId, { fallbackConversation: conversation });
     if (activeProjectId && isUUID(activeProjectId)) {
       void controllerClient.conversations
-        .createBlank({
-          projectId: activeProjectId,
-          metadata: { title: "New chat", localId: conversation.localId },
-        })
+        .createBlank({ projectId: activeProjectId, metadata: { title: "New chat", localId: conversation.localId } })
         .then((response) => {
           if (response?.conversationId) {
             setConversationControllerId(conversation.localId, response.conversationId);
           }
         });
     }
-  }, [
-    activeProjectId,
-    createConversation,
-    markConversationRead,
-    openConversationTab,
-    requestUrlPush,
-    setConversationControllerId,
-  ]);
+  }, [activeProjectId, createConversation, markConversationRead, openConversationTab, requestUrlPush, setConversationControllerId]);
 
-  useEffect(() => {
-    if (!pendingStarterConversationId) {
-      return;
-    }
-    const match =
-      conversations.find((conversation) => conversation.localId === pendingStarterConversationId) ?? null;
-    if (!match || match.lifecycleStatus === "deleted") {
-      return;
-    }
-    setPendingStarterConversationId(null);
-    if (typeof window !== "undefined") {
-      window.requestAnimationFrame(() => {
-        document.getElementById("studio-chat-input")?.focus();
-      });
-    }
-  }, [conversations, pendingStarterConversationId]);
+  const showTeamChips = feed.teams.length > 1;
+  const showTeamOnRows = feed.teams.length > 1;
+  // "New space" lands in the team being looked at, else the current one.
+  const newSpaceOrgId =
+    feed.teamFilter !== HOME_TEAM_FILTER_ALL && feed.teamFilter !== HOME_PERSONAL_TEAM_KEY
+      ? feed.teamFilter
+      : (currentProject?.orgId ?? null);
 
-  const attentionEntries = useMemo(
-    () =>
-      buildHomeAttentionEntries({
-        conversations,
-        inboxItems: sharedInboxItems,
-        currentSpaceName,
-      }),
-    [conversations, currentSpaceName, sharedInboxItems],
-  );
-  useEffect(() => {
-    setLocallyDismissedAttentionKeys((current) => {
-      if (current.length === 0) {
-        return current;
-      }
-      const availableKeys = new Set(attentionEntries.map((entry) => entry.key));
-      const next = current.filter((key) => availableKeys.has(key));
-      return next.length === current.length ? current : next;
-    });
-  }, [attentionEntries]);
-  const visibleAttentionEntries = useMemo(
-    () => attentionEntries.filter((entry) => !locallyDismissedAttentionKeys.includes(entry.key)),
-    [attentionEntries, locallyDismissedAttentionKeys],
-  );
-  const recentConversationGroups = useMemo<HomeRecentConversationGroup[]>(() => {
-    const groups: HomeRecentConversationGroup[] = [];
-    const groupByKey = new Map<string, HomeRecentConversationGroup>();
-
-    recentConversations.forEach((entry) => {
-      const key = `${entry.projectId}:${entry.orgName || ""}`;
-      let group = groupByKey.get(key);
-      if (!group) {
-        group = {
-          key,
-          label: getProjectGroupLabel(entry.projectName, entry.orgName),
-          entries: [],
-        };
-        groupByKey.set(key, group);
-        groups.push(group);
-      }
-      group.entries.push(entry);
-    });
-
-    return groups;
-  }, [recentConversations]);
-
-  const attentionItems = useMemo<HomeAttentionItem[]>(
-    () =>
-      visibleAttentionEntries.map((entry: HomeAttentionEntry) => ({
-        key: entry.key,
-        title: entry.title,
-        subtitle:
-          entry.kind === "running"
-            ? "Run in progress"
-            : entry.kind === "queued"
-              ? "Waiting for a runtime"
-              : "",
-        groupLabel:
-          entry.source === "inbox"
-            ? getProjectGroupLabel(entry.inboxItem.projectName, entry.inboxItem.orgName)
-            : getProjectGroupLabel(currentSpaceName, currentProject?.orgName ?? null),
-        meta: entry.meta,
-        preview: getHomeRowPreview(entry.preview),
-        kind: entry.kind,
-        testId: entry.testId,
-        onPress:
-          entry.source === "conversation"
-            ? () => handleOpenLocalConversation(entry.localConversationId)
-            : () => handleOpenInboxItem(entry.inboxItem),
-        onDismiss: entry.kind === "reply" ? () => handleDismissAttentionItem(entry) : undefined,
-      })),
-    [
-      currentProject?.orgName,
-      currentSpaceName,
-      handleDismissAttentionItem,
-      handleOpenInboxItem,
-      handleOpenLocalConversation,
-      visibleAttentionEntries,
-    ],
-  );
-  const attentionItemGroups = useMemo<HomeAttentionItemGroup[]>(() => {
-    const groups: HomeAttentionItemGroup[] = [];
-    const groupByKey = new Map<string, HomeAttentionItemGroup>();
-
-    attentionItems.forEach((entry) => {
-      const key = entry.groupLabel;
-      let group = groupByKey.get(key);
-      if (!group) {
-        group = {
-          key,
-          label: entry.groupLabel,
-          entries: [],
-        };
-        groupByKey.set(key, group);
-        groups.push(group);
-      }
-      group.entries.push(entry);
-    });
-
-    return groups;
-  }, [attentionItems]);
-  const dismissibleAttentionEntries = useMemo(
-    () => visibleAttentionEntries.filter((entry) => entry.kind === "reply"),
-    [visibleAttentionEntries],
-  );
-  const handleClearAllAttention = useCallback(() => {
-    void (async () => {
-      const results = await Promise.all(dismissibleAttentionEntries.map((entry) => clearAttentionEntry(entry)));
-      if (results.some(Boolean)) {
-        await refreshInbox?.({ force: true });
-      }
-    })();
-  }, [clearAttentionEntry, dismissibleAttentionEntries, refreshInbox]);
-  const handleToggleGroup = useCallback((key: string) => {
-    setCollapsedGroupKeys((current) =>
-      current.includes(key) ? current.filter((entry) => entry !== key) : [...current, key],
-    );
-  }, []);
-
-  return (
-    <SettingsShell
-      title="Home"
-      hideTitle
-      testId="home-panel"
-    >
-      <div className="min-w-0 space-y-4 overflow-x-hidden">
-        {nextAutomation ? (
-          <section className="space-y-1" data-testid="home-automation-summary">
-            <Text variant="caption" tone="muted">
-              Next automation: {nextAutomation.name} · {formatNextAutomationLabel(nextAutomation) ?? "scheduled soon"}
-            </Text>
-          </section>
-        ) : null}
-
-        <div className="grid min-w-0 gap-8 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.92fr)] xl:items-start">
-          <StudioListSection
-            title="Needs attention"
-            description={formatCountSummary(attentionItems.length, "item requiring review", "items requiring review")}
-            tone="attention"
-            icon={<Bell className="h-5 w-5" aria-hidden={true} />}
-            className="xl:col-start-1 xl:row-start-1"
-            data-testid="home-attention-section"
-            actions={
-              dismissibleAttentionEntries.length > 1 ? (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="xs"
-                  radius="full"
-                  onPress={handleClearAllAttention}
-                >
-                  Clear all
-                </Button>
-              ) : null
-            }
-          >
-            <div className="min-w-0 space-y-3">
-              {attentionItems.length === 0 ? (
-                <Text variant="caption" tone="muted" data-testid="home-attention-empty">
-                  Nothing is waiting right now.
+  const renderRow = (event: HomeFeedEvent, options: { lane: "needs" | "activity" }) => {
+    const when = formatRelativeTimestamp(event.at);
+    const subtitleText = statusSubtitle(event) ?? usablePreview(event.preview);
+    const where = showTeamOnRows ? event.team.name : event.project.name;
+    return (
+      <div key={event.key} className={ROW_SEPARATOR_CLASS}>
+        <FeedRow
+          title={event.title}
+          subtitle={
+            // Narrow screens have no room for a trailing cluster: where and
+            // when drop to a second line under the preview instead.
+            <>
+              {subtitleText ? <span className="block truncate">{subtitleText}</span> : null}
+              <span className="block truncate sm:hidden">{when ? `${where} · ${when}` : where}</span>
+            </>
+          }
+          icon={<EventIcon event={event} />}
+          iconClassName={ROW_ICON_CLASS}
+          end={
+            // One trailing cluster, vertically centred with the row: where it
+            // happened, then when. The time column is fixed so rows line up.
+            <span className="hidden shrink-0 items-center gap-2 sm:flex">
+              {showTeamOnRows ? (
+                <Badge size="xs" tone="neutral" className="max-w-[10rem] truncate" title={`${event.project.name} · ${event.team.name}`}>
+                  {event.team.name}
+                </Badge>
+              ) : (
+                <Text as="span" variant="caption" tone="subtle" className="max-w-[12rem] truncate">
+                  {event.project.name}
+                </Text>
+              )}
+              {when ? (
+                <Text as="span" variant="caption" tone="muted" className="min-w-[2.5rem] text-right tabular-nums">
+                  {when}
                 </Text>
               ) : null}
-              {attentionItemGroups.map((group) => {
-                const groupKey = `attention:${group.key}`;
-                const isCollapsed = collapsedGroupKeys.includes(groupKey);
-                return (
-                  <StudioListSurface key={group.key}>
-                    <StudioListGroupHeader
-                      label={group.label}
-                      count={group.entries.length}
-                      collapsed={isCollapsed}
-                      onPress={() => handleToggleGroup(groupKey)}
-                      testId="home-attention-group-toggle"
-                    />
-                    {!isCollapsed ? (
-                      <div className="min-w-0">
-                        {group.entries.map((item) => {
-                          const iconClassName =
-                            item.kind === "running"
-                              ? "text-emerald-600 dark:text-emerald-300"
-                              : item.kind === "queued"
-                                ? "text-amber-600 dark:text-amber-300"
-                                : "text-rose-500 dark:text-rose-300";
-                          const inlineIcon =
-                            item.kind === "running" ? (
-                              <Spinner size="xs" />
-                            ) : item.kind === "queued" ? (
-                              <Clock className={["h-4 w-4", iconClassName].join(" ")} aria-hidden="true" />
-                            ) : (
-                              <span className="block h-2 w-2 rounded-full bg-current" aria-hidden={true} />
-                            );
-                          return (
-                            <StudioListRow key={item.key}>
-                              <FeedRow
-                                title={item.title}
-                                meta={item.meta}
-                                metaPlacement="end"
-                                subtitle={item.subtitle || undefined}
-                                preview={item.preview}
-                                icon={inlineIcon}
-                                iconClassName={[HOME_ROW_ICON_CLASS_NAME, iconClassName].join(" ")}
-                                onPress={item.onPress}
-                                density="compact"
-                                verticalAlign="center"
-                                surface="plain"
-                                className={HOME_ROW_CLASS_NAME}
-                                titleEndClassName="pt-0.5"
-                                trailingActionClassName="items-center pr-2"
-                                trailingAction={
-                                  item.onDismiss ? (
-                                    <IconButton
-                                      type="button"
-                                      variant="ghost"
-                                      size="sm"
-                                      radius="full"
-                                      aria-label={`Dismiss ${item.title}`}
-                                      data-testid={`${item.testId}-dismiss`}
-                                      onPress={item.onDismiss}
-                                      className="text-slate-400 hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300"
-                                    >
-                                      <Xmark className="h-4 w-4" aria-hidden="true" />
-                                    </IconButton>
-                                  ) : null
-                                }
-                                reserveTrailingAction
-                                data-testid={item.testId}
-                              />
-                            </StudioListRow>
-                          );
-                        })}
-                      </div>
-                    ) : null}
-                  </StudioListSurface>
-                );
-              })}
-            </div>
-          </StudioListSection>
-
-          <StudioListSection
-            title="Recently active"
-            description={formatCountSummary(recentConversations.length, "recent conversation", "recent conversations")}
-            tone="activity"
-            icon={<ChatLines className="h-5 w-5" aria-hidden={true} />}
-            className="xl:col-start-2 xl:row-span-2 xl:min-h-0"
-            data-testid="home-recent-section"
-          >
-            <div
-              className="min-w-0 space-y-3 overflow-x-hidden xl:max-h-[min(44rem,calc(100vh-14rem))] xl:overflow-y-auto xl:overscroll-contain xl:pr-2"
-              data-testid="home-recent-list"
-            >
-              {recentLoading ? (
-                <div className="flex items-center gap-2 text-sm text-slate-500 dark:text-slate-300">
-                  <Spinner size="xs" />
-                  Loading recent chats…
-                </div>
-              ) : null}
-              {!recentLoading && recentConversations.length === 0 ? (
-                <div className="space-y-2" data-testid="home-recent-empty">
-                  <Text variant="caption" tone="muted">
-                    No recent chats yet.
-                  </Text>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    radius="xl"
-                    className="gap-2"
-                    onPress={handleStartBlankChat}
-                    data-testid="home-start-first-chat"
-                  >
-                    <ChatLines className="h-4 w-4" aria-hidden="true" />
-                    Start your first chat
-                  </Button>
-                </div>
-              ) : null}
-              {recentConversationGroups.map((group) => {
-                const groupKey = `recent:${group.key}`;
-                const isCollapsed = collapsedGroupKeys.includes(groupKey);
-                return (
-                  <StudioListSurface key={group.key} data-testid={`home-recent-group-${group.key}`}>
-                    <StudioListGroupHeader
-                      label={group.label}
-                      count={group.entries.length}
-                      collapsed={isCollapsed}
-                      onPress={() => handleToggleGroup(groupKey)}
-                      testId="home-recent-group-toggle"
-                    />
-                    {!isCollapsed ? (
-                      <div className="min-w-0">
-                        {group.entries.map((entry, index) => {
-                          const itemId = entry.conversationId ?? entry.localConversationId ?? `${index}`;
-                          return (
-                            <StudioListRow key={`${entry.projectId}:${itemId}`}>
-                              <FeedRow
-                                title={entry.title}
-                                meta={formatRelativeTimestamp(entry.updatedAt)}
-                                metaPlacement="end"
-                                subtitle={entry.threadPath ? `In ${entry.threadPath}` : undefined}
-                                preview={entry.preview}
-                                icon={<ChatLines className="h-4 w-4" aria-hidden={true} />}
-                                iconClassName={HOME_ROW_ICON_CLASS_NAME}
-                                onPress={() => handleOpenConversation(entry)}
-                                density="compact"
-                                verticalAlign="center"
-                                surface="plain"
-                                className={HOME_ROW_CLASS_NAME}
-                                titleEndClassName="pt-0.5"
-                                data-testid={`home-recent-item-${itemId}`}
-                              />
-                            </StudioListRow>
-                          );
-                        })}
-                      </div>
-                    ) : null}
-                  </StudioListSurface>
-                );
-              })}
-            </div>
-          </StudioListSection>
-
-          <StudioListSection
-            title="Suggestions"
-            description="Quick ways to open a focused chat."
-            tone="suggestion"
-            icon={<Sparks className="h-5 w-5" aria-hidden={true} />}
-            className="xl:col-start-1 xl:row-start-2"
-            data-testid="home-suggestions-section"
-          >
-            <StudioListSurface data-testid="home-suggestions-list">
-              {HOME_SUGGESTIONS.map((starter, index) => {
-                const Icon = starter.icon;
-                return (
-                  <StudioListRow key={starter.id} separated={index > 0}>
-                    <FeedRow
-                      title={starter.title}
-                      subtitle={starter.description}
-                      icon={<Icon className="h-[18px] w-[18px]" aria-hidden={true} />}
-                      iconClassName={HOME_SUGGESTION_ICON_CLASS_NAME}
-                      end={<NavArrowRight className="h-5 w-5" aria-hidden={true} />}
-                      endClassName="text-slate-400 dark:text-slate-500"
-                      density="compact"
-                      verticalAlign="center"
-                      surface="plain"
-                      className={HOME_ROW_CLASS_NAME}
-                      onPress={() => handleStartStarterConversation(starter)}
-                      data-testid={`home-starter-${starter.id}`}
-                    />
-                  </StudioListRow>
-                );
-              })}
-            </StudioListSurface>
-            {latestInboxItem && attentionItems.length === 0 ? (
-              <Button
+            </span>
+          }
+          onPress={() => openEvent(event)}
+          density="compact"
+          verticalAlign="center"
+          surface="interactive"
+          className="rounded-none px-2"
+          reserveTrailingAction={options.lane === "needs"}
+          trailingActionClassName="items-center pr-1"
+          trailingAction={
+            event.dismissible ? (
+              <IconButton
+                type="button"
                 variant="ghost"
                 size="sm"
-                radius="xl"
-                className="mt-3 justify-start gap-2 px-0 text-left"
-                onPress={() => handleOpenInboxItem(latestInboxItem)}
-                data-testid="home-latest-reply-fallback"
+                radius="full"
+                aria-label={`Mark ${event.title} as read`}
+                data-testid={`${event.testId}-dismiss`}
+                onPress={() => void dismissEvent(event)}
+                className="text-slate-400 hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300"
               >
-                <Bell className="h-4 w-4" aria-hidden="true" />
-                Latest reply: {latestInboxItem.conversationTitle?.trim() || "Open reply"}
+                <Xmark className="h-4 w-4" aria-hidden="true" />
+              </IconButton>
+            ) : null
+          }
+          data-testid={event.testId}
+        />
+      </div>
+    );
+  };
+
+  return (
+    <SettingsShell title="Home" hideTitle testId="home-panel">
+      <div className="min-w-0 space-y-6">
+        <header className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5" data-testid="home-team-filters">
+            {showTeamChips ? (
+              <>
+                <TeamChip
+                  label="All"
+                  count={0}
+                  selected={feed.teamFilter === HOME_TEAM_FILTER_ALL}
+                  onPress={() => setTeamFilter(HOME_TEAM_FILTER_ALL)}
+                  testId="home-team-chip-all"
+                />
+                {feed.teams.map((team) => (
+                  <TeamChip
+                    key={team.key}
+                    label={team.name}
+                    count={team.needsCount}
+                    selected={feed.teamFilter === team.key}
+                    onPress={() => setTeamFilter(team.key)}
+                    testId={`home-team-chip-${team.key}`}
+                  />
+                ))}
+              </>
+            ) : (
+              <Heading level={2} variant="subtitle">
+                Home
+              </Heading>
+            )}
+          </div>
+          {onStartNewProject ? (
+            <IconButton
+              type="button"
+              variant="ghost"
+              size="sm"
+              radius="full"
+              aria-label="New space"
+              data-testid="home-new-space"
+              onPress={() => onStartNewProject(newSpaceOrgId)}
+              className="text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100"
+            >
+              <Plus className="h-4 w-4" aria-hidden="true" />
+            </IconButton>
+          ) : null}
+        </header>
+
+        {feed.isEmpty && !recentLoading ? (
+          <section className="space-y-3" data-testid="home-empty">
+            <Heading level={2} variant="subtitle">
+              Nothing here yet
+            </Heading>
+            <Text as="p" variant="body" tone="muted" className="max-w-prose">
+              Replies, runs and changes from every space you belong to show up here.
+            </Text>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="primary" size="sm" radius="xl" className="gap-2" onPress={handleStartChat} data-testid="home-start-first-chat">
+                <ChatLines className="h-4 w-4" aria-hidden="true" />
+                Start a chat
               </Button>
-            ) : null}
-          </StudioListSection>
-        </div>
+              {onStartNewProject ? (
+                <Button variant="outline" size="sm" radius="xl" className="gap-2" onPress={() => onStartNewProject(newSpaceOrgId)}>
+                  <Plus className="h-4 w-4" aria-hidden="true" />
+                  New space
+                </Button>
+              ) : null}
+              {onOpenOrgSettings ? (
+                <Button variant="outline" size="sm" radius="xl" className="gap-2" onPress={onOpenOrgSettings}>
+                  <Group className="h-4 w-4" aria-hidden="true" />
+                  Invite people
+                </Button>
+              ) : null}
+            </div>
+          </section>
+        ) : (
+          <>
+            <section data-testid="home-attention-section">
+              <LaneHeader
+                label={feed.needs.length > 0 ? `Needs you · ${feed.needs.length}` : "Needs you"}
+                action={
+                  dismissibleNeeds.length > 0 ? (
+                    <Button type="button" variant="ghost" size="xs" radius="full" onPress={handleMarkAllRead}>
+                      Mark all read
+                    </Button>
+                  ) : null
+                }
+              />
+              {feed.needs.length === 0 ? (
+                <Text as="p" variant="caption" tone="muted" className="px-2 py-1.5" data-testid="home-attention-empty">
+                  Nothing needs you right now.
+                </Text>
+              ) : (
+                <div className="min-w-0">{feed.needs.map((event) => renderRow(event, { lane: "needs" }))}</div>
+              )}
+            </section>
+
+            <section data-testid="home-recent-section">
+              <LaneHeader label="Activity" action={recentLoading ? <Spinner size="xs" /> : null} />
+              {activityEvents.length === 0 && !recentLoading ? (
+                <Text as="p" variant="caption" tone="muted" className="px-2 py-1.5" data-testid="home-recent-empty">
+                  Quiet so far.
+                </Text>
+              ) : null}
+              {(() => {
+                let flatIndex = 0;
+                return feed.activity.map((day) => (
+                  <div key={day.key} className="min-w-0">
+                    <Text as="p" variant="overline" tone="subtle" className="px-2 pb-1 pt-3">
+                      {day.label}
+                    </Text>
+                    <div className="min-w-0">
+                      {day.events.map((event) => {
+                        const index = flatIndex;
+                        flatIndex += 1;
+                        if (index >= RECENT_LIMIT) return null;
+                        return (
+                          <div key={event.key}>
+                            {feed.sinceCutIndex === index ? (
+                              <div className="flex items-center gap-3 px-2 py-1.5" data-testid="home-since-cut" aria-hidden="true">
+                                <span className="h-px flex-1 bg-primary-400/40" />
+                                <Text as="span" variant="overline" tone="accent">
+                                  You're caught up
+                                </Text>
+                                <span className="h-px flex-1 bg-primary-400/40" />
+                              </div>
+                            ) : null}
+                            {renderRow(event, { lane: "activity" })}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ));
+              })()}
+            </section>
+          </>
+        )}
       </div>
     </SettingsShell>
   );
