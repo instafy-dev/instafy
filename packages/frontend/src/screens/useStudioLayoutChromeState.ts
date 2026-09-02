@@ -10,7 +10,33 @@ export type SourceControlOpenRequest = {
 };
 
 const LEFT_DRAWER_WIDTH_STORAGE_NAME = "instafy.leftDrawer.width.v1";
+const SIDEBAR_COLLAPSED_STORAGE_NAME = "instafy.sidebar.collapsed.v1";
 const LEFT_DRAWER_DEFAULT_WIDTH = 352;
+
+export function readStoredSidebarCollapsed(): boolean {
+  if (typeof window === "undefined") {
+    return true;
+  }
+  try {
+    const stored = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_NAME);
+    // Collapsed stays the default for anyone who never chose.
+    return stored === null ? true : stored === "1";
+  } catch {
+    return true;
+  }
+}
+
+export function writeStoredSidebarCollapsed(collapsed: boolean): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_NAME, collapsed ? "1" : "0");
+  } catch {
+    // Storage can be unavailable (private mode, quota); the preference just
+    // won't survive the reload.
+  }
+}
 const LEFT_DRAWER_MIN_WIDTH = 280;
 const LEFT_DRAWER_MAX_WIDTH = 560;
 
@@ -34,7 +60,21 @@ export function shouldDismissLeftDrawerForKeydown(
 export function useStudioLayoutChromeState({
   isLargeScreen,
 }: UseStudioLayoutChromeStateParams) {
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+  const [sidebarCollapsed, setSidebarCollapsedState] = useState(() =>
+    readStoredSidebarCollapsed(),
+  );
+  // Remember the rail preference: it used to reset to collapsed on every
+  // reload, so anyone who works expanded re-opened it every session.
+  const setSidebarCollapsed = useCallback(
+    (update: boolean | ((current: boolean) => boolean)) => {
+      setSidebarCollapsedState((current) => {
+        const next = typeof update === "function" ? update(current) : update;
+        writeStoredSidebarCollapsed(next);
+        return next;
+      });
+    },
+    [],
+  );
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [leftDrawer, setLeftDrawer] = useState<null | LeftDrawerPanel>(null);
   const [mobileGitReviewSheet, setMobileGitReviewSheet] = useState<WorkspaceGitReviewSource | null>(null);
