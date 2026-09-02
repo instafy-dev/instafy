@@ -14,7 +14,7 @@ test.describe("Home panel", () => {
     await page.getByTestId("sidebar-home-button").click();
 
     await expect(page.getByTestId("home-panel")).toBeVisible();
-    // A feed: the Activity lane, no zero-count "Needs you" placeholder, and no
+    // A feed: the Recent lane, no zero-count "Needs you" placeholder, and no
     // starter prompts (suggestions live on an empty chat).
     await expect(page.getByTestId("home-recent-section")).toBeVisible();
     await expect(page.getByText("Nothing needs you right now.", { exact: true })).toHaveCount(0);

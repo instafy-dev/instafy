@@ -61,7 +61,12 @@ const ROW_ACTION_CLASS =
   "text-slate-500 hover:bg-slate-200/70 data-[hovered]:bg-slate-200/70 dark:text-slate-400 dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)]";
 const RECENT_SPACE_FAN_OUT = 8;
 const RECENT_PER_SPACE = 3;
+// Recent renders a page at a time; "Show more" reveals the next page of what
+// was fetched (the fan-out keeps two pages in memory).
 const RECENT_LIMIT = 24;
+// Needs you folds after this many rows so a busy inbox cannot push Recent off
+// the screen; "Show N more" opens the rest in place.
+const NEEDS_PREVIEW_LIMIT = 8;
 
 function extractConversationTitle(conversation: ControllerProjectConversation): string {
   const metadata =
@@ -177,6 +182,18 @@ function CaughtUpCut() {
   );
 }
 
+function LaneMore({ label, onPress, testId }: { label: string; onPress: () => void; testId: string }) {
+  // Sits on the rows' text inset; the button's own padding is pulled back so
+  // its label lines up with the lane label above it.
+  return (
+    <div className={`pt-1 ${LANE_INSET_CLASS}`}>
+      <Button type="button" variant="ghost" size="xs" radius="full" className="-ml-2" onPress={onPress} data-testid={testId}>
+        {label}
+      </Button>
+    </div>
+  );
+}
+
 function EventIcon({ event }: { event: HomeFeedEvent }) {
   // Identity when it is real (a named agent); state only when non-default.
   // An unread reply gets no marker: inside "Needs you" every row is unread,
@@ -230,6 +247,13 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
   const [recentLoading, setRecentLoading] = useState(false);
   const [locallyDismissedKeys, setLocallyDismissedKeys] = useState<string[]>([]);
   const [teamFilter, setTeamFilter] = useState(HOME_TEAM_FILTER_ALL);
+  const [needsExpanded, setNeedsExpanded] = useState(false);
+  const [recentLimit, setRecentLimit] = useState(RECENT_LIMIT);
+  useEffect(() => {
+    // A new filter is a new page: fold both lanes again.
+    setNeedsExpanded(false);
+    setRecentLimit(RECENT_LIMIT);
+  }, [teamFilter]);
   // The cut is where the previous visit ended; this visit becomes the next cut.
   const [lastSeenAt] = useState(() => readHomeLastSeen(userEmail));
   useEffect(() => {
@@ -393,7 +417,11 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
       }),
     [conversations, currentProject, lastSeenAt, organizations, projectList, recentConversations, teamFilter, visibleAttentionEntries],
   );
-  const activityEvents = useMemo(() => feed.activity.flatMap((day) => day.events).slice(0, RECENT_LIMIT), [feed.activity]);
+  const activityTotal = useMemo(() => feed.activity.reduce((count, day) => count + day.events.length, 0), [feed.activity]);
+  const activityEvents = useMemo(
+    () => feed.activity.flatMap((day) => day.events).slice(0, recentLimit),
+    [feed.activity, recentLimit],
+  );
 
   const acknowledgeInbox = useCallback(
     async (conversationId: string): Promise<boolean> => {
@@ -523,6 +551,8 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
   const newSpaceTeam = showTeamChips
     ? (feed.teams.find((team) => team.key === teamKeyForOrgId(newSpaceOrgId)) ?? null)
     : null;
+  const visibleNeeds = needsExpanded ? feed.needs : feed.needs.slice(0, NEEDS_PREVIEW_LIMIT);
+  const hiddenNeeds = feed.needs.length - visibleNeeds.length;
   const filteredTeam = feed.teams.find((team) => team.key === feed.teamFilter) ?? null;
   const lanesEmpty = feed.needs.length === 0 && activityEvents.length === 0 && !recentLoading;
   const filteredTeamHasSpaces =
@@ -725,13 +755,20 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
                   }
                 />
                 <div className="min-w-0">
-                  {feed.needs.map((event, index) => renderRow(event, { divider: index > 0 }))}
+                  {visibleNeeds.map((event, index) => renderRow(event, { divider: index > 0 }))}
                 </div>
+                {hiddenNeeds > 0 ? (
+                  <LaneMore
+                    label={`Show ${hiddenNeeds} more`}
+                    onPress={() => setNeedsExpanded(true)}
+                    testId="home-attention-show-all"
+                  />
+                ) : null}
               </section>
             ) : null}
 
             <section data-testid="home-recent-section">
-              <LaneHeader label="Activity" action={recentLoading ? <Spinner size="xs" /> : null} />
+              <LaneHeader label="Recent" action={recentLoading ? <Spinner size="xs" /> : null} />
               {activityEvents.length === 0 && !recentLoading ? (
                 <Text as="p" variant="body" tone="muted" className={`py-2 ${LANE_INSET_CLASS}`} data-testid="home-recent-empty">
                   Quiet so far.
@@ -741,7 +778,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
                 let flatIndex = 0;
                 return feed.activity.map((day, dayIndex) => {
                   const dayStart = flatIndex;
-                  if (dayStart >= RECENT_LIMIT) return null;
+                  if (dayStart >= recentLimit) return null;
                   const cutAtDayStart = feed.sinceCutIndex === dayStart;
                   return (
                     <div key={day.key} className="min-w-0">
@@ -766,7 +803,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
                       {day.events.map((event) => {
                         const index = flatIndex;
                         flatIndex += 1;
-                        if (index >= RECENT_LIMIT) return null;
+                        if (index >= recentLimit) return null;
                         const cutHere = feed.sinceCutIndex === index && index !== dayStart;
                         return (
                           <Fragment key={event.key}>
@@ -779,6 +816,13 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
                   );
                 });
               })()}
+              {activityTotal > recentLimit ? (
+                <LaneMore
+                  label="Show more"
+                  onPress={() => setRecentLimit((limit) => limit + RECENT_LIMIT)}
+                  testId="home-recent-show-more"
+                />
+              ) : null}
             </section>
           </div>
         )}
