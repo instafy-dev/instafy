@@ -4,7 +4,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { COMMAND_OUTPUT_BODY_LINE_CAP, CommandOutputBlock } from "../CommandOutputBlock";
+import {
+  COMMAND_OUTPUT_BODY_LINE_CAP,
+  COMMAND_OUTPUT_BODY_MAX_LINES,
+  CommandOutputBlock,
+} from "../CommandOutputBlock";
 
 describe("CommandOutputBlock", () => {
   let container: HTMLDivElement;
@@ -101,6 +105,61 @@ describe("CommandOutputBlock", () => {
     });
     expect(container.querySelector("pre")?.textContent).toBe(output);
     expect(container.querySelector("pre")?.className).toContain("max-h-96");
+    expect(container.querySelector("button")).toBeNull();
+  });
+
+  it("resets bodyOnly show-all when a different command's output replaces the current one", async () => {
+    const output = Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n");
+    await act(async () => {
+      root.render(<CommandOutputBlock command="/bin/bash -lc pnpm lint" output={output} status="completed" bodyOnly />);
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("button")?.click();
+    });
+    expect(container.querySelector("button")).toBeNull();
+    expect(container.querySelector("pre")?.textContent).toBe(output);
+
+    // Same command, more output (streaming append): show-all survives.
+    await act(async () => {
+      root.render(
+        <CommandOutputBlock command="/bin/bash -lc pnpm lint" output={`${output}\nline 21`} status="completed" bodyOnly />,
+      );
+    });
+    expect(container.querySelector("button")).toBeNull();
+
+    // A later command in the same host arrives capped again.
+    await act(async () => {
+      root.render(<CommandOutputBlock command="/bin/bash -lc pnpm test" output={output} status="completed" bodyOnly />);
+    });
+    expect(container.querySelector("button")?.textContent).toBe("Show all 20 lines");
+    expect(container.querySelector("pre")?.textContent?.split("\n")).toHaveLength(COMMAND_OUTPUT_BODY_LINE_CAP);
+  });
+
+  it("bounds bodyOnly show-all at the last 400 lines behind an earlier-lines note", async () => {
+    const total = COMMAND_OUTPUT_BODY_MAX_LINES + 137;
+    const output = Array.from({ length: total }, (_, index) => `line ${index + 1}`).join("\n");
+    await act(async () => {
+      root.render(<CommandOutputBlock output={output} status="completed" bodyOnly />);
+    });
+    expect(container.querySelector('[data-testid="chat-command-output-earlier-lines"]')).toBeNull();
+    expect(container.querySelector("pre")?.textContent?.split("\n")).toHaveLength(COMMAND_OUTPUT_BODY_LINE_CAP);
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("button")?.click();
+    });
+    const pre = container.querySelector("pre");
+    const renderedLines = pre?.textContent?.split("\n") ?? [];
+    expect(renderedLines).toHaveLength(COMMAND_OUTPUT_BODY_MAX_LINES);
+    expect(renderedLines[0]).toBe("line 138");
+    expect(renderedLines.at(-1)).toBe(`line ${total}`);
+    expect(pre?.className).toContain("overflow-y-auto");
+    expect(pre?.className).toContain("max-h-96");
+    const note = container.querySelector<HTMLElement>('[data-testid="chat-command-output-earlier-lines"]');
+    expect(note?.textContent).toBe("… 137 earlier lines not shown");
+    expect(note?.className).toContain("text-slate-500");
+    expect(note?.className).toContain("dark:text-slate-400");
+    // The note sits above the tail.
+    expect(note && pre ? note.compareDocumentPosition(pre) & Node.DOCUMENT_POSITION_FOLLOWING : 0).toBeTruthy();
     expect(container.querySelector("button")).toBeNull();
   });
 
