@@ -1,6 +1,7 @@
 import { getOrgDisambiguator, getOrgDisplayName, isPersonalOrgName } from "../../org/orgNaming";
 import type { ConversationState } from "../../conversations/ConversationsProvider";
 import type { HomeAttentionEntry } from "./homeAttention";
+import type { ActivityItem } from "../../services/runtimeController/activity";
 
 /**
  * Home as one cross-team feed. Everything here is pure so the shape of the
@@ -12,7 +13,7 @@ import type { HomeAttentionEntry } from "./homeAttention";
  */
 
 export type HomeFeedLane = "needs" | "activity";
-export type HomeFeedKind = "running" | "queued" | "reply" | "conversation";
+export type HomeFeedKind = "running" | "queued" | "reply" | "conversation" | "run_finished" | "run_failed";
 
 export interface HomeFeedTeam {
   /** Org id, or "personal" for spaces without an org. */
@@ -25,9 +26,10 @@ export interface HomeFeedTeam {
 }
 
 export interface HomeFeedActor {
-  kind: "agent" | "assistant";
+  kind: "agent" | "assistant" | "user";
   handle: string | null;
   avatarSeed: string | null;
+  displayName?: string | null;
 }
 
 export interface HomeFeedEvent {
@@ -48,7 +50,8 @@ export interface HomeFeedEvent {
   source:
     | { type: "conversation"; localConversationId: string; entry: HomeAttentionEntry }
     | { type: "inbox"; entry: HomeAttentionEntry }
-    | { type: "recent"; recent: HomeFeedRecentConversation };
+    | { type: "recent"; recent: HomeFeedRecentConversation }
+    | { type: "activity"; item: ActivityItem };
 }
 
 export interface HomeFeedDay {
@@ -107,7 +110,11 @@ interface BuildHomeFeedOptions {
   /** Local conversations, to attach actors to active-space entries. */
   conversations: ConversationState[];
   teamFilter: string;
-  /** Previous visit's cut (epoch ms); null on a first visit. */
+  /** Rows from the controller's activity ledger (GET /me/activity). */
+  activity?: ActivityItem[];
+  /** The server-side cut for ledger rows: ids above it are new. */
+  serverLastSeenEventId?: string | null;
+  /** Previous visit's cut (epoch ms) for device-local rows; null on a first visit. */
   lastSeenAt: number | null;
   now?: number;
 }
@@ -220,20 +227,66 @@ function dedupeKeyFor(event: HomeFeedEvent): string {
       ? event.source.entry.inboxItem.conversationId.trim().toLowerCase()
       : event.key;
   }
+  if (event.source.type === "activity") {
+    const item = event.source.item;
+    return item.conversation?.id.toLowerCase() ?? (item.run ? `run:${item.run.id.toLowerCase()}` : event.key);
+  }
   const local = event.source.localConversationId;
   return local.toLowerCase();
+}
+
+function kindForActivity(item: ActivityItem): HomeFeedKind | null {
+  switch (item.kind) {
+    case "conversation.reply":
+      return "reply";
+    case "conversation.created":
+      return "conversation";
+    case "run.started":
+      return item.live ? "running" : null;
+    case "run.finished":
+      return "run_finished";
+    case "run.failed":
+      return "run_failed";
+    default:
+      return null;
+  }
+}
+
+function actorForActivity(item: ActivityItem): HomeFeedActor | null {
+  const actor = item.actor;
+  if (actor.kind === "agent") {
+    return { kind: "agent", handle: actor.handle, avatarSeed: actor.avatarSeed, displayName: actor.displayName };
+  }
+  if (actor.kind === "user") {
+    return { kind: "user", handle: null, avatarSeed: null, displayName: actor.displayName };
+  }
+  return null;
+}
+
+function activityEventId(item: ActivityItem): number | null {
+  const parsed = Number(item.id);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 // Work in flight sits at the top of Recent as a live group: running before
 // queued, then newest first. "Needs you" is replies only, newest first — never
 // "whichever space happens to be open" first.
-const LIVE_KIND_RANK: Record<HomeFeedKind, number> = { running: 0, queued: 1, reply: 2, conversation: 3 };
+const LIVE_KIND_RANK: Record<HomeFeedKind, number> = {
+  running: 0,
+  queued: 1,
+  reply: 2,
+  conversation: 3,
+  run_finished: 3,
+  run_failed: 3,
+};
 export const HOME_LIVE_DAY_KEY = "live";
 
 export function buildHomeFeed({
   attentionEntries,
   recentConversations,
   organizations = [],
+  activity: ledger = [],
+  serverLastSeenEventId = null,
   projects,
   activeProject,
   conversations,
@@ -275,6 +328,16 @@ export function buildHomeFeed({
       .filter((conversation) => conversation.controllerId)
       .map((conversation) => [conversation.controllerId!.trim().toLowerCase(), conversation]),
   );
+  // Local rows are keyed by their controller id when they have one, so a
+  // ledger row for the same conversation dedupes against them.
+  const canonicalKey = (event: HomeFeedEvent): string => {
+    if (event.source.type === "conversation") {
+      const local = conversationsByLocalId.get(event.source.localConversationId);
+      const controllerId = local?.controllerId?.trim().toLowerCase();
+      return controllerId || event.source.localConversationId.toLowerCase();
+    }
+    return dedupeKeyFor(event);
+  };
 
   const attentionAll: HomeFeedEvent[] = attentionEntries.map((entry) => {
     if (entry.source === "inbox") {
@@ -322,14 +385,50 @@ export function buildHomeFeed({
   const needsAll: HomeFeedEvent[] = attentionAll
     .filter((event) => event.kind === "reply")
     .sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
-  const liveAll: HomeFeedEvent[] = attentionAll
+  const localLive: HomeFeedEvent[] = attentionAll
     .filter((event) => event.kind !== "reply")
-    .map((event) => ({ ...event, lane: "activity" as const }))
-    .sort((a, b) => LIVE_KIND_RANK[a.kind] - LIVE_KIND_RANK[b.kind] || (b.at ?? 0) - (a.at ?? 0));
+    .map((event) => ({ ...event, lane: "activity" as const }));
 
-  const needsKeys = new Set([...needsAll, ...liveAll].map(dedupeKeyFor));
+  // Ledger rows from the controller: replies, new conversations and run
+  // lifecycle across every team. Unknown kinds are skipped, not shown raw.
+  const serverEvents: HomeFeedEvent[] = ledger.flatMap((item): HomeFeedEvent[] => {
+    const projectId = item.project?.id ?? "";
+    const kind = kindForActivity(item);
+    if (!projectId || !kind) {
+      return [];
+    }
+    rememberTeam(item.org?.id ?? null, item.org?.name ?? null);
+    const teamKey = resolveTeamKey(item.org?.id ?? null);
+    return [
+      {
+        key: `activity:${item.id}`,
+        lane: "activity",
+        kind,
+        title: item.title ?? (kind === "conversation" ? "New conversation" : "Conversation"),
+        preview: item.preview,
+        at: parseTimestamp(item.at),
+        project: { id: projectId, name: getSpaceLabel(item.project?.name) },
+        team: { key: teamKey, name: teamNameFor(teamKey, getOrgDisplayName(item.org?.name ?? null)) },
+        actor: actorForActivity(item),
+        isNew: false,
+        testId: `home-recent-item-${item.id}`,
+        dismissible: false,
+        source: { type: "activity", item },
+      },
+    ];
+  });
+  // The active space's own in-flight work is already known locally (and is
+  // instant); a server row for the same conversation would double it.
+  const localLiveKeys = new Set(localLive.map(canonicalKey));
+  const liveAll: HomeFeedEvent[] = [
+    ...localLive,
+    ...serverEvents.filter((event) => event.kind === "running" && !localLiveKeys.has(dedupeKeyFor(event))),
+  ].sort((a, b) => LIVE_KIND_RANK[a.kind] - LIVE_KIND_RANK[b.kind] || (b.at ?? 0) - (a.at ?? 0));
+  const serverRecent = serverEvents.filter((event) => event.kind !== "running");
 
-  const activityAll: HomeFeedEvent[] = recentConversations
+  const needsKeys = new Set([...needsAll, ...liveAll].map(canonicalKey));
+
+  const recentEvents: HomeFeedEvent[] = recentConversations
     .map((recent): HomeFeedEvent => {
       rememberTeam(recent.orgId, recent.orgName);
       const teamKey = resolveTeamKey(recent.orgId);
@@ -354,7 +453,8 @@ export function buildHomeFeed({
         dismissible: false,
         source: { type: "recent", recent },
       };
-    })
+    });
+  const activityAll: HomeFeedEvent[] = [...recentEvents, ...serverRecent]
     // Something already waiting on you is not also "recent activity".
     .filter((event) => !needsKeys.has(dedupeKeyFor(event)))
     .sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
@@ -397,17 +497,31 @@ export function buildHomeFeed({
 
   const needs = needsAll.filter(inFilter);
   const live = liveAll.filter(inFilter);
-  const activityFlat = activityAll.filter(inFilter).map((event) => ({
-    ...event,
-    isNew: lastSeenAt !== null && event.at !== null && event.at > lastSeenAt,
-  }));
+  // Ledger rows are new when their id is above the server-side cut (which
+  // follows the user across devices); device-local rows fall back to the
+  // local timestamp cut.
+  const serverCut = serverLastSeenEventId !== null ? Number(serverLastSeenEventId) : null;
+  const hasCut = lastSeenAt !== null || (serverCut !== null && Number.isFinite(serverCut));
+  const activityFlat = activityAll.filter(inFilter).map((event) => {
+    if (event.source.type === "activity") {
+      const id = activityEventId(event.source.item);
+      return {
+        ...event,
+        isNew: serverCut !== null && Number.isFinite(serverCut) && id !== null && id > serverCut,
+      };
+    }
+    return {
+      ...event,
+      isNew: lastSeenAt !== null && event.at !== null && event.at > lastSeenAt,
+    };
+  });
 
   // The cut sits before the first item the user has already seen — only
   // meaningful when there is something on both sides of it. Live rows sit
   // above the dated groups, so the cut's flat index shifts past them.
   const firstSeenIndex = activityFlat.findIndex((event) => !event.isNew);
   const sinceCutIndex =
-    lastSeenAt !== null && firstSeenIndex > 0 && firstSeenIndex < activityFlat.length
+    hasCut && firstSeenIndex > 0 && firstSeenIndex < activityFlat.length
       ? live.length + firstSeenIndex
       : null;
 
