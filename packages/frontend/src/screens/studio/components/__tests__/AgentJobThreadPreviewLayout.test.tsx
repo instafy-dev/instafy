@@ -350,6 +350,12 @@ describe("AgentJobThreadPreviewLayout", () => {
     });
   }
 
+  function findCommandHeaderButton(): HTMLButtonElement | undefined {
+    return Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => button.getAttribute("aria-label") === COMMAND_LABEL,
+    );
+  }
+
   it("renders a collapsed command row in the code-block family with an unframed chevron", async () => {
     await act(async () => {
       root.render(<AgentJobThreadPreviewLayout {...createCommandRunProps()} />);
@@ -373,23 +379,28 @@ describe("AgentJobThreadPreviewLayout", () => {
     // Still running: no result hint yet.
     expect(surface?.querySelector('[data-testid="agent-thread-command-result-hint"]')).toBeNull();
 
-    const toggle = container.querySelector<HTMLButtonElement>('button[aria-label="Expand run updates"]');
+    // The header text button is named by the command (raw command in the
+    // title); the chevron is the sole "Expand run updates" control.
+    const toggle = findCommandHeaderButton();
     expect(toggle?.className).toContain("font-mono");
     expect(toggle?.textContent).toContain(COMMAND_LABEL);
+    expect(toggle?.getAttribute("title")).toBe(COMMAND_LABEL);
 
-    const chevron = Array.from(
-      container.querySelectorAll<HTMLButtonElement>('button[aria-label="Expand run updates"]'),
-    ).find((button) => button !== toggle);
+    const expandControls = container.querySelectorAll<HTMLButtonElement>('button[aria-label="Expand run updates"]');
+    expect(expandControls).toHaveLength(1);
+    const chevron = expandControls[0];
     expect(chevron?.className).toContain("opacity-100");
     expect(chevron?.className).not.toContain("opacity-0");
     // The chevron is a glyph, not a second surface inside the surface — and
-    // no hover circle tint inside the surface either.
+    // no hover or pressed circle tint inside the surface either.
     expect(chevron?.className).not.toContain("ring-1");
     expect(chevron?.className).not.toContain("bg-white");
     expect(chevron?.className).not.toMatch(/(^|\s)bg-(?!transparent)/);
     expect(chevron?.className).toContain("hover:bg-transparent");
     expect(chevron?.className).toContain("data-[hovered]:bg-transparent");
     expect(chevron?.className).toContain("dark:hover:bg-transparent");
+    expect(chevron?.className).toContain("data-[pressed]:bg-transparent");
+    expect(chevron?.className).toContain("dark:data-[pressed]:bg-transparent");
   });
 
   function countOccurrences(haystack: string, needle: string): number {
@@ -445,9 +456,10 @@ describe("AgentJobThreadPreviewLayout", () => {
     // The command appears exactly once in the surface, shell wrapper stripped.
     expect(surface?.textContent).not.toContain("bash -lc");
     expect(countOccurrences(surface?.textContent ?? "", COMMAND_LABEL)).toBe(1);
-    const header = container.querySelector<HTMLButtonElement>('button[aria-label="Collapse run updates"]');
+    const header = findCommandHeaderButton();
     expect(header?.textContent).toContain(COMMAND_LABEL);
     expect(header?.getAttribute("title")).toBe(RAW_COMMAND);
+    expect(container.querySelectorAll('button[aria-label="Collapse run updates"]')).toHaveLength(1);
 
     // Copy lives in the header's trailing cluster while expanded, as a ghost glyph.
     const copyButton = surface?.querySelector<HTMLButtonElement>('button[aria-label="Copy output"]');
@@ -640,6 +652,287 @@ describe("AgentJobThreadPreviewLayout", () => {
     const surface = container.querySelector<HTMLElement>('[data-testid="agent-thread-command-surface"]');
     expect(surface).not.toBeNull();
     expect(surface?.querySelector('[data-testid="agent-thread-command-result-hint"]')).toBeNull();
+  });
+
+  // Document-level pins: the surface is the ONLY place the command and its
+  // output appear, so nothing legacy may render beneath it, collapsed or not.
+  it("renders a collapsed completed command exactly once in the document: pill plus hint, no legacy row beneath", async () => {
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createCommandRunProps({
+            isCompleted: true,
+            isRunning: false,
+            isThreadUnresolved: false,
+            isThreadPreviewExpanded: false,
+            showCollapsedCommandToggle: true,
+            latestCommandExecution: { command: RAW_COMMAND, output: "example-user\n220a9ff\n", status: "completed" },
+            latestCommandPreview: `${COMMAND_LABEL} -> 220a9ff`,
+          })}
+        />,
+      );
+    });
+
+    const text = container.textContent ?? "";
+    expect(countOccurrences(text, COMMAND_LABEL)).toBe(1);
+    expect(countOccurrences(text, "220a9ff")).toBe(1);
+    expect(container.querySelector('[data-testid="agent-thread-command-result-hint"]')?.textContent).toBe(
+      "→ 220a9ff",
+    );
+    expect(text).not.toContain("View");
+    expect(text).not.toContain("bash -lc");
+    expect(container.querySelectorAll('[data-testid="agent-thread-command-output-toggle"]')).toHaveLength(0);
+    expect(container.querySelectorAll('[data-testid="chat-command-output"]')).toHaveLength(0);
+    expect(container.querySelectorAll('[data-testid="agent-thread-command-panel-body"]')).toHaveLength(0);
+    expect(container.querySelector('[data-testid="agent-thread-command-surface"]')?.getAttribute("data-expanded")).toBe(
+      "false",
+    );
+    // A completed run does not auto-expand: the parent's collapsed state wins.
+    expect(container.querySelector('button[aria-label="Expand run updates"]')).not.toBeNull();
+    expect(container.querySelector('button[aria-label="Copy output"]')).toBeNull();
+  });
+
+  it("auto-expands the collapsed panel while the command streams, with one stop control in the document", async () => {
+    const onToggleThreadPreview = vi.fn();
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createCommandRunProps({
+            isThreadPreviewExpanded: false,
+            showLiveCommandOutput: true,
+            canCancelTerminalRun: true,
+            onCancelTerminalCommand: vi.fn(),
+            onToggleThreadPreview,
+            latestCommandExecution: { command: RAW_COMMAND, output: "example-user\n", status: "running" },
+            latestCommandPreview: COMMAND_LABEL,
+          })}
+        />,
+      );
+    });
+
+    const surface = container.querySelector<HTMLElement>('[data-testid="agent-thread-command-surface"]');
+    expect(surface?.getAttribute("data-expanded")).toBe("true");
+    const body = container.querySelector<HTMLElement>('[data-testid="agent-thread-command-panel-body"]');
+    expect(body).not.toBeNull();
+    expect(body?.closest('[data-testid="agent-thread-command-surface"]')).toBe(surface);
+    expect(body?.textContent).toContain("example-user");
+    expect(body?.querySelector('[data-testid="chat-command-output"]')?.getAttribute("data-streaming")).toBe("true");
+    expect(container.querySelectorAll('[data-testid="chat-command-stop-button"]')).toHaveLength(1);
+    expect(container.querySelector('[data-testid="chat-command-stop-button"]')?.getAttribute("aria-label")).toBe(
+      "Stop run",
+    );
+    expect(container.querySelectorAll('[data-testid="chat-command-output"]')).toHaveLength(1);
+    expect(container.textContent).not.toContain("bash -lc");
+    expect(countOccurrences(container.textContent ?? "", COMMAND_LABEL)).toBe(1);
+    expect(container.querySelector('button[aria-label="Collapse run updates"]')).not.toBeNull();
+    expect(onToggleThreadPreview).not.toHaveBeenCalled();
+  });
+
+  it("auto-expands the collapsed panel for a running command before any output arrives", async () => {
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createCommandRunProps({
+            isThreadPreviewExpanded: false,
+            showLiveCommandPlaceholder: true,
+            canCancelTerminalRun: true,
+            latestCommandExecution: { command: RAW_COMMAND, output: "", status: "running" },
+            latestCommandPreview: COMMAND_LABEL,
+          })}
+        />,
+      );
+    });
+
+    expect(container.querySelector('[data-testid="agent-thread-command-surface"]')?.getAttribute("data-expanded")).toBe(
+      "true",
+    );
+    expect(container.querySelector('[data-testid="agent-thread-command-panel-status"]')?.textContent).toBe("Running…");
+    expect(container.querySelectorAll('[data-testid="chat-command-stop-button"]')).toHaveLength(1);
+    expect(countOccurrences(container.textContent ?? "", COMMAND_LABEL)).toBe(1);
+    expect(container.textContent).not.toContain("Running command…");
+  });
+
+  it("lets a user collapse during streaming stick for that run and re-arms auto-expand for a new run id", async () => {
+    const onToggleThreadPreview = vi.fn();
+    const renderRun = (jobId: string, output: string) =>
+      act(async () => {
+        root.render(
+          <AgentJobThreadPreviewLayout
+            {...createCommandRunProps({
+              message: createMessage({ metadata: { messageType: "agent_job_thread", jobId } }),
+              isThreadPreviewExpanded: false,
+              showLiveCommandOutput: true,
+              onToggleThreadPreview,
+              latestCommandExecution: { command: RAW_COMMAND, output, status: "running" },
+              latestCommandPreview: COMMAND_LABEL,
+            })}
+          />,
+        );
+      });
+
+    await renderRun("run-1", "first\n");
+    expect(container.querySelector('[data-testid="agent-thread-command-panel-body"]')).not.toBeNull();
+
+    const chevron = container.querySelector<HTMLButtonElement>('button[aria-label="Collapse run updates"]');
+    await act(async () => {
+      chevron?.click();
+    });
+    // The parent already holds "collapsed": only the local override changes.
+    expect(onToggleThreadPreview).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="agent-thread-command-panel-body"]')).toBeNull();
+    expect(container.querySelector('[data-testid="agent-thread-command-surface"]')?.getAttribute("data-expanded")).toBe(
+      "false",
+    );
+
+    // More output on the same run does not re-open it.
+    await renderRun("run-1", "first\nsecond\n");
+    expect(container.querySelector('[data-testid="agent-thread-command-panel-body"]')).toBeNull();
+
+    // Expanding again goes through the parent's toggle.
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('button[aria-label="Expand run updates"]')?.click();
+    });
+    expect(onToggleThreadPreview).toHaveBeenCalledTimes(1);
+
+    // A new run id re-arms the streaming rule.
+    await renderRun("run-2", "next\n");
+    expect(container.querySelector('[data-testid="agent-thread-command-panel-body"]')?.textContent).toContain("next");
+  });
+
+  it("releases a user collapse once the run finishes so the next stream auto-expands again", async () => {
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createCommandRunProps({
+            isThreadPreviewExpanded: false,
+            showLiveCommandOutput: true,
+            latestCommandExecution: { command: RAW_COMMAND, output: "first\n", status: "running" },
+            latestCommandPreview: COMMAND_LABEL,
+          })}
+        />,
+      );
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('button[aria-label="Collapse run updates"]')?.click();
+    });
+    expect(container.querySelector('[data-testid="agent-thread-command-panel-body"]')).toBeNull();
+
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createCommandRunProps({
+            isCompleted: true,
+            isRunning: false,
+            isThreadUnresolved: false,
+            isThreadPreviewExpanded: false,
+            showCollapsedCommandToggle: true,
+            latestCommandExecution: { command: RAW_COMMAND, output: "first\n", status: "completed" },
+            latestCommandPreview: COMMAND_LABEL,
+          })}
+        />,
+      );
+    });
+    expect(container.querySelector('[data-testid="agent-thread-command-panel-body"]')).toBeNull();
+
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createCommandRunProps({
+            isThreadPreviewExpanded: false,
+            showLiveCommandOutput: true,
+            latestCommandExecution: { command: "/bin/bash -lc pnpm test", output: "again\n", status: "running" },
+            latestCommandPreview: "pnpm test",
+          })}
+        />,
+      );
+    });
+    expect(container.querySelector('[data-testid="agent-thread-command-panel-body"]')?.textContent).toContain("again");
+  });
+
+  it("collapses an explicitly expanded panel during streaming through the parent toggle and keeps it collapsed", async () => {
+    const onToggleThreadPreview = vi.fn();
+    const renderExpanded = (isThreadPreviewExpanded: boolean) =>
+      act(async () => {
+        root.render(
+          <AgentJobThreadPreviewLayout
+            {...createCommandRunProps({
+              isThreadPreviewExpanded,
+              showLiveCommandOutput: true,
+              onToggleThreadPreview,
+              latestCommandExecution: { command: RAW_COMMAND, output: "first\n", status: "running" },
+              latestCommandPreview: COMMAND_LABEL,
+            })}
+          />,
+        );
+      });
+
+    await renderExpanded(true);
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('button[aria-label="Collapse run updates"]')?.click();
+    });
+    expect(onToggleThreadPreview).toHaveBeenCalledTimes(1);
+    // The parent flips to collapsed; the local override keeps the streaming
+    // rule from re-opening it.
+    await renderExpanded(false);
+    expect(container.querySelector('[data-testid="agent-thread-command-panel-body"]')).toBeNull();
+  });
+
+  it("resets the panel's show-all when a later command replaces the output", async () => {
+    const renderCommand = (command: string, lineCount: number) =>
+      act(async () => {
+        root.render(
+          <AgentJobThreadPreviewLayout
+            {...createCommandRunProps({
+              isCompleted: true,
+              isRunning: false,
+              isThreadUnresolved: false,
+              isThreadPreviewExpanded: true,
+              showCollapsedCommandToggle: true,
+              latestCommandExecution: {
+                command,
+                output: Array.from({ length: lineCount }, (_, index) => `line ${index + 1}`).join("\n"),
+                status: "completed",
+              },
+              latestCommandPreview: command,
+            })}
+          />,
+        );
+      });
+
+    await renderCommand("/bin/bash -lc pnpm lint", 30);
+    const findShowAll = () =>
+      Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Show all"));
+    await act(async () => {
+      findShowAll()?.click();
+    });
+    expect(findShowAll()).toBeUndefined();
+
+    await renderCommand("/bin/bash -lc pnpm test", 30);
+    expect(findShowAll()?.textContent).toBe("Show all 30 lines");
+  });
+
+  it("keeps the copy glyph off the header whenever the panel shows a status line instead of a body", async () => {
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createCommandRunProps({
+            isCompleted: true,
+            isRunning: false,
+            isThreadUnresolved: false,
+            isThreadPreviewExpanded: true,
+            // Output exists, but nothing says it may be shown yet.
+            showCollapsedCommandToggle: false,
+            latestCommandExecution: { command: RAW_COMMAND, output: "example-user\n", status: "completed" },
+            latestCommandPreview: COMMAND_LABEL,
+          })}
+        />,
+      );
+    });
+
+    expect(container.querySelector('[data-testid="agent-thread-command-panel-body"]')).toBeNull();
+    expect(container.querySelector('[data-testid="agent-thread-command-panel-status"]')).not.toBeNull();
+    expect(container.querySelector('button[aria-label="Copy output"]')).toBeNull();
+    expect(container.textContent).not.toContain("example-user");
   });
 
   it("keeps the command text on the output toggle under an icon rail, without the shell wrapper", async () => {

@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { CSSProperties, ComponentType, MouseEvent, MutableRefObject, ReactNode } from "react";
 import {
   Activity,
@@ -78,10 +78,12 @@ const COMPACTION_STATUS_LABEL = "Re-organizing my thoughts";
 const COMMAND_SURFACE_CLASS =
   "rounded-xl bg-slate-950/[0.02] ring-1 ring-inset ring-slate-900/10 dark:bg-white/[0.035] dark:ring-white/[0.08]";
 const COMMAND_SURFACE_DIVIDER_CLASS = "border-t border-slate-900/10 dark:border-white/[0.08]";
-// Ghost glyphs inside the command surface: no hover circle tint, the surface
-// already carries its own hover fill.
+// Ghost glyphs inside the command surface: no hover or pressed circle tint,
+// the surface already carries its own hover fill.
 const COMMAND_SURFACE_GLYPH_BUTTON_CLASS =
-  "text-slate-500 opacity-100 hover:bg-transparent hover:text-slate-800 data-[hovered]:bg-transparent dark:text-slate-300 dark:hover:bg-transparent dark:hover:text-slate-100 dark:data-[hovered]:bg-transparent";
+  "text-slate-500 opacity-100 hover:bg-transparent hover:text-slate-800 data-[hovered]:bg-transparent data-[pressed]:bg-transparent dark:text-slate-300 dark:hover:bg-transparent dark:hover:text-slate-100 dark:data-[hovered]:bg-transparent dark:data-[pressed]:bg-transparent";
+const COMMAND_SURFACE_STOP_BUTTON_CLASS =
+  "hover:bg-transparent data-[hovered]:bg-transparent data-[pressed]:bg-transparent dark:hover:bg-transparent dark:data-[hovered]:bg-transparent dark:data-[pressed]:bg-transparent";
 // The collapsed command row may trail a short result hint ("→ 220a9ff"); a
 // longer result is not a hint, so the row stays quiet instead of truncating.
 const COMMAND_RESULT_HINT_MAX_CHARS = 24;
@@ -723,6 +725,58 @@ export function AgentJobThreadPreviewLayout({
     branchThreads.length === 0 &&
     !showCompactRailWaitingSpinner;
 
+  const showSingleCompactEventRow =
+    !useTightThreadPreviewLayout &&
+    !terminalStatusDominatesCompactRail &&
+    shouldCollapseSingleCompactEvent &&
+    singleCompactEvent !== null;
+  // A command-kind single-update run renders as the command surface: the
+  // mono header row that IS the command, growing into a panel with the output
+  // body. Whenever that surface renders at all — collapsed or expanded — it is
+  // the only place the command and its output appear, so the legacy pieces
+  // (output toggle row, framed CommandOutputBlock, running placeholder) are
+  // suppressed. Founder feedback on the nested version: "why is there even a
+  // view and hide button within there". The icon-rail (multi-update) path and
+  // non-command runs keep those pieces untouched.
+  const commandPanelActive = showSingleCompactEventRow && singleCompactEventIsCommand;
+  // Streaming rule: the panel is the only place live output shows, so a
+  // running command must not hide it behind a click. While the single command
+  // is running the panel renders expanded unless the user explicitly collapsed
+  // it during THIS run:
+  //   effectivePanelExpanded = isThreadPreviewExpanded || (commandIsRunning && !userCollapsedThisRun)
+  // The override is local, keyed by the job/run id, and released when the run
+  // id changes or the run finishes, so a completed run returns to the parent's
+  // isThreadPreviewExpanded semantics.
+  const commandIsRunning =
+    commandPanelActive &&
+    (showLiveCommandOutput || (showLiveCommandPlaceholder && !isHybridCompactionActive));
+  const commandRunKey = jobId ?? message.id;
+  const [userCollapsedCommandRunKey, setUserCollapsedCommandRunKey] = useState<string | null>(null);
+  useEffect(() => {
+    setUserCollapsedCommandRunKey(null);
+  }, [commandRunKey]);
+  useEffect(() => {
+    if (!commandIsRunning) {
+      setUserCollapsedCommandRunKey(null);
+    }
+  }, [commandIsRunning]);
+  const userCollapsedThisRun = userCollapsedCommandRunKey === commandRunKey;
+  const effectivePanelExpanded =
+    isThreadPreviewExpanded || (commandIsRunning && !userCollapsedThisRun);
+  // The chevron (and the header text) still drive the parent's toggle. The one
+  // exception is collapsing an auto-expanded panel: the parent already holds
+  // "collapsed", so only the local override changes — toggling the parent
+  // there would flip it to expanded and the collapse would never stick.
+  const handleToggleCommandPanel = () => {
+    if (commandIsRunning && effectivePanelExpanded) {
+      setUserCollapsedCommandRunKey(commandRunKey);
+      if (!isThreadPreviewExpanded) {
+        return;
+      }
+    }
+    onToggleThreadPreview();
+  };
+
   if (isStaleReasoningOnlyPreview || isCompletedChromeOnlyPreview) {
     return null;
   }
@@ -736,22 +790,14 @@ export function AgentJobThreadPreviewLayout({
       />
     );
 
-  const showSingleCompactEventRow =
-    !useTightThreadPreviewLayout &&
-    !terminalStatusDominatesCompactRail &&
-    shouldCollapseSingleCompactEvent &&
-    singleCompactEvent !== null;
-  // A command-kind single-update run has exactly two states. Collapsed: the
-  // mono header row (plus, once finished, a short muted result hint). Expanded:
-  // the same surface grows into a panel — header, hairline divider, then the
-  // output body itself (or one status line when there is none), followed by
-  // any inline updates and child threads. No toggle row and no nested output
-  // card: the header already IS the command. Founder feedback on the nested
-  // version: "why is there even a view and hide button within there".
-  const commandPanelExpanded =
-    showSingleCompactEventRow && singleCompactEventIsCommand && isThreadPreviewExpanded;
-  const commandPanelCollapsed =
-    showSingleCompactEventRow && singleCompactEventIsCommand && !isThreadPreviewExpanded;
+  // The command surface has exactly two states. Collapsed: the mono header
+  // row (plus, once finished, a short muted result hint). Expanded: the same
+  // surface grows into a panel — header, hairline divider, then the output
+  // body itself (or one status line when there is none), followed by any
+  // inline updates and child threads. No toggle row and no nested output
+  // card: the header already IS the command.
+  const commandPanelExpanded = commandPanelActive && effectivePanelExpanded;
+  const commandPanelCollapsed = commandPanelActive && !effectivePanelExpanded;
   const rawLatestCommand = latestCommandExecution?.command?.trim() || null;
   const singleCompactEventDisplayLabel = singleCompactEventIsCommand
     ? stripShellWrapperFromCommand(singleCompactEventLabel)
@@ -781,7 +827,9 @@ export function AgentJobThreadPreviewLayout({
     !showCommandPanelOutputBody &&
     latestCommandExecution !== null &&
     !isHybridCompactionActive;
-  const showCommandPanelCopy = commandPanelExpanded && Boolean(latestCommandExecution?.output);
+  // The copy glyph and the output body share one predicate: copy never sits
+  // above a status line or above nothing.
+  const showCommandPanelCopy = showCommandPanelOutputBody;
   const collapsedCommandToggleLabel = showCollapsedCommandOutput
     ? "Hide command output"
     : truncate(stripShellWrapperFromCommand(latestCommandPreview) || "Show command output", 130);
@@ -835,8 +883,12 @@ export function AgentJobThreadPreviewLayout({
       {showCommandPanelOutputBody ? (
         <div className={runDetailSectionClass} data-testid="agent-thread-command-panel-body">
           {/* The panel's own body: output only. The header names the command,
-              the trailing cluster carries copy; nothing is restated here. */}
+              the trailing cluster carries copy; nothing is restated here. The
+              block is keyed by the run and told the command so its "Show all"
+              resets for a later command instead of arriving pre-expanded. */}
           <CommandOutputBlock
+            key={commandRunKey}
+            command={latestCommandExecution?.command ?? null}
             output={latestCommandExecution?.output ?? ""}
             status={latestCommandExecution?.status ?? null}
             bodyOnly
@@ -860,7 +912,7 @@ export function AgentJobThreadPreviewLayout({
         </div>
       ) : null}
 
-      {showLiveCommandOutput && !commandPanelExpanded ? (
+      {showLiveCommandOutput && !commandPanelActive ? (
         <div className={runDetailSectionClass}>
           {renderRunDetailSectionNotch()}
           <div className="min-w-0">
@@ -875,7 +927,7 @@ export function AgentJobThreadPreviewLayout({
         </div>
       ) : null}
 
-      {showLiveCommandPlaceholder && !isHybridCompactionActive && !commandPanelExpanded ? (
+      {showLiveCommandPlaceholder && !isHybridCompactionActive && !commandPanelActive ? (
         <div className={runDetailSectionClass}>
           {renderRunDetailSectionNotch()}
           <Text
@@ -910,13 +962,14 @@ export function AgentJobThreadPreviewLayout({
         </div>
       ) : null}
 
-      {showCollapsedCommandToggle && !isHybridCompactionActive && !commandPanelExpanded ? (
+      {showCollapsedCommandToggle && !isHybridCompactionActive && !commandPanelActive ? (
         <div className={runDetailSectionClass}>
           {renderRunDetailSectionNotch()}
           <div className="min-w-0">
             {/* Under an icon rail (multi-update runs) the toggle row names the
                 command, shell wrapper stripped, and reveals the framed output
-                block. The command panel never renders this row. */}
+                block. The command surface never renders this row, collapsed
+                or expanded. */}
             <button
               type="button"
               onClick={onToggleCommandOutput}
@@ -1423,13 +1476,23 @@ export function AgentJobThreadPreviewLayout({
               >
                 <button
                   type="button"
-                  onClick={onToggleThreadPreview}
+                  onClick={singleCompactEventIsCommand ? handleToggleCommandPanel : onToggleThreadPreview}
                   className={`flex min-w-0 flex-1 items-center gap-1.5 rounded-lg py-0.5 text-left text-xs ${
                     singleCompactEventIsCommand
                       ? "font-mono text-slate-700 hover:text-slate-900 dark:text-slate-200 dark:hover:text-slate-50"
                       : "text-slate-500 hover:text-slate-800 dark:text-slate-300 dark:hover:text-slate-100"
                   }`}
-                  aria-label={isThreadPreviewExpanded ? "Collapse run updates" : "Expand run updates"}
+                  // On the command surface the text button is named by the
+                  // command itself (wrapper stripped; the raw command stays in
+                  // the title) so the chevron is the sole "Expand/Collapse run
+                  // updates" control.
+                  aria-label={
+                    singleCompactEventIsCommand && singleCompactEventDisplayLabel
+                      ? singleCompactEventDisplayLabel
+                      : isThreadPreviewExpanded
+                        ? "Collapse run updates"
+                        : "Expand run updates"
+                  }
                   title={
                     (singleCompactEventIsCommand ? rawLatestCommand : null) ??
                     (singleCompactEventDisplayLabel || resolveThreadCompactUpdateLabel(singleCompactEvent.kind))
@@ -1466,9 +1529,7 @@ export function AgentJobThreadPreviewLayout({
                       isDisabled={cancelRunPending}
                       data-testid="chat-command-stop-button"
                       className={`text-rose-500 hover:text-rose-600 dark:text-rose-300 dark:hover:text-rose-200 ${
-                        singleCompactEventIsCommand
-                          ? "hover:bg-transparent data-[hovered]:bg-transparent dark:hover:bg-transparent dark:data-[hovered]:bg-transparent"
-                          : ""
+                        singleCompactEventIsCommand ? COMMAND_SURFACE_STOP_BUTTON_CLASS : ""
                       }`}
                     >
                       <Xmark aria-hidden="true" className="h-3.5 w-3.5" />
@@ -1488,11 +1549,15 @@ export function AgentJobThreadPreviewLayout({
                     </IconButton>
                   ) : null}
                   <IconButton
-                    aria-label={isThreadPreviewExpanded ? "Collapse run updates" : "Expand run updates"}
+                    aria-label={
+                      (singleCompactEventIsCommand ? effectivePanelExpanded : isThreadPreviewExpanded)
+                        ? "Collapse run updates"
+                        : "Expand run updates"
+                    }
                     variant="ghost"
                     size="xs"
                     radius="full"
-                    onPress={onToggleThreadPreview}
+                    onPress={singleCompactEventIsCommand ? handleToggleCommandPanel : onToggleThreadPreview}
                     className={
                       singleCompactEventIsCommand
                         ? COMMAND_SURFACE_GLYPH_BUTTON_CLASS
@@ -1503,7 +1568,7 @@ export function AgentJobThreadPreviewLayout({
                           }`
                     }
                   >
-                    {isThreadPreviewExpanded ? (
+                    {(singleCompactEventIsCommand ? effectivePanelExpanded : isThreadPreviewExpanded) ? (
                       <NavArrowDown aria-hidden="true" className="h-3.5 w-3.5" />
                     ) : (
                       <NavArrowRight aria-hidden="true" className="h-3.5 w-3.5" />
