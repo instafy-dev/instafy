@@ -47,6 +47,11 @@ export interface HomeFeedEvent {
   isNew: boolean;
   testId: string;
   dismissible: boolean;
+  /**
+   * One row per conversation: this event is the thread's newest ledger row
+   * and stands for `count` rows, `newCount` of them newer than the cut.
+   */
+  group?: { count: number; newCount: number; ids: number[] };
   source:
     | { type: "conversation"; localConversationId: string; entry: HomeAttentionEntry }
     | { type: "inbox"; entry: HomeAttentionEntry }
@@ -424,7 +429,38 @@ export function buildHomeFeed({
     ...localLive,
     ...serverEvents.filter((event) => event.kind === "running" && !localLiveKeys.has(dedupeKeyFor(event))),
   ].sort((a, b) => LIVE_KIND_RANK[a.kind] - LIVE_KIND_RANK[b.kind] || (b.at ?? 0) - (a.at ?? 0));
-  const serverRecent = serverEvents.filter((event) => event.kind !== "running");
+  // One row per conversation, never one per message or per run: the newest
+  // ledger row stands for the thread and carries how many rows sit behind
+  // it. Rows without a conversation (project-scoped runs) stay singular.
+  const folded = new Map<string, { latest: HomeFeedEvent; ids: number[] }>();
+  const singles: HomeFeedEvent[] = [];
+  for (const event of serverEvents) {
+    if (event.kind === "running" || event.source.type !== "activity") {
+      continue;
+    }
+    const conversationId = event.source.item.conversation?.id.toLowerCase() ?? null;
+    const id = activityEventId(event.source.item);
+    if (!conversationId || id === null) {
+      singles.push(event);
+      continue;
+    }
+    const entry = folded.get(conversationId);
+    if (!entry) {
+      folded.set(conversationId, { latest: event, ids: [id] });
+    } else {
+      entry.ids.push(id);
+      if ((event.at ?? 0) > (entry.latest.at ?? 0)) {
+        entry.latest = event;
+      }
+    }
+  }
+  const serverRecent: HomeFeedEvent[] = [
+    ...Array.from(folded.values()).map(({ latest, ids }) => ({
+      ...latest,
+      group: { count: ids.length, newCount: 0, ids },
+    })),
+    ...singles,
+  ];
 
   const needsKeys = new Set([...needsAll, ...liveAll].map(canonicalKey));
 
@@ -504,10 +540,13 @@ export function buildHomeFeed({
   const hasCut = lastSeenAt !== null || (serverCut !== null && Number.isFinite(serverCut));
   const activityFlat = activityAll.filter(inFilter).map((event) => {
     if (event.source.type === "activity") {
-      const id = activityEventId(event.source.item);
+      const cutUsable = serverCut !== null && Number.isFinite(serverCut);
+      const ids = event.group?.ids ?? [activityEventId(event.source.item)].filter((id): id is number => id !== null);
+      const newCount = cutUsable ? ids.filter((id) => id > serverCut).length : 0;
       return {
         ...event,
-        isNew: serverCut !== null && Number.isFinite(serverCut) && id !== null && id > serverCut,
+        isNew: newCount > 0,
+        group: event.group ? { ...event.group, newCount } : undefined,
       };
     }
     return {

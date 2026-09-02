@@ -477,13 +477,21 @@ describe("buildHomeFeed with ledger rows", () => {
     };
   }
 
-  it("maps replies, new conversations and run outcomes into Recent with real actors", () => {
+  it("folds ledger rows to one row per conversation, newest state first, with real actors", () => {
     const model = buildHomeFeed({
       attentionEntries: [],
       recentConversations: [],
       activity: [
         activityItem({ id: "12", kind: "run.failed", at: new Date(NOW - 10 * 60 * 1000).toISOString(), preview: "boom", run: { id: "run-1", status: "failed", promptId: null } }),
-        activityItem({ id: "11", kind: "conversation.created", at: new Date(NOW - 30 * 60 * 1000).toISOString(), preview: null, actor: { kind: "user", userId: "u-1", displayName: "Ada Lovelace", handle: null, avatarSeed: null } }),
+        activityItem({
+          id: "11",
+          kind: "conversation.created",
+          at: new Date(NOW - 30 * 60 * 1000).toISOString(),
+          preview: null,
+          conversation: { id: "c-ada", title: "Ada's plan", visibility: "public" },
+          title: "Ada's plan",
+          actor: { kind: "user", userId: "u-1", displayName: "Ada Lovelace", handle: null, avatarSeed: null },
+        }),
         activityItem({ id: "10" }),
         activityItem({ id: "9", kind: "member.joined", at: new Date(NOW - 2 * HOUR).toISOString() }),
         activityItem({ id: "8", kind: "run.started", live: false, at: new Date(NOW - 3 * HOUR).toISOString() }),
@@ -497,16 +505,45 @@ describe("buildHomeFeed with ledger rows", () => {
     });
 
     const flat = model.activity.flatMap((day) => day.events);
-    expect(flat.map((event) => [event.kind, event.title, event.actor?.kind ?? null])).toEqual([
-      ["run_failed", "Split checkout", "agent"],
-      ["conversation", "Split checkout", "user"],
-      ["reply", "Split checkout", "agent"],
+    // "Split checkout" had a reply (10) and then a failed run (12): one row,
+    // the failure, standing for both. Unknown kinds and a stale run.started
+    // are skipped, not shown raw.
+    expect(flat.map((event) => [event.kind, event.title, event.actor?.kind ?? null, event.group?.count ?? 1])).toEqual([
+      ["run_failed", "Split checkout", "agent", 2],
+      ["conversation", "Ada's plan", "user", 1],
     ]);
+    expect(flat[0].testId).toBe("home-recent-item-12");
+    expect(flat[0].group?.ids).toEqual([12, 10]);
+    expect(flat[0].actor).toEqual({ kind: "agent", handle: "octo", avatarSeed: "seed-octo", displayName: "Octo" });
+    expect(flat[0].team).toEqual({ key: "org-acme", name: "Acme Co" });
     expect(flat[1].actor?.displayName).toBe("Ada Lovelace");
-    expect(flat[2].actor).toEqual({ kind: "agent", handle: "octo", avatarSeed: "seed-octo", displayName: "Octo" });
-    expect(flat[2].testId).toBe("home-recent-item-10");
-    expect(flat[2].team).toEqual({ key: "org-acme", name: "Acme Co" });
     expect(model.teams.map((team) => team.key)).toEqual(["personal", "org-acme"]);
+  });
+
+  it("counts the updates behind a folded thread against the server cut", () => {
+    const model = buildHomeFeed({
+      attentionEntries: [],
+      recentConversations: [],
+      activity: [
+        activityItem({ id: "8", at: new Date(NOW - HOUR).toISOString() }),
+        activityItem({ id: "6", at: new Date(NOW - 2 * HOUR).toISOString() }),
+        activityItem({ id: "4", at: new Date(NOW - 3 * HOUR).toISOString() }),
+        activityItem({ id: "3", at: new Date(NOW - 4 * HOUR).toISOString(), conversation: { id: "c-old", title: "Old", visibility: "public" }, title: "Old" }),
+      ],
+      serverLastSeenEventId: "5",
+      projects: [personalProject],
+      activeProject: personalProject,
+      conversations: [],
+      teamFilter: "all",
+      lastSeenAt: null,
+      now: NOW,
+    });
+    const flat = model.activity.flatMap((day) => day.events);
+    expect(flat.map((event) => [event.title, event.group?.count, event.group?.newCount, event.isNew])).toEqual([
+      ["Split checkout", 3, 2, true],
+      ["Old", 1, 0, false],
+    ]);
+    expect(model.sinceCutIndex).toBe(1);
   });
 
   it("puts live server runs in the In progress group and drops them once the active space knows about them", () => {

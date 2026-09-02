@@ -618,7 +618,15 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
     const when = formatRelativeTimestamp(event.at);
     const teamSuffix = showTeamOnRows && !personalTeamKeys.has(event.team.key) ? ` · ${event.team.name}` : "";
     const where = spansSpaces ? `${event.project.name}${teamSuffix}` : null;
-    const rest = [statusSubtitle(event, viewerUserId), usablePreview(event.preview)].filter(Boolean).join(" · ") || null;
+    // A folded thread says how much is behind its newest state.
+    const updates =
+      event.group && event.group.count > 1
+        ? event.group.newCount > 0
+          ? `${event.group.newCount} new of ${event.group.count} updates`
+          : `${event.group.count} updates`
+        : null;
+    const rest =
+      [updates, statusSubtitle(event, viewerUserId), usablePreview(event.preview)].filter(Boolean).join(" · ") || null;
     return (
       <div key={event.key} className={[ROW_HOVER_CLASS, options.divider ? ROW_DIVIDER_CLASS : ""].filter(Boolean).join(" ")}>
         <FeedRow
