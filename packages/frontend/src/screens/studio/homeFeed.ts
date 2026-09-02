@@ -224,9 +224,11 @@ function dedupeKeyFor(event: HomeFeedEvent): string {
   return local.toLowerCase();
 }
 
-// "Needs you" reads like a feed: work in flight first, then the newest reply
-// from any team — never "whichever space happens to be open" first.
-const NEEDS_KIND_RANK: Record<HomeFeedKind, number> = { running: 0, queued: 0, reply: 1, conversation: 2 };
+// Work in flight sits at the top of Recent as a live group: running before
+// queued, then newest first. "Needs you" is replies only, newest first — never
+// "whichever space happens to be open" first.
+const LIVE_KIND_RANK: Record<HomeFeedKind, number> = { running: 0, queued: 1, reply: 2, conversation: 3 };
+export const HOME_LIVE_DAY_KEY = "live";
 
 export function buildHomeFeed({
   attentionEntries,
@@ -274,7 +276,7 @@ export function buildHomeFeed({
       .map((conversation) => [conversation.controllerId!.trim().toLowerCase(), conversation]),
   );
 
-  const needsAll: HomeFeedEvent[] = attentionEntries.map((entry) => {
+  const attentionAll: HomeFeedEvent[] = attentionEntries.map((entry) => {
     if (entry.source === "inbox") {
       const item = entry.inboxItem;
       rememberTeam(item.orgId, item.orgName);
@@ -317,9 +319,15 @@ export function buildHomeFeed({
       source: { type: "conversation", localConversationId: entry.localConversationId, entry },
     };
   });
-  needsAll.sort((a, b) => NEEDS_KIND_RANK[a.kind] - NEEDS_KIND_RANK[b.kind] || (b.at ?? 0) - (a.at ?? 0));
+  const needsAll: HomeFeedEvent[] = attentionAll
+    .filter((event) => event.kind === "reply")
+    .sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
+  const liveAll: HomeFeedEvent[] = attentionAll
+    .filter((event) => event.kind !== "reply")
+    .map((event) => ({ ...event, lane: "activity" as const }))
+    .sort((a, b) => LIVE_KIND_RANK[a.kind] - LIVE_KIND_RANK[b.kind] || (b.at ?? 0) - (a.at ?? 0));
 
-  const needsKeys = new Set(needsAll.map(dedupeKeyFor));
+  const needsKeys = new Set([...needsAll, ...liveAll].map(dedupeKeyFor));
 
   const activityAll: HomeFeedEvent[] = recentConversations
     .map((recent): HomeFeedEvent => {
@@ -388,18 +396,22 @@ export function buildHomeFeed({
     appliedFilter === HOME_TEAM_FILTER_ALL || event.team.key === appliedFilter;
 
   const needs = needsAll.filter(inFilter);
+  const live = liveAll.filter(inFilter);
   const activityFlat = activityAll.filter(inFilter).map((event) => ({
     ...event,
     isNew: lastSeenAt !== null && event.at !== null && event.at > lastSeenAt,
   }));
 
   // The cut sits before the first item the user has already seen — only
-  // meaningful when there is something on both sides of it.
+  // meaningful when there is something on both sides of it. Live rows sit
+  // above the dated groups, so the cut's flat index shifts past them.
   const firstSeenIndex = activityFlat.findIndex((event) => !event.isNew);
   const sinceCutIndex =
-    lastSeenAt !== null && firstSeenIndex > 0 && firstSeenIndex < activityFlat.length ? firstSeenIndex : null;
+    lastSeenAt !== null && firstSeenIndex > 0 && firstSeenIndex < activityFlat.length
+      ? live.length + firstSeenIndex
+      : null;
 
-  const activity: HomeFeedDay[] = [];
+  const activity: HomeFeedDay[] = live.length > 0 ? [{ key: HOME_LIVE_DAY_KEY, label: "In progress", events: live }] : [];
   activityFlat.forEach((event) => {
     const day = dayLabelFor(event.at, now);
     const last = activity.at(-1);
@@ -416,7 +428,7 @@ export function buildHomeFeed({
     needs,
     activity,
     sinceCutIndex,
-    isEmpty: needsAll.length === 0 && activityAll.length === 0,
+    isEmpty: needsAll.length === 0 && liveAll.length === 0 && activityAll.length === 0,
   };
 }
 
