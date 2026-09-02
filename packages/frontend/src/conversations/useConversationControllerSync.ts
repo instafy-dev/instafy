@@ -259,10 +259,10 @@ export function useConversationControllerSync({
           typeof remote.parentConversationId === "string" && isUuid(remote.parentConversationId)
             ? remote.parentConversationId
             : null;
+        // A root conversation can carry a kind too: a scheduled thread is a
+        // root with thread kind "automation" — it must keep that origin.
         const threadKindFromRemote =
-          parentConversationIdFromRemote && typeof remote.threadKind === "string"
-            ? remote.threadKind.trim().toLowerCase() || null
-            : null;
+          typeof remote.threadKind === "string" ? remote.threadKind.trim().toLowerCase() || null : null;
         const visibility = resolveConversationVisibility(remote.visibility, metadata);
         const lifecycleStatus = extractConversationLifecycleFromMetadata(
           metadata,
