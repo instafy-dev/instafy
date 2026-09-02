@@ -5,10 +5,29 @@ export const CHAT_INPUT_LINE_HEIGHT_PX = 20;
 export const CHAT_INPUT_MAX_LINES_COMPACT_VIEWPORT = 6;
 export const CHAT_INPUT_MAX_LINES_WIDE_VIEWPORT = 10;
 
-// Mirrors the editor's `py-1 sm:py-0.5` padding so the pixel cap lands on a
-// whole line count once box-sizing folds the padding in.
-export const CHAT_INPUT_VERTICAL_PADDING_COMPACT_VIEWPORT_PX = 8;
-export const CHAT_INPUT_VERTICAL_PADDING_WIDE_VIEWPORT_PX = 4;
+// The row's controls are IconButton size="md": 36px (h-9) on a fine pointer,
+// 44px (pointer-coarse:min-h-11) on a coarse one. The editor pads each side
+// by (control − line) / 2 so a single line's centre sits on the control
+// centres — and, because the row is items-end and the editor grows upward,
+// so does the LAST line's centre once the draft wraps. Both sides together
+// are what box-sizing folds into the pixel cap.
+export const CHAT_INPUT_CONTROL_HEIGHT_FINE_POINTER_PX = 36;
+export const CHAT_INPUT_CONTROL_HEIGHT_COARSE_POINTER_PX = 44;
+export const CHAT_INPUT_VERTICAL_PADDING_FINE_POINTER_PX =
+  (CHAT_INPUT_CONTROL_HEIGHT_FINE_POINTER_PX - CHAT_INPUT_LINE_HEIGHT_PX) / 2;
+export const CHAT_INPUT_VERTICAL_PADDING_COARSE_POINTER_PX =
+  (CHAT_INPUT_CONTROL_HEIGHT_COARSE_POINTER_PX - CHAT_INPUT_LINE_HEIGHT_PX) / 2;
+
+// The classes that put those numbers on the editor: the control height as a
+// minimum (on the editor, and on its wrapper in the composer row), the
+// padding on each side (py-2 = 8px, py-3 = 12px), and the same top offset
+// for the overlays — placeholder, ghost remainder, recording indicator —
+// that sit on the first line. `pointer-coarse:` is Tailwind's
+// `@media (pointer: coarse)`; the JS cap reads the same query through
+// useCoarsePointer so the padding and the cap flip together.
+export const CHAT_INPUT_CONTROL_HEIGHT_CLASS = "min-h-9 pointer-coarse:min-h-11";
+export const CHAT_INPUT_VERTICAL_PADDING_CLASS = "py-2 pointer-coarse:py-3";
+export const CHAT_INPUT_OVERLAY_TOP_CLASS = "top-2 pointer-coarse:top-3";
 
 export function resolveChatInputMaxLines({ compactViewport }: { compactViewport: boolean }): number {
   return compactViewport
@@ -16,9 +35,21 @@ export function resolveChatInputMaxLines({ compactViewport }: { compactViewport:
     : CHAT_INPUT_MAX_LINES_WIDE_VIEWPORT;
 }
 
-export function resolveChatInputMaxHeightPx({ compactViewport }: { compactViewport: boolean }): number {
-  const padding = compactViewport
-    ? CHAT_INPUT_VERTICAL_PADDING_COMPACT_VIEWPORT_PX
-    : CHAT_INPUT_VERTICAL_PADDING_WIDE_VIEWPORT_PX;
-  return resolveChatInputMaxLines({ compactViewport }) * CHAT_INPUT_LINE_HEIGHT_PX + padding;
+export function resolveChatInputVerticalPaddingPx({ coarsePointer }: { coarsePointer: boolean }): number {
+  return coarsePointer
+    ? CHAT_INPUT_VERTICAL_PADDING_COARSE_POINTER_PX
+    : CHAT_INPUT_VERTICAL_PADDING_FINE_POINTER_PX;
+}
+
+export function resolveChatInputMaxHeightPx({
+  compactViewport,
+  coarsePointer,
+}: {
+  compactViewport: boolean;
+  coarsePointer: boolean;
+}): number {
+  return (
+    resolveChatInputMaxLines({ compactViewport }) * CHAT_INPUT_LINE_HEIGHT_PX +
+    2 * resolveChatInputVerticalPaddingPx({ coarsePointer })
+  );
 }

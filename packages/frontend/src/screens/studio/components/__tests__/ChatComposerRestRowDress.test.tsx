@@ -6,6 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IconButton } from "../../../../components/Button";
 import { COMPOSER_SEND_REST_CLASS, ChatComposerSurface } from "../ChatComposerSurface";
+import { CHAT_INPUT_CONTROL_HEIGHT_CLASS } from "../chat-input/chatInputGrowth";
 import { resolveChatComposerAffordances } from "../chatComposerAffordances";
 import { deriveChatVoiceComposerViewState } from "../chatVoiceComposerViewState";
 
@@ -396,4 +397,83 @@ describe("ChatComposerSurface rest-row dress", () => {
       expect(classTokens(control("send")).has(token)).toBe(false);
     }
   });
+
+  it("draws the four rest-row glyphs at one size and stroke", async () => {
+    // Founder feedback at desktop width: "'Ask for something' text alignment
+    // with the picture icon etc?" Measured on the rest row: the "+" glyph was
+    // 16px (the menu sized its own Plus with h-4 w-4) while image, mic and
+    // Send were 22px at stroke 1.5. Rule: the surface hands one icon class
+    // to all four controls and no control sizes a glyph of its own.
+    const props = await renderRow("");
+    const iconTokens = new Set(splitTokens(props.composerActionIconClass));
+    const sizeTokensOf = (tokens: Set<string>) =>
+      sortedTokens(
+        new Set(Array.from(tokens).filter((token) => /^(?:h|w|size)-/.test(utilityRoot(token)))),
+      );
+    expect(sizeTokensOf(iconTokens)).toHaveLength(2);
+
+    const glyphs = (["plus", "image", "mic", "send"] as ControlName[]).map((name) => {
+      const svg = control(name)?.querySelector("svg");
+      expect(svg, name).not.toBeNull();
+      return svg as SVGElement;
+    });
+    const [reference] = glyphs;
+    expect(reference.getAttribute("stroke-width")).not.toBeNull();
+    for (const svg of glyphs) {
+      for (const token of iconTokens) expect(classTokens(svg).has(token)).toBe(true);
+      expect(sizeTokensOf(classTokens(svg))).toEqual(sizeTokensOf(iconTokens));
+      expect(svg.getAttribute("stroke-width")).toBe(reference.getAttribute("stroke-width"));
+    }
+  });
+
+  it.each([
+    { viewport: "at sm+", compactBrowserViewport: false },
+    { viewport: "below sm", compactBrowserViewport: true },
+  ])(
+    "sizes the editor wrapper to the controls and gives the text a 4px gutter $viewport",
+    async ({ compactBrowserViewport }) => {
+      // Measured: every button box 36px centred at y=685 while the editor's
+      // single-line box was 24px centred at y=681 — its wrapper was min-h-11
+      // (44px) on every pointer, centred in a 36px row, so the text sat 4px
+      // above the icon centres. And box-to-text was 8px, the inter-button
+      // gap; with the glyphs inset 7px in their boxes that read as 15px
+      // glyph-to-text against a 25px glyph rhythm — the text looked pushed
+      // away from the image icon. Rules: the wrapper is exactly as tall as
+      // the controls, fine and coarse, and centres the editor (the editor
+      // itself pads to the same height and folds that padding into its line
+      // cap — chatInputGrowth.test.ts, ChatInput.test.tsx); the row's own
+      // gap is 4px while the groups keep the button rhythm.
+      await renderRow("", compactBrowserViewport);
+      const { ghost } = await probeIconButtons();
+      const wrapper = classTokens(container.querySelector('[data-testid="chat-input"]')?.parentElement);
+
+      // The button's own height (h-9) is the wrapper's minimum (min-h-9), and
+      // the coarse-pointer minimum is the very token the button carries.
+      const buttonHeight = Array.from(ghost).find((token) => /^h-[^:]+$/.test(token));
+      const coarseMinHeight = Array.from(ghost).find((token) => token.startsWith("pointer-coarse:min-h-"));
+      expect(buttonHeight).toBeDefined();
+      expect(coarseMinHeight).toBeDefined();
+      expect(wrapper.has(`min-${buttonHeight}`)).toBe(true);
+      expect(wrapper.has(coarseMinHeight as string)).toBe(true);
+      for (const token of splitTokens(CHAT_INPUT_CONTROL_HEIGHT_CLASS)) expect(wrapper.has(token)).toBe(true);
+      // ...and no other height of its own.
+      expect(
+        sortedTokens(
+          new Set(Array.from(wrapper).filter((token) => /^(?:min-h|max-h|h)-/.test(utilityRoot(token)))),
+        ),
+      ).toEqual(sortedTokens(new Set([`min-${buttonHeight}`, coarseMinHeight as string])));
+      for (const token of ["flex", "flex-col", "justify-center"]) expect(wrapper.has(token)).toBe(true);
+
+      const row = classTokens(container.querySelector('[data-testid="chat-composer-text-row"]'));
+      const groups = [
+        classTokens(container.querySelector('[data-testid="chat-composer-leading-controls"]')),
+        classTokens(container.querySelector('[data-testid="chat-composer-trailing-controls"]')),
+      ];
+      const gapTokens = (tokens: Set<string>) =>
+        sortedTokens(new Set(Array.from(tokens).filter((token) => utilityRoot(token).startsWith("gap-"))));
+      expect(row.has("items-end")).toBe(true);
+      expect(gapTokens(row)).toEqual(["gap-1"]);
+      for (const group of groups) expect(gapTokens(group)).toEqual(["gap-1.5", "sm:gap-2"]);
+    },
+  );
 });

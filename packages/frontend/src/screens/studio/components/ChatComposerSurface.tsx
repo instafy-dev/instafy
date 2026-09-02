@@ -37,6 +37,7 @@ import { ComposerActionMenu } from "./ComposerActionMenu";
 import { ComposerInviteModal } from "./ComposerInviteModal";
 import { ChatBrowserDock } from "./ChatBrowserDock";
 import { ChatInput, type ChatInputHandle } from "./chat-input/ChatInput";
+import { CHAT_INPUT_CONTROL_HEIGHT_CLASS } from "./chat-input/chatInputGrowth";
 import {
   resolveComposerSendModifierAction,
   type ComposerSendModifierKeys,
@@ -102,8 +103,12 @@ type ChatComposerSurfaceProps = {
   homeAttentionCount: number;
   homeAttentionBadge: string;
   // The surface dresses the "+" trigger and the mic itself (see the class
-  // props below) so every rest-row control resolves to the one family here.
-  composerActionMenuProps: Omit<ComponentProps<typeof ComposerActionMenu>, "triggerClassName">;
+  // props below) — the box from the ghost family and the glyph from the one
+  // icon class — so every rest-row control resolves to the one dress here.
+  composerActionMenuProps: Omit<
+    ComponentProps<typeof ComposerActionMenu>,
+    "triggerClassName" | "triggerIconClassName"
+  >;
   onOpenImagePicker: () => void;
   sendingAttachment: boolean;
   showMobileGhostSuggestionAcceptButton: boolean;
@@ -201,6 +206,14 @@ function resolveGoalStatusPillTone(tone: ConversationGoalHealth["tone"]): Status
 // change is the only motion the composer has. Exported so the geometry tests
 // can name the exact delta they allow.
 export const COMPOSER_SEND_REST_CLASS = "[&_svg]:text-slate-400 dark:[&_svg]:text-slate-500";
+
+// The editor wrapper in the one-row composer is exactly as tall as the row's
+// controls (IconButton md: h-9 on a fine pointer, min-h-11 on a coarse one —
+// the same tokens chatInputGrowth.ts sizes the editor by) and centres the
+// editor inside it, so a single line sits on the control centres. It used
+// to be min-h-11 on every pointer: 44px centred in a 36px row put the text
+// 4px above the icons on desktop.
+export const COMPOSER_EDITOR_WRAPPER_CLASS = `flex ${CHAT_INPUT_CONTROL_HEIGHT_CLASS} min-w-0 flex-1 flex-col justify-center`;
 
 // The Browser-session condensed bar is a separate idle layout (see
 // renderSendButton) and keeps the rest dress it had before the one-row
@@ -807,6 +820,7 @@ export function ChatComposerSurface({
       uploadImageDisabled={imageUploadDisabled}
       onInsertSuggestion={foldSuggestionIntoMenu ? onAcceptGhostSuggestion : undefined}
       triggerClassName={composerGhostActionClass}
+      triggerIconClassName={composerActionIconClass}
     />
   );
   const imageUploadButtonNode = (
@@ -1310,12 +1324,24 @@ export function ChatComposerSurface({
                 (the mic when voice is supported, and Send, always mounted and
                 lighting up in place) sit on the right. The editor wrapper keeps
                 the same tree position in every mode so Lexical never remounts.
+
+                Alignment with the text ("Ask for something…"): the four
+                glyphs share one size and stroke (composerActionIconClass);
+                the editor wrapper is as tall as the controls and centres the
+                editor, whose own padding keeps the last line centred as it
+                grows (COMPOSER_EDITOR_WRAPPER_CLASS, chatInputGrowth.ts); and
+                the row's own gap is 4px — the text starts 4px after the last
+                leading box and ends 4px before the first trailing one — while
+                the groups keep the button rhythm (gap-1.5 sm:gap-2). With the
+                glyphs inset 7px in their boxes, 4px reads as glyph-to-text
+                11px against a glyph-to-glyph 25px; the previous 8px read as
+                15px and pushed the text away from the image icon.
               */}
               <div
                 className={
                   browserComposerCondensed
                     ? "relative pb-0"
-                    : `relative flex items-end gap-1.5 sm:gap-2 ${
+                    : `relative flex items-end gap-1 ${
                         composerInlineControlsInTextRow &&
                         !(browserModeActive || compactBrowserViewport)
                           ? "pb-1.5"
@@ -1339,7 +1365,7 @@ export function ChatComposerSurface({
                 <div
                   className={
                     composerInlineControlsInTextRow
-                      ? "flex min-h-11 min-w-0 flex-1 flex-col justify-center"
+                      ? COMPOSER_EDITOR_WRAPPER_CLASS
                       : "min-w-0 flex-1"
                   }
                 >

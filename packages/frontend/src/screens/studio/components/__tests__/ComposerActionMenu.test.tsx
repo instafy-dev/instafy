@@ -60,6 +60,7 @@ describe("ComposerActionMenu", () => {
           onOpenInvite={vi.fn()}
           onImportGithubRepo={vi.fn()}
           onInsertCommand={vi.fn()}
+          triggerIconClassName="h-[22px] w-[22px]"
           {...sendActions}
         />,
       );
