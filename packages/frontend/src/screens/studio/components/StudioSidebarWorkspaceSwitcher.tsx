@@ -50,6 +50,7 @@ type StudioSidebarWorkspaceSwitcherProps = {
   workspaceOrgKey: string;
   onWorkspaceOrgChange: (orgKey: string) => void;
   onOpenOrgSettings?: () => void;
+  onCreateOrg?: () => void;
   canSearchSpaces: boolean;
   showProjectSearch: boolean;
   workspaceProjectSearchOpen: boolean;
@@ -77,6 +78,7 @@ export function StudioSidebarWorkspaceSwitcher({
   workspaceOrgKey,
   onWorkspaceOrgChange,
   onOpenOrgSettings,
+  onCreateOrg,
   canSearchSpaces,
   showProjectSearch,
   workspaceProjectSearchOpen,
@@ -222,18 +224,35 @@ export function StudioSidebarWorkspaceSwitcher({
         label="Team"
         headerClassName="pr-0"
         actions={
-          <IconButton
-            variant="ghost"
-            size="sm"
-            radius="full"
-            aria-label="Team settings"
-            data-testid="sidebar-org-settings-button"
-            isDisabled={!onOpenOrgSettings}
-            onPress={onOpenOrgSettings}
-            className={`shrink-0 ${WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}`}
-          >
-            <Settings className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
-          </IconButton>
+          <div className="flex items-center gap-1">
+            <IconButton
+              variant="ghost"
+              size="sm"
+              radius="full"
+              aria-label="Team settings"
+              data-testid="sidebar-org-settings-button"
+              isDisabled={!onOpenOrgSettings}
+              onPress={onOpenOrgSettings}
+              className={`shrink-0 ${WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}`}
+            >
+              <Settings className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
+            </IconButton>
+            {onCreateOrg ? (
+              // The section's real job for a one-team user: the door to a
+              // second team. Mirrors the "New space" action below.
+              <IconButton
+                variant="ghost"
+                size="sm"
+                radius="full"
+                aria-label="New team"
+                data-testid="sidebar-org-new"
+                onPress={onCreateOrg}
+                className={`shrink-0 ${WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}`}
+              >
+                <Plus className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
+              </IconButton>
+            ) : null}
+          </div>
         }
       >
         <div className="mt-2 space-y-1" data-testid="sidebar-org-selector">

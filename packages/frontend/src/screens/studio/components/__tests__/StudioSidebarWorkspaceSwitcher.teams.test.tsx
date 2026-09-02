@@ -90,6 +90,22 @@ describe("StudioSidebarWorkspaceSwitcher team rows", () => {
     expect(onWorkspaceOrgChange).toHaveBeenCalledWith("personal");
   });
 
+  it("offers a New team action beside team settings when creation is wired", async () => {
+    const onCreateOrg = vi.fn();
+    await render(root, { onCreateOrg });
+
+    const create = container.querySelector('[data-testid="sidebar-org-new"]') as HTMLButtonElement | null;
+    expect(create?.getAttribute("aria-label")).toBe("New team");
+    await act(async () => {
+      create?.click();
+    });
+    expect(onCreateOrg).toHaveBeenCalledTimes(1);
+
+    // Without a creation handler the door simply isn't drawn.
+    await render(root, { onCreateOrg: undefined });
+    expect(container.querySelector('[data-testid="sidebar-org-new"]')).toBeNull();
+  });
+
   it("still names the team when there is only one", async () => {
     await render(root, { orgOptions: [teams[0]], workspaceOrgKey: "personal", orgAttentionCounts: {} });
 

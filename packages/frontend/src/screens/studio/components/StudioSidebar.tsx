@@ -21,6 +21,8 @@ import { AttentionBadge } from "../../../components/AttentionBadge";
 import { Button } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
+import { StudioDialogBody, StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
+import { Input } from "../../../components/Input";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import { useStatus } from "../../../status/useStatus";
 import { useProfile } from "../../../profile/ProfileProvider";
@@ -1128,11 +1130,69 @@ export function StudioSidebar({
 
   const workspaceSwitcherOpen = workspaceMenuOpen || workspaceMobileViewOpen;
   const moreSwitcherOpen = moreMenuOpen || moreMobileViewOpen;
+  // "New team" lives with the sidebar because the sidebar already owns the
+  // org list and the switch: create, refresh that list, then select the new
+  // team so the panel lands on its (empty) spaces with the New-space action
+  // right there.
+  const [newTeamOpen, setNewTeamOpen] = useState(false);
+  const [newTeamName, setNewTeamName] = useState("");
+  const [newTeamPending, setNewTeamPending] = useState(false);
+  const closeNewTeam = useCallback(() => {
+    setNewTeamOpen(false);
+    setNewTeamName("");
+  }, []);
+  const handleCreateTeam = useCallback(async () => {
+    const orgName = newTeamName.trim();
+    if (!orgName || newTeamPending) {
+      return;
+    }
+    setNewTeamPending(true);
+    try {
+      const created = await controllerClient.organizations.create({ orgName });
+      if (!created) {
+        showStatus("Couldn't create the team. Check the team limit and try again.", "error", 4500);
+        return;
+      }
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("instafy:orgs-updated"));
+      }
+      closeNewTeam();
+      showStatus(`Team ${created.name} created.`, "success", 2500, { presentation: "confirmation" });
+      // A new team has no spaces, so selecting it would only bounce back with
+      // a "no spaces yet" notice. Go straight to making its first space; fall
+      // back to plain selection where the new-space flow isn't available.
+      if (onStartNewProject) {
+        onStartNewProject(created.id);
+        onRequestClose?.();
+      } else {
+        handleWorkspaceOrgChange(created.id);
+      }
+    } finally {
+      setNewTeamPending(false);
+    }
+  }, [
+    closeNewTeam,
+    handleWorkspaceOrgChange,
+    newTeamName,
+    newTeamPending,
+    onRequestClose,
+    onStartNewProject,
+    showStatus,
+  ]);
+
   const workspaceSwitcherSections = (
     <StudioSidebarWorkspaceSwitcher
       orgOptions={orgOptions}
       workspaceOrgKey={workspaceOrgKey}
       onWorkspaceOrgChange={handleWorkspaceOrgChange}
+      onCreateOrg={
+        runtimeControllerEnabled
+          ? () => {
+              closeWorkspaceSwitcher();
+              setNewTeamOpen(true);
+            }
+          : undefined
+      }
       projectAttentionCounts={homeAttentionByProject}
       orgAttentionCounts={homeAttentionByOrg}
       onOpenOrgSettings={
@@ -1690,6 +1750,61 @@ export function StudioSidebar({
             runtimeOptions={runtimeOptions}
             onCopyTunnel={handleCopyTunnel}
           />
+      </StudioDialogModal>
+      <StudioDialogModal
+        isOpen={newTeamOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            closeNewTeam();
+          }
+        }}
+        isDismissable
+        dialogAriaLabel="New team"
+        data-testid="sidebar-new-team-modal"
+        modalClassName="max-w-sm p-0"
+      >
+        <StudioDialogHeader
+          title="New team"
+          description="A team has its own spaces, members and credits."
+          onClose={closeNewTeam}
+          closeLabel="Close new team"
+        />
+        <StudioDialogBody>
+          <form
+            className="space-y-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handleCreateTeam();
+            }}
+          >
+            <Input
+              id="sidebar-new-team-name"
+              aria-label="Team name"
+              placeholder="Team name"
+              value={newTeamName}
+              onChange={(event) => setNewTeamName(event.target.value)}
+              autoFocus
+              autoComplete="off"
+              maxLength={80}
+              data-testid="sidebar-new-team-name"
+            />
+            <div className="flex items-center justify-end gap-2">
+              <Button variant="ghost" size="sm" radius="full" onPress={closeNewTeam}>
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                variant="primary"
+                size="sm"
+                radius="full"
+                isDisabled={newTeamName.trim().length === 0 || newTeamPending}
+                data-testid="sidebar-new-team-create"
+              >
+                {newTeamPending ? "Creating…" : "Create team"}
+              </Button>
+            </div>
+          </form>
+        </StudioDialogBody>
       </StudioDialogModal>
       {appLogsOverlayOpen ? (
         <BuildLogOverlay
