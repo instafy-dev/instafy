@@ -38,29 +38,46 @@ test.describe("Narrow-phone Studio density", () => {
     // The idle composer is one row: 1px top border + 6px top padding + the
     // 44px control row + the 8px safe-area floor = 59px. Image upload folds
     // into the "+" menu below sm. Chromium under Playwright supports web
-    // speech, so the empty rest row ends in the hold-to-talk mic, not Send;
-    // Send takes that slot once there is a draft.
+    // speech, so the rest row ends in the hold-to-talk mic AND Send: Send is
+    // always mounted, quiet (data-send-rest) while the draft is empty, and
+    // lights up in place once there is a payload. Typing adds nothing to the
+    // row and removes nothing from it.
     const composer = page.getByTestId("chat-composer-overlay");
     const input = page.getByTestId("chat-input");
+    const voice = page.getByTestId("chat-voice-input-button");
+    const send = page.getByTestId("chat-send-button");
     await expectHeightBetween(composer, 56, 62);
     await expect(input).toHaveCSS("font-size", "16px");
     await expectHeightBetween(page.getByTestId("chat-home-button-mobile"), 44, 44);
     await expectHeightBetween(page.getByTestId("composer-action-menu-trigger"), 44, 44);
-    await expectHeightBetween(page.getByTestId("chat-voice-input-button"), 44, 44);
-    await expect(page.getByTestId("chat-send-button")).toHaveCount(0);
+    await expectHeightBetween(voice, 44, 44);
+    await expectHeightBetween(send, 44, 44);
+    await expect(send).toHaveAttribute("data-send-rest", "true");
     await expect(page.getByTestId("chat-image-upload-button")).toHaveCount(0);
+    const restVoiceBox = await voice.boundingBox();
+    const restSendBox = await send.boundingBox();
+    expect(restVoiceBox).not.toBeNull();
+    expect(restSendBox).not.toBeNull();
 
     // With a one-line draft the composer is still the same one row: the 20px
-    // line + 8px editor padding sits inside the 44px row, and Send takes the
-    // mic's slot in place.
+    // line + 8px editor padding sits inside the 44px row, Send lights up in
+    // its own slot and the mic keeps the slot it had.
     await input.fill("Density check");
     await expect(input.locator("p").last()).toHaveText("Density check");
-    await expectHeightBetween(page.getByTestId("chat-send-button"), 44, 44);
+    await expectHeightBetween(send, 44, 44);
+    await expectHeightBetween(voice, 44, 44);
     await expectHeightBetween(composer, 56, 62);
+    const draftVoiceBox = await voice.boundingBox();
+    const draftSendBox = await send.boundingBox();
+    expect(draftVoiceBox).not.toBeNull();
+    expect(draftSendBox).not.toBeNull();
+    expect(Math.abs(draftVoiceBox!.x - restVoiceBox!.x)).toBeLessThan(1);
+    expect(Math.abs(draftSendBox!.x - restSendBox!.x)).toBeLessThan(1);
     await input.press("ControlOrMeta+a");
     await input.press("Backspace");
-    await expect(page.getByTestId("chat-send-button")).toHaveCount(0);
-    await expectHeightBetween(page.getByTestId("chat-voice-input-button"), 44, 44);
+    await expect(send).toHaveAttribute("data-send-rest", "true");
+    await expectHeightBetween(send, 44, 44);
+    await expectHeightBetween(voice, 44, 44);
     await expectHeightBetween(composer, 56, 62);
 
     const baseHeaderBox = await studioHeader.boundingBox();

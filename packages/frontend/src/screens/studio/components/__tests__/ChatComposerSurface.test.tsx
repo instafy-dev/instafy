@@ -4,8 +4,10 @@ import { forwardRef, useState, type ComponentProps } from "react";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ChatComposerSurface } from "../ChatComposerSurface";
+import { IconButton } from "../../../../components/Button";
+import { COMPOSER_SEND_REST_CLASS, ChatComposerSurface } from "../ChatComposerSurface";
 import { CHAT_COMPOSER_COLUMN_CLASS_NAME } from "../ChatColumn";
+import { deriveChatVoiceComposerViewState } from "../chatVoiceComposerViewState";
 import {
   TOUCH_SEND_MODE_HOLD_DELAY_MS,
   createTouchSendModePickerLayout,
@@ -45,8 +47,16 @@ vi.mock("../ConversationRoster", () => ({
   ConversationRoster: () => <div data-testid="mock-conversation-roster" />,
 }));
 
+// The mock exposes the two props the surface used to flip with the draft so
+// the geometry snapshots can prove they no longer move.
 vi.mock("../VoiceConversationActionStrip", () => ({
-  VoiceConversationActionStrip: () => <div data-testid="mock-voice-action-strip" />,
+  VoiceConversationActionStrip: (props: Record<string, unknown>) => (
+    <div
+      data-testid="mock-voice-action-strip"
+      data-voice-input-testid={String(props.voiceInputTestId ?? "chat-voice-input-button")}
+      data-voice-replies-toggle={String(props.showVoiceRepliesToggle === true)}
+    />
+  ),
 }));
 
 vi.mock("../../../extensions/ProviderTriggerNotice", () => ({
@@ -327,15 +337,93 @@ describe("ChatComposerSurface", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  function renderLayout(overrides: Partial<ComponentProps<typeof ChatComposerSurface>> = {}) {
-    const base = createProps({ showVoicePrimaryAction: false, showVoiceSecondaryAction: true });
+  // The voice flags come from the real view state so the layout tests run
+  // through the gate the founder hits: on a voice-capable client (web speech
+  // in Chromium) the mic is the "primary action" while the draft is empty and
+  // steps back to "secondary" once there is a payload; on a client without
+  // voice both flags are false throughout. Explicit overrides still win.
+  function voiceFlagsFor(voiceInputSupported: boolean, value: string) {
+    const state = deriveChatVoiceComposerViewState({
+      chatVoiceInteractionMode: "hold",
+      composerHasSendPayload: value.trim().length > 0,
+      continuousAwaitingAssistantReply: false,
+      continuousConversationActive: false,
+      continuousPauseMessage: null,
+      continuousVoiceResolving: false,
+      voiceHoldActive: false,
+      voiceInputListening: false,
+      voiceInputStarting: false,
+      voiceInputSupported,
+      voiceInputTranscript: "",
+      voiceInputTranscribing: false,
+    });
+    return {
+      showVoicePrimaryAction: state.showVoicePrimaryAction,
+      showVoiceSecondaryAction: state.showVoiceSecondaryAction,
+    };
+  }
+
+  function renderLayout(
+    overrides: Partial<ComponentProps<typeof ChatComposerSurface>> = {},
+    { voiceInputSupported = true }: { voiceInputSupported?: boolean } = {},
+  ) {
+    const base = createProps();
+    const value = (overrides.chatInputProps as { value?: string } | undefined)?.value ?? "";
     return root.render(
       <ChatComposerSurface
         {...base}
+        {...voiceFlagsFor(voiceInputSupported, value)}
         {...overrides}
         chatInputProps={{ ...base.chatInputProps, ...(overrides.chatInputProps ?? {}) }}
       />,
     );
+  }
+
+  function classTokens(node: Element | null | undefined) {
+    return new Set((node?.className ?? "").split(/\s+/).filter(Boolean));
+  }
+
+  function symmetricDifference(left: Set<string>, right: Set<string>) {
+    const result = new Set<string>();
+    for (const token of left) {
+      if (!right.has(token)) result.add(token);
+    }
+    for (const token of right) {
+      if (!left.has(token)) result.add(token);
+    }
+    return result;
+  }
+
+  // Send is the one control allowed to change its dress with the draft: its
+  // IconButton variant (primary vs outline, probed from a bare IconButton so
+  // the test follows the design system) and the composer's own primary / rest
+  // classes. Everything else on it — the shared action class, size, radius —
+  // must survive typing untouched.
+  async function allowedSendDressTokens() {
+    const probe = document.createElement("div");
+    document.body.appendChild(probe);
+    const probeRoot = createRoot(probe);
+    await act(async () =>
+      probeRoot.render(
+        <>
+          <IconButton variant="primary" size="md" radius="xl" data-testid="probe-primary" />
+          <IconButton variant="outline" size="md" radius="xl" data-testid="probe-outline" />
+        </>,
+      ),
+    );
+    const variantDelta = symmetricDifference(
+      classTokens(probe.querySelector('[data-testid="probe-primary"]')),
+      classTokens(probe.querySelector('[data-testid="probe-outline"]')),
+    );
+    await act(async () => probeRoot.unmount());
+    probe.remove();
+    for (const token of createProps().composerPrimaryActionClass.split(/\s+/)) {
+      variantDelta.add(token);
+    }
+    for (const token of COMPOSER_SEND_REST_CLASS.split(/\s+/)) {
+      variantDelta.add(token);
+    }
+    return variantDelta;
   }
 
   function layoutNodes() {
@@ -353,8 +441,9 @@ describe("ChatComposerSurface", () => {
   }
 
   // The row's geometry as a list, in document order: which node each control
-  // is, and how it is dressed. Two snapshots being equal means the row did
-  // not change layout between the renders that produced them.
+  // is, which nodes each group holds, and how everything is dressed. Two
+  // snapshots being the same means the row did not change layout between the
+  // renders that produced them.
   function controlGeometry() {
     const nodes = layoutNodes();
     const controls = [nodes.home, nodes.menu, nodes.image, nodes.voice, nodes.send].filter(
@@ -367,18 +456,56 @@ describe("ChatComposerSurface", () => {
       textRowClass: textRow?.className ?? null,
       leading: nodes.leading,
       leadingClass: nodes.leading?.className ?? null,
+      leadingChildren: Array.from(nodes.leading?.children ?? []),
       editorWrapper,
       editorWrapperClass: editorWrapper?.className ?? null,
       trailing: nodes.trailing,
       trailingClass: nodes.trailing?.className ?? null,
+      trailingChildren: Array.from(nodes.trailing?.children ?? []),
       controls,
       controlClasses: controls.map((node) =>
-        node === nodes.send ? "<send: colour only>" : node.className,
+        node === nodes.send ? "<send: dress only, checked token by token>" : node.className,
       ),
       controlOrder: controls.map((node) => node.getAttribute("data-testid")),
+      send: nodes.send,
+      sendTokens: classTokens(nodes.send),
+      sendRest: nodes.send?.getAttribute("data-send-rest") ?? null,
+      voiceInputTestId: nodes.voice?.getAttribute("data-voice-input-testid") ?? null,
+      voiceRepliesToggle: nodes.voice?.getAttribute("data-voice-replies-toggle") ?? null,
       sendInTrailing: Boolean(nodes.send && nodes.trailing?.contains(nodes.send)),
       surfaceChildCount: textRow?.parentElement?.childElementCount ?? null,
     };
+  }
+
+  type ControlGeometry = ReturnType<typeof controlGeometry>;
+
+  // "Nothing changed": the same nodes, in the same groups, in the same order,
+  // with the same classes — and on Send, whose colour is the one thing that
+  // may move, every class that differs is part of its dress.
+  function expectSameGeometry(before: ControlGeometry, after: ControlGeometry, sendDress: Set<string>) {
+    expect(after.textRow).toBe(before.textRow);
+    expect(after.textRowClass).toBe(before.textRowClass);
+    expect(after.leading).toBe(before.leading);
+    expect(after.leadingClass).toBe(before.leadingClass);
+    expect(after.leadingChildren).toHaveLength(before.leadingChildren.length);
+    after.leadingChildren.forEach((node, index) => expect(node).toBe(before.leadingChildren[index]));
+    expect(after.editorWrapper).toBe(before.editorWrapper);
+    expect(after.editorWrapperClass).toBe(before.editorWrapperClass);
+    expect(after.trailing).toBe(before.trailing);
+    expect(after.trailingClass).toBe(before.trailingClass);
+    expect(after.trailingChildren).toHaveLength(before.trailingChildren.length);
+    after.trailingChildren.forEach((node, index) => expect(node).toBe(before.trailingChildren[index]));
+    expect(after.controls).toHaveLength(before.controls.length);
+    after.controls.forEach((node, index) => expect(node).toBe(before.controls[index]));
+    expect(after.controlOrder).toEqual(before.controlOrder);
+    expect(after.controlClasses).toEqual(before.controlClasses);
+    expect(after.voiceInputTestId).toBe(before.voiceInputTestId);
+    expect(after.voiceRepliesToggle).toBe(before.voiceRepliesToggle);
+    expect(after.surfaceChildCount).toBe(before.surfaceChildCount);
+    expect(after.send).toBe(before.send);
+    expect(after.sendInTrailing).toBe(true);
+    const sendDelta = Array.from(symmetricDifference(before.sendTokens, after.sendTokens));
+    expect(sendDelta.filter((token) => !sendDress.has(token))).toEqual([]);
   }
 
   // Every accessible action offered by the composer, whether rendered inline
@@ -444,111 +571,87 @@ describe("ChatComposerSurface", () => {
     );
   });
 
-  it("changes no layout when the first character is typed at sm+: Send lights up in place", async () => {
-    // The founder's complaint: click the input on desktop, type one
-    // character, and the composer animated into a different layout. There is
-    // one layout now. The same nodes, in the same order, with the same
-    // classes, must be in the row before and after "a"; only Send's colour
-    // (its variant, wired to sendButtonVariant upstream) may differ.
-    await act(async () =>
-      renderLayout({
-        showComposerHomeButton: true,
-        homeAttentionCount: 1,
-        homeAttentionBadge: "1",
-        sendButtonVariant: "outline",
-      }),
+  describe.each([
+    { client: "a voice-capable client", voiceInputSupported: true },
+    { client: "a client without voice", voiceInputSupported: false },
+  ])("on $client", ({ voiceInputSupported }) => {
+    it.each([
+      { viewport: "at sm+", compactBrowserViewport: false },
+      { viewport: "below sm", compactBrowserViewport: true },
+    ])(
+      "changes no layout from empty to one character to three lines $viewport: Send lights up in place",
+      async ({ compactBrowserViewport }) => {
+        // The founder's complaint: click the input on desktop, type one
+        // character, and the composer changed. There is one layout now, and
+        // one set of controls. The same nodes, in the same groups, in the
+        // same order, with the same classes, must be in the row before and
+        // after "a" and after two more lines; only Send's dress (its variant,
+        // wired to sendButtonVariant upstream) may differ. This holds on a
+        // voice-capable client — where the mic used to stand in for Send while
+        // the draft was empty, so the first keystroke mounted Send beside it —
+        // exactly as on a client without voice.
+        const renderDraft = (value: string) =>
+          renderLayout(
+            {
+              compactBrowserViewport,
+              showComposerHomeButton: true,
+              homeAttentionCount: 1,
+              homeAttentionBadge: "1",
+              chatInputProps: { value } as never,
+              sendButtonVariant: value ? "primary" : "outline",
+            },
+            { voiceInputSupported },
+          );
+        const sendDress = await allowedSendDressTokens();
+
+        await act(async () => renderDraft(""));
+        const rest = controlGeometry();
+        expect(rest.controlOrder).toEqual([
+          "chat-home-button-mobile",
+          "mock-composer-action-menu",
+          ...(compactBrowserViewport ? [] : ["chat-image-upload-button"]),
+          ...(voiceInputSupported ? ["mock-voice-action-strip"] : []),
+          "chat-send-button",
+        ]);
+        expect(rest.sendInTrailing).toBe(true);
+        expect(rest.sendRest).toBe("true");
+        expect(rest.sendTokens.has("bg-transparent")).toBe(true);
+        expect(rest.sendTokens.has("primary")).toBe(false);
+        expect(rest.voiceInputTestId).toBe(voiceInputSupported ? "chat-voice-input-button" : null);
+        expect(container.querySelectorAll('[data-testid="chat-send-button"]')).toHaveLength(1);
+        expect(container.querySelectorAll('[data-testid="mock-voice-action-strip"]')).toHaveLength(
+          voiceInputSupported ? 1 : 0,
+        );
+        const inputNode = container.querySelector('[data-testid="chat-input"]');
+
+        // The first character: Send lit up, on the same node, and nothing else
+        // happened.
+        await act(async () => renderDraft("a"));
+        const oneCharacter = controlGeometry();
+        expectSameGeometry(rest, oneCharacter, sendDress);
+        expect(oneCharacter.sendRest).toBe("false");
+        expect(oneCharacter.sendTokens.has("primary")).toBe(true);
+        expect(oneCharacter.sendTokens.has("bg-transparent")).toBe(false);
+        expect(container.querySelector('[data-testid="chat-input"]')).toBe(inputNode);
+        expect(container.querySelector('[data-testid="chat-composer-toolbar"]')).toBeNull();
+        expect(container.querySelectorAll('[data-testid="chat-send-button"]')).toHaveLength(1);
+
+        // Three lines: the editor grows; the controls do not.
+        await act(async () => renderDraft("a\nb\nc"));
+        const threeLines = controlGeometry();
+        expectSameGeometry(rest, threeLines, sendDress);
+        expect(threeLines.sendRest).toBe("false");
+        expect(threeLines.sendTokens).toEqual(oneCharacter.sendTokens);
+        expect(container.querySelector('[data-testid="chat-input"]')).toBe(inputNode);
+
+        // And it goes quiet again in place when the draft clears.
+        await act(async () => renderDraft(""));
+        const cleared = controlGeometry();
+        expectSameGeometry(rest, cleared, sendDress);
+        expect(cleared.sendRest).toBe("true");
+        expect(cleared.sendTokens).toEqual(rest.sendTokens);
+      },
     );
-    const before = controlGeometry();
-    expect(before.controlOrder).toEqual([
-      "chat-home-button-mobile",
-      "mock-composer-action-menu",
-      "chat-image-upload-button",
-      "mock-voice-action-strip",
-      "chat-send-button",
-    ]);
-    expect(before.sendInTrailing).toBe(true);
-    const sendBefore = layoutNodes().send;
-    expect(sendBefore?.getAttribute("data-send-rest")).toBe("true");
-    const inputNode = container.querySelector('[data-testid="chat-input"]');
-
-    await act(async () =>
-      renderLayout({
-        showComposerHomeButton: true,
-        homeAttentionCount: 1,
-        homeAttentionBadge: "1",
-        chatInputProps: { value: "a" } as never,
-        sendButtonVariant: "primary",
-      }),
-    );
-    const after = controlGeometry();
-
-    expect(after.textRow).toBe(before.textRow);
-    expect(after.textRowClass).toBe(before.textRowClass);
-    expect(after.leading).toBe(before.leading);
-    expect(after.leadingClass).toBe(before.leadingClass);
-    expect(after.editorWrapper).toBe(before.editorWrapper);
-    expect(after.editorWrapperClass).toBe(before.editorWrapperClass);
-    expect(after.trailing).toBe(before.trailing);
-    expect(after.trailingClass).toBe(before.trailingClass);
-    expect(after.controls).toEqual(before.controls);
-    after.controls.forEach((node, index) => expect(node).toBe(before.controls[index]));
-    expect(after.controlOrder).toEqual(before.controlOrder);
-    expect(after.controlClasses).toEqual(before.controlClasses);
-    expect(after.surfaceChildCount).toBe(before.surfaceChildCount);
-    expect(after.sendInTrailing).toBe(true);
-    expect(container.querySelector('[data-testid="chat-input"]')).toBe(inputNode);
-    expect(container.querySelector('[data-testid="chat-composer-toolbar"]')).toBeNull();
-
-    // The one thing that changed: Send lit up, on the same node.
-    const sendAfter = layoutNodes().send;
-    expect(sendAfter).toBe(sendBefore);
-    expect(sendAfter?.getAttribute("data-send-rest")).toBe("false");
-    expect(sendAfter?.className.split(" ")).toContain("primary");
-    expect(sendAfter?.className.split(" ")).not.toContain("bg-transparent");
-    expect(container.querySelectorAll('[data-testid="chat-send-button"]')).toHaveLength(1);
-
-    // And it goes quiet again in place when the draft clears.
-    await act(async () =>
-      renderLayout({
-        showComposerHomeButton: true,
-        homeAttentionCount: 1,
-        homeAttentionBadge: "1",
-        chatInputProps: { value: "" } as never,
-        sendButtonVariant: "outline",
-      }),
-    );
-    const cleared = controlGeometry();
-    expect(cleared.controlOrder).toEqual(before.controlOrder);
-    expect(cleared.controlClasses).toEqual(before.controlClasses);
-    expect(layoutNodes().send).toBe(sendBefore);
-    expect(layoutNodes().send?.getAttribute("data-send-rest")).toBe("true");
-  });
-
-  it("changes no layout when the first character is typed below sm either", async () => {
-    await act(async () =>
-      renderLayout({ compactBrowserViewport: true, sendButtonVariant: "outline" }),
-    );
-    const before = controlGeometry();
-    expect(before.controlOrder).toEqual([
-      "mock-composer-action-menu",
-      "mock-voice-action-strip",
-      "chat-send-button",
-    ]);
-
-    await act(async () =>
-      renderLayout({
-        compactBrowserViewport: true,
-        chatInputProps: { value: "a" } as never,
-        sendButtonVariant: "primary",
-      }),
-    );
-    const after = controlGeometry();
-    expect(after.textRow).toBe(before.textRow);
-    expect(after.textRowClass).toBe(before.textRowClass);
-    after.controls.forEach((node, index) => expect(node).toBe(before.controls[index]));
-    expect(after.controlOrder).toEqual(before.controlOrder);
-    expect(after.controlClasses).toEqual(before.controlClasses);
-    expect(layoutNodes().send?.getAttribute("data-send-rest")).toBe("false");
   });
 
   it("folds the suggestion wand into the + menu on every viewport while a ghost suggestion is live", async () => {
@@ -716,23 +819,30 @@ describe("ChatComposerSurface", () => {
     expect(container.querySelector('[data-testid="chat-input"]')?.getAttribute("data-compact")).toBe(
       "true",
     );
+    // The condensed bar is a separate idle layout and keeps its mic-only rest
+    // while voice is the primary action; only the one-row composer always
+    // mounts Send.
+    expect(container.querySelector('[data-testid="mock-voice-action-strip"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="chat-send-button"]')).toBeNull();
     const inputNode = container.querySelector('[data-testid="chat-input"]');
 
     await act(async () => renderSurface("Tell Octo what to do on this page"));
     expect(container.querySelector('[data-browser-composer-condensed="true"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-send-button"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="chat-input"]')?.getAttribute("data-compact")).toBe(
       "false",
     );
     expect(container.querySelector('[data-testid="chat-input"]')).toBe(inputNode);
   });
 
-  it("keeps the idle composer controls visible when voice capture is unavailable", async () => {
+  it("mounts Send as the quiet control beside the mic while the draft is empty on a voice-capable client", async () => {
     await act(async () => {
       root.render(
         <ChatComposerSurface
           {...createProps({
             showVoicePrimaryAction: true,
             showVoiceStatus: false,
+            sendButtonVariant: "outline",
           })}
         />,
       );
@@ -742,7 +852,13 @@ describe("ChatComposerSurface", () => {
     expect(container.textContent).not.toContain("Voice capture is not ready yet on this client.");
     expect(container.querySelector('[data-testid="mock-voice-action-strip"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="chat-voice-active-strip"]')).toBeNull();
-    expect(container.querySelector('[data-testid="chat-primary-action-status"]')).toBeNull();
+    const send = container.querySelector('[data-testid="chat-send-button"]');
+    expect(send).not.toBeNull();
+    expect(send?.getAttribute("data-send-rest")).toBe("true");
+    expect(container.querySelector('[data-testid="chat-composer-trailing-controls"]')?.contains(send)).toBe(true);
+    // The live region is mounted with Send so later announcements land in an
+    // existing status node.
+    expect(container.querySelector('[data-testid="chat-primary-action-status"]')).not.toBeNull();
   });
 
   it("shows and enforces the read-only composer state", async () => {
@@ -846,6 +962,9 @@ describe("ChatComposerSurface", () => {
     const holdButtonOwner = container.querySelector(
       '[data-testid="mock-voice-action-strip"]',
     );
+    const sendOwner = container.querySelector('[data-testid="chat-send-button"]');
+    expect(sendOwner).not.toBeNull();
+    expect(holdButtonOwner?.getAttribute("data-voice-input-testid")).toBe("chat-voice-input-button");
 
     await act(async () =>
       renderHoldState({
@@ -858,6 +977,8 @@ describe("ChatComposerSurface", () => {
     expect(container.querySelector('[data-testid="mock-voice-action-strip"]')).toBe(
       holdButtonOwner,
     );
+    expect(holdButtonOwner?.getAttribute("data-voice-input-testid")).toBe("chat-voice-input-button");
+    expect(container.querySelector('[data-testid="chat-send-button"]')).toBe(sendOwner);
     expect(container.querySelector('[data-testid="chat-voice-active-strip"]')).toBeNull();
   });
 

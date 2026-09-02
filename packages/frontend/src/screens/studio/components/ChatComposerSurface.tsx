@@ -186,7 +186,8 @@ function resolveGoalStatusPillTone(tone: ConversationGoalHealth["tone"]): Status
 // in place once there is something to send. The variant itself stays wired to
 // sendButtonVariant — this only changes how the non-primary state dresses, and
 // the button's colour transition is the only motion the composer has.
-const COMPOSER_SEND_REST_CLASS =
+// Exported so the geometry test can name the exact class delta it allows.
+export const COMPOSER_SEND_REST_CLASS =
   "border-transparent bg-transparent text-slate-400 shadow-none dark:text-slate-500";
 
 export function ChatComposerSurface({
@@ -832,24 +833,25 @@ export function ChatComposerSurface({
         </span>
       </IconButton>
     ) : null;
-  const voiceStripNode =
-    showVoicePrimaryAction || showVoiceSecondaryAction ? (
-      <VoiceConversationActionStrip
-        {...voiceConversationActionStripProps}
-        showVoiceRepliesToggle={
-          showVoicePrimaryAction
-            ? voiceConversationActionStripProps.showVoiceRepliesToggle
-            : false
-        }
-        voiceInputTestId={
-          showVoicePrimaryAction
-            ? voiceConversationActionStripProps.voiceInputTestId
-            : "chat-voice-secondary-input-button"
-        }
-      />
-    ) : null;
+  // The mic is present whenever voice capture is supported (the view state
+  // always raises one of the two flags then), and it is the same control with
+  // the same test id and the same siblings whether or not there is a draft.
+  // It used to switch to a "secondary" test id and drop the replies toggle
+  // once a draft existed; nothing about the row may change with the text.
+  const voiceInputAvailable = showVoicePrimaryAction || showVoiceSecondaryAction;
+  const voiceStripNode = voiceInputAvailable ? (
+    <VoiceConversationActionStrip {...voiceConversationActionStripProps} />
+  ) : null;
+  // Send is always mounted in the one-row composer and lights up in place.
+  // `quiet` is that row's rest dress, and that row never adds or removes a
+  // control as the draft changes. On voice-capable clients (web speech —
+  // Chromium) the mic used to stand in for Send while the draft was empty, so
+  // the first keystroke mounted Send beside it and the trailing group widened
+  // by one button: exactly the "something changes when I type" this composer
+  // exists to remove. The Browser-session condensed bar (non-quiet) keeps its
+  // mic-only rest; it is a separate idle layout that re-expands on a draft.
   const renderSendButton = ({ quiet }: { quiet: boolean }) =>
-    !showVoicePrimaryAction ? (
+    quiet || !showVoicePrimaryAction ? (
       <>
         <span
           role="status"
@@ -1278,8 +1280,8 @@ export function ChatComposerSurface({
                 line by line. Nothing here depends on whether there is text:
                 inputs (things that put content into the message: home when
                 applicable, "+", image at sm+) sit on the left, commit actions
-                (mic, which stands in for Send while empty, and Send, which
-                lights up in place) sit on the right. The editor wrapper keeps
+                (the mic when voice is supported, and Send, always mounted and
+                lighting up in place) sit on the right. The editor wrapper keeps
                 the same tree position in every mode so Lexical never remounts.
               */}
               <div
