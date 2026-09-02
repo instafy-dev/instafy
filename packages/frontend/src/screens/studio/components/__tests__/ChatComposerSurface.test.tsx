@@ -345,7 +345,14 @@ describe("ChatComposerSurface", () => {
     };
   }
 
-  it("rests as one row at sm+ with the trailing image, mic and quiet send beside the input", async () => {
+  // True when `before` comes earlier than `after` in document order.
+  function precedes(before: Element | null | undefined, after: Element | null | undefined) {
+    return Boolean(
+      before && after && before.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  }
+
+  it("rests as one row at sm+ with + and image leading, mic and quiet send trailing beside the input", async () => {
     await act(async () => renderLayout({ sendButtonVariant: "outline" }));
 
     const nodes = layoutNodes();
@@ -354,7 +361,9 @@ describe("ChatComposerSurface", () => {
     expect(nodes.leading?.contains(nodes.menu)).toBe(true);
     expect(nodes.menu?.getAttribute("data-trigger-variant")).toBe("outline");
     expect(nodes.menu?.getAttribute("data-upload-image")).toBe("false");
-    expect(nodes.trailing?.contains(nodes.image)).toBe(true);
+    expect(nodes.leading?.contains(nodes.image)).toBe(true);
+    expect(precedes(nodes.menu, nodes.image)).toBe(true);
+    expect(nodes.trailing?.contains(nodes.image)).toBe(false);
     expect(nodes.trailing?.contains(nodes.voice)).toBe(true);
     expect(nodes.trailing?.contains(nodes.send)).toBe(true);
     expect(nodes.send?.getAttribute("data-send-rest")).toBe("true");
@@ -364,6 +373,26 @@ describe("ChatComposerSurface", () => {
       "false",
     );
     expect(container.querySelector('[data-browser-composer-condensed="true"]')).toBeNull();
+  });
+
+  it("keeps the image button beside + on the same side in the rest row and the revealed toolbar", async () => {
+    // Inputs (+, image) live on the left; commit actions (mic, send) on the
+    // right. A toolbar reveal may move controls down, never across.
+    await act(async () => renderLayout({ sendButtonVariant: "outline" }));
+    let nodes = layoutNodes();
+    expect(nodes.leading?.contains(nodes.menu)).toBe(true);
+    expect(nodes.leading?.contains(nodes.image)).toBe(true);
+    const restOrder = precedes(nodes.menu, nodes.image);
+    expect(restOrder).toBe(true);
+
+    await act(async () =>
+      renderLayout({ chatInputProps: { value: "Ship it" } as never, sendButtonVariant: "primary" }),
+    );
+    nodes = layoutNodes();
+    expect(nodes.toolbarLeading?.contains(nodes.menu)).toBe(true);
+    expect(nodes.toolbarLeading?.contains(nodes.image)).toBe(true);
+    expect(nodes.toolbarTrailing?.contains(nodes.image)).toBe(false);
+    expect(precedes(nodes.menu, nodes.image)).toBe(restOrder);
   });
 
   it("rests as one row below sm with only mic and send inline, folding image upload into the + menu", async () => {
