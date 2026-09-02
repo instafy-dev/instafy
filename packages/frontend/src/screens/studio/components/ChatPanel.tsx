@@ -4846,9 +4846,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   onGithubImportSuccessRef.current = dismissGettingStarted;
 
   const {
-    composerActionButtonClass,
     composerActionIconClass,
-    composerOutlinedActionClass,
+    composerGhostActionClass,
     composerPrimaryActionClass,
     queueCanSendNow,
     sendButtonDisabled,
@@ -5716,7 +5715,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             imageAttachments.length > 0 ||
             !activeConversationId ||
             !activeConversationEntry?.controllerId,
-          triggerClassName: composerOutlinedActionClass,
         }}
         onOpenImagePicker={openImagePicker}
         sendingAttachment={sendingAttachment}
@@ -5740,18 +5738,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           onVoicePressStart: handleStartVoiceInputHold,
           onVoicePressEnd: handleStopVoiceInputHold,
           onVoiceTap: handleChatVoiceTap,
-          primaryActionClassName: composerPrimaryActionClass,
-          outlinedActionClassName: composerOutlinedActionClass,
-          actionIconClassName: composerActionIconClass,
         }}
         sendButtonDisabled={projectWriteDisabled || sendButtonDisabled}
         sendButtonVariant={sendButtonVariant}
         primaryActionMode={composerPrimaryActionMode}
         onSendButtonPress={handleSendButtonPress}
-        composerOutlinedActionClass={composerOutlinedActionClass}
+        composerGhostActionClass={composerGhostActionClass}
         composerPrimaryActionClass={composerPrimaryActionClass}
         composerActionIconClass={composerActionIconClass}
-        composerActionButtonClass={composerActionButtonClass}
         inviteModalProps={{
           isOpen: addMenuOpen,
           onOpenChange: setAddMenuOpen,

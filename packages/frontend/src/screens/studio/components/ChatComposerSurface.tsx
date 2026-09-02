@@ -101,22 +101,30 @@ type ChatComposerSurfaceProps = {
   onOpenHome: () => void;
   homeAttentionCount: number;
   homeAttentionBadge: string;
-  composerActionMenuProps: ComponentProps<typeof ComposerActionMenu>;
+  // The surface dresses the "+" trigger and the mic itself (see the class
+  // props below) so every rest-row control resolves to the one family here.
+  composerActionMenuProps: Omit<ComponentProps<typeof ComposerActionMenu>, "triggerClassName">;
   onOpenImagePicker: () => void;
   sendingAttachment: boolean;
   showMobileGhostSuggestionAcceptButton: boolean;
   onAcceptGhostSuggestion: () => void;
   showVoicePrimaryAction: boolean;
   showVoiceSecondaryAction: boolean;
-  voiceConversationActionStripProps: ComponentProps<typeof VoiceConversationActionStrip>;
+  voiceConversationActionStripProps: Omit<
+    ComponentProps<typeof VoiceConversationActionStrip>,
+    "primaryActionClassName" | "ghostActionClassName" | "actionIconClassName"
+  >;
   sendButtonDisabled: boolean;
   sendButtonVariant: ComponentProps<typeof IconButton>["variant"];
   primaryActionMode?: "send" | "steer";
   onSendButtonPress: ComponentProps<typeof IconButton>["onPress"];
-  composerOutlinedActionClass: string;
+  // One dress for the rest row: "+", image, mic and Send are all ghost
+  // IconButtons at rest wearing composerGhostActionClass; a control that is
+  // lit (Send with a payload, the mic while capturing) wears
+  // composerPrimaryActionClass.
+  composerGhostActionClass: string;
   composerPrimaryActionClass: string;
   composerActionIconClass: string;
-  composerActionButtonClass: string;
   inviteModalProps: ComponentProps<typeof ComposerInviteModal>;
   mutationDisabled?: boolean;
   accessNotice?: string | null;
@@ -182,13 +190,22 @@ function resolveGoalStatusPillTone(tone: ConversationGoalHealth["tone"]): Status
   return "primary";
 }
 
-// The rest-state Send is a quiet ghost control; it lights up (primary variant)
-// in place once there is something to send. The variant itself stays wired to
-// sendButtonVariant — this only changes how the non-primary state dresses, and
-// the button's colour transition is the only motion the composer has.
-// Exported so the geometry test can name the exact class delta it allows.
-export const COMPOSER_SEND_REST_CLASS =
-  "border-transparent bg-transparent text-slate-400 shadow-none dark:text-slate-500";
+// One dress for the rest row: the composer card is the only surface. At rest,
+// Send is exactly what its siblings ("+", image, mic) are — a ghost IconButton
+// of the same size and radius with no fill, border or shadow of its own — so
+// the row reads as four of the same control. The only thing that says "not
+// yet" is the glyph: this class is the ghost family (composerGhostActionClass)
+// with a muted tone, and like the family it colours the svg alone. With a
+// payload the button flips to the primary dress (composerPrimaryActionClass,
+// wired through sendButtonVariant) and the muting comes off; that colour
+// change is the only motion the composer has. Exported so the geometry tests
+// can name the exact delta they allow.
+export const COMPOSER_SEND_REST_CLASS = "[&_svg]:text-slate-400 dark:[&_svg]:text-slate-500";
+
+// The Browser-session condensed bar is a separate idle layout (see
+// renderSendButton) and keeps the rest dress it had before the one-row
+// composer went ghost.
+const COMPOSER_CONDENSED_SEND_REST_CLASS = `h-11 w-11 rounded-[1.25rem] border-slate-200/70 bg-transparent shadow-none ${DARK_PANEL_BORDER_CLASS}`;
 
 export function ChatComposerSurface({
   browserDockProps,
@@ -236,10 +253,9 @@ export function ChatComposerSurface({
   sendButtonVariant,
   primaryActionMode = "send",
   onSendButtonPress,
-  composerOutlinedActionClass,
+  composerGhostActionClass,
   composerPrimaryActionClass,
   composerActionIconClass,
-  composerActionButtonClass,
   inviteModalProps,
   mutationDisabled = false,
   accessNotice = null,
@@ -790,19 +806,20 @@ export function ChatComposerSurface({
       onUploadImage={foldImageUploadIntoMenu ? onOpenImagePicker : undefined}
       uploadImageDisabled={imageUploadDisabled}
       onInsertSuggestion={foldSuggestionIntoMenu ? onAcceptGhostSuggestion : undefined}
+      triggerClassName={composerGhostActionClass}
     />
   );
   const imageUploadButtonNode = (
     <IconButton
       type="button"
       onPress={onOpenImagePicker}
-      variant="outline"
+      variant="ghost"
       size="md"
       radius="xl"
       aria-label="Upload image"
       isDisabled={imageUploadDisabled}
       data-testid="chat-image-upload-button"
-      className={composerOutlinedActionClass}
+      className={composerGhostActionClass}
     >
       <span className="sr-only">Upload image</span>
       <MediaImage className={composerActionIconClass} aria-hidden="true" />
@@ -812,12 +829,12 @@ export function ChatComposerSurface({
       <IconButton
         type="button"
         onPress={onOpenHome}
-        variant="outline"
+        variant="ghost"
         size="md"
         radius="xl"
         aria-label="Open home"
         data-testid="chat-home-button-mobile"
-        className={composerOutlinedActionClass}
+        className={composerGhostActionClass}
       >
         <span className="relative flex h-full w-full items-center justify-center">
           <HomeIcon className={composerActionIconClass} aria-hidden="true" />
@@ -839,17 +856,28 @@ export function ChatComposerSurface({
   // It used to switch to a "secondary" test id and drop the replies toggle
   // once a draft existed; nothing about the row may change with the text.
   const voiceInputAvailable = showVoicePrimaryAction || showVoiceSecondaryAction;
+  // The mic wears the same two dresses as Send: ghost at rest, primary while
+  // it is the active control.
+  const voiceStripDressProps = {
+    primaryActionClassName: composerPrimaryActionClass,
+    ghostActionClassName: composerGhostActionClass,
+    actionIconClassName: composerActionIconClass,
+  };
   const voiceStripNode = voiceInputAvailable ? (
-    <VoiceConversationActionStrip {...voiceConversationActionStripProps} />
+    <VoiceConversationActionStrip {...voiceConversationActionStripProps} {...voiceStripDressProps} />
   ) : null;
   // Send is always mounted in the one-row composer and lights up in place.
-  // `quiet` is that row's rest dress, and that row never adds or removes a
-  // control as the draft changes. On voice-capable clients (web speech —
-  // Chromium) the mic used to stand in for Send while the draft was empty, so
-  // the first keystroke mounted Send beside it and the trailing group widened
-  // by one button: exactly the "something changes when I type" this composer
-  // exists to remove. The Browser-session condensed bar (non-quiet) keeps its
-  // mic-only rest; it is a separate idle layout that re-expands on a draft.
+  // `quiet` names that row, which never adds or removes a control as the
+  // draft changes. On voice-capable clients (web speech — Chromium) the mic
+  // used to stand in for Send while the draft was empty, so the first
+  // keystroke mounted Send beside it and the trailing group widened by one
+  // button: exactly the "something changes when I type" this composer exists
+  // to remove. The Browser-session condensed bar (non-quiet) keeps its
+  // mic-only rest; it is a separate idle layout that keeps its earlier dress
+  // and re-expands on a draft. In the one-row composer Send at rest is the
+  // same ghost IconButton as "+", image and mic with a muted glyph; the glyph
+  // fades with the button when the dress flips to primary.
+  const sendIconClass = `${composerActionIconClass} transition-colors duration-150 ease-out`;
   const renderSendButton = ({ quiet }: { quiet: boolean }) =>
     quiet || !showVoicePrimaryAction ? (
       <>
@@ -874,16 +902,15 @@ export function ChatComposerSurface({
           aria-label={primaryActionLabel}
           title={primaryActionLabel}
           style={{ touchAction: "none" }}
-          variant={sendButtonVariant}
+          variant={sendButtonVariant === "primary" ? "primary" : quiet ? "ghost" : "outline"}
           size="md"
           radius="xl"
           className={[
-            composerActionButtonClass,
             sendButtonVariant === "primary"
               ? composerPrimaryActionClass
               : quiet
                 ? COMPOSER_SEND_REST_CLASS
-                : "border-slate-200/70 bg-transparent shadow-none dark:border-[color:var(--color-studio-dark-panel-border)]",
+                : COMPOSER_CONDENSED_SEND_REST_CLASS,
             sendingAttachment ? "opacity-70" : "",
           ]
             .filter(Boolean)
@@ -899,19 +926,19 @@ export function ChatComposerSurface({
           <span className="sr-only">{primaryActionLabel}</span>
           {visibleDesktopSendModifierMode === "queue" ? (
             <TaskList
-              className={composerActionIconClass}
+              className={sendIconClass}
               aria-hidden="true"
               data-testid="chat-queue-action-icon"
             />
           ) : visibleDesktopSendModifierMode === "stash" ? (
             <Bookmark
-              className={composerActionIconClass}
+              className={sendIconClass}
               aria-hidden="true"
               data-testid="chat-stash-action-icon"
             />
           ) : (
             <Send
-              className={composerActionIconClass}
+              className={sendIconClass}
               aria-hidden="true"
               data-testid="chat-send-action-icon"
             />
@@ -1439,6 +1466,7 @@ export function ChatComposerSurface({
                       <div className="flex flex-none items-center gap-1.5 sm:gap-2">
                         <VoiceConversationActionStrip
                           {...voiceConversationActionStripProps}
+                          {...voiceStripDressProps}
                           showVoiceRepliesToggle={false}
                         />
                       </div>

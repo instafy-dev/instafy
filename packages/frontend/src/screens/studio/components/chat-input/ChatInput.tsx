@@ -321,7 +321,7 @@ function ChatInputEditor(
         placeholder={
           showGhostSuggestion || showRecordingIndicator ? null : (
             <div
-              className={`pointer-events-none absolute inset-x-0 top-1 z-10 block overflow-hidden text-ellipsis whitespace-nowrap pr-2 text-base leading-5 text-slate-400 sm:top-0.5 sm:text-sm ${
+              className={`pointer-events-none absolute inset-x-0 top-1 z-10 block overflow-hidden text-ellipsis whitespace-nowrap pr-2 text-base leading-5 text-slate-400 sm:top-0.5 sm:text-sm dark:text-slate-500 ${
                 readOnly ? "opacity-60" : ""
               }`}
             >
