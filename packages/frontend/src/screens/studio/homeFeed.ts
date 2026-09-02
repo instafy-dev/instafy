@@ -1,4 +1,4 @@
-import { getOrgDisplayName } from "../../org/orgNaming";
+import { getOrgDisambiguator, getOrgDisplayName, isPersonalOrgName } from "../../org/orgNaming";
 import type { ConversationState } from "../../conversations/ConversationsProvider";
 import type { HomeAttentionEntry } from "./homeAttention";
 
@@ -18,6 +18,8 @@ export interface HomeFeedTeam {
   /** Org id, or "personal" for spaces without an org. */
   key: string;
   name: string;
+  /** The user's own team (a real "Personal" org, or the no-org bucket). */
+  isPersonal: boolean;
   /** Needs-you items for this team, before any filter. */
   needsCount: number;
 }
@@ -90,6 +92,7 @@ export interface HomeFeedProjectRef {
 export interface HomeFeedOrganizationRef {
   id: string;
   name: string | null;
+  slug?: string | null;
 }
 
 interface BuildHomeFeedOptions {
@@ -221,6 +224,10 @@ function dedupeKeyFor(event: HomeFeedEvent): string {
   return local.toLowerCase();
 }
 
+// "Needs you" reads like a feed: work in flight first, then the newest reply
+// from any team — never "whichever space happens to be open" first.
+const NEEDS_KIND_RANK: Record<HomeFeedKind, number> = { running: 0, queued: 0, reply: 1, conversation: 2 };
+
 export function buildHomeFeed({
   attentionEntries,
   recentConversations,
@@ -232,13 +239,31 @@ export function buildHomeFeed({
   lastSeenAt,
   now = Date.now(),
 }: BuildHomeFeedOptions): HomeFeedModel {
-  const teamNames = new Map<string, string>();
-  const rememberTeam = (orgId: string | null | undefined, orgName: string | null | undefined) => {
+  // The user's real Personal team is an org row like any other ("Personal
+  // team" is minted on the first space). Spaces without an org are the
+  // user's own too, so they fold into that org when it exists — otherwise
+  // Home would show two "Personal" chips for one person.
+  const personalOrgKey =
+    organizations.find((organization) => isPersonalOrgName(organization.name))?.id.trim() ||
+    projects.find((project) => project.orgId?.trim() && isPersonalOrgName(project.orgName))?.orgId?.trim() ||
+    null;
+  const resolveTeamKey = (orgId: string | null | undefined): string => {
     const key = teamKeyForOrgId(orgId);
+    return key === HOME_PERSONAL_TEAM_KEY && personalOrgKey ? personalOrgKey : key;
+  };
+
+  const teamNames = new Map<string, { name: string; isPersonal: boolean }>();
+  const rememberTeam = (orgId: string | null | undefined, orgName: string | null | undefined) => {
+    const key = resolveTeamKey(orgId);
     if (!teamNames.has(key)) {
-      teamNames.set(key, key === HOME_PERSONAL_TEAM_KEY ? "Personal" : getOrgDisplayName(orgName ?? null));
+      const isPersonal = key === HOME_PERSONAL_TEAM_KEY || key === personalOrgKey || isPersonalOrgName(orgName);
+      teamNames.set(key, {
+        name: key === HOME_PERSONAL_TEAM_KEY ? "Personal" : getOrgDisplayName(orgName ?? null),
+        isPersonal,
+      });
     }
   };
+  const teamNameFor = (key: string, fallback: string): string => teamNames.get(key)?.name ?? fallback;
   organizations.forEach((organization) => rememberTeam(organization.id, organization.name));
   projects.forEach((project) => rememberTeam(project.orgId, project.orgName));
 
@@ -253,7 +278,7 @@ export function buildHomeFeed({
     if (entry.source === "inbox") {
       const item = entry.inboxItem;
       rememberTeam(item.orgId, item.orgName);
-      const teamKey = teamKeyForOrgId(item.orgId);
+      const teamKey = resolveTeamKey(item.orgId);
       const local = conversationsByControllerId.get(item.conversationId.trim().toLowerCase()) ?? null;
       return {
         key: entry.key,
@@ -263,7 +288,7 @@ export function buildHomeFeed({
         preview: entry.preview,
         at: parseTimestamp(item.lastMessageAt),
         project: { id: item.projectId, name: getSpaceLabel(item.projectName) },
-        team: { key: teamKey, name: teamNames.get(teamKey) ?? getOrgDisplayName(item.orgName ?? null) },
+        team: { key: teamKey, name: teamNameFor(teamKey, getOrgDisplayName(item.orgName ?? null)) },
         actor: local ? resolveConversationActor(local) : { kind: "assistant", handle: null, avatarSeed: null },
         isNew: false,
         testId: entry.testId,
@@ -272,7 +297,7 @@ export function buildHomeFeed({
       };
     }
     const local = conversationsByLocalId.get(entry.localConversationId) ?? null;
-    const teamKey = teamKeyForOrgId(activeProject?.orgId ?? null);
+    const teamKey = resolveTeamKey(activeProject?.orgId ?? null);
     if (activeProject) {
       rememberTeam(activeProject.orgId, activeProject.orgName);
     }
@@ -284,7 +309,7 @@ export function buildHomeFeed({
       preview: entry.preview,
       at: local ? conversationTimestamp(local) : null,
       project: { id: activeProject?.id ?? "", name: getSpaceLabel(activeProject?.name) },
-      team: { key: teamKey, name: teamNames.get(teamKey) ?? "Personal" },
+      team: { key: teamKey, name: teamNameFor(teamKey, "Personal") },
       actor: local ? resolveConversationActor(local) : null,
       isNew: false,
       testId: entry.testId,
@@ -292,13 +317,14 @@ export function buildHomeFeed({
       source: { type: "conversation", localConversationId: entry.localConversationId, entry },
     };
   });
+  needsAll.sort((a, b) => NEEDS_KIND_RANK[a.kind] - NEEDS_KIND_RANK[b.kind] || (b.at ?? 0) - (a.at ?? 0));
 
   const needsKeys = new Set(needsAll.map(dedupeKeyFor));
 
   const activityAll: HomeFeedEvent[] = recentConversations
     .map((recent): HomeFeedEvent => {
       rememberTeam(recent.orgId, recent.orgName);
-      const teamKey = teamKeyForOrgId(recent.orgId);
+      const teamKey = resolveTeamKey(recent.orgId);
       const local = recent.localConversationId
         ? (conversationsByLocalId.get(recent.localConversationId) ?? null)
         : recent.conversationId
@@ -313,7 +339,7 @@ export function buildHomeFeed({
         preview: recent.preview,
         at: parseTimestamp(recent.updatedAt),
         project: { id: recent.projectId, name: getSpaceLabel(recent.projectName) },
-        team: { key: teamKey, name: teamNames.get(teamKey) ?? getOrgDisplayName(recent.orgName) },
+        team: { key: teamKey, name: teamNameFor(teamKey, getOrgDisplayName(recent.orgName)) },
         actor: recent.actor ?? (local ? resolveConversationActor(local) : null),
         isNew: false,
         testId: `home-recent-item-${itemId}`,
@@ -325,19 +351,35 @@ export function buildHomeFeed({
     .filter((event) => !needsKeys.has(dedupeKeyFor(event)))
     .sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
 
-  const teams: HomeFeedTeam[] = Array.from(teamNames.entries())
-    .map(([key, name]) => ({
+  // A filter bar must not reorder itself when the user opens another space,
+  // so Home pins Personal (the rail pins the ACTIVE team — a navigation rule,
+  // not a filter rule) and lists the rest by name.
+  const sortedTeams: HomeFeedTeam[] = Array.from(teamNames.entries())
+    .map(([key, team]) => ({
       key,
-      name,
+      name: team.name,
+      isPersonal: team.isPersonal,
       needsCount: needsAll.filter((event) => event.team.key === key).length,
     }))
     .sort((a, b) => {
-      if (a.key === HOME_PERSONAL_TEAM_KEY) return -1;
-      if (b.key === HOME_PERSONAL_TEAM_KEY) return 1;
+      if (a.isPersonal !== b.isPersonal) return a.isPersonal ? -1 : 1;
       return a.name.localeCompare(b.name);
     });
+  // Two DIFFERENT teams sharing a display name (another person's "Personal")
+  // get the rail's disambiguator so every chip has a distinct name.
+  const nameCounts = new Map<string, number>();
+  sortedTeams.forEach((team) => nameCounts.set(team.name, (nameCounts.get(team.name) ?? 0) + 1));
+  const slugByKey = new Map(organizations.map((organization) => [organization.id, organization.slug ?? null]));
+  const teams = sortedTeams.map((team) =>
+    (nameCounts.get(team.name) ?? 0) > 1 && team.key !== HOME_PERSONAL_TEAM_KEY
+      ? { ...team, name: `${team.name} • ${getOrgDisambiguator(slugByKey.get(team.key) ?? null, team.key)}` }
+      : team,
+  );
 
-  const requestedFilter = teamFilter.trim() || HOME_TEAM_FILTER_ALL;
+  const requestedRaw = teamFilter.trim() || HOME_TEAM_FILTER_ALL;
+  // A Personal filter chosen before the membership list resolved keeps working
+  // once the chip's key becomes the real org id.
+  const requestedFilter = requestedRaw === HOME_PERSONAL_TEAM_KEY && personalOrgKey ? personalOrgKey : requestedRaw;
   const appliedFilter =
     requestedFilter !== HOME_TEAM_FILTER_ALL && teams.some((team) => team.key === requestedFilter)
       ? requestedFilter

@@ -14,9 +14,10 @@ test.describe("Home panel", () => {
     await page.getByTestId("sidebar-home-button").click();
 
     await expect(page.getByTestId("home-panel")).toBeVisible();
-    // Two lanes, no starter prompts: Home is a feed, suggestions live on an empty chat.
-    await expect(page.getByTestId("home-attention-section")).toBeVisible();
+    // A feed: the Activity lane, no zero-count "Needs you" placeholder, and no
+    // starter prompts (suggestions live on an empty chat).
     await expect(page.getByTestId("home-recent-section")).toBeVisible();
+    await expect(page.getByText("Nothing needs you right now.", { exact: true })).toHaveCount(0);
     await expect(page.getByTestId("home-suggestions-section")).toHaveCount(0);
     await expect(page.getByRole("heading", { name: "Suggestions" })).toHaveCount(0);
     await expect(page.locator('[data-testid^="home-starter-"]')).toHaveCount(0);

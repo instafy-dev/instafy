@@ -104,8 +104,9 @@ describe("buildHomeFeed", () => {
   it("builds team chips from every team it sees, personal first, with needs-you counts", () => {
     const local = localConversation();
     const model = buildHomeFeed({
+      // Production order: the active space's local replies come first, then
+      // inbox replies — the feed must reorder by time regardless.
       attentionEntries: [
-        inboxEntry(inboxItem({})),
         {
           key: "reply-local-1",
           title: local.title,
@@ -117,6 +118,7 @@ describe("buildHomeFeed", () => {
           localConversationId: local.localId,
           testId: "home-attention-conversation-c-local-1",
         },
+        inboxEntry(inboxItem({})),
       ],
       recentConversations: [recent({ orgId: "org-fp", orgName: "Fairplanen", projectId: "p-fp", conversationId: "c-fp" })],
       projects: [personalProject, acmeProject],
@@ -165,6 +167,121 @@ describe("buildHomeFeed", () => {
     const [inbox, localEvent] = model.needs;
     expect(inbox.actor).toEqual({ kind: "assistant", handle: null, avatarSeed: null });
     expect(localEvent.actor).toEqual({ kind: "agent", handle: "octo", avatarSeed: "seed-octo" });
+  });
+
+  it("orders needs-you like a feed: work in flight first, then the newest reply across teams", () => {
+    const local = localConversation();
+    const running = localConversation({
+      localId: "local-run",
+      controllerId: "c-run",
+      title: "Nightly build",
+      messages: [{ id: "m-r", role: "user", content: "go", timestamp: NOW - 8 * HOUR }],
+    });
+    const model = buildHomeFeed({
+      attentionEntries: [
+        {
+          key: "reply-local-1",
+          title: local.title,
+          subtitle: "",
+          meta: null,
+          preview: null,
+          kind: "reply",
+          source: "conversation",
+          localConversationId: local.localId,
+          testId: "t-reply",
+        },
+        {
+          key: "running-local-run",
+          title: running.title,
+          subtitle: "",
+          meta: null,
+          preview: null,
+          kind: "running",
+          source: "conversation",
+          localConversationId: running.localId,
+          testId: "t-run",
+        },
+        inboxEntry(inboxItem({})),
+        inboxEntry(inboxItem({ conversationId: "c-undated", conversationTitle: "Undated", lastMessageAt: "" })),
+      ],
+      recentConversations: [],
+      projects: [personalProject, acmeProject],
+      activeProject: personalProject,
+      conversations: [local, running],
+      teamFilter: "all",
+      lastSeenAt: null,
+      now: NOW,
+    });
+
+    expect(model.needs.map((event) => [event.kind, event.team.name])).toEqual([
+      ["running", "Personal"],
+      ["reply", "Acme Co"],
+      ["reply", "Personal"],
+      ["reply", "Acme Co"],
+    ]);
+    expect(model.needs.at(-1)?.title).toBe("Undated");
+  });
+
+  it("pins the user's real Personal org first and folds org-less spaces into it", () => {
+    const local = localConversation();
+    const model = buildHomeFeed({
+      attentionEntries: [
+        {
+          key: "reply-local-1",
+          title: local.title,
+          subtitle: "",
+          meta: null,
+          preview: null,
+          kind: "reply",
+          source: "conversation",
+          localConversationId: local.localId,
+          testId: "t",
+        },
+      ],
+      recentConversations: [],
+      organizations: [
+        { id: "org-dr", name: "Design review" },
+        { id: "org-me", name: "Personal team" },
+      ],
+      projects: [personalProject, acmeProject],
+      activeProject: personalProject,
+      conversations: [local],
+      teamFilter: "personal",
+      lastSeenAt: null,
+      now: NOW,
+    });
+
+    expect(model.teams.map((team) => [team.key, team.name, team.isPersonal, team.needsCount])).toEqual([
+      ["org-me", "Personal", true, 1],
+      ["org-acme", "Acme Co", false, 0],
+      ["org-dr", "Design review", false, 0],
+    ]);
+    expect(model.needs[0]?.team.key).toBe("org-me");
+    expect(model.teamFilter).toBe("org-me");
+    expect(model.needs.length).toBe(1);
+  });
+
+  it("tells two different Personal teams apart without touching the null bucket", () => {
+    const model = buildHomeFeed({
+      attentionEntries: [],
+      recentConversations: [],
+      organizations: [
+        { id: "org-me", name: "Personal team", slug: "user-624ae065-1cfe-4ea8" },
+        { id: "org-them", name: "Personal team", slug: "ada" },
+      ],
+      projects: [acmeProject],
+      activeProject: acmeProject,
+      conversations: [],
+      teamFilter: "all",
+      lastSeenAt: null,
+      now: NOW,
+    });
+
+    expect(model.teams.map((team) => [team.key, team.name, team.isPersonal])).toEqual([
+      ["org-me", "Personal • 624ae065", true],
+      ["org-them", "Personal • ada", true],
+      ["org-acme", "Acme Co", false],
+    ]);
   });
 
   it("filters both lanes by team but keeps chip counts unfiltered, and falls back to all for an unknown team", () => {
@@ -288,7 +405,7 @@ describe("buildHomeFeed", () => {
       now: NOW,
     });
     expect(model.isEmpty).toBe(true);
-    expect(model.teams).toEqual([{ key: "personal", name: "Personal", needsCount: 0 }]);
+    expect(model.teams).toEqual([{ key: "personal", name: "Personal", isPersonal: true, needsCount: 0 }]);
   });
 });
 

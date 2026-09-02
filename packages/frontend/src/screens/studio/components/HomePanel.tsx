@@ -1,13 +1,17 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { ChatLines, Clock, Group, Plus, Xmark } from "iconoir-react";
+import { ChatLines, Check, Clock, Group, Plus } from "iconoir-react";
+import { MenuTrigger } from "react-aria-components";
 import { AttentionBadge } from "../../../components/AttentionBadge";
-import { Badge } from "../../../components/Badge";
 import { Button, IconButton } from "../../../components/Button";
 import { FeedRow } from "../../../components/FeedRow";
 import { Heading } from "../../../components/Heading";
+import { MenuItemContent } from "../../../components/MenuItemContent";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
+import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
+import { StudioPopover } from "../../../components/aria/StudioPopover";
+import { DRAWER_ICON_BUTTON_TONE_CLASS } from "../../../components/listRowStyles";
 import {
   useConversations,
   type ConversationState,
@@ -19,7 +23,7 @@ import {
   type NotificationInboxItem,
 } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
-import { DARK_DIVIDER_BORDER_CLASS } from "../../../theme/darkSurfaces";
+import { DARK_DIVIDER_BORDER_CLASS, DARK_RAIL_HOVER_CLASS } from "../../../theme/darkSurfaces";
 import { isUUID } from "../../../utils/uuid";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import { buildHomeAttentionEntries, type HomeAttentionEntry } from "../homeAttention";
@@ -31,20 +35,30 @@ import {
   getSpaceLabel,
   readHomeLastSeen,
   resolveConversationActor,
+  teamKeyForOrgId,
   writeHomeLastSeen,
   type HomeFeedEvent,
   type HomeFeedOrganizationRef,
   type HomeFeedRecentConversation,
 } from "../homeFeed";
 import { useWorkspaceControls } from "../workspaceControls";
+import { CHAT_COLUMN_CLASS_NAME } from "./ChatColumn";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
 import { SettingsShell } from "./SettingsShell";
 import { resolveHomeRecentConversationNavigationTarget } from "./homeRecentConversationNavigation";
 
 // Flat rows separated by a hairline: Home is a plain panel, so a lane is a
-// section with rows, never a card inside it (darkSurfaces rule 5).
-const ROW_SEPARATOR_CLASS = `border-t border-slate-200/70 first:border-t-0 ${DARK_DIVIDER_BORDER_CLASS}`;
-const ROW_ICON_CLASS = "h-8 w-8 rounded-full bg-transparent";
+// section with rows, never a card inside it (darkSurfaces rule 5). The hover
+// tint lives on the wrapper so it runs edge to edge, dismiss column included.
+const ROW_DIVIDER_CLASS = `border-t border-slate-200/70 ${DARK_DIVIDER_BORDER_CLASS}`;
+const ROW_HOVER_CLASS = `group/row transition-colors hover:bg-slate-100 ${DARK_RAIL_HOVER_CLASS}`;
+// 28px = ChatMessageAvatar xs, so a face fills its shell with no slack.
+const ROW_ICON_CLASS = "h-7 w-7 rounded-full";
+// Labels share the rows' 12px inner inset (EntityRow compact px-3).
+const LANE_INSET_CLASS = "px-3";
+// The row action must still lift on top of the row's hover band.
+const ROW_ACTION_CLASS =
+  "text-slate-500 hover:bg-slate-200/70 data-[hovered]:bg-slate-200/70 dark:text-slate-400 dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)]";
 const RECENT_SPACE_FAN_OUT = 8;
 const RECENT_PER_SPACE = 3;
 const RECENT_LIMIT = 24;
@@ -117,10 +131,12 @@ function TeamChip({
     <button
       type="button"
       aria-pressed={selected}
+      aria-label={count > 0 ? `${label}, ${count} need you` : undefined}
       data-testid={testId}
       onClick={onPress}
       className={[
-        "inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-400/60",
+        // 28px on pointers; the top bar's own pill height on touch.
+        "inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 text-xs font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-400/60 pointer-coarse:h-10 pointer-coarse:px-3",
         selected
           ? "border-primary-200 bg-primary-50 text-primary-700 dark:border-primary-500/40 dark:bg-primary-500/10 dark:text-primary-200"
           : "border-slate-200/70 text-slate-600 hover:bg-slate-100 dark:border-[color:var(--color-studio-dark-divider)] dark:text-slate-300 dark:hover:bg-[var(--color-studio-dark-active)]",
@@ -133,8 +149,9 @@ function TeamChip({
 }
 
 function LaneHeader({ label, action }: { label: string; action?: ReactNode }) {
+  // Margin, not padding, so the box is 24px with or without an action.
   return (
-    <div className="flex items-center justify-between gap-3 px-1 pb-1.5">
+    <div className={`mb-1.5 flex min-h-6 items-center justify-between gap-3 pointer-coarse:min-h-11 ${LANE_INSET_CLASS}`}>
       <Text as="h2" variant="overline" tone="subtle">
         {label}
       </Text>
@@ -143,7 +160,27 @@ function LaneHeader({ label, action }: { label: string; action?: ReactNode }) {
   );
 }
 
+function CaughtUpCut() {
+  return (
+    <div
+      role="separator"
+      aria-label="You're caught up"
+      data-testid="home-since-cut"
+      className={`flex items-center gap-3 py-1.5 ${LANE_INSET_CLASS}`}
+    >
+      <span className="h-px flex-1 bg-primary-400/40" />
+      <Text as="span" variant="overline" tone="accent">
+        You're caught up
+      </Text>
+      <span className="h-px flex-1 bg-primary-400/40" />
+    </div>
+  );
+}
+
 function EventIcon({ event }: { event: HomeFeedEvent }) {
+  // Identity when it is real (a named agent); state only when non-default.
+  // An unread reply gets no marker: inside "Needs you" every row is unread,
+  // and the lane heading plus the mark-as-read control already say so.
   if (event.actor?.handle) {
     return (
       <ChatMessageAvatar
@@ -158,9 +195,6 @@ function EventIcon({ event }: { event: HomeFeedEvent }) {
   }
   if (event.kind === "queued") {
     return <Clock className="h-4 w-4 text-amber-600 dark:text-amber-300" aria-hidden="true" />;
-  }
-  if (event.kind === "reply") {
-    return <span className="block h-2 w-2 rounded-full bg-rose-500 dark:bg-rose-300" aria-hidden="true" />;
   }
   return <ChatLines className="h-4 w-4 text-slate-400 dark:text-slate-500" aria-hidden="true" />;
 }
@@ -190,7 +224,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
   } = useConversations();
   const { showStatus } = useStatus();
   const { requestUrlPush, openConversationTab } = useWorkspaceTabs();
-  const { userEmail, onStartNewProject, onOpenOrgSettings } = useWorkspaceControls();
+  const { userEmail, onStartNewProject, onStartNewConversation, onOpenOrgSettings } = useWorkspaceControls();
   const navigate = useNavigate();
   const [recentConversations, setRecentConversations] = useState<HomeFeedRecentConversation[]>([]);
   const [recentLoading, setRecentLoading] = useState(false);
@@ -212,7 +246,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
       .list()
       .then((orgs) => {
         if (!cancelled) {
-          setOrganizations(orgs.map((org) => ({ id: org.id, name: org.name })));
+          setOrganizations(orgs.map((org) => ({ id: org.id, name: org.name, slug: org.slug ?? null })));
         }
       })
       .catch(() => {
@@ -461,60 +495,73 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
         });
     }
   }, [activeProjectId, createConversation, markConversationRead, openConversationTab, requestUrlPush, setConversationControllerId]);
+  // The top bar's (+) 58px above this one on phones creates the same kind of
+  // conversation; two adjacent pluses must not mean two different things.
+  const startChat = onStartNewConversation ?? handleStartChat;
 
   const showTeamChips = feed.teams.length > 1;
-  const showTeamOnRows = feed.teams.length > 1;
+  // Team on a row only when it is not the default: multi-team, unfiltered.
+  // Personal rows never carry it — everything here is yours already.
+  const showTeamOnRows = showTeamChips && feed.teamFilter === HOME_TEAM_FILTER_ALL;
+  const personalTeamKeys = useMemo(
+    () => new Set(feed.teams.filter((team) => team.isPersonal).map((team) => team.key)),
+    [feed.teams],
+  );
+  // Name the space only when the visible feed spans more than one — by name,
+  // since two "Untitled Space"s cannot be told apart by a label anyway.
+  const spansSpaces = useMemo(
+    () => new Set([...feed.needs, ...activityEvents].map((event) => event.project.name)).size > 1,
+    [activityEvents, feed.needs],
+  );
   // "New space" lands in the team being looked at, else the current one.
   const newSpaceOrgId =
-    feed.teamFilter !== HOME_TEAM_FILTER_ALL && feed.teamFilter !== HOME_PERSONAL_TEAM_KEY
-      ? feed.teamFilter
-      : (currentProject?.orgId ?? null);
+    feed.teamFilter === HOME_TEAM_FILTER_ALL
+      ? (currentProject?.orgId ?? null)
+      : feed.teamFilter === HOME_PERSONAL_TEAM_KEY
+        ? null
+        : feed.teamFilter;
+  const newSpaceTeam = showTeamChips
+    ? (feed.teams.find((team) => team.key === teamKeyForOrgId(newSpaceOrgId)) ?? null)
+    : null;
+  const filteredTeam = feed.teams.find((team) => team.key === feed.teamFilter) ?? null;
+  const lanesEmpty = feed.needs.length === 0 && activityEvents.length === 0 && !recentLoading;
+  const filteredTeamHasSpaces =
+    filteredTeam !== null && projectList.some((project) => teamKeyForOrgId(project.orgId) === filteredTeam.key);
 
-  const renderRow = (event: HomeFeedEvent, options: { lane: "needs" | "activity" }) => {
+  const renderRow = (event: HomeFeedEvent, options: { divider: boolean }) => {
     const when = formatRelativeTimestamp(event.at);
-    const subtitleText = statusSubtitle(event) ?? usablePreview(event.preview);
-    const where = showTeamOnRows ? event.team.name : event.project.name;
+    const teamSuffix = showTeamOnRows && !personalTeamKeys.has(event.team.key) ? ` · ${event.team.name}` : "";
+    const where = spansSpaces ? `${event.project.name}${teamSuffix}` : null;
+    const rest = statusSubtitle(event) ?? usablePreview(event.preview);
     return (
-      <div key={event.key} className={ROW_SEPARATOR_CLASS}>
+      <div key={event.key} className={[ROW_HOVER_CLASS, options.divider ? ROW_DIVIDER_CLASS : ""].filter(Boolean).join(" ")}>
         <FeedRow
           title={event.title}
+          meta={when ?? undefined}
+          metaPlacement="end"
+          // Same 20px line box as the title so the two baselines meet.
+          titleEndClassName="whitespace-nowrap tabular-nums [&>span]:leading-5"
           subtitle={
-            // Narrow screens have no room for a trailing cluster: where and
-            // when drop to a second line under the preview instead.
-            <>
-              {subtitleText ? <span className="block truncate">{subtitleText}</span> : null}
-              <span className="block truncate sm:hidden">{when ? `${where} · ${when}` : where}</span>
-            </>
+            where || rest ? (
+              <>
+                {where ? <span className="text-slate-600 dark:text-slate-300">{where}</span> : null}
+                {where && rest ? " · " : null}
+                {rest}
+              </>
+            ) : undefined
           }
           icon={<EventIcon event={event} />}
           iconClassName={ROW_ICON_CLASS}
-          end={
-            // One trailing cluster, vertically centred with the row: where it
-            // happened, then when. The time column is fixed so rows line up.
-            <span className="hidden shrink-0 items-center gap-2 sm:flex">
-              {showTeamOnRows ? (
-                <Badge size="xs" tone="neutral" className="max-w-[10rem] truncate" title={`${event.project.name} · ${event.team.name}`}>
-                  {event.team.name}
-                </Badge>
-              ) : (
-                <Text as="span" variant="caption" tone="subtle" className="max-w-[12rem] truncate">
-                  {event.project.name}
-                </Text>
-              )}
-              {when ? (
-                <Text as="span" variant="caption" tone="muted" className="min-w-[2.5rem] text-right tabular-nums">
-                  {when}
-                </Text>
-              ) : null}
-            </span>
-          }
           onPress={() => openEvent(event)}
           density="compact"
           verticalAlign="center"
-          surface="interactive"
-          className="rounded-none px-2"
-          reserveTrailingAction={options.lane === "needs"}
-          trailingActionClassName="items-center pr-1"
+          surface="plain"
+          // The wrapper owns the tint; a uniform 56px pitch on every pointer.
+          className="min-h-14 !rounded-none !bg-transparent pointer-coarse:min-h-14"
+          // One straight time column across both lanes. Below sm the column
+          // goes away: opening a row or "Mark all read" is how phones dismiss.
+          reserveTrailingAction
+          trailingActionClassName="w-8 justify-center transition-opacity max-sm:hidden pointer-coarse:w-11 pointer-fine:opacity-0 pointer-fine:group-hover/row:opacity-100 pointer-fine:group-focus-within/row:opacity-100"
           trailingAction={
             event.dismissible ? (
               <IconButton
@@ -522,12 +569,13 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
                 variant="ghost"
                 size="sm"
                 radius="full"
+                title="Mark as read"
                 aria-label={`Mark ${event.title} as read`}
                 data-testid={`${event.testId}-dismiss`}
                 onPress={() => void dismissEvent(event)}
-                className="text-slate-400 hover:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300"
+                className={ROW_ACTION_CLASS}
               >
-                <Xmark className="h-4 w-4" aria-hidden="true" />
+                <Check className="h-4 w-4" aria-hidden="true" />
               </IconButton>
             ) : null
           }
@@ -539,49 +587,80 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
 
   return (
     <SettingsShell title="Home" hideTitle testId="home-panel">
-      <div className="min-w-0 space-y-6">
-        <header className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex min-w-0 flex-wrap items-center gap-1.5" data-testid="home-team-filters">
-            {showTeamChips ? (
-              <>
+      <div className={`${CHAT_COLUMN_CLASS_NAME} min-w-0 space-y-4`}>
+        <header className="flex items-center justify-between gap-2">
+          {showTeamChips ? (
+            <div
+              role="group"
+              aria-label="Filter by team"
+              data-testid="home-team-filters"
+              // Scrolls on phones (many teams must not stack above the feed),
+              // wraps from sm up. The negative margins let the strip bleed to
+              // the shell's edge without clipping chip focus rings.
+              className="no-scrollbar -my-1 -ml-3 flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto py-1 pl-3 sm:ml-0 sm:flex-initial sm:flex-wrap sm:overflow-visible sm:pl-0"
+            >
+              <TeamChip
+                label="All"
+                count={0}
+                selected={feed.teamFilter === HOME_TEAM_FILTER_ALL}
+                onPress={() => setTeamFilter(HOME_TEAM_FILTER_ALL)}
+                testId="home-team-chip-all"
+              />
+              {feed.teams.map((team) => (
                 <TeamChip
-                  label="All"
-                  count={0}
-                  selected={feed.teamFilter === HOME_TEAM_FILTER_ALL}
-                  onPress={() => setTeamFilter(HOME_TEAM_FILTER_ALL)}
-                  testId="home-team-chip-all"
+                  key={team.key}
+                  label={team.name}
+                  count={team.needsCount}
+                  selected={feed.teamFilter === team.key}
+                  onPress={() => setTeamFilter(team.key)}
+                  testId={`home-team-chip-${team.key}`}
                 />
-                {feed.teams.map((team) => (
-                  <TeamChip
-                    key={team.key}
-                    label={team.name}
-                    count={team.needsCount}
-                    selected={feed.teamFilter === team.key}
-                    onPress={() => setTeamFilter(team.key)}
-                    testId={`home-team-chip-${team.key}`}
-                  />
-                ))}
-              </>
-            ) : (
-              <Heading level={2} variant="subtitle">
-                Home
-              </Heading>
-            )}
-          </div>
-          {onStartNewProject ? (
+              ))}
+            </div>
+          ) : (
+            <Heading level={2} variant="subtitle">
+              Home
+            </Heading>
+          )}
+          <MenuTrigger>
             <IconButton
               type="button"
               variant="ghost"
               size="sm"
               radius="full"
-              aria-label="New space"
-              data-testid="home-new-space"
-              onPress={() => onStartNewProject(newSpaceOrgId)}
-              className="text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100"
+              title="New"
+              aria-label="New chat or space"
+              data-testid="home-create"
+              className={`ml-auto shrink-0 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
             >
               <Plus className="h-4 w-4" aria-hidden="true" />
             </IconButton>
-          ) : null}
+            <StudioPopover placement="bottom end" offset={6} className="w-64 p-1">
+              <StudioMenu
+                aria-label="Create"
+                onAction={(key) => {
+                  if (key === "chat") {
+                    startChat();
+                  } else if (key === "space") {
+                    onStartNewProject?.(newSpaceOrgId);
+                  }
+                }}
+              >
+                <StudioMenuItem id="chat" data-testid="home-new-chat">
+                  <MenuItemContent start={<ChatLines aria-hidden="true" />}>
+                    {currentProject ? `New chat in ${currentSpaceName}` : "New chat"}
+                  </MenuItemContent>
+                </StudioMenuItem>
+                {onStartNewProject ? (
+                  <StudioMenuItem id="space" data-testid="home-new-space">
+                    <MenuItemContent start={<Plus aria-hidden="true" />}>
+                      {newSpaceTeam ? `New space in ${newSpaceTeam.name}` : "New space"}
+                    </MenuItemContent>
+                  </StudioMenuItem>
+                ) : null}
+              </StudioMenu>
+            </StudioPopover>
+          </MenuTrigger>
         </header>
 
         {feed.isEmpty && !recentLoading ? (
@@ -593,7 +672,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
               Replies, runs and changes from every space you belong to show up here.
             </Text>
             <div className="flex flex-wrap gap-2">
-              <Button variant="primary" size="sm" radius="xl" className="gap-2" onPress={handleStartChat} data-testid="home-start-first-chat">
+              <Button variant="primary" size="sm" radius="xl" className="gap-2" onPress={startChat} data-testid="home-start-first-chat">
                 <ChatLines className="h-4 w-4" aria-hidden="true" />
                 Start a chat
               </Button>
@@ -611,68 +690,97 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
               ) : null}
             </div>
           </section>
+        ) : filteredTeam && lanesEmpty ? (
+          // A team with nothing in it yet is an invitation, not two empty lanes.
+          <section className={`space-y-2 py-4 ${LANE_INSET_CLASS}`} data-testid="home-filter-empty">
+            <Text as="p" variant="body" tone="muted">
+              {filteredTeamHasSpaces ? `Quiet in ${filteredTeam.name} so far.` : `No spaces in ${filteredTeam.name} yet.`}
+            </Text>
+            {!filteredTeamHasSpaces && onStartNewProject ? (
+              <Button
+                variant="outline"
+                size="sm"
+                radius="xl"
+                className="gap-2"
+                data-testid="home-filter-empty-new-space"
+                onPress={() => onStartNewProject(newSpaceOrgId)}
+              >
+                <Plus className="h-4 w-4" aria-hidden="true" />
+                New space
+              </Button>
+            ) : null}
+          </section>
         ) : (
-          <>
-            <section data-testid="home-attention-section">
-              <LaneHeader
-                label={feed.needs.length > 0 ? `Needs you · ${feed.needs.length}` : "Needs you"}
-                action={
-                  dismissibleNeeds.length > 0 ? (
-                    <Button type="button" variant="ghost" size="xs" radius="full" onPress={handleMarkAllRead}>
-                      Mark all read
-                    </Button>
-                  ) : null
-                }
-              />
-              {feed.needs.length === 0 ? (
-                <Text as="p" variant="caption" tone="muted" className="px-2 py-1.5" data-testid="home-attention-empty">
-                  Nothing needs you right now.
-                </Text>
-              ) : (
-                <div className="min-w-0">{feed.needs.map((event) => renderRow(event, { lane: "needs" }))}</div>
-              )}
-            </section>
+          <div className="space-y-8">
+            {feed.needs.length > 0 ? (
+              <section data-testid="home-attention-section">
+                <LaneHeader
+                  label="Needs you"
+                  action={
+                    dismissibleNeeds.length > 0 ? (
+                      <Button type="button" variant="ghost" size="xs" radius="full" onPress={handleMarkAllRead}>
+                        Mark all read
+                      </Button>
+                    ) : null
+                  }
+                />
+                <div className="min-w-0">
+                  {feed.needs.map((event, index) => renderRow(event, { divider: index > 0 }))}
+                </div>
+              </section>
+            ) : null}
 
             <section data-testid="home-recent-section">
               <LaneHeader label="Activity" action={recentLoading ? <Spinner size="xs" /> : null} />
               {activityEvents.length === 0 && !recentLoading ? (
-                <Text as="p" variant="caption" tone="muted" className="px-2 py-1.5" data-testid="home-recent-empty">
+                <Text as="p" variant="body" tone="muted" className={`py-2 ${LANE_INSET_CLASS}`} data-testid="home-recent-empty">
                   Quiet so far.
                 </Text>
               ) : null}
               {(() => {
                 let flatIndex = 0;
-                return feed.activity.map((day) => (
-                  <div key={day.key} className="min-w-0">
-                    <Text as="p" variant="overline" tone="subtle" className="px-2 pb-1 pt-3">
-                      {day.label}
-                    </Text>
-                    <div className="min-w-0">
+                return feed.activity.map((day, dayIndex) => {
+                  const dayStart = flatIndex;
+                  if (dayStart >= RECENT_LIMIT) return null;
+                  const cutAtDayStart = feed.sinceCutIndex === dayStart;
+                  return (
+                    <div key={day.key} className="min-w-0">
+                      {cutAtDayStart ? <CaughtUpCut /> : null}
+                      {feed.activity.length > 1 ? (
+                        // A sub-group label: a caption under the lane overline,
+                        // and silent altogether when everything is one day.
+                        <Text
+                          as="p"
+                          variant="caption"
+                          tone="subtle"
+                          className={[
+                            `pb-1 pt-2.5 text-xxs font-medium ${LANE_INSET_CLASS}`,
+                            dayIndex > 0 && !cutAtDayStart ? ROW_DIVIDER_CLASS : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" ")}
+                        >
+                          {day.label}
+                        </Text>
+                      ) : null}
                       {day.events.map((event) => {
                         const index = flatIndex;
                         flatIndex += 1;
                         if (index >= RECENT_LIMIT) return null;
+                        const cutHere = feed.sinceCutIndex === index && index !== dayStart;
                         return (
-                          <div key={event.key}>
-                            {feed.sinceCutIndex === index ? (
-                              <div className="flex items-center gap-3 px-2 py-1.5" data-testid="home-since-cut" aria-hidden="true">
-                                <span className="h-px flex-1 bg-primary-400/40" />
-                                <Text as="span" variant="overline" tone="accent">
-                                  You're caught up
-                                </Text>
-                                <span className="h-px flex-1 bg-primary-400/40" />
-                              </div>
-                            ) : null}
-                            {renderRow(event, { lane: "activity" })}
-                          </div>
+                          <Fragment key={event.key}>
+                            {cutHere ? <CaughtUpCut /> : null}
+                            {renderRow(event, { divider: index !== dayStart && !cutHere })}
+                          </Fragment>
                         );
                       })}
                     </div>
-                  </div>
-                ));
+                  );
+                });
               })()}
             </section>
-          </>
+          </div>
         )}
       </div>
     </SettingsShell>
