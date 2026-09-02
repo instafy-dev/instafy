@@ -1585,6 +1585,10 @@ async fn create_conversation_tables(client: &mut tokio_postgres::Client) -> anyh
 }
 
 pub(crate) async fn setup_origin_test_pool() -> anyhow::Result<Option<PgPool>> {
+    setup_origin_test_pool_with_max_size(5).await
+}
+
+async fn setup_origin_test_pool_with_max_size(max_size: u32) -> anyhow::Result<Option<PgPool>> {
     let url = match std::env::var("TEST_DATABASE_URL") {
         Ok(value) => value,
         Err(_) => return Ok(None),
@@ -1728,7 +1732,7 @@ pub(crate) async fn setup_origin_test_pool() -> anyhow::Result<Option<PgPool>> {
         PostgresConnectionManager::new_from_stringlike(&url, crate::config::database_tls())
             .map_err(|error| anyhow::anyhow!("failed to create test pool manager: {error}"))?;
     let pool = bb8::Pool::builder()
-        .max_size(5)
+        .max_size(max_size)
         .build(manager)
         .await
         .map_err(|error| anyhow::anyhow!("failed to build test pool: {error}"))?;
@@ -18898,14 +18902,22 @@ async fn dispatch_prompt_persists_canonical_shared_browser_authority() -> anyhow
 }
 
 #[tokio::test]
-async fn dispatch_prompt_keeps_owned_personal_browser_runtime_pinned() -> anyhow::Result<()> {
-    let pool = require_origin_test_pool("Personal Browser dispatch pinning regression").await?;
+async fn conversation_message_dispatch_uses_one_pool_connection() -> anyhow::Result<()> {
+    let pool = setup_origin_test_pool_with_max_size(1)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "conversation message pool regression requires TEST_DATABASE_URL; run it through `pnpm test:controller`"
+            )
+        })?;
 
     let user_id = Uuid::new_v4();
     let org_id = Uuid::new_v4();
     let project_id = Uuid::new_v4();
     let conversation_id = Uuid::new_v4();
+    let unavailable_conversation_id = Uuid::new_v4();
     let runtime_id = Uuid::new_v4();
+    let unavailable_runtime_id = Uuid::new_v4();
     let credential_id = Uuid::new_v4();
     ensure_test_user(&pool, &user_id).await?;
 
@@ -18921,6 +18933,16 @@ async fn dispatch_prompt_keeps_owned_personal_browser_runtime_pinned() -> anyhow
         capabilities
             .as_object_mut()
             .expect("Personal Browser capabilities are an object"),
+        user_id,
+    );
+    let mut unavailable_capabilities = json!({
+        "agent": true,
+        "origin": true,
+    });
+    runtime::set_self_hosted_access_attestation(
+        unavailable_capabilities
+            .as_object_mut()
+            .expect("unavailable runtime capabilities are an object"),
         user_id,
     );
 
@@ -18948,6 +18970,16 @@ async fn dispatch_prompt_keeps_owned_personal_browser_runtime_pinned() -> anyhow
                 &[&project_id, &org_id, &user_id],
             )
             .await?;
+        for conversation_id in [conversation_id, unavailable_conversation_id] {
+            connection
+                .execute(
+                    "INSERT INTO conversations (
+                         id, project_id, created_by, metadata
+                     ) VALUES ($1, $2, $3, '{}'::jsonb)",
+                    &[&conversation_id, &project_id, &user_id],
+                )
+                .await?;
+        }
         connection
             .execute(
                 "INSERT INTO runtimes (
@@ -18962,6 +18994,23 @@ async fn dispatch_prompt_keeps_owned_personal_browser_runtime_pinned() -> anyhow
                     &project_id,
                     &format!("personal-browser-dispatch-{runtime_id}"),
                     &PgJson(capabilities),
+                ],
+            )
+            .await?;
+        connection
+            .execute(
+                "INSERT INTO runtimes (
+                     id, project_id, provider, status, endpoint_url, task_ref,
+                     idle_ttl_seconds, last_seen_at, capabilities, updated_at
+                 ) VALUES (
+                     $1, $2, 'self-hosted', 'offline', null,
+                     $3, 600, now() - interval '1 hour', $4, now()
+                 )",
+                &[
+                    &unavailable_runtime_id,
+                    &project_id,
+                    &format!("unavailable-dispatch-{unavailable_runtime_id}"),
+                    &PgJson(unavailable_capabilities),
                 ],
             )
             .await?;
@@ -18994,6 +19043,9 @@ async fn dispatch_prompt_keeps_owned_personal_browser_runtime_pinned() -> anyhow
         auth_token: None,
         metadata: None,
     }];
+    let user_token = crate::auth::issue_controller_token(&config, &user_id)
+        .map_err(|error| controller_error("issue Personal Browser controller token", error))?
+        .token;
     let state = build_test_state(pool.clone(), config);
     assert!(
         crate::provider_identifiers::is_trusted_instafy_cloud_provider_id(
@@ -19001,49 +19053,62 @@ async fn dispatch_prompt_keeps_owned_personal_browser_runtime_pinned() -> anyhow
         )
     );
 
-    let normalized = dispatch::normalize_dispatch_request(DispatchPromptRequest {
-        project_id: Some(project_id.to_string()),
-        session_id: None,
-        prompt_text: Some("Use my signed-in browser to inspect the visible page.".to_string()),
-        intent: Some("browser".to_string()),
-        plan_seed: None,
-        metadata: Some(json!({
-            "browserTransport": "desktop-personal",
-            "agentSelection": {
-                "active": ["octo"],
-                "mentions": ["octo"]
-            }
-        })),
-        conversation_metadata: None,
-        parent_conversation_id: None,
-        thread_kind: None,
-        tool_limits: None,
-        repo: None,
-        ui: None,
-        priority: None,
-        runtime_type: None,
-        idle_ttl_seconds: None,
-        conversation_id: Some(conversation_id.to_string()),
-        runtime_id: Some(runtime_id.to_string()),
-        runtime_display_name: None,
-        prefer_runtime: Some(true),
-    })
-    .map_err(|error| controller_error("normalize Personal Browser dispatch", error))?;
-
-    let response = dispatch::process_dispatch_prompt(
-        &state,
-        &RequestContext {
-            user_id: Some(user_id),
-            is_service_role: false,
-            scoped_claims: None,
-        },
-        normalized,
+    let response = timeout(
+        std::time::Duration::from_secs(10),
+        conversations::router().with_state(state.clone()).oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/conversations/{conversation_id}/messages"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {user_token}"),
+                )
+                .body(Body::from(
+                    json!({
+                        "promptText": "Use my signed-in browser to inspect the visible page.",
+                        "intent": "browser",
+                        "metadata": {
+                            "browserTransport": "desktop-personal",
+                            "agentSelection": {
+                                "active": ["octo"],
+                                "mentions": ["octo"]
+                            }
+                        },
+                        "runtimeId": runtime_id,
+                        "preferRuntime": true
+                    })
+                    .to_string(),
+                ))?,
+        ),
     )
     .await
-    .map_err(|error| controller_error("process Personal Browser dispatch", error))?;
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "conversation message dispatch did not complete with a single available pool connection"
+        )
+    })??;
 
-    let run_id = response.run_id.expect("Personal Browser run id");
-    let job_id = response.job_id.expect("Personal Browser job id");
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await?;
+    if status != StatusCode::OK {
+        anyhow::bail!(
+            "conversation message dispatch failed with status {status}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    let response: serde_json::Value = serde_json::from_slice(&body)?;
+
+    let run_id = Uuid::parse_str(
+        response["runId"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Personal Browser response omitted runId"))?,
+    )?;
+    let job_id = Uuid::parse_str(
+        response["jobId"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Personal Browser response omitted jobId"))?,
+    )?;
     let connection = pool.get().await?;
     let job = connection
         .query_one(
@@ -19090,6 +19155,69 @@ async fn dispatch_prompt_keeps_owned_personal_browser_runtime_pinned() -> anyhow
         .await?
         .get("provider");
     assert_eq!(provider, "self-hosted");
+    drop(connection);
+
+    let unavailable_response = timeout(
+        std::time::Duration::from_secs(10),
+        conversations::router().with_state(state).oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/conversations/{unavailable_conversation_id}/messages"
+                ))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {user_token}"),
+                )
+                .body(Body::from(
+                    json!({
+                        "promptText": "Report the current workspace status.",
+                        "intent": "question",
+                        "metadata": {
+                            "agentSelection": {
+                                "active": ["octo"],
+                                "mentions": ["octo"]
+                            }
+                        },
+                        "runtimeId": unavailable_runtime_id,
+                        "preferRuntime": true
+                    })
+                    .to_string(),
+                ))?,
+        ),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "unavailable-runtime dispatch did not release its connection before reconnect"
+        )
+    })??;
+    let unavailable_status = unavailable_response.status();
+    let unavailable_body = to_bytes(unavailable_response.into_body(), usize::MAX).await?;
+    anyhow::ensure!(
+        unavailable_status == StatusCode::OK,
+        "unavailable-runtime dispatch failed with status {unavailable_status}: {}",
+        String::from_utf8_lossy(&unavailable_body)
+    );
+    let unavailable_payload: serde_json::Value = serde_json::from_slice(&unavailable_body)?;
+    let unavailable_run_id = Uuid::parse_str(
+        unavailable_payload["runId"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("unavailable-runtime response omitted runId"))?,
+    )?;
+    let connection = pool.get().await?;
+    let unavailable_run_metadata: PgJson<serde_json::Value> = connection
+        .query_one(
+            "SELECT metadata FROM runs WHERE id = $1",
+            &[&unavailable_run_id],
+        )
+        .await?
+        .get("metadata");
+    assert_eq!(
+        unavailable_run_metadata.0["runtimeAlert"]["reason"],
+        json!("runtime_not_ready")
+    );
     drop(connection);
 
     cleanup_origin_project(&pool, &project_id).await?;
