@@ -471,6 +471,232 @@ describe("ChatComposerSurface", () => {
     expect(nodes.toolbarTrailing?.contains(nodes.voice)).toBe(true);
   });
 
+  it("latches an expanded toolbar for the whole voice capture so the held microphone keeps its node", async () => {
+    vi.useFakeTimers();
+    const renderHold = (value: string, capture: boolean) =>
+      renderLayout({
+        showVoiceStatus: capture,
+        voiceStatusMessage: capture ? "Listening. Speak now and release to stop." : "",
+        voiceConversationActionStripProps: {
+          voiceInteractionMode: "hold",
+          voiceActionActive: capture,
+        } as never,
+        chatInputProps: { value } as never,
+        sendButtonVariant: value ? "primary" : "outline",
+      });
+
+    await act(async () => renderHold("existing draft", false));
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    let nodes = layoutNodes();
+    expect(nodes.toolbar?.getAttribute("data-expanded")).toBe("true");
+    const micNode = nodes.voice;
+    expect(nodes.toolbarTrailing?.contains(micNode)).toBe(true);
+
+    // Capture begins on the toolbar mic: nothing may move.
+    await act(async () => renderHold("existing draft", true));
+    nodes = layoutNodes();
+    expect(nodes.toolbar?.getAttribute("data-expanded")).toBe("true");
+    expect(nodes.voice).toBe(micNode);
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+    nodes = layoutNodes();
+    expect(nodes.toolbar).not.toBeNull();
+    expect(nodes.toolbar?.getAttribute("data-expanded")).toBe("true");
+    expect(nodes.voice).toBe(micNode);
+    expect(nodes.toolbarTrailing?.contains(micNode)).toBe(true);
+    expect(nodes.textRow?.getAttribute("data-composer-inline-controls")).toBe("false");
+
+    // A transcript lands mid-hold.
+    await act(async () => renderHold("existing draft plus transcript", true));
+    nodes = layoutNodes();
+    expect(nodes.toolbar?.getAttribute("data-expanded")).toBe("true");
+    expect(nodes.voice).toBe(micNode);
+
+    // Capture ends with a draft: still expanded, still the same mic.
+    await act(async () => renderHold("existing draft plus transcript", false));
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+    nodes = layoutNodes();
+    expect(nodes.toolbar?.getAttribute("data-expanded")).toBe("true");
+    expect(nodes.voice).toBe(micNode);
+    expect(nodes.toolbarTrailing?.contains(micNode)).toBe(true);
+  });
+
+  it("collapses a latched toolbar only once voice capture has ended with an empty value", async () => {
+    vi.useFakeTimers();
+    const renderHold = (value: string, capture: boolean) =>
+      renderLayout({
+        showVoiceStatus: capture,
+        voiceStatusMessage: capture ? "Listening. Speak now and release to stop." : "",
+        voiceConversationActionStripProps: {
+          voiceInteractionMode: "hold",
+          voiceActionActive: capture,
+        } as never,
+        chatInputProps: { value } as never,
+        sendButtonVariant: value ? "primary" : "outline",
+      });
+
+    await act(async () => renderHold("existing draft", false));
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    const micNode = layoutNodes().voice;
+    expect(layoutNodes().toolbarTrailing?.contains(micNode)).toBe(true);
+
+    await act(async () => renderHold("existing draft", true));
+    // The draft empties underneath the hold (the user cleared it, or it was
+    // sent): the latch keeps the toolbar mounted and expanded regardless.
+    await act(async () => renderHold("", true));
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
+    let nodes = layoutNodes();
+    expect(nodes.toolbar).not.toBeNull();
+    expect(nodes.toolbar?.getAttribute("data-expanded")).toBe("true");
+    expect(nodes.voice).toBe(micNode);
+    expect(nodes.toolbarTrailing?.contains(micNode)).toBe(true);
+
+    // Capture ends and the value is empty: now, and only now, it collapses.
+    await act(async () => renderHold("", false));
+    expect(layoutNodes().toolbar?.getAttribute("data-expanded")).toBe("false");
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    nodes = layoutNodes();
+    expect(nodes.toolbar).toBeNull();
+    expect(nodes.textRow?.getAttribute("data-composer-inline-controls")).toBe("true");
+    expect(nodes.trailing?.contains(nodes.voice)).toBe(true);
+  });
+
+  it("dresses the composer home button as a ghost toolbar control at sm+ and outlined in the rest row", async () => {
+    const renderHome = (value: string) =>
+      renderLayout({
+        showComposerHomeButton: true,
+        homeAttentionCount: 2,
+        homeAttentionBadge: "2",
+        chatInputProps: { value } as never,
+        sendButtonVariant: value ? "primary" : "outline",
+      });
+
+    await act(async () => renderHome(""));
+    let home = container.querySelector('[data-testid="chat-home-button-mobile"]');
+    expect(layoutNodes().leading?.contains(home)).toBe(true);
+    expect(home?.getAttribute("aria-label")).toBe("Open home");
+    expect(home?.className.split(" ")).toContain("outline");
+    expect(home?.className.split(" ")).not.toContain("text-slate-600");
+    expect(home?.querySelector('[data-testid="chat-home-badge-mobile"]')?.textContent).toBe("2");
+
+    await act(async () => renderHome("Ship it"));
+    home = container.querySelector('[data-testid="chat-home-button-mobile"]');
+    expect(layoutNodes().toolbarLeading?.contains(home)).toBe(true);
+    expect(home?.getAttribute("aria-label")).toBe("Open home");
+    expect(home?.className.split(" ")).not.toContain("outline");
+    expect(home?.className.split(" ")).toContain("h-9");
+    expect(home?.className.split(" ")).toContain("text-slate-600");
+    expect(home?.querySelector('[data-testid="chat-home-badge-mobile"]')?.textContent).toBe("2");
+  });
+
+  function createFocusableChatInputRef() {
+    const focus = vi.fn();
+    const chatInputRef = {
+      current: {
+        focus,
+        focusAfterValueSync: vi.fn(),
+        acceptGhostSuggestion: vi.fn(),
+        clear: vi.fn(),
+      },
+    };
+    return { chatInputRef, focus };
+  }
+
+  it("returns focus to the editor when a keyboard-activated Send clears the draft and collapses the toolbar", async () => {
+    vi.useFakeTimers();
+    const { chatInputRef, focus } = createFocusableChatInputRef();
+    const onSendButtonPress = vi.fn();
+    const renderDraft = (value: string) =>
+      renderLayout({
+        chatInputRef,
+        onSendButtonPress,
+        chatInputProps: { value } as never,
+        sendButtonVariant: value ? "primary" : "outline",
+      });
+
+    await act(async () => renderDraft("Ship it"));
+    const sendButton = container.querySelector<HTMLButtonElement>('[data-testid="chat-send-button"]');
+    expect(layoutNodes().toolbarTrailing?.contains(sendButton)).toBe(true);
+    await act(async () => sendButton?.focus());
+    expect(document.activeElement).toBe(sendButton);
+
+    // react-aria attaches its keyup listener after the keydown commits, so
+    // the two halves of the keyboard press are separate acts.
+    await act(async () => {
+      sendButton?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+      );
+    });
+    await act(async () => {
+      sendButton?.dispatchEvent(
+        new KeyboardEvent("keyup", { key: "Enter", bubbles: true, cancelable: true }),
+      );
+    });
+    expect(onSendButtonPress).toHaveBeenCalledTimes(1);
+    expect(focus).not.toHaveBeenCalled();
+
+    // ChatPanel clears the draft once the send dispatches.
+    await act(async () => renderDraft(""));
+    expect(focus).toHaveBeenCalledTimes(1);
+
+    // The hand-off is a one-shot: a later collapse does not refocus again.
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    await act(async () => renderDraft("Another"));
+    await act(async () => renderDraft(""));
+    expect(focus).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves focus alone when the toolbar collapses without a keyboard send", async () => {
+    vi.useFakeTimers();
+    const { chatInputRef, focus } = createFocusableChatInputRef();
+    const onSendButtonPress = vi.fn();
+    const renderDraft = (value: string) =>
+      renderLayout({
+        chatInputRef,
+        onSendButtonPress,
+        chatInputProps: { value } as never,
+        sendButtonVariant: value ? "primary" : "outline",
+      });
+
+    // The draft clears with no send at all (stash, external clear, mouse).
+    await act(async () => renderDraft("Ship it"));
+    let sendButton = container.querySelector<HTMLButtonElement>('[data-testid="chat-send-button"]');
+    await act(async () => sendButton?.focus());
+    await act(async () => renderDraft(""));
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    expect(focus).not.toHaveBeenCalled();
+
+    // A mouse-driven Send is not a keyboard hand-off.
+    await act(async () => renderDraft("Ship it again"));
+    sendButton = container.querySelector<HTMLButtonElement>('[data-testid="chat-send-button"]');
+    const mouseEvent = (type: string) =>
+      new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, detail: 1 });
+    await act(async () => {
+      sendButton?.dispatchEvent(mouseEvent("mousedown"));
+      sendButton?.dispatchEvent(mouseEvent("mouseup"));
+      sendButton?.dispatchEvent(mouseEvent("click"));
+    });
+    expect(onSendButtonPress).toHaveBeenCalledTimes(1);
+    expect(onSendButtonPress.mock.calls[0]?.[0]?.pointerType).toBe("mouse");
+    await act(async () => renderDraft(""));
+    expect(focus).not.toHaveBeenCalled();
+  });
+
   it("condenses the idle composer in Browser mode and expands it when a draft appears", async () => {
     const renderSurface = (value: string) =>
       root.render(

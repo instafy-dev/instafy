@@ -35,15 +35,33 @@ test.describe("Narrow-phone Studio density", () => {
     await expectHeightBetween(page.getByTestId("topbar-tab-selector"), 44, 44);
     await expectHeightBetween(page.getByTestId("topbar-new-conversation"), 44, 44);
 
-    // The idle composer is one row: border + 6px top + 44px controls + the
-    // 8px safe-area floor. Image upload folds into the "+" menu below sm.
+    // The idle composer is one row: 1px top border + 6px top padding + the
+    // 44px control row + the 8px safe-area floor = 59px. Image upload folds
+    // into the "+" menu below sm. Chromium under Playwright supports web
+    // speech, so the empty rest row ends in the hold-to-talk mic, not Send;
+    // Send takes that slot once there is a draft.
     const composer = page.getByTestId("chat-composer-overlay");
+    const input = page.getByTestId("chat-input");
     await expectHeightBetween(composer, 56, 62);
-    await expect(page.getByTestId("chat-input")).toHaveCSS("font-size", "16px");
+    await expect(input).toHaveCSS("font-size", "16px");
     await expectHeightBetween(page.getByTestId("chat-home-button-mobile"), 44, 44);
     await expectHeightBetween(page.getByTestId("composer-action-menu-trigger"), 44, 44);
-    await expectHeightBetween(page.getByTestId("chat-send-button"), 44, 44);
+    await expectHeightBetween(page.getByTestId("chat-voice-input-button"), 44, 44);
+    await expect(page.getByTestId("chat-send-button")).toHaveCount(0);
     await expect(page.getByTestId("chat-image-upload-button")).toHaveCount(0);
+
+    // With a one-line draft the composer stays one row below sm (no toolbar
+    // reveal): the 20px line + 8px editor padding sits inside the 44px row.
+    await input.fill("Density check");
+    await expect(input.locator("p").last()).toHaveText("Density check");
+    await expectHeightBetween(page.getByTestId("chat-send-button"), 44, 44);
+    await expect(page.getByTestId("chat-composer-toolbar")).toHaveCount(0);
+    await expectHeightBetween(composer, 56, 62);
+    await input.press("ControlOrMeta+a");
+    await input.press("Backspace");
+    await expect(page.getByTestId("chat-send-button")).toHaveCount(0);
+    await expectHeightBetween(page.getByTestId("chat-voice-input-button"), 44, 44);
+    await expectHeightBetween(composer, 56, 62);
 
     const baseHeaderBox = await studioHeader.boundingBox();
     const baseComposerBox = await composer.boundingBox();

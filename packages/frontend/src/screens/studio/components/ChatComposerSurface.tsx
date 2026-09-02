@@ -428,9 +428,14 @@ export function ChatComposerSurface({
     !stashTrayProps?.stashes.length;
   const composerHasText = chatInputProps.value.trim().length > 0;
   // Hold-to-talk must keep the same microphone DOM node from press through
-  // release, and a transcript landing mid-hold creates a draft. Defer the
-  // toolbar reveal until voice capture has settled so the strip does not
-  // move rows underneath an active press.
+  // release. Voice capture therefore never moves the controls between rows:
+  // from the collapsed state a transcript landing mid-hold only DEFERS the
+  // reveal until capture ends, and from the expanded state the toolbar is
+  // latched — kept mounted and expanded for the whole capture, even if the
+  // draft empties underneath it — and only collapses once capture has ended
+  // with an empty value. Capture is derived from every signal ChatPanel feeds
+  // (showVoiceStatus covers the hold itself, the strip props cover
+  // starting/listening/transcribing) so a hold never falls through a gap.
   const voiceCaptureActive =
     showVoiceStatus ||
     Boolean(
@@ -444,19 +449,33 @@ export function ChatComposerSurface({
   // rest row, the toolbar reveal and the "+" menu fold share one source of
   // truth. Below sm the composer stays one row while typing: vertical space
   // with the keyboard up is the scarce thing there.
+  const composerToolbarAvailable =
+    !compactBrowserViewport && !browserComposerCondensed && !showVoiceActiveStrip;
+  // The latch is decided from the previous commit (refs written in an effect
+  // below, so render stays pure): capture beginning while the toolbar is
+  // mounted latches it; the latch holds for as long as capture stays active
+  // and releases the moment it ends, at which point the plain text rule takes
+  // over again (draft present → stays expanded with no state change, draft
+  // empty → collapses).
+  const voiceCaptureWasActiveRef = useRef(false);
+  const composerToolbarWasRenderedRef = useRef(false);
+  const composerToolbarCaptureLatchRef = useRef(false);
+  const composerToolbarCaptureLatched =
+    voiceCaptureActive &&
+    (voiceCaptureWasActiveRef.current
+      ? composerToolbarCaptureLatchRef.current
+      : composerToolbarWasRenderedRef.current);
   const composerToolbarVisible =
-    !compactBrowserViewport &&
-    !browserComposerCondensed &&
-    !showVoiceActiveStrip &&
-    !voiceCaptureActive &&
-    composerHasText;
+    composerToolbarAvailable &&
+    (composerToolbarCaptureLatched || (composerHasText && !voiceCaptureActive));
   const { mounted: composerToolbarMounted, expanded: composerToolbarExpanded } =
     useComposerToolbarReveal(composerToolbarVisible);
-  const composerToolbarRendered =
-    composerToolbarMounted &&
-    !compactBrowserViewport &&
-    !browserComposerCondensed &&
-    !showVoiceActiveStrip;
+  const composerToolbarRendered = composerToolbarMounted && composerToolbarAvailable;
+  useEffect(() => {
+    voiceCaptureWasActiveRef.current = voiceCaptureActive;
+    composerToolbarWasRenderedRef.current = composerToolbarRendered;
+    composerToolbarCaptureLatchRef.current = composerToolbarCaptureLatched;
+  });
   const composerInlineControlsInTextRow =
     !browserComposerCondensed && !showVoiceActiveStrip && !composerToolbarRendered;
   // Below sm the image-upload and insert-suggestion controls are not rendered
@@ -756,12 +775,61 @@ export function ChatComposerSurface({
     onOutcome: handleTouchSendModeOutcome,
   });
 
+  // A keyboard user who activates Send has focus on the Send button, and the
+  // button leaves the toolbar when the draft clears and the toolbar collapses,
+  // so focus would fall to <body>. ChatPanel only refocuses the editor after a
+  // send when the editor itself was focused, so the composer owns this case:
+  // remember the draft that was sent from the keyboard, and when that exact
+  // draft clears and takes the toolbar with it, hand focus to the editor. A
+  // collapse for any other reason (mouse clear, stash, a different draft)
+  // leaves focus alone.
+  const keyboardSendDraftRef = useRef<string | null>(null);
+  const armKeyboardSendRefocus = useCallback(
+    (pointerType: string | undefined, detail?: number) => {
+      const keyboardActivation =
+        pointerType === "keyboard" || pointerType === "virtual" || (pointerType === undefined && detail === 0);
+      if (!keyboardActivation) {
+        return;
+      }
+      if (typeof document !== "undefined") {
+        const active = document.activeElement;
+        if (!(active instanceof Element) || !active.closest('[data-testid="chat-send-button"]')) {
+          return;
+        }
+      }
+      keyboardSendDraftRef.current = chatInputProps.value;
+    },
+    [chatInputProps.value],
+  );
+  const previousComposerValueRef = useRef(chatInputProps.value);
+  const previousComposerToolbarVisibleRef = useRef(composerToolbarVisible);
+  useEffect(() => {
+    const previousValue = previousComposerValueRef.current;
+    const toolbarWasVisible = previousComposerToolbarVisibleRef.current;
+    previousComposerValueRef.current = chatInputProps.value;
+    previousComposerToolbarVisibleRef.current = composerToolbarVisible;
+    const sentDraft = keyboardSendDraftRef.current;
+    if (sentDraft === null || chatInputProps.value === sentDraft) {
+      return;
+    }
+    keyboardSendDraftRef.current = null;
+    if (
+      toolbarWasVisible &&
+      !composerToolbarVisible &&
+      previousValue === sentDraft &&
+      chatInputProps.value.trim().length === 0
+    ) {
+      chatInputRef.current?.focus();
+    }
+  }, [chatInputProps.value, chatInputRef, composerToolbarVisible]);
+
   const handleSendPress = useCallback<NonNullable<ComponentProps<typeof IconButton>["onPress"]>>(
     (event) => {
       if (sendPressHandledRef.current) {
         return;
       }
       markSendPressHandled();
+      armKeyboardSendRefocus(event.pointerType);
       if (event.pointerType !== "touch") {
         const eventModifierMode = resolveAvailableDesktopSendModifierMode(event);
         const modifierMode =
@@ -780,6 +848,7 @@ export function ChatComposerSurface({
       onSendButtonPress?.(event);
     },
     [
+      armKeyboardSendRefocus,
       markSendPressHandled,
       onQueueMessageFromComposer,
       onSendButtonPress,
@@ -795,6 +864,7 @@ export function ChatComposerSurface({
         return;
       }
       event.preventDefault();
+      armKeyboardSendRefocus(undefined, event.detail);
       const eventModifierMode = resolveAvailableDesktopSendModifierMode(event);
       const modifierMode =
         eventModifierMode === visibleDesktopSendModifierMode
@@ -814,6 +884,7 @@ export function ChatComposerSurface({
       onSendButtonPress?.({ pointerType: "mouse" } as never);
     },
     [
+      armKeyboardSendRefocus,
       onQueueMessageFromComposer,
       onSendButtonPress,
       onStashDraftFromComposer,
@@ -900,31 +971,39 @@ export function ChatComposerSurface({
         />
       </IconButton>
     ) : null;
-  const homeButtonNode = showComposerHomeButton ? (
-    <IconButton
-      type="button"
-      onPress={onOpenHome}
-      variant="outline"
-      size="md"
-      radius="xl"
-      aria-label="Open home"
-      data-testid="chat-home-button-mobile"
-      className={composerOutlinedActionClass}
-    >
-      <span className="relative flex h-full w-full items-center justify-center">
-        <HomeIcon className={composerActionIconClass} aria-hidden="true" />
-        {homeAttentionCount > 0 ? (
-          <span
+  // In the rest row the home button is outlined like its 44px siblings; in the
+  // sm+ toolbar (640-767px with touch) it takes the toolbar's 36px ghost
+  // variant so it does not sit as one raised outlined square beside ghost
+  // controls. The badge and the accessible name are the same in both.
+  const renderHomeButton = (placement: ComposerControlPlacement) =>
+    showComposerHomeButton ? (
+      <IconButton
+        type="button"
+        onPress={onOpenHome}
+        variant={placement === "toolbar" ? "ghost" : "outline"}
+        size="md"
+        radius="xl"
+        aria-label="Open home"
+        data-testid="chat-home-button-mobile"
+        className={placement === "toolbar" ? COMPOSER_TOOLBAR_ACTION_CLASS : composerOutlinedActionClass}
+      >
+        <span className="relative flex h-full w-full items-center justify-center">
+          <HomeIcon
+            className={placement === "toolbar" ? COMPOSER_TOOLBAR_ICON_CLASS : composerActionIconClass}
             aria-hidden="true"
-            data-testid="chat-home-badge-mobile"
-            className="absolute right-[1px] top-[1px] flex h-3.5 min-w-[0.875rem] items-center justify-center rounded-full bg-primary-600 px-1 text-3xs font-semibold leading-none text-white ring-2 ring-white translate-x-[16%] -translate-y-[16%] dark:bg-primary-500 dark:ring-[color:var(--color-studio-dark-panel)]"
-          >
-            {homeAttentionBadge}
-          </span>
-        ) : null}
-      </span>
-    </IconButton>
-  ) : null;
+          />
+          {homeAttentionCount > 0 ? (
+            <span
+              aria-hidden="true"
+              data-testid="chat-home-badge-mobile"
+              className="absolute right-[1px] top-[1px] flex h-3.5 min-w-[0.875rem] items-center justify-center rounded-full bg-primary-600 px-1 text-3xs font-semibold leading-none text-white ring-2 ring-white translate-x-[16%] -translate-y-[16%] dark:bg-primary-500 dark:ring-[color:var(--color-studio-dark-panel)]"
+            >
+              {homeAttentionBadge}
+            </span>
+          ) : null}
+        </span>
+      </IconButton>
+    ) : null;
   const voiceStripNode =
     showVoicePrimaryAction || showVoiceSecondaryAction ? (
       <VoiceConversationActionStrip
@@ -1393,7 +1472,7 @@ export function ChatComposerSurface({
                     className="flex flex-none items-center gap-1.5 sm:gap-2"
                     data-testid="chat-composer-leading-controls"
                   >
-                    {homeButtonNode}
+                    {renderHomeButton("inline")}
                     {renderActionMenu("inline")}
                   </div>
                 ) : null}
@@ -1492,7 +1571,7 @@ export function ChatComposerSurface({
                   <div className="space-y-2">
                     <div className="flex items-center justify-between gap-1.5 sm:gap-2 min-h-10 flex-nowrap">
                       <div className="flex min-w-0 items-stretch gap-1.5 sm:gap-2 flex-nowrap">
-                        {homeButtonNode}
+                        {renderHomeButton("inline")}
                       </div>
                       <div className="flex flex-none items-stretch justify-end gap-1.5 sm:gap-2 flex-nowrap">
                         {renderActionMenu("inline")}
@@ -1553,7 +1632,7 @@ export function ChatComposerSurface({
                         className="flex min-w-0 items-center gap-1 sm:gap-1.5"
                         data-testid="chat-composer-toolbar-leading"
                       >
-                        {homeButtonNode}
+                        {renderHomeButton("toolbar")}
                         {renderActionMenu("toolbar")}
                         {renderImageUploadButton("toolbar")}
                         {renderSuggestionButton("toolbar")}
