@@ -2558,7 +2558,16 @@ pub(crate) async fn agent_complete(
         }
     }
 
-    if let Some(run_uuid) = run_id {
+    // A run that ended with "nothing to report" (the explicit decline an
+    // automation or evaluation uses) is silence, not activity: no ledger row.
+    let silent_completion = completion_is_successful_explicit_decline(
+        &outcome_lower,
+        summary.as_deref(),
+        error_message.as_deref(),
+        crate::group_participation::job_payload_marks_agent_evaluation(&job_payload),
+        crate::group_participation::job_payload_marks_agent_declined(&job_payload),
+    );
+    if let (Some(run_uuid), false) = (run_id, silent_completion) {
         // Home's feed: the run reached a terminal state.
         crate::activity::record_run_completed(
             &transaction,
