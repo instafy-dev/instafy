@@ -1445,11 +1445,17 @@ export function ChatComposerSurface({
               }}
             >
               {/*
-                The text row is one flex row at rest: leading "+", the editor
-                as a single line, trailing controls bottom-aligned so they stay
-                pinned to the row's bottom edge while the editor grows. The
-                editor wrapper keeps the same tree position in every mode so
-                Lexical never remounts when the controls move to the toolbar.
+                The text row is one flex row at rest: leading controls, the
+                editor as a single line, trailing controls bottom-aligned so
+                they stay pinned to the row's bottom edge while the editor
+                grows. Controls never change sides between states: inputs
+                (things that put content into the message: "+", image at sm+,
+                the suggestion wand) sit on the left beside "+", commit actions
+                (mic, which stands in for Send while empty, and Send) sit on
+                the right. The toolbar keeps the same split, so a reveal only
+                moves controls down, never across. The editor wrapper keeps
+                the same tree position in every mode so Lexical never remounts
+                when the controls move to the toolbar.
               */}
               <div
                 className={
@@ -1474,6 +1480,7 @@ export function ChatComposerSurface({
                   >
                     {renderHomeButton("inline")}
                     {renderActionMenu("inline")}
+                    {compactBrowserViewport ? null : renderImageUploadButton("inline")}
                   </div>
                 ) : null}
                 <div
@@ -1497,7 +1504,6 @@ export function ChatComposerSurface({
                     className="flex flex-none items-center justify-end gap-1.5 sm:gap-2"
                     data-testid="chat-composer-trailing-controls"
                   >
-                    {compactBrowserViewport ? null : renderImageUploadButton("inline")}
                     {voiceStripNode}
                     {renderSendButton({ quiet: true })}
                   </div>
