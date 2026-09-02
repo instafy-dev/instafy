@@ -17,7 +17,7 @@ def uploadKeyPassword = envOrNull("ANDROID_UPLOAD_KEY_PASSWORD")
 def versionCodeOverride = envOrNull("ANDROID_VERSION_CODE")
 def versionNameOverride = envOrNull("ANDROID_VERSION_NAME")
 
-def resolvedVersionCode = 1
+def resolvedVersionCode = 260860836
 if (versionCodeOverride != null) {
     try {
         resolvedVersionCode = Integer.parseInt(versionCodeOverride)
