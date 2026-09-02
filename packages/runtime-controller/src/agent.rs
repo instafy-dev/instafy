@@ -2558,6 +2558,22 @@ pub(crate) async fn agent_complete(
         }
     }
 
+    if let Some(run_uuid) = run_id {
+        // Home's feed: the run reached a terminal state.
+        crate::activity::record_run_completed(
+            &transaction,
+            &project_id,
+            &run_uuid,
+            run_conversation_id,
+            run_prompt_id,
+            &job_payload,
+            run_status == "success",
+            summary_ref,
+            error_ref,
+        )
+        .await;
+    }
+
     let provider_value = extract_provider_from_metadata(&proxy_metadata);
     let credit_snapshot_value = extract_credit_snapshot(&proxy_metadata);
     let suggested_replies = extract_ui_suggested_replies(&proxy_metadata);
@@ -3570,6 +3586,16 @@ pub(crate) async fn lease_next_agent_job(
             .map_err(|error| {
                 internal_error(format!("failed to update run status on lease: {error}"))
             })?;
+        // Home's feed: the run is now in flight.
+        crate::activity::record_run_started(
+            transaction,
+            project_id,
+            &run_uuid,
+            conversation_id,
+            row.try_get("prompt_id").unwrap_or(None),
+            &payload,
+        )
+        .await;
     }
 
     if let Some(conversation_uuid) = conversation_id {
@@ -6232,6 +6258,18 @@ async fn record_agent_conversation_message(
                 "failed to bump root conversation timestamp: {error}"
             ))
         })?;
+
+    // Home's feed: an agent conversationally speaking is a reply row.
+    crate::activity::record_reply_if_visible(
+        transaction,
+        project_id,
+        conversation_id,
+        run_id,
+        prompt_id,
+        &content,
+        &metadata,
+    )
+    .await;
 
     Ok(map_conversation_message_row(&row))
 }
