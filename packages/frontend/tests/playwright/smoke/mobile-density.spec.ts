@@ -35,11 +35,15 @@ test.describe("Narrow-phone Studio density", () => {
     await expectHeightBetween(page.getByTestId("topbar-tab-selector"), 44, 44);
     await expectHeightBetween(page.getByTestId("topbar-new-conversation"), 44, 44);
 
+    // The idle composer is one row: border + 6px top + 44px controls + the
+    // 8px safe-area floor. Image upload folds into the "+" menu below sm.
     const composer = page.getByTestId("chat-composer-overlay");
-    await expectHeightBetween(composer, 108, 112);
+    await expectHeightBetween(composer, 56, 62);
     await expect(page.getByTestId("chat-input")).toHaveCSS("font-size", "16px");
     await expectHeightBetween(page.getByTestId("chat-home-button-mobile"), 44, 44);
-    await expectHeightBetween(page.getByTestId("chat-image-upload-button"), 44, 44);
+    await expectHeightBetween(page.getByTestId("composer-action-menu-trigger"), 44, 44);
+    await expectHeightBetween(page.getByTestId("chat-send-button"), 44, 44);
+    await expect(page.getByTestId("chat-image-upload-button")).toHaveCount(0);
 
     const baseHeaderBox = await studioHeader.boundingBox();
     const baseComposerBox = await composer.boundingBox();
@@ -60,12 +64,12 @@ test.describe("Narrow-phone Studio density", () => {
       document.documentElement.style.removeProperty("--safe-area-inset-bottom");
     });
     await expectHeightBetween(studioHeader, 52, 54);
-    await expectHeightBetween(composer, 108, 112);
+    await expectHeightBetween(composer, 56, 62);
 
     await page.setViewportSize({ width: 374, height: 649 });
     await expectHeightBetween(studioHeader, 52, 54);
     await expectHeightBetween(topbarToggle, 44, 44);
-    await expectHeightBetween(composer, 108, 112);
+    await expectHeightBetween(composer, 56, 62);
     await page.setViewportSize({ width: 360, height: 649 });
 
     await page.getByTestId("chat-home-button-mobile").click();

@@ -183,6 +183,53 @@ function resolveGoalStatusPillTone(tone: ConversationGoalHealth["tone"]): Status
   return "primary";
 }
 
+const COMPOSER_TOOLBAR_MOTION_MS = 150;
+const COMPOSER_TOOLBAR_ACTION_CLASS = "h-9 w-9 rounded-xl text-slate-600 dark:text-slate-300";
+const COMPOSER_TOOLBAR_ICON_CLASS = "h-5 w-5";
+// The rest-state Send is a quiet ghost control; it lights up (primary variant)
+// only once there is something to send. The variant itself stays wired to
+// sendButtonVariant — this only changes how the non-primary state dresses.
+const COMPOSER_SEND_REST_CLASS =
+  "border-transparent bg-transparent text-slate-400 shadow-none dark:text-slate-500";
+
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
+// Keeps the toolbar mounted for one motion beat after it stops being visible
+// so the collapse can animate, and mounts it collapsed for a frame so the
+// reveal can. Reduced motion (or no window) snaps both ways.
+function useComposerToolbarReveal(visible: boolean): { mounted: boolean; expanded: boolean } {
+  const [mounted, setMounted] = useState(visible);
+  const [expanded, setExpanded] = useState(visible);
+  useEffect(() => {
+    const snap = typeof window === "undefined" || prefersReducedMotion();
+    if (visible) {
+      setMounted(true);
+      if (snap || typeof window.requestAnimationFrame !== "function") {
+        setExpanded(true);
+        return;
+      }
+      let frame = window.requestAnimationFrame(() => {
+        frame = window.requestAnimationFrame(() => setExpanded(true));
+      });
+      return () => window.cancelAnimationFrame(frame);
+    }
+    setExpanded(false);
+    if (snap) {
+      setMounted(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setMounted(false), COMPOSER_TOOLBAR_MOTION_MS);
+    return () => window.clearTimeout(timer);
+  }, [visible]);
+  return { mounted, expanded };
+}
+
 export function ChatComposerSurface({
   browserDockProps,
   composerOverlayRef,
@@ -379,6 +426,44 @@ export function ChatComposerSurface({
     queueSurfaceProps.totalQueuedCount === 0 &&
     !queueSurfaceProps.editingQueuedItem &&
     !stashTrayProps?.stashes.length;
+  const composerHasText = chatInputProps.value.trim().length > 0;
+  // Hold-to-talk must keep the same microphone DOM node from press through
+  // release, and a transcript landing mid-hold creates a draft. Defer the
+  // toolbar reveal until voice capture has settled so the strip does not
+  // move rows underneath an active press.
+  const voiceCaptureActive =
+    showVoiceStatus ||
+    Boolean(
+      voiceConversationActionStripProps.voiceActionActive ||
+        voiceConversationActionStripProps.voiceListening ||
+        voiceConversationActionStripProps.voiceStarting ||
+        voiceConversationActionStripProps.voiceTranscribing,
+    );
+  // The breakpoint is decided in JS (compactBrowserViewport, from
+  // useBreakpoint("sm") upstream) rather than a Tailwind `sm:` class so the
+  // rest row, the toolbar reveal and the "+" menu fold share one source of
+  // truth. Below sm the composer stays one row while typing: vertical space
+  // with the keyboard up is the scarce thing there.
+  const composerToolbarVisible =
+    !compactBrowserViewport &&
+    !browserComposerCondensed &&
+    !showVoiceActiveStrip &&
+    !voiceCaptureActive &&
+    composerHasText;
+  const { mounted: composerToolbarMounted, expanded: composerToolbarExpanded } =
+    useComposerToolbarReveal(composerToolbarVisible);
+  const composerToolbarRendered =
+    composerToolbarMounted &&
+    !compactBrowserViewport &&
+    !browserComposerCondensed &&
+    !showVoiceActiveStrip;
+  const composerInlineControlsInTextRow =
+    !browserComposerCondensed && !showVoiceActiveStrip && !composerToolbarRendered;
+  // Below sm the image-upload and insert-suggestion controls are not rendered
+  // inline; they fold into the "+" menu so no action is lost.
+  const foldImageUploadIntoMenu = compactBrowserViewport && !browserComposerCondensed;
+  const foldSuggestionIntoMenu = foldImageUploadIntoMenu && showMobileGhostSuggestionAcceptButton;
+  const imageUploadDisabled = mutationDisabled || sendingAttachment || onboardingInputLocked;
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -759,6 +844,173 @@ export function ChatComposerSurface({
     [onHelpUnblockGoal],
   );
 
+  type ComposerControlPlacement = "inline" | "toolbar";
+  const renderActionMenu = (placement: ComposerControlPlacement) => (
+    <ComposerActionMenu
+      {...composerActionMenuProps}
+      mutationDisabled={mutationDisabled}
+      onUploadImage={foldImageUploadIntoMenu ? onOpenImagePicker : undefined}
+      uploadImageDisabled={imageUploadDisabled}
+      onInsertSuggestion={foldSuggestionIntoMenu ? onAcceptGhostSuggestion : undefined}
+      {...(placement === "toolbar"
+        ? { triggerVariant: "ghost" as const, triggerClassName: COMPOSER_TOOLBAR_ACTION_CLASS }
+        : {})}
+    />
+  );
+  const renderImageUploadButton = (placement: ComposerControlPlacement) => (
+    <IconButton
+      type="button"
+      onPress={onOpenImagePicker}
+      variant={placement === "toolbar" ? "ghost" : "outline"}
+      size="md"
+      radius="xl"
+      aria-label="Upload image"
+      isDisabled={imageUploadDisabled}
+      data-testid="chat-image-upload-button"
+      className={placement === "toolbar" ? COMPOSER_TOOLBAR_ACTION_CLASS : composerOutlinedActionClass}
+    >
+      <span className="sr-only">Upload image</span>
+      <MediaImage
+        className={placement === "toolbar" ? COMPOSER_TOOLBAR_ICON_CLASS : composerActionIconClass}
+        aria-hidden="true"
+      />
+    </IconButton>
+  );
+  const renderSuggestionButton = (placement: ComposerControlPlacement) =>
+    showMobileGhostSuggestionAcceptButton ? (
+      <IconButton
+        type="button"
+        onPress={onAcceptGhostSuggestion}
+        variant={placement === "toolbar" ? "ghost" : "outline"}
+        size="md"
+        radius="xl"
+        aria-label="Insert suggestion"
+        title="Insert suggestion"
+        data-testid="chat-accept-suggestion-button"
+        className={
+          placement === "toolbar"
+            ? `${COMPOSER_TOOLBAR_ACTION_CLASS} text-primary-600 dark:text-primary-300`
+            : `${composerOutlinedActionClass} text-primary-600 dark:text-primary-300 sm:hidden`
+        }
+      >
+        <span className="sr-only">Insert suggestion</span>
+        <MagicWand
+          className={placement === "toolbar" ? COMPOSER_TOOLBAR_ICON_CLASS : composerActionIconClass}
+          aria-hidden="true"
+        />
+      </IconButton>
+    ) : null;
+  const homeButtonNode = showComposerHomeButton ? (
+    <IconButton
+      type="button"
+      onPress={onOpenHome}
+      variant="outline"
+      size="md"
+      radius="xl"
+      aria-label="Open home"
+      data-testid="chat-home-button-mobile"
+      className={composerOutlinedActionClass}
+    >
+      <span className="relative flex h-full w-full items-center justify-center">
+        <HomeIcon className={composerActionIconClass} aria-hidden="true" />
+        {homeAttentionCount > 0 ? (
+          <span
+            aria-hidden="true"
+            data-testid="chat-home-badge-mobile"
+            className="absolute right-[1px] top-[1px] flex h-3.5 min-w-[0.875rem] items-center justify-center rounded-full bg-primary-600 px-1 text-3xs font-semibold leading-none text-white ring-2 ring-white translate-x-[16%] -translate-y-[16%] dark:bg-primary-500 dark:ring-[color:var(--color-studio-dark-panel)]"
+          >
+            {homeAttentionBadge}
+          </span>
+        ) : null}
+      </span>
+    </IconButton>
+  ) : null;
+  const voiceStripNode =
+    showVoicePrimaryAction || showVoiceSecondaryAction ? (
+      <VoiceConversationActionStrip
+        {...voiceConversationActionStripProps}
+        showVoiceRepliesToggle={
+          showVoicePrimaryAction
+            ? voiceConversationActionStripProps.showVoiceRepliesToggle
+            : false
+        }
+        voiceInputTestId={
+          showVoicePrimaryAction
+            ? voiceConversationActionStripProps.voiceInputTestId
+            : "chat-voice-secondary-input-button"
+        }
+      />
+    ) : null;
+  const renderSendButton = ({ quiet }: { quiet: boolean }) =>
+    !showVoicePrimaryAction ? (
+      <>
+        <span
+          role="status"
+          aria-atomic="true"
+          aria-live="polite"
+          className="sr-only"
+          data-testid="chat-primary-action-status"
+        >
+          {primaryActionStatus}
+        </span>
+        <IconButton
+          type="button"
+          {...touchSendModePicker.triggerProps}
+          onPress={handleSendPress}
+          onClick={handleSendClick}
+          isDisabled={
+            mutationDisabled ||
+            (visibleDesktopSendModifierMode === null && sendButtonDisabled)
+          }
+          aria-label={primaryActionLabel}
+          title={primaryActionLabel}
+          style={{ touchAction: "none" }}
+          variant={sendButtonVariant}
+          size="md"
+          radius="xl"
+          className={[
+            composerActionButtonClass,
+            sendButtonVariant === "primary"
+              ? composerPrimaryActionClass
+              : quiet
+                ? COMPOSER_SEND_REST_CLASS
+                : "border-slate-200/70 bg-transparent shadow-none dark:border-[color:var(--color-studio-dark-panel-border)]",
+            sendingAttachment ? "opacity-70" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+          data-testid="chat-send-button"
+          data-send-mode={visiblePrimaryActionMode}
+          data-send-rest={sendButtonVariant === "primary" ? "false" : "true"}
+          data-send-modifier-preview={
+            visibleDesktopSendModifierMode ?? undefined
+          }
+          data-send-options-open={touchSendModePicker.isOpen ? "true" : "false"}
+        >
+          <span className="sr-only">{primaryActionLabel}</span>
+          {visibleDesktopSendModifierMode === "queue" ? (
+            <TaskList
+              className={composerActionIconClass}
+              aria-hidden="true"
+              data-testid="chat-queue-action-icon"
+            />
+          ) : visibleDesktopSendModifierMode === "stash" ? (
+            <Bookmark
+              className={composerActionIconClass}
+              aria-hidden="true"
+              data-testid="chat-stash-action-icon"
+            />
+          ) : (
+            <Send
+              className={composerActionIconClass}
+              aria-hidden="true"
+              data-testid="chat-send-action-icon"
+            />
+          )}
+        </IconButton>
+      </>
+    ) : null;
+
   return (
     <>
       <ChatBrowserDock {...browserDockProps} />
@@ -1096,10 +1348,11 @@ export function ChatComposerSurface({
                 browserComposerCondensed
                   ? `grid grid-cols-[minmax(0,1fr)_auto] items-center overflow-hidden rounded-none border-x-0 border-b-0 border-t border-slate-200/70 bg-slate-50/90 px-3 py-1 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`
                   : browserModeActive || compactBrowserViewport
-                  ? `flex flex-col overflow-hidden rounded-none border-x-0 border-b-0 border-t border-slate-200/70 bg-slate-50/90 px-3 pb-0 pt-2 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`
-                  : `flex flex-col overflow-hidden rounded-t-3xl rounded-b-none border border-b-0 border-slate-200/70 bg-slate-50/90 px-3 pb-0 pt-2.5 sm:px-4 sm:pt-3 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`
+                  ? `flex flex-col overflow-hidden rounded-none border-x-0 border-b-0 border-t border-slate-200/70 bg-slate-50/90 px-3 pb-0 pt-1.5 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`
+                  : `flex flex-col overflow-hidden rounded-t-3xl rounded-b-none border border-b-0 border-slate-200/70 bg-slate-50/90 px-3 pb-0 pt-1.5 sm:px-4 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`
               }
               data-browser-composer-condensed={browserComposerCondensed ? "true" : undefined}
+              data-composer-toolbar={composerToolbarRendered ? "true" : undefined}
               style={{
                 paddingBottom:
                   // The software keyboard covers the home-indicator area on
@@ -1112,18 +1365,64 @@ export function ChatComposerSurface({
                       : "max(var(--instafy-safe-area-inset-bottom), 0px)",
               }}
             >
+              {/*
+                The text row is one flex row at rest: leading "+", the editor
+                as a single line, trailing controls bottom-aligned so they stay
+                pinned to the row's bottom edge while the editor grows. The
+                editor wrapper keeps the same tree position in every mode so
+                Lexical never remounts when the controls move to the toolbar.
+              */}
               <div
-                className={`relative ${browserComposerCondensed ? "pb-0" : "pb-1.5"}`}
+                className={
+                  browserComposerCondensed
+                    ? "relative pb-0"
+                    : `relative flex items-end gap-1.5 sm:gap-2 ${
+                        composerInlineControlsInTextRow &&
+                        !(browserModeActive || compactBrowserViewport)
+                          ? "pb-1.5"
+                          : "pb-0"
+                      }`
+                }
+                data-testid="chat-composer-text-row"
+                data-composer-inline-controls={composerInlineControlsInTextRow ? "true" : "false"}
                 onDragOver={onDragOver}
                 onDrop={onDrop}
               >
-                <ChatInput
-                  ref={chatInputRef}
-                  {...chatInputProps}
-                  compact={browserComposerCondensed}
-                  readOnly={mutationDisabled || accessChecking}
-                  onReadOnlyKeyDown={handleReadOnlyKeyDown}
-                />
+                {composerInlineControlsInTextRow ? (
+                  <div
+                    className="flex flex-none items-center gap-1.5 sm:gap-2"
+                    data-testid="chat-composer-leading-controls"
+                  >
+                    {homeButtonNode}
+                    {renderActionMenu("inline")}
+                  </div>
+                ) : null}
+                <div
+                  className={
+                    composerInlineControlsInTextRow
+                      ? "flex min-h-11 min-w-0 flex-1 flex-col justify-center"
+                      : "min-w-0 flex-1"
+                  }
+                >
+                  <ChatInput
+                    ref={chatInputRef}
+                    {...chatInputProps}
+                    compact={browserComposerCondensed}
+                    compactViewport={compactBrowserViewport}
+                    readOnly={mutationDisabled || accessChecking}
+                    onReadOnlyKeyDown={handleReadOnlyKeyDown}
+                  />
+                </div>
+                {composerInlineControlsInTextRow ? (
+                  <div
+                    className="flex flex-none items-center justify-end gap-1.5 sm:gap-2"
+                    data-testid="chat-composer-trailing-controls"
+                  >
+                    {compactBrowserViewport ? null : renderImageUploadButton("inline")}
+                    {voiceStripNode}
+                    {renderSendButton({ quiet: true })}
+                  </div>
+                ) : null}
               </div>
               <input
                 ref={imageInputRef}
@@ -1188,14 +1487,26 @@ export function ChatComposerSurface({
                 </div>
               ) : null}
               {providerTriggerNoticeProps ? <ProviderTriggerNotice {...providerTriggerNoticeProps} /> : null}
-              <div
-                className={browserComposerCondensed
-                  ? "m-0 p-0 pl-2"
-                  : `-mx-3 mt-0 px-3 pb-1 pt-1 max-[375px]:pb-0.5 max-[375px]:pt-0.5 sm:-mx-4 sm:px-4 sm:pb-2.5 sm:pt-1.5`
-                }
-              >
-                <div className="space-y-2">
-                  {showVoiceActiveStrip ? (
+              {browserComposerCondensed ? (
+                <div className="m-0 p-0 pl-2">
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-1.5 sm:gap-2 min-h-10 flex-nowrap">
+                      <div className="flex min-w-0 items-stretch gap-1.5 sm:gap-2 flex-nowrap">
+                        {homeButtonNode}
+                      </div>
+                      <div className="flex flex-none items-stretch justify-end gap-1.5 sm:gap-2 flex-nowrap">
+                        {renderActionMenu("inline")}
+                        {renderImageUploadButton("inline")}
+                        {renderSuggestionButton("inline")}
+                        {voiceStripNode}
+                        {renderSendButton({ quiet: false })}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : showVoiceActiveStrip ? (
+                <div className="-mx-3 mt-0 px-3 pb-1 pt-1 max-[375px]:pb-0.5 max-[375px]:pt-0.5 sm:-mx-4 sm:px-4 sm:pb-2.5 sm:pt-1.5">
+                  <div className="space-y-2">
                     <div
                       className="flex min-h-[3.5rem] items-center justify-between gap-3 rounded-2xl border border-slate-200/70 bg-slate-50/90 px-3 py-2 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)]"
                       data-testid="chat-voice-active-strip"
@@ -1222,158 +1533,42 @@ export function ChatComposerSurface({
                         />
                       </div>
                     </div>
-                  ) : (
-                    <div
-                      className={`flex items-center justify-between gap-1.5 sm:gap-2 ${
-                        browserComposerCondensed
-                          ? "min-h-10 flex-nowrap"
-                          : "min-h-[3.5rem] flex-wrap max-[375px]:min-h-11"
-                      }`}
-                    >
-                      <div className={`flex min-w-0 items-stretch gap-1.5 sm:gap-2 ${browserComposerCondensed ? "flex-nowrap" : "flex-wrap"}`}>
-                        {showComposerHomeButton ? (
-                          <IconButton
-                            type="button"
-                            onPress={onOpenHome}
-                            variant="outline"
-                            size="md"
-                            radius="xl"
-                            aria-label="Open home"
-                            data-testid="chat-home-button-mobile"
-                            className={composerOutlinedActionClass}
-                          >
-                            <span className="relative flex h-full w-full items-center justify-center">
-                              <HomeIcon className={composerActionIconClass} aria-hidden="true" />
-                              {homeAttentionCount > 0 ? (
-                                <span
-                                  aria-hidden="true"
-                                  data-testid="chat-home-badge-mobile"
-                                  className="absolute right-[1px] top-[1px] flex h-3.5 min-w-[0.875rem] items-center justify-center rounded-full bg-primary-600 px-1 text-3xs font-semibold leading-none text-white ring-2 ring-white translate-x-[16%] -translate-y-[16%] dark:bg-primary-500 dark:ring-[color:var(--color-studio-dark-panel)]"
-                                >
-                                  {homeAttentionBadge}
-                                </span>
-                              ) : null}
-                            </span>
-                          </IconButton>
-                        ) : null}
+                  </div>
+                </div>
+              ) : composerToolbarRendered ? (
+                // Hybrid composing state (sm+ only): once there is text the
+                // controls leave the text row for a toolbar underneath it so
+                // the text row is text-only while writing. The grid-rows trick
+                // animates the height without measuring; reduced motion snaps.
+                <div
+                  className={`grid transition-[grid-template-rows] duration-150 ease-out motion-reduce:transition-none ${
+                    composerToolbarExpanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+                  }`}
+                  data-testid="chat-composer-toolbar"
+                  data-expanded={composerToolbarExpanded ? "true" : "false"}
+                >
+                  <div className="-mx-1 min-h-0 overflow-hidden px-1">
+                    <div className="flex items-center justify-between gap-1.5 pb-1.5 pt-1 sm:gap-2">
+                      <div
+                        className="flex min-w-0 items-center gap-1 sm:gap-1.5"
+                        data-testid="chat-composer-toolbar-leading"
+                      >
+                        {homeButtonNode}
+                        {renderActionMenu("toolbar")}
+                        {renderImageUploadButton("toolbar")}
+                        {renderSuggestionButton("toolbar")}
                       </div>
-                      <div className={`flex flex-none items-stretch justify-end gap-1.5 sm:gap-2 ${browserComposerCondensed ? "flex-nowrap" : "flex-wrap"}`}>
-                        <ComposerActionMenu {...composerActionMenuProps} mutationDisabled={mutationDisabled} />
-                        <IconButton
-                          type="button"
-                          onPress={onOpenImagePicker}
-                          variant="outline"
-                          size="md"
-                          radius="xl"
-                          aria-label="Upload image"
-                          isDisabled={mutationDisabled || sendingAttachment || onboardingInputLocked}
-                          data-testid="chat-image-upload-button"
-                          className={composerOutlinedActionClass}
-                        >
-                          <span className="sr-only">Upload image</span>
-                          <MediaImage className={composerActionIconClass} aria-hidden="true" />
-                        </IconButton>
-                        {showMobileGhostSuggestionAcceptButton ? (
-                          <IconButton
-                            type="button"
-                            onPress={onAcceptGhostSuggestion}
-                            variant="outline"
-                            size="md"
-                            radius="xl"
-                            aria-label="Insert suggestion"
-                            title="Insert suggestion"
-                            data-testid="chat-accept-suggestion-button"
-                            className={`${composerOutlinedActionClass} text-primary-600 dark:text-primary-300 sm:hidden`}
-                          >
-                            <span className="sr-only">Insert suggestion</span>
-                            <MagicWand className={composerActionIconClass} aria-hidden="true" />
-                          </IconButton>
-                        ) : null}
-                        {showVoicePrimaryAction || showVoiceSecondaryAction ? (
-                          <VoiceConversationActionStrip
-                            {...voiceConversationActionStripProps}
-                            showVoiceRepliesToggle={
-                              showVoicePrimaryAction
-                                ? voiceConversationActionStripProps.showVoiceRepliesToggle
-                                : false
-                            }
-                            voiceInputTestId={
-                              showVoicePrimaryAction
-                                ? voiceConversationActionStripProps.voiceInputTestId
-                                : "chat-voice-secondary-input-button"
-                            }
-                          />
-                        ) : null}
-                        {!showVoicePrimaryAction ? (
-                          <>
-                            <span
-                              role="status"
-                              aria-atomic="true"
-                              aria-live="polite"
-                              className="sr-only"
-                              data-testid="chat-primary-action-status"
-                            >
-                              {primaryActionStatus}
-                            </span>
-                            <IconButton
-                              type="button"
-                              {...touchSendModePicker.triggerProps}
-                              onPress={handleSendPress}
-                              onClick={handleSendClick}
-                              isDisabled={
-                                mutationDisabled ||
-                                (visibleDesktopSendModifierMode === null && sendButtonDisabled)
-                              }
-                              aria-label={primaryActionLabel}
-                              title={primaryActionLabel}
-                              style={{ touchAction: "none" }}
-                              variant={sendButtonVariant}
-                              size="md"
-                              radius="xl"
-                              className={[
-                                composerActionButtonClass,
-                                sendButtonVariant === "primary"
-                                  ? composerPrimaryActionClass
-                                  : "border-slate-200/70 bg-transparent shadow-none dark:border-[color:var(--color-studio-dark-panel-border)]",
-                                sendingAttachment ? "opacity-70" : "",
-                              ]
-                                .filter(Boolean)
-                                .join(" ")}
-                              data-testid="chat-send-button"
-                              data-send-mode={visiblePrimaryActionMode}
-                              data-send-modifier-preview={
-                                visibleDesktopSendModifierMode ?? undefined
-                              }
-                              data-send-options-open={touchSendModePicker.isOpen ? "true" : "false"}
-                            >
-                              <span className="sr-only">{primaryActionLabel}</span>
-                              {visibleDesktopSendModifierMode === "queue" ? (
-                                <TaskList
-                                  className={composerActionIconClass}
-                                  aria-hidden="true"
-                                  data-testid="chat-queue-action-icon"
-                                />
-                              ) : visibleDesktopSendModifierMode === "stash" ? (
-                                <Bookmark
-                                  className={composerActionIconClass}
-                                  aria-hidden="true"
-                                  data-testid="chat-stash-action-icon"
-                                />
-                              ) : (
-                                <Send
-                                  className={composerActionIconClass}
-                                  aria-hidden="true"
-                                  data-testid="chat-send-action-icon"
-                                />
-                              )}
-                            </IconButton>
-                          </>
-                        ) : null}
+                      <div
+                        className="flex flex-none items-center justify-end gap-1.5 sm:gap-2"
+                        data-testid="chat-composer-toolbar-trailing"
+                      >
+                        {voiceStripNode}
+                        {renderSendButton({ quiet: true })}
                       </div>
                     </div>
-                  )}
+                  </div>
                 </div>
-              </div>
+              ) : null}
             </Surface>
           </div>
         </form>
