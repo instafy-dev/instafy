@@ -439,16 +439,17 @@ function ChatSpeakerStickyOverlay({
       className="relative"
     >
       {/* Backdrop (#191): the pill rides over whatever scrolls under it, so the
-          transcript fades out beneath the top edge — a true fade from the
-          surface colour to its own transparent, never a solid hold (a held
-          band reads as a grey strip stamped over the text) and never
-          `transparent` (oklab ramps to black through the mid-tones). It spans
+          transcript frosts out beneath the top edge — a tapered backdrop blur
+          plus a tint from the surface colour, both masked to nothing across
+          the band, so a line passing through reads as glass, not as greyed-out
+          text. Never a solid hold (a held band reads as a strip stamped over
+          the text) and never `transparent` (oklab ramps to black). It spans
           the scroll container's horizontal inset and fades with the pill. */}
       <div
         aria-hidden="true"
         data-testid="chat-speaker-sticky-backdrop"
         className={[
-          "pointer-events-none absolute -inset-x-3 -top-2 h-12 bg-gradient-to-b from-white to-white/0 transition-opacity duration-150 ease-out dark:from-[var(--color-studio-dark-panel)] dark:to-[var(--color-studio-dark-panel)]/0 sm:-inset-x-4",
+          "pointer-events-none absolute -inset-x-3 -top-2 h-12 bg-gradient-to-b from-white/90 to-white/0 backdrop-blur-[6px] [mask-image:linear-gradient(to_bottom,black_20%,transparent)] transition-opacity duration-150 ease-out dark:from-[var(--color-studio-dark-panel)]/90 dark:to-[var(--color-studio-dark-panel)]/0 sm:-inset-x-4",
           speaker ? "opacity-100" : "opacity-0",
         ].join(" ")}
       />
