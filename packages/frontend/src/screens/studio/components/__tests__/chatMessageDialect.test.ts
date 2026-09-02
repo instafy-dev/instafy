@@ -50,8 +50,81 @@ describe("chatMessageDialect", () => {
     ]);
   });
 
-  it("keeps an unindented bulleted list after an ordered list as a sibling block", () => {
-    expect(parseMessageContentBlocks("1. First\n- flat bullet")).toEqual([
+  it("nests unindented bullets that directly follow an ordered item as its sublist (#191)", () => {
+    // Verbatim shape of the real agent answer from the box-check thread.
+    expect(
+      parseMessageContentBlocks(
+        [
+          "1. Persistent-context skills starting with `autofix-`:",
+          "- `autofix-bugfix`: land a fix",
+          "- `autofix-triage`: sort reports",
+          "2. First bullet under `Identity, repos, ground rules` in `AGENTS.md`:",
+          "- keep the box rules",
+          "3. Done.",
+        ].join("\n"),
+      ),
+    ).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [
+          { text: "Persistent-context skills starting with `autofix-`:", depth: 0, ordered: true },
+          { text: "`autofix-bugfix`: land a fix", depth: 1, ordered: false },
+          { text: "`autofix-triage`: sort reports", depth: 1, ordered: false },
+          {
+            text: "First bullet under `Identity, repos, ground rules` in `AGENTS.md`:",
+            depth: 0,
+            ordered: true,
+          },
+          { text: "keep the box rules", depth: 1, ordered: false },
+          { text: "Done.", depth: 0, ordered: true },
+        ],
+      },
+    ]);
+  });
+
+  it("lets indented bullets nest deeper under a flat sublist bullet", () => {
+    expect(parseMessageContentBlocks("1. Step\n- detail\n  - finer detail\n- detail two\n2. Next")).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [
+          { text: "Step", depth: 0, ordered: true },
+          { text: "detail", depth: 1, ordered: false },
+          { text: "finer detail", depth: 2, ordered: false },
+          { text: "detail two", depth: 1, ordered: false },
+          { text: "Next", depth: 0, ordered: true },
+        ],
+      },
+    ]);
+  });
+
+  it("carries the flat sublist across one blank line only when the ordered item ends with a colon", () => {
+    expect(parseMessageContentBlocks("1. Skills:\n\n- alpha\n- beta\n\n2. Next")).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [
+          { text: "Skills:", depth: 0, ordered: true },
+          { text: "alpha", depth: 1, ordered: false },
+          { text: "beta", depth: 1, ordered: false },
+        ],
+      },
+      {
+        kind: "list",
+        ordered: true,
+        start: 2,
+        items: [{ text: "Next", depth: 0, ordered: true }],
+      },
+    ]);
+  });
+
+  it("keeps bullets after a blank line as a sibling block when the ordered item has no trailing colon", () => {
+    // Pins the boundary of the #191 leniency rule.
+    expect(parseMessageContentBlocks("1. First\n\n- flat bullet")).toEqual([
       {
         kind: "list",
         ordered: true,
@@ -63,6 +136,34 @@ describe("chatMessageDialect", () => {
         ordered: false,
         items: [{ text: "flat bullet", depth: 0, ordered: false }],
       },
+    ]);
+  });
+
+  it("does not apply the flat-sublist leniency to ordered items after bullets", () => {
+    expect(parseMessageContentBlocks("- topic:\n1. step")).toEqual([
+      {
+        kind: "list",
+        ordered: false,
+        items: [{ text: "topic:", depth: 0, ordered: false }],
+      },
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [{ text: "step", depth: 0, ordered: true }],
+      },
+    ]);
+  });
+
+  it("still flushes a colon-terminated ordered item across a blank line before non-list content", () => {
+    expect(parseMessageContentBlocks("1. Command output:\n\n```text\nok\n```")).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [{ text: "Command output:", depth: 0, ordered: true }],
+      },
+      { kind: "code", language: "text", lines: ["ok"] },
     ]);
   });
 

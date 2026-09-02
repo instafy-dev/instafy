@@ -323,6 +323,88 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(container.textContent).toContain("Running command…");
   });
 
+  it("renders a collapsed command row in the code-block family with a framed chevron", async () => {
+    const commandLabel = "whoami; git -C ~/work/core rev-parse --short HEAD";
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createProps({
+            message: createMessage({
+              metadata: {
+                messageType: "agent_job_thread",
+                jobId: "run-1",
+              },
+            }),
+            showHeaderAvatar: false,
+            isCompleted: false,
+            isRunning: true,
+            isThreadUnresolved: true,
+            visibleCompactEvents: [{ id: "command", kind: "command", actorHandle: "@octo" }],
+            latestCompactEventId: "command",
+            singleCompactEvent: { id: "command", kind: "command", actorHandle: "@octo" },
+            singleCompactEventLabel: commandLabel,
+            finalSummaryMessage: null,
+            showSummaryBody: false,
+          })}
+        />,
+      );
+    });
+
+    const row = container.querySelector('[data-testid="agent-thread-single-update-row"]');
+    expect(row?.getAttribute("data-update-kind")).toBe("command");
+    // Same surface family as CODE_BLOCK_CLASS: radius and ring tokens, subtler fill.
+    expect(row?.className).toContain("rounded-xl");
+    expect(row?.className).toContain("ring-1 ring-inset ring-slate-900/10");
+    expect(row?.className).toContain("dark:ring-white/[0.08]");
+    expect(row?.className).toContain("bg-slate-950/[0.02]");
+    expect(row?.className).toContain("dark:bg-white/[0.035]");
+
+    const toggle = container.querySelector<HTMLButtonElement>('button[aria-label="Expand run updates"]');
+    expect(toggle?.className).toContain("font-mono");
+    expect(toggle?.textContent).toContain(commandLabel);
+
+    const chevron = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button[aria-label="Expand run updates"]'),
+    ).find((button) => button !== toggle);
+    expect(chevron?.className).toContain("opacity-100");
+    expect(chevron?.className).not.toContain("opacity-0");
+    expect(chevron?.className).toContain("ring-1 ring-inset");
+    expect(chevron?.className).toContain("rounded-md");
+  });
+
+  it("keeps non-command single update rows on the plain row treatment", async () => {
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createProps({
+            message: createMessage({
+              metadata: {
+                messageType: "agent_job_thread",
+                jobId: "run-1",
+              },
+            }),
+            showHeaderAvatar: false,
+            isCompleted: false,
+            isRunning: true,
+            isThreadUnresolved: true,
+            visibleCompactEvents: [{ id: "thinking", kind: "thinking", actorHandle: "@octo" }],
+            latestCompactEventId: "thinking",
+            singleCompactEvent: { id: "thinking", kind: "thinking", actorHandle: "@octo" },
+            singleCompactEventLabel: "Reading the box rules",
+            finalSummaryMessage: null,
+            showSummaryBody: false,
+          })}
+        />,
+      );
+    });
+
+    const row = container.querySelector('[data-testid="agent-thread-single-update-row"]');
+    expect(row?.getAttribute("data-update-kind")).toBe("thinking");
+    expect(row?.className).not.toContain("ring-1");
+    const toggle = container.querySelector<HTMLButtonElement>('button[aria-label="Expand run updates"]');
+    expect(toggle?.className).not.toContain("font-mono");
+  });
+
   it("does not reserve an empty header above compact live command rows", async () => {
     await act(async () => {
       root.render(

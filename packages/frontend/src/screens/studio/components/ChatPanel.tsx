@@ -436,10 +436,24 @@ function ChatSpeakerStickyOverlay({
       aria-hidden={speaker ? undefined : "true"}
       data-chat-speaker-overlay="true"
       data-testid="chat-speaker-sticky-overlay"
+      className="relative"
     >
+      {/* Backdrop (#191): the pill rides over whatever scrolls under it, so a
+          band of the surface colour fades out beneath it — the overlap then
+          reads as the transcript passing under a header, not a pill stamped
+          on a code block. It spans the scroll container's horizontal inset
+          and fades with the pill. */}
+      <div
+        aria-hidden="true"
+        data-testid="chat-speaker-sticky-backdrop"
+        className={[
+          "pointer-events-none absolute -inset-x-3 -top-2 h-12 bg-gradient-to-b from-white from-55% to-transparent transition-opacity duration-150 ease-out dark:from-[var(--color-studio-dark-panel)] sm:-inset-x-4",
+          speaker ? "opacity-100" : "opacity-0",
+        ].join(" ")}
+      />
       <div
         className={[
-          "w-fit max-w-full transition-[opacity,transform] duration-150 ease-out",
+          "relative w-fit max-w-full transition-[opacity,transform] duration-150 ease-out",
           speaker ? "translate-y-0 opacity-100" : "-translate-y-1 opacity-0",
         ].join(" ")}
       >

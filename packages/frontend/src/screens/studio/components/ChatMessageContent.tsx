@@ -31,6 +31,7 @@ import {
   parseTeamFlowLine,
   tokenizeChatLine,
   type ConversationReferenceDescriptor,
+  type ChatLineTokenChunk,
   type MessageListItem,
   type WorkspaceFileReferenceDescriptor,
 } from "./chatMessageDialect";
@@ -122,6 +123,8 @@ const WORKSPACE_FILE_ACTION_MENU_WIDTH_PX = 176;
 const WORKSPACE_FILE_ACTION_MENU_HEIGHT_ESTIMATE_PX = 96;
 const WORKSPACE_FILE_ACTION_MENU_PADDING_PX = 12;
 const WORKSPACE_FILE_PREVIEW_INTENT_EVENT = "instafy:workspace-file-preview-intent";
+// Punctuation that reads as part of the chip before it and must not wrap alone.
+const CHIP_TRAILING_PUNCTUATION_REGEX = /^[:;,.!?)\]]+/;
 const INLINE_CODE_TOKEN_CLASS = [
   "inline-flex items-center rounded-[0.34rem] bg-slate-950/[0.035] px-1.5 py-[0.08em] font-mono text-[0.92em] leading-[1.18] text-slate-700 ring-1 ring-inset ring-slate-900/10 shadow-[inset_0_-1px_0_rgba(15,23,42,0.07)] align-baseline",
   "dark:bg-white/[0.055] dark:text-slate-200 dark:ring-white/[0.08] dark:shadow-[inset_0_-1px_0_rgba(255,255,255,0.045)]",
@@ -1485,8 +1488,11 @@ export function MessageContent({
     );
   };
 
-  const renderInlineTokens = (line: string, keyPrefix: string): ReactNode[] =>
-    tokenizeChatLine(line, agentMentionHandles).map((token, tokenIndex) => {
+  const renderInlineToken = (
+    token: ChatLineTokenChunk,
+    tokenIndex: number,
+    keyPrefix: string,
+  ): ReactNode => {
       if (token.type === "text") {
         return token.value;
       }
@@ -1563,12 +1569,53 @@ export function MessageContent({
           previewCacheRef={workspaceFilePreviewCacheRef}
         />
       );
-    });
+  };
+
+  // An inline chip and the punctuation right after it are one unit: "`AGENTS.md`:"
+  // must never wrap with the ":" orphaned on the next line (#191). A chip token
+  // followed by punctuation renders inside a no-break span with that punctuation.
+  const renderInlineTokens = (line: string, keyPrefix: string): ReactNode[] => {
+    const tokens = tokenizeChatLine(line, agentMentionHandles);
+    const nodes: ReactNode[] = [];
+    for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex += 1) {
+      const token = tokens[tokenIndex];
+      if (!token) {
+        continue;
+      }
+      const rendered = renderInlineToken(token, tokenIndex, keyPrefix);
+      const nextToken = tokens[tokenIndex + 1];
+      const gluedPunctuation =
+        (token.type === "inline-code" || token.type === "workspace-file") && nextToken?.type === "text"
+          ? (nextToken.value.match(CHIP_TRAILING_PUNCTUATION_REGEX)?.[0] ?? "")
+          : "";
+      if (!gluedPunctuation || nextToken?.type !== "text") {
+        nodes.push(rendered);
+        continue;
+      }
+      nodes.push(
+        <span
+          key={`${keyPrefix}-chip-glue-${tokenIndex}`}
+          data-testid="chat-message-chip-glue"
+          className="whitespace-nowrap"
+        >
+          {rendered}
+          {gluedPunctuation}
+        </span>,
+      );
+      const remainder = nextToken.value.slice(gluedPunctuation.length);
+      if (remainder) {
+        nodes.push(remainder);
+      }
+      tokenIndex += 1;
+    }
+    return nodes;
+  };
 
   // One list grammar at every depth (#167): a fixed 1.25rem indent step,
   // ordered markers a shade darker than bullets (they carry sequence), bullet
-  // glyphs stepping disc → circle → square so levels read distinctly, and a
-  // small gap between an item's own text and its sublist.
+  // glyphs stepping disc → circle → square so levels read distinctly, and the
+  // sublist sitting on the same half-step rhythm as sibling items so the
+  // indent, not extra air, does the grouping (#191).
   const renderListLevel = (
     items: MessageListItem[],
     depth: number,
@@ -1598,7 +1645,7 @@ export function MessageContent({
         >
           {renderInlineTokens(item.text, itemKey)}
           {nestedItems.length > 0
-            ? renderListLevel(nestedItems, depth + 1, `${itemKey}-sub`, undefined, "mt-1")
+            ? renderListLevel(nestedItems, depth + 1, `${itemKey}-sub`, undefined, "mt-0.5")
             : null}
         </li>,
       );
