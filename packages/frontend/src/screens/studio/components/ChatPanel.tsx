@@ -4855,7 +4855,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     sendButtonVariant,
     showMobileGhostSuggestionAcceptButton,
   } = resolveChatComposerAffordances({
-    compactBrowserViewport,
     composerGhostSuggestionRemainder: composerGhostSuggestion?.remainder ?? null,
     credentialsReady,
     activeConversationControllerId: activeConversationEntry?.controllerId ?? null,

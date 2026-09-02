@@ -52,6 +52,34 @@ test.describe("Chat inline composer completion", () => {
     await expect(editorParagraph).toHaveText("Hello there");
   });
 
+  test("offers the accept action in the + menu on desktop too and applies the suggestion when clicked", async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await prepareStudio(page, { waitForHostedRuntime: false });
+
+    const input = page.getByTestId("chat-input");
+    await expect(input).toBeVisible({ timeout: 30_000 });
+    const editorParagraph = input.locator("p").last();
+
+    await input.fill("Hel");
+    await expect(editorParagraph).toHaveText("Hel");
+
+    await expect(page.getByText("lo there", { exact: true })).toBeVisible({ timeout: 30_000 });
+
+    // The composer is one row on every viewport; the wand lives in the "+"
+    // menu everywhere, never as a control that appears while typing.
+    await expect(page.getByTestId("chat-accept-suggestion-button")).toHaveCount(0);
+    await expect(page.getByTestId("chat-image-upload-button")).toBeVisible();
+    await page.getByTestId("composer-action-menu-trigger").click();
+    const acceptAction = page.getByTestId("composer-action-menu-insert-suggestion");
+    await expect(acceptAction).toBeVisible({ timeout: 30_000 });
+    // Image upload is inline at sm+, so it is not duplicated in the menu.
+    await expect(page.getByTestId("composer-action-menu-upload-image")).toHaveCount(0);
+    await acceptAction.click();
+
+    await expect(acceptAction).toBeHidden();
+    await expect(editorParagraph).toHaveText("Hello there");
+  });
+
   test("folds the accept action into the + menu on mobile and applies the suggestion when tapped", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await prepareStudio(page, { waitForHostedRuntime: false });
@@ -76,7 +104,7 @@ test.describe("Chat inline composer completion", () => {
     await expect(editorParagraph).toHaveText("Hello there");
   });
 
-  test("does not show the mobile accept button before there is an actual draft prefix", async ({ page }) => {
+  test("does not offer the accept action before there is an actual draft prefix", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await prepareStudio(page, { waitForHostedRuntime: false });
 

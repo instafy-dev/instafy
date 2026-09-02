@@ -86,7 +86,6 @@ export function ComposerActionMenu({
   uploadImageDisabled = false,
   onInsertSuggestion,
   triggerClassName,
-  triggerVariant = "outline",
   mutationDisabled = false,
   inviteActionLabel = "Invite teammates",
 }: {
@@ -104,14 +103,14 @@ export function ComposerActionMenu({
   onStashDraft?: () => void;
   queueDisabled?: boolean;
   stashDisabled?: boolean;
-  // Narrow viewports fold the inline image-upload and insert-suggestion
-  // controls into this menu so the one-row composer never loses an action.
-  // The composer passes them only when it is not rendering them inline.
+  // The one-row composer folds actions it does not render inline into this
+  // menu so nothing is lost: image upload below sm, and the insert-suggestion
+  // wand on every viewport (Tab accepts the inline ghost suggestion from the
+  // keyboard). The composer passes each handler only while it applies.
   onUploadImage?: () => void;
   uploadImageDisabled?: boolean;
   onInsertSuggestion?: () => void;
   triggerClassName?: string;
-  triggerVariant?: "outline" | "ghost";
   mutationDisabled?: boolean;
   inviteActionLabel?: string;
 }) {
@@ -145,7 +144,7 @@ export function ComposerActionMenu({
     <DialogTrigger isOpen={open} onOpenChange={handleOpenChange}>
       <IconButton
         type="button"
-        variant={triggerVariant}
+        variant="outline"
         size="md"
         radius="xl"
         aria-label="Open composer actions"
