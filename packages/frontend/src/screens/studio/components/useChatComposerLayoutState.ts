@@ -12,6 +12,19 @@ import { getChatScrollObstructionPaddingPx } from "./browserSessionLayout";
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 24;
 const BROWSER_SURFACE_GAP_PX = 8;
 const NATIVE_KEYBOARD_MIN_OCCLUSION_PX = 96;
+const HISTORY_PREFETCH_MIN_THRESHOLD_PX = 48;
+
+// Ask for the next history page half a viewport before the top instead of at
+// the last 48px. A trackpad flick keeps moving after it crosses the trigger,
+// so a late trigger lands the prepend after the user has already hit the
+// hard top; triggering half a viewport early usually lands it while they are
+// still inside loaded content. The 48px floor keeps tiny containers working.
+export function getHistoryPrefetchThresholdPx(clientHeight: number): number {
+  if (!Number.isFinite(clientHeight) || clientHeight <= 0) {
+    return HISTORY_PREFETCH_MIN_THRESHOLD_PX;
+  }
+  return Math.max(HISTORY_PREFETCH_MIN_THRESHOLD_PX, clientHeight / 2);
+}
 
 export function isNativeKeyboardViewportOpen({
   closedViewportHeight,
@@ -180,7 +193,17 @@ export function useChatComposerLayoutState({
         setComposerAutoHidden(false);
       }
     }
-    if (node.scrollTop <= 48 && hasMoreHistory && !isHistoryLoading) {
+    // A landed page can leave the container still inside this threshold (its
+    // growth is often less than half a viewport), so the scroll event the
+    // prepend itself raises may re-trigger immediately. That is intended: the
+    // pending guard in requestOlderMessages keeps it to one page in flight,
+    // and each landing pushes the user further from the top until the pages
+    // outrun the threshold or hasMoreHistory turns false.
+    if (
+      node.scrollTop <= getHistoryPrefetchThresholdPx(node.clientHeight) &&
+      hasMoreHistory &&
+      !isHistoryLoading
+    ) {
       requestOlderMessages();
     }
   }, [
