@@ -26198,18 +26198,18 @@ mod billing_service_tests {
 }
 
 #[tokio::test]
-async fn credential_usage_report_follows_revoked_credential_fallback() -> anyhow::Result<()> {
+async fn credential_usage_report_refuses_revoked_credentials() -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {
-        eprintln!("skipping credential usage fallback test: TEST_DATABASE_URL not set");
+        eprintln!("skipping revoked-credential usage test: TEST_DATABASE_URL not set");
         return Ok(());
     };
 
     let user_id = Uuid::new_v4();
     ensure_test_user(&pool, &user_id).await?;
 
-    // A rotated-away pinned credential and the live default that replaced it
-    // (same provider). The usage path never decrypts, so placeholder
-    // ciphertext is enough.
+    // A revoked pinned credential AND a live same-provider default: revoke
+    // means stop, so the default must NOT inherit the revoked credential's
+    // usage snapshots — the default serves new jobs, not cut-off ones (#115).
     let pinned_id = Uuid::new_v4();
     let default_id = Uuid::new_v4();
     {
@@ -26229,81 +26229,106 @@ async fn credential_usage_report_follows_revoked_credential_fallback() -> anyhow
     let config = build_app_config(
         test_origin_private_key(),
         test_origin_public_key(),
-        "credential-usage-fallback-test",
+        "revoked-credential-usage-test",
     );
     let state = build_test_state(pool.clone(), config);
 
-    let post_usage = |target: Uuid, snapshot: serde_json::Value| {
-        let state = state.clone();
-        async move {
-            crate::credentials::router()
-                .with_state(state)
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri(format!("/internal/credentials/{target}/usage"))
-                        .header("authorization", "Bearer credential-lease")
-                        .header("content-type", "application/json")
-                        .body(Body::from(snapshot.to_string()))?,
-                )
-                .await
-                .map_err(anyhow::Error::from)
-        }
-    };
-
-    // Usage reported against the revoked pinned id must land on the same
-    // effective credential the lease fallback serves, not be dropped.
-    let snapshot =
-        json!({ "planName": "Codex", "windows": [{ "window": "weekly", "leftPercent": 42 }] });
-    let response = post_usage(pinned_id, snapshot.clone()).await?;
+    let response = crate::credentials::router()
+        .with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/internal/credentials/{pinned_id}/usage"))
+                .header("authorization", "Bearer credential-lease")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "planName": "Codex" }).to_string()))?,
+        )
+        .await?;
     assert_eq!(
         response.status(),
-        StatusCode::NO_CONTENT,
-        "usage for a revoked pinned credential must redirect to the fallback default"
+        StatusCode::NOT_FOUND,
+        "usage for a revoked credential must be refused, not redirected"
     );
 
     {
         let connection = pool.get().await?;
-        let default_row = connection
-            .query_one(
-                "select subscription_usage from user_credentials where id = $1",
-                &[&default_id],
-            )
-            .await?;
-        let stored: Option<PgJson<serde_json::Value>> = default_row.get("subscription_usage");
-        assert_eq!(
-            stored.map(|value| value.0),
-            Some(snapshot),
-            "snapshot must be stored on the fallback default credential"
-        );
+        for id in [pinned_id, default_id] {
+            let row = connection
+                .query_one(
+                    "select subscription_usage from user_credentials where id = $1",
+                    &[&id],
+                )
+                .await?;
+            let stored: Option<PgJson<serde_json::Value>> = row.get("subscription_usage");
+            assert!(
+                stored.is_none(),
+                "no credential may accumulate usage from a revoked id"
+            );
+        }
+    }
 
-        let pinned_row = connection
-            .query_one(
-                "select subscription_usage from user_credentials where id = $1",
-                &[&pinned_id],
-            )
-            .await?;
-        let pinned_usage: Option<PgJson<serde_json::Value>> = pinned_row.get("subscription_usage");
-        assert!(
-            pinned_usage.is_none(),
-            "the revoked pinned credential must not accumulate usage"
-        );
+    cleanup_test_user(&pool, &user_id).await?;
+    Ok(())
+}
 
-        // With the default revoked too there is no authorized replacement:
-        // the report must 404 exactly like before the fallback existed.
+#[tokio::test]
+async fn credential_lease_refuses_revoked_credentials_even_with_a_default() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping revoked-credential lease test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let user_id = Uuid::new_v4();
+    ensure_test_user(&pool, &user_id).await?;
+
+    let pinned_id = Uuid::new_v4();
+    let default_id = Uuid::new_v4();
+    {
+        let connection = pool.get().await?;
         connection
             .execute(
-                "update user_credentials set revoked_at = now() where id = $1",
-                &[&default_id],
+                "insert into user_credentials
+                   (id, user_id, kind, nonce_b64, ciphertext_b64, metadata, is_default, revoked_at)
+                 values
+                   ($1, $3, 'codex_auth_json', 'nonce', 'ciphertext', '{}'::jsonb, false, now()),
+                   ($2, $3, 'codex_auth_json', 'nonce', 'ciphertext', '{}'::jsonb, true, null)",
+                &[&pinned_id, &default_id, &user_id],
             )
             .await?;
     }
 
-    let dropped = post_usage(pinned_id, json!({ "planName": "Codex" })).await?;
+    let mut config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "revoked-credential-lease-test",
+    );
+    config.credential_encryption_key = Some(crate::config::CredentialEncryptionKey::for_test(
+        "revoked-credential-lease-test-key",
+    ));
+    let state = build_test_state(pool.clone(), config);
+
+    // Revoking a credential is the user's stop lever: the lease must 404 even
+    // though a live same-provider default exists — no silent continuation.
+    let response = crate::credentials::router()
+        .with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/internal/credentials/{pinned_id}"))
+                .header("authorization", "Bearer credential-lease")
+                .body(Body::empty())?,
+        )
+        .await?;
     assert_eq!(
-        dropped.status(),
+        response.status(),
         StatusCode::NOT_FOUND,
-        "no live same-provider replacement means the usage report is refused"
+        "a revoked credential must stop serving leases"
+    );
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024).await?;
+    let message = String::from_utf8_lossy(&body);
+    assert!(
+        message.contains("credential not found"),
+        "the studio's reconnect-credentials classifier keys on this prefix; got: {message}"
     );
 
     cleanup_test_user(&pool, &user_id).await?;

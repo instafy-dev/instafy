@@ -523,7 +523,7 @@ export function CredentialsSettingsCard() {
         const hint = credential ? resolveCredentialAccountHint(credential) : null;
         const detail = [kind, hint].filter(Boolean).join(" · ");
         const confirmed = window.confirm(
-          `Remove ${label}${detail ? ` (${detail})` : ""}?\n\nHosted agents will stop using it.`,
+          `Remove ${label}${detail ? ` (${detail})` : ""}?\n\nAgents stop using it immediately — running work pinned to it will fail.`,
         );
         if (!confirmed) {
           return;
