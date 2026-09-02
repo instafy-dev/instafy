@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import type { CSSProperties, ComponentType, MouseEvent, MutableRefObject } from "react";
+import type { CSSProperties, ComponentType, MouseEvent, MutableRefObject, ReactNode } from "react";
 import {
   Activity,
   ClipboardCheck,
@@ -38,6 +38,7 @@ import {
   splitActivityLeadAndDetails,
   stripWorkspacePrefixForPreview,
   summarizeActiveCommandForPreview,
+  summarizeCommandExecutionResultForPreview,
   truncate,
 } from "./chatContentHelpers";
 import {
@@ -55,6 +56,7 @@ import {
 } from "./threadPreviewState";
 import {
   renderThreadCompactEventIcon,
+  stripShellWrapperFromCommand,
   THREAD_SPINE_COMPACT_NOTCH_OFFSET_PX,
   THREAD_SPINE_DEFAULT_NOTCH_OFFSET_PX,
   THREAD_SPINE_END_SEGMENT_HEIGHT_PX,
@@ -68,6 +70,39 @@ import {
 } from "./proxyError";
 
 const COMPACTION_STATUS_LABEL = "Re-organizing my thoughts";
+
+// The command surface is one visual family with CODE_BLOCK_CLASS: same radius
+// and ring tokens, subtler fill. Sections stacked inside it are separated by a
+// hairline drawn with the ring tokens so the panel reads as one box (#191).
+const COMMAND_SURFACE_CLASS =
+  "rounded-xl bg-slate-950/[0.02] ring-1 ring-inset ring-slate-900/10 dark:bg-white/[0.035] dark:ring-white/[0.08]";
+const COMMAND_SURFACE_DIVIDER_CLASS = "border-t border-slate-900/10 dark:border-white/[0.08]";
+
+const COMMAND_RUNNING_STATUSES = new Set([
+  "in_progress",
+  "queued",
+  "started",
+  "running",
+  "applying",
+  "refreshing",
+]);
+
+// Result line fallback when a finished command produced nothing worth quoting:
+// the command's exit state, never the command text the header already shows.
+function resolveCommandResultStatusLabel(status: string | null | undefined): string {
+  const normalized = typeof status === "string" ? status.trim().toLowerCase() : "";
+  if (!normalized) {
+    return "No output";
+  }
+  if (COMMAND_RUNNING_STATUSES.has(normalized)) {
+    return "Running…";
+  }
+  if (normalized === "completed" || normalized === "success" || normalized === "succeeded") {
+    return "Completed";
+  }
+  const spaced = normalized.replace(/[_-]+/g, " ");
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -675,6 +710,430 @@ export function AgentJobThreadPreviewLayout({
       />
     );
 
+  const showSingleCompactEventRow =
+    !useTightThreadPreviewLayout &&
+    !terminalStatusDominatesCompactRail &&
+    shouldCollapseSingleCompactEvent &&
+    singleCompactEvent !== null;
+  // A command-kind single-update run expands inside its own surface: the pill
+  // becomes a panel whose header row is followed by the run detail sections
+  // (command status, output toggle, inline updates, child threads) inside the
+  // same box. Founder feedback on the split layout: "expanding commands looks
+  // a bit clunky … expansion is outside surface? and chevron has a surface
+  // itself?"
+  const commandPanelExpanded =
+    showSingleCompactEventRow && singleCompactEventIsCommand && isThreadPreviewExpanded;
+  const rawLatestCommand = latestCommandExecution?.command?.trim() || null;
+  const singleCompactEventDisplayLabel = singleCompactEventIsCommand
+    ? stripShellWrapperFromCommand(singleCompactEventLabel)
+    : singleCompactEventLabel;
+  const commandResultPreview = summarizeCommandExecutionResultForPreview(
+    latestCommandExecution?.output ?? null,
+    160,
+  );
+  const commandResultLine =
+    commandResultPreview || resolveCommandResultStatusLabel(latestCommandExecution?.status);
+  const collapsedCommandToggleLabel = showCollapsedCommandOutput
+    ? "Hide command output"
+    : commandPanelExpanded
+      ? commandResultLine
+      : truncate(stripShellWrapperFromCommand(latestCommandPreview) || "Show command output", 130);
+
+  // Run detail sections sit beside the spine with their own notch when they
+  // stack under a plain row; inside the command panel they lose the notch and
+  // pick up a hairline divider instead, so the spine stays outside the box.
+  const runDetailSectionClass = commandPanelExpanded
+    ? `relative ${COMMAND_SURFACE_DIVIDER_CLASS} px-2.5 py-1.5`
+    : "relative py-1";
+  const runDetailGroupSectionClass = `group ${runDetailSectionClass}`;
+  const renderRunDetailSectionNotch = (): ReactNode =>
+    commandPanelExpanded ? null : renderThreadPreviewNotch();
+
+  const runDetailSections = (
+    <>
+      {!useTightThreadPreviewLayout && showCollapsedCompactRailStatus ? (
+        <div className={runDetailSectionClass}>
+          {renderRunDetailSectionNotch()}
+          <Text
+            as="div"
+            variant="caption"
+            tone="muted"
+            className="flex min-w-0 items-center gap-1.5 pl-1 text-xs"
+          >
+            {commandOwnerBadgeElement}
+            <span
+              className={`${shouldSweepCompactRailStatusText ? "instafy-status-sweep" : ""} min-w-0 truncate`}
+              data-sweep-text={compactRailStatusText}
+            >
+              {compactRailStatusText}
+            </span>
+            {canCancelTerminalRun ? (
+              <IconButton
+                aria-label="Stop run"
+                variant="ghost"
+                size="xs"
+                radius="full"
+                onPress={handleCancelRun}
+                isDisabled={cancelRunPending}
+                data-testid="chat-command-stop-button"
+                className="ml-1 text-rose-500 hover:text-rose-600 dark:text-rose-300 dark:hover:text-rose-200"
+              >
+                <Xmark aria-hidden="true" className="h-3.5 w-3.5" />
+              </IconButton>
+            ) : null}
+          </Text>
+        </div>
+      ) : null}
+
+      {showLiveCommandOutput ? (
+        <div className={runDetailSectionClass}>
+          {renderRunDetailSectionNotch()}
+          <div className="min-w-0">
+            <CommandOutputBlock
+              command={latestCommandExecution?.command ?? null}
+              output={latestCommandExecution?.output ?? ""}
+              status={latestCommandExecution?.status ?? null}
+              compact
+              subtle={commandPanelExpanded}
+              onCancel={onCancelTerminalCommand ?? null}
+            />
+          </div>
+        </div>
+      ) : null}
+
+      {showLiveCommandPlaceholder && !isHybridCompactionActive ? (
+        <div className={runDetailSectionClass}>
+          {renderRunDetailSectionNotch()}
+          <Text
+            as="div"
+            variant="caption"
+            tone="muted"
+            className="flex min-w-0 items-center gap-1.5 text-xs"
+          >
+            <Terminal aria-hidden="true" className="h-3.5 w-3.5 text-slate-500 dark:text-slate-300" />
+            {commandOwnerBadgeElement}
+            <span
+              className={`${shouldAnimateThreadLiveState ? "instafy-status-sweep" : ""} min-w-0 truncate`}
+              data-sweep-text={latestCommandExecution?.command ?? "Running command…"}
+            >
+              {summarizeActiveCommandForPreview(latestCommandExecution?.command ?? "", 120) || "Running command…"}
+            </span>
+            {canCancelTerminalRun ? (
+              <IconButton
+                aria-label="Stop run"
+                variant="ghost"
+                size="xs"
+                radius="full"
+                onPress={handleCancelRun}
+                isDisabled={cancelRunPending}
+                data-testid="chat-command-stop-button"
+                className="ml-1 text-rose-500 hover:text-rose-600 dark:text-rose-300 dark:hover:text-rose-200"
+              >
+                <Xmark aria-hidden="true" className="h-3.5 w-3.5" />
+              </IconButton>
+            ) : null}
+          </Text>
+        </div>
+      ) : null}
+
+      {showCollapsedCommandToggle && !isHybridCompactionActive ? (
+        <div className={runDetailSectionClass}>
+          {renderRunDetailSectionNotch()}
+          <div className="min-w-0">
+            {/* Under a command header the toggle row is the RESULT line (the
+                first meaningful output line, else the exit state) — never a
+                restatement of the command the header already shows. Under an
+                icon rail it still names the command, shell wrapper stripped. */}
+            <button
+              type="button"
+              onClick={onToggleCommandOutput}
+              data-testid="agent-thread-command-output-toggle"
+              className="group flex min-w-0 w-full items-center justify-between gap-2 rounded-lg py-0.5 pr-1.5 text-left text-xs text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100"
+              title={rawLatestCommand ?? undefined}
+            >
+              <span className="inline-flex min-w-0 items-center gap-1.5">
+                {commandPanelExpanded ? (
+                  <span aria-hidden="true" className="flex-shrink-0 font-mono text-slate-400 dark:text-slate-500">
+                    →
+                  </span>
+                ) : (
+                  <Terminal aria-hidden="true" className="h-3.5 w-3.5 flex-shrink-0" />
+                )}
+                <span className={`min-w-0 truncate ${commandPanelExpanded && !showCollapsedCommandOutput ? "font-mono" : ""}`}>
+                  {collapsedCommandToggleLabel}
+                </span>
+              </span>
+              <span className="inline-flex flex-shrink-0 items-center gap-1">
+                <Eye aria-hidden="true" className="h-3 w-3" />
+                {showCollapsedCommandOutput ? "Hide" : "View"}
+              </span>
+            </button>
+            {showCollapsedCommandOutput ? (
+              <div className="mt-2">
+                <CommandOutputBlock
+                  command={latestCommandExecution?.command ?? null}
+                  output={latestCommandExecution?.output ?? ""}
+                  status={latestCommandExecution?.status ?? null}
+                  compact
+                  subtle={commandPanelExpanded}
+                  onCancel={onCancelTerminalCommand ?? null}
+                />
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {visibleInlineUpdates.map((update) => {
+        const updateType = (getMessageType(update) ?? "").trim().toLowerCase();
+        const isActivityUpdate = updateType === "reasoning" || updateType === "status";
+        const rawContent = isActivityUpdate ? normalizeActivityText(update.content) : update.content.trim();
+        const retryingPresentation = isActivityUpdate
+          ? resolveRetryingStatusPresentation({ metadata: update.metadata, content: rawContent })
+          : null;
+        const content =
+          retryingPresentation?.displayText ?? formatProxyUpstreamErrorSummary(rawContent) ?? rawContent;
+        const updateTitle = retryingPresentation?.fullText ?? content;
+        const expanded = Boolean(expandedUpdateIds[update.id]);
+        const updateDetails = extractMessageDetails(update.metadata);
+
+        if (updateType === "integration_request") {
+          return (
+            <div key={update.id} className={runDetailSectionClass}>
+              {renderRunDetailSectionNotch()}
+              <div className="min-w-0">
+                <IntegrationRequestEntry
+                  message={update}
+                  projectId={projectId ?? null}
+                  details={updateDetails}
+                />
+              </div>
+            </div>
+          );
+        }
+
+        if (updateType === "secret_request") {
+          return (
+            <div key={update.id} className={runDetailSectionClass}>
+              {renderRunDetailSectionNotch()}
+              <div className="min-w-0">
+                <SecretRequestEntry
+                  message={update}
+                  projectId={projectId ?? null}
+                  details={updateDetails}
+                />
+              </div>
+            </div>
+          );
+        }
+
+        if (updateType === "action_request") {
+          return (
+            <div key={update.id} className={runDetailSectionClass}>
+              {renderRunDetailSectionNotch()}
+              <div className="min-w-0">
+                <ActionRequestEntry message={update} details={updateDetails} />
+              </div>
+            </div>
+          );
+        }
+
+        if (updateType === "multi_agent_plan") {
+          return (
+            <div key={update.id} className={runDetailSectionClass}>
+              {renderRunDetailSectionNotch()}
+              <div className="min-w-0 max-w-full overflow-hidden">
+                {content ? (
+                  <MessageContent
+                    content={content}
+                    projectId={projectId ?? null}
+                  />
+                ) : null}
+                <MultiAgentPlanEntry details={updateDetails} />
+              </div>
+            </div>
+          );
+        }
+
+        const todoItems = updateType === "todo_list" ? parseTodoItems(updateDetails) : [];
+        const isCompactionUpdate =
+          (updateType === "reasoning" || updateType === "status") && isCompactionStatusText(content);
+        const isLocalCapabilityActivity =
+          updateType === "local_capability_result" || shouldRenderLocalCapabilityStatusAsTimeline(update);
+        const updateIcon =
+          updateType === "todo_list" ? (
+            <ClipboardCheck
+              className="mt-[1px] h-3 w-3 flex-shrink-0 text-slate-400 dark:text-slate-500"
+              aria-hidden="true"
+            />
+          ) : isCompactionUpdate ? (
+            <CompressLines
+              className="mt-[1px] h-3 w-3 flex-shrink-0 text-slate-400 dark:text-slate-500"
+              aria-hidden="true"
+            />
+          ) : isLocalCapabilityActivity ? (
+            <Globe
+              className="mt-[1px] h-3 w-3 flex-shrink-0 text-slate-400 dark:text-slate-500"
+              aria-hidden="true"
+            />
+          ) : isActivityUpdate ? (
+            <Activity
+              className="mt-[1px] h-3 w-3 flex-shrink-0 text-slate-400 dark:text-slate-500"
+              aria-hidden="true"
+            />
+          ) : null;
+        const canExpand =
+          content.length > 240 ||
+          content.includes("\n") ||
+          (update.metadata && JSON.stringify(update.metadata).length > 300);
+        const previewSource =
+          isCompactionUpdate
+            ? COMPACTION_STATUS_LABEL
+            : updateType === "file_change"
+              ? stripWorkspacePrefixForPreview(content)
+              : content;
+        const previewLine = truncate(previewSource.replace(/\s+/g, " "), 200);
+        const activityPreviewParts = isActivityUpdate
+          ? splitActivityLeadAndDetails(previewLine)
+          : null;
+
+        return (
+          <div key={update.id} className={runDetailGroupSectionClass}>
+            {renderRunDetailSectionNotch()}
+            <div className="min-w-0">
+              <div
+                data-testid="agent-thread-inline-update-row"
+                className="flex min-w-0 items-center justify-between gap-2 rounded-lg pr-1"
+              >
+                {canExpand ? (
+                  <button
+                    type="button"
+                    onClick={() => onToggleUpdateExpanded(update.id)}
+                    className="min-w-0 flex-1 truncate text-left text-xs text-slate-600 hover:text-slate-800 dark:text-slate-300 dark:hover:text-slate-100"
+                    title={updateTitle}
+                  >
+                    <span className="flex min-w-0 items-start gap-2">
+                      {updateIcon}
+                      {activityPreviewParts ? (
+                        <span className="min-w-0 truncate">
+                          <span className="font-medium text-slate-700 dark:text-slate-100">
+                            {activityPreviewParts.lead}
+                          </span>
+                          {activityPreviewParts.details ? (
+                            <span className="text-slate-600 dark:text-slate-300">
+                              {" "}
+                              {activityPreviewParts.details}
+                            </span>
+                          ) : null}
+                        </span>
+                      ) : (
+                        <span className="min-w-0 truncate">{previewLine}</span>
+                      )}
+                    </span>
+                  </button>
+                ) : (
+                  <div
+                    className="min-w-0 flex-1 truncate text-xs text-slate-600 dark:text-slate-300"
+                    title={updateTitle}
+                  >
+                    <span className="flex min-w-0 items-start gap-2">
+                      {updateIcon}
+                      {activityPreviewParts ? (
+                        <span className="min-w-0 truncate">
+                          <span className="font-medium text-slate-700 dark:text-slate-100">
+                            {activityPreviewParts.lead}
+                          </span>
+                          {activityPreviewParts.details ? (
+                            <span className="text-slate-600 dark:text-slate-300">
+                              {" "}
+                              {activityPreviewParts.details}
+                            </span>
+                          ) : null}
+                        </span>
+                      ) : (
+                        <span className="min-w-0 truncate">{previewLine}</span>
+                      )}
+                    </span>
+                  </div>
+                )}
+
+                {canExpand ? (
+                  <IconButton
+                    aria-label={expanded ? "Collapse update" : "Expand update"}
+                    variant="ghost"
+                    size="xs"
+                    radius="full"
+                    onPress={() => onToggleUpdateExpanded(update.id)}
+                    className={`transition-opacity ${
+                      expanded
+                        ? "opacity-100"
+                        : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[focus-visible]:opacity-100"
+                    }`}
+                  >
+                    <NavArrowRight
+                      className={`h-3 w-3 transition-transform ${
+                        expanded ? "rotate-90 text-slate-600 dark:text-slate-200" : "text-slate-400"
+                      }`}
+                      aria-hidden="true"
+                    />
+                  </IconButton>
+                ) : null}
+              </div>
+
+              {expanded ? (
+                <div className="mt-2 rounded-xl bg-white/60 p-2 text-sm text-slate-700 dark:bg-slate-950/40 dark:text-slate-200">
+                  {isActivityUpdate ? (
+                    <p className="whitespace-pre-wrap break-words text-sm">{content}</p>
+                  ) : (
+                    <MessageContent content={content} projectId={projectId ?? null} />
+                  )}
+                  {todoItems.length > 0 ? (
+                    <ul className="mt-2 space-y-1 text-xs">
+                      {todoItems.map((item, itemIndex) => (
+                        <li key={`${item.text}-${itemIndex}`} className="flex items-start gap-2">
+                          <span
+                            className={`mt-1 inline-flex h-2 w-2 flex-shrink-0 rounded-full ${
+                              item.completed ? "bg-primary-500" : "bg-slate-300 dark:bg-slate-700"
+                            }`}
+                            aria-hidden="true"
+                          />
+                          <span
+                            className={
+                              item.completed
+                                ? "line-through text-slate-400 dark:text-slate-500"
+                                : "text-slate-600 dark:text-slate-200"
+                            }
+                          >
+                            {item.text}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        );
+      })}
+
+      {isThreadPreviewExpanded && branchThreads.length > 0 ? (
+        <div className={runDetailSectionClass}>
+          {renderRunDetailSectionNotch()}
+          <div className="space-y-1.5">
+            {branchThreads.map((branch) => (
+              <AgentThreadBranchRowEntry
+                key={branch.threadLocalId}
+                branch={branch}
+                onOpen={onOpenBranchThread}
+              />
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+
   return (
     <div
       ref={threadPreviewRootRef}
@@ -873,452 +1332,100 @@ export function AgentJobThreadPreviewLayout({
           </div>
         ) : null}
 
-        {!useTightThreadPreviewLayout && !terminalStatusDominatesCompactRail && shouldCollapseSingleCompactEvent && singleCompactEvent ? (
+        {showSingleCompactEventRow && singleCompactEvent ? (
           <div className="group relative py-1">
             {renderThreadPreviewNotch(THREAD_SPINE_COMPACT_NOTCH_OFFSET_PX)}
-            {/* A collapsed command row is one visual family with the command
-                output it stands for (#191): monospace on the code-block
-                surface (same radius and ring tokens, subtler fill) with the
-                expand chevron framed at the row's end instead of a faint glyph
-                pinned to the far edge. Other update kinds keep the plain row. */}
+            {/* A command row is one visual family with the command output it
+                stands for (#191): monospace on the code-block surface (same
+                radius and ring tokens, subtler fill). Collapsed it is a single
+                pill; expanded the same surface grows into a panel that holds
+                the run detail sections under a hairline divider, so nothing
+                the expansion reveals lands outside the box. The chevron is an
+                unframed ghost glyph — no second surface inside the surface.
+                Other update kinds keep the plain row. */}
             <div
-              data-testid="agent-thread-single-update-row"
-              data-update-kind={singleCompactEvent.kind}
-              className={`flex min-w-0 w-full items-center gap-2 ${
-                singleCompactEventIsCommand
-                  ? "rounded-xl bg-slate-950/[0.02] py-1 pl-2.5 pr-1 ring-1 ring-inset ring-slate-900/10 transition-colors group-hover:bg-slate-950/[0.045] dark:bg-white/[0.035] dark:ring-white/[0.08] dark:group-hover:bg-white/[0.065]"
-                  : "rounded-lg py-0.5 pr-1"
-              }`}
+              data-testid={singleCompactEventIsCommand ? "agent-thread-command-surface" : undefined}
+              data-expanded={singleCompactEventIsCommand ? (commandPanelExpanded ? "true" : "false") : undefined}
+              className={singleCompactEventIsCommand ? `min-w-0 w-full ${COMMAND_SURFACE_CLASS}` : "min-w-0 w-full"}
             >
-              <button
-                type="button"
-                onClick={onToggleThreadPreview}
-                className={`flex min-w-0 flex-1 items-center gap-1.5 rounded-lg py-0.5 text-left text-xs ${
+              <div
+                data-testid="agent-thread-single-update-row"
+                data-update-kind={singleCompactEvent.kind}
+                className={`flex min-w-0 w-full items-center gap-2 ${
                   singleCompactEventIsCommand
-                    ? "font-mono text-slate-700 hover:text-slate-900 dark:text-slate-200 dark:hover:text-slate-50"
-                    : "text-slate-500 hover:text-slate-800 dark:text-slate-300 dark:hover:text-slate-100"
+                    ? `${commandPanelExpanded ? "rounded-t-xl" : "rounded-xl"} py-1 pl-2.5 pr-1 transition-colors hover:bg-slate-950/[0.025] dark:hover:bg-white/[0.03]`
+                    : "rounded-lg py-0.5 pr-1"
                 }`}
-                aria-label={isThreadPreviewExpanded ? "Collapse run updates" : "Expand run updates"}
-                title={singleCompactEventLabel || resolveThreadCompactUpdateLabel(singleCompactEvent.kind)}
               >
-                <span className="flex-shrink-0 text-slate-500 dark:text-slate-300">
-                  {renderThreadCompactEventIcon(singleCompactEvent.kind)}
-                </span>
-                <span
-                  className={`${showSingleCompactEventStatusSweep ? "instafy-status-sweep" : ""} min-w-0 truncate`}
-                  data-sweep-text={singleCompactEventLabel}
-                >
-                  {singleCompactEventLabel}
-                </span>
-              </button>
-              <div className="ml-auto flex flex-none items-center gap-1">
-                {canCancelTerminalRun ? (
-                  <IconButton
-                    aria-label="Stop run"
-                    variant="ghost"
-                    size="xs"
-                    radius="full"
-                    onPress={handleCancelRun}
-                    isDisabled={cancelRunPending}
-                    data-testid="chat-command-stop-button"
-                    className="text-rose-500 hover:text-rose-600 dark:text-rose-300 dark:hover:text-rose-200"
-                  >
-                    <Xmark aria-hidden="true" className="h-3.5 w-3.5" />
-                  </IconButton>
-                ) : null}
-                <IconButton
-                  aria-label={isThreadPreviewExpanded ? "Collapse run updates" : "Expand run updates"}
-                  variant="ghost"
-                  size="xs"
-                  radius={singleCompactEventIsCommand ? "md" : "full"}
-                  onPress={onToggleThreadPreview}
-                  className={
+                <button
+                  type="button"
+                  onClick={onToggleThreadPreview}
+                  className={`flex min-w-0 flex-1 items-center gap-1.5 rounded-lg py-0.5 text-left text-xs ${
                     singleCompactEventIsCommand
-                      ? "bg-white/70 text-slate-500 opacity-100 ring-1 ring-inset ring-slate-900/10 hover:bg-white hover:text-slate-800 dark:bg-white/[0.04] dark:text-slate-300 dark:ring-white/[0.1] dark:hover:bg-white/[0.09] dark:hover:text-slate-100"
-                      : `text-slate-400 hover:text-slate-700 dark:text-slate-500 dark:hover:text-slate-200 ${
-                          isThreadPreviewExpanded
-                            ? "opacity-100"
-                            : "opacity-0 group-hover:opacity-90 group-focus-within:opacity-90"
-                        }`
+                      ? "font-mono text-slate-700 hover:text-slate-900 dark:text-slate-200 dark:hover:text-slate-50"
+                      : "text-slate-500 hover:text-slate-800 dark:text-slate-300 dark:hover:text-slate-100"
+                  }`}
+                  aria-label={isThreadPreviewExpanded ? "Collapse run updates" : "Expand run updates"}
+                  title={
+                    (singleCompactEventIsCommand ? rawLatestCommand : null) ??
+                    (singleCompactEventDisplayLabel || resolveThreadCompactUpdateLabel(singleCompactEvent.kind))
                   }
                 >
-                  {isThreadPreviewExpanded ? (
-                    <NavArrowDown aria-hidden="true" className="h-3.5 w-3.5" />
-                  ) : (
-                    <NavArrowRight aria-hidden="true" className="h-3.5 w-3.5" />
-                  )}
-                </IconButton>
-              </div>
-            </div>
-          </div>
-        ) : null}
-
-        {!useTightThreadPreviewLayout && showCollapsedCompactRailStatus ? (
-          <div className="relative py-1">
-            {renderThreadPreviewNotch()}
-            <Text
-              as="div"
-              variant="caption"
-              tone="muted"
-              className="flex min-w-0 items-center gap-1.5 pl-1 text-xs"
-            >
-              {commandOwnerBadgeElement}
-              <span
-                className={`${shouldSweepCompactRailStatusText ? "instafy-status-sweep" : ""} min-w-0 truncate`}
-                data-sweep-text={compactRailStatusText}
-              >
-                {compactRailStatusText}
-              </span>
-              {canCancelTerminalRun ? (
-                <IconButton
-                  aria-label="Stop run"
-                  variant="ghost"
-                  size="xs"
-                  radius="full"
-                  onPress={handleCancelRun}
-                  isDisabled={cancelRunPending}
-                  data-testid="chat-command-stop-button"
-                  className="ml-1 text-rose-500 hover:text-rose-600 dark:text-rose-300 dark:hover:text-rose-200"
-                >
-                  <Xmark aria-hidden="true" className="h-3.5 w-3.5" />
-                </IconButton>
-              ) : null}
-            </Text>
-          </div>
-        ) : null}
-
-        {showLiveCommandOutput ? (
-          <div className="relative py-1">
-            {renderThreadPreviewNotch()}
-            <div className="min-w-0">
-              <CommandOutputBlock
-                command={latestCommandExecution?.command ?? null}
-                output={latestCommandExecution?.output ?? ""}
-                status={latestCommandExecution?.status ?? null}
-                compact
-                onCancel={onCancelTerminalCommand ?? null}
-              />
-            </div>
-          </div>
-        ) : null}
-
-        {showLiveCommandPlaceholder && !isHybridCompactionActive ? (
-          <div className="relative py-1">
-            {renderThreadPreviewNotch()}
-            <Text
-              as="div"
-              variant="caption"
-              tone="muted"
-              className="flex min-w-0 items-center gap-1.5 text-xs"
-            >
-              <Terminal aria-hidden="true" className="h-3.5 w-3.5 text-slate-500 dark:text-slate-300" />
-              {commandOwnerBadgeElement}
-              <span
-                className={`${shouldAnimateThreadLiveState ? "instafy-status-sweep" : ""} min-w-0 truncate`}
-                data-sweep-text={latestCommandExecution?.command ?? "Running command…"}
-              >
-                {summarizeActiveCommandForPreview(latestCommandExecution?.command ?? "", 120) || "Running command…"}
-              </span>
-              {canCancelTerminalRun ? (
-                <IconButton
-                  aria-label="Stop run"
-                  variant="ghost"
-                  size="xs"
-                  radius="full"
-                  onPress={handleCancelRun}
-                  isDisabled={cancelRunPending}
-                  data-testid="chat-command-stop-button"
-                  className="ml-1 text-rose-500 hover:text-rose-600 dark:text-rose-300 dark:hover:text-rose-200"
-                >
-                  <Xmark aria-hidden="true" className="h-3.5 w-3.5" />
-                </IconButton>
-              ) : null}
-            </Text>
-          </div>
-        ) : null}
-
-        {showCollapsedCommandToggle && !isHybridCompactionActive ? (
-          <div className="relative py-1">
-            {renderThreadPreviewNotch()}
-            <div className="min-w-0">
-              <button
-                type="button"
-                onClick={onToggleCommandOutput}
-                className="group flex min-w-0 w-full items-center justify-between gap-2 rounded-lg py-0.5 pr-1.5 text-left text-xs text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100"
-              >
-                <span className="inline-flex min-w-0 items-center gap-1.5">
-                  <Terminal aria-hidden="true" className="h-3.5 w-3.5 flex-shrink-0" />
-                  <span className="min-w-0 truncate">
-                    {showCollapsedCommandOutput ? "Hide command output" : truncate(latestCommandPreview || "Show command output", 130)}
+                  <span className="flex-shrink-0 text-slate-500 dark:text-slate-300">
+                    {renderThreadCompactEventIcon(singleCompactEvent.kind)}
                   </span>
-                </span>
-                <span className="inline-flex flex-shrink-0 items-center gap-1">
-                  <Eye aria-hidden="true" className="h-3 w-3" />
-                  {showCollapsedCommandOutput ? "Hide" : "View"}
-                </span>
-              </button>
-              {showCollapsedCommandOutput ? (
-                <div className="mt-2">
-                  <CommandOutputBlock
-                    command={latestCommandExecution?.command ?? null}
-                    output={latestCommandExecution?.output ?? ""}
-                    status={latestCommandExecution?.status ?? null}
-                    compact
-                    onCancel={onCancelTerminalCommand ?? null}
-                  />
-                </div>
-              ) : null}
-            </div>
-          </div>
-        ) : null}
-
-        {visibleInlineUpdates.map((update) => {
-          const updateType = (getMessageType(update) ?? "").trim().toLowerCase();
-          const isActivityUpdate = updateType === "reasoning" || updateType === "status";
-          const rawContent = isActivityUpdate ? normalizeActivityText(update.content) : update.content.trim();
-          const retryingPresentation = isActivityUpdate
-            ? resolveRetryingStatusPresentation({ metadata: update.metadata, content: rawContent })
-            : null;
-          const content =
-            retryingPresentation?.displayText ?? formatProxyUpstreamErrorSummary(rawContent) ?? rawContent;
-          const updateTitle = retryingPresentation?.fullText ?? content;
-          const expanded = Boolean(expandedUpdateIds[update.id]);
-          const updateDetails = extractMessageDetails(update.metadata);
-
-          if (updateType === "integration_request") {
-            return (
-              <div key={update.id} className="relative py-1">
-                {renderThreadPreviewNotch()}
-                <div className="min-w-0">
-                  <IntegrationRequestEntry
-                    message={update}
-                    projectId={projectId ?? null}
-                    details={updateDetails}
-                  />
-                </div>
-              </div>
-            );
-          }
-
-          if (updateType === "secret_request") {
-            return (
-              <div key={update.id} className="relative py-1">
-                {renderThreadPreviewNotch()}
-                <div className="min-w-0">
-                  <SecretRequestEntry
-                    message={update}
-                    projectId={projectId ?? null}
-                    details={updateDetails}
-                  />
-                </div>
-              </div>
-            );
-          }
-
-          if (updateType === "action_request") {
-            return (
-              <div key={update.id} className="relative py-1">
-                {renderThreadPreviewNotch()}
-                <div className="min-w-0">
-                  <ActionRequestEntry message={update} details={updateDetails} />
-                </div>
-              </div>
-            );
-          }
-
-          if (updateType === "multi_agent_plan") {
-            return (
-              <div key={update.id} className="relative py-1">
-                {renderThreadPreviewNotch()}
-                <div className="min-w-0 max-w-full overflow-hidden">
-                  {content ? (
-                    <MessageContent
-                      content={content}
-                      projectId={projectId ?? null}
-                    />
-                  ) : null}
-                  <MultiAgentPlanEntry details={updateDetails} />
-                </div>
-              </div>
-            );
-          }
-
-          const todoItems = updateType === "todo_list" ? parseTodoItems(updateDetails) : [];
-          const isCompactionUpdate =
-            (updateType === "reasoning" || updateType === "status") && isCompactionStatusText(content);
-          const isLocalCapabilityActivity =
-            updateType === "local_capability_result" || shouldRenderLocalCapabilityStatusAsTimeline(update);
-          const updateIcon =
-            updateType === "todo_list" ? (
-              <ClipboardCheck
-                className="mt-[1px] h-3 w-3 flex-shrink-0 text-slate-400 dark:text-slate-500"
-                aria-hidden="true"
-              />
-            ) : isCompactionUpdate ? (
-              <CompressLines
-                className="mt-[1px] h-3 w-3 flex-shrink-0 text-slate-400 dark:text-slate-500"
-                aria-hidden="true"
-              />
-            ) : isLocalCapabilityActivity ? (
-              <Globe
-                className="mt-[1px] h-3 w-3 flex-shrink-0 text-slate-400 dark:text-slate-500"
-                aria-hidden="true"
-              />
-            ) : isActivityUpdate ? (
-              <Activity
-                className="mt-[1px] h-3 w-3 flex-shrink-0 text-slate-400 dark:text-slate-500"
-                aria-hidden="true"
-              />
-            ) : null;
-          const canExpand =
-            content.length > 240 ||
-            content.includes("\n") ||
-            (update.metadata && JSON.stringify(update.metadata).length > 300);
-          const previewSource =
-            isCompactionUpdate
-              ? COMPACTION_STATUS_LABEL
-              : updateType === "file_change"
-                ? stripWorkspacePrefixForPreview(content)
-                : content;
-          const previewLine = truncate(previewSource.replace(/\s+/g, " "), 200);
-          const activityPreviewParts = isActivityUpdate
-            ? splitActivityLeadAndDetails(previewLine)
-            : null;
-
-          return (
-            <div key={update.id} className="group relative py-1">
-              {renderThreadPreviewNotch()}
-              <div className="min-w-0">
-                <div
-                  data-testid="agent-thread-inline-update-row"
-                  className="flex min-w-0 items-center justify-between gap-2 rounded-lg pr-1"
-                >
-                  {canExpand ? (
-                    <button
-                      type="button"
-                      onClick={() => onToggleUpdateExpanded(update.id)}
-                      className="min-w-0 flex-1 truncate text-left text-xs text-slate-600 hover:text-slate-800 dark:text-slate-300 dark:hover:text-slate-100"
-                      title={updateTitle}
-                    >
-                      <span className="flex min-w-0 items-start gap-2">
-                        {updateIcon}
-                        {activityPreviewParts ? (
-                          <span className="min-w-0 truncate">
-                            <span className="font-medium text-slate-700 dark:text-slate-100">
-                              {activityPreviewParts.lead}
-                            </span>
-                            {activityPreviewParts.details ? (
-                              <span className="text-slate-600 dark:text-slate-300">
-                                {" "}
-                                {activityPreviewParts.details}
-                              </span>
-                            ) : null}
-                          </span>
-                        ) : (
-                          <span className="min-w-0 truncate">{previewLine}</span>
-                        )}
-                      </span>
-                    </button>
-                  ) : (
-                    <div
-                      className="min-w-0 flex-1 truncate text-xs text-slate-600 dark:text-slate-300"
-                      title={updateTitle}
-                    >
-                      <span className="flex min-w-0 items-start gap-2">
-                        {updateIcon}
-                        {activityPreviewParts ? (
-                          <span className="min-w-0 truncate">
-                            <span className="font-medium text-slate-700 dark:text-slate-100">
-                              {activityPreviewParts.lead}
-                            </span>
-                            {activityPreviewParts.details ? (
-                              <span className="text-slate-600 dark:text-slate-300">
-                                {" "}
-                                {activityPreviewParts.details}
-                              </span>
-                            ) : null}
-                          </span>
-                        ) : (
-                          <span className="min-w-0 truncate">{previewLine}</span>
-                        )}
-                      </span>
-                    </div>
-                  )}
-
-                  {canExpand ? (
+                  <span
+                    className={`${showSingleCompactEventStatusSweep ? "instafy-status-sweep" : ""} min-w-0 truncate`}
+                    data-sweep-text={singleCompactEventDisplayLabel}
+                  >
+                    {singleCompactEventDisplayLabel}
+                  </span>
+                </button>
+                <div className="ml-auto flex flex-none items-center gap-1">
+                  {canCancelTerminalRun ? (
                     <IconButton
-                      aria-label={expanded ? "Collapse update" : "Expand update"}
+                      aria-label="Stop run"
                       variant="ghost"
                       size="xs"
                       radius="full"
-                      onPress={() => onToggleUpdateExpanded(update.id)}
-                      className={`transition-opacity ${
-                        expanded
-                          ? "opacity-100"
-                          : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 data-[focus-visible]:opacity-100"
-                      }`}
+                      onPress={handleCancelRun}
+                      isDisabled={cancelRunPending}
+                      data-testid="chat-command-stop-button"
+                      className="text-rose-500 hover:text-rose-600 dark:text-rose-300 dark:hover:text-rose-200"
                     >
-                      <NavArrowRight
-                        className={`h-3 w-3 transition-transform ${
-                          expanded ? "rotate-90 text-slate-600 dark:text-slate-200" : "text-slate-400"
-                        }`}
-                        aria-hidden="true"
-                      />
+                      <Xmark aria-hidden="true" className="h-3.5 w-3.5" />
                     </IconButton>
                   ) : null}
-                </div>
-
-                {expanded ? (
-                  <div className="mt-2 rounded-xl bg-white/60 p-2 text-sm text-slate-700 dark:bg-slate-950/40 dark:text-slate-200">
-                    {isActivityUpdate ? (
-                      <p className="whitespace-pre-wrap break-words text-sm">{content}</p>
+                  <IconButton
+                    aria-label={isThreadPreviewExpanded ? "Collapse run updates" : "Expand run updates"}
+                    variant="ghost"
+                    size="xs"
+                    radius="full"
+                    onPress={onToggleThreadPreview}
+                    className={
+                      singleCompactEventIsCommand
+                        ? "text-slate-500 opacity-100 hover:text-slate-800 dark:text-slate-300 dark:hover:text-slate-100"
+                        : `text-slate-400 hover:text-slate-700 dark:text-slate-500 dark:hover:text-slate-200 ${
+                            isThreadPreviewExpanded
+                              ? "opacity-100"
+                              : "opacity-0 group-hover:opacity-90 group-focus-within:opacity-90"
+                          }`
+                    }
+                  >
+                    {isThreadPreviewExpanded ? (
+                      <NavArrowDown aria-hidden="true" className="h-3.5 w-3.5" />
                     ) : (
-                      <MessageContent content={content} projectId={projectId ?? null} />
+                      <NavArrowRight aria-hidden="true" className="h-3.5 w-3.5" />
                     )}
-                    {todoItems.length > 0 ? (
-                      <ul className="mt-2 space-y-1 text-xs">
-                        {todoItems.map((item, itemIndex) => (
-                          <li key={`${item.text}-${itemIndex}`} className="flex items-start gap-2">
-                            <span
-                              className={`mt-1 inline-flex h-2 w-2 flex-shrink-0 rounded-full ${
-                                item.completed ? "bg-primary-500" : "bg-slate-300 dark:bg-slate-700"
-                              }`}
-                              aria-hidden="true"
-                            />
-                            <span
-                              className={
-                                item.completed
-                                  ? "line-through text-slate-400 dark:text-slate-500"
-                                  : "text-slate-600 dark:text-slate-200"
-                              }
-                            >
-                              {item.text}
-                            </span>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : null}
-                  </div>
-                ) : null}
+                  </IconButton>
+                </div>
               </div>
-            </div>
-          );
-        })}
-
-        {isThreadPreviewExpanded && branchThreads.length > 0 ? (
-          <div className="relative py-1">
-            {renderThreadPreviewNotch()}
-            <div className="space-y-1.5">
-              {branchThreads.map((branch) => (
-                <AgentThreadBranchRowEntry
-                  key={branch.threadLocalId}
-                  branch={branch}
-                  onOpen={onOpenBranchThread}
-                />
-              ))}
+              {commandPanelExpanded ? runDetailSections : null}
             </div>
           </div>
         ) : null}
+
+        {commandPanelExpanded ? null : runDetailSections}
 
         {showSummaryBody && !suppressSummaryRunningStatus ? (
           <div
