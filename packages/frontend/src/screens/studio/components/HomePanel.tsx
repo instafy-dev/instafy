@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { ChatLines, Check, Clock, Group, Plus, WarningTriangle } from "iconoir-react";
+import { ChatLines, Check, Clock, Group, Plus, User, WarningTriangle } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
 import { AttentionBadge } from "../../../components/AttentionBadge";
 import { Button, IconButton } from "../../../components/Button";
@@ -14,6 +14,7 @@ import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { DRAWER_ICON_BUTTON_TONE_CLASS } from "../../../components/listRowStyles";
 import { useConversations } from "../../../conversations/ConversationsProvider";
 import { useProjects } from "../../../projects/useProjects";
+import { useAuth } from "../../../providers/AuthProvider";
 import { controllerClient, type NotificationInboxItem } from "../../../sdk/instafy";
 import type { ActivityItem } from "../../../services/runtimeController/activity";
 import { useStatus } from "../../../status/useStatus";
@@ -183,12 +184,14 @@ function EventIcon({ event }: { event: HomeFeedEvent }) {
     );
   }
   if (event.actor?.kind === "user") {
+    // A person: their initials, or a plain figure when no name is on file.
+    const initials = initialsFor(event.actor.displayName);
     return (
       <span
         className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-slate-200 text-xxs font-medium text-slate-700 dark:bg-slate-700 dark:text-slate-200"
         aria-hidden="true"
       >
-        {initialsFor(event.actor.displayName)}
+        {initials === "?" ? <User className="h-4 w-4" aria-hidden="true" /> : initials}
       </span>
     );
   }
@@ -207,7 +210,7 @@ function EventIcon({ event }: { event: HomeFeedEvent }) {
   return <ChatLines className="h-4 w-4 text-slate-400 dark:text-slate-500" aria-hidden="true" />;
 }
 
-function statusSubtitle(event: HomeFeedEvent): string | null {
+function statusSubtitle(event: HomeFeedEvent, viewerUserId: string | null): string | null {
   switch (event.kind) {
     case "running":
       return "Run in progress";
@@ -217,8 +220,13 @@ function statusSubtitle(event: HomeFeedEvent): string | null {
       return "Run finished";
     case "run_failed":
       return "Run failed";
-    case "conversation":
-      return event.source.type === "activity" ? "Started a conversation" : null;
+    case "conversation": {
+      if (event.source.type !== "activity") {
+        return null;
+      }
+      const actorId = event.source.item.actor.userId;
+      return actorId && actorId === viewerUserId ? "You started a conversation" : "Started a conversation";
+    }
     default:
       return null;
   }
@@ -275,6 +283,8 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
   const { showStatus } = useStatus();
   const { requestUrlPush, openConversationTab } = useWorkspaceTabs();
   const { userEmail, onStartNewProject, onStartNewConversation, onOpenOrgSettings } = useWorkspaceControls();
+  const { user: authUser } = useAuth();
+  const viewerUserId = authUser?.id ?? null;
   const navigate = useNavigate();
   const [locallyDismissedKeys, setLocallyDismissedKeys] = useState<string[]>([]);
   const [teamFilter, setTeamFilter] = useState(HOME_TEAM_FILTER_ALL);
@@ -608,7 +618,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
     const when = formatRelativeTimestamp(event.at);
     const teamSuffix = showTeamOnRows && !personalTeamKeys.has(event.team.key) ? ` · ${event.team.name}` : "";
     const where = spansSpaces ? `${event.project.name}${teamSuffix}` : null;
-    const rest = [statusSubtitle(event), usablePreview(event.preview)].filter(Boolean).join(" · ") || null;
+    const rest = [statusSubtitle(event, viewerUserId), usablePreview(event.preview)].filter(Boolean).join(" · ") || null;
     return (
       <div key={event.key} className={[ROW_HOVER_CLASS, options.divider ? ROW_DIVIDER_CLASS : ""].filter(Boolean).join(" ")}>
         <FeedRow
