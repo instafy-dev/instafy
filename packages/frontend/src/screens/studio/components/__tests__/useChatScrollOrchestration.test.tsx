@@ -484,6 +484,60 @@ describe("useChatScrollController", () => {
     expect(scrollContainer.scrollTop).toBe(380);
   });
 
+  it("keeps the user's live position when they scroll while an older page is in flight", async () => {
+    const loadOlderMessages = vi.fn();
+
+    await act(async () => {
+      root.render(
+        <ScrollHarness
+          loadOlderMessages={loadOlderMessages}
+          messages={[createMessage("newer")]}
+          scrollHeight={500}
+        />,
+      );
+    });
+
+    const scrollContainer = container.querySelector('[data-testid="scroll-container"]') as HTMLDivElement;
+    // The scroll handler asks for the next page as soon as the user crosses the
+    // top threshold, so the request fires at 40px...
+    scrollContainer.scrollTop = 40;
+
+    await act(async () => {
+      container.querySelector("button")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(loadOlderMessages).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      root.render(
+        <ScrollHarness
+          isHistoryLoading
+          loadOlderMessages={loadOlderMessages}
+          messages={[createMessage("newer")]}
+          scrollHeight={500}
+        />,
+      );
+    });
+
+    // ...but trackpad momentum keeps carrying the user to the very top while
+    // the page is loading.
+    scrollContainer.scrollTop = 0;
+
+    await act(async () => {
+      root.render(
+        <ScrollHarness
+          isHistoryLoading={false}
+          loadOlderMessages={loadOlderMessages}
+          messages={[createMessage("older"), createMessage("newer")]}
+          scrollHeight={1248}
+        />,
+      );
+    });
+
+    // The prepend must offset where the user actually is (0 + 748), not snap
+    // them back to where they were when the request went out (40 + 748).
+    expect(scrollContainer.scrollTop).toBe(748);
+  });
+
   it("does not fight the user if they scroll after older history loads", async () => {
     const loadOlderMessages = vi.fn();
 
