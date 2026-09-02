@@ -17,7 +17,14 @@ vi.mock("../ChatBrowserDock", () => ({
 }));
 
 vi.mock("../ComposerActionMenu", () => ({
-  ComposerActionMenu: () => <div data-testid="mock-composer-action-menu" />,
+  ComposerActionMenu: (props: Record<string, unknown>) => (
+    <div
+      data-testid="mock-composer-action-menu"
+      data-trigger-variant={String(props.triggerVariant ?? "outline")}
+      data-upload-image={String(typeof props.onUploadImage === "function")}
+      data-insert-suggestion={String(typeof props.onInsertSuggestion === "function")}
+    />
+  ),
 }));
 
 vi.mock("../ComposerInviteModal", () => ({
@@ -43,6 +50,7 @@ vi.mock("../chat-input/ChatInput", () => ({
     return (
       <div
         data-compact={String(_props.compact === true)}
+        data-compact-viewport={String(_props.compactViewport === true)}
         data-read-only={String(_props.readOnly === true)}
         data-testid="chat-input"
       >
@@ -308,6 +316,159 @@ describe("ChatComposerSurface", () => {
     vi.useRealTimers();
     vi.restoreAllMocks();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  function renderLayout(overrides: Partial<ComponentProps<typeof ChatComposerSurface>> = {}) {
+    const base = createProps({ showVoicePrimaryAction: false, showVoiceSecondaryAction: true });
+    return root.render(
+      <ChatComposerSurface
+        {...base}
+        {...overrides}
+        chatInputProps={{ ...base.chatInputProps, ...(overrides.chatInputProps ?? {}) }}
+      />,
+    );
+  }
+
+  function layoutNodes() {
+    return {
+      textRow: container.querySelector('[data-testid="chat-composer-text-row"]'),
+      leading: container.querySelector('[data-testid="chat-composer-leading-controls"]'),
+      trailing: container.querySelector('[data-testid="chat-composer-trailing-controls"]'),
+      toolbar: container.querySelector('[data-testid="chat-composer-toolbar"]'),
+      toolbarLeading: container.querySelector('[data-testid="chat-composer-toolbar-leading"]'),
+      toolbarTrailing: container.querySelector('[data-testid="chat-composer-toolbar-trailing"]'),
+      menu: container.querySelector('[data-testid="mock-composer-action-menu"]'),
+      send: container.querySelector('[data-testid="chat-send-button"]'),
+      image: container.querySelector('[data-testid="chat-image-upload-button"]'),
+      wand: container.querySelector('[data-testid="chat-accept-suggestion-button"]'),
+      voice: container.querySelector('[data-testid="mock-voice-action-strip"]'),
+    };
+  }
+
+  it("rests as one row at sm+ with the trailing image, mic and quiet send beside the input", async () => {
+    await act(async () => renderLayout({ sendButtonVariant: "outline" }));
+
+    const nodes = layoutNodes();
+    expect(nodes.textRow?.getAttribute("data-composer-inline-controls")).toBe("true");
+    expect(nodes.toolbar).toBeNull();
+    expect(nodes.leading?.contains(nodes.menu)).toBe(true);
+    expect(nodes.menu?.getAttribute("data-trigger-variant")).toBe("outline");
+    expect(nodes.menu?.getAttribute("data-upload-image")).toBe("false");
+    expect(nodes.trailing?.contains(nodes.image)).toBe(true);
+    expect(nodes.trailing?.contains(nodes.voice)).toBe(true);
+    expect(nodes.trailing?.contains(nodes.send)).toBe(true);
+    expect(nodes.send?.getAttribute("data-send-rest")).toBe("true");
+    expect(nodes.send?.className.split(" ")).not.toContain("primary");
+    expect(nodes.send?.className.split(" ")).toContain("bg-transparent");
+    expect(container.querySelector('[data-testid="chat-input"]')?.getAttribute("data-compact-viewport")).toBe(
+      "false",
+    );
+    expect(container.querySelector('[data-browser-composer-condensed="true"]')).toBeNull();
+  });
+
+  it("rests as one row below sm with only mic and send inline, folding image upload into the + menu", async () => {
+    await act(async () =>
+      renderLayout({ compactBrowserViewport: true, sendButtonVariant: "outline" }),
+    );
+
+    const nodes = layoutNodes();
+    expect(nodes.textRow?.getAttribute("data-composer-inline-controls")).toBe("true");
+    expect(nodes.toolbar).toBeNull();
+    expect(nodes.image).toBeNull();
+    expect(nodes.wand).toBeNull();
+    expect(nodes.leading?.contains(nodes.menu)).toBe(true);
+    expect(nodes.menu?.getAttribute("data-upload-image")).toBe("true");
+    expect(nodes.menu?.getAttribute("data-insert-suggestion")).toBe("false");
+    expect(nodes.trailing?.contains(nodes.voice)).toBe(true);
+    expect(nodes.trailing?.contains(nodes.send)).toBe(true);
+    expect(nodes.send?.getAttribute("data-send-rest")).toBe("true");
+    expect(container.querySelector('[data-testid="chat-input"]')?.getAttribute("data-compact-viewport")).toBe(
+      "true",
+    );
+  });
+
+  it("reveals the toolbar below the text row at sm+ once there is text and collapses it when cleared", async () => {
+    vi.useFakeTimers();
+    await act(async () => renderLayout({ sendButtonVariant: "outline" }));
+    const inputNode = container.querySelector('[data-testid="chat-input"]');
+    expect(layoutNodes().toolbar).toBeNull();
+
+    await act(async () => renderLayout({ chatInputProps: { value: "   " } as never, sendButtonVariant: "outline" }));
+    expect(layoutNodes().toolbar).toBeNull();
+
+    await act(async () =>
+      renderLayout({ chatInputProps: { value: "Ship it" } as never, sendButtonVariant: "primary" }),
+    );
+    let nodes = layoutNodes();
+    expect(nodes.toolbar).not.toBeNull();
+    expect(nodes.textRow?.getAttribute("data-composer-inline-controls")).toBe("false");
+    expect(nodes.leading).toBeNull();
+    expect(nodes.trailing).toBeNull();
+    expect(nodes.toolbarLeading?.contains(nodes.menu)).toBe(true);
+    expect(nodes.menu?.getAttribute("data-trigger-variant")).toBe("ghost");
+    expect(nodes.toolbarLeading?.contains(nodes.image)).toBe(true);
+    expect(nodes.toolbarTrailing?.contains(nodes.voice)).toBe(true);
+    expect(nodes.toolbarTrailing?.contains(nodes.send)).toBe(true);
+    expect(nodes.send?.getAttribute("data-send-rest")).toBe("false");
+    expect(nodes.send?.className.split(" ")).toContain("primary");
+    expect(container.querySelectorAll('[data-testid="chat-send-button"]')).toHaveLength(1);
+    expect(container.querySelector('[data-testid="chat-input"]')).toBe(inputNode);
+
+    await act(async () => renderLayout({ chatInputProps: { value: "" } as never, sendButtonVariant: "outline" }));
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    nodes = layoutNodes();
+    expect(nodes.toolbar).toBeNull();
+    expect(nodes.textRow?.getAttribute("data-composer-inline-controls")).toBe("true");
+    expect(nodes.trailing?.contains(nodes.send)).toBe(true);
+    expect(nodes.send?.getAttribute("data-send-rest")).toBe("true");
+    expect(container.querySelector('[data-testid="chat-input"]')).toBe(inputNode);
+  });
+
+  it("stays one row while typing below sm and folds the suggestion wand into the + menu", async () => {
+    await act(async () =>
+      renderLayout({
+        compactBrowserViewport: true,
+        showMobileGhostSuggestionAcceptButton: true,
+        chatInputProps: { value: "Hel" } as never,
+        sendButtonVariant: "primary",
+      }),
+    );
+
+    const nodes = layoutNodes();
+    expect(nodes.toolbar).toBeNull();
+    expect(nodes.textRow?.getAttribute("data-composer-inline-controls")).toBe("true");
+    expect(nodes.image).toBeNull();
+    expect(nodes.wand).toBeNull();
+    expect(nodes.menu?.getAttribute("data-upload-image")).toBe("true");
+    expect(nodes.menu?.getAttribute("data-insert-suggestion")).toBe("true");
+    expect(nodes.trailing?.contains(nodes.send)).toBe(true);
+    expect(nodes.send?.getAttribute("data-send-rest")).toBe("false");
+  });
+
+  it("defers the toolbar reveal while voice capture is active so the held microphone never moves rows", async () => {
+    const renderHold = (value: string, showVoiceStatus: boolean) =>
+      renderLayout({
+        showVoiceStatus,
+        voiceStatusMessage: showVoiceStatus ? "Listening. Speak now and release to stop." : "",
+        voiceConversationActionStripProps: { voiceInteractionMode: "hold" } as never,
+        chatInputProps: { value } as never,
+        sendButtonVariant: value ? "primary" : "outline",
+      });
+
+    await act(async () => renderHold("", true));
+    const micOwner = container.querySelector('[data-testid="mock-voice-action-strip"]');
+    expect(layoutNodes().trailing?.contains(micOwner)).toBe(true);
+
+    await act(async () => renderHold("transcribed draft", true));
+    expect(layoutNodes().toolbar).toBeNull();
+    expect(container.querySelector('[data-testid="mock-voice-action-strip"]')).toBe(micOwner);
+
+    await act(async () => renderHold("transcribed draft", false));
+    const nodes = layoutNodes();
+    expect(nodes.toolbar).not.toBeNull();
+    expect(nodes.toolbarTrailing?.contains(nodes.voice)).toBe(true);
   });
 
   it("condenses the idle composer in Browser mode and expands it when a draft appears", async () => {

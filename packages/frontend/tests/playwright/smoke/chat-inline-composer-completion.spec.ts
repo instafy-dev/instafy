@@ -52,7 +52,7 @@ test.describe("Chat inline composer completion", () => {
     await expect(editorParagraph).toHaveText("Hello there");
   });
 
-  test("shows a compact accept button on mobile and applies the suggestion when tapped", async ({ page }) => {
+  test("folds the accept action into the + menu on mobile and applies the suggestion when tapped", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await prepareStudio(page, { waitForHostedRuntime: false });
 
@@ -65,11 +65,14 @@ test.describe("Chat inline composer completion", () => {
 
     await expect(page.getByText("lo there", { exact: true })).toBeVisible({ timeout: 30_000 });
 
-    const acceptButton = page.getByTestId("chat-accept-suggestion-button");
-    await expect(acceptButton).toBeVisible({ timeout: 30_000 });
-    await acceptButton.click();
+    // Below sm the composer is one row; the wand lives in the "+" menu.
+    await expect(page.getByTestId("chat-accept-suggestion-button")).toHaveCount(0);
+    await page.getByTestId("composer-action-menu-trigger").click();
+    const acceptAction = page.getByTestId("composer-action-menu-insert-suggestion");
+    await expect(acceptAction).toBeVisible({ timeout: 30_000 });
+    await acceptAction.click();
 
-    await expect(acceptButton).toBeHidden();
+    await expect(acceptAction).toBeHidden();
     await expect(editorParagraph).toHaveText("Hello there");
   });
 
@@ -79,5 +82,8 @@ test.describe("Chat inline composer completion", () => {
 
     await expect(page.getByTestId("chat-input")).toBeVisible({ timeout: 30_000 });
     await expect(page.getByTestId("chat-accept-suggestion-button")).toHaveCount(0);
+    await page.getByTestId("composer-action-menu-trigger").click();
+    await expect(page.getByTestId("composer-action-menu-upload-image")).toBeVisible();
+    await expect(page.getByTestId("composer-action-menu-insert-suggestion")).toHaveCount(0);
   });
 });

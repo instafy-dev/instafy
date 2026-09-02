@@ -3,6 +3,8 @@ import {
   Bookmark,
   Github,
   Group,
+  MagicWand,
+  MediaImage,
   NavArrowLeft,
   NavArrowRight,
   OpenNewWindow,
@@ -80,7 +82,11 @@ export function ComposerActionMenu({
   onStashDraft,
   queueDisabled = false,
   stashDisabled = false,
+  onUploadImage,
+  uploadImageDisabled = false,
+  onInsertSuggestion,
   triggerClassName,
+  triggerVariant = "outline",
   mutationDisabled = false,
   inviteActionLabel = "Invite teammates",
 }: {
@@ -98,7 +104,14 @@ export function ComposerActionMenu({
   onStashDraft?: () => void;
   queueDisabled?: boolean;
   stashDisabled?: boolean;
+  // Narrow viewports fold the inline image-upload and insert-suggestion
+  // controls into this menu so the one-row composer never loses an action.
+  // The composer passes them only when it is not rendering them inline.
+  onUploadImage?: () => void;
+  uploadImageDisabled?: boolean;
+  onInsertSuggestion?: () => void;
   triggerClassName?: string;
+  triggerVariant?: "outline" | "ghost";
   mutationDisabled?: boolean;
   inviteActionLabel?: string;
 }) {
@@ -132,7 +145,7 @@ export function ComposerActionMenu({
     <DialogTrigger isOpen={open} onOpenChange={handleOpenChange}>
       <IconButton
         type="button"
-        variant="outline"
+        variant={triggerVariant}
         size="md"
         radius="xl"
         aria-label="Open composer actions"
@@ -176,6 +189,36 @@ export function ComposerActionMenu({
           </div>
         ) : (
           <div className="space-y-1">
+            {onInsertSuggestion ? (
+              <ActionRow
+                icon={<MagicWand className="h-4 w-4" aria-hidden="true" />}
+                title="Insert suggestion"
+                onPress={() => {
+                  closeMenu();
+                  onInsertSuggestion();
+                }}
+                testId="composer-action-menu-insert-suggestion"
+              />
+            ) : null}
+            {!mutationDisabled && onUploadImage ? (
+              <ActionRow
+                icon={<MediaImage className="h-4 w-4" aria-hidden="true" />}
+                title="Upload image"
+                onPress={() => {
+                  closeMenu();
+                  onUploadImage();
+                }}
+                disabled={uploadImageDisabled}
+                testId="composer-action-menu-upload-image"
+              />
+            ) : null}
+            {(onInsertSuggestion || (!mutationDisabled && onUploadImage)) &&
+            (!mutationDisabled || showInviteAction) ? (
+              <div
+                role="separator"
+                className="mx-2 my-1 border-t border-slate-200/70 dark:border-[color:var(--color-studio-dark-panel-border)]"
+              />
+            ) : null}
             {!mutationDisabled && onQueueMessage ? (
               <ActionRow
                 icon={<Send className="h-4 w-4" aria-hidden="true" />}

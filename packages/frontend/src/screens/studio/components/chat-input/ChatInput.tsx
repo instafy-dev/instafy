@@ -16,6 +16,7 @@ import { AssistantMentionsPlugin, type MentionAgentProfile } from "./AssistantMe
 import { formatGhostSuggestionRemainderForDisplay } from "./ghostSuggestionDisplay";
 import { SlashCommandsPlugin } from "./SlashCommandsPlugin";
 import { UserMentionNode } from "./UserMentionNode";
+import { resolveChatInputMaxHeightPx } from "./chatInputGrowth";
 import type { ControllerProjectMember } from "../../../../sdk/instafy";
 import { installBrowserUseVirtualClipboardForAutomation } from "./browserUseVirtualClipboard";
 
@@ -41,6 +42,9 @@ type ChatInputProps = {
   recordingIndicatorActive?: boolean;
   recordingIndicatorLabel?: string | null;
   compact?: boolean;
+  // Narrow (< sm) viewports cap growth at fewer lines; the composer passes the
+  // same JS breakpoint it uses for its own layout so both agree.
+  compactViewport?: boolean;
   readOnly?: boolean;
   onReadOnlyKeyDown?: () => void;
 };
@@ -99,6 +103,7 @@ function ChatInputEditor(
     recordingIndicatorActive,
     recordingIndicatorLabel,
     compact,
+    compactViewport = false,
     readOnly = false,
     onReadOnlyKeyDown,
   }: ChatInputProps,
@@ -302,8 +307,14 @@ function ChatInputEditor(
               onKeyDown?.(event);
             }}
             onPaste={onPaste}
+            // The editor is a single line at rest and auto-grows with content
+            // until the per-viewport line cap, then scrolls inside. The cap is
+            // an inline style so the line count stays the single source of
+            // truth (see chatInputGrowth.ts).
+            style={compact ? undefined : { maxHeight: `${resolveChatInputMaxHeightPx({ compactViewport })}px` }}
+            data-max-height-px={compact ? undefined : resolveChatInputMaxHeightPx({ compactViewport })}
             className={`relative z-0 w-full overflow-auto whitespace-pre-wrap break-words text-base leading-5 text-slate-900 outline-none sm:text-sm dark:text-slate-100 ${
-              compact ? "min-h-7 max-h-24 py-0.5" : "min-h-[2.5rem] max-h-36 py-1 sm:py-0.5"
+              compact ? "min-h-7 max-h-24 py-0.5" : "min-h-7 py-1 sm:min-h-6 sm:py-0.5"
             } ${readOnly ? "cursor-not-allowed opacity-60" : ""}`}
           />
         }
@@ -350,6 +361,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
     recordingIndicatorActive,
     recordingIndicatorLabel,
     compact,
+    compactViewport,
     readOnly,
     onReadOnlyKeyDown,
   },
@@ -393,6 +405,7 @@ export const ChatInput = forwardRef<ChatInputHandle, ChatInputProps>(function Ch
         recordingIndicatorActive={recordingIndicatorActive}
         recordingIndicatorLabel={recordingIndicatorLabel}
         compact={compact}
+        compactViewport={compactViewport}
         readOnly={readOnly}
         onReadOnlyKeyDown={onReadOnlyKeyDown}
       />
