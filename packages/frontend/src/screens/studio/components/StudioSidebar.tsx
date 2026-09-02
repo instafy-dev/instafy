@@ -1576,7 +1576,7 @@ export function StudioSidebar({
       <StudioSidebarMobileDrillIn
         open={!isLargeScreen && workspaceMobileViewOpen}
         testId="sidebar-project-switcher-menu"
-        title="Space switcher"
+        title="Team & spaces"
         backLabel="Back"
         backTestId="sidebar-project-switcher-back"
         onBack={closeWorkspaceSwitcher}
