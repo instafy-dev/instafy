@@ -213,13 +213,59 @@ describe("buildHomeFeed", () => {
       now: NOW,
     });
 
+    // Replies only, newest first; the undated one sinks to the bottom.
     expect(model.needs.map((event) => [event.kind, event.team.name])).toEqual([
-      ["running", "Personal"],
       ["reply", "Acme Co"],
       ["reply", "Personal"],
       ["reply", "Acme Co"],
     ]);
     expect(model.needs.at(-1)?.title).toBe("Undated");
+    // Work in flight is progress, not a demand: it leads Recent as a live group.
+    expect(model.activity[0]).toMatchObject({ key: "live", label: "In progress" });
+    expect(model.activity[0].events.map((event) => [event.kind, event.lane, event.title])).toEqual([
+      ["running", "activity", "Nightly build"],
+    ]);
+    expect(model.teams.find((team) => team.isPersonal)?.needsCount).toBe(1);
+  });
+
+  it("keeps the caught-up cut in place when live rows sit above the dated groups", () => {
+    const running = localConversation({
+      localId: "local-run",
+      controllerId: "c-run",
+      title: "Nightly build",
+      messages: [{ id: "m-r", role: "user", content: "go", timestamp: NOW - 8 * HOUR }],
+    });
+    const model = buildHomeFeed({
+      attentionEntries: [
+        {
+          key: "running-local-run",
+          title: running.title,
+          subtitle: "",
+          meta: null,
+          preview: null,
+          kind: "running",
+          source: "conversation",
+          localConversationId: running.localId,
+          testId: "t-run",
+        },
+      ],
+      recentConversations: [
+        recent({ conversationId: "a", updatedAt: new Date(NOW - HOUR).toISOString() }),
+        recent({ conversationId: "b", updatedAt: new Date(NOW - 3 * HOUR).toISOString() }),
+      ],
+      projects: [personalProject],
+      activeProject: personalProject,
+      conversations: [running],
+      teamFilter: "all",
+      lastSeenAt: NOW - 2 * HOUR,
+      now: NOW,
+    });
+
+    const flat = model.activity.flatMap((day) => day.events);
+    expect(flat.map((event) => event.kind)).toEqual(["running", "conversation", "conversation"]);
+    // Index 2 in the flat list: after the live row and the one new conversation.
+    expect(model.sinceCutIndex).toBe(2);
+    expect(model.isEmpty).toBe(false);
   });
 
   it("pins the user's real Personal org first and folds org-less spaces into it", () => {
