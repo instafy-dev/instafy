@@ -540,6 +540,25 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
   // Indentation of each open list level, innermost last; a deeper-indented
   // item opens a sublist, a shallower one returns to the matching ancestor.
   let pendingListIndentStack: number[] = [];
+  // Flat-sublist leniency (#191). Real agent markdown writes
+  //   "1. Persistent-context skills:" followed by UNINDENTED "- `autofix-x`: …"
+  // bullets. CommonMark makes those a sibling bullet list, which renders as a
+  // flat "1. • • • 2. • 3." sequence. A human reads them as the item's
+  // sublist, so the parser does too, under one asymmetric, conservative rule:
+  //   - a bullet item that directly follows an ORDERED item (no blank line)
+  //     and is not indented enough to nest on its own becomes that item's
+  //     sublist at depth + 1, whatever the item's trailing punctuation;
+  //   - across exactly ONE blank line the same happens only when the ordered
+  //     item ends with ":" (it announced a list); without the colon, or after
+  //     two blank lines, the bullets stay a sibling block as CommonMark says;
+  //   - an ordered item after a bullet never nests this way, and the indented
+  //     form keeps its existing, explicit nesting.
+  // The virtual level lives on the indent stack like an indented one would, so
+  // deeper indented bullets under a flat bullet still nest via indentation;
+  // `flatSublistLevel` remembers its index so a following ordered item at the
+  // parent's level can close it.
+  let flatSublistLevel: number | null = null;
+  let listSurvivesBlankLine = false;
   let pendingQuote: Extract<MessageContentBlock, { kind: "quote" }> | null = null;
   let pendingCode: PendingCodeFence | null = null;
 
@@ -549,6 +568,8 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
       pendingList = null;
       pendingListIndentStack = [];
     }
+    flatSublistLevel = null;
+    listSurvivesBlankLine = false;
   };
   const flushQuote = () => {
     if (pendingQuote) {
@@ -575,9 +596,30 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
     }
 
     if (!line.trim()) {
-      flushList();
+      const lastListItem = pendingList?.items[pendingList.items.length - 1];
+      if (
+        pendingList?.ordered &&
+        lastListItem?.ordered &&
+        lastListItem.text.endsWith(":") &&
+        !listSurvivesBlankLine
+      ) {
+        // The item announced a list: hold the flush for one blank line and let
+        // the next line decide (see the leniency rule above).
+        listSurvivesBlankLine = true;
+      } else {
+        flushList();
+      }
       flushQuote();
       continue;
+    }
+
+    if (listSurvivesBlankLine) {
+      listSurvivesBlankLine = false;
+      // Only a bullet line may continue the held list across the blank line;
+      // anything else gets the flush the blank line would have done.
+      if (!/^\s*[-*]\s+\S/.test(line)) {
+        flushList();
+      }
     }
 
     const fenceOpening = parseCodeFenceOpening(line);
@@ -618,7 +660,20 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
         pendingList !== null &&
         pendingListIndentStack.length > 0 &&
         indent >= (pendingListIndentStack[0] ?? 0) + 2;
-      if (!pendingList || (!nestsInPendingList && pendingList.ordered !== ordered)) {
+      // Flat-sublist leniency (#191): an unindented bullet after an ordered
+      // item, or while such a flat sublist is already open, nests instead of
+      // starting a sibling block. Ordered items never take this path.
+      const lastListItem = pendingList?.items[pendingList.items.length - 1];
+      const nestsAsFlatSublist =
+        pendingList !== null &&
+        pendingList.ordered &&
+        !ordered &&
+        !nestsInPendingList &&
+        (flatSublistLevel !== null || lastListItem?.ordered === true);
+      if (
+        !pendingList ||
+        (!nestsInPendingList && !nestsAsFlatSublist && pendingList.ordered !== ordered)
+      ) {
         flushList();
         pendingList = {
           kind: "list",
@@ -628,13 +683,28 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
         };
         pendingListIndentStack = [indent];
       } else {
+        if (
+          flatSublistLevel !== null &&
+          ordered &&
+          indent < (pendingListIndentStack[flatSublistLevel] ?? 0) + 2
+        ) {
+          // An ordered item back at the parent's level closes the flat sublist.
+          pendingListIndentStack.length = flatSublistLevel;
+          flatSublistLevel = null;
+        }
+        // Bullets never dedent past an open flat sublist: its level is where
+        // they belong even though their indentation is the parent's.
+        const shallowestLevel = flatSublistLevel !== null && !ordered ? flatSublistLevel + 1 : 1;
         while (
-          pendingListIndentStack.length > 1 &&
+          pendingListIndentStack.length > shallowestLevel &&
           indent < (pendingListIndentStack[pendingListIndentStack.length - 1] ?? 0)
         ) {
           pendingListIndentStack.pop();
         }
-        if (indent >= (pendingListIndentStack[pendingListIndentStack.length - 1] ?? 0) + 2) {
+        if (nestsAsFlatSublist && flatSublistLevel === null) {
+          flatSublistLevel = pendingListIndentStack.length;
+          pendingListIndentStack.push(indent);
+        } else if (indent >= (pendingListIndentStack[pendingListIndentStack.length - 1] ?? 0) + 2) {
           pendingListIndentStack.push(indent);
         }
       }

@@ -446,6 +446,7 @@ export function AgentJobThreadPreviewLayout({
     visibleCompactEvents.length === 1 &&
     overflowCompactCount === 0 &&
     !showCompactRailWaitingSpinner;
+  const singleCompactEventIsCommand = singleCompactEvent?.kind === "command";
   // The in-flight pill sits at the rail's newest end; before any update chips
   // exist it reads as the run starting, afterwards as work continuing (#176).
   const compactRailInFlightLabel =
@@ -875,11 +876,28 @@ export function AgentJobThreadPreviewLayout({
         {!useTightThreadPreviewLayout && !terminalStatusDominatesCompactRail && shouldCollapseSingleCompactEvent && singleCompactEvent ? (
           <div className="group relative py-1">
             {renderThreadPreviewNotch(THREAD_SPINE_COMPACT_NOTCH_OFFSET_PX)}
-            <div className="flex min-w-0 w-full items-center gap-2 rounded-lg py-0.5 pr-1">
+            {/* A collapsed command row is one visual family with the command
+                output it stands for (#191): monospace on the code-block
+                surface (same radius and ring tokens, subtler fill) with the
+                expand chevron framed at the row's end instead of a faint glyph
+                pinned to the far edge. Other update kinds keep the plain row. */}
+            <div
+              data-testid="agent-thread-single-update-row"
+              data-update-kind={singleCompactEvent.kind}
+              className={`flex min-w-0 w-full items-center gap-2 ${
+                singleCompactEventIsCommand
+                  ? "rounded-xl bg-slate-950/[0.02] py-1 pl-2.5 pr-1 ring-1 ring-inset ring-slate-900/10 transition-colors group-hover:bg-slate-950/[0.045] dark:bg-white/[0.035] dark:ring-white/[0.08] dark:group-hover:bg-white/[0.065]"
+                  : "rounded-lg py-0.5 pr-1"
+              }`}
+            >
               <button
                 type="button"
                 onClick={onToggleThreadPreview}
-                className="flex min-w-0 flex-1 items-center gap-1.5 rounded-lg py-0.5 text-left text-xs text-slate-500 hover:text-slate-800 dark:text-slate-300 dark:hover:text-slate-100"
+                className={`flex min-w-0 flex-1 items-center gap-1.5 rounded-lg py-0.5 text-left text-xs ${
+                  singleCompactEventIsCommand
+                    ? "font-mono text-slate-700 hover:text-slate-900 dark:text-slate-200 dark:hover:text-slate-50"
+                    : "text-slate-500 hover:text-slate-800 dark:text-slate-300 dark:hover:text-slate-100"
+                }`}
                 aria-label={isThreadPreviewExpanded ? "Collapse run updates" : "Expand run updates"}
                 title={singleCompactEventLabel || resolveThreadCompactUpdateLabel(singleCompactEvent.kind)}
               >
@@ -912,13 +930,17 @@ export function AgentJobThreadPreviewLayout({
                   aria-label={isThreadPreviewExpanded ? "Collapse run updates" : "Expand run updates"}
                   variant="ghost"
                   size="xs"
-                  radius="full"
+                  radius={singleCompactEventIsCommand ? "md" : "full"}
                   onPress={onToggleThreadPreview}
-                  className={`text-slate-400 hover:text-slate-700 dark:text-slate-500 dark:hover:text-slate-200 ${
-                    isThreadPreviewExpanded
-                      ? "opacity-100"
-                      : "opacity-0 group-hover:opacity-90 group-focus-within:opacity-90"
-                  }`}
+                  className={
+                    singleCompactEventIsCommand
+                      ? "bg-white/70 text-slate-500 opacity-100 ring-1 ring-inset ring-slate-900/10 hover:bg-white hover:text-slate-800 dark:bg-white/[0.04] dark:text-slate-300 dark:ring-white/[0.1] dark:hover:bg-white/[0.09] dark:hover:text-slate-100"
+                      : `text-slate-400 hover:text-slate-700 dark:text-slate-500 dark:hover:text-slate-200 ${
+                          isThreadPreviewExpanded
+                            ? "opacity-100"
+                            : "opacity-0 group-hover:opacity-90 group-focus-within:opacity-90"
+                        }`
+                  }
                 >
                   {isThreadPreviewExpanded ? (
                     <NavArrowDown aria-hidden="true" className="h-3.5 w-3.5" />
