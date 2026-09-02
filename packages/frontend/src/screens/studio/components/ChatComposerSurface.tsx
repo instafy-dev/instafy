@@ -11,7 +11,6 @@ import {
   Archery,
   Bookmark,
   Lock,
-  MagicWand,
   MediaImage,
   Microphone,
   NavArrowDown,
@@ -183,52 +182,12 @@ function resolveGoalStatusPillTone(tone: ConversationGoalHealth["tone"]): Status
   return "primary";
 }
 
-const COMPOSER_TOOLBAR_MOTION_MS = 150;
-const COMPOSER_TOOLBAR_ACTION_CLASS = "h-9 w-9 rounded-xl text-slate-600 dark:text-slate-300";
-const COMPOSER_TOOLBAR_ICON_CLASS = "h-5 w-5";
 // The rest-state Send is a quiet ghost control; it lights up (primary variant)
-// only once there is something to send. The variant itself stays wired to
-// sendButtonVariant — this only changes how the non-primary state dresses.
+// in place once there is something to send. The variant itself stays wired to
+// sendButtonVariant — this only changes how the non-primary state dresses, and
+// the button's colour transition is the only motion the composer has.
 const COMPOSER_SEND_REST_CLASS =
   "border-transparent bg-transparent text-slate-400 shadow-none dark:text-slate-500";
-
-function prefersReducedMotion(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    typeof window.matchMedia === "function" &&
-    window.matchMedia("(prefers-reduced-motion: reduce)").matches
-  );
-}
-
-// Keeps the toolbar mounted for one motion beat after it stops being visible
-// so the collapse can animate, and mounts it collapsed for a frame so the
-// reveal can. Reduced motion (or no window) snaps both ways.
-function useComposerToolbarReveal(visible: boolean): { mounted: boolean; expanded: boolean } {
-  const [mounted, setMounted] = useState(visible);
-  const [expanded, setExpanded] = useState(visible);
-  useEffect(() => {
-    const snap = typeof window === "undefined" || prefersReducedMotion();
-    if (visible) {
-      setMounted(true);
-      if (snap || typeof window.requestAnimationFrame !== "function") {
-        setExpanded(true);
-        return;
-      }
-      let frame = window.requestAnimationFrame(() => {
-        frame = window.requestAnimationFrame(() => setExpanded(true));
-      });
-      return () => window.cancelAnimationFrame(frame);
-    }
-    setExpanded(false);
-    if (snap) {
-      setMounted(false);
-      return;
-    }
-    const timer = window.setTimeout(() => setMounted(false), COMPOSER_TOOLBAR_MOTION_MS);
-    return () => window.clearTimeout(timer);
-  }, [visible]);
-  return { mounted, expanded };
-}
 
 export function ChatComposerSurface({
   browserDockProps,
@@ -426,62 +385,21 @@ export function ChatComposerSurface({
     queueSurfaceProps.totalQueuedCount === 0 &&
     !queueSurfaceProps.editingQueuedItem &&
     !stashTrayProps?.stashes.length;
-  const composerHasText = chatInputProps.value.trim().length > 0;
-  // Hold-to-talk must keep the same microphone DOM node from press through
-  // release. Voice capture therefore never moves the controls between rows:
-  // from the collapsed state a transcript landing mid-hold only DEFERS the
-  // reveal until capture ends, and from the expanded state the toolbar is
-  // latched — kept mounted and expanded for the whole capture, even if the
-  // draft empties underneath it — and only collapses once capture has ended
-  // with an empty value. Capture is derived from every signal ChatPanel feeds
-  // (showVoiceStatus covers the hold itself, the strip props cover
-  // starting/listening/transcribing) so a hold never falls through a gap.
-  const voiceCaptureActive =
-    showVoiceStatus ||
-    Boolean(
-      voiceConversationActionStripProps.voiceActionActive ||
-        voiceConversationActionStripProps.voiceListening ||
-        voiceConversationActionStripProps.voiceStarting ||
-        voiceConversationActionStripProps.voiceTranscribing,
-    );
+  // The composer is one row on every viewport. The controls sit beside the
+  // editor and never move, re-dress or re-mount as the draft changes; the
+  // editor alone grows with the text (line by line, capped per viewport in
+  // chatInputGrowth.ts, then scrolling). The only other layouts are the
+  // Browser-session condensed idle bar and the active voice strip.
+  const composerInlineControlsInTextRow = !browserComposerCondensed && !showVoiceActiveStrip;
   // The breakpoint is decided in JS (compactBrowserViewport, from
   // useBreakpoint("sm") upstream) rather than a Tailwind `sm:` class so the
-  // rest row, the toolbar reveal and the "+" menu fold share one source of
-  // truth. Below sm the composer stays one row while typing: vertical space
-  // with the keyboard up is the scarce thing there.
-  const composerToolbarAvailable =
-    !compactBrowserViewport && !browserComposerCondensed && !showVoiceActiveStrip;
-  // The latch is decided from the previous commit (refs written in an effect
-  // below, so render stays pure): capture beginning while the toolbar is
-  // mounted latches it; the latch holds for as long as capture stays active
-  // and releases the moment it ends, at which point the plain text rule takes
-  // over again (draft present → stays expanded with no state change, draft
-  // empty → collapses).
-  const voiceCaptureWasActiveRef = useRef(false);
-  const composerToolbarWasRenderedRef = useRef(false);
-  const composerToolbarCaptureLatchRef = useRef(false);
-  const composerToolbarCaptureLatched =
-    voiceCaptureActive &&
-    (voiceCaptureWasActiveRef.current
-      ? composerToolbarCaptureLatchRef.current
-      : composerToolbarWasRenderedRef.current);
-  const composerToolbarVisible =
-    composerToolbarAvailable &&
-    (composerToolbarCaptureLatched || (composerHasText && !voiceCaptureActive));
-  const { mounted: composerToolbarMounted, expanded: composerToolbarExpanded } =
-    useComposerToolbarReveal(composerToolbarVisible);
-  const composerToolbarRendered = composerToolbarMounted && composerToolbarAvailable;
-  useEffect(() => {
-    voiceCaptureWasActiveRef.current = voiceCaptureActive;
-    composerToolbarWasRenderedRef.current = composerToolbarRendered;
-    composerToolbarCaptureLatchRef.current = composerToolbarCaptureLatched;
-  });
-  const composerInlineControlsInTextRow =
-    !browserComposerCondensed && !showVoiceActiveStrip && !composerToolbarRendered;
-  // Below sm the image-upload and insert-suggestion controls are not rendered
-  // inline; they fold into the "+" menu so no action is lost.
+  // row and the "+" menu fold share one source of truth. Below sm the
+  // image-upload control is not rendered inline; it folds into the "+" menu.
+  // The insert-suggestion wand lives in the "+" menu on every viewport (Tab
+  // accepts the inline ghost suggestion from the keyboard) so no action is
+  // lost and no control appears or disappears while typing.
   const foldImageUploadIntoMenu = compactBrowserViewport && !browserComposerCondensed;
-  const foldSuggestionIntoMenu = foldImageUploadIntoMenu && showMobileGhostSuggestionAcceptButton;
+  const foldSuggestionIntoMenu = showMobileGhostSuggestionAcceptButton;
   const imageUploadDisabled = mutationDisabled || sendingAttachment || onboardingInputLocked;
 
   useEffect(() => {
@@ -775,61 +693,12 @@ export function ChatComposerSurface({
     onOutcome: handleTouchSendModeOutcome,
   });
 
-  // A keyboard user who activates Send has focus on the Send button, and the
-  // button leaves the toolbar when the draft clears and the toolbar collapses,
-  // so focus would fall to <body>. ChatPanel only refocuses the editor after a
-  // send when the editor itself was focused, so the composer owns this case:
-  // remember the draft that was sent from the keyboard, and when that exact
-  // draft clears and takes the toolbar with it, hand focus to the editor. A
-  // collapse for any other reason (mouse clear, stash, a different draft)
-  // leaves focus alone.
-  const keyboardSendDraftRef = useRef<string | null>(null);
-  const armKeyboardSendRefocus = useCallback(
-    (pointerType: string | undefined, detail?: number) => {
-      const keyboardActivation =
-        pointerType === "keyboard" || pointerType === "virtual" || (pointerType === undefined && detail === 0);
-      if (!keyboardActivation) {
-        return;
-      }
-      if (typeof document !== "undefined") {
-        const active = document.activeElement;
-        if (!(active instanceof Element) || !active.closest('[data-testid="chat-send-button"]')) {
-          return;
-        }
-      }
-      keyboardSendDraftRef.current = chatInputProps.value;
-    },
-    [chatInputProps.value],
-  );
-  const previousComposerValueRef = useRef(chatInputProps.value);
-  const previousComposerToolbarVisibleRef = useRef(composerToolbarVisible);
-  useEffect(() => {
-    const previousValue = previousComposerValueRef.current;
-    const toolbarWasVisible = previousComposerToolbarVisibleRef.current;
-    previousComposerValueRef.current = chatInputProps.value;
-    previousComposerToolbarVisibleRef.current = composerToolbarVisible;
-    const sentDraft = keyboardSendDraftRef.current;
-    if (sentDraft === null || chatInputProps.value === sentDraft) {
-      return;
-    }
-    keyboardSendDraftRef.current = null;
-    if (
-      toolbarWasVisible &&
-      !composerToolbarVisible &&
-      previousValue === sentDraft &&
-      chatInputProps.value.trim().length === 0
-    ) {
-      chatInputRef.current?.focus();
-    }
-  }, [chatInputProps.value, chatInputRef, composerToolbarVisible]);
-
   const handleSendPress = useCallback<NonNullable<ComponentProps<typeof IconButton>["onPress"]>>(
     (event) => {
       if (sendPressHandledRef.current) {
         return;
       }
       markSendPressHandled();
-      armKeyboardSendRefocus(event.pointerType);
       if (event.pointerType !== "touch") {
         const eventModifierMode = resolveAvailableDesktopSendModifierMode(event);
         const modifierMode =
@@ -848,7 +717,6 @@ export function ChatComposerSurface({
       onSendButtonPress?.(event);
     },
     [
-      armKeyboardSendRefocus,
       markSendPressHandled,
       onQueueMessageFromComposer,
       onSendButtonPress,
@@ -864,7 +732,6 @@ export function ChatComposerSurface({
         return;
       }
       event.preventDefault();
-      armKeyboardSendRefocus(undefined, event.detail);
       const eventModifierMode = resolveAvailableDesktopSendModifierMode(event);
       const modifierMode =
         eventModifierMode === visibleDesktopSendModifierMode
@@ -884,7 +751,6 @@ export function ChatComposerSurface({
       onSendButtonPress?.({ pointerType: "mouse" } as never);
     },
     [
-      armKeyboardSendRefocus,
       onQueueMessageFromComposer,
       onSendButtonPress,
       onStashDraftFromComposer,
@@ -915,83 +781,45 @@ export function ChatComposerSurface({
     [onHelpUnblockGoal],
   );
 
-  type ComposerControlPlacement = "inline" | "toolbar";
-  const renderActionMenu = (placement: ComposerControlPlacement) => (
+  // Each control is rendered once, with one dress, wherever the row puts it.
+  const actionMenuNode = (
     <ComposerActionMenu
       {...composerActionMenuProps}
       mutationDisabled={mutationDisabled}
       onUploadImage={foldImageUploadIntoMenu ? onOpenImagePicker : undefined}
       uploadImageDisabled={imageUploadDisabled}
       onInsertSuggestion={foldSuggestionIntoMenu ? onAcceptGhostSuggestion : undefined}
-      {...(placement === "toolbar"
-        ? { triggerVariant: "ghost" as const, triggerClassName: COMPOSER_TOOLBAR_ACTION_CLASS }
-        : {})}
     />
   );
-  const renderImageUploadButton = (placement: ComposerControlPlacement) => (
+  const imageUploadButtonNode = (
     <IconButton
       type="button"
       onPress={onOpenImagePicker}
-      variant={placement === "toolbar" ? "ghost" : "outline"}
+      variant="outline"
       size="md"
       radius="xl"
       aria-label="Upload image"
       isDisabled={imageUploadDisabled}
       data-testid="chat-image-upload-button"
-      className={placement === "toolbar" ? COMPOSER_TOOLBAR_ACTION_CLASS : composerOutlinedActionClass}
+      className={composerOutlinedActionClass}
     >
       <span className="sr-only">Upload image</span>
-      <MediaImage
-        className={placement === "toolbar" ? COMPOSER_TOOLBAR_ICON_CLASS : composerActionIconClass}
-        aria-hidden="true"
-      />
+      <MediaImage className={composerActionIconClass} aria-hidden="true" />
     </IconButton>
   );
-  const renderSuggestionButton = (placement: ComposerControlPlacement) =>
-    showMobileGhostSuggestionAcceptButton ? (
-      <IconButton
-        type="button"
-        onPress={onAcceptGhostSuggestion}
-        variant={placement === "toolbar" ? "ghost" : "outline"}
-        size="md"
-        radius="xl"
-        aria-label="Insert suggestion"
-        title="Insert suggestion"
-        data-testid="chat-accept-suggestion-button"
-        className={
-          placement === "toolbar"
-            ? `${COMPOSER_TOOLBAR_ACTION_CLASS} text-primary-600 dark:text-primary-300`
-            : `${composerOutlinedActionClass} text-primary-600 dark:text-primary-300 sm:hidden`
-        }
-      >
-        <span className="sr-only">Insert suggestion</span>
-        <MagicWand
-          className={placement === "toolbar" ? COMPOSER_TOOLBAR_ICON_CLASS : composerActionIconClass}
-          aria-hidden="true"
-        />
-      </IconButton>
-    ) : null;
-  // In the rest row the home button is outlined like its 44px siblings; in the
-  // sm+ toolbar (640-767px with touch) it takes the toolbar's 36px ghost
-  // variant so it does not sit as one raised outlined square beside ghost
-  // controls. The badge and the accessible name are the same in both.
-  const renderHomeButton = (placement: ComposerControlPlacement) =>
-    showComposerHomeButton ? (
+  const homeButtonNode = showComposerHomeButton ? (
       <IconButton
         type="button"
         onPress={onOpenHome}
-        variant={placement === "toolbar" ? "ghost" : "outline"}
+        variant="outline"
         size="md"
         radius="xl"
         aria-label="Open home"
         data-testid="chat-home-button-mobile"
-        className={placement === "toolbar" ? COMPOSER_TOOLBAR_ACTION_CLASS : composerOutlinedActionClass}
+        className={composerOutlinedActionClass}
       >
         <span className="relative flex h-full w-full items-center justify-center">
-          <HomeIcon
-            className={placement === "toolbar" ? COMPOSER_TOOLBAR_ICON_CLASS : composerActionIconClass}
-            aria-hidden="true"
-          />
+          <HomeIcon className={composerActionIconClass} aria-hidden="true" />
           {homeAttentionCount > 0 ? (
             <span
               aria-hidden="true"
@@ -1431,7 +1259,6 @@ export function ChatComposerSurface({
                   : `flex flex-col overflow-hidden rounded-t-3xl rounded-b-none border border-b-0 border-slate-200/70 bg-slate-50/90 px-3 pb-0 pt-1.5 sm:px-4 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`
               }
               data-browser-composer-condensed={browserComposerCondensed ? "true" : undefined}
-              data-composer-toolbar={composerToolbarRendered ? "true" : undefined}
               style={{
                 paddingBottom:
                   // The software keyboard covers the home-indicator area on
@@ -1445,17 +1272,15 @@ export function ChatComposerSurface({
               }}
             >
               {/*
-                The text row is one flex row at rest: leading controls, the
-                editor as a single line, trailing controls bottom-aligned so
-                they stay pinned to the row's bottom edge while the editor
-                grows. Controls never change sides between states: inputs
-                (things that put content into the message: "+", image at sm+,
-                the suggestion wand) sit on the left beside "+", commit actions
-                (mic, which stands in for Send while empty, and Send) sit on
-                the right. The toolbar keeps the same split, so a reveal only
-                moves controls down, never across. The editor wrapper keeps
-                the same tree position in every mode so Lexical never remounts
-                when the controls move to the toolbar.
+                The text row is one flex row: leading controls, the editor,
+                trailing controls — bottom-aligned (items-end) so the controls
+                stay pinned to the row's bottom edge while the editor grows
+                line by line. Nothing here depends on whether there is text:
+                inputs (things that put content into the message: home when
+                applicable, "+", image at sm+) sit on the left, commit actions
+                (mic, which stands in for Send while empty, and Send, which
+                lights up in place) sit on the right. The editor wrapper keeps
+                the same tree position in every mode so Lexical never remounts.
               */}
               <div
                 className={
@@ -1469,7 +1294,6 @@ export function ChatComposerSurface({
                       }`
                 }
                 data-testid="chat-composer-text-row"
-                data-composer-inline-controls={composerInlineControlsInTextRow ? "true" : "false"}
                 onDragOver={onDragOver}
                 onDrop={onDrop}
               >
@@ -1478,9 +1302,9 @@ export function ChatComposerSurface({
                     className="flex flex-none items-center gap-1.5 sm:gap-2"
                     data-testid="chat-composer-leading-controls"
                   >
-                    {renderHomeButton("inline")}
-                    {renderActionMenu("inline")}
-                    {compactBrowserViewport ? null : renderImageUploadButton("inline")}
+                    {homeButtonNode}
+                    {actionMenuNode}
+                    {compactBrowserViewport ? null : imageUploadButtonNode}
                   </div>
                 ) : null}
                 <div
@@ -1577,12 +1401,11 @@ export function ChatComposerSurface({
                   <div className="space-y-2">
                     <div className="flex items-center justify-between gap-1.5 sm:gap-2 min-h-10 flex-nowrap">
                       <div className="flex min-w-0 items-stretch gap-1.5 sm:gap-2 flex-nowrap">
-                        {renderHomeButton("inline")}
+                        {homeButtonNode}
                       </div>
                       <div className="flex flex-none items-stretch justify-end gap-1.5 sm:gap-2 flex-nowrap">
-                        {renderActionMenu("inline")}
-                        {renderImageUploadButton("inline")}
-                        {renderSuggestionButton("inline")}
+                        {actionMenuNode}
+                        {imageUploadButtonNode}
                         {voiceStripNode}
                         {renderSendButton({ quiet: false })}
                       </div>
@@ -1616,39 +1439,6 @@ export function ChatComposerSurface({
                           {...voiceConversationActionStripProps}
                           showVoiceRepliesToggle={false}
                         />
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ) : composerToolbarRendered ? (
-                // Hybrid composing state (sm+ only): once there is text the
-                // controls leave the text row for a toolbar underneath it so
-                // the text row is text-only while writing. The grid-rows trick
-                // animates the height without measuring; reduced motion snaps.
-                <div
-                  className={`grid transition-[grid-template-rows] duration-150 ease-out motion-reduce:transition-none ${
-                    composerToolbarExpanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
-                  }`}
-                  data-testid="chat-composer-toolbar"
-                  data-expanded={composerToolbarExpanded ? "true" : "false"}
-                >
-                  <div className="-mx-1 min-h-0 overflow-hidden px-1">
-                    <div className="flex items-center justify-between gap-1.5 pb-1.5 pt-1 sm:gap-2">
-                      <div
-                        className="flex min-w-0 items-center gap-1 sm:gap-1.5"
-                        data-testid="chat-composer-toolbar-leading"
-                      >
-                        {renderHomeButton("toolbar")}
-                        {renderActionMenu("toolbar")}
-                        {renderImageUploadButton("toolbar")}
-                        {renderSuggestionButton("toolbar")}
-                      </div>
-                      <div
-                        className="flex flex-none items-center justify-end gap-1.5 sm:gap-2"
-                        data-testid="chat-composer-toolbar-trailing"
-                      >
-                        {voiceStripNode}
-                        {renderSendButton({ quiet: true })}
                       </div>
                     </div>
                   </div>

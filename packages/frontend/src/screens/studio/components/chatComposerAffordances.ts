@@ -1,5 +1,4 @@
 export function resolveChatComposerAffordances({
-  compactBrowserViewport,
   composerGhostSuggestionRemainder,
   credentialsReady,
   activeConversationControllerId,
@@ -19,7 +18,6 @@ export function resolveChatComposerAffordances({
   voiceInputStarting,
   voiceInputTranscribing,
 }: {
-  compactBrowserViewport: boolean;
   composerGhostSuggestionRemainder: string | null;
   credentialsReady: boolean;
   activeConversationControllerId: string | null;
@@ -39,8 +37,10 @@ export function resolveChatComposerAffordances({
   voiceInputStarting: boolean;
   voiceInputTranscribing: boolean;
 }) {
+  // The pointer-driven "Insert suggestion" action lives in the composer's "+"
+  // menu on every viewport (the composer is one row everywhere); Tab accepts
+  // the same ghost suggestion from the keyboard. The name is historical.
   const showMobileGhostSuggestionAcceptButton =
-    compactBrowserViewport &&
     Boolean(composerGhostSuggestionRemainder) &&
     !onboardingInputLocked &&
     !sendingAttachment;

@@ -50,12 +50,12 @@ test.describe("Narrow-phone Studio density", () => {
     await expect(page.getByTestId("chat-send-button")).toHaveCount(0);
     await expect(page.getByTestId("chat-image-upload-button")).toHaveCount(0);
 
-    // With a one-line draft the composer stays one row below sm (no toolbar
-    // reveal): the 20px line + 8px editor padding sits inside the 44px row.
+    // With a one-line draft the composer is still the same one row: the 20px
+    // line + 8px editor padding sits inside the 44px row, and Send takes the
+    // mic's slot in place.
     await input.fill("Density check");
     await expect(input.locator("p").last()).toHaveText("Density check");
     await expectHeightBetween(page.getByTestId("chat-send-button"), 44, 44);
-    await expect(page.getByTestId("chat-composer-toolbar")).toHaveCount(0);
     await expectHeightBetween(composer, 56, 62);
     await input.press("ControlOrMeta+a");
     await input.press("Backspace");
