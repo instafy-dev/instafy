@@ -2306,7 +2306,20 @@ async fn ensure_runtime_launch_inner(
             } else {
                 format!("provider failed to ensure runtime {runtime_uuid}")
             };
-            return Err(internal_error(public_message));
+            // The provider's own text is in the bug report above; this is the
+            // one rebuild on the hosted-launch path, and without a code the
+            // most common hosted failure would reach the automation notice
+            // with no discriminator at all. Status and public message are
+            // unchanged. Deliberately coarse: a provider timeout and a
+            // provider 500 are already collapsed upstream.
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError::with_details(
+                    public_message,
+                    "provider_launch_failed",
+                    json!({ "runtimeId": runtime_uuid.to_string() }),
+                )),
+            ));
         }
     }
 

@@ -672,14 +672,14 @@ async fn execute_automation_once(
         )
     };
 
-    if let Err((_, Json(api_error))) = authorize_automation_execution(state, record).await {
+    if let Err((status, Json(api_error))) = authorize_automation_execution(state, record).await {
         finalize_automation_attempt(
             state,
             record,
             now,
             next_run_at,
             status_override,
-            Some(api_error.message),
+            Some(AutomationLaunchFailure::from_api_error(status, api_error)),
         )
         .await?;
         return Ok(());
@@ -725,10 +725,10 @@ async fn execute_automation_once(
                     now,
                     next_run_at,
                     status_override,
-                    Some(
-                        "Hosted automations require a controller-managed runtime provider"
-                            .to_string(),
-                    ),
+                    Some(AutomationLaunchFailure::minted(
+                        "Hosted automations require a controller-managed runtime provider",
+                        CODE_HOSTED_PROVIDER_UNSUPPORTED,
+                    )),
                 )
                 .await?;
                 return Ok(());
@@ -748,14 +748,14 @@ async fn execute_automation_once(
             .await;
             match response {
                 Ok(response) => Some(Uuid::from_str(&response.runtime_id)?),
-                Err((_, Json(api_error))) => {
+                Err((status, Json(api_error))) => {
                     finalize_automation_attempt(
                         state,
                         record,
                         now,
                         next_run_at,
                         status_override,
-                        Some(api_error.message),
+                        Some(AutomationLaunchFailure::from_api_error(status, api_error)),
                     )
                     .await?;
                     return Ok(());
@@ -788,7 +788,10 @@ async fn execute_automation_once(
                         now,
                         next_run_at,
                         status_override,
-                        Some(message.to_string()),
+                        Some(AutomationLaunchFailure::minted(
+                            message,
+                            CODE_SELF_HOSTED_RUNTIME_OFFLINE,
+                        )),
                     )
                     .await?;
                     return Ok(());
@@ -808,14 +811,14 @@ async fn execute_automation_once(
                 .await;
                 match response {
                     Ok(response) => Some(Uuid::from_str(&response.runtime_id)?),
-                    Err((_, Json(api_error))) => {
+                    Err((status, Json(api_error))) => {
                         finalize_automation_attempt(
                             state,
                             record,
                             now,
                             next_run_at,
                             status_override,
-                            Some(api_error.message),
+                            Some(AutomationLaunchFailure::from_api_error(status, api_error)),
                         )
                         .await?;
                         return Ok(());
@@ -909,14 +912,14 @@ async fn execute_automation_once(
             finalize_automation_attempt(state, record, now, next_run_at, status_override, None)
                 .await?;
         }
-        Err((_, Json(api_error))) => {
+        Err((status, Json(api_error))) => {
             finalize_automation_attempt(
                 state,
                 record,
                 now,
                 next_run_at,
                 status_override,
-                Some(api_error.message),
+                Some(AutomationLaunchFailure::from_api_error(status, api_error)),
             )
             .await?;
         }
@@ -991,10 +994,12 @@ async fn finalize_automation_attempt(
     attempted_at: DateTime<Utc>,
     next_run_at: Option<DateTime<Utc>>,
     status_override: Option<&str>,
-    error: Option<String>,
+    failure: Option<AutomationLaunchFailure>,
 ) -> anyhow::Result<()> {
     let automation_id = record.id;
     let mut connection = state.pool.get().await?;
+    let failure_code = failure.as_ref().and_then(|failure| failure.code.clone());
+    let error = failure.map(|failure| failure.message);
     let error_value = error
         .as_deref()
         .map(|value| value.trim())
@@ -1040,21 +1045,15 @@ async fn finalize_automation_attempt(
         (stored_error.as_deref(), record.conversation_id)
     {
         let content = format!("This scheduled run couldn't start: {error_text}");
+        // `reason` must stay the literal "automation_launch_failed": the
+        // frontend's content resolver replaces the message with canned copy on
+        // any reason it does not recognise. The cause goes in its own field, so
+        // a notice with no code renders exactly as one written before this.
         let metadata = json!({
             "source": "controller",
             "kind": "runtime_alert",
             "messageType": "runtime_alert",
-            "details": {
-                "reason": "automation_launch_failed",
-                "automationId": record.id.to_string(),
-                "automationName": record.name,
-                // Purely additive today. Re-running an automation is
-                // owner-gated (`can_access_owned_automation`) while this notice
-                // is visible to every conversation participant, so a future
-                // "Run now" action needs the owner id on the row to know
-                // whether it may render at all.
-                "automationOwnerId": record.user_id.to_string(),
-            },
+            "details": build_launch_failure_details(record, failure_code.as_deref()),
         });
         if let Err((_, Json(api_error))) = crate::agent::record_agent_conversation_message(
             &transaction,
@@ -1081,6 +1080,7 @@ async fn finalize_automation_attempt(
             record.user_id,
             &automation_id,
             error_text,
+            failure_code.as_deref(),
         )
         .await;
     }
@@ -1166,8 +1166,85 @@ fn hosted_automation_provider_is_managed(provider: &str, configured_as_self_host
 /// "start or repair the runtime" invited exactly that wasted trip. The frontend
 /// recognises SELF_HOSTED_LAUNCH_MARKER inside this sentence to offer the
 /// "How to start it" dialog, so the two must be edited together.
+#[cfg(test)]
 pub(crate) const SELF_HOSTED_LAUNCH_MARKER: &str =
     "no self-hosted runtime was online for this space";
+
+/// Machine-readable causes for a launch failure. The frontend switches on these
+/// in packages/frontend/src/screens/studio/components/controllerConversationNotice.ts
+/// to pick a per-cause action; a code it does not know falls back to the generic
+/// one, so adding a code here is safe on its own. A test on each side pins the
+/// vocabulary, so renaming one half fails CI.
+pub(crate) const CODE_SELF_HOSTED_RUNTIME_OFFLINE: &str = "self_hosted_runtime_offline";
+pub(crate) const CODE_HOSTED_PROVIDER_UNSUPPORTED: &str = "hosted_provider_unsupported";
+pub(crate) const CODE_AUTOMATION_ACCESS_DENIED: &str = "automation_access_denied";
+pub(crate) const CODE_CONTROLLER_UNAVAILABLE: &str = "controller_unavailable";
+
+/// The prose plus, where we know it, a machine-readable cause. Before this the
+/// choke point took `Option<String>`, which forced every call site to flatten a
+/// perfectly good `ApiError` down to its message and throw the code away.
+pub(crate) struct AutomationLaunchFailure {
+    pub(crate) message: String,
+    pub(crate) code: Option<String>,
+}
+
+impl AutomationLaunchFailure {
+    /// A cause the controller states itself, with no upstream error behind it.
+    fn minted(message: impl Into<String>, code: &'static str) -> Self {
+        Self {
+            message: message.into(),
+            code: Some(code.to_string()),
+        }
+    }
+
+    /// Prefer the code the refusal already set; otherwise infer one from the
+    /// status, which is the only signal a bare `ApiError::new` leaves behind.
+    fn from_api_error(status: StatusCode, api_error: ApiError) -> Self {
+        Self {
+            message: api_error.message,
+            code: api_error
+                .code
+                .or_else(|| fallback_code_for_status(status).map(|code| code.to_string())),
+        }
+    }
+}
+
+/// The notice's `details` object.
+///
+/// `reason` must stay the literal "automation_launch_failed": the frontend's
+/// content resolver replaces the message with canned copy on any reason it does
+/// not recognise, so the cause goes in its own field. `failureCode` is omitted
+/// rather than null when unknown, which makes an uncoded new notice
+/// byte-identical to one written before this existed.
+fn build_launch_failure_details(
+    record: &AutomationRecord,
+    failure_code: Option<&str>,
+) -> JsonValue {
+    let mut details = json!({
+        "reason": "automation_launch_failed",
+        "automationId": record.id.to_string(),
+        "automationName": record.name,
+        // Re-running an automation is owner-gated
+        // (`can_access_owned_automation`) while this notice is visible to every
+        // conversation participant, so an owner-only action needs the owner id
+        // on the row to know whether it may render at all.
+        "automationOwnerId": record.user_id.to_string(),
+    });
+    if let (Some(code), Some(object)) = (failure_code, details.as_object_mut()) {
+        object.insert("failureCode".into(), JsonValue::String(code.to_string()));
+    }
+    details
+}
+
+fn fallback_code_for_status(status: StatusCode) -> Option<&'static str> {
+    match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND => {
+            Some(CODE_AUTOMATION_ACCESS_DENIED)
+        }
+        StatusCode::SERVICE_UNAVAILABLE => Some(CODE_CONTROLLER_UNAVAILABLE),
+        _ => None,
+    }
+}
 
 fn no_live_self_hosted_runtime_error(provider_is_self_hosted: bool) -> Option<&'static str> {
     provider_is_self_hosted.then_some(
@@ -2209,12 +2286,19 @@ async fn run_automation_now(
 #[cfg(test)]
 mod tests {
     use super::{
-        automation_runtime_is_selectable, can_access_owned_automation, can_view_automation,
-        conversation_visibility_for_result_visibility, hosted_automation_provider_is_managed,
-        no_live_self_hosted_runtime_error, normalize_result_visibility, UpdateAutomationBody,
-        SELF_HOSTED_LAUNCH_MARKER,
+        automation_runtime_is_selectable, build_launch_failure_details,
+        can_access_owned_automation, can_view_automation,
+        conversation_visibility_for_result_visibility, fallback_code_for_status,
+        hosted_automation_provider_is_managed, no_live_self_hosted_runtime_error,
+        normalize_result_visibility, AutomationLaunchFailure, AutomationRecord,
+        UpdateAutomationBody, CODE_AUTOMATION_ACCESS_DENIED, CODE_CONTROLLER_UNAVAILABLE,
+        CODE_HOSTED_PROVIDER_UNSUPPORTED, CODE_SELF_HOSTED_RUNTIME_OFFLINE, DEFAULT_TIMEZONE,
+        RESULT_VISIBILITY_TEAM, SELF_HOSTED_LAUNCH_MARKER,
     };
-    use serde_json::json;
+    use crate::errors::ApiError;
+    use axum::http::StatusCode;
+    use chrono::Utc;
+    use serde_json::{json, Value as JsonValue};
     use uuid::Uuid;
 
     #[test]
@@ -2458,5 +2542,124 @@ mod tests {
             "instafy-cloud",
             false,
         ));
+    }
+
+    fn launch_failure_record() -> AutomationRecord {
+        let now = Utc::now();
+        AutomationRecord {
+            id: Uuid::nil(),
+            project_id: Uuid::nil(),
+            user_id: Uuid::nil(),
+            name: "Weekly receipts".to_string(),
+            prompt_text: String::new(),
+            metadata: JsonValue::Null,
+            schedule_kind: "interval".to_string(),
+            run_at: None,
+            interval_hours: Some(24),
+            by_day: Vec::new(),
+            by_hour: None,
+            by_minute: None,
+            timezone: DEFAULT_TIMEZONE.to_string(),
+            runtime_mode: "auto".to_string(),
+            runtime_provider: None,
+            silent_when_nothing_to_report: false,
+            result_visibility: RESULT_VISIBILITY_TEAM.to_string(),
+            conversation_id: None,
+            status: "active".to_string(),
+            locked_until: None,
+            last_run_at: None,
+            next_run_at: None,
+            last_error: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn launch_failure_prefers_the_code_the_refusal_already_set() {
+        // The whole point of the carrier: these codes existed upstream and were
+        // being thrown away when the call site flattened the error to prose.
+        let failure = AutomationLaunchFailure::from_api_error(
+            StatusCode::PAYMENT_REQUIRED,
+            ApiError::with_details("out of credits", "insufficient_credits", json!({})),
+        );
+        assert_eq!(failure.code.as_deref(), Some("insufficient_credits"));
+        assert_eq!(failure.message, "out of credits");
+    }
+
+    #[test]
+    fn launch_failure_falls_back_to_the_status_when_no_code_was_set() {
+        // A bare ApiError::new leaves the status as the only signal.
+        for (status, expected) in [
+            (StatusCode::FORBIDDEN, Some(CODE_AUTOMATION_ACCESS_DENIED)),
+            (StatusCode::NOT_FOUND, Some(CODE_AUTOMATION_ACCESS_DENIED)),
+            (
+                StatusCode::UNAUTHORIZED,
+                Some(CODE_AUTOMATION_ACCESS_DENIED),
+            ),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Some(CODE_CONTROLLER_UNAVAILABLE),
+            ),
+            (StatusCode::INTERNAL_SERVER_ERROR, None),
+        ] {
+            assert_eq!(
+                fallback_code_for_status(status),
+                expected,
+                "status {status}"
+            );
+            let failure =
+                AutomationLaunchFailure::from_api_error(status, ApiError::new("something broke"));
+            assert_eq!(failure.code.as_deref(), expected, "status {status}");
+        }
+    }
+
+    #[test]
+    fn launch_failure_details_keep_the_reason_the_frontend_matches_on() {
+        // Changing `reason` would route the notice into the frontend's default
+        // arm, which replaces the controller's sentence with canned copy.
+        let record = launch_failure_record();
+        for code in [None, Some(CODE_SELF_HOSTED_RUNTIME_OFFLINE)] {
+            let details = build_launch_failure_details(&record, code);
+            assert_eq!(
+                details.get("reason").and_then(JsonValue::as_str),
+                Some("automation_launch_failed")
+            );
+        }
+    }
+
+    #[test]
+    fn launch_failure_details_omit_the_code_rather_than_writing_null() {
+        // An uncoded new notice must be byte-identical to a legacy one, so the
+        // frontend has two shapes to handle, not three.
+        let record = launch_failure_record();
+        let uncoded = build_launch_failure_details(&record, None);
+        assert!(!uncoded
+            .as_object()
+            .expect("details object")
+            .contains_key("failureCode"));
+
+        let coded = build_launch_failure_details(&record, Some(CODE_SELF_HOSTED_RUNTIME_OFFLINE));
+        assert_eq!(
+            coded.get("failureCode").and_then(JsonValue::as_str),
+            Some("self_hosted_runtime_offline")
+        );
+    }
+
+    #[test]
+    fn launch_failure_codes_match_the_frontend_vocabulary() {
+        // Mirrored in
+        // packages/frontend/src/screens/studio/components/controllerConversationNotice.ts.
+        // A rename on one side must fail CI rather than silently drop a button.
+        assert_eq!(
+            CODE_SELF_HOSTED_RUNTIME_OFFLINE,
+            "self_hosted_runtime_offline"
+        );
+        assert_eq!(
+            CODE_HOSTED_PROVIDER_UNSUPPORTED,
+            "hosted_provider_unsupported"
+        );
+        assert_eq!(CODE_AUTOMATION_ACCESS_DENIED, "automation_access_denied");
+        assert_eq!(CODE_CONTROLLER_UNAVAILABLE, "controller_unavailable");
     }
 }
