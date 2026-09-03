@@ -219,6 +219,9 @@ export function RuntimeOperationsProvider({
     },
     [activeProjectId, refreshRuntimeStatuses, runtimeMutationEnabled, showStatus],
   );
+  const showDesktopRuntimeHelp = useCallback(() => {
+    setDesktopRuntimeHelpVisible(true);
+  }, []);
   const {
     hostedRuntimeEnsuring,
     ensureHostedRuntime,
@@ -232,6 +235,7 @@ export function RuntimeOperationsProvider({
     showStatus,
     setRuntimeEnsureError,
     setRuntimeEnsureLimit,
+    showDesktopRuntimeHelp,
   });
   const { desktopRuntimeEnsuring, ensureDesktopRuntime } =
     useDesktopRuntimeEnsure({
@@ -263,9 +267,6 @@ export function RuntimeOperationsProvider({
     }
     return state.tunnelGrants[runtimeId] ?? null;
   }, [state.localWorkspace?.runtimeId, state.tunnelGrants]);
-  const showDesktopRuntimeHelp = useCallback(() => {
-    setDesktopRuntimeHelpVisible(true);
-  }, []);
   const hideDesktopRuntimeHelp = useCallback(() => {
     setDesktopRuntimeHelpVisible(false);
   }, []);
@@ -332,6 +333,7 @@ export function RuntimeOperationsProvider({
           "Tunnel details are not available yet. Try again once the desktop runtime is online.",
           "warning",
           6000,
+          { actionLabel: "How to reconnect", onAction: showDesktopRuntimeHelp },
         );
         return false;
       }
@@ -343,9 +345,21 @@ export function RuntimeOperationsProvider({
             : normalizedStatus === "expired"
               ? "Tunnel link expired. Reconnect your desktop runtime to refresh it."
               : normalizedStatus === "failed"
-                ? "Tunnel link failed. Reconnect your desktop runtime or switch to Instafy Cloud."
+                ? "Tunnel link failed. Reconnect your desktop runtime or start Instafy Cloud."
                 : "Tunnel link is unavailable. Reconnect your desktop runtime to refresh it.";
-        showStatus(message, "warning", 7000);
+        showStatus(
+          message,
+          "warning",
+          7000,
+          normalizedStatus === "failed"
+            ? {
+                actionLabel: "Start Instafy Cloud",
+                onAction: () => {
+                  void ensureHostedRuntime();
+                },
+              }
+            : { actionLabel: "How to reconnect", onAction: showDesktopRuntimeHelp },
+        );
         return false;
       }
       const value =
@@ -371,7 +385,13 @@ export function RuntimeOperationsProvider({
         return false;
       }
     },
-    [effectiveRuntimeId, showStatus, state.tunnelGrants],
+    [
+      effectiveRuntimeId,
+      ensureHostedRuntime,
+      showDesktopRuntimeHelp,
+      showStatus,
+      state.tunnelGrants,
+    ],
   );
 
   const terminateRuntime = useCallback(
@@ -543,6 +563,7 @@ export function RuntimeOperationsProvider({
     selectedLocalRuntimeId,
     tunnel: localRuntimeTunnelGrant,
     showStatus,
+    onShowSelfHostHelp: showDesktopRuntimeHelp,
   });
   useEffect(() => {
     if (typeof window === "undefined") {
