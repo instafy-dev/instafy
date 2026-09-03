@@ -2026,7 +2026,6 @@ async fn get_internal_credential(
     Ok(Json(response))
 }
 
-
 /// Store the latest BYOC subscription-usage snapshot for a credential. Called
 /// by the proxy (fire-and-forget) after it captures OpenAI's x-codex-* rate
 /// limit headers. Guarded by the same proxy credential-lease token as the
@@ -2963,7 +2962,6 @@ mod provider_metadata_tests {
         );
     }
 }
-
 
 #[cfg(test)]
 mod inline_completion_tests {

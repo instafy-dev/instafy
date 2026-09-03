@@ -841,6 +841,9 @@ pub(crate) async fn create_blank_project_conversation(
             })?;
     }
 
+    // Home's feed: a new root conversation is activity in its space.
+    crate::activity::record_conversation_created(&transaction, &conversation).await;
+
     transaction.commit().await.map_err(|error| {
         internal_error(format!("failed to finalize conversation insert: {error}"))
     })?;
@@ -2833,6 +2836,9 @@ pub(crate) async fn ensure_conversation_record(
                     ))
                 })?;
         }
+
+        // Home's feed: a first send creates the conversation too.
+        crate::activity::record_conversation_created(transaction, &inserted_conversation).await;
 
         Ok(inserted_conversation)
     }
