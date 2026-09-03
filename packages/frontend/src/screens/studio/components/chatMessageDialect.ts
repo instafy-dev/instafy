@@ -15,6 +15,14 @@ export type UrlReferenceDescriptor = {
   label: string;
 };
 
+export type GitHubReferenceDescriptor = {
+  url: string;
+  owner: string;
+  repo: string;
+  number: number;
+  kind: "pull" | "issue";
+};
+
 export type ConversationReferenceDescriptor = {
   kind: "conversation" | "thread" | "message";
   raw: string;
@@ -36,7 +44,8 @@ export type ChatLineTokenChunk =
   | { type: "agent-mention"; value: string }
   | { type: "workspace-file"; value: WorkspaceFileReferenceDescriptor }
   | { type: "conversation-reference"; value: ConversationReferenceDescriptor }
-  | { type: "link"; value: UrlReferenceDescriptor };
+  | { type: "link"; value: UrlReferenceDescriptor }
+  | { type: "github-reference"; value: GitHubReferenceDescriptor };
 
 export type MessageListItem = {
   text: string;
@@ -61,6 +70,10 @@ export type MessageContentBlock =
 const WORKSPACE_FILE_REFERENCE_REGEX =
   /^((?:\/workspace\/[^/\s<>"'`()]+\/)?[0-9A-Za-z_.-]+(?:\/[0-9A-Za-z_.-]+)*\.(?:markdown|md|json|tsx?|jsx?|ya?ml|toml|py|rs|css|html|txt|sh|sql))(?:#L(\d+)|:(\d+))?/;
 const URL_REFERENCE_REGEX = /^(https?:\/\/[^\s<>"'`]+)/i;
+// Only the exact PR/issue page shape chips — deeper paths (files, comments,
+// diffs) and other GitHub pages keep their full URL rendering.
+const GITHUB_REFERENCE_URL_REGEX =
+  /^https:\/\/github\.com\/([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)\/([A-Za-z0-9._-]+)\/(pull|issues)\/(\d+)$/i;
 const URL_TRAILING_PUNCTUATION_REGEX = /[)\]}>.,!?;:'"`]+$/;
 const TEAM_FLOW_LINE_PREFIX_REGEX =
   /^\s*(?:workstreams?|workstream refs?|lanes?|team|team flow|coordination|coordination flow|recovered team|existing team)\s*:\s*/i;
@@ -157,6 +170,26 @@ function sanitizeUrlCandidate(raw: string): string {
     value = next;
   }
   return value;
+}
+
+export function parseGitHubReferenceUrl(url: string): GitHubReferenceDescriptor | null {
+  const match = url.match(GITHUB_REFERENCE_URL_REGEX);
+  if (!match) {
+    return null;
+  }
+  const owner = match[1] ?? "";
+  const repo = match[2] ?? "";
+  const number = Number.parseInt(match[4] ?? "", 10);
+  if (!owner || !repo || !Number.isFinite(number) || number <= 0) {
+    return null;
+  }
+  return {
+    url,
+    owner,
+    repo,
+    number,
+    kind: (match[3] ?? "").toLowerCase() === "pull" ? "pull" : "issue",
+  };
 }
 
 function findUrlAt(text: string, index: number): { reference: UrlReferenceDescriptor; end: number } | null {
@@ -411,7 +444,12 @@ export function tokenizeChatLine(
       if (index > cursor) {
         tokens.push({ type: "text", value: text.slice(cursor, index) });
       }
-      tokens.push({ type: "link", value: urlMatch.reference });
+      const githubReference = parseGitHubReferenceUrl(urlMatch.reference.url);
+      if (githubReference) {
+        tokens.push({ type: "github-reference", value: githubReference });
+      } else {
+        tokens.push({ type: "link", value: urlMatch.reference });
+      }
       index = urlMatch.end;
       cursor = index;
       continue;

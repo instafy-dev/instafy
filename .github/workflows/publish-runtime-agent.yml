@@ -129,9 +129,10 @@ jobs:
       - authorize
       - release-approval
     runs-on: ${{ matrix.runner }}
-    # Normal cells finish in under 15 minutes. Bound a wedged BuildKit worker
-    # so one matrix cannot consume the hosted-runner allowance for six hours.
-    timeout-minutes: 30
+    # Cache-hit cells normally finish in under 15 minutes, but observed cold
+    # Rust rebuilds can approach an hour. Keep a bounded 75-minute path while
+    # still preventing a wedged BuildKit worker from consuming six hours.
+    timeout-minutes: 75
     permissions:
       contents: read
       packages: write

@@ -97,8 +97,11 @@ The object-store release selected by `stable-release.json` is the distribution a
 Git tag identifies the source, but the pipeline does not create a GitHub Release or use GitHub
 release assets as a second download surface.
 
-The stable tag must equal `desktop-app-v<package-version>`, and its commit must
-be reachable from the current `origin/main`. The packaged runtime manifest and
+The version in `packages/desktop-app/package.json` is the sole Desktop version
+authority. A deployment coordinator may read that exact value to prepare
+release intent, but it must not maintain a second release-number literal. The
+stable tag must equal `desktop-app-v<package-version>`, and its commit must be
+reachable from the current `origin/main`. The packaged runtime manifest and
 public `latest.json` both record the full source commit.
 Release verification recalculates updater SHA-512 entries and extracts or
 mounts the final installer/archive to verify the bundled runtime from shipped
@@ -124,17 +127,20 @@ of the following are true:
 - an immutable artifact answers a `bytes=0-0` request with a valid `206`,
   `Content-Range`, one-byte body, and `Accept-Ranges: bytes`
 
-The checks retry boundedly for edge propagation. A failed gate blocks the
-GitHub release. Do not replace immutable tag objects to repair a failure; fix
-the worker or publication configuration and rerun the same tag only when the
-already-published bytes are identical.
+The checks retry boundedly for edge propagation. A failed gate prevents a
+successful stable publication. Do not replace immutable tag objects to repair
+a failure; fix the worker or publication configuration and rerun the same tag
+only when the already-published bytes are identical.
 
-Before tagging, run a non-publishing readiness build that exercises the same
-macOS signing/notarization, unsigned Windows packaging, final-artifact verification,
-and packaged Personal Browser canary as the release build. Deployment-specific
-workflow wiring and credentials stay outside the public core. Do not run a
-packaged drain-aware canary until migration `20260000000064` and its matching
-controller behavior have been verified in that deployment.
+A non-publishing readiness build can exercise macOS signing/notarization,
+unsigned Windows packaging, final-artifact verification, and the packaged
+Personal Browser canary without publishing. It is useful for diagnosis, but it
+is not a prerequisite for a new stable tag. Stable publication must rebuild and
+repeat those gates independently; it must not promote readiness artifacts or
+require a prior readiness success. Deployment-specific workflow wiring and
+credentials stay outside the public core. Do not run a packaged drain-aware
+canary until migration `20260000000064` and its matching controller behavior
+have been verified in that deployment.
 
 An operator can run the same gate independently when diagnosing a release:
 

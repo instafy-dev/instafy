@@ -132,11 +132,15 @@ test("image publication bounds every BuildKit matrix cell", () => {
     runtimeSource.indexOf("  assemble-release-manifest:\n", runtimeStart),
   );
 
-  for (const [name, section] of [
-    ["production service", serviceSection],
-    ["runtime agent", runtimeSection],
+  for (const [name, section, timeoutMinutes] of [
+    ["production service", serviceSection, 30],
+    ["runtime agent", runtimeSection, 75],
   ]) {
-    assert.match(section, /timeout-minutes: 30/u, `${name} build timeout`);
+    assert.match(
+      section,
+      new RegExp(`timeout-minutes: ${timeoutMinutes}`, "u"),
+      `${name} build timeout`,
+    );
     assert.equal(
       [...section.matchAll(/timeout-minutes:/gu)].length,
       1,

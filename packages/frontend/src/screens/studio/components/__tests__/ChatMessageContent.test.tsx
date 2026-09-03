@@ -505,6 +505,36 @@ describe("ChatMessageContent", () => {
     expect(codeRefs.map((entry) => entry.textContent?.trim())).toEqual(["[literal](https://example.com/raw)"]);
   });
 
+  it("renders GitHub PR and issue URLs as compact chips while other URLs stay plain links", async () => {
+    await act(async () => {
+      root.render(
+        <MessageContent content="Opened https://github.com/instafy-dev/instafy/pull/551. Tracked in https://github.com/instafy-dev/instafy/issues/173 and https://example.com/docs." />,
+      );
+    });
+
+    const chips = Array.from(
+      container.querySelectorAll('[data-testid="chat-message-github-reference"]'),
+    ) as HTMLAnchorElement[];
+    expect(chips).toHaveLength(2);
+    expect(chips.map((chip) => chip.textContent?.trim())).toEqual([
+      "instafy-dev/instafy#551",
+      "instafy-dev/instafy#173",
+    ]);
+    expect(chips.map((chip) => chip.getAttribute("data-github-ref-kind"))).toEqual(["pull", "issue"]);
+    expect(chips[0]?.getAttribute("href")).toBe("https://github.com/instafy-dev/instafy/pull/551");
+    expect(chips[0]?.getAttribute("title")).toBe("https://github.com/instafy-dev/instafy/pull/551");
+    expect(chips[0]?.getAttribute("target")).toBe("_blank");
+    expect(chips[0]?.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(chips[0]?.querySelector('[data-testid="chat-message-github-reference-glyph"]')).not.toBeNull();
+    // The chip elides the raw URL but keeps the trailing punctuation as prose.
+    expect(container.textContent).not.toContain("https://github.com/instafy-dev/instafy/pull/551");
+    expect(container.textContent).toContain("instafy-dev/instafy#551.");
+
+    const links = Array.from(container.querySelectorAll('[data-testid="chat-message-link"]'));
+    expect(links).toHaveLength(1);
+    expect(links[0]?.getAttribute("href")).toBe("https://example.com/docs");
+  });
+
   it("renders simple markdown lists as compact semantic lists", async () => {
     await act(async () => {
       root.render(
