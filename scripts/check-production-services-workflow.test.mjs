@@ -216,10 +216,20 @@ test("image publication retries only the same scanned bytes and waits for GHCR v
     assert.match(
       source,
       new RegExp(
-        `for attempt in 1 2 3 4; do[\\s\\S]*docker push "\\$${tag}" \\| tee "\\$attempt_log"[\\s\\S]*mv "\\$attempt_log" "\\$push_log"`,
+        `for attempt in 1 2 3 4; do[\\s\\S]*docker push "\\$${tag}" 2>&1 \\| tee "\\$attempt_log"[\\s\\S]*mv "\\$attempt_log" "\\$push_log"`,
         "u",
       ),
       `${name} must retry the unchanged local image and parse only the successful push log`,
+    );
+    assert.match(
+      source,
+      /terminal_error="\$\([\s\S]*tr -d '\\r' < "\$attempt_log"[\s\S]*awk 'NF \{ terminal = \$0 \} END \{ print terminal \}'[\s\S]*\)"/u,
+      `${name} must normalize only the terminal provider response`,
+    );
+    assert.match(
+      source,
+      /if \[\[ "\$terminal_error" != "unknown blob" \]\]; then[\s\S]*GHCR push failed with a non-retryable response\.[\s\S]*exit 1/u,
+      `${name} must fail closed instead of retrying unrelated push errors`,
     );
     assert.match(source, /GHCR rejected all bounded attempts/u, name);
     assert.match(
