@@ -353,12 +353,32 @@ pub(crate) async fn record_conversation_created(
         .metadata
         .as_ref()
         .and_then(|metadata| metadata.get("title"))
-        .and_then(JsonValue::as_str)
+        .and_then(JsonValue::as_str);
+    record_conversation_created_raw(
+        client,
+        &conversation.project_id,
+        &conversation.id,
+        conversation.created_by,
+        title,
+        conversation.thread_kind.as_deref(),
+    )
+    .await
+}
+
+/// Same, for writers that insert the conversation row themselves.
+pub(crate) async fn record_conversation_created_raw(
+    client: &impl GenericClient,
+    project_id: &Uuid,
+    conversation_id: &Uuid,
+    created_by: Option<Uuid>,
+    title: Option<&str>,
+    thread_kind: Option<&str>,
+) -> Option<i64> {
+    let title = title
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| value.chars().take(PREVIEW_MAX_CHARS).collect());
-    let actor = conversation
-        .created_by
+        .map(|value| value.chars().take(PREVIEW_MAX_CHARS).collect::<String>());
+    let actor = created_by
         .map(ActivityActor::user)
         .unwrap_or_else(ActivityActor::system);
     append(
@@ -366,8 +386,8 @@ pub(crate) async fn record_conversation_created(
         &ActivityRow {
             kind: KIND_CONVERSATION_CREATED,
             org_id: None,
-            project_id: Some(conversation.project_id),
-            conversation_id: Some(conversation.id),
+            project_id: Some(*project_id),
+            conversation_id: Some(*conversation_id),
             run_id: None,
             prompt_id: None,
             visibility: VISIBILITY_CONVERSATION,
@@ -376,7 +396,38 @@ pub(crate) async fn record_conversation_created(
             target_user_id: None,
             title,
             preview: None,
-            data: json!({ "threadKind": conversation.thread_kind }),
+            data: json!({ "threadKind": thread_kind }),
+        },
+    )
+    .await
+}
+
+/// A scheduled run could not even start. It is a failed run in the owner's
+/// feed, addressed to them, so it reaches Home like any other failure.
+pub(crate) async fn record_launch_failure(
+    client: &impl GenericClient,
+    project_id: &Uuid,
+    conversation_id: &Uuid,
+    owner_user_id: Uuid,
+    automation_id: &Uuid,
+    error_message: &str,
+) -> Option<i64> {
+    append(
+        client,
+        &ActivityRow {
+            kind: KIND_RUN_FAILED,
+            org_id: None,
+            project_id: Some(*project_id),
+            conversation_id: Some(*conversation_id),
+            run_id: None,
+            prompt_id: None,
+            visibility: VISIBILITY_CONVERSATION,
+            actor: ActivityActor::system(),
+            owner_user_id: None,
+            target_user_id: Some(owner_user_id),
+            title: None,
+            preview: bounded_preview(error_message),
+            data: json!({ "outcome": "failed", "launch": true, "automationId": automation_id.to_string() }),
         },
     )
     .await
@@ -517,6 +568,8 @@ pub(crate) struct ActivityConversationRef {
     id: Uuid,
     title: Option<String>,
     visibility: Option<String>,
+    /// "automation" for a scheduled conversation; null for an ordinary one.
+    thread_kind: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -711,6 +764,7 @@ async fn list_my_activity(
                 ap.name as project_name,
                 o.id as org_id, o.name as org_name,
                 c.visibility as conversation_visibility,
+                c.thread_kind as conversation_thread_kind,
                 nullif(btrim(c.metadata ->> 'title'), '') as conversation_title,
                 r.status as run_status,
                 coalesce(
@@ -795,6 +849,7 @@ async fn list_my_activity(
                 id,
                 title: conversation_title.clone(),
                 visibility: row.get("conversation_visibility"),
+                thread_kind: row.get("conversation_thread_kind"),
             }),
             run: run_id.map(|id| ActivityRunRef {
                 id,
