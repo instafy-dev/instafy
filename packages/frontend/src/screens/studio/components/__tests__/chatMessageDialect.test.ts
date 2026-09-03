@@ -30,6 +30,29 @@ describe("chatMessageDialect", () => {
     ]);
   });
 
+  it("joins hard-wrapped consecutive lines into a single paragraph block (#210)", () => {
+    const hardWrapped = [
+      "You are an autonomous engineer running inside the Instafy agent",
+      "stack. Each run of this runbook is ONE iteration: handle at most",
+      "one bug, land it, and stop. If there is nothing to pick up, advance",
+      "the core pin, then stop. Small, safe, reviewable changes",
+      "are fine. Prefer doing less, correctly, over doing more.",
+    ].join("\n");
+
+    expect(parseMessageContentBlocks(hardWrapped)).toEqual([{ kind: "paragraph", line: hardWrapped }]);
+  });
+
+  it("still starts a new paragraph block only at a blank line", () => {
+    expect(parseMessageContentBlocks("para one line a\npara one line b\n\npara two")).toEqual([
+      { kind: "paragraph", line: "para one line a\npara one line b" },
+      { kind: "paragraph", line: "para two" },
+    ]);
+  });
+
+  it("preserves a chat author's single newline as a line break inside one paragraph", () => {
+    expect(parseMessageContentBlocks("a\nb")).toEqual([{ kind: "paragraph", line: "a\nb" }]);
+  });
+
   it("nests indented bulleted sublists inside an ordered list block", () => {
     expect(
       parseMessageContentBlocks(
