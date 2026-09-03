@@ -1048,6 +1048,12 @@ async fn finalize_automation_attempt(
                 "reason": "automation_launch_failed",
                 "automationId": record.id.to_string(),
                 "automationName": record.name,
+                // Purely additive today. Re-running an automation is
+                // owner-gated (`can_access_owned_automation`) while this notice
+                // is visible to every conversation participant, so a future
+                // "Run now" action needs the owner id on the row to know
+                // whether it may render at all.
+                "automationOwnerId": record.user_id.to_string(),
             },
         });
         if let Err((_, Json(api_error))) = crate::agent::record_agent_conversation_message(
@@ -1153,9 +1159,21 @@ fn hosted_automation_provider_is_managed(provider: &str, configured_as_self_host
 /// caller can supply. When no live self-hosted runtime matched the automation,
 /// fail the run with an actionable operator message instead of leaking the
 /// launch-path refusal into lastError (instafy-dev/instafy#105).
+///
+/// The wording has to be specific about *which* machine. `select_viable_runtime_id`
+/// matches `provider = $2` exactly, so a runtime started on some other machine
+/// registers under a different provider and the next run fails identically —
+/// "start or repair the runtime" invited exactly that wasted trip. The frontend
+/// recognises SELF_HOSTED_LAUNCH_MARKER inside this sentence to offer the
+/// "How to start it" dialog, so the two must be edited together.
+pub(crate) const SELF_HOSTED_LAUNCH_MARKER: &str =
+    "no self-hosted runtime was online for this space";
+
 fn no_live_self_hosted_runtime_error(provider_is_self_hosted: bool) -> Option<&'static str> {
     provider_is_self_hosted.then_some(
-        "no live self-hosted runtime available for this space; start or repair the runtime and re-run",
+        "no self-hosted runtime was online for this space; this schedule is pinned to a \
+         self-hosted machine, so start Instafy on that machine and the next scheduled run \
+         will pick it up",
     )
 }
 
@@ -2194,6 +2212,7 @@ mod tests {
         automation_runtime_is_selectable, can_access_owned_automation, can_view_automation,
         conversation_visibility_for_result_visibility, hosted_automation_provider_is_managed,
         no_live_self_hosted_runtime_error, normalize_result_visibility, UpdateAutomationBody,
+        SELF_HOSTED_LAUNCH_MARKER,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -2414,10 +2433,16 @@ mod tests {
         assert_eq!(
             no_live_self_hosted_runtime_error(true),
             Some(
-                "no live self-hosted runtime available for this space; \
-                 start or repair the runtime and re-run"
+                "no self-hosted runtime was online for this space; this schedule is pinned to a \
+                 self-hosted machine, so start Instafy on that machine and the next scheduled run \
+                 will pick it up"
             )
         );
+        // The frontend keys its "How to start it" action off this substring;
+        // editing the sentence without editing controllerConversationNotice.ts
+        // silently drops the button.
+        assert!(no_live_self_hosted_runtime_error(true)
+            .is_some_and(|message| message.contains(SELF_HOSTED_LAUNCH_MARKER)));
         // Managed providers keep falling through to the launch path.
         assert_eq!(no_live_self_hosted_runtime_error(false), None);
     }

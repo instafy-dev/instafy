@@ -242,8 +242,12 @@ function buildInsufficientQuotaGuidance(upstreamLabel: string): ProxyUpstreamErr
 function buildExpiredCredentialGuidance(summary: string): ProxyUpstreamErrorGuidance {
   return {
     summary,
-    detail: "The selected upstream AI login/token is stale. Reconnect or choose another credential before retrying.",
-    actionLabel: "Reconnect AI",
+    // The button opens AI settings and nothing more — there is no credential
+    // picker and no retry control on this row, so the sentence must not
+    // promise either. Send the message again once the connection is fixed.
+    detail:
+      "The saved AI login is stale. Fix the connection in AI settings, then send your message again.",
+    actionLabel: "Open AI settings",
     actionKind: "open_ai_settings",
   };
 }

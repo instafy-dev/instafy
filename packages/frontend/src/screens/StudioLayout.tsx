@@ -35,6 +35,10 @@ import { StudioTopBar } from "./studio/components/StudioTopBar";
 import { MobileBottomDock } from "./studio/components/MobileBottomDock";
 import { ProjectLauncher } from "./studio/components/ProjectLauncher";
 import { ChatPanel } from "./studio/components/ChatPanel";
+import {
+  ControllerNoticeActionsProvider,
+  type ControllerNoticeActionsContextValue,
+} from "./studio/components/ControllerNoticeActions";
 import { ProjectPickerPanel } from "./studio/components/ProjectPickerPanel";
 import { SettingsPanel } from "./studio/components/SettingsPanel";
 import { SecretsPanel } from "./studio/components/SecretsPanel";
@@ -259,6 +263,8 @@ function StudioLayoutInner() {
   const requestHistoryPush = useCallback(() => {
     requestUrlNavigation("push");
   }, [requestUrlNavigation]);
+
+
   const { showStatus } = useStatus();
   const {
     projectInitialized,
@@ -268,7 +274,25 @@ function StudioLayoutInner() {
     activeProjectId,
   } = useProject();
   const { billing: creditBilling, controllerEnabled: creditsControllerEnabled } = useCredits();
-  const { runtime, runtimeReady, effectiveRuntimeId, runtimeStatuses } = useRuntime();
+  const { runtime, runtimeReady, effectiveRuntimeId, runtimeStatuses, showDesktopRuntimeHelp } =
+    useRuntime();
+
+  // Controller notices ("Workspace unavailable", "Scheduled run couldn't
+  // start") used to be text-only cards naming a composer Runtime button that no
+  // longer exists. They get their action here, where both the Machines route
+  // and the self-host dialog already live.
+  const controllerNoticeActionsValue = useMemo<ControllerNoticeActionsContextValue>(
+    () => ({
+      onOpenMachines: () => {
+        // Push before opening, or the ?panel= reconciliation snaps the
+        // workspace straight back to the chat surface.
+        requestHistoryPush();
+        openPanelTab("machines", { activate: true });
+      },
+      onShowSelfHostHelp: showDesktopRuntimeHelp,
+    }),
+    [openPanelTab, requestHistoryPush, showDesktopRuntimeHelp],
+  );
   const controllerProjectMissing =
     runtime.controllerProjectMissing || projectAccessBlockedFromProject;
   const projectReadyForWorkspace = projectInitialized && !projectAccessPending;
@@ -1896,10 +1920,8 @@ function StudioLayoutInner() {
     </div>
   );
 
-
-
   return (
-    <>
+    <ControllerNoticeActionsProvider value={controllerNoticeActionsValue}>
       {shouldRenderFilesExplorerPortal ? (
         <FilesPanel
           renderMode="portal"
@@ -2189,7 +2211,7 @@ function StudioLayoutInner() {
       <ProviderBindingApprovalHost />
       <Status />
       <DesktopRuntimeHelpDialog />
-    </>
+    </ControllerNoticeActionsProvider>
   );
 }
 

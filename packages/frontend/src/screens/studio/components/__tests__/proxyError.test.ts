@@ -118,8 +118,8 @@ describe("proxyError", () => {
     expect(guidance?.summary).toBe(
       "ChatGPT login needs reconnecting. Reconnect AI credentials, then retry the message.",
     );
-    expect(guidance?.detail).toContain("login/token is stale");
-    expect(guidance?.actionLabel).toBe("Reconnect AI");
+    expect(guidance?.detail).toContain("The saved AI login is stale");
+    expect(guidance?.actionLabel).toBe("Open AI settings");
     expect(guidance?.actionKind).toBe("open_ai_settings");
   });
 

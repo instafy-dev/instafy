@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "../../types";
 import { ConversationMessageRows } from "../ConversationMessageRows";
 import { RunFailureRetryProvider } from "../RunFailureNotice";
+import { ControllerNoticeActionsProvider } from "../ControllerNoticeActions";
 import {
   CHAT_SPEAKER_MARKER_SELECTOR,
   readStickyChatSpeakerMarker,
@@ -141,6 +142,92 @@ describe("ConversationMessageRows", () => {
       );
     });
   }
+
+  async function renderWithNoticeActions(
+    messages: ChatMessage[],
+    actions: { onOpenMachines: () => void; onShowSelfHostHelp: () => void },
+  ) {
+    await act(async () => {
+      root.render(
+        <ControllerNoticeActionsProvider value={actions}>
+          <ConversationMessageRows
+            messages={messages}
+            currentUserId="user-1"
+            chatClientSessionId="session-1"
+            projectId="project-1"
+            runtimeId={null}
+            conversationLocalId="conversation-local"
+            conversationControllerId="conversation-controller"
+            firstPlanMessageId={null}
+            humanLabelByUserId={new Map()}
+            runAgentIdentityByRunId={new Map()}
+            runAgentHandleByRunId={new Map()}
+            renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
+            assistantAvatarPlaceholder={<span aria-hidden="true" className="h-8 w-8" />}
+            onRequestActions={vi.fn()}
+            onRequestActionsAtPoint={vi.fn()}
+            onCancelTerminalCommand={null}
+            onMessageContextMenu={vi.fn()}
+          />
+        </ControllerNoticeActionsProvider>,
+      );
+    });
+  }
+
+  it("gives a scheduled-run failure a working way out", async () => {
+    // The reported bug: this card was text-only, so a reader told to "start or
+    // repair the runtime" had nothing to click.
+    const onOpenMachines = vi.fn();
+    const onShowSelfHostHelp = vi.fn();
+    const notice = createMessage({
+      id: "automation-launch-failed",
+      role: "assistant",
+      authorId: null,
+      content:
+        "This scheduled run couldn't start: no self-hosted runtime was online for this space; " +
+        "this schedule is pinned to a self-hosted machine, so start Instafy on that machine and " +
+        "the next scheduled run will pick it up",
+      metadata: {
+        source: "controller",
+        kind: "runtime_alert",
+        details: { reason: "automation_launch_failed", automationId: "automation-1" },
+      },
+    });
+
+    await renderWithNoticeActions([notice], { onOpenMachines, onShowSelfHostHelp });
+
+    const action = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-controller-notice-action"]',
+    );
+    expect(action).not.toBeNull();
+    expect(action?.textContent).toContain("How to start it");
+    await act(async () => {
+      action?.click();
+    });
+    expect(onShowSelfHostHelp).toHaveBeenCalledTimes(1);
+    expect(onOpenMachines).not.toHaveBeenCalled();
+  });
+
+  it("leaves the notice button-free when no action provider is mounted", async () => {
+    // Thread previews and other hosts render this card without the provider;
+    // it must degrade to its old shape rather than throw.
+    const notice = createMessage({
+      id: "runtime-unavailable",
+      role: "assistant",
+      authorId: null,
+      content: "Runtime is unavailable.",
+      metadata: {
+        source: "controller",
+        kind: "runtime_alert",
+        details: { reason: "runtime_unavailable" },
+      },
+    });
+
+    await renderSpeakerBoundaryMessages([notice]);
+
+    expect(container.querySelector('[data-testid="chat-controller-notice"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="chat-controller-notice-action"]')).toBeNull();
+  });
 
   it("renders normal chat messages without decorative corner notches", async () => {
     const shortPrompt = createMessage({
@@ -421,7 +508,7 @@ describe("ConversationMessageRows", () => {
     const notice = container.querySelector('[data-testid="chat-controller-notice"]');
     expect(notice).not.toBeNull();
     expect(notice?.textContent).toContain("Workspace unavailable");
-    expect(notice?.textContent).toContain("Use the Runtime button by the composer");
+    expect(notice?.textContent).toContain("Open Machines");
     const inlineSpeakers = Array.from(container.querySelectorAll('[data-testid="chat-speaker-inline"]'));
     expect(inlineSpeakers).toHaveLength(2);
     expect(inlineSpeakers[1]?.textContent).toContain("octo");
