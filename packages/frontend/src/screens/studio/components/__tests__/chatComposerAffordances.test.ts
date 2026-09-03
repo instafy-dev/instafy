@@ -4,7 +4,6 @@ import { resolveChatComposerAffordances } from "../chatComposerAffordances";
 
 function resolveAffordances(overrides: Partial<Parameters<typeof resolveChatComposerAffordances>[0]> = {}) {
   return resolveChatComposerAffordances({
-    compactBrowserViewport: false,
     composerGhostSuggestionRemainder: null,
     credentialsReady: true,
     activeConversationControllerId: "controller-1",
