@@ -1,7 +1,7 @@
 {
   "name": "@instafy/desktop-app",
   "private": true,
-  "version": "0.2.9",
+  "version": "0.2.10",
   "license": "AGPL-3.0-only",
   "description": "Instafy desktop app (Electron).",
   "desktopName": "dev.instafy.studio.desktop",
