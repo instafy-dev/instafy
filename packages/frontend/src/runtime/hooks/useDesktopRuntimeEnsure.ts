@@ -1,24 +1,38 @@
-import { useCallback, useState, type Dispatch } from "react";
+import { useCallback, useMemo, useState, type Dispatch } from "react";
 import { controllerClient } from "../../sdk/instafy";
+import type { ControllerRuntimeStatusEntry } from "../../sdk/instafy";
 import type { RuntimeAction } from "../runtimeStore";
 import type { ShowStatusFn } from "./types";
 
 interface UseDesktopRuntimeEnsureOptions {
   enabled: boolean;
   projectId: string | null;
+  runtimeStatuses: ControllerRuntimeStatusEntry[];
   dispatch: Dispatch<RuntimeAction>;
   refreshRuntimeStatuses: () => Promise<void>;
   showStatus: ShowStatusFn;
+  onShowSelfHostHelp?: () => void;
 }
 
 export function useDesktopRuntimeEnsure({
   enabled,
   projectId,
+  runtimeStatuses,
   dispatch,
   refreshRuntimeStatuses,
   showStatus,
+  onShowSelfHostHelp,
 }: UseDesktopRuntimeEnsureOptions) {
   const [desktopRuntimeEnsuring, setDesktopRuntimeEnsuring] = useState(false);
+  // The request is about a machine that has already registered itself. Without
+  // one there is nothing for the controller to reconnect: a self-hosted request
+  // naming no runtime is refused outright ("self-hosted runtimes must first
+  // register from their owner device"), so firing it would only produce an
+  // error toast blaming the agent for being offline.
+  const localRuntimeId = useMemo(
+    () => runtimeStatuses.find((entry) => entry.isLocal)?.runtimeId ?? null,
+    [runtimeStatuses],
+  );
 
   const ensureDesktopRuntime = useCallback(async () => {
     if (!enabled || !projectId) {
@@ -32,12 +46,24 @@ export function useDesktopRuntimeEnsure({
     if (desktopRuntimeEnsuring) {
       return true;
     }
+    if (!localRuntimeId) {
+      showStatus(
+        "No self-hosted machine is registered for this space yet.",
+        "warning",
+        5000,
+        onShowSelfHostHelp
+          ? { actionLabel: "How to connect one", onAction: onShowSelfHostHelp }
+          : undefined,
+      );
+      return false;
+    }
     setDesktopRuntimeEnsuring(true);
     try {
       // Keep the runtime record's TTL at a sane default. In local debug controller builds,
       // omitting this gets coerced down to ~30s and can trigger quick churn (tunnel revoked).
       const result = await controllerClient.runtimes.requestDesktop({
         projectId,
+        runtimeId: localRuntimeId,
         idleTtlSeconds: controllerClient.core.runtimeIdleTtlSecondsDefault,
       });
       if (!result) {
@@ -75,8 +101,10 @@ export function useDesktopRuntimeEnsure({
   }, [
     enabled,
     projectId,
+    localRuntimeId,
     desktopRuntimeEnsuring,
     dispatch,
+    onShowSelfHostHelp,
     refreshRuntimeStatuses,
     showStatus,
   ]);
