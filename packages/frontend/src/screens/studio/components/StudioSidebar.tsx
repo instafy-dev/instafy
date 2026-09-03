@@ -12,7 +12,6 @@ import { Capacitor } from "@capacitor/core";
 import { DESKTOP_TITLE_BAR_HEIGHT_PX, desktopTitleBarFree } from "../../../lib/desktopShell";
 import { DialogTrigger } from "react-aria-components";
 import {
-  Cube,
   NavArrowDown,
   SidebarCollapse,
   SidebarExpand,
@@ -22,6 +21,8 @@ import { AttentionBadge } from "../../../components/AttentionBadge";
 import { Button } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
+import { StudioDialogBody, StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
+import { Input } from "../../../components/Input";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import { useStatus } from "../../../status/useStatus";
 import { useProfile } from "../../../profile/ProfileProvider";
@@ -41,7 +42,8 @@ import type { TunnelCopyMode } from "../../../runtime/components/RuntimeTunnelDe
 import { useWorkspaceControls } from "../workspaceControls";
 import type { StudioNavItem, StudioPanel } from "../types";
 import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
-import { getOrgDisambiguator, getOrgDisplayName, getOrgInitials } from "../../../org/orgNaming";
+import { getOrgDisambiguator, getOrgDisplayName } from "../../../org/orgNaming";
+import { SidebarOrgDeck } from "./SidebarOrgDeck";
 import { useAppLogs } from "../../../debug/useAppLogs";
 import {
   controllerClient,
@@ -76,11 +78,9 @@ import { StudioSidebarWorkspaceSwitcher } from "./StudioSidebarWorkspaceSwitcher
 import {
   normalizeSidebarOrgUser,
   readCachedControllerOrgs,
-  readSidebarOrgSnapshot,
   writeSidebarOrgSnapshot,
 } from "./sidebarOrgSnapshot";
 
-const TEAM_RAIL_VISIBLE_LIMIT = 4;
 
 const EXPANDED_SIDEBAR_ROW_LAYOUT_CLASS = "justify-start gap-2.5 px-3 py-1";
 const COLLAPSED_SIDEBAR_ROW_LAYOUT_CLASS = "justify-center px-1 py-1.5";
@@ -166,10 +166,6 @@ export function StudioSidebar({
   );
   const [orgsFetchState, setOrgsFetchState] = useState<"loading" | "ready" | "error">(() =>
     runtimeControllerEnabled ? "loading" : "ready",
-  );
-  /** Chip count the rail rendered on this user's last successful load (0 = unknown). */
-  const [cachedRailChipCount, setCachedRailChipCount] = useState(
-    () => readSidebarOrgSnapshot(userEmail)?.railChipCount ?? 0,
   );
   const hydratedOrgUserRef = useRef<string | null>(normalizeSidebarOrgUser(userEmail));
   const [pendingOrgSwitchKey, setPendingOrgSwitchKey] = useState<string | null>(null);
@@ -597,7 +593,6 @@ export function StudioSidebar({
     let cancelled = false;
     if (!runtimeControllerEnabled) {
       setControllerOrgs([]);
-      setCachedRailChipCount(0);
       setOrgsFetchState("ready");
       return () => {
         cancelled = true;
@@ -611,7 +606,6 @@ export function StudioSidebar({
       hydratedOrgUserRef.current = userKey;
       setControllerOrgs(readCachedControllerOrgs(userEmail));
     }
-    setCachedRailChipCount(readSidebarOrgSnapshot(userEmail)?.railChipCount ?? 0);
     setOrgsFetchState("loading");
     listControllerOrganizations()
       .then((orgs) => {
@@ -789,36 +783,36 @@ export function StudioSidebar({
     }
     return getOrgDisplayName(activeProject?.orgName);
   }, [activeOrgKey, activeProject?.orgName, orgOptions]);
-  // Slack-style team rail: active team pinned first, the rest ordered by
-  // attention, then name. Only rendered when the user is in more than one team.
-  const teamRailTeams = useMemo(() => {
-    const teams = orgOptions.filter((org) => org.key !== "all");
-    return [...teams].sort((a, b) => {
-      if (a.key === activeOrgKey) return -1;
-      if (b.key === activeOrgKey) return 1;
-      const attentionDelta =
-        (homeAttentionByOrg[b.key] ?? 0) - (homeAttentionByOrg[a.key] ?? 0);
-      if (attentionDelta !== 0) {
-        return attentionDelta;
-      }
-      return a.name.localeCompare(b.name);
-    });
-  }, [activeOrgKey, homeAttentionByOrg, orgOptions]);
-  const teamRailVisible = teamRailTeams.length > 1;
-  // Space is reserved during the first load only when this user's snapshot says
-  // a rail is coming. Solo users (the common case) never get a phantom gap.
-  const showTeamRailPlaceholder =
-    !teamRailVisible && orgsFetchState === "loading" && cachedRailChipCount > 1;
-  const teamRailPlaceholderChips = Math.min(cachedRailChipCount, TEAM_RAIL_VISIBLE_LIMIT);
-  const teamRailPlaceholderHasOverflow = cachedRailChipCount > TEAM_RAIL_VISIBLE_LIMIT;
+  // The org deck (the team & spaces row's icon) shows the selected team on top
+  // and reads as a stack when there is more than one; switching happens in the
+  // popover it opens. Selection follows the user's CHOICE instantly; the active
+  // project catches up once that team's spaces load.
+  const orgDeckTeams = useMemo(
+    () => orgOptions.filter((org) => org.key !== "all"),
+    [orgOptions],
+  );
+  const orgDeckSelectedKey = workspaceOrgKey === "all" ? activeOrgKey : workspaceOrgKey;
+  const orgDeckTeam = useMemo(
+    () => orgDeckTeams.find((team) => team.key === orgDeckSelectedKey) ?? orgDeckTeams[0] ?? null,
+    [orgDeckSelectedKey, orgDeckTeams],
+  );
+  const orgDeckOtherAttention = useMemo(
+    () =>
+      orgDeckTeams.reduce(
+        (total, team) =>
+          team.key === orgDeckSelectedKey ? total : total + (homeAttentionByOrg[team.key] ?? 0),
+        0,
+      ),
+    [homeAttentionByOrg, orgDeckSelectedKey, orgDeckTeams],
+  );
   // Refresh the snapshot after every successful load (never after a failure —
-  // a flaky request must not erase a rail the user really has).
+  // a flaky request must not erase teams the user really has).
   useEffect(() => {
     if (!runtimeControllerEnabled || orgsFetchState !== "ready") {
       return;
     }
-    writeSidebarOrgSnapshot(userEmail, controllerOrgs, teamRailTeams.length);
-  }, [controllerOrgs, orgsFetchState, teamRailTeams.length, userEmail]);
+    writeSidebarOrgSnapshot(userEmail, controllerOrgs, orgDeckTeams.length);
+  }, [controllerOrgs, orgDeckTeams.length, orgsFetchState, userEmail]);
   const activeProjectName = activeProject?.name?.trim() || "Untitled space";
   const selectedWorkspaceOrg = useMemo(
     () => orgOptions.find((org) => org.key === workspaceOrgKey) ?? null,
@@ -1136,11 +1130,69 @@ export function StudioSidebar({
 
   const workspaceSwitcherOpen = workspaceMenuOpen || workspaceMobileViewOpen;
   const moreSwitcherOpen = moreMenuOpen || moreMobileViewOpen;
+  // "New team" lives with the sidebar because the sidebar already owns the
+  // org list and the switch: create, refresh that list, then select the new
+  // team so the panel lands on its (empty) spaces with the New-space action
+  // right there.
+  const [newTeamOpen, setNewTeamOpen] = useState(false);
+  const [newTeamName, setNewTeamName] = useState("");
+  const [newTeamPending, setNewTeamPending] = useState(false);
+  const closeNewTeam = useCallback(() => {
+    setNewTeamOpen(false);
+    setNewTeamName("");
+  }, []);
+  const handleCreateTeam = useCallback(async () => {
+    const orgName = newTeamName.trim();
+    if (!orgName || newTeamPending) {
+      return;
+    }
+    setNewTeamPending(true);
+    try {
+      const created = await controllerClient.organizations.create({ orgName });
+      if (!created) {
+        showStatus("Couldn't create the team. Check the team limit and try again.", "error", 4500);
+        return;
+      }
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("instafy:orgs-updated"));
+      }
+      closeNewTeam();
+      showStatus(`Team ${created.name} created.`, "success", 2500, { presentation: "confirmation" });
+      // A new team has no spaces, so selecting it would only bounce back with
+      // a "no spaces yet" notice. Go straight to making its first space; fall
+      // back to plain selection where the new-space flow isn't available.
+      if (onStartNewProject) {
+        onStartNewProject(created.id);
+        onRequestClose?.();
+      } else {
+        handleWorkspaceOrgChange(created.id);
+      }
+    } finally {
+      setNewTeamPending(false);
+    }
+  }, [
+    closeNewTeam,
+    handleWorkspaceOrgChange,
+    newTeamName,
+    newTeamPending,
+    onRequestClose,
+    onStartNewProject,
+    showStatus,
+  ]);
+
   const workspaceSwitcherSections = (
     <StudioSidebarWorkspaceSwitcher
       orgOptions={orgOptions}
       workspaceOrgKey={workspaceOrgKey}
       onWorkspaceOrgChange={handleWorkspaceOrgChange}
+      onCreateOrg={
+        runtimeControllerEnabled
+          ? () => {
+              closeWorkspaceSwitcher();
+              setNewTeamOpen(true);
+            }
+          : undefined
+      }
       projectAttentionCounts={homeAttentionByProject}
       orgAttentionCounts={homeAttentionByOrg}
       onOpenOrgSettings={
@@ -1261,107 +1313,6 @@ export function StudioSidebar({
             </Button>
           </li>
 
-          {teamRailVisible ? (
-            <li
-              className="mb-1 border-b border-slate-200/70 pb-2 dark:border-[color:var(--color-studio-dark-divider)]"
-              data-testid="sidebar-team-rail"
-            >
-              <div
-                className={[
-                  "flex gap-1.5 px-2 pt-1",
-                  showLabels ? "flex-row flex-wrap items-center" : "flex-col items-center",
-                ].join(" ")}
-              >
-                {teamRailTeams.slice(0, TEAM_RAIL_VISIBLE_LIMIT).map((team) => {
-                  // Highlight follows the user's SELECTION instantly; the
-                  // active project catches up once its org's spaces load.
-                  const isSelectedTeam =
-                    workspaceOrgKey === "all"
-                      ? team.key === activeOrgKey
-                      : team.key === workspaceOrgKey;
-                  const isPendingTeam = pendingOrgSwitchKey === team.key;
-                  return (
-                    <button
-                      key={team.key}
-                      type="button"
-                      title={team.label}
-                      aria-label={`Switch to team ${team.label}`}
-                      aria-current={isSelectedTeam ? "true" : undefined}
-                      aria-busy={isPendingTeam || undefined}
-                      data-testid={`sidebar-team-chip-${team.key}`}
-                      onClick={() => {
-                        if (!isSelectedTeam || pendingOrgSwitchKey) {
-                          handleWorkspaceOrgChange(team.key);
-                        }
-                      }}
-                      className={[
-                        "relative flex h-8 w-8 shrink-0 items-center justify-center overflow-visible rounded-lg text-xxs font-semibold transition active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-400/60",
-                        isSelectedTeam
-                          ? "bg-primary-600 text-white dark:bg-primary-500"
-                          : "bg-slate-200/80 text-slate-600 hover:bg-slate-300/70 hover:text-slate-800 dark:bg-white/[0.08] dark:text-slate-300 dark:hover:bg-white/[0.14] dark:hover:text-slate-100",
-                        isPendingTeam ? "animate-pulse" : "",
-                      ]
-                        .filter(Boolean)
-                        .join(" ")}
-                    >
-                      {team.avatarUrl ? (
-                        <img
-                          src={team.avatarUrl}
-                          alt=""
-                          aria-hidden="true"
-                          className="h-8 w-8 rounded-lg object-cover"
-                          draggable={false}
-                        />
-                      ) : (
-                        getOrgInitials(team.name)
-                      )}
-                      <AttentionBadge
-                        count={homeAttentionByOrg[team.key] ?? 0}
-                        aria-hidden
-                        testId={`sidebar-team-chip-attention-${team.key}`}
-                        className="absolute -right-1 -top-1 ring-2 ring-slate-50 dark:ring-[color:var(--color-studio-dark-rail)]"
-                      />
-                    </button>
-                  );
-                })}
-                {teamRailTeams.length > TEAM_RAIL_VISIBLE_LIMIT ? (
-                  <button
-                    type="button"
-                    title="All teams"
-                    aria-label="Show all teams"
-                    data-testid="sidebar-team-chip-overflow"
-                    onClick={openWorkspaceSwitcher}
-                    className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-transparent text-xxs font-semibold text-slate-500 transition hover:bg-slate-200/70 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-400/60 dark:text-slate-400 dark:hover:bg-white/[0.08] dark:hover:text-slate-200"
-                  >
-                    +{teamRailTeams.length - TEAM_RAIL_VISIBLE_LIMIT}
-                  </button>
-                ) : null}
-              </div>
-            </li>
-          ) : showTeamRailPlaceholder ? (
-            // Same box, same divider, same chip geometry — held empty so the
-            // real rail drops into place instead of shoving the nav down.
-            <li
-              className="mb-1 border-b border-slate-200/70 pb-2 dark:border-[color:var(--color-studio-dark-divider)]"
-              data-testid="sidebar-team-rail-placeholder"
-              aria-hidden="true"
-            >
-              <div
-                className={[
-                  "flex gap-1.5 px-2 pt-1",
-                  showLabels ? "flex-row flex-wrap items-center" : "flex-col items-center",
-                ].join(" ")}
-              >
-                {Array.from({ length: teamRailPlaceholderChips }, (_, index) => (
-                  <span key={index} className="h-8 w-8 shrink-0 rounded-lg" />
-                ))}
-                {teamRailPlaceholderHasOverflow ? (
-                  <span className="h-8 w-8 shrink-0 rounded-lg" />
-                ) : null}
-              </div>
-            </li>
-          ) : null}
-
           <li>
             <Button
               onPress={() => {
@@ -1422,15 +1373,18 @@ export function StudioSidebar({
                 >
                   <span
                     className={[
-                      `relative flex ${sidebarIconShellSizeClass} items-center justify-center rounded-lg border transition-colors`,
-                      workspaceSwitcherOpen
-                        ? showLabels
-                          ? "border-transparent bg-transparent text-primary-600 dark:text-primary-500"
-                          : "border-primary-200 bg-primary-50 text-primary-600 dark:border-primary-500/40 dark:bg-primary-500/10 dark:text-primary-500"
-                        : "border-transparent text-slate-400 group-hover/item:text-primary-600 dark:text-slate-500 dark:group-hover/item:text-primary-500",
-                    ].join(" ")}
+                      `relative flex ${sidebarIconShellSizeClass} shrink-0 items-center justify-center rounded-lg transition-transform active:scale-95`,
+                      workspaceSwitcherOpen ? "ring-2 ring-primary-400/60 ring-offset-1 ring-offset-slate-50 dark:ring-offset-[color:var(--color-studio-dark-rail)]" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
                   >
-                    <Cube className="text-base" aria-hidden="true" />
+                    <SidebarOrgDeck
+                      team={orgDeckTeam}
+                      teamCount={orgDeckTeams.length}
+                      otherAttentionCount={orgDeckOtherAttention}
+                      pending={pendingOrgSwitchKey !== null}
+                    />
                   </span>
                   {showLabels ? (
                     <span className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left">
@@ -1478,13 +1432,19 @@ export function StudioSidebar({
                 aria-label="Open team and spaces"
               >
                 <span
-                  className={`relative flex ${sidebarIconShellSizeClass} items-center justify-center rounded-lg transition-colors ${
-                    workspaceSwitcherOpen
-                      ? "bg-primary-50 text-primary-600 dark:bg-primary-500/10 dark:text-primary-500"
-                      : "text-slate-400 group-hover/item:text-primary-600 dark:text-slate-500 dark:group-hover/item:text-primary-500"
-                  }`}
+                  className={[
+                    `relative flex ${sidebarIconShellSizeClass} shrink-0 items-center justify-center rounded-lg transition-transform active:scale-95`,
+                    workspaceSwitcherOpen ? "ring-2 ring-primary-400/60 ring-offset-1 ring-offset-slate-50 dark:ring-offset-[color:var(--color-studio-dark-rail)]" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
                 >
-                  <Cube className="text-base" aria-hidden="true" />
+                  <SidebarOrgDeck
+                    team={orgDeckTeam}
+                    teamCount={orgDeckTeams.length}
+                    otherAttentionCount={orgDeckOtherAttention}
+                    pending={pendingOrgSwitchKey !== null}
+                  />
                 </span>
                 {showLabels ? (
                   <span className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left">
@@ -1676,7 +1636,7 @@ export function StudioSidebar({
       <StudioSidebarMobileDrillIn
         open={!isLargeScreen && workspaceMobileViewOpen}
         testId="sidebar-project-switcher-menu"
-        title="Space switcher"
+        title="Team & spaces"
         backLabel="Back"
         backTestId="sidebar-project-switcher-back"
         onBack={closeWorkspaceSwitcher}
@@ -1790,6 +1750,61 @@ export function StudioSidebar({
             runtimeOptions={runtimeOptions}
             onCopyTunnel={handleCopyTunnel}
           />
+      </StudioDialogModal>
+      <StudioDialogModal
+        isOpen={newTeamOpen}
+        onOpenChange={(open) => {
+          if (!open) {
+            closeNewTeam();
+          }
+        }}
+        isDismissable
+        dialogAriaLabel="New team"
+        data-testid="sidebar-new-team-modal"
+        modalClassName="max-w-sm p-0"
+      >
+        <StudioDialogHeader
+          title="New team"
+          description="A team has its own spaces, members and credits."
+          onClose={closeNewTeam}
+          closeLabel="Close new team"
+        />
+        <StudioDialogBody>
+          <form
+            className="space-y-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void handleCreateTeam();
+            }}
+          >
+            <Input
+              id="sidebar-new-team-name"
+              aria-label="Team name"
+              placeholder="Team name"
+              value={newTeamName}
+              onChange={(event) => setNewTeamName(event.target.value)}
+              autoFocus
+              autoComplete="off"
+              maxLength={80}
+              data-testid="sidebar-new-team-name"
+            />
+            <div className="flex items-center justify-end gap-2">
+              <Button variant="ghost" size="sm" radius="full" onPress={closeNewTeam}>
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                variant="primary"
+                size="sm"
+                radius="full"
+                isDisabled={newTeamName.trim().length === 0 || newTeamPending}
+                data-testid="sidebar-new-team-create"
+              >
+                {newTeamPending ? "Creating…" : "Create team"}
+              </Button>
+            </div>
+          </form>
+        </StudioDialogBody>
       </StudioDialogModal>
       {appLogsOverlayOpen ? (
         <BuildLogOverlay
