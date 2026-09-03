@@ -3,6 +3,8 @@ import {
   Bookmark,
   Github,
   Group,
+  MagicWand,
+  MediaImage,
   NavArrowLeft,
   NavArrowRight,
   OpenNewWindow,
@@ -80,7 +82,11 @@ export function ComposerActionMenu({
   onStashDraft,
   queueDisabled = false,
   stashDisabled = false,
+  onUploadImage,
+  uploadImageDisabled = false,
+  onInsertSuggestion,
   triggerClassName,
+  triggerIconClassName,
   mutationDisabled = false,
   inviteActionLabel = "Invite teammates",
 }: {
@@ -98,7 +104,18 @@ export function ComposerActionMenu({
   onStashDraft?: () => void;
   queueDisabled?: boolean;
   stashDisabled?: boolean;
+  // The one-row composer folds actions it does not render inline into this
+  // menu so nothing is lost: image upload below sm, and the insert-suggestion
+  // wand on every viewport (Tab accepts the inline ghost suggestion from the
+  // keyboard). The composer passes each handler only while it applies.
+  onUploadImage?: () => void;
+  uploadImageDisabled?: boolean;
+  onInsertSuggestion?: () => void;
   triggerClassName?: string;
+  // The trigger's glyph is sized by the composer, the same class it hands
+  // image, mic and Send, so "+" is one of four identical controls; the
+  // menu never picks a glyph size of its own.
+  triggerIconClassName: string;
   mutationDisabled?: boolean;
   inviteActionLabel?: string;
 }) {
@@ -132,7 +149,7 @@ export function ComposerActionMenu({
     <DialogTrigger isOpen={open} onOpenChange={handleOpenChange}>
       <IconButton
         type="button"
-        variant="outline"
+        variant="ghost"
         size="md"
         radius="xl"
         aria-label="Open composer actions"
@@ -140,7 +157,7 @@ export function ComposerActionMenu({
         data-testid="composer-action-menu-trigger"
         className={triggerClassName}
       >
-        <Plus className="h-4 w-4" aria-hidden="true" />
+        <Plus className={triggerIconClassName} aria-hidden="true" />
       </IconButton>
       <StudioDialogPopover
         placement="top start"
@@ -176,6 +193,36 @@ export function ComposerActionMenu({
           </div>
         ) : (
           <div className="space-y-1">
+            {onInsertSuggestion ? (
+              <ActionRow
+                icon={<MagicWand className="h-4 w-4" aria-hidden="true" />}
+                title="Insert suggestion"
+                onPress={() => {
+                  closeMenu();
+                  onInsertSuggestion();
+                }}
+                testId="composer-action-menu-insert-suggestion"
+              />
+            ) : null}
+            {!mutationDisabled && onUploadImage ? (
+              <ActionRow
+                icon={<MediaImage className="h-4 w-4" aria-hidden="true" />}
+                title="Upload image"
+                onPress={() => {
+                  closeMenu();
+                  onUploadImage();
+                }}
+                disabled={uploadImageDisabled}
+                testId="composer-action-menu-upload-image"
+              />
+            ) : null}
+            {(onInsertSuggestion || (!mutationDisabled && onUploadImage)) &&
+            (!mutationDisabled || showInviteAction) ? (
+              <div
+                role="separator"
+                className="mx-2 my-1 border-t border-slate-200/70 dark:border-[color:var(--color-studio-dark-panel-border)]"
+              />
+            ) : null}
             {!mutationDisabled && onQueueMessage ? (
               <ActionRow
                 icon={<Send className="h-4 w-4" aria-hidden="true" />}
