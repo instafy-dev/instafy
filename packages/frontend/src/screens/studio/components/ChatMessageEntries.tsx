@@ -97,7 +97,9 @@ export function NotchedMessageShell({
     width === "full"
       ? `w-full ${CHAT_BUBBLE_MAX_WIDTH.messageFull}`
       : `w-fit ${CHAT_BUBBLE_MAX_WIDTH.message}`;
-  const paddingClassName = padding === "none" ? "" : "px-1.5 py-1";
+  // No horizontal padding: the shell's left edge IS the chat alignment line —
+  // speaker header, body text, and chip rows all start on it (#177).
+  const paddingClassName = padding === "none" ? "" : "py-1";
 
   return (
     <div
@@ -351,6 +353,7 @@ function AgentJobThreadPreviewEntry({
   showHeaderAvatar = true,
   showHeaderIdentity = true,
   hideThreadSpine = false,
+  runStatusShownInEntryHeader = false,
 }: {
   message: ChatMessage;
   projectId?: string | null;
@@ -359,6 +362,7 @@ function AgentJobThreadPreviewEntry({
   showHeaderAvatar?: boolean;
   showHeaderIdentity?: boolean;
   hideThreadSpine?: boolean;
+  runStatusShownInEntryHeader?: boolean;
 }) {
   const previewState = useAgentJobThreadPreviewState({
     message,
@@ -397,6 +401,7 @@ function AgentJobThreadPreviewEntry({
       ChatFileChangeList={ChatFileChangeList}
       onMessageContextMenu={onMessageContextMenu}
       showHeaderIdentity={showHeaderIdentity}
+      runStatusShownInEntryHeader={runStatusShownInEntryHeader}
     />
   );
 }
@@ -515,6 +520,12 @@ export type AssistantMessageEntryProps = {
   mentionableAgentHandles?: string[] | null;
   useOuterWorkflowSpine?: boolean;
   renderContext?: "conversation" | "runTrace";
+  /**
+   * True when the surrounding row's speaker header already carries the
+   * terminal run-status marker, so job-thread previews skip the duplicate
+   * content-level status caption (#145).
+   */
+  runStatusShownInEntryHeader?: boolean;
 };
 
 export function AssistantMessageEntry({
@@ -534,6 +545,7 @@ export function AssistantMessageEntry({
   mentionableAgentHandles,
   useOuterWorkflowSpine = false,
   renderContext = "conversation",
+  runStatusShownInEntryHeader = false,
 }: AssistantMessageEntryProps) {
   const messageType = getMessageType(message);
   const details = extractMessageDetails(message.metadata);
@@ -733,6 +745,7 @@ export function AssistantMessageEntry({
         showHeaderAvatar={showAgentIdentityAvatar}
         showHeaderIdentity={showAgentThreadHeaderIdentity}
         hideThreadSpine={useOuterWorkflowSpine}
+        runStatusShownInEntryHeader={runStatusShownInEntryHeader}
       />
     );
   }
