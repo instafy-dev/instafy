@@ -309,6 +309,40 @@ describe("ChatMessageContent", () => {
     expect(container.querySelector('[data-testid="chat-message-inline-reference"]')).toBeNull();
   });
 
+  it("renders hard-wrapped source text as one paragraph instead of one <p> per source line (#210)", async () => {
+    const hardWrapped = [
+      "You are an autonomous engineer running inside the Instafy agent",
+      "stack. Each run of this runbook is ONE iteration: handle at most",
+      "one bug, land it, and stop. Small, safe, reviewable changes",
+      "are fine. Prefer doing less, correctly, over doing more.",
+    ].join("\n");
+
+    await act(async () => {
+      root.render(<MessageContent content={hardWrapped} />);
+    });
+
+    const paragraphs = container.querySelectorAll("p");
+    expect(paragraphs).toHaveLength(1);
+    expect(paragraphs[0]?.className).not.toContain("mt-2");
+    expect(paragraphs[0]?.className).toContain("whitespace-pre-wrap");
+    // whitespace-pre-wrap renders the embedded "\n" as a line break while
+    // keeping it a single <p> — textContent preserves the raw newlines.
+    expect(paragraphs[0]?.textContent).toBe(hardWrapped);
+  });
+
+  it("still starts a new <p> only at a blank line, and keeps a chat author's newline as a break", async () => {
+    await act(async () => {
+      root.render(<MessageContent content={"para one line a\npara one line b\n\npara two"} />);
+    });
+
+    const paragraphs = container.querySelectorAll("p");
+    expect(paragraphs).toHaveLength(2);
+    expect(paragraphs[0]?.textContent).toBe("para one line a\npara one line b");
+    expect(paragraphs[0]?.className).not.toContain("mt-2");
+    expect(paragraphs[1]?.textContent).toBe("para two");
+    expect(paragraphs[1]?.className).toContain("mt-2");
+  });
+
   it("offers AI settings from upstream quota failures", async () => {
     const quotaError = `unexpected status 502 Bad Gateway: upstream request failed (credential_source=claim, endpoint=api.openai.com/v1/responses): backend responded with 429 Too Many Requests: {
       "error": {
@@ -1849,5 +1883,88 @@ describe("ChatMessageContent", () => {
     expect(container.querySelector('[data-testid="multi-agent-evidence-detail"]')?.textContent).toContain(
       "Tail detail",
     );
+  });
+
+  // jsdom cannot lay out, so these assert structure/classes rather than
+  // measured pixel widths (#207: the bubble shell's content child needs an
+  // explicit width to wrap instead of overflowing, and prose needs a capped
+  // measure). Real width assertions live in the Playwright component suite.
+  describe("bubble width and prose measure (#207)", () => {
+    it("gives the assistant bubble's content wrapper an explicit full-width class and caps the paragraph's measure", async () => {
+      const longParagraph =
+        "This is a long unbroken runbook paragraph that keeps going and going without any line breaks, exactly the kind of prose that used to overflow the chat bubble shell instead of wrapping inside it because the content wrapper had no width of its own.";
+      const message: ChatMessage = {
+        id: "long-prose-answer",
+        role: "assistant",
+        content: longParagraph,
+        timestamp: Date.now(),
+      };
+
+      await act(async () => {
+        root.render(<AssistantMessageEntry message={message} conversationMessages={[message]} />);
+      });
+
+      const bubble = container.querySelector('[data-testid="chat-bubble-assistant"]');
+      expect(bubble).not.toBeNull();
+      // NotchedMessageShell wraps every child (text, files, chip rows) in a
+      // single content div; it must carry an explicit width so it resolves
+      // against the shell's already-clamped size instead of the fit-content
+      // sizing a plain flex-column `items-start` child would otherwise get.
+      const contentWrapper = bubble?.firstElementChild as HTMLElement | null;
+      expect(contentWrapper?.className).toContain("w-full");
+
+      const paragraph = bubble?.querySelector("p");
+      expect(paragraph?.textContent).toBe(longParagraph);
+      expect(paragraph?.className).toContain("max-w-[70ch]");
+    });
+
+    it("keeps the break and overflow-wrap classes on a paragraph with a very long unbroken token", async () => {
+      const longToken = "x".repeat(200);
+      const message: ChatMessage = {
+        id: "long-token-answer",
+        role: "assistant",
+        content: `See ${longToken} for details.`,
+        timestamp: Date.now(),
+      };
+
+      await act(async () => {
+        root.render(<AssistantMessageEntry message={message} conversationMessages={[message]} />);
+      });
+
+      const paragraph = container.querySelector('[data-testid="chat-bubble-assistant"] p');
+      expect(paragraph?.textContent).toContain(longToken);
+      expect(paragraph?.className).toContain("max-w-[70ch]");
+      expect(paragraph?.className).toContain("break-words");
+      expect(paragraph?.className).toContain("[overflow-wrap:anywhere]");
+    });
+
+    it("caps list items to the prose measure but leaves fenced code blocks at full width", async () => {
+      const message: ChatMessage = {
+        id: "list-and-code-answer",
+        role: "assistant",
+        content:
+          "Steps:\n- Inspect the long-running bubble shell for missing width constraints on its content wrapper\n- Run the checks\n```sh\npnpm --filter @instafy/frontend test:unit\n```",
+        timestamp: Date.now(),
+      };
+
+      await act(async () => {
+        root.render(<AssistantMessageEntry message={message} conversationMessages={[message]} />);
+      });
+
+      const listItems = Array.from(
+        container.querySelectorAll('[data-testid="chat-message-list"] li'),
+      ) as HTMLElement[];
+      expect(listItems.length).toBeGreaterThan(0);
+      for (const item of listItems) {
+        expect(item.className).toContain("max-w-[70ch]");
+      }
+
+      const codeBlock = container.querySelector('[data-testid="chat-message-code-block"]');
+      expect(codeBlock).not.toBeNull();
+      expect(codeBlock?.textContent).toContain("pnpm --filter @instafy/frontend test:unit");
+      expect(codeBlock?.className).not.toContain("max-w-[70ch]");
+      // The code block keeps its own full-width class untouched.
+      expect(codeBlock?.className).toContain("max-w-full");
+    });
   });
 });
