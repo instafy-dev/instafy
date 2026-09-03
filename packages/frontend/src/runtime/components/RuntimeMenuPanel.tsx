@@ -30,6 +30,7 @@ interface RuntimeMenuPanelProps {
   onTerminateRuntime?: (runtimeId: string | null) => void;
   onRemoveRuntime?: (runtimeId: string | null) => void;
   onStartRuntime?: (runtimeId: string | null) => void;
+  onShowSelfHostHelp?: () => void;
   onCopyTunnel?: (mode: TunnelCopyMode, runtimeId?: string | null) => void;
   listClassName?: string;
   emptyStateMessage?: string;
@@ -61,6 +62,7 @@ export function RuntimeMenuPanel({
   onTerminateRuntime,
   onRemoveRuntime,
   onStartRuntime,
+  onShowSelfHostHelp,
   onCopyTunnel,
   listClassName = "mt-2 max-h-60 overflow-auto",
   emptyStateMessage = "No runtimes available yet.",
@@ -384,6 +386,7 @@ export function RuntimeMenuPanel({
           onTerminateRuntime={onTerminateRuntime}
           onRemoveRuntime={onRemoveRuntime}
           onStartRuntime={onStartRuntime}
+          onShowSelfHostHelp={onShowSelfHostHelp}
           className={listClassName}
           selectedOptionClassName="bg-slate-100 font-medium text-slate-900 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-50"
           emptyStateMessage={emptyStateMessage}
