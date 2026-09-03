@@ -125,7 +125,7 @@ test("runtime image inputs reject the vulnerable Chromium and Go crypto baseline
   );
   assert.equal(
     runtimeDefaults.get("CHROMIUM_MIN_VERSION"),
-    "151.0.7922.173-1~deb13u1",
+    "152.0.7977.75-1~deb13u1",
   );
   assert.match(
     dockerfileStage(runtimeSource, "runtime"),
