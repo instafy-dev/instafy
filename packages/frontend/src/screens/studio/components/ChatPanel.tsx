@@ -322,7 +322,7 @@ import {
   readBrowserTransportPreference,
   writeBrowserTransportPreference,
 } from "./browserTransportPreference";
-import { ChatTranscriptViewport } from "./ChatTranscriptViewport";
+import { ChatSpeakerStickyOverlay, ChatTranscriptViewport } from "./ChatTranscriptViewport";
 import { resolveSharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import { useSharedBrowserApprovalTransport } from "./useSharedBrowserApprovalTransport";
 
@@ -402,7 +402,11 @@ function formatCredentialConnectionFailure(raw: string | null | undefined): stri
 }
 
 const NARROW_SPEAKER_INLINE_SELECTOR = '[data-chat-speaker-inline="true"]';
-const SPEAKER_STICKY_FALLBACK_TOP_PX = 8;
+// The scroll container's own top padding (`pt-2`) — where its content
+// actually starts painting. The pill now lives in the roster row above the
+// transcript rather than overlapping it, so this edge (not the pill's own
+// position) is the only stable line left to compare marker positions against.
+const CHAT_TRANSCRIPT_VISIBLE_TOP_INSET_PX = 8;
 
 function speakersEqual(left: StickyChatSpeaker | null, right: StickyChatSpeaker | null): boolean {
   if (left === null || right === null) {
@@ -3069,9 +3073,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   const [stickyChatSpeaker, setStickyChatSpeaker] =
     useState<StickyChatSpeaker | null>(null);
-  // The pill floats over the scroller's top edge as a sibling of the scroller
-  // (never inside it, so the transcript's top-edge fade cannot touch it); its
-  // top edge is the line a speaker marker has to cross to become sticky.
+  // Rendered in the roster row above the transcript (never inside the
+  // scroller), so the ref stays valid for as long as the chat panel is
+  // mounted — the sticky-speaker effect below no longer reads its rect (see
+  // CHAT_TRANSCRIPT_VISIBLE_TOP_INSET_PX), but ChatSpeakerStickyOverlay still
+  // takes a ref, so this stays the one it's given.
   const stickySpeakerOverlayRef = useRef<HTMLDivElement>(null);
 
   useLayoutEffect(() => {
@@ -3083,11 +3089,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
     let animationFrameId: number | null = null;
     const readAndApplySpeaker = () => {
+      // The pill lives in the roster row now, physically separate from the
+      // transcript, so its own rect can no longer mark the handoff line — a
+      // marker's inline label only needs to hide once it has actually
+      // scrolled past the transcript's own visible top edge.
       const containerRect = scrollContainer.getBoundingClientRect();
-      const overlayRect = stickySpeakerOverlayRef.current?.getBoundingClientRect();
-      const thresholdTop = overlayRect
-        ? overlayRect.top
-        : containerRect.top + SPEAKER_STICKY_FALLBACK_TOP_PX;
+      const thresholdTop = containerRect.top + CHAT_TRANSCRIPT_VISIBLE_TOP_INSET_PX;
       const markers = Array.from(
         scrollContainer.querySelectorAll(CHAT_SPEAKER_MARKER_SELECTOR),
       );
@@ -5305,8 +5312,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         data-testid="chat-conversation-roster-row"
       >
         {/* Constrain to the shared 56rem chat column so the roster's right
-            edge lands on the message column, not the panel edge. */}
-        <ChatColumn className="flex items-center justify-end">
+            edge lands on the message column, not the panel edge. The sticky
+            speaker pill takes the column's left side (fading in/out as the
+            transcript scrolls) and the roster stays right-aligned; both are
+            always rendered, so the roster never shifts when the pill appears
+            or disappears. */}
+        <ChatColumn className="flex items-center justify-between gap-2">
+          <ChatSpeakerStickyOverlay ref={stickySpeakerOverlayRef} speaker={stickyChatSpeaker} />
           <ConversationRoster
             agents={conversationRosterAgents}
             humans={conversationRosterHumans}
@@ -5320,8 +5332,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         onContextMenu={handleConversationContextMenu}
         scrollContainerRef={scrollContainerRef}
         scrollPaddingBottom={chatScrollPaddingBottom}
-        stickySpeaker={stickyChatSpeaker}
-        stickySpeakerOverlayRef={stickySpeakerOverlayRef}
       >
         <OctoScrollMotionScope
           sourceRef={scrollContainerRef}
