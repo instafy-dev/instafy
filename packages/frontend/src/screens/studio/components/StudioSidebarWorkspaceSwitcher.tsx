@@ -50,6 +50,7 @@ type StudioSidebarWorkspaceSwitcherProps = {
   workspaceOrgKey: string;
   onWorkspaceOrgChange: (orgKey: string) => void;
   onOpenOrgSettings?: () => void;
+  onCreateOrg?: () => void;
   canSearchSpaces: boolean;
   showProjectSearch: boolean;
   workspaceProjectSearchOpen: boolean;
@@ -66,16 +67,18 @@ type StudioSidebarWorkspaceSwitcherProps = {
 };
 
 /**
- * The spaces panel. Teams are a flat chip strip (mirroring the sidebar team
- * rail) rather than a nested dropdown — one interaction language, no popover
- * inside a popover. Everything below is a single spaces list with the active
- * space as its first, selected row.
+ * The team & spaces panel — the picker the sidebar's org deck opens. Teams
+ * are a short row list (avatar, name, attention), one row per team, with the
+ * selected team marked exactly like the current space below; no nested
+ * dropdown, no popover inside a popover. Everything below is a single spaces
+ * list with the active space as its first, selected row.
  */
 export function StudioSidebarWorkspaceSwitcher({
   orgOptions,
   workspaceOrgKey,
   onWorkspaceOrgChange,
   onOpenOrgSettings,
+  onCreateOrg,
   canSearchSpaces,
   showProjectSearch,
   workspaceProjectSearchOpen,
@@ -100,12 +103,80 @@ export function StudioSidebarWorkspaceSwitcher({
     visibleLimit: projectVisibleLimit,
   });
 
-  const selectedOrg =
-    orgOptions.find((org) => org.key === workspaceOrgKey) ?? orgOptions[0] ?? null;
-  // The Team section itself always renders: with a single org its settings
-  // entry is the only path to members/invites/leave (invited users land in
-  // exactly one org). Only the switcher CHIPS are noise in the solo case.
-  const showTeamChips = orgOptions.length > 1;
+  // The Team section always renders: with a single team its row names where
+  // you are and its settings entry is the only path to members/invites/leave
+  // (invited users land in exactly one team). A single row is not a choice,
+  // so it is marked current and never reads as a control.
+  const selectedOrgKey =
+    orgOptions.some((org) => org.key === workspaceOrgKey)
+      ? workspaceOrgKey
+      : (orgOptions[0]?.key ?? workspaceOrgKey);
+  const totalOrgAttention = Object.values(orgAttentionCounts).reduce(
+    (sum, value) => sum + value,
+    0,
+  );
+
+  const renderTeamRow = (org: SidebarWorkspaceOrgOption) => {
+    const isSelected = org.key === selectedOrgKey;
+    const isAll = org.key === "all";
+    const attention = isAll ? totalOrgAttention : (orgAttentionCounts[org.key] ?? 0);
+    return (
+      <button
+        key={org.key}
+        type="button"
+        aria-label={`Show team ${org.label}`}
+        aria-pressed={isSelected}
+        data-testid={`sidebar-org-chip-${org.key}`}
+        onClick={() => onWorkspaceOrgChange(org.key)}
+        className={[
+          "flex w-full items-center gap-2.5 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-400/60",
+          DRAWER_LIST_ROW_TEXT_CLASS,
+          SWITCHER_MENU_ROW_CLASS,
+          isSelected
+            ? "bg-slate-100 font-medium text-slate-900 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-50"
+            : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-[var(--color-studio-dark-active)]",
+        ].join(" ")}
+      >
+        <span
+          aria-hidden="true"
+          className={[
+            "flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-lg text-xxs font-semibold",
+            isSelected
+              ? "bg-primary-600 text-white dark:bg-primary-500"
+              : "bg-slate-200/80 text-slate-600 dark:bg-white/[0.08] dark:text-slate-300",
+          ].join(" ")}
+        >
+          {isAll ? (
+            "All"
+          ) : org.avatarUrl ? (
+            <img
+              src={org.avatarUrl}
+              alt=""
+              aria-hidden="true"
+              className="h-full w-full object-cover"
+              draggable={false}
+            />
+          ) : (
+            getOrgInitials(org.name)
+          )}
+        </span>
+        <span className="min-w-0 flex-1 truncate">{isAll ? "All teams" : org.label}</span>
+        <span className="flex shrink-0 items-center gap-1.5">
+          {isSelected ? (
+            <span className="text-3xs font-medium uppercase tracking-[0.08em] text-slate-400 dark:text-slate-500">
+              Current
+            </span>
+          ) : null}
+          <AttentionBadge
+            count={attention}
+            aria-hidden
+            testId={`sidebar-org-attention-${org.key}`}
+            className="shrink-0"
+          />
+        </span>
+      </button>
+    );
+  };
 
   const renderProjectRow = (project: MergedProjectListItem, options: { current: boolean }) => (
     <StudioMenuItem
@@ -153,77 +224,40 @@ export function StudioSidebarWorkspaceSwitcher({
         label="Team"
         headerClassName="pr-0"
         actions={
-          <IconButton
-            variant="ghost"
-            size="sm"
-            radius="full"
-            aria-label="Team settings"
-            data-testid="sidebar-org-settings-button"
-            isDisabled={!onOpenOrgSettings}
-            onPress={onOpenOrgSettings}
-            className={`shrink-0 ${WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}`}
-          >
-            <Settings className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
-          </IconButton>
+          <div className="flex items-center gap-1">
+            <IconButton
+              variant="ghost"
+              size="sm"
+              radius="full"
+              aria-label="Team settings"
+              data-testid="sidebar-org-settings-button"
+              isDisabled={!onOpenOrgSettings}
+              onPress={onOpenOrgSettings}
+              className={`shrink-0 ${WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}`}
+            >
+              <Settings className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
+            </IconButton>
+            {onCreateOrg ? (
+              // The section's real job for a one-team user: the door to a
+              // second team. Mirrors the "New space" action below.
+              <IconButton
+                variant="ghost"
+                size="sm"
+                radius="full"
+                aria-label="New team"
+                data-testid="sidebar-org-new"
+                onPress={onCreateOrg}
+                className={`shrink-0 ${WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS}`}
+              >
+                <Plus className={WORKSPACE_SWITCHER_ACTION_ICON_CLASS} aria-hidden="true" />
+              </IconButton>
+            ) : null}
+          </div>
         }
       >
-        {showTeamChips ? (
-          <div className="mt-2 flex flex-wrap items-center gap-1.5">
-            {orgOptions.map((org) => {
-              const isSelected = org.key === workspaceOrgKey;
-              return (
-                <button
-                  key={org.key}
-                  type="button"
-                  title={org.label}
-                  aria-label={`Show team ${org.label}`}
-                  aria-pressed={isSelected}
-                  data-testid={`sidebar-org-chip-${org.key}`}
-                  onClick={() => onWorkspaceOrgChange(org.key)}
-                  className={[
-                    "relative flex h-8 min-w-8 shrink-0 items-center justify-center rounded-lg px-1.5 text-xxs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-400/60",
-                    isSelected
-                      ? "bg-primary-600 text-white dark:bg-primary-500"
-                      : "bg-slate-200/80 text-slate-600 hover:bg-slate-300/70 hover:text-slate-800 dark:bg-white/[0.08] dark:text-slate-300 dark:hover:bg-white/[0.14] dark:hover:text-slate-100",
-                  ].join(" ")}
-                >
-                  {org.key === "all" ? (
-                    "All"
-                  ) : org.avatarUrl ? (
-                    <img
-                      src={org.avatarUrl}
-                      alt=""
-                      aria-hidden="true"
-                      className="h-8 w-8 rounded-lg object-cover"
-                      draggable={false}
-                    />
-                  ) : (
-                    getOrgInitials(org.name)
-                  )}
-                  <AttentionBadge
-                    count={
-                      org.key === "all"
-                        ? Object.values(orgAttentionCounts).reduce((sum, value) => sum + value, 0)
-                        : orgAttentionCounts[org.key] ?? 0
-                    }
-                    aria-hidden
-                    testId={`sidebar-org-attention-${org.key}`}
-                    className="absolute -right-1 -top-1 ring-2 ring-white dark:ring-[color:var(--color-studio-dark-floating)]"
-                  />
-                </button>
-              );
-            })}
-          </div>
-        ) : null}
-        <Text
-          as="div"
-          variant="caption"
-          tone="muted"
-          data-testid="sidebar-org-selector"
-          className="mt-2 truncate"
-        >
-          {selectedOrg?.label ?? ""}
-        </Text>
+        <div className="mt-2 space-y-1" data-testid="sidebar-org-selector">
+          {orgOptions.map(renderTeamRow)}
+        </div>
       </SidebarMenuSection>
 
       <SidebarMenuSection
@@ -290,7 +324,9 @@ export function StudioSidebarWorkspaceSwitcher({
       </SidebarMenuSection>
 
       {!currentOrgProject && switcherProjects.length === 0 ? (
-        <div className="mt-2 px-2 text-sm text-slate-500 dark:text-slate-400">No spaces yet.</div>
+        <Text as="p" variant="body" tone="muted" className="mt-2 px-3.5">
+          No spaces yet.
+        </Text>
       ) : (
         <>
           <StudioMenu
@@ -303,15 +339,20 @@ export function StudioSidebarWorkspaceSwitcher({
             {visibleProjects.map((project) => renderProjectRow(project, { current: false }))}
           </StudioMenu>
           {hiddenProjectCount > 0 ? (
-            <div
-              className="mt-3 rounded-xl border border-slate-200/70 bg-slate-50/70 px-3.5 py-2 text-sm text-slate-500 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)] dark:text-slate-400"
+            // A flat line, not a card: this panel is already a floating
+            // surface (darkSurfaces rule 5), and the note is an aside.
+            <Text
+              as="p"
+              variant="caption"
+              tone="muted"
+              className="mt-3 px-3.5"
               data-testid="sidebar-project-switcher-list-truncated"
             >
               Showing {visibleProjects.length} of {switcherProjects.length} spaces.{" "}
               {trimmedWorkspaceProjectQuery.length > 0
                 ? "Refine the search to narrow the results."
                 : "Use search to find older spaces."}
-            </div>
+            </Text>
           ) : null}
         </>
       )}
