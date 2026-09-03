@@ -116,7 +116,19 @@ export function NotchedMessageShell({
       onContextMenu={onContextMenu}
       onClickCapture={onClickCapture}
     >
-      <div className={`${width === "full" ? "w-full" : ""} min-w-0`.trim()}>{children}</div>
+      {/*
+        Always full width, not just for `width="full"`: the shell above is a
+        column flex container with `items-start`, so a cross-axis (width)
+        auto-sized flex item ignores the shell's own max-width and grows to
+        its content's max-content size instead of wrapping (#207). Giving
+        this single content child an explicit width resolves it against the
+        shell's already-clamped size, which is what actually makes long
+        prose wrap at the shell's max-width instead of overflowing it. Short
+        content is unaffected: percentage widths are treated as `auto` when
+        the shell itself computes its own fit-content size, so narrow
+        bubbles still hug their content exactly as before.
+      */}
+      <div className="w-full min-w-0">{children}</div>
     </div>
   );
 }
