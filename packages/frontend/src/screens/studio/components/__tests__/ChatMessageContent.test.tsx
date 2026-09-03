@@ -685,6 +685,35 @@ describe("ChatMessageContent", () => {
     );
   });
 
+  it("glues a conversation-reference and a GitHub-reference chip to their trailing punctuation too", async () => {
+    resolveConversationByController.mockReturnValue(null);
+    await act(async () => {
+      root.render(
+        <MessageContent
+          content={
+            "See [[thread:thread-controller-123|design pass]]: it landed. Tracked in https://github.com/instafy-dev/instafy/pull/551."
+          }
+        />,
+      );
+    });
+
+    const glued = Array.from(container.querySelectorAll('[data-testid="chat-message-chip-glue"]'));
+    expect(glued).toHaveLength(2);
+    glued.forEach((entry) => {
+      expect(entry.className).toContain("whitespace-nowrap");
+    });
+    // The conversation-reference chip carries its trailing colon inside the no-break span.
+    expect(glued[0]?.querySelector('[data-testid="chat-message-inline-reference"]')?.textContent).toBe(
+      "design pass",
+    );
+    expect(glued[0]?.textContent).toBe("design pass:");
+    // The github-reference chip carries its trailing period the same way.
+    expect(glued[1]?.querySelector('[data-testid="chat-message-github-reference"]')?.textContent?.trim()).toBe(
+      "instafy-dev/instafy#551",
+    );
+    expect(glued[1]?.textContent).toBe("instafy-dev/instafy#551.");
+  });
+
   it("keeps a fenced block inside a list item on the item's indent", async () => {
     await act(async () => {
       root.render(

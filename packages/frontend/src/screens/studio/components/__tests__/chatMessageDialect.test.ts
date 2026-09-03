@@ -145,6 +145,45 @@ describe("chatMessageDialect", () => {
     ]);
   });
 
+  it("keeps a loose flat sublist in one nested list across blank lines between its own bullets (#182)", () => {
+    // Reviewer OBSERVATION on #182: a blank line between the flat sublist's
+    // OWN bullets used to end the leniency after the first bullet, splitting
+    // the list into ol[0,1] then a separate ul[0] instead of one nested list.
+    expect(parseMessageContentBlocks("1. Skills:\n\n- alpha\n\n- beta")).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [
+          { text: "Skills:", depth: 0, ordered: true },
+          { text: "alpha", depth: 1, ordered: false },
+          { text: "beta", depth: 1, ordered: false },
+        ],
+      },
+    ]);
+  });
+
+  it("still ends the loose flat sublist after two consecutive blank lines", () => {
+    // Two blank lines terminate the leniency even inside an open flat
+    // sublist, matching the single-blank-line boundary rule above.
+    expect(parseMessageContentBlocks("1. Skills:\n\n- alpha\n\n\n- beta")).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [
+          { text: "Skills:", depth: 0, ordered: true },
+          { text: "alpha", depth: 1, ordered: false },
+        ],
+      },
+      {
+        kind: "list",
+        ordered: false,
+        items: [{ text: "beta", depth: 0, ordered: false }],
+      },
+    ]);
+  });
+
   it("keeps bullets after a blank line as a sibling block when the ordered item has no trailing colon", () => {
     // Pins the boundary of the #191 leniency rule.
     expect(parseMessageContentBlocks("1. First\n\n- flat bullet")).toEqual([
