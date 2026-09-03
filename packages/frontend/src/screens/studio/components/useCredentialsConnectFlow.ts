@@ -45,8 +45,11 @@ type UseCredentialsConnectFlowOptions = {
     message: string,
     intent: "error" | "success" | "warning",
     durationMs?: number,
+    options?: { actionLabel?: string; onAction?: () => void; presentation?: "confirmation" },
   ) => void;
   formatCredentialTestFailureMessage: (raw: string | null | undefined) => string | null;
+  /** Surfaces outside AI Manager pass this so a completion warning can jump there. */
+  onOpenAiManager?: () => void;
 };
 
 type UseCredentialsConnectFlowResult = {
@@ -62,6 +65,7 @@ export function useCredentialsConnectFlow({
   notifyAiConfigChanged,
   showStatus,
   formatCredentialTestFailureMessage,
+  onOpenAiManager,
 }: UseCredentialsConnectFlowOptions): UseCredentialsConnectFlowResult {
   const [connectPending, setConnectPending] = useState(false);
   const [labelDraft, setLabelDraft] = useState("");
@@ -257,7 +261,17 @@ export function useCredentialsConnectFlow({
       await loadCredentials({ silent: true });
       notifyAiConfigChanged(deviceAuthProvider === "gemini" ? "gemini_oauth_connected" : "codex_oauth_connected");
       if (deviceAuthCompletionWarning) {
-        showStatus(deviceAuthCompletionWarning, "warning", 6500);
+        showStatus(
+          deviceAuthCompletionWarning,
+          "warning",
+          6500,
+          onOpenAiManager
+            ? {
+                actionLabel: "Open AI Manager",
+                onAction: onOpenAiManager,
+              }
+            : undefined,
+        );
       } else {
         showStatus(
           deviceAuthProvider === "gemini" ? "Gemini credentials connected." : "ChatGPT credentials connected.",
@@ -274,6 +288,7 @@ export function useCredentialsConnectFlow({
     deviceAuthSession,
     loadCredentials,
     notifyAiConfigChanged,
+    onOpenAiManager,
     showStatus,
   ]);
 
@@ -408,6 +423,45 @@ export function useCredentialsConnectFlow({
     [closeConnectModal, labelDraft, loadCredentials, notifyAiConfigChanged, showStatus, userPresent],
   );
 
+  // Verification failed, so the half-created credential has to go. When that
+  // cleanup itself fails, keep the removal on the toast instead of sending the
+  // user to AI Connections to finish it by hand.
+  const reportUnverifiedCredential = useCallback(
+    async (credentialId: string, message: string, durationMs: number) => {
+      const revokeResult = await revokeMyCredential(credentialId);
+      if (revokeResult.success) {
+        showStatus(message, "error", durationMs);
+        return;
+      }
+      showStatus(
+        `${message} The unverified connection could not be removed.`,
+        "error",
+        durationMs,
+        {
+          actionLabel: "Remove it",
+          onAction: () => {
+            void (async () => {
+              const retryResult = await revokeMyCredential(credentialId);
+              if (!retryResult.success) {
+                showStatus(
+                  retryResult.error ?? "Unable to remove the unverified connection.",
+                  "error",
+                  5000,
+                );
+                return;
+              }
+              showStatus("Unverified connection removed.", "success", 2500, {
+                presentation: "confirmation",
+              });
+              await loadCredentials({ silent: true });
+            })();
+          },
+        },
+      );
+    },
+    [loadCredentials, showStatus],
+  );
+
   const handleConnectApiKey = useCallback(
     async (provider: CredentialsConnectApiKeyProvider): Promise<boolean> => {
       if (!runtimeControllerEnabled || !controllerBaseUrl) {
@@ -469,28 +523,22 @@ export function useCredentialsConnectFlow({
         createdCredentialId = result.credentialId;
         const testResult = await testMyCredential(result.credentialId);
         if (!testResult.success) {
-          const revokeResult = await revokeMyCredential(result.credentialId);
           createdCredentialId = null;
-          const cleanupDetail = revokeResult.success
-            ? ""
-            : " The unverified connection could not be removed; remove it from AI Connections before retrying.";
-          showStatus(
-            `${formatCredentialTestFailureMessage(testResult.error) ?? "Unable to test credential."}${cleanupDetail}`,
-            "error",
+          await reportUnverifiedCredential(
+            result.credentialId,
+            formatCredentialTestFailureMessage(testResult.error) ?? "Unable to test credential.",
             6500,
           );
           return false;
         }
         if (!testResult.ok) {
           const detail = formatCredentialTestFailureMessage(testResult.output);
-          const revokeResult = await revokeMyCredential(result.credentialId);
           createdCredentialId = null;
-          const cleanupDetail = revokeResult.success
-            ? ""
-            : " The unverified connection could not be removed; remove it from AI Connections before retrying.";
-          showStatus(
-            `${detail ? `Credential verification failed: ${detail}` : "Credential verification failed. Check the key and retry."}${cleanupDetail}`,
-            "error",
+          await reportUnverifiedCredential(
+            result.credentialId,
+            detail
+              ? `Credential verification failed: ${detail}`
+              : "Credential verification failed. Check the key and retry.",
             7000,
           );
           return false;
@@ -537,6 +585,7 @@ export function useCredentialsConnectFlow({
       notifyAiConfigChanged,
       openaiApiKeyDraft,
       openaiLabelDraft,
+      reportUnverifiedCredential,
       showStatus,
       userPresent,
       zaiApiKeyDraft,
