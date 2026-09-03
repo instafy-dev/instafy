@@ -166,7 +166,7 @@ function formatCredentialTestFailureMessage(raw: string | null | undefined): str
     lowered.includes("access_token_scope_insufficient") ||
     lowered.includes("insufficient authentication scopes")
   ) {
-    return "Google login is missing required scopes. Add a fresh Gemini connection and grant all requested permissions.";
+    return "This Gemini connection used Google login, which is no longer supported. Replace it with a Gemini API key.";
   }
   if (
     lowered.includes("service_disabled") ||

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   controllerClient,
   type DeviceAuthProvider,
-  type GeminiOauthMode,
 } from "../../../../sdk/instafy";
 
 export type DeviceAuthSession = {
@@ -17,7 +16,6 @@ export type DeviceAuthSession = {
 
 export type DeviceAuthFlowBeginOptions = {
   provider: DeviceAuthProvider;
-  geminiOauthMode?: GeminiOauthMode | null;
   label?: string | null;
 };
 
@@ -72,14 +70,7 @@ export function useDeviceAuthFlow({
       setSession(null);
       statusFailureCountRef.current = 0;
       try {
-        const result = await controllerClient.credentials.startDeviceAuth(
-          options.provider,
-          {
-          ...(options.provider === "gemini"
-            ? { geminiOauthMode: options.geminiOauthMode ?? null, label: options.label ?? null }
-            : undefined),
-          },
-        );
+        const result = await controllerClient.credentials.startDeviceAuth(options.provider);
         if (beginGenerationRef.current !== generation) {
           return;
         }

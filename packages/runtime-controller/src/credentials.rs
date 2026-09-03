@@ -47,14 +47,11 @@ const INLINE_COMPLETION_MAX_OUTPUT_TOKENS: u32 = 128;
 const CONVERSATION_TITLE_MAX_INPUT_CHARS: usize = 600;
 const CONVERSATION_TITLE_MAX_OUTPUT_TOKENS: u32 = 32;
 const CONVERSATION_TITLE_MAX_CHARS: usize = 48;
-const GOOGLE_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const CODEX_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR: &str = "CODEX_REFRESH_TOKEN_URL_OVERRIDE";
 const CODEX_ACCESS_TOKEN_REFRESH_MAX_AGE_SECONDS: i64 = 60 * 60;
 const INTERNAL_CREDENTIAL_LEASE_SECONDS: u64 = 60;
-const GEMINI_AUTH_MODE_CODE_ASSIST: &str = "code_assist";
-const GEMINI_AUTH_MODE_CODE_ASSIST_CLI: &str = "code_assist_cli";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1965,12 +1962,16 @@ async fn get_internal_credential(
 
     let mut parsed = decode_authoritative_credential_payload(key, &nonce_b64, &ciphertext_b64)?;
 
-    let auth_json_to_persist = if let Some(updated_auth_json) =
+    // Pick the refresher by the credential's kind, not by the shape of its
+    // payload. maybe_refresh_codex_oauth_access_token keys only off
+    // tokens.refresh_token, and a Gemini Google-OAuth credential carries
+    // exactly that — so an untyped call sent a GOOGLE refresh token to
+    // https://auth.openai.com/oauth/token, and the resulting failure was
+    // reported to the user as a Codex problem.
+    let auth_json_to_persist = if kind == CREDENTIAL_KIND_CODEX_AUTH_JSON {
         maybe_refresh_codex_oauth_access_token(&state, &parsed, query.force_refresh).await?
-    {
-        Some(updated_auth_json)
     } else {
-        maybe_refresh_gemini_oauth_access_token(&state, &metadata, &parsed).await?
+        maybe_refresh_gemini_oauth_access_token(&metadata).await?
     };
 
     if let Some(updated_auth_json) = auth_json_to_persist {
@@ -2073,17 +2074,6 @@ async fn set_internal_credential_usage(
     }
 
     Ok(StatusCode::NO_CONTENT)
-}
-
-#[derive(Debug, Deserialize)]
-struct GoogleOauthRefreshResponse {
-    access_token: Option<String>,
-    refresh_token: Option<String>,
-    expires_in: Option<u64>,
-    token_type: Option<String>,
-    scope: Option<String>,
-    error: Option<String>,
-    error_description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2354,215 +2344,29 @@ fn codex_oauth_token_url() -> String {
         .unwrap_or_else(|_| CODEX_OAUTH_TOKEN_URL.to_string())
 }
 
+/// Google no longer permits the OAuth login Gemini used, so a credential
+/// stored that way can never be refreshed again. Say that plainly instead of
+/// attempting a refresh that cannot succeed — the row is replaced with an API
+/// key from the AI connections card.
 async fn maybe_refresh_gemini_oauth_access_token(
-    state: &AppState,
     metadata: &JsonValue,
-    auth_json: &JsonValue,
 ) -> Result<Option<JsonValue>, (StatusCode, Json<ApiError>)> {
     let metadata_map = metadata.as_object();
-    let provider = metadata_map
-        .and_then(|map| map.get("provider"))
-        .and_then(JsonValue::as_str)
-        .map(|value| value.trim().to_ascii_lowercase())
-        .unwrap_or_default();
-    if provider != PROVIDER_GEMINI {
-        return Ok(None);
-    }
-
-    let source = metadata_map
-        .and_then(|map| map.get("source"))
-        .and_then(JsonValue::as_str)
-        .map(|value| value.trim().to_ascii_lowercase())
-        .unwrap_or_default();
-    if source != "google_oauth" {
-        return Ok(None);
-    }
-
-    let auth_mode = metadata_map
-        .and_then(|map| map.get("auth_mode"))
-        .and_then(JsonValue::as_str)
-        .map(|value| value.trim().to_ascii_lowercase())
-        .unwrap_or_default();
-    if !is_gemini_code_assist_mode(auth_mode.as_str()) {
-        return Ok(None);
-    }
-
-    let auth_map = auth_json.as_object().ok_or_else(|| {
-        internal_error("credential payload must be a JSON object for OAuth refresh")
-    })?;
-    let tokens = auth_map
-        .get("tokens")
-        .and_then(JsonValue::as_object)
-        .ok_or_else(|| internal_error("credential payload missing tokens object"))?;
-
-    let refresh_token = tokens
-        .get("refresh_token")
-        .and_then(JsonValue::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| internal_error("credential payload missing tokens.refresh_token"))?;
-
-    let expires_at = tokens
-        .get("expires_at")
-        .and_then(JsonValue::as_str)
-        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| value.with_timezone(&Utc));
-    if let Some(expires_at) = expires_at {
-        if expires_at > Utc::now() + chrono::Duration::seconds(60) {
-            return Ok(None);
-        }
-    }
-
-    let (client_id, client_secret) = if auth_mode == GEMINI_AUTH_MODE_CODE_ASSIST_CLI {
-        let client_id = read_env_trimmed("GEMINI_OAUTH_CLI_CLIENT_ID")
-            .or_else(|| read_env_trimmed("GEMINI_OAUTH_CLIENT_ID"))
-            .or_else(|| read_env_trimmed("GOOGLE_OAUTH_CLIENT_ID"))
-            .ok_or_else(|| {
-                internal_error(
-                    "Gemini Google login refresh is not enabled. Reconnect Gemini with an API key.",
-                )
-            })?;
-        let client_secret = read_env_trimmed("GEMINI_OAUTH_CLI_CLIENT_SECRET")
-            .or_else(|| read_env_trimmed("GEMINI_OAUTH_CLIENT_SECRET"))
-            .or_else(|| read_env_trimmed("GOOGLE_OAUTH_CLIENT_SECRET"));
-        (client_id, client_secret)
-    } else {
-        let client_id = read_env_trimmed("GEMINI_OAUTH_CLIENT_ID")
-            .or_else(|| read_env_trimmed("GOOGLE_OAUTH_CLIENT_ID"))
-            .ok_or_else(|| {
-                internal_error(
-                    "Gemini OAuth refresh is not configured. Set GEMINI_OAUTH_CLIENT_ID (or GOOGLE_OAUTH_CLIENT_ID).",
-                )
-            })?;
-        let client_secret = read_env_trimmed("GEMINI_OAUTH_CLIENT_SECRET")
-            .or_else(|| read_env_trimmed("GOOGLE_OAUTH_CLIENT_SECRET"));
-        (client_id, client_secret)
+    let field = |name: &str| {
+        metadata_map
+            .and_then(|map| map.get(name))
+            .and_then(JsonValue::as_str)
+            .map(|value| value.trim().to_ascii_lowercase())
+            .unwrap_or_default()
     };
-
-    let mut form = vec![
-        ("grant_type", "refresh_token".to_string()),
-        ("refresh_token", refresh_token.to_string()),
-        ("client_id", client_id),
-    ];
-    if let Some(secret) = client_secret
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        form.push(("client_secret", secret.to_string()));
+    if field("provider") != PROVIDER_GEMINI || field("source") != "google_oauth" {
+        return Ok(None);
     }
 
-    let request = state
-        .http_client
-        .post(GOOGLE_OAUTH_TOKEN_URL)
-        .header("accept", "application/json")
-        .form(&form);
-    let response = timeout(Duration::from_secs(12), request.send())
-        .await
-        .map_err(|_| internal_error("Gemini OAuth refresh request timed out"))?
-        .map_err(|error| internal_error(format!("Gemini OAuth refresh request failed: {error}")))?;
-
-    let status = response.status();
-    let payload: GoogleOauthRefreshResponse = response.json().await.map_err(|error| {
-        internal_error(format!("Gemini OAuth refresh response invalid: {error}"))
-    })?;
-
-    if !status.is_success() {
-        let message = payload
-            .error_description
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .or_else(|| {
-                payload
-                    .error
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-            })
-            .unwrap_or("OAuth refresh failed");
-        return Err(internal_error(format!(
-            "Gemini OAuth refresh failed: {message}"
-        )));
-    }
-
-    let access_token = payload
-        .access_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| internal_error("Gemini OAuth refresh returned no access_token"))?;
-
-    let expires_in = payload.expires_in.unwrap_or(3600);
-    let expires_at =
-        Utc::now() + chrono::Duration::seconds(i64::try_from(expires_in).unwrap_or(3600));
-
-    let mut refreshed = auth_map.clone();
-    refreshed.insert(
-        "OPENAI_API_KEY".to_string(),
-        JsonValue::String(access_token.to_string()),
-    );
-
-    let mut refreshed_tokens = tokens.clone();
-    refreshed_tokens.insert(
-        "access_token".to_string(),
-        JsonValue::String(access_token.to_string()),
-    );
-    refreshed_tokens.insert(
-        "expires_in".to_string(),
-        JsonValue::Number(serde_json::Number::from(expires_in)),
-    );
-    refreshed_tokens.insert(
-        "expires_at".to_string(),
-        JsonValue::String(expires_at.to_rfc3339()),
-    );
-    if let Some(refresh_token) = payload
-        .refresh_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        refreshed_tokens.insert(
-            "refresh_token".to_string(),
-            JsonValue::String(refresh_token.to_string()),
-        );
-    }
-    if let Some(token_type) = payload
-        .token_type
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        refreshed_tokens.insert(
-            "token_type".to_string(),
-            JsonValue::String(token_type.to_string()),
-        );
-    }
-    if let Some(scope) = payload
-        .scope
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        refreshed_tokens.insert("scope".to_string(), JsonValue::String(scope.to_string()));
-    }
-    refreshed.insert("tokens".to_string(), JsonValue::Object(refreshed_tokens));
-
-    Ok(Some(JsonValue::Object(refreshed)))
-}
-
-fn read_env_trimmed(key: &str) -> Option<String> {
-    std::env::var(key)
-        .ok()
-        .map(|raw| raw.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn is_gemini_code_assist_mode(mode: &str) -> bool {
-    matches!(
-        mode.trim().to_ascii_lowercase().as_str(),
-        GEMINI_AUTH_MODE_CODE_ASSIST | GEMINI_AUTH_MODE_CODE_ASSIST_CLI
-    )
+    Err(bad_request(
+        "This Gemini connection used Google login, which is no longer supported. \
+         Replace it with a Gemini API key.",
+    ))
 }
 
 fn require_proxy_credential_lease_token(
