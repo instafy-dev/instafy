@@ -11,6 +11,8 @@ export type ControllerNoticeActionsContextValue = {
    * to "no self-hosted runtime was online".
    */
   onShowSelfHostHelp: () => void;
+  /** Opens the credits page, for a run refused because the team is out. */
+  onOpenCredits: () => void;
 };
 
 /**
@@ -50,7 +52,11 @@ export function resolveControllerNoticeActionHandler(
     return null;
   }
   const handler =
-    action.kind === "desktop_runtime_help" ? actions.onShowSelfHostHelp : actions.onOpenMachines;
+    action.kind === "desktop_runtime_help"
+      ? actions.onShowSelfHostHelp
+      : action.kind === "open_credits"
+        ? actions.onOpenCredits
+        : actions.onOpenMachines;
   // A half-populated context (a test mock, a provider mid-refactor) must not
   // ship a button that looks live and does nothing.
   return typeof handler === "function" ? handler : null;
