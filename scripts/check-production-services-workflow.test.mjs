@@ -205,6 +205,49 @@ test("both image workflows parse the tagged digest line emitted by docker push",
   }
 });
 
+test("image publication retries only the same scanned bytes and waits for GHCR visibility", () => {
+  const services = readWorkflow();
+  const runtime = readRuntimeWorkflow();
+
+  for (const [name, source, tag] of [
+    ["production services", services, "RELEASE_TAG"],
+    ["runtime architectures", runtime, "ARCH_TAG"],
+  ]) {
+    assert.match(
+      source,
+      new RegExp(
+        `for attempt in 1 2 3 4; do[\\s\\S]*docker push "\\$${tag}" \\| tee "\\$attempt_log"[\\s\\S]*mv "\\$attempt_log" "\\$push_log"`,
+        "u",
+      ),
+      `${name} must retry the unchanged local image and parse only the successful push log`,
+    );
+    assert.match(source, /GHCR rejected all bounded attempts/u, name);
+    assert.match(
+      source,
+      /for attempt in 1 2 3 4 5 6; do[\s\S]*docker buildx imagetools inspect "\$immutable_(?:ref|image)"/u,
+      `${name} must tolerate bounded registry propagation delay`,
+    );
+  }
+
+  const assembleStart = runtime.indexOf(
+    "- name: Assemble commit-SHA multiarch manifests from immutable digests",
+  );
+  assert.notEqual(assembleStart, -1);
+  const assemble = runtime.slice(assembleStart);
+  assertOrdered(
+    assemble,
+    '--tag "$release_tag"',
+    'immutable_image="${image}@${digest}"',
+    'docker buildx imagetools inspect "$immutable_image" --raw > "$raw_manifest"',
+    'jq -c \'',
+    '"$raw_manifest"',
+  );
+  assert.match(
+    assemble,
+    /GHCR did not expose the assembled immutable manifest within the bounded visibility window/u,
+  );
+});
+
 test("the sealed manifest requires the complete hosted image set", () => {
   const source = readWorkflow();
   for (const key of [
