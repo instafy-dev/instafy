@@ -15,6 +15,12 @@ import {
 import {
   extractControllerConversationNoticeStatus,
 } from "./controllerConversationNotice";
+import {
+  parseCommandExecutionOutput,
+  parseTodoItems,
+  summarizeCommandInvocationForPreview,
+  truncate,
+} from "./chatContentHelpers";
 import { extractMessageDetails, getMessageType } from "./chatMessageMetadata";
 import type { ThreadCompactUpdateKind } from "./threadPreviewState";
 import type { ChatMessage } from "../types";
@@ -62,6 +68,13 @@ export type ThreadCompactEvent = {
   id: string;
   kind: ThreadCompactUpdateKind;
   actorHandle?: string | null;
+  // Short excerpt of what the step did, shown in the rail chip's hover card
+  // (#179). Null when the source message carries nothing worth previewing —
+  // the chip then keeps its plain title tooltip.
+  previewText?: string | null;
+  // True when the excerpt is code-shaped (a command line, a tool descriptor)
+  // and should render monospace, matching the file-preview card.
+  previewMono?: boolean;
 };
 
 // `/bin/bash -lc`, `bash -lc`, `zsh -lc`, `sh -c` (plus `-c`/`-lc`/`-cl` flag
@@ -97,6 +110,118 @@ export function stripShellWrapperFromCommand(command: string): string {
     current = body;
   }
   return current;
+}
+
+// The hover card is a scent, not a viewer: hard caps keep it compact and the
+// full detail stays behind the expanded thread.
+export const THREAD_COMPACT_EVENT_PREVIEW_MAX_CHARS = 280;
+const THREAD_COMPACT_EVENT_PREVIEW_MAX_LINES = 3;
+
+export type ThreadCompactEventPreview = {
+  text: string;
+  mono: boolean;
+};
+
+function collapseWhitespaceForPreview(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function toSingleLineCompactEventPreview(value: string, mono: boolean): ThreadCompactEventPreview | null {
+  const collapsed = collapseWhitespaceForPreview(value);
+  if (!collapsed) {
+    return null;
+  }
+  return { text: truncate(collapsed, THREAD_COMPACT_EVENT_PREVIEW_MAX_CHARS), mono };
+}
+
+// Thinking/plan excerpts keep up to three lines so the scent reads like the
+// source text; everything else is collapsed to one line.
+function toMultilineCompactEventPreview(value: string): ThreadCompactEventPreview | null {
+  const lines = value
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => collapseWhitespaceForPreview(line))
+    .filter((line) => line.length > 0)
+    .slice(0, THREAD_COMPACT_EVENT_PREVIEW_MAX_LINES);
+  if (lines.length === 0) {
+    return null;
+  }
+  return { text: truncate(lines.join("\n"), THREAD_COMPACT_EVENT_PREVIEW_MAX_CHARS), mono: false };
+}
+
+function summarizeToolCallArgumentsForPreview(details: Record<string, unknown> | null): string | null {
+  if (!details) {
+    return null;
+  }
+  const candidates = [details["arguments"], details["args"], details["input"], details["params"]];
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return collapseWhitespaceForPreview(candidate);
+    }
+    if ((isRecord(candidate) && Object.keys(candidate).length > 0) || (Array.isArray(candidate) && candidate.length > 0)) {
+      try {
+        return JSON.stringify(candidate);
+      } catch {
+        // Non-serializable arguments carry no scent.
+      }
+    }
+  }
+  return null;
+}
+
+export function resolveThreadCompactEventPreview(
+  update: ChatMessage,
+  kind: ThreadCompactUpdateKind,
+): ThreadCompactEventPreview | null {
+  const metadata = update.metadata && isRecord(update.metadata) ? update.metadata : null;
+  const details = extractMessageDetails(metadata);
+
+  switch (kind) {
+    case "command": {
+      const command = parseCommandExecutionOutput(update).command;
+      if (!command) {
+        return null;
+      }
+      const summarized = summarizeCommandInvocationForPreview(command, THREAD_COMPACT_EVENT_PREVIEW_MAX_CHARS);
+      return summarized ? { text: summarized, mono: true } : null;
+    }
+    case "search": {
+      const query = details && typeof details["query"] === "string" ? details["query"] : "";
+      return toSingleLineCompactEventPreview(query || update.content, false);
+    }
+    case "tool": {
+      const server = details && typeof details["server"] === "string" ? details["server"].trim() : "";
+      const tool = details && typeof details["tool"] === "string" ? details["tool"].trim() : "";
+      const descriptor = server && tool ? `${server}/${tool}` : tool || server;
+      if (!descriptor) {
+        return toSingleLineCompactEventPreview(update.content, false);
+      }
+      const argsSummary = summarizeToolCallArgumentsForPreview(details);
+      return toSingleLineCompactEventPreview(
+        argsSummary ? `${descriptor} ${argsSummary}` : descriptor,
+        true,
+      );
+    }
+    case "plan": {
+      const items = parseTodoItems(details);
+      if (items.length > 0) {
+        const lines = items
+          .slice(0, THREAD_COMPACT_EVENT_PREVIEW_MAX_LINES)
+          .map((item) => `${item.completed ? "✓" : "·"} ${item.text}`)
+          .join("\n");
+        return { text: truncate(lines, THREAD_COMPACT_EVENT_PREVIEW_MAX_CHARS), mono: false };
+      }
+      return toMultilineCompactEventPreview(update.content);
+    }
+    case "thinking":
+    case "compaction":
+      // Strip bold markers the way status normalization does, but keep the
+      // line structure — the excerpt may span up to three lines.
+      return toMultilineCompactEventPreview(update.content.replace(/\*\*/g, ""));
+    case "runtime":
+    default:
+      return toSingleLineCompactEventPreview(update.content, false);
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

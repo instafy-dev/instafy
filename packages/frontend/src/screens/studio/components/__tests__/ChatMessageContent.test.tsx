@@ -309,6 +309,40 @@ describe("ChatMessageContent", () => {
     expect(container.querySelector('[data-testid="chat-message-inline-reference"]')).toBeNull();
   });
 
+  it("renders hard-wrapped source text as one paragraph instead of one <p> per source line (#210)", async () => {
+    const hardWrapped = [
+      "You are an autonomous engineer running inside the Instafy agent",
+      "stack. Each run of this runbook is ONE iteration: handle at most",
+      "one bug, land it, and stop. Small, safe, reviewable changes",
+      "are fine. Prefer doing less, correctly, over doing more.",
+    ].join("\n");
+
+    await act(async () => {
+      root.render(<MessageContent content={hardWrapped} />);
+    });
+
+    const paragraphs = container.querySelectorAll("p");
+    expect(paragraphs).toHaveLength(1);
+    expect(paragraphs[0]?.className).not.toContain("mt-2");
+    expect(paragraphs[0]?.className).toContain("whitespace-pre-wrap");
+    // whitespace-pre-wrap renders the embedded "\n" as a line break while
+    // keeping it a single <p> — textContent preserves the raw newlines.
+    expect(paragraphs[0]?.textContent).toBe(hardWrapped);
+  });
+
+  it("still starts a new <p> only at a blank line, and keeps a chat author's newline as a break", async () => {
+    await act(async () => {
+      root.render(<MessageContent content={"para one line a\npara one line b\n\npara two"} />);
+    });
+
+    const paragraphs = container.querySelectorAll("p");
+    expect(paragraphs).toHaveLength(2);
+    expect(paragraphs[0]?.textContent).toBe("para one line a\npara one line b");
+    expect(paragraphs[0]?.className).not.toContain("mt-2");
+    expect(paragraphs[1]?.textContent).toBe("para two");
+    expect(paragraphs[1]?.className).toContain("mt-2");
+  });
+
   it("offers AI settings from upstream quota failures", async () => {
     const quotaError = `unexpected status 502 Bad Gateway: upstream request failed (credential_source=claim, endpoint=api.openai.com/v1/responses): backend responded with 429 Too Many Requests: {
       "error": {
@@ -649,6 +683,35 @@ describe("ChatMessageContent", () => {
     expect(container.textContent).toBe(
       "First bullet under Identity, repos, ground rules in AGENTS.md: keep it green with pnpm test.",
     );
+  });
+
+  it("glues a conversation-reference and a GitHub-reference chip to their trailing punctuation too", async () => {
+    resolveConversationByController.mockReturnValue(null);
+    await act(async () => {
+      root.render(
+        <MessageContent
+          content={
+            "See [[thread:thread-controller-123|design pass]]: it landed. Tracked in https://github.com/instafy-dev/instafy/pull/551."
+          }
+        />,
+      );
+    });
+
+    const glued = Array.from(container.querySelectorAll('[data-testid="chat-message-chip-glue"]'));
+    expect(glued).toHaveLength(2);
+    glued.forEach((entry) => {
+      expect(entry.className).toContain("whitespace-nowrap");
+    });
+    // The conversation-reference chip carries its trailing colon inside the no-break span.
+    expect(glued[0]?.querySelector('[data-testid="chat-message-inline-reference"]')?.textContent).toBe(
+      "design pass",
+    );
+    expect(glued[0]?.textContent).toBe("design pass:");
+    // The github-reference chip carries its trailing period the same way.
+    expect(glued[1]?.querySelector('[data-testid="chat-message-github-reference"]')?.textContent?.trim()).toBe(
+      "instafy-dev/instafy#551",
+    );
+    expect(glued[1]?.textContent).toBe("instafy-dev/instafy#551.");
   });
 
   it("keeps a fenced block inside a list item on the item's indent", async () => {

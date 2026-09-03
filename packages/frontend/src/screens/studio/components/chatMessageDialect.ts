@@ -587,7 +587,9 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
   //     and is not indented enough to nest on its own becomes that item's
   //     sublist at depth + 1, whatever the item's trailing punctuation;
   //   - across exactly ONE blank line the same happens only when the ordered
-  //     item ends with ":" (it announced a list); without the colon, or after
+  //     item ends with ":" (it announced a list), or a flat sublist is already
+  //     open (a LOOSE flat sublist — blank lines between its own bullets —
+  //     keeps nesting instead of splitting mid-list); without either, or after
   //     two blank lines, the bullets stay a sibling block as CommonMark says;
   //   - an ordered item after a bullet never nests this way, and the indented
   //     form keeps its existing, explicit nesting.
@@ -599,6 +601,13 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
   let listSurvivesBlankLine = false;
   let pendingQuote: Extract<MessageContentBlock, { kind: "quote" }> | null = null;
   let pendingCode: PendingCodeFence | null = null;
+  // CommonMark: consecutive non-blank paragraph lines are one paragraph — only
+  // a blank line (or a line another block type claims) starts a new one.
+  // Lines accumulate here and join with "\n" on flush; `whitespace-pre-wrap`
+  // in the renderer turns that embedded newline back into a soft line break
+  // inside the single <p>, so a hard-wrapped source (a runbook, pasted docs)
+  // no longer gets a `<p>` + `mt-2` per source line (#210).
+  let pendingParagraph: string[] | null = null;
 
   const flushList = () => {
     if (pendingList) {
@@ -621,6 +630,12 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
       pendingCode = null;
     }
   };
+  const flushParagraph = () => {
+    if (pendingParagraph) {
+      blocks.push({ kind: "paragraph", line: pendingParagraph.join("\n") });
+      pendingParagraph = null;
+    }
+  };
 
   for (const rawLine of content.split(/\n/)) {
     const line = rawLine.trimEnd();
@@ -637,17 +652,21 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
       const lastListItem = pendingList?.items[pendingList.items.length - 1];
       if (
         pendingList?.ordered &&
-        lastListItem?.ordered &&
-        lastListItem.text.endsWith(":") &&
-        !listSurvivesBlankLine
+        !listSurvivesBlankLine &&
+        ((lastListItem?.ordered && lastListItem.text.endsWith(":")) || flatSublistLevel !== null)
       ) {
-        // The item announced a list: hold the flush for one blank line and let
-        // the next line decide (see the leniency rule above).
+        // The item announced a list, or a flat sublist is already open: hold
+        // the flush for one blank line and let the next line decide (see the
+        // leniency rule above). Holding while a flat sublist is open keeps a
+        // LOOSE flat sublist — one with a blank line between its own bullets,
+        // not just before its first one — from splitting into a separate
+        // sibling list mid-way through.
         listSurvivesBlankLine = true;
       } else {
         flushList();
       }
       flushQuote();
+      flushParagraph();
       continue;
     }
 
@@ -669,6 +688,7 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
       }
       flushList();
       flushQuote();
+      flushParagraph();
       pendingCode = fenceOpening;
       continue;
     }
@@ -676,6 +696,7 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
     const quoteMatch = line.match(/^\s*>\s?(.*)$/);
     if (quoteMatch) {
       flushList();
+      flushParagraph();
       if (!pendingQuote) {
         pendingQuote = { kind: "quote", lines: [] };
       }
@@ -687,6 +708,7 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
     const orderedMatch = line.match(/^(\s*)(\d+)[.)]\s+(.+)$/);
     if (unorderedMatch || orderedMatch) {
       flushQuote();
+      flushParagraph();
       const ordered = Boolean(orderedMatch);
       const indent = (orderedMatch?.[1] ?? unorderedMatch?.[1] ?? "").length;
       const item = (orderedMatch?.[3] ?? unorderedMatch?.[2] ?? "").trim();
@@ -756,11 +778,25 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
 
     flushList();
     flushQuote();
-    blocks.push({ kind: "paragraph", line });
+    // A team-flow status line (see parseTeamFlowLine) is a synthesized,
+    // self-contained line: it must stay its own block even with no blank
+    // line around it, so the renderer's per-block `parseTeamFlowLine` check
+    // still finds it instead of a merged, unparseable paragraph.
+    if (parseTeamFlowLine(line)) {
+      flushParagraph();
+      blocks.push({ kind: "paragraph", line });
+      continue;
+    }
+    if (pendingParagraph) {
+      pendingParagraph.push(line);
+    } else {
+      pendingParagraph = [line];
+    }
   }
 
   flushList();
   flushQuote();
+  flushParagraph();
   // An unclosed fence runs to the end of the message, per CommonMark.
   flushCode();
   return blocks.length > 0 ? blocks : [{ kind: "paragraph", line: "" }];
