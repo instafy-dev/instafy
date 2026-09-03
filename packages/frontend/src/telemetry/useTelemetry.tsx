@@ -123,7 +123,7 @@ export function useTelemetry() {
         if (reason === "no_runtime_connected") {
           message =
             providedMessage ??
-            "No runtime is connected. Start or reconnect a runtime from Runtime & AI to process queued jobs.";
+            "No runtime is connected. Open Machines to start one and process queued jobs.";
           intent = "error";
         } else {
           message =
