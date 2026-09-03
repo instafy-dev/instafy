@@ -54,7 +54,9 @@ import {
   getWorkspaceFileRawUrl,
   importGithubProject,
   interruptControllerConversationRuns,
+  listMyActivity,
   listMyNotificationInbox,
+  markMyActivitySeen,
   listProjectSecrets,
   listWorkspaceEntriesFromController,
   listControllerConversationParticipants,
@@ -303,6 +305,10 @@ export const controllerClient = createControllerClient({
       requestAccessToken: requestOriginAccessToken,
       applyChanges: applyWorkspaceChangesViaOrigin,
     }),
+  }),
+  activity: Object.freeze({
+    list: listMyActivity,
+    markSeen: markMyActivitySeen,
   }),
   notifications: Object.freeze({
     getWebPushVapidPublicKey,

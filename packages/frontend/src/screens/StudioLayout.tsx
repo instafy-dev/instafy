@@ -460,13 +460,15 @@ function StudioLayoutInner() {
 
   const homeAttentionCount = useMemo(() => {
     const currentSpaceName = (activeProjectName ?? "").trim() || "Choose a Space";
+    // The badge counts what Home's "Needs you" lane shows: replies waiting on
+    // the user. Work in flight is progress, not a demand — it lives in Recent.
     return buildHomeAttentionEntries({
       conversations,
       inboxItems: visibleHomeAttentionInboxItems,
       currentSpaceName,
       visibleConversationLocalId,
       visibleConversationControllerId,
-    }).length;
+    }).filter((entry) => entry.kind === "reply").length;
   }, [
     activeProjectName,
     conversations,
