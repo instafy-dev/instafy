@@ -1036,7 +1036,9 @@ async fn finalize_automation_attempt(
     // the scheduled conversation (like a runtime alert), and a failed-run row
     // in the owner's feed. Before this the only trace was a side field on the
     // automation, visible only in that space's Automations panel.
-    if let (Some(error_text), Some(conversation_id)) = (stored_error.as_deref(), record.conversation_id) {
+    if let (Some(error_text), Some(conversation_id)) =
+        (stored_error.as_deref(), record.conversation_id)
+    {
         let content = format!("This scheduled run couldn't start: {error_text}");
         let metadata = json!({
             "source": "controller",

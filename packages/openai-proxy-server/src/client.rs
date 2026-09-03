@@ -1530,7 +1530,11 @@ fn codex_header_str(headers: &reqwest::header::HeaderMap, name: &str) -> Option<
 /// accepts both integer and fractional forms.
 fn codex_header_rounded_i64(headers: &reqwest::header::HeaderMap, name: &str) -> Option<i64> {
     codex_header_str(headers, name).and_then(|value| {
-        value.parse::<f64>().ok().filter(|n| n.is_finite()).map(|n| n.round() as i64)
+        value
+            .parse::<f64>()
+            .ok()
+            .filter(|n| n.is_finite())
+            .map(|n| n.round() as i64)
     })
 }
 
@@ -1545,8 +1549,10 @@ fn parse_codex_rate_limit_window(
     kind: &str,
     now: i64,
 ) -> Option<Value> {
-    let window_minutes =
-        codex_header_rounded_i64(headers, &codex_rate_limit_header_name(kind, "window-minutes"))?;
+    let window_minutes = codex_header_rounded_i64(
+        headers,
+        &codex_rate_limit_header_name(kind, "window-minutes"),
+    )?;
     if window_minutes <= 0 {
         return None;
     }
@@ -1697,7 +1703,10 @@ mod tests {
     #[test]
     fn codex_rate_limit_window_with_zero_minutes_is_omitted() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-codex-primary-used-percent", HeaderValue::from_static("5"));
+        headers.insert(
+            "x-codex-primary-used-percent",
+            HeaderValue::from_static("5"),
+        );
         headers.insert(
             "x-codex-primary-window-minutes",
             HeaderValue::from_static("0"),
@@ -2029,7 +2038,8 @@ data: [DONE]
 
 "#;
 
-        let error = read_chatgpt_stream_text(stream).expect_err("quota refusal must fail the stream");
+        let error =
+            read_chatgpt_stream_text(stream).expect_err("quota refusal must fail the stream");
         let rendered = format!("{error:#}");
         assert!(
             rendered.contains("insufficient_quota"),
@@ -2050,7 +2060,8 @@ data: [DONE]
 
 "#;
 
-        let error = read_chatgpt_stream_text(stream).expect_err("an error event must fail the stream");
+        let error =
+            read_chatgpt_stream_text(stream).expect_err("an error event must fail the stream");
         let rendered = format!("{error:#}");
         assert!(rendered.contains("rate_limit_exceeded"), "{rendered}");
         assert!(rendered.contains("Rate limit reached."), "{rendered}");
