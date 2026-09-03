@@ -86,7 +86,31 @@ const SELF_HOSTED_LAUNCH_MARKER = "no self-hosted runtime was online for this sp
 
 export type ControllerConversationNoticeAction = {
   label: string;
-  kind: "open_machines" | "desktop_runtime_help";
+  kind: "open_machines" | "desktop_runtime_help" | "open_credits";
+};
+
+/**
+ * Causes the controller can name, mirrored from
+ * packages/runtime-controller/src/automations.rs (the CODE_* constants and the
+ * codes forwarded from runtime/ensure.rs). Each side has a test pinning the
+ * vocabulary, so renaming one half fails CI instead of silently dropping a
+ * button. A code absent from this map — including no code at all, which is
+ * every notice written before the controller carried one — falls through to
+ * the legacy behaviour below.
+ */
+const ACTION_BY_FAILURE_CODE: Record<string, ControllerConversationNoticeAction | null> = {
+  self_hosted_runtime_offline: { label: "How to start it", kind: "desktop_runtime_help" },
+  insufficient_credits: { label: "Open credits", kind: "open_credits" },
+  // The runtime holding the last slot is on that page, and stopping it is the
+  // actual fix.
+  runtime_limit_reached: { label: "Open Machines", kind: "open_machines" },
+  // Nothing the reader can press changes any of these, so they get no button:
+  // the platform is full, the schedule's provider needs editing, the space is
+  // gone, or it is transient and resolves itself.
+  platform_at_capacity: null,
+  hosted_provider_unsupported: null,
+  automation_access_denied: null,
+  controller_unavailable: null,
 };
 
 /**
@@ -107,6 +131,12 @@ export function resolveControllerConversationNoticeAction(
   const reason = normalizeString(details?.["reason"] ?? metadata?.["reason"]);
 
   if (reason === "automation_launch_failed") {
+    const failureCode = normalizeString(details?.["failureCode"]);
+    if (failureCode && failureCode in ACTION_BY_FAILURE_CODE) {
+      return ACTION_BY_FAILURE_CODE[failureCode] ?? null;
+    }
+    // No code, or one this build does not know: every notice stored before the
+    // controller carried a code lands here, and the prose is all we have.
     return message.content.includes(SELF_HOSTED_LAUNCH_MARKER)
       ? { label: "How to start it", kind: "desktop_runtime_help" }
       : { label: "Open Machines", kind: "open_machines" };

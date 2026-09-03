@@ -411,7 +411,16 @@ pub(crate) async fn record_launch_failure(
     owner_user_id: Uuid,
     automation_id: &Uuid,
     error_message: &str,
+    failure_code: Option<&str>,
 ) -> Option<i64> {
+    // Same discriminator the conversation notice carries, so Home can branch on
+    // the cause later without re-deriving it from the prose. Omitted, never
+    // null, when the cause could not be established.
+    let mut data =
+        json!({ "outcome": "failed", "launch": true, "automationId": automation_id.to_string() });
+    if let (Some(code), Some(object)) = (failure_code, data.as_object_mut()) {
+        object.insert("failureCode".into(), JsonValue::String(code.to_string()));
+    }
     append(
         client,
         &ActivityRow {
@@ -427,7 +436,7 @@ pub(crate) async fn record_launch_failure(
             target_user_id: Some(owner_user_id),
             title: None,
             preview: bounded_preview(error_message),
-            data: json!({ "outcome": "failed", "launch": true, "automationId": automation_id.to_string() }),
+            data,
         },
     )
     .await
