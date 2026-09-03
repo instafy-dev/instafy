@@ -471,7 +471,9 @@ function ControllerConversationNoticeEntry({
   // Without the provider (thread previews, tests) the card keeps its old
   // button-free shape rather than throwing.
   const noticeActions = useControllerNoticeActions();
-  const noticeAction = resolveControllerConversationNoticeAction(message);
+  const noticeAction = resolveControllerConversationNoticeAction(message, {
+    viewerUserId: noticeActions?.viewerUserId ?? null,
+  });
   const handleNoticeAction = resolveControllerNoticeActionHandler(noticeAction, noticeActions);
 
   return (

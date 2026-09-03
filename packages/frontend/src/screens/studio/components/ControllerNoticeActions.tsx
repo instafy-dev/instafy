@@ -13,6 +13,10 @@ export type ControllerNoticeActionsContextValue = {
   onShowSelfHostHelp: () => void;
   /** Opens the credits page, for a run refused because the team is out. */
   onOpenCredits: () => void;
+  /** Re-runs a schedule. Owner-only — the controller refuses anyone else. */
+  onRunAutomation: (automationId: string) => void;
+  /** Who is reading, so an owner-only action knows whether to render. */
+  viewerUserId: string | null;
 };
 
 /**
@@ -50,6 +54,11 @@ export function resolveControllerNoticeActionHandler(
 ): (() => void) | null {
   if (!action || !actions) {
     return null;
+  }
+  if (action.kind === "run_automation") {
+    const { automationId } = action;
+    const run = actions.onRunAutomation;
+    return automationId && typeof run === "function" ? () => run(automationId) : null;
   }
   const handler =
     action.kind === "desktop_runtime_help"

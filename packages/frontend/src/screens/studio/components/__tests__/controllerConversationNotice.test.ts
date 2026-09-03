@@ -355,4 +355,81 @@ describe("controllerConversationNotice", () => {
       }
     });
   });
+
+  describe("owner-gated re-run", () => {
+    const OWNER = "11111111-1111-4111-8111-111111111111";
+    const OTHER = "99999999-9999-4999-8999-999999999999";
+
+    const retryable = (failureCode: string, ownerId: string | null = OWNER) =>
+      makeMessage({
+        content: "This scheduled run couldn't start: something transient",
+        metadata: {
+          source: "controller",
+          kind: "runtime_alert",
+          details: {
+            reason: "automation_launch_failed",
+            automationId: "22222222-2222-4222-8222-222222222222",
+            ...(ownerId ? { automationOwnerId: ownerId } : {}),
+            failureCode,
+          },
+        },
+      });
+
+    it("offers the owner a re-run when trying again could go differently", () => {
+      const action = resolveControllerConversationNoticeAction(
+        retryable("platform_at_capacity"),
+        { viewerUserId: OWNER },
+      );
+      expect(action).toEqual({
+        label: "Run now",
+        kind: "run_automation",
+        automationId: "22222222-2222-4222-8222-222222222222",
+      });
+    });
+
+    it("never offers it to another participant, who would only get a 403", () => {
+      // The card is conversation-visible; re-running is owner-gated.
+      expect(
+        resolveControllerConversationNoticeAction(retryable("platform_at_capacity"), {
+          viewerUserId: OTHER,
+        }),
+      ).toBeNull();
+    });
+
+    it("does not offer it when the viewer is unknown", () => {
+      expect(resolveControllerConversationNoticeAction(retryable("platform_at_capacity"))).toBeNull();
+      expect(
+        resolveControllerConversationNoticeAction(retryable("platform_at_capacity"), {
+          viewerUserId: null,
+        }),
+      ).toBeNull();
+    });
+
+    it("does not offer it on a legacy notice that carries no owner", () => {
+      expect(
+        resolveControllerConversationNoticeAction(retryable("platform_at_capacity", null), {
+          viewerUserId: OWNER,
+        }),
+      ).toBeNull();
+    });
+
+    it("refuses to re-run a cause that is still true", () => {
+      // Retrying out-of-credits or a runtime limit fails again in front of
+      // the person who pressed it.
+      for (const code of ["insufficient_credits", "runtime_limit_reached"]) {
+        const action = resolveControllerConversationNoticeAction(retryable(code), {
+          viewerUserId: OWNER,
+        });
+        expect(action?.kind).not.toBe("run_automation");
+      }
+    });
+
+    it("still offers the owner the self-host dialog rather than a doomed re-run", () => {
+      const action = resolveControllerConversationNoticeAction(
+        retryable("self_hosted_runtime_offline"),
+        { viewerUserId: OWNER },
+      );
+      expect(action?.kind).toBe("desktop_runtime_help");
+    });
+  });
 });

@@ -747,7 +747,21 @@ async fn execute_automation_once(
             )
             .await;
             match response {
-                Ok(response) => Some(Uuid::from_str(&response.runtime_id)?),
+                Ok(response) => match Uuid::from_str(&response.runtime_id) {
+                    Ok(runtime_id) => Some(runtime_id),
+                    Err(error) => {
+                        finalize_automation_attempt(
+                            state,
+                            record,
+                            now,
+                            next_run_at,
+                            status_override,
+                            Some(unusable_runtime_id_failure(&response.runtime_id, &error)),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                },
                 Err((status, Json(api_error))) => {
                     finalize_automation_attempt(
                         state,
@@ -763,14 +777,34 @@ async fn execute_automation_once(
             }
         }
         "auto" => {
-            if let Some(runtime_id) = select_viable_runtime_id(
+            let viable_runtime_id = match select_viable_runtime_id(
                 state,
                 record.project_id,
                 record.user_id,
                 record.runtime_provider.as_deref(),
             )
-            .await?
+            .await
             {
+                Ok(runtime_id) => runtime_id,
+                Err(error) => {
+                    finalize_automation_attempt(
+                        state,
+                        record,
+                        now,
+                        next_run_at,
+                        status_override,
+                        Some(AutomationLaunchFailure::minted(
+                            format!(
+                                "the controller could not check which machines are available: {error}"
+                            ),
+                            CODE_CONTROLLER_UNAVAILABLE,
+                        )),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+            if let Some(runtime_id) = viable_runtime_id {
                 Some(runtime_id)
             } else {
                 let requested_provider = record
@@ -810,7 +844,21 @@ async fn execute_automation_once(
                 )
                 .await;
                 match response {
-                    Ok(response) => Some(Uuid::from_str(&response.runtime_id)?),
+                    Ok(response) => match Uuid::from_str(&response.runtime_id) {
+                        Ok(runtime_id) => Some(runtime_id),
+                        Err(error) => {
+                            finalize_automation_attempt(
+                                state,
+                                record,
+                                now,
+                                next_run_at,
+                                status_override,
+                                Some(unusable_runtime_id_failure(&response.runtime_id, &error)),
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                    },
                     Err((status, Json(api_error))) => {
                         finalize_automation_attempt(
                             state,
@@ -906,7 +954,19 @@ async fn execute_automation_once(
         Ok(result) => {
             if record.conversation_id.is_none() {
                 if let Some(conversation_id) = result.conversation_id {
-                    attach_automation_conversation(state, record.id, conversation_id).await?;
+                    // The run succeeded; only the link back to its thread
+                    // failed. Bailing here used to discard the success too,
+                    // leaving the schedule with no last_run_at and no trace.
+                    if let Err(error) =
+                        attach_automation_conversation(state, record.id, conversation_id).await
+                    {
+                        warn!(
+                            automation_id = %record.id,
+                            conversation_id = %conversation_id,
+                            ?error,
+                            "automation ran but its conversation could not be attached"
+                        );
+                    }
                 }
             }
             finalize_automation_attempt(state, record, now, next_run_at, status_override, None)
@@ -1248,6 +1308,15 @@ fn build_launch_failure_details(
         object.insert("failureCode".into(), JsonValue::String(code.to_string()));
     }
     details
+}
+
+/// The provider answered, but with a runtime id we cannot parse. Nothing the
+/// reader can press fixes that, so it carries the code that renders no button.
+fn unusable_runtime_id_failure(raw: &str, error: &uuid::Error) -> AutomationLaunchFailure {
+    AutomationLaunchFailure::minted(
+        format!("the runtime the provider returned could not be identified ({raw:?}): {error}"),
+        CODE_CONTROLLER_UNAVAILABLE,
+    )
 }
 
 fn fallback_code_for_status(status: StatusCode) -> Option<&'static str> {
@@ -2304,10 +2373,11 @@ mod tests {
         can_access_owned_automation, can_view_automation,
         conversation_visibility_for_result_visibility, fallback_code_for_status,
         hosted_automation_provider_is_managed, no_live_self_hosted_runtime_error,
-        normalize_result_visibility, AutomationLaunchFailure, AutomationRecord,
-        UpdateAutomationBody, CODE_AUTOMATION_ACCESS_DENIED, CODE_CONTROLLER_UNAVAILABLE,
-        CODE_HOSTED_PROVIDER_UNSUPPORTED, CODE_SELF_HOSTED_RUNTIME_OFFLINE, DEFAULT_TIMEZONE,
-        RESULT_VISIBILITY_TEAM, SELF_HOSTED_LAUNCH_MARKER,
+        normalize_result_visibility, unusable_runtime_id_failure, AutomationLaunchFailure,
+        AutomationRecord, UpdateAutomationBody, CODE_AUTOMATION_ACCESS_DENIED,
+        CODE_CONTROLLER_UNAVAILABLE, CODE_HOSTED_PROVIDER_UNSUPPORTED,
+        CODE_SELF_HOSTED_RUNTIME_OFFLINE, DEFAULT_TIMEZONE, RESULT_VISIBILITY_TEAM,
+        SELF_HOSTED_LAUNCH_MARKER,
     };
     use crate::errors::ApiError;
     use axum::http::StatusCode;
@@ -2674,6 +2744,20 @@ mod tests {
             "hosted_provider_unsupported"
         );
         assert_eq!(CODE_AUTOMATION_ACCESS_DENIED, "automation_access_denied");
+        assert_eq!(CODE_CONTROLLER_UNAVAILABLE, "controller_unavailable");
+    }
+
+    #[test]
+    fn an_unusable_provider_runtime_id_is_recorded_rather_than_swallowed() {
+        // This used to bail with `?`, so the schedule showed no last_error, no
+        // notice and no ledger row — it just looked like nothing had run.
+        let error = Uuid::parse_str("not-a-uuid").expect_err("must not parse");
+        let failure = unusable_runtime_id_failure("not-a-uuid", &error);
+
+        assert_eq!(failure.code.as_deref(), Some(CODE_CONTROLLER_UNAVAILABLE));
+        assert!(failure.message.contains("not-a-uuid"));
+        // The card renders no button for this code: nothing the reader presses
+        // fixes a provider that answered with an id we cannot parse.
         assert_eq!(CODE_CONTROLLER_UNAVAILABLE, "controller_unavailable");
     }
 }

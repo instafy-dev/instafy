@@ -149,11 +149,19 @@ describe("ConversationMessageRows", () => {
       onOpenMachines: () => void;
       onShowSelfHostHelp: () => void;
       onOpenCredits: () => void;
+      onRunAutomation?: (automationId: string) => void;
+      viewerUserId?: string | null;
     },
   ) {
     await act(async () => {
       root.render(
-        <ControllerNoticeActionsProvider value={actions}>
+        <ControllerNoticeActionsProvider
+          value={{
+            onRunAutomation: vi.fn(),
+            viewerUserId: null,
+            ...actions,
+          }}
+        >
           <ConversationMessageRows
             messages={messages}
             currentUserId="user-1"
