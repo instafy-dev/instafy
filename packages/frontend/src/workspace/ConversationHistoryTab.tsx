@@ -8,6 +8,7 @@ import { Input } from "../components/Input";
 import { ToolbarMenuSelect } from "../components/ToolbarMenuSelect";
 import { TreeDisclosureButton, TreeRowMarkerSlot } from "../components/TreeDisclosureButton";
 import { useConversations } from "../conversations/ConversationsProvider";
+import { isEmptyConversationPlaceholder } from "../conversations/conversationState";
 import type { ConversationLifecycleStatus } from "../conversations/ConversationsProvider";
 import { MenuItemContent } from "../components/MenuItemContent";
 import { StudioPopover } from "../components/aria/StudioPopover";
@@ -30,7 +31,13 @@ export function ConversationHistoryTab({
   onRequestClose,
   onStartNewConversation,
 }: ConversationHistoryTabProps = {}) {
-  const { conversations, activeConversationId, setConversationLifecycleStatus, setConversationTitle } = useConversations();
+  const {
+    conversations,
+    activeConversationId,
+    setConversationLifecycleStatus,
+    setConversationTitle,
+    remoteConversationHistoryResolved,
+  } = useConversations();
   const { tabs, closeTab, openConversationTab, requestUrlPush } = useWorkspaceTabs();
   const { showStatus } = useStatus();
   const isLargeScreen = useBreakpoint("lg");
@@ -231,6 +238,15 @@ export function ConversationHistoryTab({
     filteredTree.forEach((node) => walk(node, 0));
     return rows;
   }, [activeThreadPath, expanded, filteredTree, query]);
+
+  // A space we have not opened yet starts with a single local placeholder
+  // while its real conversations are still being fetched. Listing that
+  // placeholder — or worse, "No conversations found." — makes an org the
+  // viewer does have chats in look empty until they reload.
+  const historyPending = useMemo(
+    () => !remoteConversationHistoryResolved && conversations.every(isEmptyConversationPlaceholder),
+    [conversations, remoteConversationHistoryResolved],
+  );
 
   // The marker gutter exists for structure (disclosure arrows, nesting, the
   // private-chat lock). A flat list of public chats — the common case — should
@@ -519,7 +535,14 @@ export function ConversationHistoryTab({
       ) : null}
 
       <div className={["flex-1 overflow-y-auto pr-1", touchDrawer ? "mt-4" : "mt-3"].join(" ")}>
-        {visibleRows.length === 0 ? (
+        {historyPending ? (
+          <div
+            className="flex h-full items-center justify-center px-4 py-10"
+            data-testid="conversation-history-loading"
+          >
+            <span className="text-sm text-slate-500 dark:text-slate-400">Loading conversations…</span>
+          </div>
+        ) : visibleRows.length === 0 ? (
           <div className="flex h-full items-center justify-center px-4 py-10">
             <span className="text-sm text-slate-500 dark:text-slate-400">No conversations found.</span>
           </div>
