@@ -63,6 +63,9 @@ function resolveRuntimeAlertContent(
       return "No runtime is connected for this space. Use the Runtime button by the composer to start Instafy Cloud.";
     case "runtime_inspection_failed":
       return "The workspace runtime could not be verified. Use the Runtime button by the composer to inspect or reconnect it.";
+    case "automation_launch_failed":
+      // The controller wrote the actual cause into the message.
+      return legacyContent?.trim() || "This scheduled run couldn't start.";
     default:
       return "The workspace runtime could not be reached. Use the Runtime button by the composer to inspect or reconnect it.";
   }
@@ -129,6 +132,9 @@ export function resolveControllerConversationNoticeLabel(message: ChatMessage): 
 
   const metadata = message.metadata && isRecord(message.metadata) ? message.metadata : null;
   const details = extractMessageDetails(metadata);
+  if (normalizeString(details?.["reason"] ?? metadata?.["reason"]) === "automation_launch_failed") {
+    return "Scheduled run couldn't start";
+  }
   return isRecoverableRuntimeStartAlert(details, message.content)
     ? "Workspace starting"
     : "Workspace unavailable";
