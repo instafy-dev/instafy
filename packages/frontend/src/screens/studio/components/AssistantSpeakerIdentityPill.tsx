@@ -1,3 +1,4 @@
+import { WarningTriangle } from "iconoir-react";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
 import { requestAgentProfile } from "./agentProfileOpen";
 import type {
@@ -46,18 +47,51 @@ export function AssistantSpeakerIdentityPill({
   );
 }
 
+export type SpeakerStatusMarker = {
+  label: string;
+  tone: "danger" | "warning";
+};
+
+// Status is header vocabulary, not chip vocabulary: a tinted text label beside
+// the author and timestamp, never a filled pill (#145).
+export function SpeakerStatusMarkerLabel({ marker }: { marker: SpeakerStatusMarker }) {
+  return (
+    <span
+      data-testid="chat-speaker-run-status"
+      className={`inline-flex min-w-0 flex-none items-center gap-1 text-xxs font-semibold ${
+        marker.tone === "danger"
+          ? "text-rose-600 dark:text-rose-300"
+          : "text-secondary-700 dark:text-secondary-200"
+      }`}
+    >
+      <WarningTriangle aria-hidden="true" className="h-3 w-3 flex-none" />
+      <span className="min-w-0 truncate">{marker.label}</span>
+    </span>
+  );
+}
+
 export function AssistantSpeakerIdentityLabel({
   handle,
   timestamp,
   metadata = null,
   agentIdentity = null,
   motion = "idle",
+  avatarVisibility = "always",
+  statusMarker = null,
 }: {
   handle: string | null | undefined;
   timestamp?: number | null;
   metadata?: Record<string, unknown> | null;
   agentIdentity?: AssistantAgentIdentity | null;
   motion?: AssistantAvatarMotion;
+  /**
+   * "narrow" hides the label's own avatar at sm+ where the avatar gutter of
+   * the message row shows the face instead — name, timestamp, and body then
+   * share one left alignment line (#177). Narrow layouts keep the inline
+   * avatar because the gutter collapses there.
+   */
+  avatarVisibility?: "always" | "narrow";
+  statusMarker?: SpeakerStatusMarker | null;
 }) {
   const normalizedHandle = normalizeAssistantHandleLabel(handle);
   const avatarSeed = resolveAvatarSeed(normalizedHandle, agentIdentity);
@@ -68,14 +102,16 @@ export function AssistantSpeakerIdentityLabel({
       className="inline-flex max-w-full items-center gap-2 text-xs text-slate-500 dark:text-slate-400"
       data-agent-handle={normalizedHandle}
     >
-      {/* Narrow layouts have no avatar gutter, so this label is the
-          transcript's profile door — ChatPanel hosts the card by handle. */}
+      {/* Where the gutter is collapsed this label is the transcript's profile
+          door — ChatPanel hosts the card by handle. */}
       <button
         type="button"
         onClick={() => requestAgentProfile(normalizedHandle)}
         aria-label={`View profile for ${normalizedHandle}`}
         data-testid="chat-speaker-agent-profile"
-        className="flex-none rounded-full outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+        className={`flex-none rounded-full outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 ${
+          avatarVisibility === "narrow" ? "sm:hidden" : ""
+        }`.trim()}
       >
         <ChatMessageAvatar
           kind="assistant"
@@ -98,6 +134,7 @@ export function AssistantSpeakerIdentityLabel({
           {timestampInfo.label}
         </time>
       ) : null}
+      {statusMarker ? <SpeakerStatusMarkerLabel marker={statusMarker} /> : null}
     </div>
   );
 }

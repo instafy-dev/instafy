@@ -53,10 +53,17 @@ export function HumanSpeakerIdentityLabel({
   avatarSeed,
   label,
   timestamp,
+  avatarVisibility = "always",
 }: {
   avatarSeed: string | null;
   label: string;
   timestamp?: number | null;
+  /**
+   * "narrow" hides the label's own avatar at sm+ where the message row's
+   * avatar gutter shows the face instead, so name and body share one left
+   * alignment line (#177).
+   */
+  avatarVisibility?: "always" | "narrow";
 }) {
   const timestampInfo = formatSpeakerTimestamp(timestamp);
   return (
@@ -64,12 +71,14 @@ export function HumanSpeakerIdentityLabel({
       className="inline-flex max-w-full items-center gap-2 text-xs text-slate-500 dark:text-slate-400"
       data-testid="chat-human-speaker-label"
     >
-      <ChatMessageAvatar
-        kind="human"
-        seed={avatarSeed}
-        label={label}
-        size="xs"
-      />
+      <span className={`flex-none ${avatarVisibility === "narrow" ? "sm:hidden" : ""}`.trim()}>
+        <ChatMessageAvatar
+          kind="human"
+          seed={avatarSeed}
+          label={label}
+          size="xs"
+        />
+      </span>
       <span className="min-w-0 truncate font-semibold text-slate-600 dark:text-slate-300">
         {label}
       </span>
