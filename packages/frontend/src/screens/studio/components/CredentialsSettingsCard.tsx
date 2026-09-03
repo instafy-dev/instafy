@@ -35,7 +35,10 @@ import {
   normalizeAiProviderId,
   type AiProviderId,
 } from "../../../utils/aiProviderModels";
-import { CredentialsConnectModal } from "./CredentialsConnectModal";
+import {
+  CredentialsConnectModal,
+  type CredentialsConnectApiKeyProvider,
+} from "./CredentialsConnectModal";
 import { AgentProfileModal, type AgentProfileModalMode } from "./AgentProfileModal";
 import {
   clearPendingAgentProfileTarget,
@@ -192,15 +195,33 @@ function formatCredentialTestFailureMessage(raw: string | null | undefined): str
 
 /**
  * Reconnect-in-place re-uploads an auth.json, so it only exists for that kind.
- * Every other provider has to be re-added. The copy below and the row's
- * Reconnect button both derive from this predicate — they used to disagree, so
- * a Gemini or API-key row said "Reconnect the credential" beside no Reconnect
- * button at all.
  */
 function canReconnectCredentialInPlace(
   credential: { kind?: string | null } | null | undefined,
 ): boolean {
   return credential?.kind === "codex_auth_json";
+}
+
+/**
+ * Everything else is an API key, which cannot be re-uploaded — it is replaced:
+ * a new key is entered, verified, promoted if the old one was the default, and
+ * only then is the old one retired. The copy on the row derives from the same
+ * two predicates as the buttons, so they cannot drift apart again.
+ */
+/** The API-key step a replacement for this credential should open on. */
+function connectStepForCredential(
+  credential: Pick<ControllerCredentialListItem, "kind" | "metadata">,
+): CredentialsConnectApiKeyProvider {
+  const provider = resolveCredentialProviderId(credential);
+  return provider === "deepseek" || provider === "zai" || provider === "gemini"
+    ? provider
+    : "openai";
+}
+
+function canReplaceCredential(
+  credential: { kind?: string | null; revokedAt?: string | null } | null | undefined,
+): boolean {
+  return Boolean(credential) && !credential?.revokedAt && !canReconnectCredentialInPlace(credential);
 }
 
 function resolveCredentialTestFailureFeedback(
@@ -213,7 +234,7 @@ function resolveCredentialTestFailureFeedback(
       status: "needs_reconnect",
       detail: canReconnect
         ? "The saved AI login is stale. Reconnect it below, then test again."
-        : "The saved AI login is stale. Add a fresh connection for this provider, make it the default, then remove this one.",
+        : "The saved AI login is stale. Replace it below with a fresh key.",
     };
   }
   return { status: "fail", detail };
@@ -419,6 +440,7 @@ export function CredentialsSettingsCard() {
     canManageAiConnections,
     openConnectModal,
     openConnectModalAtStep,
+    openConnectModalToReplace,
     connectModalProps,
   } = useCredentialsConnectFlow({
     userPresent: Boolean(user),
@@ -426,6 +448,10 @@ export function CredentialsSettingsCard() {
     notifyAiConfigChanged,
     showStatus,
     formatCredentialTestFailureMessage,
+    // Read at finalize time, not when the button was pressed: the default can
+    // move while the connect modal is open.
+    isCredentialDefault: (credentialId: string) =>
+      Boolean(credentialsById.get(credentialId)?.isDefault),
   });
 
   const handleTestCredential = useCallback(
@@ -1281,6 +1307,7 @@ export function CredentialsSettingsCard() {
                   const pending = actionPendingId === credential.id;
                   const testPending = credentialTestPendingId === credential.id;
                   const canReconnectAuthJson = canReconnectCredentialInPlace(credential);
+                  const canReplace = canReplaceCredential(credential);
                   const testFeedbackEntry = credentialTestFeedback[credential.id] ?? null;
                   const testFeedbackState = testFeedbackEntry?.status ?? null;
                   const testFeedbackLabel = testFeedbackState
@@ -1410,6 +1437,35 @@ export function CredentialsSettingsCard() {
                                 {testPending ? "Testing…" : testFeedbackEntry ? "Retest" : "Test"}
                               </Button>
 
+                              {canReplace ? (
+                                <Button
+                                  onPress={() =>
+                                    openConnectModalToReplace(
+                                      {
+                                        id: credential.id,
+                                        label:
+                                          resolveCredentialLabel(credential) || "this connection",
+                                      },
+                                      connectStepForCredential(credential),
+                                    )
+                                  }
+                                  isDisabled={pending || testPending}
+                                  variant={testFeedbackState === "needs_reconnect" ? "outline" : "ghost"}
+                                  size="xs"
+                                  radius="full"
+                                  className={[
+                                    "gap-1.5",
+                                    testFeedbackState === "needs_reconnect"
+                                      ? "border-secondary-200 bg-secondary-50 text-secondary-800 hover:bg-secondary-100 dark:bg-secondary-500/10 dark:text-secondary-100 dark:hover:bg-secondary-500/15"
+                                      : null,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(" ")}
+                                  data-testid={`credentials-connection-replace-${credential.id}`}
+                                >
+                                  Replace
+                                </Button>
+                              ) : null}
                               {canReconnectAuthJson ? (
                                 <Button
                                   onPress={() => handleTriggerReconnectCredential(credential.id)}
