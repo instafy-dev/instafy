@@ -675,7 +675,7 @@ async fn execute_automation_once(
     if let Err((_, Json(api_error))) = authorize_automation_execution(state, record).await {
         finalize_automation_attempt(
             state,
-            record.id,
+            record,
             now,
             next_run_at,
             status_override,
@@ -721,7 +721,7 @@ async fn execute_automation_once(
             if !hosted_automation_provider_is_managed(&runtime_provider, provider_is_self_hosted) {
                 finalize_automation_attempt(
                     state,
-                    record.id,
+                    record,
                     now,
                     next_run_at,
                     status_override,
@@ -751,7 +751,7 @@ async fn execute_automation_once(
                 Err((_, Json(api_error))) => {
                     finalize_automation_attempt(
                         state,
-                        record.id,
+                        record,
                         now,
                         next_run_at,
                         status_override,
@@ -784,7 +784,7 @@ async fn execute_automation_once(
                 if let Some(message) = no_live_self_hosted_runtime_error(provider_is_self_hosted) {
                     finalize_automation_attempt(
                         state,
-                        record.id,
+                        record,
                         now,
                         next_run_at,
                         status_override,
@@ -811,7 +811,7 @@ async fn execute_automation_once(
                     Err((_, Json(api_error))) => {
                         finalize_automation_attempt(
                             state,
-                            record.id,
+                            record,
                             now,
                             next_run_at,
                             status_override,
@@ -906,13 +906,13 @@ async fn execute_automation_once(
                     attach_automation_conversation(state, record.id, conversation_id).await?;
                 }
             }
-            finalize_automation_attempt(state, record.id, now, next_run_at, status_override, None)
+            finalize_automation_attempt(state, record, now, next_run_at, status_override, None)
                 .await?;
         }
         Err((_, Json(api_error))) => {
             finalize_automation_attempt(
                 state,
-                record.id,
+                record,
                 now,
                 next_run_at,
                 status_override,
@@ -953,17 +953,19 @@ async fn authorize_automation_execution(
     Ok(())
 }
 
+// A scheduled conversation is an ordinary conversation that a schedule opens
+// on the owner's behalf: it stays visible in the space's list (its origin is
+// its thread kind and `automationId`), so what it did and where it failed
+// can be read like any other thread.
 fn build_automation_conversation_metadata(
-    user_id: Uuid,
+    _user_id: Uuid,
     automation_id: Uuid,
     name: &str,
     conversation_visibility: &str,
 ) -> JsonValue {
-    let lifecycle_key = format!("instafy_conversation_lifecycle_v1_{user_id}");
     json!({
         "title": name,
         "visibility": conversation_visibility,
-        lifecycle_key: "hidden",
         "automationId": automation_id.to_string(),
     })
 }
@@ -985,13 +987,14 @@ async fn attach_automation_conversation(
 
 async fn finalize_automation_attempt(
     state: &AppState,
-    automation_id: Uuid,
+    record: &AutomationRecord,
     attempted_at: DateTime<Utc>,
     next_run_at: Option<DateTime<Utc>>,
     status_override: Option<&str>,
     error: Option<String>,
 ) -> anyhow::Result<()> {
-    let connection = state.pool.get().await?;
+    let automation_id = record.id;
+    let mut connection = state.pool.get().await?;
     let error_value = error
         .as_deref()
         .map(|value| value.trim())
@@ -1008,7 +1011,8 @@ async fn finalize_automation_attempt(
         .map(|value| value.trim())
         .filter(|value| !value.is_empty());
 
-    connection
+    let transaction = connection.transaction().await?;
+    transaction
         .execute(
             "update automations
              set locked_until = null,
@@ -1027,6 +1031,53 @@ async fn finalize_automation_attempt(
             ],
         )
         .await?;
+
+    // A launch failure is told where the work would have happened: a notice in
+    // the scheduled conversation (like a runtime alert), and a failed-run row
+    // in the owner's feed. Before this the only trace was a side field on the
+    // automation, visible only in that space's Automations panel.
+    if let (Some(error_text), Some(conversation_id)) = (stored_error.as_deref(), record.conversation_id) {
+        let content = format!("This scheduled run couldn't start: {error_text}");
+        let metadata = json!({
+            "source": "controller",
+            "kind": "runtime_alert",
+            "messageType": "runtime_alert",
+            "details": {
+                "reason": "automation_launch_failed",
+                "automationId": record.id.to_string(),
+                "automationName": record.name,
+            },
+        });
+        if let Err((_, Json(api_error))) = crate::agent::record_agent_conversation_message(
+            &transaction,
+            &record.project_id,
+            &conversation_id,
+            None,
+            None,
+            None,
+            content,
+            metadata,
+        )
+        .await
+        {
+            tracing::warn!(
+                automation_id = %automation_id,
+                error = %api_error.message,
+                "failed to record automation launch failure notice"
+            );
+        }
+        crate::activity::record_launch_failure(
+            &transaction,
+            &record.project_id,
+            &conversation_id,
+            record.user_id,
+            &automation_id,
+            error_text,
+        )
+        .await;
+    }
+
+    transaction.commit().await?;
     Ok(())
 }
 
@@ -1459,6 +1510,16 @@ async fn create_project_automation(
         )
         .await
         .map_err(|error| internal_error(format!("failed to insert automation conversation: {error}")))?;
+    // Home's feed: the scheduled conversation exists from now on.
+    crate::activity::record_conversation_created_raw(
+        &transaction,
+        &project_id,
+        &conversation_id,
+        Some(user_id),
+        Some(name.as_str()),
+        Some("automation"),
+    )
+    .await;
     transaction
         .execute(
             "insert into conversation_participants (conversation_id, user_id, role, added_by)
