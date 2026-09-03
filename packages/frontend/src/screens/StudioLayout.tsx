@@ -277,26 +277,6 @@ function StudioLayoutInner() {
   const { runtime, runtimeReady, effectiveRuntimeId, runtimeStatuses, showDesktopRuntimeHelp } =
     useRuntime();
 
-  // Controller notices ("Workspace unavailable", "Scheduled run couldn't
-  // start") used to be text-only cards naming a composer Runtime button that no
-  // longer exists. They get their action here, where both the Machines route
-  // and the self-host dialog already live.
-  const controllerNoticeActionsValue = useMemo<ControllerNoticeActionsContextValue>(
-    () => ({
-      onOpenMachines: () => {
-        // Push before opening, or the ?panel= reconciliation snaps the
-        // workspace straight back to the chat surface.
-        requestHistoryPush();
-        openPanelTab("machines", { activate: true });
-      },
-      onShowSelfHostHelp: showDesktopRuntimeHelp,
-      onOpenCredits: () => {
-        requestHistoryPush();
-        openPanelTab("credits", { activate: true });
-      },
-    }),
-    [openPanelTab, requestHistoryPush, showDesktopRuntimeHelp],
-  );
   const controllerProjectMissing =
     runtime.controllerProjectMissing || projectAccessBlockedFromProject;
   const projectReadyForWorkspace = projectInitialized && !projectAccessPending;
@@ -344,6 +324,43 @@ function StudioLayoutInner() {
     return conversations.find((conversation) => conversation.localId === activeConversationId) ?? null;
   }, [activeConversationId, conversations]);
   const currentUserId = user?.id ?? null;
+
+  // Controller notices ("Workspace unavailable", "Scheduled run couldn't
+  // start") used to be text-only cards naming a composer Runtime button that no
+  // longer exists. They get their action here, where both the Machines route
+  // and the self-host dialog already live.
+  const controllerNoticeActionsValue = useMemo<ControllerNoticeActionsContextValue>(
+    () => ({
+      onOpenMachines: () => {
+        // Push before opening, or the ?panel= reconciliation snaps the
+        // workspace straight back to the chat surface.
+        requestHistoryPush();
+        openPanelTab("machines", { activate: true });
+      },
+      onShowSelfHostHelp: showDesktopRuntimeHelp,
+      onOpenCredits: () => {
+        requestHistoryPush();
+        openPanelTab("credits", { activate: true });
+      },
+      onRunAutomation: (automationId: string) => {
+        void (async () => {
+          try {
+            const started = await controllerClient.automations.runNow({ automationId });
+            if (started) {
+              showStatus("Running the schedule now…", "info", 3500);
+              return;
+            }
+            showStatus("Couldn't start that run. Try again in a moment.", "error", 4500);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            showStatus(`Couldn't start that run: ${message}`, "error", 5000);
+          }
+        })();
+      },
+      viewerUserId: currentUserId,
+    }),
+    [currentUserId, openPanelTab, requestHistoryPush, showDesktopRuntimeHelp, showStatus],
+  );
   const [mobileHomeReturnTarget, setMobileHomeReturnTarget] = useState<{
     tabId: string;
     fallbackPanel: StudioPanel;

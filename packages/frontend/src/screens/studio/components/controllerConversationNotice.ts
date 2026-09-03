@@ -86,8 +86,23 @@ const SELF_HOSTED_LAUNCH_MARKER = "no self-hosted runtime was online for this sp
 
 export type ControllerConversationNoticeAction = {
   label: string;
-  kind: "open_machines" | "desktop_runtime_help" | "open_credits";
+  kind: "open_machines" | "desktop_runtime_help" | "open_credits" | "run_automation";
+  /** Set only for "run_automation". */
+  automationId?: string;
 };
+
+/**
+ * Causes where running the schedule again could plausibly go differently. The
+ * platform was full, the controller stumbled, or the provider call failed —
+ * all transient. Deliberately excludes insufficient_credits and
+ * runtime_limit_reached: the cause is still true, so a retry fails again in
+ * front of whoever pressed it.
+ */
+const RETRYABLE_FAILURE_CODES = new Set([
+  "platform_at_capacity",
+  "controller_unavailable",
+  "provider_launch_failed",
+]);
 
 /**
  * Causes the controller can name, mirrored from
@@ -122,6 +137,7 @@ const ACTION_BY_FAILURE_CODE: Record<string, ControllerConversationNoticeAction 
  */
 export function resolveControllerConversationNoticeAction(
   message: ChatMessage,
+  viewer?: { viewerUserId?: string | null },
 ): ControllerConversationNoticeAction | null {
   if (getControllerConversationNoticeKind(message) !== "runtime_alert") {
     return null;
@@ -132,6 +148,23 @@ export function resolveControllerConversationNoticeAction(
 
   if (reason === "automation_launch_failed") {
     const failureCode = normalizeString(details?.["failureCode"]);
+    // Re-running is owner-gated in the controller
+    // (`can_access_owned_automation`), while this card is visible to every
+    // conversation participant. Offering it to anyone else would 403 for the
+    // person who pressed it.
+    const automationId = normalizeString(details?.["automationId"]);
+    const ownerId = normalizeString(details?.["automationOwnerId"]);
+    const viewerId = normalizeString(viewer?.viewerUserId);
+    if (
+      automationId &&
+      ownerId &&
+      viewerId &&
+      ownerId === viewerId &&
+      failureCode &&
+      RETRYABLE_FAILURE_CODES.has(failureCode)
+    ) {
+      return { label: "Run now", kind: "run_automation", automationId };
+    }
     if (failureCode && failureCode in ACTION_BY_FAILURE_CODE) {
       return ACTION_BY_FAILURE_CODE[failureCode] ?? null;
     }
