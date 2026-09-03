@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ConversationState } from "../../../conversations/ConversationsProvider";
 import type { HomeAttentionEntry } from "../homeAttention";
 import type { NotificationInboxItem } from "../../../sdk/instafy";
+import type { ActivityItem } from "../../../services/runtimeController/activity";
 import {
   buildHomeFeed,
   dayLabelFor,
@@ -213,13 +214,59 @@ describe("buildHomeFeed", () => {
       now: NOW,
     });
 
+    // Replies only, newest first; the undated one sinks to the bottom.
     expect(model.needs.map((event) => [event.kind, event.team.name])).toEqual([
-      ["running", "Personal"],
       ["reply", "Acme Co"],
       ["reply", "Personal"],
       ["reply", "Acme Co"],
     ]);
     expect(model.needs.at(-1)?.title).toBe("Undated");
+    // Work in flight is progress, not a demand: it leads Recent as a live group.
+    expect(model.activity[0]).toMatchObject({ key: "live", label: "In progress" });
+    expect(model.activity[0].events.map((event) => [event.kind, event.lane, event.title])).toEqual([
+      ["running", "activity", "Nightly build"],
+    ]);
+    expect(model.teams.find((team) => team.isPersonal)?.needsCount).toBe(1);
+  });
+
+  it("keeps the caught-up cut in place when live rows sit above the dated groups", () => {
+    const running = localConversation({
+      localId: "local-run",
+      controllerId: "c-run",
+      title: "Nightly build",
+      messages: [{ id: "m-r", role: "user", content: "go", timestamp: NOW - 8 * HOUR }],
+    });
+    const model = buildHomeFeed({
+      attentionEntries: [
+        {
+          key: "running-local-run",
+          title: running.title,
+          subtitle: "",
+          meta: null,
+          preview: null,
+          kind: "running",
+          source: "conversation",
+          localConversationId: running.localId,
+          testId: "t-run",
+        },
+      ],
+      recentConversations: [
+        recent({ conversationId: "a", updatedAt: new Date(NOW - HOUR).toISOString() }),
+        recent({ conversationId: "b", updatedAt: new Date(NOW - 3 * HOUR).toISOString() }),
+      ],
+      projects: [personalProject],
+      activeProject: personalProject,
+      conversations: [running],
+      teamFilter: "all",
+      lastSeenAt: NOW - 2 * HOUR,
+      now: NOW,
+    });
+
+    const flat = model.activity.flatMap((day) => day.events);
+    expect(flat.map((event) => event.kind)).toEqual(["running", "conversation", "conversation"]);
+    // Index 2 in the flat list: after the live row and the one new conversation.
+    expect(model.sinceCutIndex).toBe(2);
+    expect(model.isEmpty).toBe(false);
   });
 
   it("pins the user's real Personal org first and folds org-less spaces into it", () => {
@@ -406,6 +453,177 @@ describe("buildHomeFeed", () => {
     });
     expect(model.isEmpty).toBe(true);
     expect(model.teams).toEqual([{ key: "personal", name: "Personal", isPersonal: true, needsCount: 0 }]);
+  });
+});
+
+describe("buildHomeFeed with ledger rows", () => {
+  function activityItem(overrides: Partial<ActivityItem> = {}): ActivityItem {
+    return {
+      id: "10",
+      kind: "conversation.reply",
+      at: new Date(NOW - HOUR).toISOString(),
+      project: { id: "p-acme", name: "checkout-flow" },
+      org: { id: "org-acme", name: "Acme Co" },
+      conversation: { id: "c-server", title: "Split checkout", visibility: "public", threadKind: null },
+      run: null,
+      actor: { kind: "agent", userId: null, displayName: "Octo", handle: "octo", avatarSeed: "seed-octo" },
+      title: "Split checkout",
+      preview: "Opened fix/checkout-package",
+      needsYou: false,
+      live: false,
+      seen: false,
+      data: {},
+      ...overrides,
+    };
+  }
+
+  it("folds ledger rows to one row per conversation, newest state first, with real actors", () => {
+    const model = buildHomeFeed({
+      attentionEntries: [],
+      recentConversations: [],
+      activity: [
+        activityItem({ id: "12", kind: "run.failed", at: new Date(NOW - 10 * 60 * 1000).toISOString(), preview: "boom", run: { id: "run-1", status: "failed", promptId: null } }),
+        activityItem({
+          id: "11",
+          kind: "conversation.created",
+          at: new Date(NOW - 30 * 60 * 1000).toISOString(),
+          preview: null,
+          conversation: { id: "c-ada", title: "Ada's plan", visibility: "public", threadKind: null },
+          title: "Ada's plan",
+          actor: { kind: "user", userId: "u-1", displayName: "Ada Lovelace", handle: null, avatarSeed: null },
+        }),
+        activityItem({ id: "10" }),
+        activityItem({ id: "9", kind: "member.joined", at: new Date(NOW - 2 * HOUR).toISOString() }),
+        activityItem({ id: "8", kind: "run.started", live: false, at: new Date(NOW - 3 * HOUR).toISOString() }),
+      ],
+      projects: [personalProject],
+      activeProject: personalProject,
+      conversations: [],
+      teamFilter: "all",
+      lastSeenAt: null,
+      now: NOW,
+    });
+
+    const flat = model.activity.flatMap((day) => day.events);
+    // "Split checkout" had a reply (10) and then a failed run (12): one row,
+    // the failure, standing for both. Unknown kinds and a stale run.started
+    // are skipped, not shown raw.
+    expect(flat.map((event) => [event.kind, event.title, event.actor?.kind ?? null, event.group?.count ?? 1])).toEqual([
+      ["run_failed", "Split checkout", "agent", 2],
+      ["conversation", "Ada's plan", "user", 1],
+    ]);
+    expect(flat[0].testId).toBe("home-recent-item-12");
+    expect(flat[0].group?.ids).toEqual([12, 10]);
+    expect(flat[0].actor).toEqual({ kind: "agent", handle: "octo", avatarSeed: "seed-octo", displayName: "Octo" });
+    expect(flat[0].team).toEqual({ key: "org-acme", name: "Acme Co" });
+    expect(flat[1].actor?.displayName).toBe("Ada Lovelace");
+    expect(model.teams.map((team) => team.key)).toEqual(["personal", "org-acme"]);
+  });
+
+  it("counts the updates behind a folded thread against the server cut", () => {
+    const model = buildHomeFeed({
+      attentionEntries: [],
+      recentConversations: [],
+      activity: [
+        activityItem({ id: "8", at: new Date(NOW - HOUR).toISOString() }),
+        activityItem({ id: "6", at: new Date(NOW - 2 * HOUR).toISOString() }),
+        activityItem({ id: "4", at: new Date(NOW - 3 * HOUR).toISOString() }),
+        activityItem({ id: "3", at: new Date(NOW - 4 * HOUR).toISOString(), conversation: { id: "c-old", title: "Old", visibility: "public", threadKind: null }, title: "Old" }),
+      ],
+      serverLastSeenEventId: "5",
+      projects: [personalProject],
+      activeProject: personalProject,
+      conversations: [],
+      teamFilter: "all",
+      lastSeenAt: null,
+      now: NOW,
+    });
+    const flat = model.activity.flatMap((day) => day.events);
+    expect(flat.map((event) => [event.title, event.group?.count, event.group?.newCount, event.isNew])).toEqual([
+      ["Split checkout", 3, 2, true],
+      ["Old", 1, 0, false],
+    ]);
+    expect(model.sinceCutIndex).toBe(1);
+  });
+
+  it("puts live server runs in the In progress group and drops them once the active space knows about them", () => {
+    const local = localConversation({
+      localId: "local-run",
+      controllerId: "c-server",
+      messages: [{ id: "m-r", role: "user", content: "go", timestamp: NOW - 8 * HOUR }],
+    });
+    const model = buildHomeFeed({
+      attentionEntries: [
+        {
+          key: "running-local-run",
+          title: local.title,
+          subtitle: "",
+          meta: null,
+          preview: null,
+          kind: "running",
+          source: "conversation",
+          localConversationId: local.localId,
+          testId: "t-run",
+        },
+      ],
+      recentConversations: [],
+      activity: [
+        activityItem({ id: "20", kind: "run.started", live: true, conversation: { id: "c-server", title: "Split checkout", visibility: "public", threadKind: null } }),
+        activityItem({ id: "21", kind: "run.started", live: true, conversation: { id: "c-other", title: "Other", visibility: "public", threadKind: null }, title: "Other" }),
+      ],
+      projects: [personalProject],
+      activeProject: personalProject,
+      conversations: [local],
+      teamFilter: "all",
+      lastSeenAt: null,
+      now: NOW,
+    });
+
+    expect(model.activity[0]).toMatchObject({ key: "live", label: "In progress" });
+    // Newest first: the server row for "Other" (an hour ago) precedes the
+    // local run whose last message is eight hours old. The server row for
+    // c-server is gone — the active space's own entry already covers it.
+    expect(model.activity[0].events.map((event) => [event.kind, event.title])).toEqual([
+      ["running", "Other"],
+      ["running", local.title],
+    ]);
+  });
+
+  it("hides a server reply for a conversation that already needs you", () => {
+    const model = buildHomeFeed({
+      attentionEntries: [inboxEntry(inboxItem({ conversationId: "C-SERVER" }))],
+      recentConversations: [],
+      activity: [activityItem({ id: "10" })],
+      projects: [personalProject, acmeProject],
+      activeProject: personalProject,
+      conversations: [],
+      teamFilter: "all",
+      lastSeenAt: null,
+      now: NOW,
+    });
+    expect(model.needs.length).toBe(1);
+    expect(model.activity.flatMap((day) => day.events).length).toBe(0);
+  });
+
+  it("places the caught-up cut from the server-side event cursor", () => {
+    const model = buildHomeFeed({
+      attentionEntries: [],
+      recentConversations: [],
+      activity: [
+        activityItem({ id: "6", at: new Date(NOW - HOUR).toISOString(), conversation: { id: "c-6", title: "Six", visibility: "public", threadKind: null }, title: "Six" }),
+        activityItem({ id: "4", at: new Date(NOW - 2 * HOUR).toISOString(), conversation: { id: "c-4", title: "Four", visibility: "public", threadKind: null }, title: "Four" }),
+      ],
+      serverLastSeenEventId: "5",
+      projects: [personalProject],
+      activeProject: personalProject,
+      conversations: [],
+      teamFilter: "all",
+      lastSeenAt: null,
+      now: NOW,
+    });
+    const flat = model.activity.flatMap((day) => day.events);
+    expect(flat.map((event) => event.isNew)).toEqual([true, false]);
+    expect(model.sinceCutIndex).toBe(1);
   });
 });
 
