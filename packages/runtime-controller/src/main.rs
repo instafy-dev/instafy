@@ -12,6 +12,7 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 mod active_job_auth;
+mod activity;
 mod agent;
 mod agent_contexts;
 mod agent_write_scopes;
@@ -449,6 +450,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(send_intents::router())
         .merge(send_queue::router())
         .merge(notifications::router())
+        .merge(activity::router())
         .merge(runs::router())
         .merge(workspace::router())
         .merge(ota::router())
