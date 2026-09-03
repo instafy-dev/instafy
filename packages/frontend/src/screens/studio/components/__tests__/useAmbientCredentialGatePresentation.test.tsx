@@ -22,7 +22,6 @@ function Harness({
 
 function resolveOutOfCreditsSendDisabled(result: HookResult | null) {
   return resolveChatComposerAffordances({
-    compactBrowserViewport: false,
     composerGhostSuggestionRemainder: null,
     credentialsReady: true,
     activeConversationControllerId: "controller-1",

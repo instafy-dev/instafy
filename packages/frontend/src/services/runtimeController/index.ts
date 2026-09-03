@@ -33,3 +33,4 @@ export type {
   ControllerLocalWorkspace,
   LocalWorkspaceEventData,
 } from "../originTypes";
+export * from "./activity";
