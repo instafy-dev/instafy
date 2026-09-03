@@ -181,7 +181,8 @@ pub(crate) fn is_visible_reply(
     content: &str,
     metadata: &JsonValue,
 ) -> bool {
-    if !role.eq_ignore_ascii_case("assistant") || created_by.is_some() || content.trim().is_empty() {
+    if !role.eq_ignore_ascii_case("assistant") || created_by.is_some() || content.trim().is_empty()
+    {
         return false;
     }
     let message_type = message_type(metadata);
@@ -279,7 +280,9 @@ pub(crate) async fn append(client: &impl GenericClient, row: &ActivityRow) -> Op
     match result {
         Ok(inserted) => {
             if savepoint_created {
-                let _ = client.execute("release savepoint activity_append", &[]).await;
+                let _ = client
+                    .execute("release savepoint activity_append", &[])
+                    .await;
             }
             Some(inserted.get::<_, i64>("id"))
         }
@@ -289,7 +292,9 @@ pub(crate) async fn append(client: &impl GenericClient, row: &ActivityRow) -> Op
                 let _ = client
                     .execute("rollback to savepoint activity_append", &[])
                     .await;
-                let _ = client.execute("release savepoint activity_append", &[]).await;
+                let _ = client
+                    .execute("release savepoint activity_append", &[])
+                    .await;
             }
             None
         }
@@ -490,7 +495,9 @@ pub(crate) async fn record_run_completed(
 pub(crate) struct ActivityListQuery {
     /// History page: rows with id < before, newest first.
     before: Option<String>,
-    /// Catch-up: rows with id > since (minus an overlap window), oldest first.
+    /// Catch-up: rows with id > since (minus an overlap window). Newest first,
+    /// like every page, so a caller that is far behind still sees the newest
+    /// rows and walks the rest back through `nextBefore`.
     since: Option<String>,
     limit: Option<i64>,
     /// `all` (default), `needs`, or `activity`.
@@ -566,8 +573,14 @@ pub(crate) struct ActivityListResponse {
     server_time: String,
 }
 
-fn parse_cursor(raw: Option<&String>, name: &str) -> Result<Option<i64>, (StatusCode, Json<ApiError>)> {
-    match raw.map(|value| value.trim()).filter(|value| !value.is_empty()) {
+fn parse_cursor(
+    raw: Option<&String>,
+    name: &str,
+) -> Result<Option<i64>, (StatusCode, Json<ApiError>)> {
+    match raw
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
         None => Ok(None),
         Some(value) => value
             .parse::<i64>()
@@ -689,7 +702,6 @@ async fn list_my_activity(
         "needs" => format!("and ({NEEDS_YOU_EXPR})"),
         _ => String::new(),
     };
-    let order = if since.is_some() { "asc" } else { "desc" };
 
     let sql = format!(
         "{ACCESS_CTE}
@@ -721,7 +733,7 @@ async fn list_my_activity(
          where {VISIBLE_WHERE}
            {cursor_clause}
            {lane_clause}
-         order by e.id {order}
+         order by e.id desc
          limit $2"
     );
 
@@ -799,11 +811,15 @@ async fn list_my_activity(
         });
     }
 
-    let next_before = if before.is_some() || since.is_none() {
-        items.last().map(|item| item.id.clone()).filter(|_| has_more)
-    } else {
-        None
-    };
+    // Always newest-first with a continuation, catch-up included: an ascending
+    // catch-up page could fill entirely with rows the caller already had (the
+    // overlap window alone can exceed the page limit) and hand back no cursor,
+    // so newer rows were never reached. Newest-first can only starve history,
+    // which `before` then walks back through.
+    let next_before = items
+        .last()
+        .map(|item| item.id.clone())
+        .filter(|_| has_more);
 
     Ok(Json(ActivityListResponse {
         ok: true,
@@ -876,7 +892,12 @@ mod tests {
         let plain = json!({ "agent": { "handle": "octo" } });
         assert!(is_visible_reply("assistant", None, "done", &plain));
         assert!(!is_visible_reply("user", None, "done", &plain));
-        assert!(!is_visible_reply("assistant", Some(Uuid::new_v4()), "done", &plain));
+        assert!(!is_visible_reply(
+            "assistant",
+            Some(Uuid::new_v4()),
+            "done",
+            &plain
+        ));
         assert!(!is_visible_reply("assistant", None, "   ", &plain));
         for message_type in [
             "command_execution",
@@ -886,12 +907,21 @@ mod tests {
             "run_cancellation",
         ] {
             let metadata = json!({ "messageType": message_type });
-            assert!(!is_visible_reply("assistant", None, "x", &metadata), "{message_type}");
+            assert!(
+                !is_visible_reply("assistant", None, "x", &metadata),
+                "{message_type}"
+            );
         }
-        let status_agent = json!({ "messageType": "status", "details": { "kind": "agent_message" } });
+        let status_agent =
+            json!({ "messageType": "status", "details": { "kind": "agent_message" } });
         assert!(is_visible_reply("assistant", None, "x", &status_agent));
         let cancelled = json!({ "kind": "run_cancellation" });
-        assert!(!is_visible_reply("assistant", None, "Agent job cancelled", &cancelled));
+        assert!(!is_visible_reply(
+            "assistant",
+            None,
+            "Agent job cancelled",
+            &cancelled
+        ));
     }
 
     #[test]
@@ -924,8 +954,14 @@ mod tests {
 
     #[test]
     fn cursors_must_be_integers() {
-        assert_eq!(parse_cursor(Some(&"42".to_string()), "before").unwrap(), Some(42));
-        assert_eq!(parse_cursor(Some(&"  ".to_string()), "before").unwrap(), None);
+        assert_eq!(
+            parse_cursor(Some(&"42".to_string()), "before").unwrap(),
+            Some(42)
+        );
+        assert_eq!(
+            parse_cursor(Some(&"  ".to_string()), "before").unwrap(),
+            None
+        );
         assert!(parse_cursor(Some(&"abc".to_string()), "before").is_err());
     }
 }

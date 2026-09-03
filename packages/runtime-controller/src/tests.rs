@@ -26346,10 +26346,7 @@ async fn get_activity_json(
             Request::builder()
                 .method("GET")
                 .uri(uri)
-                .header(
-                    axum::http::header::AUTHORIZATION,
-                    format!("Bearer {token}"),
-                )
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
                 .body(Body::empty())?,
         )
         .await?;
@@ -26365,8 +26362,8 @@ async fn get_activity_json(
 }
 
 #[tokio::test]
-async fn activity_feed_respects_conversation_privacy_and_current_membership(
-) -> anyhow::Result<()> {
+async fn activity_feed_respects_conversation_privacy_and_current_membership() -> anyhow::Result<()>
+{
     let Some(pool) = setup_origin_test_pool().await? else {
         eprintln!("skipping activity feed test: TEST_DATABASE_URL not set");
         return Ok(());
@@ -26412,7 +26409,11 @@ async fn activity_feed_respects_conversation_privacy_and_current_membership(
             .execute(
                 "insert into conversation_participants (conversation_id, user_id, role, added_by)
                  values ($1, $2, 'member', $3)",
-                &[&private_conversation_id, &participant_user_id, &owner_user_id],
+                &[
+                    &private_conversation_id,
+                    &participant_user_id,
+                    &owner_user_id,
+                ],
             )
             .await?;
         // A public child under the private root: Phase 1 writes no rows for it.
@@ -26422,7 +26423,12 @@ async fn activity_feed_respects_conversation_privacy_and_current_membership(
                      id, project_id, created_by, metadata, visibility,
                      parent_conversation_id, root_conversation_id
                  ) values ($1, $2, $3, '{}'::jsonb, 'public', $4, $4)",
-                &[&child_conversation_id, &project_id, &owner_user_id, &private_conversation_id],
+                &[
+                    &child_conversation_id,
+                    &project_id,
+                    &owner_user_id,
+                    &private_conversation_id,
+                ],
             )
             .await?;
     }
@@ -26520,13 +26526,22 @@ async fn activity_feed_respects_conversation_privacy_and_current_membership(
     let owner_feed = get_activity_json(&app, &owner_token, "/me/activity").await?;
     let owner_items = owner_feed["items"].as_array().cloned().unwrap_or_default();
     assert_eq!(owner_items.len(), 3);
-    assert_eq!(owner_items[0]["id"].as_str(), Some(third_id.to_string().as_str()));
+    assert_eq!(
+        owner_items[0]["id"].as_str(),
+        Some(third_id.to_string().as_str())
+    );
     assert_eq!(owner_items[0]["kind"].as_str(), Some("conversation.reply"));
     assert_eq!(owner_items[0]["title"].as_str(), Some("Private plan"));
-    assert_eq!(owner_items[0]["preview"].as_str(), Some("third private reply"));
+    assert_eq!(
+        owner_items[0]["preview"].as_str(),
+        Some("third private reply")
+    );
     assert_eq!(owner_items[0]["actor"]["kind"].as_str(), Some("agent"));
     assert_eq!(owner_items[0]["actor"]["handle"].as_str(), Some("octo"));
-    assert_eq!(owner_items[0]["actor"]["avatarSeed"].as_str(), Some("seed-octo"));
+    assert_eq!(
+        owner_items[0]["actor"]["avatarSeed"].as_str(),
+        Some("seed-octo")
+    );
     assert!(owner_items[0]["actor"].get("description").is_none());
     assert_eq!(owner_items[0]["needsYou"].as_bool(), Some(true));
     assert_eq!(owner_items[0]["seen"].as_bool(), Some(false));
@@ -26546,7 +26561,10 @@ async fn activity_feed_respects_conversation_privacy_and_current_membership(
     let page = get_activity_json(&app, &owner_token, "/me/activity?limit=2").await?;
     assert_eq!(page["items"].as_array().map(Vec::len), Some(2));
     assert_eq!(page["hasMore"].as_bool(), Some(true));
-    assert_eq!(page["nextBefore"].as_str(), Some(second_id.to_string().as_str()));
+    assert_eq!(
+        page["nextBefore"].as_str(),
+        Some(second_id.to_string().as_str())
+    );
     let rest = get_activity_json(
         &app,
         &owner_token,
@@ -26555,7 +26573,10 @@ async fn activity_feed_respects_conversation_privacy_and_current_membership(
     .await?;
     let rest_items = rest["items"].as_array().cloned().unwrap_or_default();
     assert_eq!(rest_items.len(), 1);
-    assert_eq!(rest_items[0]["id"].as_str(), Some(first_id.to_string().as_str()));
+    assert_eq!(
+        rest_items[0]["id"].as_str(),
+        Some(first_id.to_string().as_str())
+    );
     assert_eq!(rest["hasMore"].as_bool(), Some(false));
     let catch_up = get_activity_json(
         &app,
@@ -26570,8 +26591,37 @@ async fn activity_feed_respects_conversation_privacy_and_current_membership(
         .iter()
         .filter_map(|item| item["id"].as_str().and_then(|id| id.parse::<i64>().ok()))
         .collect();
-    assert!(catch_up_ids.windows(2).all(|pair| pair[0] < pair[1]), "since pages ascend");
+    assert!(
+        catch_up_ids.windows(2).all(|pair| pair[0] > pair[1]),
+        "every page is newest-first, catch-up included"
+    );
     assert!(catch_up_ids.contains(&third_id));
+
+    // A caller far behind must still be handed the NEWEST rows plus a way
+    // back: an ascending catch-up whose page filled with rows the caller
+    // already had left no continuation, so newer rows were never reached.
+    let narrow_catch_up = get_activity_json(
+        &app,
+        &owner_token,
+        &format!("/me/activity?since={first_id}&limit=1"),
+    )
+    .await?;
+    let narrow_items = narrow_catch_up["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(narrow_items.len(), 1);
+    assert_eq!(
+        narrow_items[0]["id"].as_str(),
+        Some(third_id.to_string().as_str()),
+        "a one-row catch-up returns the newest row, never the oldest"
+    );
+    assert_eq!(narrow_catch_up["hasMore"].as_bool(), Some(true));
+    assert_eq!(
+        narrow_catch_up["nextBefore"].as_str(),
+        Some(third_id.to_string().as_str()),
+        "catch-up hands back a cursor to walk the remainder"
+    );
 
     // The needs lane, then the cross-device cut.
     let needs = get_activity_json(&app, &owner_token, "/me/activity?lane=needs").await?;
