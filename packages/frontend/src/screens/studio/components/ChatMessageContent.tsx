@@ -133,6 +133,13 @@ const CODE_BLOCK_CLASS = [
   "block max-w-full overflow-x-auto whitespace-pre rounded-xl bg-slate-950/[0.035] px-3 py-2 font-mono text-[0.85em] leading-normal text-slate-700 ring-1 ring-inset ring-slate-900/10 shadow-[inset_0_-1px_0_rgba(15,23,42,0.07)]",
   "dark:bg-white/[0.055] dark:text-slate-200 dark:ring-white/[0.08] dark:shadow-[inset_0_-1px_0_rgba(255,255,255,0.045)]",
 ].join(" ");
+// Comfortable reading measure for prose only (#207): even after the bubble
+// shell stops overflowing, its own max-width still lets a line run to ~96
+// characters. 70ch keeps paragraphs and list items in the 45–75ch range
+// `leading-relaxed` was tuned for. Deliberately not applied to code blocks,
+// command/output blocks, diff or file-change lists, tables, or image rows —
+// those want the full bubble width.
+const PROSE_MEASURE_CLASS = "max-w-[70ch]";
 const GITHUB_REFERENCE_TOKEN_CLASS = [
   "inline-flex items-center gap-1 rounded-[0.34rem] bg-slate-950/[0.035] px-1.5 py-[0.08em] font-mono text-[0.92em] leading-[1.18] text-slate-700 no-underline ring-1 ring-inset ring-slate-900/10 shadow-[inset_0_-1px_0_rgba(15,23,42,0.07)] align-baseline transition hover:bg-slate-950/[0.06] hover:text-slate-900",
   "dark:bg-white/[0.055] dark:text-slate-200 dark:ring-white/[0.08] dark:shadow-[inset_0_-1px_0_rgba(255,255,255,0.045)] dark:hover:bg-white/[0.09] dark:hover:text-slate-50",
@@ -1691,7 +1698,7 @@ export function MessageContent({
       renderedItems.push(
         <li
           key={itemKey}
-          className="pl-1 whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
+          className={`pl-1 ${PROSE_MEASURE_CLASS} whitespace-pre-wrap break-words [overflow-wrap:anywhere]`}
         >
           {renderInlineTokens(item.text, itemKey)}
           {nestedItems.length > 0
@@ -1828,7 +1835,11 @@ export function MessageContent({
             key={`paragraph-${blockIndex}`}
             variant="body"
             tone="inherit"
-            className={[blockSpacingClassName, "whitespace-pre-wrap break-words [overflow-wrap:anywhere]"]
+            className={[
+              blockSpacingClassName,
+              PROSE_MEASURE_CLASS,
+              "whitespace-pre-wrap break-words [overflow-wrap:anywhere]",
+            ]
               .filter(Boolean)
               .join(" ")}
           >
