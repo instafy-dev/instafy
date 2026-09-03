@@ -300,6 +300,26 @@ async fn mark_parent_plan_job_dispatched(
             })?;
     }
 
+    if let Some(run_id) = run_id {
+        // Home's feed: the planning turn finished.
+        let job_payload = completed_row
+            .as_ref()
+            .map(|row| row.get::<_, PgJson<JsonValue>>("payload").0)
+            .unwrap_or_else(|| json!({}));
+        crate::activity::record_run_completed(
+            &transaction,
+            &project_id,
+            &run_id,
+            Some(conversation_id),
+            None,
+            &job_payload,
+            true,
+            summary,
+            None,
+        )
+        .await;
+    }
+
     transaction.commit().await.map_err(|error| {
         internal_error(format!("failed to commit planning job completion: {error}"))
     })?;

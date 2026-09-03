@@ -945,7 +945,11 @@ async fn create_response(
     let mut credit_guard = if let Some(ref claims) = claims {
         // Credit burn is keyed before credential resolution, so an absent
         // model uses the crate default as its ledger dimension.
-        let burn_model = if model.is_empty() { DEFAULT_MODEL } else { &model };
+        let burn_model = if model.is_empty() {
+            DEFAULT_MODEL
+        } else {
+            &model
+        };
         state.begin_credit_burn(claims, burn_model).await?
     } else {
         None
@@ -1080,11 +1084,7 @@ async fn create_response(
             .await
             {
                 Ok((response, _upstream_model)) => {
-                    spawn_credential_usage_report(
-                        Some(controller),
-                        Some(credential_id),
-                        &response,
-                    );
+                    spawn_credential_usage_report(Some(controller), Some(credential_id), &response);
                     ProxyCompletion::Remote(response)
                 }
                 Err(error) => {

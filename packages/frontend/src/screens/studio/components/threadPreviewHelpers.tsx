@@ -77,6 +77,41 @@ export type ThreadCompactEvent = {
   previewMono?: boolean;
 };
 
+// `/bin/bash -lc`, `bash -lc`, `zsh -lc`, `sh -c` (plus `-c`/`-lc`/`-cl` flag
+// spellings) at the start of a command line, optionally with an absolute
+// interpreter path. The body may be bare or wrapped in one pair of quotes.
+const SHELL_WRAPPER_PREFIX_REGEX = /^(?:\/[\w./-]+\/)?(?:bash|zsh|sh)\s+-(?:l?c|cl)\s+/i;
+const SHELL_WRAPPER_MAX_DEPTH = 3;
+
+/**
+ * Strips the shell interpreter wrapper the runtime adds around a command
+ * (`/bin/bash -lc whoami`, `bash -lc 'pnpm test'`, `sh -c "ls"`, `zsh -lc …`)
+ * so labels show the command the agent actually wrote. Nested wrappers
+ * unwrap too; the raw command stays with the caller for titles/tooltips.
+ */
+export function stripShellWrapperFromCommand(command: string): string {
+  let current = command.trim();
+  for (let depth = 0; depth < SHELL_WRAPPER_MAX_DEPTH; depth += 1) {
+    const prefix = current.match(SHELL_WRAPPER_PREFIX_REGEX);
+    if (!prefix) {
+      break;
+    }
+    let body = current.slice(prefix[0].length).trim();
+    if (!body) {
+      break;
+    }
+    const quote = body[0];
+    if ((quote === "'" || quote === '"') && body.length >= 2 && body.endsWith(quote)) {
+      body = body.slice(1, -1).trim();
+      if (!body) {
+        break;
+      }
+    }
+    current = body;
+  }
+  return current;
+}
+
 // The hover card is a scent, not a viewer: hard caps keep it compact and the
 // full detail stays behind the expanded thread.
 export const THREAD_COMPACT_EVENT_PREVIEW_MAX_CHARS = 280;

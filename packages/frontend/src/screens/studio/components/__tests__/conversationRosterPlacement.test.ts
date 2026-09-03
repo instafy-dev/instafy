@@ -27,9 +27,10 @@ describe("conversation roster placement", () => {
       'className={browserSubtab === "chat" ? "flex min-h-0 flex-1 flex-col" : "hidden"}',
     );
     const rosterRow = chatPanel.indexOf('data-testid="chat-conversation-roster-row"');
-    // The read-only job-thread branch earlier in the file has its own scroll
-    // container, so look for the one that belongs to this chat panel.
-    const scrollContainer = chatPanel.indexOf('data-testid="chat-message-scroll"', rosterRow);
+    // The chat panel's scroll container is composed by ChatTranscriptViewport
+    // (the read-only job-thread branch earlier in the file inlines its own),
+    // so look for the viewport that belongs to this chat panel.
+    const scrollContainer = chatPanel.indexOf("<ChatTranscriptViewport", rosterRow);
 
     expect(chatPanelWrapper).toBeGreaterThan(-1);
     expect(rosterRow).toBeGreaterThan(chatPanelWrapper);

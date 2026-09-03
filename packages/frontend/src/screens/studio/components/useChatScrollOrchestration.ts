@@ -99,9 +99,12 @@ export function useChatScrollController({
     stalledPages: 0,
     pendingPage: null,
   });
-  const historyPaginationRef = useRef<{ pending: boolean; scrollTop: number; scrollHeight: number }>({
+  // Only the request-time scrollHeight is remembered: the landing offsets the
+  // container's *current* scrollTop by how much the content grew. Storing the
+  // request-time scrollTop too would snap the user back to wherever they were
+  // when the page was asked for, undoing any scrolling they did while it loaded.
+  const historyPaginationRef = useRef<{ pending: boolean; scrollHeight: number }>({
     pending: false,
-    scrollTop: 0,
     scrollHeight: 0,
   });
   const activeConversationIdRef = useRef<string | null>(activeConversationId);
@@ -337,14 +340,13 @@ export function useChatScrollController({
     }
     historyPaginationRef.current = {
       pending: true,
-      scrollTop: container.scrollTop,
       scrollHeight: container.scrollHeight,
     };
     shouldAutoScrollRef.current = false;
     const result = loadOlderMessages();
     if (result && typeof (result as Promise<unknown>).catch === "function") {
       (result as Promise<unknown>).catch(() => {
-        historyPaginationRef.current = { pending: false, scrollTop: 0, scrollHeight: 0 };
+        historyPaginationRef.current = { pending: false, scrollHeight: 0 };
       });
     }
   }, [hasMoreHistory, isHistoryLoading, loadOlderMessages]);
@@ -470,14 +472,17 @@ export function useChatScrollController({
     }
     const container = scrollContainerRef.current;
     if (!container) {
-      historyPaginationRef.current = { pending: false, scrollTop: 0, scrollHeight: 0 };
+      historyPaginationRef.current = { pending: false, scrollHeight: 0 };
       return;
     }
-    const { scrollTop, scrollHeight } = historyPaginationRef.current;
+    const { scrollHeight } = historyPaginationRef.current;
     const delta = Math.max(0, container.scrollHeight - scrollHeight);
-    container.scrollTop = scrollTop + delta;
+    // Offset from where the user is *now*, not where they were at request time:
+    // trackpad momentum keeps them moving while the page is in flight, and the
+    // prepend must keep the text under their eyes wherever that carried them.
+    container.scrollTop = container.scrollTop + delta;
     lastScrollHeightRef.current = container.scrollHeight;
-    historyPaginationRef.current = { pending: false, scrollTop: 0, scrollHeight: 0 };
+    historyPaginationRef.current = { pending: false, scrollHeight: 0 };
     startHistoryScrollAnchor(container);
   }, [isHistoryLoading, messages, startHistoryScrollAnchor]);
 

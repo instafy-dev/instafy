@@ -2,6 +2,7 @@ import {
   expect,
   type APIRequestContext,
   type Page,
+  type Response,
   type TestInfo,
 } from "@playwright/test";
 import { spawnSync } from "node:child_process";
@@ -153,6 +154,36 @@ function sanitizeJobFailure(value: unknown): string | null {
     .replaceAll(/[A-Za-z0-9_-]{80,}/g, "[redacted]")
     .trim()
     .slice(0, 500);
+}
+
+async function readConversationDispatchResponse(response: Response): Promise<unknown> {
+  let payload: unknown = null;
+  try {
+    payload = await response.json();
+  } catch {
+    if (response.ok()) {
+      throw new Error("Conversation dispatch returned invalid JSON.");
+    }
+  }
+
+  if (!response.ok()) {
+    const error = payload && typeof payload === "object" ? payload : null;
+    const code = sanitizeJobFailure(
+      error && "code" in error ? (error as { code?: unknown }).code : null,
+    );
+    const message = sanitizeJobFailure(
+      error && "message" in error ? (error as { message?: unknown }).message : null,
+    );
+    const details = [
+      `status=${response.status()}`,
+      sanitizeJobFailure(response.statusText()),
+      code ? `code=${code}` : null,
+      message ? `message=${message}` : null,
+    ].filter((value): value is string => Boolean(value));
+    throw new Error(`Conversation dispatch failed (${details.join(", ")}).`);
+  }
+
+  return payload;
 }
 
 function readPackagedPersonalBrowserCapabilityContract(resourcesPath: string): unknown {
@@ -770,8 +801,7 @@ test.describe("Packaged Electron Personal Browser real agent turn", () => {
     );
     await page.getByTestId("chat-send-button").click();
     const dispatchResponse = await dispatchResponsePromise;
-    expect(dispatchResponse.ok()).toBe(true);
-    const dispatchPayload = (await dispatchResponse.json()) as {
+    const dispatchPayload = (await readConversationDispatchResponse(dispatchResponse)) as {
       jobId?: unknown;
       promptId?: unknown;
       runId?: unknown;
