@@ -197,9 +197,7 @@ fn normalize_optional_model(
 fn normalize_optional_reasoning_effort(value: Option<String>) -> Option<String> {
     value
         .map(|entry| entry.trim().to_ascii_lowercase())
-        .filter(|entry| {
-            matches!(entry.as_str(), "minimal" | "low" | "medium" | "high")
-        })
+        .filter(|entry| matches!(entry.as_str(), "minimal" | "low" | "medium" | "high"))
 }
 
 async fn resolve_agent_provider_for_credential(

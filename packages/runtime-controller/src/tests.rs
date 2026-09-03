@@ -26334,3 +26334,351 @@ async fn credential_lease_refuses_revoked_credentials_even_with_a_default() -> a
     cleanup_test_user(&pool, &user_id).await?;
     Ok(())
 }
+
+async fn get_activity_json(
+    app: &axum::Router,
+    token: &str,
+    uri: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await?;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "GET {uri}: {}",
+        String::from_utf8_lossy(&body)
+    );
+    Ok(serde_json::from_slice(&body)?)
+}
+
+#[tokio::test]
+async fn activity_feed_respects_conversation_privacy_and_current_membership() -> anyhow::Result<()>
+{
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping activity feed test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    ensure_conversation_event_test_tables(&pool).await?;
+
+    let owner_user_id = Uuid::new_v4();
+    let participant_user_id = Uuid::new_v4();
+    let bystander_user_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let private_conversation_id = Uuid::new_v4();
+    let child_conversation_id = Uuid::new_v4();
+    for user_id in [&owner_user_id, &participant_user_id, &bystander_user_id] {
+        ensure_test_user(&pool, user_id).await?;
+    }
+
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into projects (id, name, project_type, owner_user_id, status)
+                 values ($1, 'Activity feed test', 'customer', $2, 'active')",
+                &[&project_id, &owner_user_id],
+            )
+            .await?;
+        for user_id in [&participant_user_id, &bystander_user_id] {
+            connection
+                .execute(
+                    "insert into project_memberships (project_id, user_id, role)
+                     values ($1, $2, 'builder')",
+                    &[&project_id, user_id],
+                )
+                .await?;
+        }
+        connection
+            .execute(
+                "insert into conversations (id, project_id, created_by, metadata, visibility)
+                 values ($1, $2, $3, '{\"title\":\"Private plan\"}'::jsonb, 'private')",
+                &[&private_conversation_id, &project_id, &owner_user_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into conversation_participants (conversation_id, user_id, role, added_by)
+                 values ($1, $2, 'member', $3)",
+                &[
+                    &private_conversation_id,
+                    &participant_user_id,
+                    &owner_user_id,
+                ],
+            )
+            .await?;
+        // A public child under the private root: Phase 1 writes no rows for it.
+        connection
+            .execute(
+                "insert into conversations (
+                     id, project_id, created_by, metadata, visibility,
+                     parent_conversation_id, root_conversation_id
+                 ) values ($1, $2, $3, '{}'::jsonb, 'public', $4, $4)",
+                &[
+                    &child_conversation_id,
+                    &project_id,
+                    &owner_user_id,
+                    &private_conversation_id,
+                ],
+            )
+            .await?;
+    }
+
+    let agent_metadata = serde_json::json!({
+        "agent": {
+            "handle": "octo",
+            "displayName": "Octo",
+            "avatarSeed": "seed-octo",
+            "description": "never stored"
+        }
+    });
+    let (first_id, second_id, third_id) = {
+        let mut connection = pool.get().await?;
+        let transaction = connection.transaction().await?;
+        let first = crate::activity::record_reply_if_visible(
+            &transaction,
+            &project_id,
+            &private_conversation_id,
+            None,
+            None,
+            "first private reply",
+            &agent_metadata,
+        )
+        .await;
+        let second = crate::activity::record_reply_if_visible(
+            &transaction,
+            &project_id,
+            &private_conversation_id,
+            None,
+            None,
+            "second private reply",
+            &agent_metadata,
+        )
+        .await;
+        let third = crate::activity::record_reply_if_visible(
+            &transaction,
+            &project_id,
+            &private_conversation_id,
+            None,
+            None,
+            "third private reply",
+            &agent_metadata,
+        )
+        .await;
+        let notice = crate::activity::record_reply_if_visible(
+            &transaction,
+            &project_id,
+            &private_conversation_id,
+            None,
+            None,
+            "Agent job cancelled by user",
+            &serde_json::json!({ "kind": "run_cancellation" }),
+        )
+        .await;
+        let child = crate::activity::record_reply_if_visible(
+            &transaction,
+            &project_id,
+            &child_conversation_id,
+            None,
+            None,
+            "child reply",
+            &agent_metadata,
+        )
+        .await;
+        transaction.commit().await?;
+        assert!(notice.is_none(), "a controller notice is not a reply");
+        assert!(child.is_none(), "child threads get no rows in phase 1");
+        (
+            first.expect("first reply row"),
+            second.expect("second reply row"),
+            third.expect("third reply row"),
+        )
+    };
+    assert!(first_id < second_id && second_id < third_id);
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "activity-feed",
+    );
+    let owner_token = crate::auth::issue_controller_token(&config, &owner_user_id)
+        .map_err(|error| controller_error("issue activity owner token", error))?
+        .token;
+    let participant_token = crate::auth::issue_controller_token(&config, &participant_user_id)
+        .map_err(|error| controller_error("issue activity participant token", error))?
+        .token;
+    let bystander_token = crate::auth::issue_controller_token(&config, &bystander_user_id)
+        .map_err(|error| controller_error("issue activity bystander token", error))?
+        .token;
+    let state = build_test_state(pool.clone(), config);
+    let app = crate::activity::router().with_state(state);
+
+    // The creator sees every reply, newest first, with the allow-listed actor.
+    let owner_feed = get_activity_json(&app, &owner_token, "/me/activity").await?;
+    let owner_items = owner_feed["items"].as_array().cloned().unwrap_or_default();
+    assert_eq!(owner_items.len(), 3);
+    assert_eq!(
+        owner_items[0]["id"].as_str(),
+        Some(third_id.to_string().as_str())
+    );
+    assert_eq!(owner_items[0]["kind"].as_str(), Some("conversation.reply"));
+    assert_eq!(owner_items[0]["title"].as_str(), Some("Private plan"));
+    assert_eq!(
+        owner_items[0]["preview"].as_str(),
+        Some("third private reply")
+    );
+    assert_eq!(owner_items[0]["actor"]["kind"].as_str(), Some("agent"));
+    assert_eq!(owner_items[0]["actor"]["handle"].as_str(), Some("octo"));
+    assert_eq!(
+        owner_items[0]["actor"]["avatarSeed"].as_str(),
+        Some("seed-octo")
+    );
+    assert!(owner_items[0]["actor"].get("description").is_none());
+    assert_eq!(owner_items[0]["needsYou"].as_bool(), Some(true));
+    assert_eq!(owner_items[0]["seen"].as_bool(), Some(false));
+    assert_eq!(
+        owner_items[0]["project"]["id"].as_str(),
+        Some(project_id.to_string().as_str())
+    );
+    assert_eq!(owner_feed["hasMore"].as_bool(), Some(false));
+
+    // A participant sees it too; a project member who is not a participant does not.
+    let participant_feed = get_activity_json(&app, &participant_token, "/me/activity").await?;
+    assert_eq!(participant_feed["items"].as_array().map(Vec::len), Some(3));
+    let bystander_feed = get_activity_json(&app, &bystander_token, "/me/activity").await?;
+    assert_eq!(bystander_feed["items"].as_array().map(Vec::len), Some(0));
+
+    // Keyset paging: newest-first history, then an ascending catch-up.
+    let page = get_activity_json(&app, &owner_token, "/me/activity?limit=2").await?;
+    assert_eq!(page["items"].as_array().map(Vec::len), Some(2));
+    assert_eq!(page["hasMore"].as_bool(), Some(true));
+    assert_eq!(
+        page["nextBefore"].as_str(),
+        Some(second_id.to_string().as_str())
+    );
+    let rest = get_activity_json(
+        &app,
+        &owner_token,
+        &format!("/me/activity?limit=2&before={second_id}"),
+    )
+    .await?;
+    let rest_items = rest["items"].as_array().cloned().unwrap_or_default();
+    assert_eq!(rest_items.len(), 1);
+    assert_eq!(
+        rest_items[0]["id"].as_str(),
+        Some(first_id.to_string().as_str())
+    );
+    assert_eq!(rest["hasMore"].as_bool(), Some(false));
+    let catch_up = get_activity_json(
+        &app,
+        &owner_token,
+        &format!("/me/activity?since={first_id}"),
+    )
+    .await?;
+    let catch_up_ids: Vec<i64> = catch_up["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|item| item["id"].as_str().and_then(|id| id.parse::<i64>().ok()))
+        .collect();
+    assert!(
+        catch_up_ids.windows(2).all(|pair| pair[0] > pair[1]),
+        "every page is newest-first, catch-up included"
+    );
+    assert!(catch_up_ids.contains(&third_id));
+
+    // A caller far behind must still be handed the NEWEST rows plus a way
+    // back: an ascending catch-up whose page filled with rows the caller
+    // already had left no continuation, so newer rows were never reached.
+    let narrow_catch_up = get_activity_json(
+        &app,
+        &owner_token,
+        &format!("/me/activity?since={first_id}&limit=1"),
+    )
+    .await?;
+    let narrow_items = narrow_catch_up["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(narrow_items.len(), 1);
+    assert_eq!(
+        narrow_items[0]["id"].as_str(),
+        Some(third_id.to_string().as_str()),
+        "a one-row catch-up returns the newest row, never the oldest"
+    );
+    assert_eq!(narrow_catch_up["hasMore"].as_bool(), Some(true));
+    assert_eq!(
+        narrow_catch_up["nextBefore"].as_str(),
+        Some(third_id.to_string().as_str()),
+        "catch-up hands back a cursor to walk the remainder"
+    );
+
+    // The needs lane, then the cross-device cut.
+    let needs = get_activity_json(&app, &owner_token, "/me/activity?lane=needs").await?;
+    assert_eq!(needs["items"].as_array().map(Vec::len), Some(3));
+    let seen_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/me/activity/seen")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {owner_token}"),
+                )
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "lastSeenEventId": second_id.to_string() }).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(seen_response.status(), StatusCode::OK);
+    let after_seen = get_activity_json(&app, &owner_token, "/me/activity").await?;
+    assert_eq!(
+        after_seen["lastSeenEventId"].as_str(),
+        Some(second_id.to_string().as_str())
+    );
+    let after_seen_items = after_seen["items"].as_array().cloned().unwrap_or_default();
+    assert_eq!(after_seen_items[0]["seen"].as_bool(), Some(false));
+    assert_eq!(after_seen_items[1]["seen"].as_bool(), Some(true));
+    assert_eq!(after_seen_items[2]["seen"].as_bool(), Some(true));
+
+    // Revoking the participant's project membership hides the history at once,
+    // even though their stale participant row is still there.
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "delete from project_memberships where project_id = $1 and user_id = $2",
+                &[&project_id, &participant_user_id],
+            )
+            .await?;
+    }
+    let revoked_feed = get_activity_json(&app, &participant_token, "/me/activity").await?;
+    assert_eq!(revoked_feed["items"].as_array().map(Vec::len), Some(0));
+
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "delete from activity_seen where user_id = $1",
+                &[&owner_user_id],
+            )
+            .await?;
+    }
+    cleanup_origin_project(&pool, &project_id).await?;
+    for user_id in [&owner_user_id, &participant_user_id, &bystander_user_id] {
+        cleanup_test_user(&pool, user_id).await?;
+    }
+    Ok(())
+}
