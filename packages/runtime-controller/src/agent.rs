@@ -2558,6 +2558,31 @@ pub(crate) async fn agent_complete(
         }
     }
 
+    // A run that ended with "nothing to report" (the explicit decline an
+    // automation or evaluation uses) is silence, not activity: no ledger row.
+    let silent_completion = completion_is_successful_explicit_decline(
+        &outcome_lower,
+        summary.as_deref(),
+        error_message.as_deref(),
+        crate::group_participation::job_payload_marks_agent_evaluation(&job_payload),
+        crate::group_participation::job_payload_marks_agent_declined(&job_payload),
+    );
+    if let (Some(run_uuid), false) = (run_id, silent_completion) {
+        // Home's feed: the run reached a terminal state.
+        crate::activity::record_run_completed(
+            &transaction,
+            &project_id,
+            &run_uuid,
+            run_conversation_id,
+            run_prompt_id,
+            &job_payload,
+            run_status == "success",
+            summary_ref,
+            error_ref,
+        )
+        .await;
+    }
+
     let provider_value = extract_provider_from_metadata(&proxy_metadata);
     let credit_snapshot_value = extract_credit_snapshot(&proxy_metadata);
     let suggested_replies = extract_ui_suggested_replies(&proxy_metadata);
@@ -3570,6 +3595,16 @@ pub(crate) async fn lease_next_agent_job(
             .map_err(|error| {
                 internal_error(format!("failed to update run status on lease: {error}"))
             })?;
+        // Home's feed: the run is now in flight.
+        crate::activity::record_run_started(
+            transaction,
+            project_id,
+            &run_uuid,
+            conversation_id,
+            row.try_get("prompt_id").unwrap_or(None),
+            &payload,
+        )
+        .await;
     }
 
     if let Some(conversation_uuid) = conversation_id {
@@ -3673,7 +3708,7 @@ async fn load_conversation_history_for_agent(
     let clamped_limit = limit.clamp(1, 200);
     let rows = transaction
         .query(
-            "select role, content, metadata, created_at
+            "select id, role, content, metadata, created_at
              from conversation_messages
              where conversation_id = $1
              order by created_at desc
@@ -3686,6 +3721,7 @@ async fn load_conversation_history_for_agent(
     let mut entries: Vec<JsonValue> = rows
         .into_iter()
         .filter_map(|row| {
+            let message_id: Uuid = row.get("id");
             let role: String = row.get("role");
             let mut content: String = row.get("content");
             let metadata: JsonValue = row.get("metadata");
@@ -3716,6 +3752,10 @@ async fn load_conversation_history_for_agent(
                     content.push_str(&attachment_context);
                 }
             }
+            // The message id lets the runtime resolve structured message
+            // references (e.g. the undo affordance's `undoTargetMessageId`
+            // metadata) against this history instead of text heuristics.
+            map.insert("id".to_string(), JsonValue::String(message_id.to_string()));
             map.insert("role".to_string(), JsonValue::String(role));
             map.insert("content".to_string(), JsonValue::String(content));
             map.insert(
@@ -6140,7 +6180,7 @@ mod tests {
     // The controller always provides recent conversation context to agent jobs.
 }
 
-async fn record_agent_conversation_message(
+pub(crate) async fn record_agent_conversation_message(
     transaction: &tokio_postgres::Transaction<'_>,
     project_id: &Uuid,
     conversation_id: &Uuid,
@@ -6227,6 +6267,18 @@ async fn record_agent_conversation_message(
                 "failed to bump root conversation timestamp: {error}"
             ))
         })?;
+
+    // Home's feed: an agent conversationally speaking is a reply row.
+    crate::activity::record_reply_if_visible(
+        transaction,
+        project_id,
+        conversation_id,
+        run_id,
+        prompt_id,
+        &content,
+        &metadata,
+    )
+    .await;
 
     Ok(map_conversation_message_row(&row))
 }

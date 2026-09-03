@@ -300,8 +300,10 @@ export function SettingsShell({
   return (
     <div
       className={[
-        "relative mx-auto w-full max-w-6xl space-y-3 px-3 py-3 sm:space-y-4 sm:px-4",
-        isLargeScreen ? "px-6" : "",
+        // One horizontal inset per breakpoint: the large-screen gutter must
+        // not compete with sm:px-4 (an unprefixed px-6 always lost to it).
+        "relative mx-auto w-full max-w-6xl space-y-3 px-3 py-3 sm:space-y-4",
+        isLargeScreen ? "sm:px-6" : "sm:px-4",
         className,
       ]
         .filter(Boolean)

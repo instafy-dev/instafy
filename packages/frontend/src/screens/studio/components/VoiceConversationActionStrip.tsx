@@ -31,7 +31,7 @@ export type VoiceConversationActionStripProps = {
   onVoicePressEnd: () => void;
   onVoiceTap?: () => void | Promise<void>;
   primaryActionClassName: string;
-  outlinedActionClassName: string;
+  ghostActionClassName: string;
   actionIconClassName: string;
   voiceRepliesTestId?: string;
   voiceInputTestId?: string;
@@ -59,7 +59,7 @@ export function VoiceConversationActionStrip({
   onVoicePressEnd,
   onVoiceTap,
   primaryActionClassName,
-  outlinedActionClassName,
+  ghostActionClassName,
   actionIconClassName,
   voiceRepliesTestId = "chat-voice-replies-toggle",
   voiceInputTestId = "chat-voice-input-button",
@@ -219,7 +219,7 @@ export function VoiceConversationActionStrip({
         <IconButton
           type="button"
           onPress={onToggleVoiceReplies}
-          variant={voiceRepliesEnabled ? "primary" : "outline"}
+          variant={voiceRepliesEnabled ? "primary" : "ghost"}
           size="md"
           radius="xl"
           aria-label={
@@ -240,7 +240,7 @@ export function VoiceConversationActionStrip({
           data-voice-replies-speaking={replySpeaking ? "true" : "false"}
           data-voice-replies-backend={replyBackendLabel ?? ""}
           data-voice-replies-error={replyError ?? ""}
-          className={voiceRepliesEnabled ? primaryActionClassName : outlinedActionClassName}
+          className={voiceRepliesEnabled ? primaryActionClassName : ghostActionClassName}
         >
           <span className="sr-only">
             {voiceRepliesEnabled
@@ -248,7 +248,7 @@ export function VoiceConversationActionStrip({
               : "Turn on spoken assistant replies"}
           </span>
           {replySpeaking ? (
-            <Spinner aria-hidden="true" tone="primary" size="xs" className="h-[22px] w-[22px]" />
+            <Spinner aria-hidden="true" tone="primary" size="xs" className={actionIconClassName} />
           ) : voiceRepliesEnabled ? (
             <SoundHigh className={actionIconClassName} aria-hidden="true" />
           ) : (
@@ -267,7 +267,7 @@ export function VoiceConversationActionStrip({
         onContextMenu={handleContextMenu}
         style={{ touchAction: "none" }}
         aria-pressed={voiceActionActive}
-        variant={voiceActionActive ? "primary" : "outline"}
+        variant={voiceActionActive ? "primary" : "ghost"}
         size="md"
         radius="xl"
         aria-label={voiceButtonAccessibleLabel}
@@ -279,7 +279,7 @@ export function VoiceConversationActionStrip({
         data-voice-state={voiceState}
         data-voice-backend={voiceBackendLabel ?? ""}
         data-voice-error={voiceError ?? ""}
-        className={voiceActionActive ? primaryActionClassName : outlinedActionClassName}
+        className={voiceActionActive ? primaryActionClassName : ghostActionClassName}
       >
         {voiceActionActive ? (
           <Microphone className={`${actionIconClassName} animate-pulse`} aria-hidden="true" />

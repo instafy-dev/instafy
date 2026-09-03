@@ -20,8 +20,11 @@ export interface ToolbarMenuSelectProps {
   menuTestId?: string;
 }
 
+// Mirrors the canonical compact-select trigger (see ModelMenuSelect): the
+// design-system Button shape with the studio control tokens, so toolbar
+// selects read as the same family as the composer's model picker.
 const TRIGGER_CLASS =
-  "h-10 min-w-[8rem] justify-between gap-2 rounded-full border border-slate-200/70 bg-slate-50/80 px-3.5 text-sm font-medium text-slate-700 shadow-none hover:border-slate-300 hover:bg-slate-50 data-[hovered]:border-slate-300 data-[hovered]:bg-slate-50 dark:border-slate-800 dark:bg-slate-900/60 dark:text-slate-200 dark:hover:border-slate-700 dark:hover:bg-slate-900 dark:data-[hovered]:border-slate-700 dark:data-[hovered]:bg-slate-900";
+  "min-w-[8rem] justify-between bg-slate-50 shadow-none hover:bg-slate-100 data-[hovered]:bg-slate-100 dark:bg-[var(--color-studio-dark-raised-control)] dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)]";
 
 export function ToolbarMenuSelect({
   options,
@@ -73,9 +76,9 @@ export function ToolbarMenuSelect({
     <MenuTrigger isOpen={menuOpen} onOpenChange={setMenuOpen}>
       <Button
         ref={triggerRef}
-        variant="ghost"
-        size="xs"
-        radius="full"
+        variant="outline"
+        size="sm"
+        radius="xl"
         aria-label={ariaLabel}
         aria-haspopup="menu"
         data-testid={triggerTestId}
@@ -86,8 +89,8 @@ export function ToolbarMenuSelect({
         }}
         className={[TRIGGER_CLASS, className].filter(Boolean).join(" ")}
       >
-        <span className="min-w-0 flex-1 truncate text-left leading-none">{selectedLabel}</span>
-        <NavArrowDown className="text-sm text-slate-400 dark:text-slate-500" aria-hidden="true" />
+        <span className="min-w-0 flex-1 truncate text-left">{selectedLabel}</span>
+        <NavArrowDown className="text-base text-slate-400" aria-hidden="true" />
       </Button>
       <StudioPopover
         triggerRef={triggerRef}

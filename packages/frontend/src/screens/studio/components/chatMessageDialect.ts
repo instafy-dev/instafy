@@ -15,6 +15,14 @@ export type UrlReferenceDescriptor = {
   label: string;
 };
 
+export type GitHubReferenceDescriptor = {
+  url: string;
+  owner: string;
+  repo: string;
+  number: number;
+  kind: "pull" | "issue";
+};
+
 export type ConversationReferenceDescriptor = {
   kind: "conversation" | "thread" | "message";
   raw: string;
@@ -36,7 +44,8 @@ export type ChatLineTokenChunk =
   | { type: "agent-mention"; value: string }
   | { type: "workspace-file"; value: WorkspaceFileReferenceDescriptor }
   | { type: "conversation-reference"; value: ConversationReferenceDescriptor }
-  | { type: "link"; value: UrlReferenceDescriptor };
+  | { type: "link"; value: UrlReferenceDescriptor }
+  | { type: "github-reference"; value: GitHubReferenceDescriptor };
 
 export type MessageListItem = {
   text: string;
@@ -61,6 +70,10 @@ export type MessageContentBlock =
 const WORKSPACE_FILE_REFERENCE_REGEX =
   /^((?:\/workspace\/[^/\s<>"'`()]+\/)?[0-9A-Za-z_.-]+(?:\/[0-9A-Za-z_.-]+)*\.(?:markdown|md|json|tsx?|jsx?|ya?ml|toml|py|rs|css|html|txt|sh|sql))(?:#L(\d+)|:(\d+))?/;
 const URL_REFERENCE_REGEX = /^(https?:\/\/[^\s<>"'`]+)/i;
+// Only the exact PR/issue page shape chips — deeper paths (files, comments,
+// diffs) and other GitHub pages keep their full URL rendering.
+const GITHUB_REFERENCE_URL_REGEX =
+  /^https:\/\/github\.com\/([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)\/([A-Za-z0-9._-]+)\/(pull|issues)\/(\d+)$/i;
 const URL_TRAILING_PUNCTUATION_REGEX = /[)\]}>.,!?;:'"`]+$/;
 const TEAM_FLOW_LINE_PREFIX_REGEX =
   /^\s*(?:workstreams?|workstream refs?|lanes?|team|team flow|coordination|coordination flow|recovered team|existing team)\s*:\s*/i;
@@ -157,6 +170,26 @@ function sanitizeUrlCandidate(raw: string): string {
     value = next;
   }
   return value;
+}
+
+export function parseGitHubReferenceUrl(url: string): GitHubReferenceDescriptor | null {
+  const match = url.match(GITHUB_REFERENCE_URL_REGEX);
+  if (!match) {
+    return null;
+  }
+  const owner = match[1] ?? "";
+  const repo = match[2] ?? "";
+  const number = Number.parseInt(match[4] ?? "", 10);
+  if (!owner || !repo || !Number.isFinite(number) || number <= 0) {
+    return null;
+  }
+  return {
+    url,
+    owner,
+    repo,
+    number,
+    kind: (match[3] ?? "").toLowerCase() === "pull" ? "pull" : "issue",
+  };
 }
 
 function findUrlAt(text: string, index: number): { reference: UrlReferenceDescriptor; end: number } | null {
@@ -411,7 +444,12 @@ export function tokenizeChatLine(
       if (index > cursor) {
         tokens.push({ type: "text", value: text.slice(cursor, index) });
       }
-      tokens.push({ type: "link", value: urlMatch.reference });
+      const githubReference = parseGitHubReferenceUrl(urlMatch.reference.url);
+      if (githubReference) {
+        tokens.push({ type: "github-reference", value: githubReference });
+      } else {
+        tokens.push({ type: "link", value: urlMatch.reference });
+      }
       index = urlMatch.end;
       cursor = index;
       continue;
@@ -540,6 +578,27 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
   // Indentation of each open list level, innermost last; a deeper-indented
   // item opens a sublist, a shallower one returns to the matching ancestor.
   let pendingListIndentStack: number[] = [];
+  // Flat-sublist leniency (#191). Real agent markdown writes
+  //   "1. Persistent-context skills:" followed by UNINDENTED "- `autofix-x`: …"
+  // bullets. CommonMark makes those a sibling bullet list, which renders as a
+  // flat "1. • • • 2. • 3." sequence. A human reads them as the item's
+  // sublist, so the parser does too, under one asymmetric, conservative rule:
+  //   - a bullet item that directly follows an ORDERED item (no blank line)
+  //     and is not indented enough to nest on its own becomes that item's
+  //     sublist at depth + 1, whatever the item's trailing punctuation;
+  //   - across exactly ONE blank line the same happens only when the ordered
+  //     item ends with ":" (it announced a list), or a flat sublist is already
+  //     open (a LOOSE flat sublist — blank lines between its own bullets —
+  //     keeps nesting instead of splitting mid-list); without either, or after
+  //     two blank lines, the bullets stay a sibling block as CommonMark says;
+  //   - an ordered item after a bullet never nests this way, and the indented
+  //     form keeps its existing, explicit nesting.
+  // The virtual level lives on the indent stack like an indented one would, so
+  // deeper indented bullets under a flat bullet still nest via indentation;
+  // `flatSublistLevel` remembers its index so a following ordered item at the
+  // parent's level can close it.
+  let flatSublistLevel: number | null = null;
+  let listSurvivesBlankLine = false;
   let pendingQuote: Extract<MessageContentBlock, { kind: "quote" }> | null = null;
   let pendingCode: PendingCodeFence | null = null;
 
@@ -549,6 +608,8 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
       pendingList = null;
       pendingListIndentStack = [];
     }
+    flatSublistLevel = null;
+    listSurvivesBlankLine = false;
   };
   const flushQuote = () => {
     if (pendingQuote) {
@@ -575,9 +636,33 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
     }
 
     if (!line.trim()) {
-      flushList();
+      const lastListItem = pendingList?.items[pendingList.items.length - 1];
+      if (
+        pendingList?.ordered &&
+        !listSurvivesBlankLine &&
+        ((lastListItem?.ordered && lastListItem.text.endsWith(":")) || flatSublistLevel !== null)
+      ) {
+        // The item announced a list, or a flat sublist is already open: hold
+        // the flush for one blank line and let the next line decide (see the
+        // leniency rule above). Holding while a flat sublist is open keeps a
+        // LOOSE flat sublist — one with a blank line between its own bullets,
+        // not just before its first one — from splitting into a separate
+        // sibling list mid-way through.
+        listSurvivesBlankLine = true;
+      } else {
+        flushList();
+      }
       flushQuote();
       continue;
+    }
+
+    if (listSurvivesBlankLine) {
+      listSurvivesBlankLine = false;
+      // Only a bullet line may continue the held list across the blank line;
+      // anything else gets the flush the blank line would have done.
+      if (!/^\s*[-*]\s+\S/.test(line)) {
+        flushList();
+      }
     }
 
     const fenceOpening = parseCodeFenceOpening(line);
@@ -618,7 +703,20 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
         pendingList !== null &&
         pendingListIndentStack.length > 0 &&
         indent >= (pendingListIndentStack[0] ?? 0) + 2;
-      if (!pendingList || (!nestsInPendingList && pendingList.ordered !== ordered)) {
+      // Flat-sublist leniency (#191): an unindented bullet after an ordered
+      // item, or while such a flat sublist is already open, nests instead of
+      // starting a sibling block. Ordered items never take this path.
+      const lastListItem = pendingList?.items[pendingList.items.length - 1];
+      const nestsAsFlatSublist =
+        pendingList !== null &&
+        pendingList.ordered &&
+        !ordered &&
+        !nestsInPendingList &&
+        (flatSublistLevel !== null || lastListItem?.ordered === true);
+      if (
+        !pendingList ||
+        (!nestsInPendingList && !nestsAsFlatSublist && pendingList.ordered !== ordered)
+      ) {
         flushList();
         pendingList = {
           kind: "list",
@@ -628,13 +726,28 @@ export function parseMessageContentBlocks(content: string): MessageContentBlock[
         };
         pendingListIndentStack = [indent];
       } else {
+        if (
+          flatSublistLevel !== null &&
+          ordered &&
+          indent < (pendingListIndentStack[flatSublistLevel] ?? 0) + 2
+        ) {
+          // An ordered item back at the parent's level closes the flat sublist.
+          pendingListIndentStack.length = flatSublistLevel;
+          flatSublistLevel = null;
+        }
+        // Bullets never dedent past an open flat sublist: its level is where
+        // they belong even though their indentation is the parent's.
+        const shallowestLevel = flatSublistLevel !== null && !ordered ? flatSublistLevel + 1 : 1;
         while (
-          pendingListIndentStack.length > 1 &&
+          pendingListIndentStack.length > shallowestLevel &&
           indent < (pendingListIndentStack[pendingListIndentStack.length - 1] ?? 0)
         ) {
           pendingListIndentStack.pop();
         }
-        if (indent >= (pendingListIndentStack[pendingListIndentStack.length - 1] ?? 0) + 2) {
+        if (nestsAsFlatSublist && flatSublistLevel === null) {
+          flatSublistLevel = pendingListIndentStack.length;
+          pendingListIndentStack.push(indent);
+        } else if (indent >= (pendingListIndentStack[pendingListIndentStack.length - 1] ?? 0) + 2) {
           pendingListIndentStack.push(indent);
         }
       }

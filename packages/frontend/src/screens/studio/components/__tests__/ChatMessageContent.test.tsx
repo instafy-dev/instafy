@@ -505,6 +505,36 @@ describe("ChatMessageContent", () => {
     expect(codeRefs.map((entry) => entry.textContent?.trim())).toEqual(["[literal](https://example.com/raw)"]);
   });
 
+  it("renders GitHub PR and issue URLs as compact chips while other URLs stay plain links", async () => {
+    await act(async () => {
+      root.render(
+        <MessageContent content="Opened https://github.com/instafy-dev/instafy/pull/551. Tracked in https://github.com/instafy-dev/instafy/issues/173 and https://example.com/docs." />,
+      );
+    });
+
+    const chips = Array.from(
+      container.querySelectorAll('[data-testid="chat-message-github-reference"]'),
+    ) as HTMLAnchorElement[];
+    expect(chips).toHaveLength(2);
+    expect(chips.map((chip) => chip.textContent?.trim())).toEqual([
+      "instafy-dev/instafy#551",
+      "instafy-dev/instafy#173",
+    ]);
+    expect(chips.map((chip) => chip.getAttribute("data-github-ref-kind"))).toEqual(["pull", "issue"]);
+    expect(chips[0]?.getAttribute("href")).toBe("https://github.com/instafy-dev/instafy/pull/551");
+    expect(chips[0]?.getAttribute("title")).toBe("https://github.com/instafy-dev/instafy/pull/551");
+    expect(chips[0]?.getAttribute("target")).toBe("_blank");
+    expect(chips[0]?.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(chips[0]?.querySelector('[data-testid="chat-message-github-reference-glyph"]')).not.toBeNull();
+    // The chip elides the raw URL but keeps the trailing punctuation as prose.
+    expect(container.textContent).not.toContain("https://github.com/instafy-dev/instafy/pull/551");
+    expect(container.textContent).toContain("instafy-dev/instafy#551.");
+
+    const links = Array.from(container.querySelectorAll('[data-testid="chat-message-link"]'));
+    expect(links).toHaveLength(1);
+    expect(links[0]?.getAttribute("href")).toBe("https://example.com/docs");
+  });
+
   it("renders simple markdown lists as compact semantic lists", async () => {
     await act(async () => {
       root.render(
@@ -551,12 +581,103 @@ describe("ChatMessageContent", () => {
     // Nested bullets step to circle and indent one fixed step under the item.
     expect(sublist?.className).toContain("[list-style-type:circle]");
     expect(sublist?.className).toContain("pl-5");
-    expect(sublist?.className).toContain("mt-1");
+    // The sublist keeps the sibling half-step rhythm so the indent groups it.
+    expect(sublist?.className).toContain("mt-0.5");
+    expect(sublist?.className).not.toContain("mt-1");
     expect(Array.from(sublist?.querySelectorAll("li") ?? []).map((item) => item.textContent)).toEqual([
       "detail a",
       "detail b",
     ]);
     expect(topLevelItems[1]?.querySelector('[data-testid="chat-message-sublist"]')).toBeNull();
+  });
+
+  it("nests unindented bullets after an ordered item the way the real agent thread writes them", async () => {
+    await act(async () => {
+      root.render(
+        <MessageContent
+          content={
+            "1. Persistent-context skills starting with `autofix-`:\n- `autofix-bugfix`: land a fix\n- `autofix-triage`: sort reports\n2. Done."
+          }
+          projectId="project-1"
+        />,
+      );
+    });
+
+    const lists = Array.from(container.querySelectorAll('[data-testid="chat-message-list"]'));
+    expect(lists).toHaveLength(1);
+    expect(lists[0]?.tagName).toBe("OL");
+    const topLevelItems = Array.from(lists[0]?.children ?? []);
+    expect(topLevelItems).toHaveLength(2);
+    const sublist = topLevelItems[0]?.querySelector('[data-testid="chat-message-sublist"]');
+    expect(sublist?.tagName).toBe("UL");
+    expect(sublist?.getAttribute("data-list-depth")).toBe("1");
+    expect(sublist?.className).toContain("[list-style-type:circle]");
+    expect(Array.from(sublist?.querySelectorAll("li") ?? []).map((item) => item.textContent)).toEqual([
+      "autofix-bugfix: land a fix",
+      "autofix-triage: sort reports",
+    ]);
+    expect(topLevelItems[1]?.textContent).toBe("Done.");
+  });
+
+  it("glues an inline chip to the punctuation that follows it so it cannot wrap alone", async () => {
+    await act(async () => {
+      root.render(
+        <MessageContent
+          content={"First bullet under `Identity, repos, ground rules` in `AGENTS.md`: keep it green with `pnpm test`."}
+          projectId="project-1"
+        />,
+      );
+    });
+
+    const glued = Array.from(container.querySelectorAll('[data-testid="chat-message-chip-glue"]'));
+    expect(glued).toHaveLength(2);
+    glued.forEach((entry) => {
+      expect(entry.className).toContain("whitespace-nowrap");
+    });
+    // The workspace-file chip carries its trailing colon inside the no-break span.
+    expect(glued[0]?.querySelector('[data-testid="chat-message-file-reference-inline"]')?.textContent?.trim()).toBe(
+      "AGENTS.md",
+    );
+    expect(glued[0]?.textContent).toBe("AGENTS.md:");
+    // The inline-code chip carries its trailing period the same way.
+    expect(glued[1]?.querySelector('[data-testid="chat-message-inline-code"]')?.textContent).toBe("pnpm test");
+    expect(glued[1]?.textContent).toBe("pnpm test.");
+    // A chip followed by a space stays unwrapped, and the prose around it is intact.
+    const inlineCode = Array.from(container.querySelectorAll('[data-testid="chat-message-inline-code"]'));
+    expect(inlineCode.map((entry) => entry.textContent)).toEqual(["Identity, repos, ground rules", "pnpm test"]);
+    expect(inlineCode[0]?.parentElement?.getAttribute("data-testid")).not.toBe("chat-message-chip-glue");
+    expect(container.textContent).toBe(
+      "First bullet under Identity, repos, ground rules in AGENTS.md: keep it green with pnpm test.",
+    );
+  });
+
+  it("glues a conversation-reference and a GitHub-reference chip to their trailing punctuation too", async () => {
+    resolveConversationByController.mockReturnValue(null);
+    await act(async () => {
+      root.render(
+        <MessageContent
+          content={
+            "See [[thread:thread-controller-123|design pass]]: it landed. Tracked in https://github.com/instafy-dev/instafy/pull/551."
+          }
+        />,
+      );
+    });
+
+    const glued = Array.from(container.querySelectorAll('[data-testid="chat-message-chip-glue"]'));
+    expect(glued).toHaveLength(2);
+    glued.forEach((entry) => {
+      expect(entry.className).toContain("whitespace-nowrap");
+    });
+    // The conversation-reference chip carries its trailing colon inside the no-break span.
+    expect(glued[0]?.querySelector('[data-testid="chat-message-inline-reference"]')?.textContent).toBe(
+      "design pass",
+    );
+    expect(glued[0]?.textContent).toBe("design pass:");
+    // The github-reference chip carries its trailing period the same way.
+    expect(glued[1]?.querySelector('[data-testid="chat-message-github-reference"]')?.textContent?.trim()).toBe(
+      "instafy-dev/instafy#551",
+    );
+    expect(glued[1]?.textContent).toBe("instafy-dev/instafy#551.");
   });
 
   it("keeps a fenced block inside a list item on the item's indent", async () => {

@@ -50,8 +50,120 @@ describe("chatMessageDialect", () => {
     ]);
   });
 
-  it("keeps an unindented bulleted list after an ordered list as a sibling block", () => {
-    expect(parseMessageContentBlocks("1. First\n- flat bullet")).toEqual([
+  it("nests unindented bullets that directly follow an ordered item as its sublist (#191)", () => {
+    // Verbatim shape of the real agent answer from the box-check thread.
+    expect(
+      parseMessageContentBlocks(
+        [
+          "1. Persistent-context skills starting with `autofix-`:",
+          "- `autofix-bugfix`: land a fix",
+          "- `autofix-triage`: sort reports",
+          "2. First bullet under `Identity, repos, ground rules` in `AGENTS.md`:",
+          "- keep the box rules",
+          "3. Done.",
+        ].join("\n"),
+      ),
+    ).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [
+          { text: "Persistent-context skills starting with `autofix-`:", depth: 0, ordered: true },
+          { text: "`autofix-bugfix`: land a fix", depth: 1, ordered: false },
+          { text: "`autofix-triage`: sort reports", depth: 1, ordered: false },
+          {
+            text: "First bullet under `Identity, repos, ground rules` in `AGENTS.md`:",
+            depth: 0,
+            ordered: true,
+          },
+          { text: "keep the box rules", depth: 1, ordered: false },
+          { text: "Done.", depth: 0, ordered: true },
+        ],
+      },
+    ]);
+  });
+
+  it("lets indented bullets nest deeper under a flat sublist bullet", () => {
+    expect(parseMessageContentBlocks("1. Step\n- detail\n  - finer detail\n- detail two\n2. Next")).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [
+          { text: "Step", depth: 0, ordered: true },
+          { text: "detail", depth: 1, ordered: false },
+          { text: "finer detail", depth: 2, ordered: false },
+          { text: "detail two", depth: 1, ordered: false },
+          { text: "Next", depth: 0, ordered: true },
+        ],
+      },
+    ]);
+  });
+
+  it("carries the flat sublist across one blank line only when the ordered item ends with a colon", () => {
+    expect(parseMessageContentBlocks("1. Skills:\n\n- alpha\n- beta\n\n2. Next")).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [
+          { text: "Skills:", depth: 0, ordered: true },
+          { text: "alpha", depth: 1, ordered: false },
+          { text: "beta", depth: 1, ordered: false },
+        ],
+      },
+      {
+        kind: "list",
+        ordered: true,
+        start: 2,
+        items: [{ text: "Next", depth: 0, ordered: true }],
+      },
+    ]);
+  });
+
+  it("keeps a loose flat sublist in one nested list across blank lines between its own bullets (#182)", () => {
+    // Reviewer OBSERVATION on #182: a blank line between the flat sublist's
+    // OWN bullets used to end the leniency after the first bullet, splitting
+    // the list into ol[0,1] then a separate ul[0] instead of one nested list.
+    expect(parseMessageContentBlocks("1. Skills:\n\n- alpha\n\n- beta")).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [
+          { text: "Skills:", depth: 0, ordered: true },
+          { text: "alpha", depth: 1, ordered: false },
+          { text: "beta", depth: 1, ordered: false },
+        ],
+      },
+    ]);
+  });
+
+  it("still ends the loose flat sublist after two consecutive blank lines", () => {
+    // Two blank lines terminate the leniency even inside an open flat
+    // sublist, matching the single-blank-line boundary rule above.
+    expect(parseMessageContentBlocks("1. Skills:\n\n- alpha\n\n\n- beta")).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [
+          { text: "Skills:", depth: 0, ordered: true },
+          { text: "alpha", depth: 1, ordered: false },
+        ],
+      },
+      {
+        kind: "list",
+        ordered: false,
+        items: [{ text: "beta", depth: 0, ordered: false }],
+      },
+    ]);
+  });
+
+  it("keeps bullets after a blank line as a sibling block when the ordered item has no trailing colon", () => {
+    // Pins the boundary of the #191 leniency rule.
+    expect(parseMessageContentBlocks("1. First\n\n- flat bullet")).toEqual([
       {
         kind: "list",
         ordered: true,
@@ -63,6 +175,34 @@ describe("chatMessageDialect", () => {
         ordered: false,
         items: [{ text: "flat bullet", depth: 0, ordered: false }],
       },
+    ]);
+  });
+
+  it("does not apply the flat-sublist leniency to ordered items after bullets", () => {
+    expect(parseMessageContentBlocks("- topic:\n1. step")).toEqual([
+      {
+        kind: "list",
+        ordered: false,
+        items: [{ text: "topic:", depth: 0, ordered: false }],
+      },
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [{ text: "step", depth: 0, ordered: true }],
+      },
+    ]);
+  });
+
+  it("still flushes a colon-terminated ordered item across a blank line before non-list content", () => {
+    expect(parseMessageContentBlocks("1. Command output:\n\n```text\nok\n```")).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [{ text: "Command output:", depth: 0, ordered: true }],
+      },
+      { kind: "code", language: "text", lines: ["ok"] },
     ]);
   });
 
@@ -207,6 +347,63 @@ describe("chatMessageDialect", () => {
     });
     expect(tokens[11]).toEqual({ type: "agent-mention", value: "@api" });
     expect(tokens[13]).toEqual({ type: "assistant-mention", value: "@octo" });
+  });
+
+  it("tokenizes GitHub PR and issue URLs into github-reference tokens without swallowing trailing punctuation", () => {
+    expect(
+      tokenizeChatLine("Draft PR https://github.com/instafy-dev/instafy/pull/551. Rollout tracked in https://github.com/instafy-dev/instafy/issues/173)."),
+    ).toEqual([
+      { type: "text", value: "Draft PR " },
+      {
+        type: "github-reference",
+        value: {
+          url: "https://github.com/instafy-dev/instafy/pull/551",
+          owner: "instafy-dev",
+          repo: "instafy",
+          number: 551,
+          kind: "pull",
+        },
+      },
+      { type: "text", value: ". Rollout tracked in " },
+      {
+        type: "github-reference",
+        value: {
+          url: "https://github.com/instafy-dev/instafy/issues/173",
+          owner: "instafy-dev",
+          repo: "instafy",
+          number: 173,
+          kind: "issue",
+        },
+      },
+      { type: "text", value: ")." },
+    ]);
+  });
+
+  it("keeps non-GitHub URLs and GitHub URLs of other shapes as plain links", () => {
+    expect(tokenizeChatLine("See https://example.com/pull/5 for details.")).toEqual([
+      { type: "text", value: "See " },
+      { type: "link", value: { url: "https://example.com/pull/5", label: "https://example.com/pull/5" } },
+      { type: "text", value: " for details." },
+    ]);
+    expect(tokenizeChatLine("Diff at https://github.com/instafy-dev/instafy/pull/551/files now.")).toEqual([
+      { type: "text", value: "Diff at " },
+      {
+        type: "link",
+        value: {
+          url: "https://github.com/instafy-dev/instafy/pull/551/files",
+          label: "https://github.com/instafy-dev/instafy/pull/551/files",
+        },
+      },
+      { type: "text", value: " now." },
+    ]);
+    expect(tokenizeChatLine("Repo https://github.com/instafy-dev/instafy here.")).toEqual([
+      { type: "text", value: "Repo " },
+      {
+        type: "link",
+        value: { url: "https://github.com/instafy-dev/instafy", label: "https://github.com/instafy-dev/instafy" },
+      },
+      { type: "text", value: " here." },
+    ]);
   });
 
   it("keeps markdown-like markers literal inside inline code", () => {

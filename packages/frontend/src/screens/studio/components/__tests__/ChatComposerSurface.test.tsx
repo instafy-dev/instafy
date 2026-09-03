@@ -4,8 +4,10 @@ import { forwardRef, useState, type ComponentProps } from "react";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ChatComposerSurface } from "../ChatComposerSurface";
+import { IconButton } from "../../../../components/Button";
+import { COMPOSER_SEND_REST_CLASS, ChatComposerSurface } from "../ChatComposerSurface";
 import { CHAT_COMPOSER_COLUMN_CLASS_NAME } from "../ChatColumn";
+import { deriveChatVoiceComposerViewState } from "../chatVoiceComposerViewState";
 import {
   TOUCH_SEND_MODE_HOLD_DELAY_MS,
   createTouchSendModePickerLayout,
@@ -16,8 +18,26 @@ vi.mock("../ChatBrowserDock", () => ({
   ChatBrowserDock: () => null,
 }));
 
+// The mock exposes the folded actions as labelled buttons so "no action
+// lost" can be checked by accessible name alone, across inline and menu.
 vi.mock("../ComposerActionMenu", () => ({
-  ComposerActionMenu: () => <div data-testid="mock-composer-action-menu" />,
+  ComposerActionMenu: (props: Record<string, unknown>) => (
+    <div
+      data-testid="mock-composer-action-menu"
+      data-upload-image={String(typeof props.onUploadImage === "function")}
+      data-insert-suggestion={String(typeof props.onInsertSuggestion === "function")}
+      data-trigger-class={String(props.triggerClassName ?? "")}
+      data-trigger-icon-class={String(props.triggerIconClassName ?? "")}
+    >
+      <button type="button" aria-label="Open composer actions" className="mock-menu-trigger" />
+      {typeof props.onUploadImage === "function" ? (
+        <button type="button" aria-label="Upload image" data-testid="mock-menu-upload-image" />
+      ) : null}
+      {typeof props.onInsertSuggestion === "function" ? (
+        <button type="button" aria-label="Insert suggestion" data-testid="mock-menu-insert-suggestion" />
+      ) : null}
+    </div>
+  ),
 }));
 
 vi.mock("../ComposerInviteModal", () => ({
@@ -29,8 +49,20 @@ vi.mock("../ConversationRoster", () => ({
   ConversationRoster: () => <div data-testid="mock-conversation-roster" />,
 }));
 
+// The mock exposes the two props the surface used to flip with the draft so
+// the geometry snapshots can prove they no longer move, and the dress it was
+// handed so the rest-row dress can be checked from one place.
 vi.mock("../VoiceConversationActionStrip", () => ({
-  VoiceConversationActionStrip: () => <div data-testid="mock-voice-action-strip" />,
+  VoiceConversationActionStrip: (props: Record<string, unknown>) => (
+    <div
+      data-testid="mock-voice-action-strip"
+      data-voice-input-testid={String(props.voiceInputTestId ?? "chat-voice-input-button")}
+      data-voice-replies-toggle={String(props.showVoiceRepliesToggle === true)}
+      data-ghost-class={String(props.ghostActionClassName ?? "")}
+      data-primary-class={String(props.primaryActionClassName ?? "")}
+      data-icon-class={String(props.actionIconClassName ?? "")}
+    />
+  ),
 }));
 
 vi.mock("../../../extensions/ProviderTriggerNotice", () => ({
@@ -43,6 +75,7 @@ vi.mock("../chat-input/ChatInput", () => ({
     return (
       <div
         data-compact={String(_props.compact === true)}
+        data-compact-viewport={String(_props.compactViewport === true)}
         data-read-only={String(_props.readOnly === true)}
         data-testid="chat-input"
       >
@@ -201,10 +234,9 @@ function createProps(
     sendButtonDisabled: false,
     sendButtonVariant: "primary",
     onSendButtonPress: () => undefined,
-    composerOutlinedActionClass: "outline",
+    composerGhostActionClass: "ghost",
     composerPrimaryActionClass: "primary",
     composerActionIconClass: "icon",
-    composerActionButtonClass: "action",
     inviteModalProps: {} as never,
     ...overrides,
   };
@@ -310,6 +342,532 @@ describe("ChatComposerSurface", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
+  // The voice flags come from the real view state so the layout tests run
+  // through the gate the founder hits: on a voice-capable client (web speech
+  // in Chromium) the mic is the "primary action" while the draft is empty and
+  // steps back to "secondary" once there is a payload; on a client without
+  // voice both flags are false throughout. Explicit overrides still win.
+  function voiceFlagsFor(voiceInputSupported: boolean, value: string) {
+    const state = deriveChatVoiceComposerViewState({
+      chatVoiceInteractionMode: "hold",
+      composerHasSendPayload: value.trim().length > 0,
+      continuousAwaitingAssistantReply: false,
+      continuousConversationActive: false,
+      continuousPauseMessage: null,
+      continuousVoiceResolving: false,
+      voiceHoldActive: false,
+      voiceInputListening: false,
+      voiceInputStarting: false,
+      voiceInputSupported,
+      voiceInputTranscript: "",
+      voiceInputTranscribing: false,
+    });
+    return {
+      showVoicePrimaryAction: state.showVoicePrimaryAction,
+      showVoiceSecondaryAction: state.showVoiceSecondaryAction,
+    };
+  }
+
+  function renderLayout(
+    overrides: Partial<ComponentProps<typeof ChatComposerSurface>> = {},
+    { voiceInputSupported = true }: { voiceInputSupported?: boolean } = {},
+  ) {
+    const base = createProps();
+    const value = (overrides.chatInputProps as { value?: string } | undefined)?.value ?? "";
+    return root.render(
+      <ChatComposerSurface
+        {...base}
+        {...voiceFlagsFor(voiceInputSupported, value)}
+        {...overrides}
+        chatInputProps={{ ...base.chatInputProps, ...(overrides.chatInputProps ?? {}) }}
+      />,
+    );
+  }
+
+  // Read the class attribute rather than `className` so the helper also works
+  // on the SVG icons, whose `className` is an SVGAnimatedString.
+  function classTokens(node: Element | null | undefined) {
+    return new Set((node?.getAttribute("class") ?? "").split(/\s+/).filter(Boolean));
+  }
+
+  // The tokens that define a control's surface — its box, radius, fill, edge
+  // and shadow — in either theme and any interaction state. Bracket contents
+  // are blanked first so an arbitrary value such as `border-[color:var(--x)]`
+  // cannot read as a variant prefix.
+  const SURFACE_TOKEN_PATTERN = /(?:^|:)(?:border|bg|shadow|ring|rounded|h|w)-/;
+  function surfaceTokens(node: Element | null | undefined) {
+    return new Set(
+      Array.from(classTokens(node)).filter((token) =>
+        SURFACE_TOKEN_PATTERN.test(token.replace(/\[[^\]]*\]/g, "[]")),
+      ),
+    );
+  }
+
+  function sortedTokens(tokens: Set<string>) {
+    return Array.from(tokens).sort();
+  }
+
+  function symmetricDifference(left: Set<string>, right: Set<string>) {
+    const result = new Set<string>();
+    for (const token of left) {
+      if (!right.has(token)) result.add(token);
+    }
+    for (const token of right) {
+      if (!left.has(token)) result.add(token);
+    }
+    return result;
+  }
+
+  // Send is the one control allowed to change its dress with the draft: its
+  // IconButton variant (primary vs ghost, probed from bare IconButtons so the
+  // test follows the design system) and the composer's own two dresses — the
+  // muted ghost rest dress and the primary dress it lights up into. Everything
+  // else on it — size, radius, the ghost box — must survive typing untouched.
+  async function allowedSendDressTokens() {
+    const probe = document.createElement("div");
+    document.body.appendChild(probe);
+    const probeRoot = createRoot(probe);
+    await act(async () =>
+      probeRoot.render(
+        <>
+          <IconButton variant="primary" size="md" radius="xl" data-testid="probe-primary" />
+          <IconButton variant="ghost" size="md" radius="xl" data-testid="probe-outline" />
+        </>,
+      ),
+    );
+    const variantDelta = symmetricDifference(
+      classTokens(probe.querySelector('[data-testid="probe-primary"]')),
+      classTokens(probe.querySelector('[data-testid="probe-outline"]')),
+    );
+    await act(async () => probeRoot.unmount());
+    probe.remove();
+    for (const token of createProps().composerPrimaryActionClass.split(/\s+/)) {
+      variantDelta.add(token);
+    }
+    for (const token of COMPOSER_SEND_REST_CLASS.split(/\s+/)) {
+      variantDelta.add(token);
+    }
+    return variantDelta;
+  }
+
+  function layoutNodes() {
+    return {
+      textRow: container.querySelector('[data-testid="chat-composer-text-row"]'),
+      leading: container.querySelector('[data-testid="chat-composer-leading-controls"]'),
+      trailing: container.querySelector('[data-testid="chat-composer-trailing-controls"]'),
+      menu: container.querySelector('[data-testid="mock-composer-action-menu"]'),
+      home: container.querySelector('[data-testid="chat-home-button-mobile"]'),
+      send: container.querySelector('[data-testid="chat-send-button"]'),
+      image: container.querySelector('[data-testid="chat-image-upload-button"]'),
+      wand: container.querySelector('[data-testid="chat-accept-suggestion-button"]'),
+      voice: container.querySelector('[data-testid="mock-voice-action-strip"]'),
+    };
+  }
+
+  // The row's geometry as a list, in document order: which node each control
+  // is, which nodes each group holds, and how everything is dressed. Two
+  // snapshots being the same means the row did not change layout between the
+  // renders that produced them.
+  function controlGeometry() {
+    const nodes = layoutNodes();
+    const controls = [nodes.home, nodes.menu, nodes.image, nodes.voice, nodes.send].filter(
+      (node): node is Element => node !== null,
+    );
+    const textRow = nodes.textRow;
+    const editorWrapper = container.querySelector('[data-testid="chat-input"]')?.parentElement ?? null;
+    return {
+      textRow,
+      textRowClass: textRow?.className ?? null,
+      leading: nodes.leading,
+      leadingClass: nodes.leading?.className ?? null,
+      leadingChildren: Array.from(nodes.leading?.children ?? []),
+      editorWrapper,
+      editorWrapperClass: editorWrapper?.className ?? null,
+      trailing: nodes.trailing,
+      trailingClass: nodes.trailing?.className ?? null,
+      trailingChildren: Array.from(nodes.trailing?.children ?? []),
+      controls,
+      controlClasses: controls.map((node) =>
+        node === nodes.send ? "<send: dress only, checked token by token>" : node.className,
+      ),
+      controlOrder: controls.map((node) => node.getAttribute("data-testid")),
+      send: nodes.send,
+      sendTokens: classTokens(nodes.send),
+      sendRest: nodes.send?.getAttribute("data-send-rest") ?? null,
+      voiceInputTestId: nodes.voice?.getAttribute("data-voice-input-testid") ?? null,
+      voiceRepliesToggle: nodes.voice?.getAttribute("data-voice-replies-toggle") ?? null,
+      sendInTrailing: Boolean(nodes.send && nodes.trailing?.contains(nodes.send)),
+      surfaceChildCount: textRow?.parentElement?.childElementCount ?? null,
+    };
+  }
+
+  type ControlGeometry = ReturnType<typeof controlGeometry>;
+
+  // "Nothing changed": the same nodes, in the same groups, in the same order,
+  // with the same classes — and on Send, whose colour is the one thing that
+  // may move, every class that differs is part of its dress.
+  function expectSameGeometry(before: ControlGeometry, after: ControlGeometry, sendDress: Set<string>) {
+    expect(after.textRow).toBe(before.textRow);
+    expect(after.textRowClass).toBe(before.textRowClass);
+    expect(after.leading).toBe(before.leading);
+    expect(after.leadingClass).toBe(before.leadingClass);
+    expect(after.leadingChildren).toHaveLength(before.leadingChildren.length);
+    after.leadingChildren.forEach((node, index) => expect(node).toBe(before.leadingChildren[index]));
+    expect(after.editorWrapper).toBe(before.editorWrapper);
+    expect(after.editorWrapperClass).toBe(before.editorWrapperClass);
+    expect(after.trailing).toBe(before.trailing);
+    expect(after.trailingClass).toBe(before.trailingClass);
+    expect(after.trailingChildren).toHaveLength(before.trailingChildren.length);
+    after.trailingChildren.forEach((node, index) => expect(node).toBe(before.trailingChildren[index]));
+    expect(after.controls).toHaveLength(before.controls.length);
+    after.controls.forEach((node, index) => expect(node).toBe(before.controls[index]));
+    expect(after.controlOrder).toEqual(before.controlOrder);
+    expect(after.controlClasses).toEqual(before.controlClasses);
+    expect(after.voiceInputTestId).toBe(before.voiceInputTestId);
+    expect(after.voiceRepliesToggle).toBe(before.voiceRepliesToggle);
+    expect(after.surfaceChildCount).toBe(before.surfaceChildCount);
+    expect(after.send).toBe(before.send);
+    expect(after.sendInTrailing).toBe(true);
+    const sendDelta = Array.from(symmetricDifference(before.sendTokens, after.sendTokens));
+    expect(sendDelta.filter((token) => !sendDress.has(token))).toEqual([]);
+  }
+
+  // One dress for the rest row: the card is the only surface. "+" (whose
+  // trigger the surface dresses), the mic (dressed by the surface too), image
+  // and home all wear the ghost family; Send wears the same ghost box with a
+  // muted glyph. On the buttons the surface renders itself the
+  // surface-defining tokens (box, radius, fill, edge, shadow) are identical,
+  // and Send differs from its siblings by nothing beyond the family's tone
+  // versus its own muting. The real "+" and mic are checked end to end in
+  // ChatComposerRestRowDress.test.tsx. The editor wrapper carries no surface
+  // of its own.
+  function expectOneRestRowDress(geometry: ControlGeometry) {
+    const { composerGhostActionClass, composerActionIconClass } = createProps();
+    const nodes = layoutNodes();
+    expect(nodes.menu?.getAttribute("data-trigger-class")).toBe(composerGhostActionClass);
+    expect(nodes.menu?.getAttribute("data-trigger-icon-class")).toBe(composerActionIconClass);
+    if (nodes.voice) {
+      expect(nodes.voice.getAttribute("data-ghost-class")).toBe(composerGhostActionClass);
+      expect(nodes.voice.getAttribute("data-icon-class")).toBe(composerActionIconClass);
+    }
+    const siblings = [nodes.home, nodes.image].filter((node): node is Element => node !== null);
+    for (const button of siblings) {
+      expect(classTokens(button).has(composerGhostActionClass)).toBe(true);
+    }
+    expect(nodes.send).not.toBeNull();
+    expect(geometry.sendRest).toBe("true");
+    const reference = siblings[0] ?? nodes.send;
+    const toneTokens = new Set([
+      ...composerGhostActionClass.split(/\s+/),
+      ...COMPOSER_SEND_REST_CLASS.split(/\s+/),
+    ]);
+    for (const button of [...siblings, nodes.send]) {
+      expect(sortedTokens(surfaceTokens(button))).toEqual(sortedTokens(surfaceTokens(reference)));
+      const delta = Array.from(symmetricDifference(classTokens(button), classTokens(reference)));
+      expect(delta.filter((token) => !toneTokens.has(token))).toEqual([]);
+    }
+    for (const token of COMPOSER_SEND_REST_CLASS.split(/\s+/)) {
+      expect(classTokens(nodes.send).has(token)).toBe(true);
+    }
+    expect(sortedTokens(surfaceTokens(geometry.editorWrapper))).toEqual([]);
+  }
+
+  // Every accessible action offered by the composer, whether rendered inline
+  // or folded into the "+" menu, plus the file input's presence.
+  function reachableActionLabels() {
+    return new Set(
+      Array.from(container.querySelectorAll("button[aria-label]"))
+        .map((node) => node.getAttribute("aria-label"))
+        .filter((label): label is string => Boolean(label)),
+    );
+  }
+
+  // True when `before` comes earlier than `after` in document order.
+  function precedes(before: Element | null | undefined, after: Element | null | undefined) {
+    return Boolean(
+      before && after && before.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+  }
+
+  it("rests as one row at sm+ with + and image leading, mic and quiet send trailing beside the input", async () => {
+    await act(async () => renderLayout({ sendButtonVariant: "ghost" }));
+
+    const nodes = layoutNodes();
+    expect(nodes.textRow?.className.split(" ")).toContain("items-end");
+    expect(nodes.leading?.contains(nodes.menu)).toBe(true);
+    expect(nodes.menu?.getAttribute("data-upload-image")).toBe("false");
+    expect(nodes.menu?.getAttribute("data-insert-suggestion")).toBe("false");
+    expect(nodes.leading?.contains(nodes.image)).toBe(true);
+    expect(precedes(nodes.menu, nodes.image)).toBe(true);
+    expect(nodes.image?.className.split(" ")).toContain("ghost");
+    expect(nodes.trailing?.contains(nodes.image)).toBe(false);
+    expect(nodes.trailing?.contains(nodes.voice)).toBe(true);
+    expect(nodes.trailing?.contains(nodes.send)).toBe(true);
+    expect(precedes(nodes.voice, nodes.send)).toBe(true);
+    expect(nodes.wand).toBeNull();
+    expect(nodes.send?.getAttribute("data-send-rest")).toBe("true");
+    expect(nodes.send?.className.split(" ")).not.toContain("primary");
+    expectOneRestRowDress(controlGeometry());
+    expect(container.querySelector('[data-testid="chat-input"]')?.getAttribute("data-compact-viewport")).toBe(
+      "false",
+    );
+    expect(container.querySelector('[data-browser-composer-condensed="true"]')).toBeNull();
+  });
+
+  it("rests as one row below sm with only mic and send inline, folding image upload into the + menu", async () => {
+    await act(async () =>
+      renderLayout({ compactBrowserViewport: true, sendButtonVariant: "ghost" }),
+    );
+
+    const nodes = layoutNodes();
+    expect(nodes.textRow?.className.split(" ")).toContain("items-end");
+    expect(nodes.image).toBeNull();
+    expect(nodes.wand).toBeNull();
+    expect(nodes.leading?.contains(nodes.menu)).toBe(true);
+    expect(nodes.menu?.getAttribute("data-upload-image")).toBe("true");
+    expect(nodes.menu?.getAttribute("data-insert-suggestion")).toBe("false");
+    expect(nodes.trailing?.contains(nodes.voice)).toBe(true);
+    expect(nodes.trailing?.contains(nodes.send)).toBe(true);
+    expect(precedes(nodes.voice, nodes.send)).toBe(true);
+    expect(nodes.send?.getAttribute("data-send-rest")).toBe("true");
+    expect(container.querySelector('[data-testid="chat-input"]')?.getAttribute("data-compact-viewport")).toBe(
+      "true",
+    );
+  });
+
+  describe.each([
+    { client: "a voice-capable client", voiceInputSupported: true },
+    { client: "a client without voice", voiceInputSupported: false },
+  ])("on $client", ({ voiceInputSupported }) => {
+    it.each([
+      { viewport: "at sm+", compactBrowserViewport: false },
+      { viewport: "below sm", compactBrowserViewport: true },
+    ])(
+      "changes no layout from empty to one character to three lines $viewport: Send lights up in place",
+      async ({ compactBrowserViewport }) => {
+        // The founder's complaint: click the input on desktop, type one
+        // character, and the composer changed. There is one layout now, and
+        // one set of controls. The same nodes, in the same groups, in the
+        // same order, with the same classes, must be in the row before and
+        // after "a" and after two more lines; only Send's dress (its variant,
+        // wired to sendButtonVariant upstream) may differ. This holds on a
+        // voice-capable client — where the mic used to stand in for Send while
+        // the draft was empty, so the first keystroke mounted Send beside it —
+        // exactly as on a client without voice.
+        const renderDraft = (value: string) =>
+          renderLayout(
+            {
+              compactBrowserViewport,
+              showComposerHomeButton: true,
+              homeAttentionCount: 1,
+              homeAttentionBadge: "1",
+              chatInputProps: { value } as never,
+              sendButtonVariant: value ? "primary" : "ghost",
+            },
+            { voiceInputSupported },
+          );
+        const sendDress = await allowedSendDressTokens();
+
+        await act(async () => renderDraft(""));
+        const rest = controlGeometry();
+        expect(rest.controlOrder).toEqual([
+          "chat-home-button-mobile",
+          "mock-composer-action-menu",
+          ...(compactBrowserViewport ? [] : ["chat-image-upload-button"]),
+          ...(voiceInputSupported ? ["mock-voice-action-strip"] : []),
+          "chat-send-button",
+        ]);
+        expect(rest.sendInTrailing).toBe(true);
+        expect(rest.sendRest).toBe("true");
+        expect(rest.sendTokens.has("primary")).toBe(false);
+        expectOneRestRowDress(rest);
+        expect(rest.voiceInputTestId).toBe(voiceInputSupported ? "chat-voice-input-button" : null);
+        expect(container.querySelectorAll('[data-testid="chat-send-button"]')).toHaveLength(1);
+        expect(container.querySelectorAll('[data-testid="mock-voice-action-strip"]')).toHaveLength(
+          voiceInputSupported ? 1 : 0,
+        );
+        const inputNode = container.querySelector('[data-testid="chat-input"]');
+
+        // The first character: Send lit up, on the same node, and nothing else
+        // happened.
+        await act(async () => renderDraft("a"));
+        const oneCharacter = controlGeometry();
+        expectSameGeometry(rest, oneCharacter, sendDress);
+        expect(oneCharacter.sendRest).toBe("false");
+        expect(oneCharacter.sendTokens.has("primary")).toBe(true);
+        // Lit, Send sheds its muting: the primary dress is the whole delta.
+        for (const token of COMPOSER_SEND_REST_CLASS.split(/\s+/)) {
+          expect(oneCharacter.sendTokens.has(token)).toBe(false);
+        }
+        expect(container.querySelector('[data-testid="chat-input"]')).toBe(inputNode);
+        expect(container.querySelector('[data-testid="chat-composer-toolbar"]')).toBeNull();
+        expect(container.querySelectorAll('[data-testid="chat-send-button"]')).toHaveLength(1);
+
+        // Three lines: the editor grows; the controls do not.
+        await act(async () => renderDraft("a\nb\nc"));
+        const threeLines = controlGeometry();
+        expectSameGeometry(rest, threeLines, sendDress);
+        expect(threeLines.sendRest).toBe("false");
+        expect(threeLines.sendTokens).toEqual(oneCharacter.sendTokens);
+        expect(container.querySelector('[data-testid="chat-input"]')).toBe(inputNode);
+
+        // And it goes quiet again in place when the draft clears.
+        await act(async () => renderDraft(""));
+        const cleared = controlGeometry();
+        expectSameGeometry(rest, cleared, sendDress);
+        expect(cleared.sendRest).toBe("true");
+        expect(cleared.sendTokens).toEqual(rest.sendTokens);
+        expectOneRestRowDress(cleared);
+      },
+    );
+  });
+
+  it("folds the suggestion wand into the + menu on every viewport while a ghost suggestion is live", async () => {
+    // Below sm.
+    await act(async () =>
+      renderLayout({
+        compactBrowserViewport: true,
+        showMobileGhostSuggestionAcceptButton: true,
+        chatInputProps: { value: "Hel" } as never,
+        sendButtonVariant: "primary",
+      }),
+    );
+    let nodes = layoutNodes();
+    expect(nodes.image).toBeNull();
+    expect(nodes.wand).toBeNull();
+    expect(nodes.menu?.getAttribute("data-upload-image")).toBe("true");
+    expect(nodes.menu?.getAttribute("data-insert-suggestion")).toBe("true");
+    expect(nodes.trailing?.contains(nodes.send)).toBe(true);
+
+    // At sm+: image stays inline, the wand is in the menu, nothing inline
+    // appeared or disappeared for the suggestion.
+    await act(async () => renderLayout({ sendButtonVariant: "ghost" }));
+    const restGeometry = controlGeometry();
+    await act(async () =>
+      renderLayout({
+        showMobileGhostSuggestionAcceptButton: true,
+        chatInputProps: { value: "Hel" } as never,
+        sendButtonVariant: "primary",
+      }),
+    );
+    nodes = layoutNodes();
+    expect(nodes.leading?.contains(nodes.image)).toBe(true);
+    expect(nodes.wand).toBeNull();
+    expect(nodes.menu?.getAttribute("data-upload-image")).toBe("false");
+    expect(nodes.menu?.getAttribute("data-insert-suggestion")).toBe("true");
+    expect(controlGeometry().controlOrder).toEqual(restGeometry.controlOrder);
+    expect(controlGeometry().controlClasses).toEqual(restGeometry.controlClasses);
+  });
+
+  it("loses no action between viewports: every sm+ action is reachable inline or in the + menu below sm", async () => {
+    const richProps = {
+      showComposerHomeButton: true,
+      homeAttentionCount: 1,
+      homeAttentionBadge: "1",
+      showMobileGhostSuggestionAcceptButton: true,
+      chatInputProps: { value: "Hel" } as never,
+      sendButtonVariant: "primary" as const,
+    };
+    await act(async () => renderLayout(richProps));
+    const wideLabels = reachableActionLabels();
+    expect(wideLabels).toContain("Open home");
+    expect(wideLabels).toContain("Open composer actions");
+    expect(wideLabels).toContain("Upload image");
+    expect(wideLabels).toContain("Insert suggestion");
+    expect(wideLabels).toContain("Send message");
+    expect(container.querySelector('[data-testid="chat-image-upload-input"]')).not.toBeNull();
+
+    await act(async () => renderLayout({ ...richProps, compactBrowserViewport: true }));
+    const narrowLabels = reachableActionLabels();
+    expect(narrowLabels).toEqual(wideLabels);
+    expect(container.querySelector('[data-testid="chat-image-upload-input"]')).not.toBeNull();
+
+    // Inline below sm: only home, + and the commit actions; the rest is in
+    // the menu.
+    const nodes = layoutNodes();
+    expect(nodes.image).toBeNull();
+    expect(nodes.wand).toBeNull();
+    expect(container.querySelector('[data-testid="mock-menu-upload-image"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="mock-menu-insert-suggestion"]')).not.toBeNull();
+  });
+
+  it("keeps the held microphone on the same node in the same row for the whole voice capture", async () => {
+    const renderHold = (value: string, capture: boolean) =>
+      renderLayout({
+        showVoiceStatus: capture,
+        voiceStatusMessage: capture ? "Listening. Speak now and release to stop." : "",
+        voiceConversationActionStripProps: {
+          voiceInteractionMode: "hold",
+          voiceActionActive: capture,
+        } as never,
+        chatInputProps: { value } as never,
+        sendButtonVariant: value ? "primary" : "ghost",
+      });
+
+    await act(async () => renderHold("existing draft", false));
+    let nodes = layoutNodes();
+    const micNode = nodes.voice;
+    const trailing = nodes.trailing;
+    expect(trailing?.contains(micNode)).toBe(true);
+    const geometry = controlGeometry();
+
+    // Capture begins on the mic: nothing may move.
+    await act(async () => renderHold("existing draft", true));
+    nodes = layoutNodes();
+    expect(nodes.voice).toBe(micNode);
+    expect(nodes.trailing).toBe(trailing);
+    expect(controlGeometry().controlOrder).toEqual(geometry.controlOrder);
+
+    // A transcript lands mid-hold.
+    await act(async () => renderHold("existing draft plus transcript", true));
+    nodes = layoutNodes();
+    expect(nodes.voice).toBe(micNode);
+    expect(nodes.trailing).toBe(trailing);
+
+    // The draft empties underneath the hold.
+    await act(async () => renderHold("", true));
+    nodes = layoutNodes();
+    expect(nodes.voice).toBe(micNode);
+    expect(nodes.trailing).toBe(trailing);
+
+    // Capture ends, with and without a draft: still the same mic, same row.
+    await act(async () => renderHold("", false));
+    expect(layoutNodes().voice).toBe(micNode);
+    await act(async () => renderHold("transcribed draft", false));
+    nodes = layoutNodes();
+    expect(nodes.voice).toBe(micNode);
+    expect(nodes.trailing).toBe(trailing);
+    expect(controlGeometry().controlOrder).toEqual(geometry.controlOrder);
+    expect(controlGeometry().controlClasses).toEqual(geometry.controlClasses);
+  });
+
+  it("renders the composer home button once, as a ghost, first in the row, regardless of the draft", async () => {
+    const renderHome = (value: string) =>
+      renderLayout({
+        showComposerHomeButton: true,
+        homeAttentionCount: 2,
+        homeAttentionBadge: "2",
+        chatInputProps: { value } as never,
+        sendButtonVariant: value ? "primary" : "ghost",
+      });
+
+    await act(async () => renderHome(""));
+    const home = layoutNodes().home;
+    expect(layoutNodes().leading?.contains(home)).toBe(true);
+    expect(layoutNodes().leading?.firstElementChild).toBe(home);
+    expect(home?.getAttribute("aria-label")).toBe("Open home");
+    expect(home?.className.split(" ")).toContain("ghost");
+    expect(home?.querySelector('[data-testid="chat-home-badge-mobile"]')?.textContent).toBe("2");
+    const homeClass = home?.className;
+
+    await act(async () => renderHome("Ship it"));
+    expect(layoutNodes().home).toBe(home);
+    expect(layoutNodes().leading?.firstElementChild).toBe(home);
+    expect(home?.className).toBe(homeClass);
+    expect(home?.querySelector('[data-testid="chat-home-badge-mobile"]')?.textContent).toBe("2");
+    expect(container.querySelectorAll('[data-testid="chat-home-button-mobile"]')).toHaveLength(1);
+  });
+
   it("condenses the idle composer in Browser mode and expands it when a draft appears", async () => {
     const renderSurface = (value: string) =>
       root.render(
@@ -329,23 +887,30 @@ describe("ChatComposerSurface", () => {
     expect(container.querySelector('[data-testid="chat-input"]')?.getAttribute("data-compact")).toBe(
       "true",
     );
+    // The condensed bar is a separate idle layout and keeps its mic-only rest
+    // while voice is the primary action; only the one-row composer always
+    // mounts Send.
+    expect(container.querySelector('[data-testid="mock-voice-action-strip"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="chat-send-button"]')).toBeNull();
     const inputNode = container.querySelector('[data-testid="chat-input"]');
 
     await act(async () => renderSurface("Tell Octo what to do on this page"));
     expect(container.querySelector('[data-browser-composer-condensed="true"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-send-button"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="chat-input"]')?.getAttribute("data-compact")).toBe(
       "false",
     );
     expect(container.querySelector('[data-testid="chat-input"]')).toBe(inputNode);
   });
 
-  it("keeps the idle composer controls visible when voice capture is unavailable", async () => {
+  it("mounts Send as the quiet control beside the mic while the draft is empty on a voice-capable client", async () => {
     await act(async () => {
       root.render(
         <ChatComposerSurface
           {...createProps({
             showVoicePrimaryAction: true,
             showVoiceStatus: false,
+            sendButtonVariant: "ghost",
           })}
         />,
       );
@@ -355,7 +920,13 @@ describe("ChatComposerSurface", () => {
     expect(container.textContent).not.toContain("Voice capture is not ready yet on this client.");
     expect(container.querySelector('[data-testid="mock-voice-action-strip"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="chat-voice-active-strip"]')).toBeNull();
-    expect(container.querySelector('[data-testid="chat-primary-action-status"]')).toBeNull();
+    const send = container.querySelector('[data-testid="chat-send-button"]');
+    expect(send).not.toBeNull();
+    expect(send?.getAttribute("data-send-rest")).toBe("true");
+    expect(container.querySelector('[data-testid="chat-composer-trailing-controls"]')?.contains(send)).toBe(true);
+    // The live region is mounted with Send so later announcements land in an
+    // existing status node.
+    expect(container.querySelector('[data-testid="chat-primary-action-status"]')).not.toBeNull();
   });
 
   it("shows and enforces the read-only composer state", async () => {
@@ -459,6 +1030,9 @@ describe("ChatComposerSurface", () => {
     const holdButtonOwner = container.querySelector(
       '[data-testid="mock-voice-action-strip"]',
     );
+    const sendOwner = container.querySelector('[data-testid="chat-send-button"]');
+    expect(sendOwner).not.toBeNull();
+    expect(holdButtonOwner?.getAttribute("data-voice-input-testid")).toBe("chat-voice-input-button");
 
     await act(async () =>
       renderHoldState({
@@ -471,6 +1045,8 @@ describe("ChatComposerSurface", () => {
     expect(container.querySelector('[data-testid="mock-voice-action-strip"]')).toBe(
       holdButtonOwner,
     );
+    expect(holdButtonOwner?.getAttribute("data-voice-input-testid")).toBe("chat-voice-input-button");
+    expect(container.querySelector('[data-testid="chat-send-button"]')).toBe(sendOwner);
     expect(container.querySelector('[data-testid="chat-voice-active-strip"]')).toBeNull();
   });
 
