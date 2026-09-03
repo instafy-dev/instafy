@@ -376,9 +376,9 @@ describe("ChatMessageContent", () => {
     });
 
     expect(container.textContent).toContain("ChatGPT login needs reconnecting.");
-    expect(container.textContent).toContain("login/token is stale");
+    expect(container.textContent).toContain("The saved AI login is stale");
     const action = container.querySelector<HTMLButtonElement>('[data-testid="chat-message-proxy-error-action"]');
-    expect(action?.textContent).toBe("Reconnect AI");
+    expect(action?.textContent).toBe("Open AI settings");
 
     action?.click();
 

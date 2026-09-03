@@ -128,6 +128,7 @@ export function MachinesPanel() {
     terminateRuntime,
     removeRuntime,
     startRuntime,
+    showDesktopRuntimeHelp,
     runtimeEnsureError,
     runtimeEnsureLimit,
     refreshRuntimeStatuses,
@@ -379,6 +380,7 @@ export function MachinesPanel() {
         onTerminateRuntime={(runtimeId) => void terminateRuntime(runtimeId)}
         onRemoveRuntime={(runtimeId) => void removeRuntime(runtimeId)}
         onStartRuntime={(runtimeId) => void startRuntime(runtimeId)}
+        onShowSelfHostHelp={showDesktopRuntimeHelp}
         onCopyTunnel={copyTunnelDetails}
         listClassName="mt-2 pr-1"
         emptyStateMessage="No machines are connected yet — send an agent a message and the shared cloud runtime boots on demand."
