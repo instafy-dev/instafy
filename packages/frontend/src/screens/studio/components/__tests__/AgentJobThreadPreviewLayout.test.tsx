@@ -1377,6 +1377,161 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(pills[0]?.getAttribute("aria-label")).toBe("Starting run");
   });
 
+  it("shows the step's hover card with header and excerpt when a rail chip gains focus", async () => {
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createProps({
+            isHybridCompactionActive: true,
+            visibleCompactEvents: [
+              {
+                id: "cmd",
+                kind: "command",
+                actorHandle: "@octo",
+                previewText: "pnpm --filter @instafy/frontend test:unit",
+                previewMono: true,
+              },
+            ],
+            latestCompactEventId: "cmd",
+            finalSummaryMessage: createLongSummaryMessage(),
+          })}
+        />,
+      );
+    });
+
+    const chip = container.querySelector<HTMLButtonElement>(".instafy-compact-event-pill");
+    expect(chip).not.toBeNull();
+    expect(chip?.tagName).toBe("BUTTON");
+    // The card replaces the native tooltip on chips that carry an excerpt.
+    expect(chip?.getAttribute("title")).toBeNull();
+
+    await act(async () => {
+      chip?.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    });
+
+    const card = container.querySelector('[data-testid="agent-thread-compact-event-preview"]');
+    expect(card).not.toBeNull();
+    expect(
+      card?.querySelector('[data-testid="agent-thread-compact-event-preview-header"]')?.textContent,
+    ).toBe("Command");
+    const body = card?.querySelector('[data-testid="agent-thread-compact-event-preview-body"]');
+    expect(body?.textContent).toBe("pnpm --filter @instafy/frontend test:unit");
+    expect(body?.querySelector(".font-mono")).not.toBeNull();
+
+    await act(async () => {
+      chip?.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    });
+    expect(container.querySelector('[data-testid="agent-thread-compact-event-preview"]')).toBeNull();
+  });
+
+  it("shows the hover card after the hover delay on mouse hover", async () => {
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        root.render(
+          <AgentJobThreadPreviewLayout
+            {...createProps({
+              isHybridCompactionActive: true,
+              visibleCompactEvents: [
+                {
+                  id: "search",
+                  kind: "search",
+                  actorHandle: "@octo",
+                  previewText: "react hover card patterns",
+                  previewMono: false,
+                },
+              ],
+              latestCompactEventId: "search",
+              finalSummaryMessage: createLongSummaryMessage(),
+            })}
+          />,
+        );
+      });
+
+      const chip = container.querySelector<HTMLButtonElement>(".instafy-compact-event-pill");
+      await act(async () => {
+        chip?.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+      });
+      expect(container.querySelector('[data-testid="agent-thread-compact-event-preview"]')).toBeNull();
+
+      await act(async () => {
+        vi.advanceTimersByTime(260);
+      });
+      const card = container.querySelector('[data-testid="agent-thread-compact-event-preview"]');
+      expect(card).not.toBeNull();
+      expect(
+        card?.querySelector('[data-testid="agent-thread-compact-event-preview-header"]')?.textContent,
+      ).toBe("Web search");
+      expect(
+        card?.querySelector('[data-testid="agent-thread-compact-event-preview-body"]')?.textContent,
+      ).toBe("react hover card patterns");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("suppresses the hover card and keeps the plain tooltip for chips without an excerpt", async () => {
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createProps({
+            isHybridCompactionActive: true,
+            visibleCompactEvents: [{ id: "bare", kind: "thinking", actorHandle: "@octo" }],
+            latestCompactEventId: "bare",
+            finalSummaryMessage: createLongSummaryMessage(),
+          })}
+        />,
+      );
+    });
+
+    const chip = container.querySelector<HTMLButtonElement>(".instafy-compact-event-pill");
+    expect(chip?.getAttribute("title")).toBe("Reasoning");
+
+    await act(async () => {
+      chip?.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    });
+    expect(container.querySelector('[data-testid="agent-thread-compact-event-preview"]')).toBeNull();
+  });
+
+  it("lists the elided steps' history labels on the overflow chip's card", async () => {
+    await act(async () => {
+      root.render(
+        <AgentJobThreadPreviewLayout
+          {...createProps({
+            isHybridCompactionActive: true,
+            overflowCompactCount: 3,
+            overflowCompactEvents: [
+              { id: "a", kind: "command", actorHandle: "@octo" },
+              { id: "b", kind: "search", actorHandle: "@octo" },
+              { id: "c", kind: "thinking", actorHandle: "@octo" },
+            ],
+            visibleCompactEvents: [{ id: "latest", kind: "tool", actorHandle: "@octo" }],
+            latestCompactEventId: "latest",
+            finalSummaryMessage: createLongSummaryMessage(),
+          })}
+        />,
+      );
+    });
+
+    const overflowChip = container.querySelector<HTMLButtonElement>(".instafy-compact-overflow-indicator");
+    expect(overflowChip).not.toBeNull();
+    expect(overflowChip?.tagName).toBe("BUTTON");
+
+    await act(async () => {
+      overflowChip?.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    });
+
+    const card = container.querySelector('[data-testid="agent-thread-compact-event-preview"]');
+    expect(card).not.toBeNull();
+    expect(
+      card?.querySelector('[data-testid="agent-thread-compact-event-preview-header"]')?.textContent,
+    ).toBe("3 earlier run updates");
+    const lines = Array.from(
+      card?.querySelectorAll('[data-testid="agent-thread-compact-event-preview-body"] .block.truncate') ?? [],
+    ).map((line) => line.textContent);
+    expect(lines).toEqual(["Command", "Web search", "Reasoning"]);
+  });
+
   it("collapses the raw failure text behind the quiet details toggle", async () => {
     await act(async () => {
       root.render(
@@ -1739,7 +1894,7 @@ describe("AgentJobThreadPreviewLayout", () => {
       );
     });
 
-    expect(container.querySelector('button[aria-label="Run updates"]')).toBeNull();
+    expect(container.querySelector('[data-testid="agent-thread-compact-rail"]')).toBeNull();
     expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')?.textContent).toBe(
       "Run failed",
     );
@@ -1766,7 +1921,7 @@ describe("AgentJobThreadPreviewLayout", () => {
 
     expect(container.textContent).toContain("Severity-ranked findings.");
     expect(container.querySelector('[data-testid="agent-thread-owner-badge"]')).toBeNull();
-    expect(container.querySelector('button[aria-label="Run updates"]')).toBeNull();
+    expect(container.querySelector('[data-testid="agent-thread-compact-rail"]')).toBeNull();
   });
 
   it("keeps short completed replies close to the prompt by hiding duplicate run chrome", async () => {
@@ -1787,7 +1942,7 @@ describe("AgentJobThreadPreviewLayout", () => {
     });
 
     expect(container.textContent).toContain("The codec-audit lane found it.");
-    expect(container.querySelector('button[aria-label="Run updates"]')).toBeNull();
+    expect(container.querySelector('[data-testid="agent-thread-compact-rail"]')).toBeNull();
     expect(container.querySelector('[data-testid="thread-spine"]')).toBeNull();
   });
 
@@ -1870,7 +2025,7 @@ describe("AgentJobThreadPreviewLayout", () => {
 
     expect(container.querySelector('[data-testid="agent-job-thread-preview"]')).toBeNull();
     expect(container.querySelector('[aria-label="Open run trace"]')).toBeNull();
-    expect(container.querySelector('[aria-label="Run updates"]')).toBeNull();
+    expect(container.querySelector('[data-testid="agent-thread-compact-rail"]')).toBeNull();
   });
 
   it("renders child thread branch rows only when run updates are expanded", async () => {
