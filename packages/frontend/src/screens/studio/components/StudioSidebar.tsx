@@ -1150,7 +1150,7 @@ export function StudioSidebar({
     try {
       const created = await controllerClient.organizations.create({ orgName });
       if (!created) {
-        showStatus("Couldn't create the team. Check the team limit and try again.", "error", 4500);
+        showStatus("Couldn't create the team. Nothing was changed — try again in a moment.", "error", 4500);
         return;
       }
       if (typeof window !== "undefined") {

@@ -264,13 +264,15 @@ export function AiCredentialsStatusBubble({
       case "checking":
         return null;
       case "needs_default":
-        return connectedCredentials.length > 0
-          ? "Choose one below — you can change it anytime."
-          : "Open AI Manager and set one as default.";
+        // effectiveState normalizes the zero-credential case to "missing", so
+        // this branch always has credentials to choose from.
+        return "Choose one below — you can change it anytime.";
       case "unavailable":
         return "Retry in a moment. Your AI credentials may still be fine.";
       case "error":
-        return "Try again, or manage AI connections in AI Manager.";
+        // The Retry button beside this is real; there is no link to AI Manager
+        // from here, so the sentence no longer sends the reader looking for one.
+        return "Try again — your AI connections are unchanged.";
       default:
         if (intent === "connect" && managedAi?.available && connectedCredentials.length === 0) {
           const burnLabel =

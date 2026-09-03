@@ -129,7 +129,7 @@ type CredentialTestFeedback = {
 function formatAiModeErrorDetail(raw: string | null | undefined): string {
   const normalized = typeof raw === "string" ? raw.replace(/\s+/g, " ").trim() : "";
   if (!normalized) {
-    return "AI runtime status is unavailable. Retry after the runtime reconnects.";
+    return "AI runtime status is unavailable right now.";
   }
 
   const lowered = normalized.toLowerCase();
@@ -138,7 +138,7 @@ function formatAiModeErrorDetail(raw: string | null | undefined): string {
     lowered.includes("connection refused") ||
     lowered.includes("/healthz")
   ) {
-    return "AI runtime is not reachable. Start or reconnect the runtime controller, then retry.";
+    return "Instafy can't reach the AI runtime right now.";
   }
 
   const compact = normalized.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
