@@ -21,9 +21,15 @@ import {
   extractImageAttachments,
   UserMessageBubble,
 } from "./ChatMessageEntries";
-import { AssistantSpeakerIdentityLabel } from "./AssistantSpeakerIdentityPill";
+import {
+  AssistantSpeakerIdentityLabel,
+  type SpeakerStatusMarker,
+} from "./AssistantSpeakerIdentityPill";
 import { normalizeAssistantHandleLabel } from "./assistantSpeakerIdentity";
+import { ChatMessageAvatar } from "./ChatMessageAvatar";
 import { extractAgentJobId } from "./chatMessagePresentation";
+import { resolveThreadRunStatusFromMessages } from "./threadPreviewHelpers";
+import { resolveSpineToneFromStatus } from "./ThreadSpine";
 import {
   HumanSpeakerIdentityLabel,
   resolveHumanChatIdentity,
@@ -56,6 +62,27 @@ function extractThreadMessages(message: ChatMessage): ChatMessage[] {
   const metadata = message.metadata && isRecord(message.metadata) ? message.metadata : null;
   const threadMessages = metadata?.threadMessages;
   return Array.isArray(threadMessages) ? (threadMessages as ChatMessage[]) : [];
+}
+
+// Terminal run state belongs to the entry header — beside author and
+// timestamp — not to a content-level chip (#145). Derived from the same
+// thread messages the preview layout reads, so header and body agree.
+function resolveThreadTerminalStatusMarker(message: ChatMessage): SpeakerStatusMarker | null {
+  if ((getMessageType(message) ?? "").trim().toLowerCase() !== "agent_job_thread") {
+    return null;
+  }
+  const runStatus = resolveThreadRunStatusFromMessages(extractThreadMessages(message));
+  if (runStatus.phase !== "completed") {
+    return null;
+  }
+  const tone = resolveSpineToneFromStatus(runStatus.status);
+  if (tone !== "danger" && tone !== "warning") {
+    return null;
+  }
+  return {
+    label: tone === "danger" ? "Run failed" : "Run needs attention",
+    tone,
+  };
 }
 
 function shouldShowSpeakerIdentityForMessage(message: ChatMessage): boolean {
@@ -363,6 +390,17 @@ export function ConversationMessageRows({
           assistantHandleForMessage === normalizedPreviousAssistantHandle;
         const suppressDesktopAssistantAvatar = suppressOuterAssistantAvatar || isRepeatedAssistantSpeaker;
         const usesAssistantAvatarRail = message.role === "assistant" && Boolean(workflowSpineKey);
+        const showSpeakerIdentity = shouldShowSpeakerIdentityForMessage(message);
+        const showRuntimeNoticeIdentity =
+          message.role === "assistant" &&
+          normalizedMessageType === "runtime_alert" &&
+          assistantHandleForMessage.length > 0;
+        const showInlineNarrowSpeakerIdentity =
+          showRuntimeNoticeIdentity ||
+          (showSpeakerIdentity && assistantHandleForMessage !== normalizedPreviousAssistantHandle);
+        const threadTerminalStatusMarker = showInlineNarrowSpeakerIdentity
+          ? resolveThreadTerminalStatusMarker(message)
+          : null;
         const showNotch = isGroupTail && (trimmedContent.length > 0 || hasFileChanges || hasImageAttachments);
         const hasOwnUserStartBoundaryRisk =
           trimmedContent.length >= 96 ||
@@ -395,6 +433,7 @@ export function ConversationMessageRows({
               showNotch={showNotch}
               showAgentIdentityAvatar={showAssistantIdentityAvatar}
               showAgentThreadHeaderIdentity={false}
+              runStatusShownInEntryHeader={threadTerminalStatusMarker !== null}
               defaultPlanExpanded={firstPlanMessageId !== null && message.id === firstPlanMessageId}
               onRequestActions={onRequestActions}
               onRequestActionsAtPoint={onRequestActionsAtPoint}
@@ -407,6 +446,10 @@ export function ConversationMessageRows({
             />
           );
 
+        // Every left-aligned row keeps the avatar gutter (face at group heads,
+        // spacer otherwise) so header, body, and chip rows all start on one
+        // shared alignment line — Slack-style (#177). Narrow layouts collapse
+        // the gutter and the identity label shows its own avatar instead.
         const avatar =
           message.role === "assistant"
             ? usesAssistantAvatarRail
@@ -418,24 +461,32 @@ export function ConversationMessageRows({
                       scrollReactive: messageAssistantAvatarMotion === "thinking",
                     })
                   : assistantAvatarPlaceholder
-              : null
-            : null;
+              : showInlineNarrowSpeakerIdentity
+                ? renderAssistantAvatar(messageMetadata, messageAgentIdentity, {
+                    motion: messageAssistantAvatarMotion,
+                    scrollReactive: messageAssistantAvatarMotion === "thinking",
+                  })
+                : assistantAvatarPlaceholder
+            : isLeftAligned
+              ? isGroupHead && humanIdentity
+                ? (
+                    <ChatMessageAvatar
+                      kind="human"
+                      seed={humanIdentity.avatarSeed}
+                      label={humanIdentity.label}
+                    />
+                  )
+                : assistantAvatarPlaceholder
+              : null;
         const humanSpeakerIdentity =
           message.role === "user" && !isOwnUserMessage && isGroupHead && humanIdentity ? (
             <HumanSpeakerIdentityLabel
               avatarSeed={humanIdentity.avatarSeed}
               label={humanIdentity.label}
               timestamp={message.timestamp}
+              avatarVisibility="narrow"
             />
           ) : null;
-        const showSpeakerIdentity = shouldShowSpeakerIdentityForMessage(message);
-        const showRuntimeNoticeIdentity =
-          message.role === "assistant" &&
-          normalizedMessageType === "runtime_alert" &&
-          assistantHandleForMessage.length > 0;
-        const showInlineNarrowSpeakerIdentity =
-          showRuntimeNoticeIdentity ||
-          (showSpeakerIdentity && assistantHandleForMessage !== normalizedPreviousAssistantHandle);
         const inlineSpeakerIdentity = showInlineNarrowSpeakerIdentity ? (
           <AssistantSpeakerIdentityLabel
             handle={assistantHandleForMessage}
@@ -443,6 +494,8 @@ export function ConversationMessageRows({
             metadata={messageMetadata}
             agentIdentity={messageAgentIdentity}
             motion={messageAssistantAvatarMotion}
+            avatarVisibility={usesAssistantAvatarRail ? "always" : "narrow"}
+            statusMarker={threadTerminalStatusMarker}
           />
         ) : null;
         const speakerIdentity =
@@ -469,7 +522,7 @@ export function ConversationMessageRows({
             testId="chat-message-row"
             align={isLeftAligned ? "left" : "right"}
             avatar={avatar}
-            collapseAvatarOnNarrow={usesAssistantAvatarRail}
+            collapseAvatarOnNarrow={avatar !== null}
             speakerIdentity={speakerIdentity}
             narrowSpeakerIdentity={narrowSpeakerIdentity}
             speakerMarker={speakerMarker}

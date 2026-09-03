@@ -10,8 +10,178 @@ describe("chatMessageDialect", () => {
   it("groups paragraphs and compact markdown-style lists into explicit blocks", () => {
     expect(parseMessageContentBlocks("Summary:\n- Inspect `TODO.md`\n- Run checks\n\n2. Second\n3. Third")).toEqual([
       { kind: "paragraph", line: "Summary:" },
-      { kind: "list", ordered: false, items: ["Inspect `TODO.md`", "Run checks"] },
-      { kind: "list", ordered: true, start: 2, items: ["Second", "Third"] },
+      {
+        kind: "list",
+        ordered: false,
+        items: [
+          { text: "Inspect `TODO.md`", depth: 0, ordered: false },
+          { text: "Run checks", depth: 0, ordered: false },
+        ],
+      },
+      {
+        kind: "list",
+        ordered: true,
+        start: 2,
+        items: [
+          { text: "Second", depth: 0, ordered: true },
+          { text: "Third", depth: 0, ordered: true },
+        ],
+      },
+    ]);
+  });
+
+  it("nests indented bulleted sublists inside an ordered list block", () => {
+    expect(
+      parseMessageContentBlocks(
+        "1. First step\n   - detail a\n   - detail b\n2. Second step",
+      ),
+    ).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [
+          { text: "First step", depth: 0, ordered: true },
+          { text: "detail a", depth: 1, ordered: false },
+          { text: "detail b", depth: 1, ordered: false },
+          { text: "Second step", depth: 0, ordered: true },
+        ],
+      },
+    ]);
+  });
+
+  it("nests unindented bullets that directly follow an ordered item as its sublist (#191)", () => {
+    // Verbatim shape of the real agent answer from the box-check thread.
+    expect(
+      parseMessageContentBlocks(
+        [
+          "1. Persistent-context skills starting with `autofix-`:",
+          "- `autofix-bugfix`: land a fix",
+          "- `autofix-triage`: sort reports",
+          "2. First bullet under `Identity, repos, ground rules` in `AGENTS.md`:",
+          "- keep the box rules",
+          "3. Done.",
+        ].join("\n"),
+      ),
+    ).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [
+          { text: "Persistent-context skills starting with `autofix-`:", depth: 0, ordered: true },
+          { text: "`autofix-bugfix`: land a fix", depth: 1, ordered: false },
+          { text: "`autofix-triage`: sort reports", depth: 1, ordered: false },
+          {
+            text: "First bullet under `Identity, repos, ground rules` in `AGENTS.md`:",
+            depth: 0,
+            ordered: true,
+          },
+          { text: "keep the box rules", depth: 1, ordered: false },
+          { text: "Done.", depth: 0, ordered: true },
+        ],
+      },
+    ]);
+  });
+
+  it("lets indented bullets nest deeper under a flat sublist bullet", () => {
+    expect(parseMessageContentBlocks("1. Step\n- detail\n  - finer detail\n- detail two\n2. Next")).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [
+          { text: "Step", depth: 0, ordered: true },
+          { text: "detail", depth: 1, ordered: false },
+          { text: "finer detail", depth: 2, ordered: false },
+          { text: "detail two", depth: 1, ordered: false },
+          { text: "Next", depth: 0, ordered: true },
+        ],
+      },
+    ]);
+  });
+
+  it("carries the flat sublist across one blank line only when the ordered item ends with a colon", () => {
+    expect(parseMessageContentBlocks("1. Skills:\n\n- alpha\n- beta\n\n2. Next")).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [
+          { text: "Skills:", depth: 0, ordered: true },
+          { text: "alpha", depth: 1, ordered: false },
+          { text: "beta", depth: 1, ordered: false },
+        ],
+      },
+      {
+        kind: "list",
+        ordered: true,
+        start: 2,
+        items: [{ text: "Next", depth: 0, ordered: true }],
+      },
+    ]);
+  });
+
+  it("keeps bullets after a blank line as a sibling block when the ordered item has no trailing colon", () => {
+    // Pins the boundary of the #191 leniency rule.
+    expect(parseMessageContentBlocks("1. First\n\n- flat bullet")).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [{ text: "First", depth: 0, ordered: true }],
+      },
+      {
+        kind: "list",
+        ordered: false,
+        items: [{ text: "flat bullet", depth: 0, ordered: false }],
+      },
+    ]);
+  });
+
+  it("does not apply the flat-sublist leniency to ordered items after bullets", () => {
+    expect(parseMessageContentBlocks("- topic:\n1. step")).toEqual([
+      {
+        kind: "list",
+        ordered: false,
+        items: [{ text: "topic:", depth: 0, ordered: false }],
+      },
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [{ text: "step", depth: 0, ordered: true }],
+      },
+    ]);
+  });
+
+  it("still flushes a colon-terminated ordered item across a blank line before non-list content", () => {
+    expect(parseMessageContentBlocks("1. Command output:\n\n```text\nok\n```")).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [{ text: "Command output:", depth: 0, ordered: true }],
+      },
+      { kind: "code", language: "text", lines: ["ok"] },
+    ]);
+  });
+
+  it("returns to the parent level when a nested sublist dedents", () => {
+    expect(
+      parseMessageContentBlocks("- top\n  - nested\n    - deeper\n  - nested again\n- top again"),
+    ).toEqual([
+      {
+        kind: "list",
+        ordered: false,
+        items: [
+          { text: "top", depth: 0, ordered: false },
+          { text: "nested", depth: 1, ordered: false },
+          { text: "deeper", depth: 2, ordered: false },
+          { text: "nested again", depth: 1, ordered: false },
+          { text: "top again", depth: 0, ordered: false },
+        ],
+      },
     ]);
   });
 
@@ -26,16 +196,26 @@ describe("chatMessageDialect", () => {
     expect(
       parseMessageContentBlocks("3) Command output:\n```text\nexample-user\nd3fdb3f\n```\n\nBOX OK"),
     ).toEqual([
-      { kind: "list", ordered: true, start: 3, items: ["Command output:"] },
-      { kind: "code", language: "text", lines: ["example-user", "d3fdb3f"] },
+      {
+        kind: "list",
+        ordered: true,
+        start: 3,
+        items: [{ text: "Command output:", depth: 0, ordered: true }],
+      },
+      { kind: "code", language: "text", lines: ["example-user", "d3fdb3f"], inListItem: true },
       { kind: "paragraph", line: "BOX OK" },
     ]);
   });
 
   it("opens a fenced code block after an ordered-list item with dot delimiters", () => {
     expect(parseMessageContentBlocks("1. Command output:\n```sh\npnpm test\n```")).toEqual([
-      { kind: "list", ordered: true, start: 1, items: ["Command output:"] },
-      { kind: "code", language: "sh", lines: ["pnpm test"] },
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [{ text: "Command output:", depth: 0, ordered: true }],
+      },
+      { kind: "code", language: "sh", lines: ["pnpm test"], inListItem: true },
     ]);
   });
 
@@ -53,9 +233,19 @@ describe("chatMessageDialect", () => {
     expect(
       parseMessageContentBlocks("1. Run the check:\n   ```sh\n   pnpm test\n   ```\n2. Ship it"),
     ).toEqual([
-      { kind: "list", ordered: true, start: 1, items: ["Run the check:"] },
-      { kind: "code", language: "sh", lines: ["pnpm test"] },
-      { kind: "list", ordered: true, start: 2, items: ["Ship it"] },
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [{ text: "Run the check:", depth: 0, ordered: true }],
+      },
+      { kind: "code", language: "sh", lines: ["pnpm test"], inListItem: true },
+      {
+        kind: "list",
+        ordered: true,
+        start: 2,
+        items: [{ text: "Ship it", depth: 0, ordered: true }],
+      },
     ]);
   });
 

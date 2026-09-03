@@ -1,6 +1,7 @@
 import type { ChatMessage } from "../types";
 import { summarizeCommandOutputForPreview } from "./CommandOutputBlock";
 import { extractMessageDetails } from "./chatMessageMetadata";
+import { stripShellWrapperFromCommand } from "./threadPreviewHelpers";
 
 const URL_TRAILING_PUNCTUATION_REGEX = /[)\]}>.,!?;:'"`]+$/;
 const URL_IN_TEXT_REGEX = /https?:\/\/[^\s<>"'`]+/gi;
@@ -121,9 +122,29 @@ export function summarizeCommandInvocationForPreview(value: string, maxLength = 
   if (!normalized) {
     return "";
   }
-  const bashWrapped = normalized.match(/^bash\s+-lc\s+(['"])([\s\S]*)\1$/i);
-  const command = (bashWrapped?.[2] ?? normalized).trim();
+  const command = stripShellWrapperFromCommand(normalized);
   return truncate(command, maxLength);
+}
+
+/**
+ * The result half of a command preview — the best URL in the output, else the
+ * output's last meaningful line — without the command itself. Empty when the
+ * output has nothing worth summarizing.
+ */
+export function summarizeCommandExecutionResultForPreview(
+  output: string | null | undefined,
+  maxLength = 160,
+): string {
+  const outputText = typeof output === "string" ? output : "";
+  if (!outputText) {
+    return "";
+  }
+  const url = extractBestUrlFromText(outputText);
+  if (url) {
+    return url;
+  }
+  const outputPreview = summarizeCommandOutputForPreview(outputText, maxLength);
+  return outputPreview && !looksLikeTrivialCommandOutputPreview(outputPreview) ? outputPreview : "";
 }
 
 function unwrapCommandInvocation(value: string): string {
