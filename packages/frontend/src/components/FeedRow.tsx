@@ -101,13 +101,13 @@ export function FeedRow({
       }
       start={
         icon ? (
+          // iconClassName replaces the shell's size and radius (a later
+          // same-property utility does not reliably win in the build).
           <span
             className={[
-              "inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl",
-              iconClassName,
-            ]
-              .filter(Boolean)
-              .join(" ")}
+              "inline-flex shrink-0 items-center justify-center",
+              iconClassName ?? "h-9 w-9 rounded-2xl",
+            ].join(" ")}
             aria-hidden="true"
           >
             {icon}

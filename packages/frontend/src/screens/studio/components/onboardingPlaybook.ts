@@ -175,29 +175,3 @@ export const ONBOARDING_PATHS: OnboardingPath[] = [
   },
 ];
 
-function findAction(actionId: string): OnboardingAction {
-  for (const path of ONBOARDING_PATHS) {
-    const action = path.actions.find((entry) => entry.id === actionId);
-    if (action) {
-      return action;
-    }
-  }
-  throw new Error(`Unknown onboarding action: ${actionId}`);
-}
-
-function findPromptAction(actionId: string): PromptOnboardingAction {
-  const action = findAction(actionId);
-  if (action.kind !== "prompt" || !action.prompt) {
-    throw new Error(`Onboarding action ${actionId} is not a prompt starter.`);
-  }
-  return { ...action, kind: "prompt", prompt: action.prompt };
-}
-
-export const HOME_STARTERS: PromptOnboardingAction[] = [
-  "build-with-code",
-  "analyze-company",
-  "explore-science-topic",
-  "connect-github",
-  "track-market-news",
-  "build-landing-page",
-].map(findPromptAction);

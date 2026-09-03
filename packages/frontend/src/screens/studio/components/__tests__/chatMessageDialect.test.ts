@@ -310,6 +310,63 @@ describe("chatMessageDialect", () => {
     expect(tokens[13]).toEqual({ type: "assistant-mention", value: "@octo" });
   });
 
+  it("tokenizes GitHub PR and issue URLs into github-reference tokens without swallowing trailing punctuation", () => {
+    expect(
+      tokenizeChatLine("Draft PR https://github.com/instafy-dev/instafy/pull/551. Rollout tracked in https://github.com/instafy-dev/instafy/issues/173)."),
+    ).toEqual([
+      { type: "text", value: "Draft PR " },
+      {
+        type: "github-reference",
+        value: {
+          url: "https://github.com/instafy-dev/instafy/pull/551",
+          owner: "instafy-dev",
+          repo: "instafy",
+          number: 551,
+          kind: "pull",
+        },
+      },
+      { type: "text", value: ". Rollout tracked in " },
+      {
+        type: "github-reference",
+        value: {
+          url: "https://github.com/instafy-dev/instafy/issues/173",
+          owner: "instafy-dev",
+          repo: "instafy",
+          number: 173,
+          kind: "issue",
+        },
+      },
+      { type: "text", value: ")." },
+    ]);
+  });
+
+  it("keeps non-GitHub URLs and GitHub URLs of other shapes as plain links", () => {
+    expect(tokenizeChatLine("See https://example.com/pull/5 for details.")).toEqual([
+      { type: "text", value: "See " },
+      { type: "link", value: { url: "https://example.com/pull/5", label: "https://example.com/pull/5" } },
+      { type: "text", value: " for details." },
+    ]);
+    expect(tokenizeChatLine("Diff at https://github.com/instafy-dev/instafy/pull/551/files now.")).toEqual([
+      { type: "text", value: "Diff at " },
+      {
+        type: "link",
+        value: {
+          url: "https://github.com/instafy-dev/instafy/pull/551/files",
+          label: "https://github.com/instafy-dev/instafy/pull/551/files",
+        },
+      },
+      { type: "text", value: " now." },
+    ]);
+    expect(tokenizeChatLine("Repo https://github.com/instafy-dev/instafy here.")).toEqual([
+      { type: "text", value: "Repo " },
+      {
+        type: "link",
+        value: { url: "https://github.com/instafy-dev/instafy", label: "https://github.com/instafy-dev/instafy" },
+      },
+      { type: "text", value: " here." },
+    ]);
+  });
+
   it("keeps markdown-like markers literal inside inline code", () => {
     expect(tokenizeChatLine("Keep `**literal** @octo docs/README.md:12 [docs](https://example.com)` intact.")).toEqual([
       { type: "text", value: "Keep " },

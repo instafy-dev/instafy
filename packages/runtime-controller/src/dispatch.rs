@@ -794,7 +794,7 @@ pub(crate) async fn process_dispatch_prompt(
         };
     let project_runtime_preference = if let Some(preference) = selected_runtime_preference {
         let accessible = if let Some(runtime_id) = preference.runtime_id {
-            workspace::fetch_runtime_candidate(&state.pool, &project.id, &runtime_id)
+            workspace::fetch_runtime_candidate_with_client(&*connection, &project.id, &runtime_id)
                 .await?
                 .is_some_and(|candidate| {
                     runtime::self_hosted_runtime_is_accessible_to_user(
@@ -2002,7 +2002,9 @@ pub(crate) async fn process_dispatch_prompt(
     let mut runtime_alert_detail: Option<String> = None;
 
     if let Some(record) = runtime_record.as_ref() {
-        match workspace::fetch_runtime_candidate(&state.pool, &project.id, &record.id).await {
+        match workspace::fetch_runtime_candidate_with_client(&*connection, &project.id, &record.id)
+            .await
+        {
             Ok(candidate_opt) => {
                 let status_viable = matches!(record.status.as_str(), "ready" | "running");
                 let candidate_recent_strict = candidate_opt
@@ -2150,14 +2152,20 @@ pub(crate) async fn process_dispatch_prompt(
                             detail.contains("lastSeen=") && !detail.contains("lastSeen=unknown")
                         })
                         .unwrap_or(false);
-                match runtime::ensure_runtime_for_dispatch_reconnect(
+                // Reconnect owns its database lifecycle and may wait on a
+                // provider. Do not pin the dispatch connection while it runs.
+                drop(connection);
+                let reconnect_result = runtime::ensure_runtime_for_dispatch_reconnect(
                     state,
                     record,
                     "dispatch_runtime_alert",
                     force_new_lease,
                 )
-                .await
-                {
+                .await;
+                connection = state.pool.get().await.map_err(|error| {
+                    internal_error(format!("failed to get connection: {error}"))
+                })?;
+                match reconnect_result {
                     Ok(response) => {
                         reconnect_metadata = Some(json!({
                             "status": "requested",
