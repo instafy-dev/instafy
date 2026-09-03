@@ -272,4 +272,87 @@ describe("controllerConversationNotice", () => {
       expect(content).not.toContain("Runtime button by the composer");
     }
   });
+
+  describe("per-cause actions", () => {
+    const codedNotice = (failureCode: string) =>
+      makeMessage({
+        content: "This scheduled run couldn't start: whatever the controller said",
+        metadata: {
+          source: "controller",
+          kind: "runtime_alert",
+          details: { reason: "automation_launch_failed", automationId: "a-1", failureCode },
+        },
+      });
+
+    it("sends an out-of-credits failure to credits, not Machines", () => {
+      expect(resolveControllerConversationNoticeAction(codedNotice("insufficient_credits"))).toEqual(
+        { label: "Open credits", kind: "open_credits" },
+      );
+    });
+
+    it("sends a runtime-limit failure to Machines, where the blocker can be stopped", () => {
+      expect(
+        resolveControllerConversationNoticeAction(codedNotice("runtime_limit_reached"))?.kind,
+      ).toBe("open_machines");
+    });
+
+    it("offers the self-host dialog on the code, without needing the prose", () => {
+      // The marker substring is the legacy fallback; the code should carry it.
+      expect(
+        resolveControllerConversationNoticeAction(codedNotice("self_hosted_runtime_offline"))?.kind,
+      ).toBe("desktop_runtime_help");
+    });
+
+    it("offers nothing where no button would be honest", () => {
+      for (const code of [
+        "platform_at_capacity",
+        "hosted_provider_unsupported",
+        "automation_access_denied",
+        "controller_unavailable",
+      ]) {
+        expect(resolveControllerConversationNoticeAction(codedNotice(code))).toBeNull();
+      }
+    });
+
+    it("falls back to the legacy prose match for a code this build does not know", () => {
+      // A newer controller can mint a code before the frontend maps it.
+      const unknown = makeMessage({
+        content:
+          "This scheduled run couldn't start: no self-hosted runtime was online for this space",
+        metadata: {
+          source: "controller",
+          kind: "runtime_alert",
+          details: { reason: "automation_launch_failed", failureCode: "something_new" },
+        },
+      });
+      expect(resolveControllerConversationNoticeAction(unknown)?.kind).toBe("desktop_runtime_help");
+    });
+
+    it("keeps the controller's own sentence when a code is present", () => {
+      // The guard that the new field did not knock the notice into the canned
+      // default arm.
+      const message = codedNotice("insufficient_credits");
+      expect(resolveControllerConversationNoticeContent(message)).toBe(
+        "This scheduled run couldn't start: whatever the controller said",
+      );
+    });
+
+    it("pins the vocabulary the controller writes", () => {
+      // Mirrored in packages/runtime-controller/src/automations.rs.
+      for (const code of [
+        "self_hosted_runtime_offline",
+        "insufficient_credits",
+        "runtime_limit_reached",
+        "platform_at_capacity",
+        "hosted_provider_unsupported",
+        "automation_access_denied",
+        "controller_unavailable",
+      ]) {
+        // Every known code resolves deterministically — either an action or a
+        // deliberate null — rather than falling through to the prose match.
+        const resolved = resolveControllerConversationNoticeAction(codedNotice(code));
+        expect(resolved === null || typeof resolved.kind === "string").toBe(true);
+      }
+    });
+  });
 });

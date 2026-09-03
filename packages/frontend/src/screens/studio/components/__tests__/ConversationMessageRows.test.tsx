@@ -145,7 +145,11 @@ describe("ConversationMessageRows", () => {
 
   async function renderWithNoticeActions(
     messages: ChatMessage[],
-    actions: { onOpenMachines: () => void; onShowSelfHostHelp: () => void },
+    actions: {
+      onOpenMachines: () => void;
+      onShowSelfHostHelp: () => void;
+      onOpenCredits: () => void;
+    },
   ) {
     await act(async () => {
       root.render(
@@ -194,7 +198,11 @@ describe("ConversationMessageRows", () => {
       },
     });
 
-    await renderWithNoticeActions([notice], { onOpenMachines, onShowSelfHostHelp });
+    await renderWithNoticeActions([notice], {
+      onOpenMachines,
+      onShowSelfHostHelp,
+      onOpenCredits: vi.fn(),
+    });
 
     const action = container.querySelector<HTMLButtonElement>(
       '[data-testid="chat-controller-notice-action"]',
@@ -205,6 +213,42 @@ describe("ConversationMessageRows", () => {
       action?.click();
     });
     expect(onShowSelfHostHelp).toHaveBeenCalledTimes(1);
+    expect(onOpenMachines).not.toHaveBeenCalled();
+  });
+
+  it("routes an out-of-credits failure to credits rather than Machines", async () => {
+    const onOpenMachines = vi.fn();
+    const onOpenCredits = vi.fn();
+    const notice = createMessage({
+      id: "automation-out-of-credits",
+      role: "assistant",
+      authorId: null,
+      content: "This scheduled run couldn't start: this team is out of credits for today",
+      metadata: {
+        source: "controller",
+        kind: "runtime_alert",
+        details: {
+          reason: "automation_launch_failed",
+          automationId: "automation-1",
+          failureCode: "insufficient_credits",
+        },
+      },
+    });
+
+    await renderWithNoticeActions([notice], {
+      onOpenMachines,
+      onShowSelfHostHelp: vi.fn(),
+      onOpenCredits,
+    });
+
+    const action = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-controller-notice-action"]',
+    );
+    expect(action?.textContent).toContain("Open credits");
+    await act(async () => {
+      action?.click();
+    });
+    expect(onOpenCredits).toHaveBeenCalledTimes(1);
     expect(onOpenMachines).not.toHaveBeenCalled();
   });
 

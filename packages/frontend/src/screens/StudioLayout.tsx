@@ -290,6 +290,10 @@ function StudioLayoutInner() {
         openPanelTab("machines", { activate: true });
       },
       onShowSelfHostHelp: showDesktopRuntimeHelp,
+      onOpenCredits: () => {
+        requestHistoryPush();
+        openPanelTab("credits", { activate: true });
+      },
     }),
     [openPanelTab, requestHistoryPush, showDesktopRuntimeHelp],
   );
