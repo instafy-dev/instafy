@@ -550,4 +550,23 @@ describe("ChatFileChangeList", () => {
     expect(label.endsWith(".tsx")).toBe(true);
     expect(label.length).toBeLessThanOrEqual(28);
   });
+
+  it("never carries the chat message prose measure cap (#207)", async () => {
+    // The file-change list wants the full bubble width, unlike prose
+    // paragraphs and list items, which are capped to a ~70ch measure inside
+    // ChatMessageContent. Nothing here should ever pick up that cap.
+    const files = [fileChange("src/one.ts"), fileChange("src/two.ts")].map((entry) => ({
+      ...entry,
+      changeType: "changed" as const,
+    }));
+
+    await act(async () => {
+      root.render(createElement(ChatFileChangeList, { files, projectId: null }));
+    });
+
+    const summary = container.querySelector('[data-testid="chat-file-change-summary"]');
+    expect(summary).not.toBeNull();
+    expect(container.querySelector(".max-w-\\[70ch\\]")).toBeNull();
+    expect(container.innerHTML).not.toContain("max-w-[70ch]");
+  });
 });
