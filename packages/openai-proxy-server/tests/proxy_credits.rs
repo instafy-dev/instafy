@@ -406,10 +406,7 @@ async fn proxy_required_controller_auth_fails_closed_without_integration() -> Re
 #[serial]
 async fn controller_integrated_proxy_fails_startup_without_credential_lease_token() -> Result<()> {
     let env_guard = EnvGuard::set(&[
-        (
-            "CONTROLLER_BASE_URL",
-            "http://127.0.0.1:1".to_string(),
-        ),
+        ("CONTROLLER_BASE_URL", "http://127.0.0.1:1".to_string()),
         ("PROXY_CONTROLLER_BASE_URL", "".to_string()),
         ("CONTROLLER_INTERNAL_TOKEN", "controller-secret".to_string()),
         ("PROXY_CREDENTIAL_LEASE_TOKEN", "".to_string()),
@@ -430,11 +427,7 @@ async fn controller_integrated_proxy_fails_startup_without_credential_lease_toke
     )
     .await
     .expect_err("partial controller integration must fail before binding");
-    assert!(
-        error
-            .to_string()
-            .contains("PROXY_CREDENTIAL_LEASE_TOKEN")
-    );
+    assert!(error.to_string().contains("PROXY_CREDENTIAL_LEASE_TOKEN"));
 
     drop(env_guard);
     Ok(())
