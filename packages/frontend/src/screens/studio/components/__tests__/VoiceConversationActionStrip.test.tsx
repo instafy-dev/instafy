@@ -66,7 +66,7 @@ describe("VoiceConversationActionStrip", () => {
           onVoicePressStart={onVoicePressStart}
           onVoicePressEnd={onVoicePressEnd}
           primaryActionClassName="primary"
-          outlinedActionClassName="outline"
+          ghostActionClassName="ghost"
           actionIconClassName="icon"
         />,
       );
@@ -125,7 +125,7 @@ describe("VoiceConversationActionStrip", () => {
           onVoicePressEnd={onVoicePressEnd}
           onVoiceTap={vi.fn()}
           primaryActionClassName="primary"
-          outlinedActionClassName="outline"
+          ghostActionClassName="ghost"
           actionIconClassName="icon"
         />,
       );
@@ -172,7 +172,7 @@ describe("VoiceConversationActionStrip", () => {
           onVoicePressEnd={onVoicePressEnd}
           onVoiceTap={vi.fn()}
           primaryActionClassName="primary"
-          outlinedActionClassName="outline"
+          ghostActionClassName="ghost"
           actionIconClassName="icon"
         />,
       );
@@ -216,7 +216,7 @@ describe("VoiceConversationActionStrip", () => {
           onVoicePressEnd={onVoicePressEnd}
           onVoiceTap={onVoiceTap}
           primaryActionClassName="primary"
-          outlinedActionClassName="outline"
+          ghostActionClassName="ghost"
           actionIconClassName="icon"
         />,
       );
@@ -262,7 +262,7 @@ describe("VoiceConversationActionStrip", () => {
           onVoicePressEnd={onVoicePressEnd}
           onVoiceTap={onVoiceTap}
           primaryActionClassName="primary"
-          outlinedActionClassName="outline"
+          ghostActionClassName="ghost"
           actionIconClassName="icon"
         />,
       );
@@ -306,7 +306,7 @@ describe("VoiceConversationActionStrip", () => {
           onVoicePressEnd={() => {}}
           onVoiceTap={onVoiceTap}
           primaryActionClassName="primary"
-          outlinedActionClassName="outline"
+          ghostActionClassName="ghost"
           actionIconClassName="icon"
         />,
       );
