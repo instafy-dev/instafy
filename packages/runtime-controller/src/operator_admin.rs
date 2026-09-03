@@ -862,8 +862,7 @@ mod operator_metrics_tests {
     fn maps_every_count_to_its_own_field() {
         // A transposed active7d/active30d is invisible to a test that seeds
         // symmetric data, so each input here is distinct.
-        let summary =
-            build_operator_metrics_summary(chrono::Utc::now(), sample_counts());
+        let summary = build_operator_metrics_summary(chrono::Utc::now(), sample_counts());
         let payload = serde_json::to_value(&summary).expect("summary serialises");
         let mut seen: Vec<i64> = Vec::new();
         for section in ["people", "bugs", "projects"] {
