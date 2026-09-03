@@ -1041,6 +1041,9 @@ async fn finalize_automation_attempt(
     // the scheduled conversation (like a runtime alert), and a failed-run row
     // in the owner's feed. Before this the only trace was a side field on the
     // automation, visible only in that space's Automations panel.
+    // Published only after the commit below: a subscriber that refetches on the
+    // event must not be able to beat the row into existence.
+    let mut notice_to_publish: Option<crate::conversations::ConversationMessageRow> = None;
     if let (Some(error_text), Some(conversation_id)) =
         (stored_error.as_deref(), record.conversation_id)
     {
@@ -1055,7 +1058,7 @@ async fn finalize_automation_attempt(
             "messageType": "runtime_alert",
             "details": build_launch_failure_details(record, failure_code.as_deref()),
         });
-        if let Err((_, Json(api_error))) = crate::agent::record_agent_conversation_message(
+        match crate::agent::record_agent_conversation_message(
             &transaction,
             &record.project_id,
             &conversation_id,
@@ -1067,11 +1070,14 @@ async fn finalize_automation_attempt(
         )
         .await
         {
-            tracing::warn!(
-                automation_id = %automation_id,
-                error = %api_error.message,
-                "failed to record automation launch failure notice"
-            );
+            Ok(message_row) => notice_to_publish = Some(message_row),
+            Err((_, Json(api_error))) => {
+                tracing::warn!(
+                    automation_id = %automation_id,
+                    error = %api_error.message,
+                    "failed to record automation launch failure notice"
+                );
+            }
         }
         crate::activity::record_launch_failure(
             &transaction,
@@ -1086,6 +1092,14 @@ async fn finalize_automation_attempt(
     }
 
     transaction.commit().await?;
+
+    // Every other producer of a controller notice publishes; this one never
+    // did, so a scheduled run that could not start stayed invisible until the
+    // next history fetch. Deliberately no push notification: worth seeing when
+    // the thread is open, not worth waking someone for.
+    if let Some(message_row) = notice_to_publish {
+        crate::conversations::publish_conversation_message_event(&state.events, &message_row);
+    }
     Ok(())
 }
 
