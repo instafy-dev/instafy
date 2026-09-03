@@ -30,8 +30,8 @@ import {
   parseMessageContentBlocks,
   parseTeamFlowLine,
   tokenizeChatLine,
-  type ConversationReferenceDescriptor,
   type ChatLineTokenChunk,
+  type ConversationReferenceDescriptor,
   type MessageListItem,
   type WorkspaceFileReferenceDescriptor,
 } from "./chatMessageDialect";
@@ -1638,7 +1638,11 @@ export function MessageContent({
       const rendered = renderInlineToken(token, tokenIndex, keyPrefix);
       const nextToken = tokens[tokenIndex + 1];
       const gluedPunctuation =
-        (token.type === "inline-code" || token.type === "workspace-file") && nextToken?.type === "text"
+        (token.type === "inline-code" ||
+          token.type === "workspace-file" ||
+          token.type === "conversation-reference" ||
+          token.type === "github-reference") &&
+        nextToken?.type === "text"
           ? (nextToken.value.match(CHIP_TRAILING_PUNCTUATION_REGEX)?.[0] ?? "")
           : "";
       if (!gluedPunctuation || nextToken?.type !== "text") {

@@ -36,6 +36,7 @@ import {
   coerceThreadMessages,
   isGenericProgressLabel,
   looksLikeTerminalProgressLabel,
+  resolveThreadCompactEventPreview,
   resolveThreadCompactUpdateKind,
   resolveThreadRunStatusFromMessages,
   shouldKeepThreadUpdateInline,
@@ -565,7 +566,16 @@ export function useAgentJobThreadPreviewState({
       }
       const kind = resolveThreadCompactUpdateKind(update);
       if (kind) {
-        compactEvents.push({ id: update.id, kind, actorHandle: extractMessageAgentHandle(update) });
+        // Enriched at assembly time with a short excerpt so the chip's hover
+        // card can show what the step did without resolving the message again.
+        const eventPreview = resolveThreadCompactEventPreview(update, kind);
+        compactEvents.push({
+          id: update.id,
+          kind,
+          actorHandle: extractMessageAgentHandle(update),
+          previewText: eventPreview?.text ?? null,
+          previewMono: eventPreview?.mono ?? false,
+        });
         continue;
       }
       if (visibleUpdateIds.has(update.id) && !inlineUpdateIds.has(update.id)) {
@@ -577,10 +587,14 @@ export function useAgentJobThreadPreviewState({
     const safeIconSlots = Math.max(1, THREAD_COMPACT_EVENT_ICON_CAP);
     let overflowCount = 0;
     let nextVisibleCompactEvents: ThreadCompactEvent[] = compactEvents;
+    let nextOverflowCompactEvents: ThreadCompactEvent[] = [];
     if (compactEvents.length > safeIconSlots) {
       const tailSlots = Math.max(1, safeIconSlots - 1);
       overflowCount = compactEvents.length - tailSlots;
       nextVisibleCompactEvents = compactEvents.slice(-tailSlots);
+      // The elided head of the rail: the "+N" chip's hover card lists these
+      // steps' history labels so the overflow is inspectable without expanding.
+      nextOverflowCompactEvents = compactEvents.slice(0, overflowCount);
     } else {
       nextVisibleCompactEvents = compactEvents.slice(-safeIconSlots);
     }
@@ -599,6 +613,7 @@ export function useAgentJobThreadPreviewState({
       inlineUpdates,
       visibleCompactEvents: nextVisibleCompactEvents,
       overflowCompactCount: overflowCount,
+      overflowCompactEvents: nextOverflowCompactEvents,
     };
   }, [
     finalSummaryMessage?.id,
@@ -613,6 +628,7 @@ export function useAgentJobThreadPreviewState({
     : (hybridThreadCompaction?.inlineUpdates ?? visibleUpdates);
   const visibleCompactEvents = hybridThreadCompaction?.visibleCompactEvents ?? [];
   const overflowCompactCount = hybridThreadCompaction?.overflowCompactCount ?? 0;
+  const overflowCompactEvents = hybridThreadCompaction?.overflowCompactEvents ?? [];
   const latestCompactEvent = visibleCompactEvents[visibleCompactEvents.length - 1] ?? null;
   const showLiveCommandOutput = showLiveCommandOutputRaw && !isHybridCompactionActive;
   const showCompactIconRail =
@@ -885,6 +901,7 @@ export function useAgentJobThreadPreviewState({
     isThreadPreviewExpanded,
     visibleCompactEvents,
     overflowCompactCount,
+    overflowCompactEvents,
     latestCompactEventId: latestCompactEvent?.id ?? null,
     showCompactRailWaitingSpinner,
     isThreadUnresolved,
