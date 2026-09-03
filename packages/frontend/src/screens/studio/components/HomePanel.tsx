@@ -58,6 +58,9 @@ const RECENT_LIMIT = 24;
 const NEEDS_PREVIEW_LIMIT = 8;
 // The ledger is polled at the inbox's cadence until the live stream lands.
 const ACTIVITY_POLL_MS = 20_000;
+// A poll that finds more than one page of new activity bridges the gap, but
+// never walks history forever on a device that has been closed for weeks.
+const CATCH_UP_MAX_PAGES = 3;
 
 // Bare run counters ("3") leak in as previews; they say nothing on a row.
 function usablePreview(value: string | null | undefined): string | null {
@@ -345,15 +348,27 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
     void loadFirstPage();
     const timer = window.setInterval(() => {
       void (async () => {
-        // Catch up from the newest row we hold; the server overlaps a little
-        // and rows are deduped by id.
+        // Catch up from the newest row we hold. Pages come back newest-first,
+        // so the first one always carries the new activity; if it says there
+        // is more, walk back a bounded number of pages to close the gap
+        // rather than leaving a hole in Recent. Rows dedupe by id.
         const since = newestActivityId(activityItemsRef.current);
-        const result = await controllerClient.activity.list(since ? { since, limit: 200 } : { limit: RECENT_LIMIT * 2 });
+        let result = await controllerClient.activity.list(
+          since ? { since, limit: 200 } : { limit: RECENT_LIMIT * 2 },
+        );
         if (cancelled || !result.success) return;
         const items = result.items ?? [];
         if (items.length === 0) return;
         setActivityItems((current) => mergeActivity(current, items));
         advanceSeen(items);
+        for (let page = 0; page < CATCH_UP_MAX_PAGES; page += 1) {
+          if (!result.hasMore || !result.nextBefore) return;
+          result = await controllerClient.activity.list({ before: result.nextBefore, limit: 200 });
+          if (cancelled || !result.success) return;
+          const older = result.items ?? [];
+          if (older.length === 0) return;
+          setActivityItems((current) => mergeActivity(current, older));
+        }
       })();
     }, ACTIVITY_POLL_MS);
     return () => {
