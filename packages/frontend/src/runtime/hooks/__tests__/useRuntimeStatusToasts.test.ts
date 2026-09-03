@@ -46,6 +46,7 @@ type HarnessProps = {
   runtimeEntry?: ControllerRuntimeStatusEntry | null;
   selectedLocalRuntimeId?: string | null;
   showStatus: ShowStatusFn;
+  onShowSelfHostHelp?: () => void;
 };
 
 function RuntimeStatusToastHarness(props: HarnessProps) {
@@ -56,6 +57,7 @@ function RuntimeStatusToastHarness(props: HarnessProps) {
     selectedLocalRuntimeId: props.selectedLocalRuntimeId,
     tunnel: null,
     showStatus: props.showStatus,
+    onShowSelfHostHelp: props.onShowSelfHostHelp,
   });
   return null;
 }
@@ -208,6 +210,30 @@ describe("local runtime status toasts", () => {
     expect(showStatus).not.toHaveBeenCalled();
   });
 
+  it("hands the offline toast a way to bring the machine back", async () => {
+    // A self-hosted machine cannot be started from the browser, so the toast's
+    // "Reconnect it" resolves to the self-host instructions rather than a start.
+    const onShowSelfHostHelp = vi.fn();
+    await renderHarness({ onShowSelfHostHelp });
+    await renderHarness({
+      onShowSelfHostHelp,
+      workspace: createWorkspace({ runtimeId: "runtime-local-1", status: "offline" }),
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(LOCAL_RUNTIME_OFFLINE_TOAST_DEBOUNCE_MS);
+    });
+
+    const call = showStatus.mock.calls.find(
+      ([message]) => typeof message === "string" && message.includes("appears offline"),
+    );
+    expect(call).toBeDefined();
+    const options = call?.[3] as { actionLabel?: string; onAction?: () => void } | undefined;
+    expect(options?.actionLabel).toBe("How to reconnect");
+    options?.onAction?.();
+    expect(onShowSelfHostHelp).toHaveBeenCalledTimes(1);
+  });
+
   it("shows an offline toast only after the workspace status remains offline", async () => {
     await renderHarness();
 
@@ -226,6 +252,7 @@ describe("local runtime status toasts", () => {
       "CLI Runtime Dogfood appears offline. Reconnect it or select another runtime if work stalls.",
       "warning",
       6000,
+      { actionLabel: "How to reconnect", onAction: undefined },
     );
 
     await renderHarness({

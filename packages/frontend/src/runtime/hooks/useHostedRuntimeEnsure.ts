@@ -26,6 +26,7 @@ interface UseHostedRuntimeEnsureOptions {
   showStatus: ShowStatusFn;
   setRuntimeEnsureError: (message: string | null) => void;
   setRuntimeEnsureLimit: (details: HostedRuntimeLimitErrorDetails | null) => void;
+  showDesktopRuntimeHelp: () => void;
 }
 
 export function useHostedRuntimeEnsure({
@@ -37,6 +38,7 @@ export function useHostedRuntimeEnsure({
   showStatus,
   setRuntimeEnsureError,
   setRuntimeEnsureLimit,
+  showDesktopRuntimeHelp,
 }: UseHostedRuntimeEnsureOptions) {
   const [hostedRuntimeEnsuring, setHostedRuntimeEnsuring] = useState(false);
   const debugLog = useCallback((message: string, data?: unknown) => {
@@ -204,13 +206,19 @@ export function useHostedRuntimeEnsure({
         error && typeof error === "object" && "code" in error
           ? String((error as { code?: unknown }).code ?? "")
           : "";
+      // Both refusals point at the same escape hatch — a self-hosted machine —
+      // so give the sentence the control it names instead of leaving it as advice.
       if (errorCode === "insufficient_credits") {
         showStatus(
           message ||
-            "This team is out of credits for today, so a hosted machine can't start. Credits refill daily at 00:00 UTC.",
+            "This team is out of credits for today, so a hosted machine can't start. Credits refill daily at 00:00 UTC — or connect your own machine.",
           "error",
           10000,
-          { id: "runtime-insufficient-credits" },
+          {
+            id: "runtime-insufficient-credits",
+            actionLabel: "How to connect one",
+            onAction: showDesktopRuntimeHelp,
+          },
         );
       } else if (errorCode === "platform_at_capacity") {
         showStatus(
@@ -218,7 +226,11 @@ export function useHostedRuntimeEnsure({
             "All hosted machines are in use right now — try again in a few minutes, or connect your own machine.",
           "warning",
           8000,
-          { id: "runtime-at-capacity" },
+          {
+            id: "runtime-at-capacity",
+            actionLabel: "How to connect one",
+            onAction: showDesktopRuntimeHelp,
+          },
         );
       }
       return false;
@@ -236,6 +248,7 @@ export function useHostedRuntimeEnsure({
     resolveEffectiveProjectId,
     setRuntimeEnsureError,
     setRuntimeEnsureLimit,
+    showDesktopRuntimeHelp,
   ]);
 
   const ensureHostedRuntime = useCallback(async () => {
