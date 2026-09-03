@@ -241,9 +241,11 @@ export function RuntimeOperationsProvider({
     useDesktopRuntimeEnsure({
       enabled: runtimeControllerEnabled && runtimeMutationEnabled,
       projectId: activeProjectId ?? null,
+      runtimeStatuses: state.runtimeStatuses,
       dispatch,
       refreshRuntimeStatuses,
       showStatus,
+      onShowSelfHostHelp: showDesktopRuntimeHelp,
     });
   const localRuntimeEntry = useMemo<ControllerRuntimeStatusEntry | null>(() => {
     if (!state.runtimeStatuses.length) {
