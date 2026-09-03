@@ -3597,6 +3597,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     notifyAiConfigChanged: emitAiConfigChanged,
     showStatus,
     formatCredentialTestFailureMessage: formatCredentialConnectionFailure,
+    onOpenAiManager: openAiManager,
   });
   const {
     beginGithubDeviceAuth,

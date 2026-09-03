@@ -20,6 +20,7 @@ interface Options {
   selectedLocalRuntimeId?: string | null;
   tunnel: ControllerTunnelGrant | null;
   showStatus: ShowStatusFn;
+  onShowSelfHostHelp?: () => void;
 }
 
 export const LOCAL_RUNTIME_OFFLINE_TOAST_DEBOUNCE_MS = 2500;
@@ -68,6 +69,7 @@ export function useRuntimeStatusToasts({
   selectedLocalRuntimeId,
   tunnel,
   showStatus,
+  onShowSelfHostHelp,
 }: Options) {
   const lastWorkspaceStatusRef = useRef<LocalWorkspaceStatus | null>(null);
   const lastPresenceStatusRef = useRef<ControllerOriginPresence["status"] | null>(
@@ -144,6 +146,10 @@ export function useRuntimeStatusToasts({
                 formatLocalRuntimeOfflineMessage(runtimeName),
                 "warning",
                 6000,
+                {
+                  actionLabel: "How to reconnect",
+                  onAction: onShowSelfHostHelp,
+                },
               );
               workspaceOfflineToastShownRef.current = true;
             }
@@ -187,6 +193,7 @@ export function useRuntimeStatusToasts({
     lastPresenceStatusRef.current = currentPresence;
   }, [
     enabled,
+    onShowSelfHostHelp,
     runtimeEntry,
     runtimeName,
     selectedLocalRuntimeId,
@@ -232,6 +239,10 @@ export function useRuntimeStatusToasts({
                 formatLocalRuntimeOfflineMessage(runtimeName),
                 "warning",
                 6000,
+                {
+                  actionLabel: "How to reconnect",
+                  onAction: onShowSelfHostHelp,
+                },
               );
               originOfflineToastShownRef.current = true;
             }
@@ -263,6 +274,7 @@ export function useRuntimeStatusToasts({
     lastOriginStatusRef.current = originStatus;
   }, [
     enabled,
+    onShowSelfHostHelp,
     runtimeEntry?.origin?.status,
     runtimeName,
     showStatus,

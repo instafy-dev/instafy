@@ -317,7 +317,7 @@ export function ProjectProviderBindingsCard({
   canManageAccess = true,
 }: ProjectProviderBindingsCardProps) {
   const { showStatus } = useStatus();
-  const { localWorkspace } = useRuntime();
+  const { localWorkspace, showDesktopRuntimeHelp } = useRuntime();
   const workspaceSummary = useMemo(
     () => resolveProjectWorkspaceSummary(localWorkspace),
     [localWorkspace],
@@ -372,13 +372,20 @@ export function ProjectProviderBindingsCard({
         path: result.path,
         defaultPath: current?.defaultPath ?? "",
       }));
-      showStatus(
-        result.runtimeRestartRequired
-          ? "Folder linked. Restart the local runtime to start using it."
-          : "Folder linked. The local runtime will use it for this space's files.",
-        "success",
-        4000,
-      );
+      if (result.runtimeRestartRequired) {
+        showStatus(
+          "Folder linked. Restart the local runtime to start using it.",
+          "success",
+          8000,
+          { actionLabel: "Runtime controls", onAction: showDesktopRuntimeHelp },
+        );
+      } else {
+        showStatus(
+          "Folder linked. The local runtime will use it for this space's files.",
+          "success",
+          4000,
+        );
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       showStatus(message, "error", 5000);
@@ -394,7 +401,10 @@ export function ProjectProviderBindingsCard({
       setWorkspaceFolderBinding((current) =>
         current ? { ...current, path: null } : current,
       );
-      showStatus("Reset to the managed folder. Restart the local runtime to apply.", "info", 4000);
+      showStatus("Reset to the managed folder. Restart the local runtime to apply.", "info", 8000, {
+        actionLabel: "Runtime controls",
+        onAction: showDesktopRuntimeHelp,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       showStatus(message, "error", 5000);
