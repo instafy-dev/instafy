@@ -30,6 +30,29 @@ describe("chatMessageDialect", () => {
     ]);
   });
 
+  it("joins hard-wrapped consecutive lines into a single paragraph block (#210)", () => {
+    const hardWrapped = [
+      "You are an autonomous engineer running inside the Instafy agent",
+      "stack. Each run of this runbook is ONE iteration: handle at most",
+      "one bug, land it, and stop. If there is nothing to pick up, advance",
+      "the core pin, then stop. Small, safe, reviewable changes",
+      "are fine. Prefer doing less, correctly, over doing more.",
+    ].join("\n");
+
+    expect(parseMessageContentBlocks(hardWrapped)).toEqual([{ kind: "paragraph", line: hardWrapped }]);
+  });
+
+  it("still starts a new paragraph block only at a blank line", () => {
+    expect(parseMessageContentBlocks("para one line a\npara one line b\n\npara two")).toEqual([
+      { kind: "paragraph", line: "para one line a\npara one line b" },
+      { kind: "paragraph", line: "para two" },
+    ]);
+  });
+
+  it("preserves a chat author's single newline as a line break inside one paragraph", () => {
+    expect(parseMessageContentBlocks("a\nb")).toEqual([{ kind: "paragraph", line: "a\nb" }]);
+  });
+
   it("nests indented bulleted sublists inside an ordered list block", () => {
     expect(
       parseMessageContentBlocks(
@@ -118,6 +141,45 @@ describe("chatMessageDialect", () => {
         ordered: true,
         start: 2,
         items: [{ text: "Next", depth: 0, ordered: true }],
+      },
+    ]);
+  });
+
+  it("keeps a loose flat sublist in one nested list across blank lines between its own bullets (#182)", () => {
+    // Reviewer OBSERVATION on #182: a blank line between the flat sublist's
+    // OWN bullets used to end the leniency after the first bullet, splitting
+    // the list into ol[0,1] then a separate ul[0] instead of one nested list.
+    expect(parseMessageContentBlocks("1. Skills:\n\n- alpha\n\n- beta")).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [
+          { text: "Skills:", depth: 0, ordered: true },
+          { text: "alpha", depth: 1, ordered: false },
+          { text: "beta", depth: 1, ordered: false },
+        ],
+      },
+    ]);
+  });
+
+  it("still ends the loose flat sublist after two consecutive blank lines", () => {
+    // Two blank lines terminate the leniency even inside an open flat
+    // sublist, matching the single-blank-line boundary rule above.
+    expect(parseMessageContentBlocks("1. Skills:\n\n- alpha\n\n\n- beta")).toEqual([
+      {
+        kind: "list",
+        ordered: true,
+        start: 1,
+        items: [
+          { text: "Skills:", depth: 0, ordered: true },
+          { text: "alpha", depth: 1, ordered: false },
+        ],
+      },
+      {
+        kind: "list",
+        ordered: false,
+        items: [{ text: "beta", depth: 0, ordered: false }],
       },
     ]);
   });
