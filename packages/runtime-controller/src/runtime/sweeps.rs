@@ -228,7 +228,7 @@ async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()> {
                  where r.project_id = agent_jobs.project_id
                    and r.status not in ('stopped', 'offline', 'removed')
                )
-             returning id, project_id",
+             returning id, project_id, run_id, conversation_id, payload, error_message",
             &[&(REQUEUED_JOB_EXPIRY_SECONDS as f64)],
         )
         .await
@@ -250,6 +250,43 @@ async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()> {
             )
         })?;
         job_input_state_updates.extend(updates);
+
+        // The job is dead, so its run is too: without this the run stays
+        // "in_progress" forever and Home would list it as live work.
+        let run_id: Option<Uuid> = row.get("run_id");
+        if let Some(run_id) = run_id {
+            let project_id: Uuid = row.get("project_id");
+            let conversation_id: Option<Uuid> = row.get("conversation_id");
+            let error_message: Option<String> = row.get("error_message");
+            let payload = row
+                .get::<_, tokio_postgres::types::Json<serde_json::Value>>("payload")
+                .0;
+            transaction
+                .execute(
+                    "update runs
+                     set status = 'failed',
+                         progress_stage = null,
+                         last_message = coalesce($2, last_message),
+                         updated_at = now()
+                     where id = $1
+                       and status not in ('success', 'failed', 'canceled')",
+                    &[&run_id, &error_message],
+                )
+                .await
+                .context("failed to fail run for expired requeued job")?;
+            crate::activity::record_run_completed(
+                &transaction,
+                &project_id,
+                &run_id,
+                conversation_id,
+                None,
+                &payload,
+                false,
+                None,
+                error_message.as_deref(),
+            )
+            .await;
+        }
     }
 
     transaction
