@@ -4,6 +4,14 @@ import { act, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatInput, type ChatInputHandle } from "../chat-input/ChatInput";
+import {
+  CHAT_INPUT_CONTROL_HEIGHT_CLASS,
+  CHAT_INPUT_LINE_HEIGHT_PX,
+  CHAT_INPUT_OVERLAY_TOP_CLASS,
+  CHAT_INPUT_VERTICAL_PADDING_CLASS,
+  resolveChatInputMaxHeightPx,
+} from "../chat-input/chatInputGrowth";
+import { COARSE_POINTER_MEDIA_QUERY } from "../../../../hooks/useCoarsePointer";
 
 describe("ChatInput", () => {
   let container: HTMLDivElement;
@@ -269,5 +277,107 @@ describe("ChatInput", () => {
     expect(ghost?.className).toContain("bottom-0");
     expect(ghost?.className).toContain("overflow-hidden");
     expect(ghost?.className).toContain("whitespace-pre-wrap");
+    // It starts on the first line: the editor's own top padding.
+    for (const token of CHAT_INPUT_OVERLAY_TOP_CLASS.split(/\s+/)) {
+      expect(ghost?.className.split(/\s+/)).toContain(token);
+    }
+  });
+
+  it("sizes the one-row editor to the composer controls and folds the padding into its line cap", async () => {
+    // The controls beside the editor are 36px on a fine pointer; the editor
+    // pads (36 − 20) / 2 = 8px each side of its 20px line so one line — and
+    // the last line of a wrapped draft — sits on the control centres, and
+    // its placeholder starts on that first line. The pixel cap is the line
+    // cap plus both paddings.
+    await act(async () => {
+      root.render(
+        <ChatInput
+          value=""
+          editorState={null}
+          placeholder="Ask for something..."
+          agentHandles={[]}
+          onChange={vi.fn()}
+          onKeyDown={vi.fn()}
+        />,
+      );
+    });
+
+    const input = container.querySelector<HTMLElement>('[data-testid="chat-input"]');
+    expect(input).not.toBeNull();
+    const inputTokens = (input?.className ?? "").split(/\s+/);
+    for (const token of [
+      ...CHAT_INPUT_CONTROL_HEIGHT_CLASS.split(/\s+/),
+      ...CHAT_INPUT_VERTICAL_PADDING_CLASS.split(/\s+/),
+    ]) {
+      expect(inputTokens).toContain(token);
+    }
+    // No second box: the old `min-h-7 py-1 sm:min-h-6 sm:py-0.5` is gone.
+    expect(inputTokens.filter((token) => /^(?:sm:)?(?:py|min-h|max-h)-/.test(token))).toEqual([
+      "min-h-9",
+      "py-2",
+    ]);
+    const expectedMaxHeight = resolveChatInputMaxHeightPx({ compactViewport: false, coarsePointer: false });
+    expect(expectedMaxHeight).toBe(10 * CHAT_INPUT_LINE_HEIGHT_PX + 2 * 8);
+    expect(input?.getAttribute("data-max-height-px")).toBe(String(expectedMaxHeight));
+    expect(input?.style.maxHeight).toBe(`${expectedMaxHeight}px`);
+
+    // The leaf div that holds the placeholder text (its ancestors carry the
+    // same textContent while the editor is empty).
+    const placeholder = Array.from(container.querySelectorAll("div")).find(
+      (node) => node.children.length === 0 && node.textContent === "Ask for something...",
+    );
+    expect(placeholder).toBeDefined();
+    for (const token of CHAT_INPUT_OVERLAY_TOP_CLASS.split(/\s+/)) {
+      expect(placeholder?.className.split(/\s+/)).toContain(token);
+    }
+  });
+
+  it("reads the coarse-pointer padding into the cap on touch devices", async () => {
+    // On a coarse pointer the controls are 44px, so the editor pads
+    // (44 − 20) / 2 = 12px a side (pointer-coarse:py-3 in CSS) and the cap
+    // must fold in 24px, not 16px: the JS reads the same media query the
+    // Tailwind variant does.
+    const originalMatchMedia = Object.getOwnPropertyDescriptor(window, "matchMedia");
+    const matchMedia = vi.fn(
+      (query: string) =>
+        ({
+          matches: query === COARSE_POINTER_MEDIA_QUERY,
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(),
+        }) as unknown as MediaQueryList,
+    );
+    Object.defineProperty(window, "matchMedia", { configurable: true, writable: true, value: matchMedia });
+    try {
+      await act(async () => {
+        root.render(
+          <ChatInput
+            value=""
+            editorState={null}
+            placeholder="Ask for something..."
+            agentHandles={[]}
+            onChange={vi.fn()}
+            onKeyDown={vi.fn()}
+            compactViewport
+          />,
+        );
+      });
+      expect(matchMedia).toHaveBeenCalledWith(COARSE_POINTER_MEDIA_QUERY);
+      const input = container.querySelector<HTMLElement>('[data-testid="chat-input"]');
+      const expectedMaxHeight = resolveChatInputMaxHeightPx({ compactViewport: true, coarsePointer: true });
+      expect(expectedMaxHeight).toBe(6 * CHAT_INPUT_LINE_HEIGHT_PX + 2 * 12);
+      expect(input?.getAttribute("data-max-height-px")).toBe(String(expectedMaxHeight));
+      expect(input?.style.maxHeight).toBe(`${expectedMaxHeight}px`);
+    } finally {
+      if (originalMatchMedia) {
+        Object.defineProperty(window, "matchMedia", originalMatchMedia);
+      } else {
+        Reflect.deleteProperty(window, "matchMedia");
+      }
+    }
   });
 });
