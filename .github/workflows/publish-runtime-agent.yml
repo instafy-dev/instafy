@@ -319,7 +319,34 @@ jobs:
           set -euo pipefail
           docker tag "$AUDIT_IMAGE" "$ARCH_TAG"
           push_log="$RUNNER_TEMP/runtime-${FLAVOR}-${ARCHITECTURE}-push.log"
-          docker push "$ARCH_TAG" | tee "$push_log"
+          # GHCR can transiently reject a content-addressed push after accepting
+          # some layers. Retry only this already-scanned local image; never rebuild.
+          push_succeeded=false
+          for attempt in 1 2 3 4; do
+            attempt_log="${push_log}.attempt-${attempt}"
+            if docker push "$ARCH_TAG" 2>&1 | tee "$attempt_log"; then
+              mv "$attempt_log" "$push_log"
+              push_succeeded=true
+              break
+            fi
+            terminal_error="$(
+              tr -d '\r' < "$attempt_log" |
+                awk 'NF { terminal = $0 } END { print terminal }'
+            )"
+            if [[ "$terminal_error" != "unknown blob" ]]; then
+              echo "::error::GHCR push failed with a non-retryable response."
+              exit 1
+            fi
+            if [[ "$attempt" != "4" ]]; then
+              delay_seconds=$((attempt * 5))
+              echo "::warning::GHCR returned the retryable unknown-blob response on attempt ${attempt}; retrying the same scanned image in ${delay_seconds}s."
+              sleep "$delay_seconds"
+            fi
+          done
+          if [[ "$push_succeeded" != "true" ]]; then
+            echo "::error::GHCR rejected all bounded attempts to push the scanned image."
+            exit 1
+          fi
           digest="$(
             node scripts/lib/dockerPushDigest.mjs "$push_log"
           )"
@@ -328,7 +355,23 @@ jobs:
             exit 1
           fi
           immutable_ref="${IMAGE}@${digest}"
-          docker buildx imagetools inspect "$immutable_ref" >/dev/null
+          # A successful push can precede digest visibility by a few seconds.
+          registry_visible=false
+          for attempt in 1 2 3 4 5 6; do
+            if docker buildx imagetools inspect "$immutable_ref" >/dev/null; then
+              registry_visible=true
+              break
+            fi
+            if [[ "$attempt" != "6" ]]; then
+              delay_seconds=$((1 << attempt))
+              echo "::warning::GHCR has not exposed ${immutable_ref} yet; retrying in ${delay_seconds}s."
+              sleep "$delay_seconds"
+            fi
+          done
+          if [[ "$registry_visible" != "true" ]]; then
+            echo "::error::GHCR did not expose the pushed immutable image within the bounded visibility window."
+            exit 1
+          fi
           mkdir -p "$RELEASE_REF_DIR"
           IMMUTABLE_REF="$immutable_ref" node --input-type=module <<'NODE'
           import fs from "node:fs";
@@ -523,14 +566,31 @@ jobs:
               exit 1
             fi
             immutable_image="${image}@${digest}"
+            raw_manifest="$RUNNER_TEMP/${flavor}-manifest.json"
+            # Manifest creation can win the race with GHCR's digest read path.
+            registry_visible=false
+            for attempt in 1 2 3 4 5 6; do
+              if docker buildx imagetools inspect "$immutable_image" --raw > "$raw_manifest"; then
+                registry_visible=true
+                break
+              fi
+              if [[ "$attempt" != "6" ]]; then
+                delay_seconds=$((1 << attempt))
+                echo "::warning::GHCR has not exposed ${immutable_image} yet; retrying in ${delay_seconds}s."
+                sleep "$delay_seconds"
+              fi
+            done
+            if [[ "$registry_visible" != "true" ]]; then
+              echo "::error::GHCR did not expose the assembled immutable manifest within the bounded visibility window."
+              exit 1
+            fi
             platforms="$(
-              docker buildx imagetools inspect "$immutable_image" --raw |
-                jq -c '
-                  [.manifests[].platform |
-                    select(.os != "unknown" and .architecture != "unknown") |
-                    "\(.os)/\(.architecture)"
-                  ] | sort
-                '
+              jq -c '
+                [.manifests[].platform |
+                  select(.os != "unknown" and .architecture != "unknown") |
+                  "\(.os)/\(.architecture)"
+                ] | sort
+              ' "$raw_manifest"
             )"
             if [[ "$platforms" != '["linux/amd64","linux/arm64"]' ]]; then
               echo "::error::Assembled ${flavor} manifest has unexpected platforms: ${platforms}."
