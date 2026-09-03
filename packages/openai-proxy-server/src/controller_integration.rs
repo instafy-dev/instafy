@@ -53,8 +53,7 @@ impl ControllerIntegration {
         let validator = ProxyTokenValidator::from_env(true).ok_or_else(|| {
             anyhow!("controller integration requires proxy token validation configuration")
         })?;
-        let client =
-            ControllerClient::new(base_url, service_bearer, credential_lease_bearer);
+        let client = ControllerClient::new(base_url, service_bearer, credential_lease_bearer);
 
         let credential_cache_ttl = Duration::from_secs(
             read_env("PROXY_CREDENTIAL_CACHE_SECONDS")

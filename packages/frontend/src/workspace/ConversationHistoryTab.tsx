@@ -635,6 +635,12 @@ export function ConversationHistoryTab({
                   data-testid="conversation-history-item"
                   aria-current={isActive ? "page" : undefined}
                   titleClassName={isDeleted ? "line-through text-slate-400 dark:text-slate-500" : ""}
+                  end={
+                    // A conversation a schedule opens says so; nothing else changes.
+                    conversation.threadKind === "automation" ? (
+                      <span className="text-xxs text-slate-400 dark:text-slate-500">Scheduled</span>
+                    ) : undefined
+                  }
                   className={
                     [
                       showMarkerGutter ? "pl-0" : touchDrawer ? "relative pl-[1.125rem]" : "relative pl-4",

@@ -1366,7 +1366,14 @@ fn deny_timeout_replay_and_stale_target_fail_closed_without_action() {
     assert!(String::from_utf8_lossy(&denied.stderr).contains("approval_denied_non_retryable"));
 
     let timed_out = fixture
-        .command_for_with_timeout("safe", "page-target", "POST", "/v1/click", Some(&body), "250")
+        .command_for_with_timeout(
+            "safe",
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&body),
+            "250",
+        )
         .output()
         .expect("run embedded shared browser command");
     assert!(!timed_out.status.success());

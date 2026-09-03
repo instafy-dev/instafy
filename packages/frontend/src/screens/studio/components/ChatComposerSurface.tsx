@@ -11,7 +11,6 @@ import {
   Archery,
   Bookmark,
   Lock,
-  MagicWand,
   MediaImage,
   Microphone,
   NavArrowDown,
@@ -38,6 +37,7 @@ import { ComposerActionMenu } from "./ComposerActionMenu";
 import { ComposerInviteModal } from "./ComposerInviteModal";
 import { ChatBrowserDock } from "./ChatBrowserDock";
 import { ChatInput, type ChatInputHandle } from "./chat-input/ChatInput";
+import { CHAT_INPUT_CONTROL_HEIGHT_CLASS } from "./chat-input/chatInputGrowth";
 import {
   resolveComposerSendModifierAction,
   type ComposerSendModifierKeys,
@@ -102,22 +102,34 @@ type ChatComposerSurfaceProps = {
   onOpenHome: () => void;
   homeAttentionCount: number;
   homeAttentionBadge: string;
-  composerActionMenuProps: ComponentProps<typeof ComposerActionMenu>;
+  // The surface dresses the "+" trigger and the mic itself (see the class
+  // props below) — the box from the ghost family and the glyph from the one
+  // icon class — so every rest-row control resolves to the one dress here.
+  composerActionMenuProps: Omit<
+    ComponentProps<typeof ComposerActionMenu>,
+    "triggerClassName" | "triggerIconClassName"
+  >;
   onOpenImagePicker: () => void;
   sendingAttachment: boolean;
   showMobileGhostSuggestionAcceptButton: boolean;
   onAcceptGhostSuggestion: () => void;
   showVoicePrimaryAction: boolean;
   showVoiceSecondaryAction: boolean;
-  voiceConversationActionStripProps: ComponentProps<typeof VoiceConversationActionStrip>;
+  voiceConversationActionStripProps: Omit<
+    ComponentProps<typeof VoiceConversationActionStrip>,
+    "primaryActionClassName" | "ghostActionClassName" | "actionIconClassName"
+  >;
   sendButtonDisabled: boolean;
   sendButtonVariant: ComponentProps<typeof IconButton>["variant"];
   primaryActionMode?: "send" | "steer";
   onSendButtonPress: ComponentProps<typeof IconButton>["onPress"];
-  composerOutlinedActionClass: string;
+  // One dress for the rest row: "+", image, mic and Send are all ghost
+  // IconButtons at rest wearing composerGhostActionClass; a control that is
+  // lit (Send with a payload, the mic while capturing) wears
+  // composerPrimaryActionClass.
+  composerGhostActionClass: string;
   composerPrimaryActionClass: string;
   composerActionIconClass: string;
-  composerActionButtonClass: string;
   inviteModalProps: ComponentProps<typeof ComposerInviteModal>;
   mutationDisabled?: boolean;
   accessNotice?: string | null;
@@ -183,6 +195,31 @@ function resolveGoalStatusPillTone(tone: ConversationGoalHealth["tone"]): Status
   return "primary";
 }
 
+// One dress for the rest row: the composer card is the only surface. At rest,
+// Send is exactly what its siblings ("+", image, mic) are — a ghost IconButton
+// of the same size and radius with no fill, border or shadow of its own — so
+// the row reads as four of the same control. The only thing that says "not
+// yet" is the glyph: this class is the ghost family (composerGhostActionClass)
+// with a muted tone, and like the family it colours the svg alone. With a
+// payload the button flips to the primary dress (composerPrimaryActionClass,
+// wired through sendButtonVariant) and the muting comes off; that colour
+// change is the only motion the composer has. Exported so the geometry tests
+// can name the exact delta they allow.
+export const COMPOSER_SEND_REST_CLASS = "[&_svg]:text-slate-400 dark:[&_svg]:text-slate-500";
+
+// The editor wrapper in the one-row composer is exactly as tall as the row's
+// controls (IconButton md: h-9 on a fine pointer, min-h-11 on a coarse one —
+// the same tokens chatInputGrowth.ts sizes the editor by) and centres the
+// editor inside it, so a single line sits on the control centres. It used
+// to be min-h-11 on every pointer: 44px centred in a 36px row put the text
+// 4px above the icons on desktop.
+export const COMPOSER_EDITOR_WRAPPER_CLASS = `flex ${CHAT_INPUT_CONTROL_HEIGHT_CLASS} min-w-0 flex-1 flex-col justify-center`;
+
+// The Browser-session condensed bar is a separate idle layout (see
+// renderSendButton) and keeps the rest dress it had before the one-row
+// composer went ghost.
+const COMPOSER_CONDENSED_SEND_REST_CLASS = `h-11 w-11 rounded-[1.25rem] border-slate-200/70 bg-transparent shadow-none ${DARK_PANEL_BORDER_CLASS}`;
+
 export function ChatComposerSurface({
   browserDockProps,
   composerOverlayRef,
@@ -229,10 +266,9 @@ export function ChatComposerSurface({
   sendButtonVariant,
   primaryActionMode = "send",
   onSendButtonPress,
-  composerOutlinedActionClass,
+  composerGhostActionClass,
   composerPrimaryActionClass,
   composerActionIconClass,
-  composerActionButtonClass,
   inviteModalProps,
   mutationDisabled = false,
   accessNotice = null,
@@ -379,6 +415,22 @@ export function ChatComposerSurface({
     queueSurfaceProps.totalQueuedCount === 0 &&
     !queueSurfaceProps.editingQueuedItem &&
     !stashTrayProps?.stashes.length;
+  // The composer is one row on every viewport. The controls sit beside the
+  // editor and never move, re-dress or re-mount as the draft changes; the
+  // editor alone grows with the text (line by line, capped per viewport in
+  // chatInputGrowth.ts, then scrolling). The only other layouts are the
+  // Browser-session condensed idle bar and the active voice strip.
+  const composerInlineControlsInTextRow = !browserComposerCondensed && !showVoiceActiveStrip;
+  // The breakpoint is decided in JS (compactBrowserViewport, from
+  // useBreakpoint("sm") upstream) rather than a Tailwind `sm:` class so the
+  // row and the "+" menu fold share one source of truth. Below sm the
+  // image-upload control is not rendered inline; it folds into the "+" menu.
+  // The insert-suggestion wand lives in the "+" menu on every viewport (Tab
+  // accepts the inline ghost suggestion from the keyboard) so no action is
+  // lost and no control appears or disappears while typing.
+  const foldImageUploadIntoMenu = compactBrowserViewport && !browserComposerCondensed;
+  const foldSuggestionIntoMenu = showMobileGhostSuggestionAcceptButton;
+  const imageUploadDisabled = mutationDisabled || sendingAttachment || onboardingInputLocked;
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -759,6 +811,156 @@ export function ChatComposerSurface({
     [onHelpUnblockGoal],
   );
 
+  // Each control is rendered once, with one dress, wherever the row puts it.
+  const actionMenuNode = (
+    <ComposerActionMenu
+      {...composerActionMenuProps}
+      mutationDisabled={mutationDisabled}
+      onUploadImage={foldImageUploadIntoMenu ? onOpenImagePicker : undefined}
+      uploadImageDisabled={imageUploadDisabled}
+      onInsertSuggestion={foldSuggestionIntoMenu ? onAcceptGhostSuggestion : undefined}
+      triggerClassName={composerGhostActionClass}
+      triggerIconClassName={composerActionIconClass}
+    />
+  );
+  const imageUploadButtonNode = (
+    <IconButton
+      type="button"
+      onPress={onOpenImagePicker}
+      variant="ghost"
+      size="md"
+      radius="xl"
+      aria-label="Upload image"
+      isDisabled={imageUploadDisabled}
+      data-testid="chat-image-upload-button"
+      className={composerGhostActionClass}
+    >
+      <span className="sr-only">Upload image</span>
+      <MediaImage className={composerActionIconClass} aria-hidden="true" />
+    </IconButton>
+  );
+  const homeButtonNode = showComposerHomeButton ? (
+      <IconButton
+        type="button"
+        onPress={onOpenHome}
+        variant="ghost"
+        size="md"
+        radius="xl"
+        aria-label="Open home"
+        data-testid="chat-home-button-mobile"
+        className={composerGhostActionClass}
+      >
+        <span className="relative flex h-full w-full items-center justify-center">
+          <HomeIcon className={composerActionIconClass} aria-hidden="true" />
+          {homeAttentionCount > 0 ? (
+            <span
+              aria-hidden="true"
+              data-testid="chat-home-badge-mobile"
+              className="absolute right-[1px] top-[1px] flex h-3.5 min-w-[0.875rem] items-center justify-center rounded-full bg-primary-600 px-1 text-3xs font-semibold leading-none text-white ring-2 ring-white translate-x-[16%] -translate-y-[16%] dark:bg-primary-500 dark:ring-[color:var(--color-studio-dark-panel)]"
+            >
+              {homeAttentionBadge}
+            </span>
+          ) : null}
+        </span>
+      </IconButton>
+    ) : null;
+  // The mic is present whenever voice capture is supported (the view state
+  // always raises one of the two flags then), and it is the same control with
+  // the same test id and the same siblings whether or not there is a draft.
+  // It used to switch to a "secondary" test id and drop the replies toggle
+  // once a draft existed; nothing about the row may change with the text.
+  const voiceInputAvailable = showVoicePrimaryAction || showVoiceSecondaryAction;
+  // The mic wears the same two dresses as Send: ghost at rest, primary while
+  // it is the active control.
+  const voiceStripDressProps = {
+    primaryActionClassName: composerPrimaryActionClass,
+    ghostActionClassName: composerGhostActionClass,
+    actionIconClassName: composerActionIconClass,
+  };
+  const voiceStripNode = voiceInputAvailable ? (
+    <VoiceConversationActionStrip {...voiceConversationActionStripProps} {...voiceStripDressProps} />
+  ) : null;
+  // Send is always mounted in the one-row composer and lights up in place.
+  // `quiet` names that row, which never adds or removes a control as the
+  // draft changes. On voice-capable clients (web speech — Chromium) the mic
+  // used to stand in for Send while the draft was empty, so the first
+  // keystroke mounted Send beside it and the trailing group widened by one
+  // button: exactly the "something changes when I type" this composer exists
+  // to remove. The Browser-session condensed bar (non-quiet) keeps its
+  // mic-only rest; it is a separate idle layout that keeps its earlier dress
+  // and re-expands on a draft. In the one-row composer Send at rest is the
+  // same ghost IconButton as "+", image and mic with a muted glyph; the glyph
+  // fades with the button when the dress flips to primary.
+  const sendIconClass = `${composerActionIconClass} transition-colors duration-150 ease-out`;
+  const renderSendButton = ({ quiet }: { quiet: boolean }) =>
+    quiet || !showVoicePrimaryAction ? (
+      <>
+        <span
+          role="status"
+          aria-atomic="true"
+          aria-live="polite"
+          className="sr-only"
+          data-testid="chat-primary-action-status"
+        >
+          {primaryActionStatus}
+        </span>
+        <IconButton
+          type="button"
+          {...touchSendModePicker.triggerProps}
+          onPress={handleSendPress}
+          onClick={handleSendClick}
+          isDisabled={
+            mutationDisabled ||
+            (visibleDesktopSendModifierMode === null && sendButtonDisabled)
+          }
+          aria-label={primaryActionLabel}
+          title={primaryActionLabel}
+          style={{ touchAction: "none" }}
+          variant={sendButtonVariant === "primary" ? "primary" : quiet ? "ghost" : "outline"}
+          size="md"
+          radius="xl"
+          className={[
+            sendButtonVariant === "primary"
+              ? composerPrimaryActionClass
+              : quiet
+                ? COMPOSER_SEND_REST_CLASS
+                : COMPOSER_CONDENSED_SEND_REST_CLASS,
+            sendingAttachment ? "opacity-70" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+          data-testid="chat-send-button"
+          data-send-mode={visiblePrimaryActionMode}
+          data-send-rest={sendButtonVariant === "primary" ? "false" : "true"}
+          data-send-modifier-preview={
+            visibleDesktopSendModifierMode ?? undefined
+          }
+          data-send-options-open={touchSendModePicker.isOpen ? "true" : "false"}
+        >
+          <span className="sr-only">{primaryActionLabel}</span>
+          {visibleDesktopSendModifierMode === "queue" ? (
+            <TaskList
+              className={sendIconClass}
+              aria-hidden="true"
+              data-testid="chat-queue-action-icon"
+            />
+          ) : visibleDesktopSendModifierMode === "stash" ? (
+            <Bookmark
+              className={sendIconClass}
+              aria-hidden="true"
+              data-testid="chat-stash-action-icon"
+            />
+          ) : (
+            <Send
+              className={sendIconClass}
+              aria-hidden="true"
+              data-testid="chat-send-action-icon"
+            />
+          )}
+        </IconButton>
+      </>
+    ) : null;
+
   return (
     <>
       <ChatBrowserDock {...browserDockProps} />
@@ -1096,8 +1298,8 @@ export function ChatComposerSurface({
                 browserComposerCondensed
                   ? `grid grid-cols-[minmax(0,1fr)_auto] items-center overflow-hidden rounded-none border-x-0 border-b-0 border-t border-slate-200/70 bg-slate-50/90 px-3 py-1 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`
                   : browserModeActive || compactBrowserViewport
-                  ? `flex flex-col overflow-hidden rounded-none border-x-0 border-b-0 border-t border-slate-200/70 bg-slate-50/90 px-3 pb-0 pt-2 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`
-                  : `flex flex-col overflow-hidden rounded-t-3xl rounded-b-none border border-b-0 border-slate-200/70 bg-slate-50/90 px-3 pb-0 pt-2.5 sm:px-4 sm:pt-3 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`
+                  ? `flex flex-col overflow-hidden rounded-none border-x-0 border-b-0 border-t border-slate-200/70 bg-slate-50/90 px-3 pb-0 pt-1.5 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`
+                  : `flex flex-col overflow-hidden rounded-t-3xl rounded-b-none border border-b-0 border-slate-200/70 bg-slate-50/90 px-3 pb-0 pt-1.5 sm:px-4 ${DARK_RAISED_CONTROL_BG_CLASS} ${DARK_PANEL_BORDER_CLASS}`
               }
               data-browser-composer-condensed={browserComposerCondensed ? "true" : undefined}
               style={{
@@ -1112,18 +1314,84 @@ export function ChatComposerSurface({
                       : "max(var(--instafy-safe-area-inset-bottom), 0px)",
               }}
             >
+              {/*
+                The text row is one flex row: leading controls, the editor,
+                trailing controls — bottom-aligned (items-end) so the controls
+                stay pinned to the row's bottom edge while the editor grows
+                line by line. Nothing here depends on whether there is text:
+                inputs (things that put content into the message: home when
+                applicable, "+", image at sm+) sit on the left, commit actions
+                (the mic when voice is supported, and Send, always mounted and
+                lighting up in place) sit on the right. The editor wrapper keeps
+                the same tree position in every mode so Lexical never remounts.
+
+                Alignment with the text ("Ask for something…"): the four
+                glyphs share one size and stroke (composerActionIconClass);
+                the editor wrapper is as tall as the controls and centres the
+                editor, whose own padding keeps the last line centred as it
+                grows (COMPOSER_EDITOR_WRAPPER_CLASS, chatInputGrowth.ts); and
+                the row keeps ONE glyph-edge rhythm, ≈16px, on both sides.
+                The gaps are chosen between glyph edges, not box edges: the
+                22px glyphs sit inset 7px in their 36px boxes, so inside a
+                group gap-0.5 (2px) reads as 7+2+7 = 16px glyph-to-glyph, and
+                between a group and the editor gap-2 (8px) reads as 7+8 = 15px
+                glyph-to-text. Coarse pointers (44px boxes, 11px insets) keep
+                the same relative rhythm: 24px glyph-to-glyph, 19px
+                glyph-to-text. Before (8px inside a group, 4px to the editor)
+                the icons read 22px apart but the text only 11px from the
+                image icon — founder: "the text is too close to the picture
+                icon or the icon spacing is too large".
+              */}
               <div
-                className={`relative ${browserComposerCondensed ? "pb-0" : "pb-1.5"}`}
+                className={
+                  browserComposerCondensed
+                    ? "relative pb-0"
+                    : `relative flex items-end gap-2 ${
+                        composerInlineControlsInTextRow &&
+                        !(browserModeActive || compactBrowserViewport)
+                          ? "pb-1.5"
+                          : "pb-0"
+                      }`
+                }
+                data-testid="chat-composer-text-row"
                 onDragOver={onDragOver}
                 onDrop={onDrop}
               >
-                <ChatInput
-                  ref={chatInputRef}
-                  {...chatInputProps}
-                  compact={browserComposerCondensed}
-                  readOnly={mutationDisabled || accessChecking}
-                  onReadOnlyKeyDown={handleReadOnlyKeyDown}
-                />
+                {composerInlineControlsInTextRow ? (
+                  <div
+                    className="flex flex-none items-center gap-0.5"
+                    data-testid="chat-composer-leading-controls"
+                  >
+                    {homeButtonNode}
+                    {actionMenuNode}
+                    {compactBrowserViewport ? null : imageUploadButtonNode}
+                  </div>
+                ) : null}
+                <div
+                  className={
+                    composerInlineControlsInTextRow
+                      ? COMPOSER_EDITOR_WRAPPER_CLASS
+                      : "min-w-0 flex-1"
+                  }
+                >
+                  <ChatInput
+                    ref={chatInputRef}
+                    {...chatInputProps}
+                    compact={browserComposerCondensed}
+                    compactViewport={compactBrowserViewport}
+                    readOnly={mutationDisabled || accessChecking}
+                    onReadOnlyKeyDown={handleReadOnlyKeyDown}
+                  />
+                </div>
+                {composerInlineControlsInTextRow ? (
+                  <div
+                    className="flex flex-none items-center justify-end gap-0.5"
+                    data-testid="chat-composer-trailing-controls"
+                  >
+                    {voiceStripNode}
+                    {renderSendButton({ quiet: true })}
+                  </div>
+                ) : null}
               </div>
               <input
                 ref={imageInputRef}
@@ -1188,14 +1456,25 @@ export function ChatComposerSurface({
                 </div>
               ) : null}
               {providerTriggerNoticeProps ? <ProviderTriggerNotice {...providerTriggerNoticeProps} /> : null}
-              <div
-                className={browserComposerCondensed
-                  ? "m-0 p-0 pl-2"
-                  : `-mx-3 mt-0 px-3 pb-1 pt-1 max-[375px]:pb-0.5 max-[375px]:pt-0.5 sm:-mx-4 sm:px-4 sm:pb-2.5 sm:pt-1.5`
-                }
-              >
-                <div className="space-y-2">
-                  {showVoiceActiveStrip ? (
+              {browserComposerCondensed ? (
+                <div className="m-0 p-0 pl-2">
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between gap-1.5 sm:gap-2 min-h-10 flex-nowrap">
+                      <div className="flex min-w-0 items-stretch gap-1.5 sm:gap-2 flex-nowrap">
+                        {homeButtonNode}
+                      </div>
+                      <div className="flex flex-none items-stretch justify-end gap-1.5 sm:gap-2 flex-nowrap">
+                        {actionMenuNode}
+                        {imageUploadButtonNode}
+                        {voiceStripNode}
+                        {renderSendButton({ quiet: false })}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : showVoiceActiveStrip ? (
+                <div className="-mx-3 mt-0 px-3 pb-1 pt-1 max-[375px]:pb-0.5 max-[375px]:pt-0.5 sm:-mx-4 sm:px-4 sm:pb-2.5 sm:pt-1.5">
+                  <div className="space-y-2">
                     <div
                       className="flex min-h-[3.5rem] items-center justify-between gap-3 rounded-2xl border border-slate-200/70 bg-slate-50/90 px-3 py-2 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)]"
                       data-testid="chat-voice-active-strip"
@@ -1218,162 +1497,14 @@ export function ChatComposerSurface({
                       <div className="flex flex-none items-center gap-1.5 sm:gap-2">
                         <VoiceConversationActionStrip
                           {...voiceConversationActionStripProps}
+                          {...voiceStripDressProps}
                           showVoiceRepliesToggle={false}
                         />
                       </div>
                     </div>
-                  ) : (
-                    <div
-                      className={`flex items-center justify-between gap-1.5 sm:gap-2 ${
-                        browserComposerCondensed
-                          ? "min-h-10 flex-nowrap"
-                          : "min-h-[3.5rem] flex-wrap max-[375px]:min-h-11"
-                      }`}
-                    >
-                      <div className={`flex min-w-0 items-stretch gap-1.5 sm:gap-2 ${browserComposerCondensed ? "flex-nowrap" : "flex-wrap"}`}>
-                        {showComposerHomeButton ? (
-                          <IconButton
-                            type="button"
-                            onPress={onOpenHome}
-                            variant="outline"
-                            size="md"
-                            radius="xl"
-                            aria-label="Open home"
-                            data-testid="chat-home-button-mobile"
-                            className={composerOutlinedActionClass}
-                          >
-                            <span className="relative flex h-full w-full items-center justify-center">
-                              <HomeIcon className={composerActionIconClass} aria-hidden="true" />
-                              {homeAttentionCount > 0 ? (
-                                <span
-                                  aria-hidden="true"
-                                  data-testid="chat-home-badge-mobile"
-                                  className="absolute right-[1px] top-[1px] flex h-3.5 min-w-[0.875rem] items-center justify-center rounded-full bg-primary-600 px-1 text-3xs font-semibold leading-none text-white ring-2 ring-white translate-x-[16%] -translate-y-[16%] dark:bg-primary-500 dark:ring-[color:var(--color-studio-dark-panel)]"
-                                >
-                                  {homeAttentionBadge}
-                                </span>
-                              ) : null}
-                            </span>
-                          </IconButton>
-                        ) : null}
-                      </div>
-                      <div className={`flex flex-none items-stretch justify-end gap-1.5 sm:gap-2 ${browserComposerCondensed ? "flex-nowrap" : "flex-wrap"}`}>
-                        <ComposerActionMenu {...composerActionMenuProps} mutationDisabled={mutationDisabled} />
-                        <IconButton
-                          type="button"
-                          onPress={onOpenImagePicker}
-                          variant="outline"
-                          size="md"
-                          radius="xl"
-                          aria-label="Upload image"
-                          isDisabled={mutationDisabled || sendingAttachment || onboardingInputLocked}
-                          data-testid="chat-image-upload-button"
-                          className={composerOutlinedActionClass}
-                        >
-                          <span className="sr-only">Upload image</span>
-                          <MediaImage className={composerActionIconClass} aria-hidden="true" />
-                        </IconButton>
-                        {showMobileGhostSuggestionAcceptButton ? (
-                          <IconButton
-                            type="button"
-                            onPress={onAcceptGhostSuggestion}
-                            variant="outline"
-                            size="md"
-                            radius="xl"
-                            aria-label="Insert suggestion"
-                            title="Insert suggestion"
-                            data-testid="chat-accept-suggestion-button"
-                            className={`${composerOutlinedActionClass} text-primary-600 dark:text-primary-300 sm:hidden`}
-                          >
-                            <span className="sr-only">Insert suggestion</span>
-                            <MagicWand className={composerActionIconClass} aria-hidden="true" />
-                          </IconButton>
-                        ) : null}
-                        {showVoicePrimaryAction || showVoiceSecondaryAction ? (
-                          <VoiceConversationActionStrip
-                            {...voiceConversationActionStripProps}
-                            showVoiceRepliesToggle={
-                              showVoicePrimaryAction
-                                ? voiceConversationActionStripProps.showVoiceRepliesToggle
-                                : false
-                            }
-                            voiceInputTestId={
-                              showVoicePrimaryAction
-                                ? voiceConversationActionStripProps.voiceInputTestId
-                                : "chat-voice-secondary-input-button"
-                            }
-                          />
-                        ) : null}
-                        {!showVoicePrimaryAction ? (
-                          <>
-                            <span
-                              role="status"
-                              aria-atomic="true"
-                              aria-live="polite"
-                              className="sr-only"
-                              data-testid="chat-primary-action-status"
-                            >
-                              {primaryActionStatus}
-                            </span>
-                            <IconButton
-                              type="button"
-                              {...touchSendModePicker.triggerProps}
-                              onPress={handleSendPress}
-                              onClick={handleSendClick}
-                              isDisabled={
-                                mutationDisabled ||
-                                (visibleDesktopSendModifierMode === null && sendButtonDisabled)
-                              }
-                              aria-label={primaryActionLabel}
-                              title={primaryActionLabel}
-                              style={{ touchAction: "none" }}
-                              variant={sendButtonVariant}
-                              size="md"
-                              radius="xl"
-                              className={[
-                                composerActionButtonClass,
-                                sendButtonVariant === "primary"
-                                  ? composerPrimaryActionClass
-                                  : "border-slate-200/70 bg-transparent shadow-none dark:border-[color:var(--color-studio-dark-panel-border)]",
-                                sendingAttachment ? "opacity-70" : "",
-                              ]
-                                .filter(Boolean)
-                                .join(" ")}
-                              data-testid="chat-send-button"
-                              data-send-mode={visiblePrimaryActionMode}
-                              data-send-modifier-preview={
-                                visibleDesktopSendModifierMode ?? undefined
-                              }
-                              data-send-options-open={touchSendModePicker.isOpen ? "true" : "false"}
-                            >
-                              <span className="sr-only">{primaryActionLabel}</span>
-                              {visibleDesktopSendModifierMode === "queue" ? (
-                                <TaskList
-                                  className={composerActionIconClass}
-                                  aria-hidden="true"
-                                  data-testid="chat-queue-action-icon"
-                                />
-                              ) : visibleDesktopSendModifierMode === "stash" ? (
-                                <Bookmark
-                                  className={composerActionIconClass}
-                                  aria-hidden="true"
-                                  data-testid="chat-stash-action-icon"
-                                />
-                              ) : (
-                                <Send
-                                  className={composerActionIconClass}
-                                  aria-hidden="true"
-                                  data-testid="chat-send-action-icon"
-                                />
-                              )}
-                            </IconButton>
-                          </>
-                        ) : null}
-                      </div>
-                    </div>
-                  )}
+                  </div>
                 </div>
-              </div>
+              ) : null}
             </Surface>
           </div>
         </form>
