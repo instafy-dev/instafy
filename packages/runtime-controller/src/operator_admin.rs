@@ -33,6 +33,7 @@ pub(crate) fn router() -> Router<AppState> {
             "/operator/projects/:project_id/runtimes/:runtime_id/stop",
             post(stop_project_runtime),
         )
+        .route("/operator/metrics/summary", get(operator_metrics_summary))
 }
 
 #[derive(Debug, Serialize)]
@@ -558,4 +559,319 @@ async fn load_owner_email(
         .map_err(|error| internal_error(format!("failed to load owner email: {error}")))?;
 
     Ok(row.and_then(|value| value.get::<_, Option<String>>("email")))
+}
+
+// ---------------------------------------------------------------------------
+// Operator metrics summary
+//
+// One request that answers "how is the product doing" for the internal
+// operator console. Everything here is an aggregate over data the product
+// already writes; nothing new is instrumented.
+//
+// Human activity is measured from conversation_messages and prompts rather
+// than conversations, because both carry the acting user and neither is
+// written by the agent on a user's behalf: assistant messages are inserted
+// with a null created_by, so `created_by is not null` isolates real people.
+// conversations.updated_at, by contrast, is bumped by agent traffic and would
+// silently count robots as users.
+// ---------------------------------------------------------------------------
+
+/// Distinct people who did something, by window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OperatorPeopleMetrics {
+    #[serde(rename = "active24h")]
+    active_24h: i64,
+    #[serde(rename = "active7d")]
+    active_7d: i64,
+    #[serde(rename = "active30d")]
+    active_30d: i64,
+    /// Active in the last 7 days who were also active in the 7 days before.
+    #[serde(rename = "returning7d")]
+    returning_7d: i64,
+    #[serde(rename = "newUsers7d")]
+    new_users_7d: i64,
+    total_users: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OperatorBugMetrics {
+    open: i64,
+    in_progress: i64,
+    resolved: i64,
+    #[serde(rename = "new24h")]
+    new_24h: i64,
+    #[serde(rename = "new7d")]
+    new_7d: i64,
+    /// Unresolved reports filed by the system rather than a person.
+    system_open: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OperatorProjectMetrics {
+    #[serde(rename = "active7d")]
+    active_7d: i64,
+    total: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OperatorMetricsSummary {
+    generated_at: String,
+    people: OperatorPeopleMetrics,
+    bugs: OperatorBugMetrics,
+    projects: OperatorProjectMetrics,
+}
+
+/// Raw counts as they come back from Postgres, kept separate from the response
+/// so the row-to-field mapping can be tested without a database.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct OperatorMetricsCounts {
+    pub(crate) active_24h: i64,
+    pub(crate) active_7d: i64,
+    pub(crate) active_30d: i64,
+    pub(crate) returning_7d: i64,
+    pub(crate) new_users_7d: i64,
+    pub(crate) total_users: i64,
+    pub(crate) projects_active_7d: i64,
+    pub(crate) projects_total: i64,
+    pub(crate) bugs_open: i64,
+    pub(crate) bugs_in_progress: i64,
+    pub(crate) bugs_resolved: i64,
+    pub(crate) bugs_new_24h: i64,
+    pub(crate) bugs_new_7d: i64,
+    pub(crate) bugs_system_open: i64,
+}
+
+pub(crate) fn build_operator_metrics_summary(
+    generated_at: chrono::DateTime<chrono::Utc>,
+    counts: OperatorMetricsCounts,
+) -> OperatorMetricsSummary {
+    OperatorMetricsSummary {
+        generated_at: generated_at.to_rfc3339(),
+        people: OperatorPeopleMetrics {
+            active_24h: counts.active_24h,
+            active_7d: counts.active_7d,
+            active_30d: counts.active_30d,
+            returning_7d: counts.returning_7d,
+            new_users_7d: counts.new_users_7d,
+            total_users: counts.total_users,
+        },
+        bugs: OperatorBugMetrics {
+            open: counts.bugs_open,
+            in_progress: counts.bugs_in_progress,
+            resolved: counts.bugs_resolved,
+            new_24h: counts.bugs_new_24h,
+            new_7d: counts.bugs_new_7d,
+            system_open: counts.bugs_system_open,
+        },
+        projects: OperatorProjectMetrics {
+            active_7d: counts.projects_active_7d,
+            total: counts.projects_total,
+        },
+    }
+}
+
+const OPERATOR_ACTIVITY_SQL: &str = "
+    with human_activity as (
+        select created_by as actor_id, project_id, created_at
+          from conversation_messages
+         where created_by is not null
+        union all
+        select user_id as actor_id, project_id, created_at
+          from prompts
+         where user_id is not null and project_id is not null
+    ),
+    recent_actors as (
+        select distinct actor_id from human_activity where created_at >= $2
+    ),
+    prior_actors as (
+        select distinct actor_id
+          from human_activity
+         where created_at >= $4 and created_at < $2
+    )
+    select
+        count(distinct actor_id) filter (where created_at >= $1) as active_24h,
+        count(distinct actor_id) filter (where created_at >= $2) as active_7d,
+        count(distinct actor_id) filter (where created_at >= $3) as active_30d,
+        count(distinct project_id) filter (where created_at >= $2) as projects_active_7d,
+        (
+            select count(*)
+              from recent_actors r
+              join prior_actors p on p.actor_id = r.actor_id
+        ) as returning_7d,
+        (select count(*) from auth.users where created_at >= $2) as new_users_7d,
+        (select count(*) from auth.users) as total_users,
+        (select count(*) from projects where status <> 'deleted') as projects_total
+      from human_activity
+";
+
+const OPERATOR_BUGS_SQL: &str = "
+    select
+        count(*) filter (where status = 'open') as open,
+        count(*) filter (where status = 'in_progress') as in_progress,
+        count(*) filter (where status = 'resolved') as resolved,
+        count(*) filter (where created_at >= $1) as new_24h,
+        count(*) filter (where created_at >= $2) as new_7d,
+        count(*) filter (
+            where coalesce(reporter_email, '') = 'system@instafy.dev'
+              and status <> 'resolved'
+        ) as system_open
+      from bug_reports
+";
+
+async fn operator_metrics_summary(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<OperatorMetricsSummary>, (StatusCode, Json<ApiError>)> {
+    require_operator_access(&state, &headers).await?;
+
+    let generated_at = chrono::Utc::now();
+    let since_24h = generated_at - chrono::Duration::hours(24);
+    let since_7d = generated_at - chrono::Duration::days(7);
+    let since_30d = generated_at - chrono::Duration::days(30);
+    let since_14d = generated_at - chrono::Duration::days(14);
+
+    let mut connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+
+    let activity = transaction
+        .query_one(
+            OPERATOR_ACTIVITY_SQL,
+            &[&since_24h, &since_7d, &since_30d, &since_14d],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load activity metrics: {error}")))?;
+
+    let bugs = transaction
+        .query_one(OPERATOR_BUGS_SQL, &[&since_24h, &since_7d])
+        .await
+        .map_err(|error| internal_error(format!("failed to load bug metrics: {error}")))?;
+
+    let counts = OperatorMetricsCounts {
+        active_24h: activity.get("active_24h"),
+        active_7d: activity.get("active_7d"),
+        active_30d: activity.get("active_30d"),
+        returning_7d: activity.get("returning_7d"),
+        new_users_7d: activity.get("new_users_7d"),
+        total_users: activity.get("total_users"),
+        projects_active_7d: activity.get("projects_active_7d"),
+        projects_total: activity.get("projects_total"),
+        bugs_open: bugs.get("open"),
+        bugs_in_progress: bugs.get("in_progress"),
+        bugs_resolved: bugs.get("resolved"),
+        bugs_new_24h: bugs.get("new_24h"),
+        bugs_new_7d: bugs.get("new_7d"),
+        bugs_system_open: bugs.get("system_open"),
+    };
+
+    Ok(Json(build_operator_metrics_summary(generated_at, counts)))
+}
+
+#[cfg(test)]
+mod operator_metrics_tests {
+    use super::{build_operator_metrics_summary, OperatorMetricsCounts};
+    use chrono::TimeZone;
+
+    fn sample_counts() -> OperatorMetricsCounts {
+        OperatorMetricsCounts {
+            active_24h: 1,
+            active_7d: 2,
+            active_30d: 3,
+            returning_7d: 4,
+            new_users_7d: 5,
+            total_users: 6,
+            projects_active_7d: 7,
+            projects_total: 8,
+            bugs_open: 9,
+            bugs_in_progress: 10,
+            bugs_resolved: 11,
+            bugs_new_24h: 12,
+            bugs_new_7d: 13,
+            bugs_system_open: 14,
+        }
+    }
+
+    #[test]
+    fn serialises_the_exact_keys_the_console_reads() {
+        // serde's camelCase does not reliably produce `active24h` from
+        // `active_24h`, so every digit-bearing field carries an explicit
+        // rename. This locks the wire shape the console is written against.
+        let summary = build_operator_metrics_summary(
+            chrono::Utc.with_ymd_and_hms(2026, 9, 3, 12, 0, 0).unwrap(),
+            sample_counts(),
+        );
+        let payload = serde_json::to_value(&summary).expect("summary serialises");
+
+        assert_eq!(payload["generatedAt"], "2026-09-03T12:00:00+00:00");
+
+        let people = &payload["people"];
+        assert_eq!(people["active24h"], 1);
+        assert_eq!(people["active7d"], 2);
+        assert_eq!(people["active30d"], 3);
+        assert_eq!(people["returning7d"], 4);
+        assert_eq!(people["newUsers7d"], 5);
+        assert_eq!(people["totalUsers"], 6);
+
+        let projects = &payload["projects"];
+        assert_eq!(projects["active7d"], 7);
+        assert_eq!(projects["total"], 8);
+
+        let bugs = &payload["bugs"];
+        assert_eq!(bugs["open"], 9);
+        assert_eq!(bugs["inProgress"], 10);
+        assert_eq!(bugs["resolved"], 11);
+        assert_eq!(bugs["new24h"], 12);
+        assert_eq!(bugs["new7d"], 13);
+        assert_eq!(bugs["systemOpen"], 14);
+    }
+
+    #[test]
+    fn leaks_no_snake_case_keys() {
+        let summary = build_operator_metrics_summary(
+            chrono::Utc.with_ymd_and_hms(2026, 9, 3, 12, 0, 0).unwrap(),
+            sample_counts(),
+        );
+        let payload = serde_json::to_value(&summary).expect("summary serialises");
+        for (section, key) in [
+            ("people", "active_24h"),
+            ("people", "new_users_7d"),
+            ("people", "total_users"),
+            ("bugs", "in_progress"),
+            ("bugs", "system_open"),
+            ("projects", "active_7d"),
+        ] {
+            assert!(
+                payload[section].get(key).is_none(),
+                "{section}.{key} leaked in snake_case"
+            );
+        }
+        assert!(payload.get("generated_at").is_none());
+    }
+
+    #[test]
+    fn maps_every_count_to_its_own_field() {
+        // A transposed active7d/active30d is invisible to a test that seeds
+        // symmetric data, so each input here is distinct.
+        let summary =
+            build_operator_metrics_summary(chrono::Utc::now(), sample_counts());
+        let payload = serde_json::to_value(&summary).expect("summary serialises");
+        let mut seen: Vec<i64> = Vec::new();
+        for section in ["people", "bugs", "projects"] {
+            for (_, value) in payload[section].as_object().expect("section object") {
+                seen.push(value.as_i64().expect("count is an integer"));
+            }
+        }
+        seen.sort_unstable();
+        assert_eq!(seen, (1..=14).collect::<Vec<i64>>());
+    }
 }
