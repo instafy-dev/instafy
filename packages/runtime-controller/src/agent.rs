@@ -6180,7 +6180,7 @@ mod tests {
     // The controller always provides recent conversation context to agent jobs.
 }
 
-async fn record_agent_conversation_message(
+pub(crate) async fn record_agent_conversation_message(
     transaction: &tokio_postgres::Transaction<'_>,
     project_id: &Uuid,
     conversation_id: &Uuid,
