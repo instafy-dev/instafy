@@ -634,6 +634,11 @@ describe("ConversationMessageRows", () => {
     expect(container.querySelector('[data-testid="agent-thread-preview-header"]')).toBeNull();
     expect(container.querySelector('[data-testid="agent-thread-owner-badge"]')).toBeNull();
     expect(container.querySelector('[data-testid="agent-job-thread-avatar"]')).toBeNull();
+    // Run status folds into the speaker header beside author and timestamp,
+    // and the preview drops its duplicate content-level caption (#145).
+    const runStatus = speaker?.querySelector('[data-testid="chat-speaker-run-status"]');
+    expect(runStatus?.textContent).toBe("Run failed");
+    expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')).toBeNull();
   });
 
   it("animates only the active job thread speaker avatar", async () => {
@@ -765,7 +770,14 @@ describe("ConversationMessageRows", () => {
     expect(labels[1]?.querySelector('[data-testid="chat-avatar-human"]')).not.toBeNull();
     expect(labels[0]?.querySelector("time")).not.toBeNull();
     expect(labels[1]?.querySelector("time")).not.toBeNull();
-    expect(container.querySelectorAll('[data-testid="chat-avatar-human"]')).toHaveLength(2);
+    // Each teammate group head shows one face twice in the DOM: in the avatar
+    // gutter (desktop) and inside the label (narrow layouts, where the gutter
+    // collapses); only one is visible per breakpoint.
+    expect(container.querySelectorAll('[data-testid="chat-avatar-human"]')).toHaveLength(4);
+    for (const label of labels) {
+      const labelAvatarWrapper = label.querySelector('[data-testid="chat-avatar-human"]')?.parentElement;
+      expect(labelAvatarWrapper?.className).toContain("sm:hidden");
+    }
   });
 
   it("deduplicates narrow inline speaker identity until the assistant changes", async () => {
@@ -896,7 +908,7 @@ describe("ConversationMessageRows", () => {
     ).toEqual(["octo", "octo"]);
   });
 
-  it("uses inline assistant identity without reserving avatar gutter for ordinary rows", async () => {
+  it("reserves the avatar gutter on assistant rows with faces at speaker heads", async () => {
     const firstOcto = createMessage({
       id: "first-octo",
       role: "assistant",
@@ -966,8 +978,17 @@ describe("ConversationMessageRows", () => {
       );
     });
 
-    expect(container.querySelectorAll('[data-testid="assistant-avatar"]')).toHaveLength(0);
-    expect(container.querySelectorAll('[data-testid="assistant-avatar-placeholder"]')).toHaveLength(0);
+    // Slack-style grammar (#177): speaker heads carry the face in the gutter,
+    // continuation rows keep an empty spacer so header, body, and chip rows
+    // all share one left alignment line.
+    const gutterAvatars = Array.from(container.querySelectorAll('[data-testid="assistant-avatar"]'));
+    expect(gutterAvatars.map((node) => node.getAttribute("data-agent-handle"))).toEqual([
+      "octo",
+      "octo",
+      "reviewer",
+      "octo",
+    ]);
+    expect(container.querySelectorAll('[data-testid="assistant-avatar-placeholder"]')).toHaveLength(1);
     const inlineSpeakers = Array.from(container.querySelectorAll('[data-testid="chat-speaker-inline"]'));
     expect(
       inlineSpeakers.map((node) => node.querySelector("[data-agent-handle]")?.getAttribute("data-agent-handle")),
@@ -977,6 +998,12 @@ describe("ConversationMessageRows", () => {
       "reviewer",
       "octo",
     ]);
+    // The label's own avatar only serves narrow layouts where the gutter
+    // collapses; desktop shows the gutter face instead.
+    for (const inlineSpeaker of inlineSpeakers) {
+      const profileDoor = inlineSpeaker.querySelector('[data-testid="chat-speaker-agent-profile"]');
+      expect(profileDoor?.className).toContain("sm:hidden");
+    }
   });
 
   it("trims layout-only trailing blank lines when copying selected bubble text from document copy", async () => {
