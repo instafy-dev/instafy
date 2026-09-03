@@ -324,14 +324,22 @@ jobs:
           push_succeeded=false
           for attempt in 1 2 3 4; do
             attempt_log="${push_log}.attempt-${attempt}"
-            if docker push "$ARCH_TAG" | tee "$attempt_log"; then
+            if docker push "$ARCH_TAG" 2>&1 | tee "$attempt_log"; then
               mv "$attempt_log" "$push_log"
               push_succeeded=true
               break
             fi
+            terminal_error="$(
+              tr -d '\r' < "$attempt_log" |
+                awk 'NF { terminal = $0 } END { print terminal }'
+            )"
+            if [[ "$terminal_error" != "unknown blob" ]]; then
+              echo "::error::GHCR push failed with a non-retryable response."
+              exit 1
+            fi
             if [[ "$attempt" != "4" ]]; then
               delay_seconds=$((attempt * 5))
-              echo "::warning::GHCR rejected push attempt ${attempt}; retrying the same scanned image in ${delay_seconds}s."
+              echo "::warning::GHCR returned the retryable unknown-blob response on attempt ${attempt}; retrying the same scanned image in ${delay_seconds}s."
               sleep "$delay_seconds"
             fi
           done
