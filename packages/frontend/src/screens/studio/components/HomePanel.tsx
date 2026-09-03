@@ -1,6 +1,6 @@
-import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { ChatLines, Check, Clock, Group, Plus } from "iconoir-react";
+import { ChatLines, Check, Clock, Group, Plus, User, WarningTriangle } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
 import { AttentionBadge } from "../../../components/AttentionBadge";
 import { Button, IconButton } from "../../../components/Button";
@@ -12,16 +12,11 @@ import { Text } from "../../../components/Text";
 import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { DRAWER_ICON_BUTTON_TONE_CLASS } from "../../../components/listRowStyles";
-import {
-  useConversations,
-  type ConversationState,
-} from "../../../conversations/ConversationsProvider";
+import { useConversations } from "../../../conversations/ConversationsProvider";
 import { useProjects } from "../../../projects/useProjects";
-import {
-  controllerClient,
-  type ControllerProjectConversation,
-  type NotificationInboxItem,
-} from "../../../sdk/instafy";
+import { useAuth } from "../../../providers/AuthProvider";
+import { controllerClient, type NotificationInboxItem } from "../../../sdk/instafy";
+import type { ActivityItem } from "../../../services/runtimeController/activity";
 import { useStatus } from "../../../status/useStatus";
 import { DARK_DIVIDER_BORDER_CLASS, DARK_RAIL_HOVER_CLASS } from "../../../theme/darkSurfaces";
 import { isUUID } from "../../../utils/uuid";
@@ -33,13 +28,9 @@ import {
   buildHomeFeed,
   formatRelativeTimestamp,
   getSpaceLabel,
-  readHomeLastSeen,
-  resolveConversationActor,
   teamKeyForOrgId,
-  writeHomeLastSeen,
   type HomeFeedEvent,
   type HomeFeedOrganizationRef,
-  type HomeFeedRecentConversation,
 } from "../homeFeed";
 import { useWorkspaceControls } from "../workspaceControls";
 import { CHAT_COLUMN_CLASS_NAME } from "./ChatColumn";
@@ -59,35 +50,17 @@ const LANE_INSET_CLASS = "px-3";
 // The row action must still lift on top of the row's hover band.
 const ROW_ACTION_CLASS =
   "text-slate-500 hover:bg-slate-200/70 data-[hovered]:bg-slate-200/70 dark:text-slate-400 dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:data-[hovered]:bg-[var(--color-studio-dark-control-hover)]";
-const RECENT_SPACE_FAN_OUT = 8;
-const RECENT_PER_SPACE = 3;
-// Recent renders a page at a time; "Show more" reveals the next page of what
-// was fetched (the fan-out keeps two pages in memory).
+// Recent renders a page at a time; "Show more" reveals what is already in
+// memory first, then asks the controller for the next page of the ledger.
 const RECENT_LIMIT = 24;
 // Needs you folds after this many rows so a busy inbox cannot push Recent off
 // the screen; "Show N more" opens the rest in place.
 const NEEDS_PREVIEW_LIMIT = 8;
-
-function extractConversationTitle(conversation: ControllerProjectConversation): string {
-  const metadata =
-    conversation.metadata && typeof conversation.metadata === "object"
-      ? (conversation.metadata as Record<string, unknown>)
-      : null;
-  const rawTitle = metadata?.title;
-  if (typeof rawTitle === "string" && rawTitle.trim().length > 0) {
-    return rawTitle.trim();
-  }
-  const preview = conversation.lastMessagePreview?.trim() ?? "";
-  if (preview.length > 0) {
-    return preview.length > 72 ? `${preview.slice(0, 71)}…` : preview;
-  }
-  return "Conversation";
-}
-
-function getConversationPreview(conversation: ConversationState): string | null {
-  const candidate = [...conversation.messages].reverse().find((message) => message.content.trim().length > 0);
-  return candidate?.content.trim() ?? null;
-}
+// The ledger is polled at the inbox's cadence until the live stream lands.
+const ACTIVITY_POLL_MS = 20_000;
+// A poll that finds more than one page of new activity bridges the gap, but
+// never walks history forever on a device that has been closed for weeks.
+const CATCH_UP_MAX_PAGES = 3;
 
 // Bare run counters ("3") leak in as previews; they say nothing on a row.
 function usablePreview(value: string | null | undefined): string | null {
@@ -117,6 +90,12 @@ function buildRouteToConversation(projectId: string, conversationControllerId: s
       conversationControllerId ? `&conversationControllerId=${encodeURIComponent(conversationControllerId)}` : ""
     }&panel=chat`;
   }
+}
+
+function initialsFor(name: string | null | undefined): string {
+  const parts = (name ?? "").trim().split(/\s+/).filter(Boolean).slice(0, 2);
+  const initials = parts.map((part) => part[0]?.toUpperCase() ?? "").join("");
+  return initials || "?";
 }
 
 function TeamChip({
@@ -195,9 +174,9 @@ function LaneMore({ label, onPress, testId }: { label: string; onPress: () => vo
 }
 
 function EventIcon({ event }: { event: HomeFeedEvent }) {
-  // Identity when it is real (a named agent); state only when non-default.
-  // An unread reply gets no marker: inside "Needs you" every row is unread,
-  // and the lane heading plus the mark-as-read control already say so.
+  // Identity when it is real (a named agent or a person); state only when
+  // non-default. An unread reply gets no marker: inside "Needs you" every
+  // row is unread, and the lane heading plus the mark-as-read control say so.
   if (event.actor?.handle) {
     return (
       <ChatMessageAvatar
@@ -207,23 +186,91 @@ function EventIcon({ event }: { event: HomeFeedEvent }) {
       />
     );
   }
+  if (event.actor?.kind === "user") {
+    // A person: their initials, or a plain figure when no name is on file.
+    const initials = initialsFor(event.actor.displayName);
+    return (
+      <span
+        className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-slate-200 text-xxs font-medium text-slate-700 dark:bg-slate-700 dark:text-slate-200"
+        aria-hidden="true"
+      >
+        {initials === "?" ? <User className="h-4 w-4" aria-hidden="true" /> : initials}
+      </span>
+    );
+  }
   if (event.kind === "running") {
     return <Spinner size="xs" />;
   }
   if (event.kind === "queued") {
     return <Clock className="h-4 w-4 text-amber-600 dark:text-amber-300" aria-hidden="true" />;
   }
+  if (event.kind === "run_failed") {
+    return <WarningTriangle className="h-4 w-4 text-rose-600 dark:text-rose-300" aria-hidden="true" />;
+  }
+  if (event.kind === "run_finished") {
+    return <Check className="h-4 w-4 text-emerald-600 dark:text-emerald-300" aria-hidden="true" />;
+  }
   return <ChatLines className="h-4 w-4 text-slate-400 dark:text-slate-500" aria-hidden="true" />;
 }
 
-function statusSubtitle(event: HomeFeedEvent): string | null {
-  if (event.kind === "running") {
-    return "Run in progress";
+function statusSubtitle(event: HomeFeedEvent, viewerUserId: string | null): string | null {
+  switch (event.kind) {
+    case "running":
+      return "Run in progress";
+    case "queued":
+      return "Waiting for a runtime";
+    case "run_finished":
+      return "Run finished";
+    case "run_failed":
+      return "Run failed";
+    case "conversation": {
+      if (event.source.type !== "activity") {
+        return null;
+      }
+      if (event.source.item.data.threadKind === "automation") {
+        return "Scheduled conversation";
+      }
+      const actorId = event.source.item.actor.userId;
+      return actorId && actorId === viewerUserId ? "You started a conversation" : "Started a conversation";
+    }
+    default:
+      return null;
   }
-  if (event.kind === "queued") {
-    return "Waiting for a runtime";
+}
+
+function newestActivityId(items: ActivityItem[]): string | null {
+  let newest: bigint | null = null;
+  for (const item of items) {
+    try {
+      const id = BigInt(item.id);
+      if (newest === null || id > newest) {
+        newest = id;
+      }
+    } catch {
+      // Not a numeric cursor; skip it.
+    }
   }
-  return null;
+  return newest === null ? null : newest.toString();
+}
+
+function mergeActivity(current: ActivityItem[], incoming: ActivityItem[]): ActivityItem[] {
+  const seen = new Set(current.map((item) => item.id));
+  const merged = [...current];
+  for (const item of incoming) {
+    if (!seen.has(item.id)) {
+      seen.add(item.id);
+      merged.push(item);
+    }
+  }
+  return merged.sort((a, b) => {
+    try {
+      const left = BigInt(a.id);
+      const right = BigInt(b.id);
+      return left === right ? 0 : left > right ? -1 : 1;
+    } catch {
+      return 0;
+    }
+  });
 }
 
 interface HomePanelProps {
@@ -242,9 +289,9 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
   const { showStatus } = useStatus();
   const { requestUrlPush, openConversationTab } = useWorkspaceTabs();
   const { userEmail, onStartNewProject, onStartNewConversation, onOpenOrgSettings } = useWorkspaceControls();
+  const { user: authUser } = useAuth();
+  const viewerUserId = authUser?.id ?? null;
   const navigate = useNavigate();
-  const [recentConversations, setRecentConversations] = useState<HomeFeedRecentConversation[]>([]);
-  const [recentLoading, setRecentLoading] = useState(false);
   const [locallyDismissedKeys, setLocallyDismissedKeys] = useState<string[]>([]);
   const [teamFilter, setTeamFilter] = useState(HOME_TEAM_FILTER_ALL);
   const [needsExpanded, setNeedsExpanded] = useState(false);
@@ -254,11 +301,94 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
     setNeedsExpanded(false);
     setRecentLimit(RECENT_LIMIT);
   }, [teamFilter]);
-  // The cut is where the previous visit ended; this visit becomes the next cut.
-  const [lastSeenAt] = useState(() => readHomeLastSeen(userEmail));
+
+  // The ledger: what happened across every team, from the controller.
+  const [activityItems, setActivityItems] = useState<ActivityItem[]>([]);
+  const [activityLoading, setActivityLoading] = useState(true);
+  const [activityNextBefore, setActivityNextBefore] = useState<string | null>(null);
+  const [activityHasMore, setActivityHasMore] = useState(false);
+  // The cut is where the previous visit ended; it is read once per visit and
+  // then advanced on the server so the next visit (on any device) starts here.
+  const [serverLastSeenEventId, setServerLastSeenEventId] = useState<string | null>(null);
+  const cutCapturedRef = useRef(false);
+  const seenAdvancedToRef = useRef<string | null>(null);
+
+  const advanceSeen = useCallback((items: ActivityItem[]) => {
+    const newest = newestActivityId(items);
+    if (!newest || seenAdvancedToRef.current === newest) {
+      return;
+    }
+    seenAdvancedToRef.current = newest;
+    void controllerClient.activity.markSeen({ lastSeenEventId: newest });
+  }, []);
+
   useEffect(() => {
-    writeHomeLastSeen(userEmail, Date.now());
-  }, [userEmail]);
+    let cancelled = false;
+    cutCapturedRef.current = false;
+    seenAdvancedToRef.current = null;
+    setActivityItems([]);
+    setActivityLoading(true);
+    const loadFirstPage = async () => {
+      const result = await controllerClient.activity.list({ limit: RECENT_LIMIT * 2 });
+      if (cancelled) return;
+      setActivityLoading(false);
+      if (!result.success) {
+        return;
+      }
+      const items = result.items ?? [];
+      setActivityItems(items);
+      setActivityNextBefore(result.nextBefore ?? null);
+      setActivityHasMore(result.hasMore === true);
+      if (!cutCapturedRef.current) {
+        cutCapturedRef.current = true;
+        setServerLastSeenEventId(result.lastSeenEventId ?? null);
+      }
+      advanceSeen(items);
+    };
+    void loadFirstPage();
+    const timer = window.setInterval(() => {
+      void (async () => {
+        // Catch up from the newest row we hold. Pages come back newest-first,
+        // so the first one always carries the new activity; if it says there
+        // is more, walk back a bounded number of pages to close the gap
+        // rather than leaving a hole in Recent. Rows dedupe by id.
+        const since = newestActivityId(activityItemsRef.current);
+        let result = await controllerClient.activity.list(
+          since ? { since, limit: 200 } : { limit: RECENT_LIMIT * 2 },
+        );
+        if (cancelled || !result.success) return;
+        const items = result.items ?? [];
+        if (items.length === 0) return;
+        setActivityItems((current) => mergeActivity(current, items));
+        advanceSeen(items);
+        for (let page = 0; page < CATCH_UP_MAX_PAGES; page += 1) {
+          if (!result.hasMore || !result.nextBefore) return;
+          result = await controllerClient.activity.list({ before: result.nextBefore, limit: 200 });
+          if (cancelled || !result.success) return;
+          const older = result.items ?? [];
+          if (older.length === 0) return;
+          setActivityItems((current) => mergeActivity(current, older));
+        }
+      })();
+    }, ACTIVITY_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [advanceSeen, userEmail]);
+  const activityItemsRef = useRef<ActivityItem[]>([]);
+  useEffect(() => {
+    activityItemsRef.current = activityItems;
+  }, [activityItems]);
+
+  const loadMoreActivity = useCallback(async () => {
+    if (!activityNextBefore) return;
+    const result = await controllerClient.activity.list({ before: activityNextBefore, limit: RECENT_LIMIT });
+    if (!result.success) return;
+    setActivityItems((current) => mergeActivity(current, result.items ?? []));
+    setActivityNextBefore(result.nextBefore ?? null);
+    setActivityHasMore(result.hasMore === true);
+  }, [activityNextBefore]);
 
   // Membership, not spaces, decides which teams get a chip: a team you just
   // joined (or created) has no space yet but still belongs on Home.
@@ -306,86 +436,6 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
     return () => window.clearInterval(timer);
   }, [refreshInbox]);
 
-  // The active space's conversations are already in memory; every other space
-  // is fetched (a bounded fan-out — Phase 2 replaces this with a user-level
-  // activity feed so nothing depends on which spaces this device has opened).
-  const localRecentConversations = useMemo<HomeFeedRecentConversation[]>(() => {
-    if (!activeProjectId || !currentProject) {
-      return [];
-    }
-    return conversations
-      .filter((conversation) => conversation.lifecycleStatus === "active")
-      .map((conversation) => ({
-        projectId: activeProjectId,
-        projectName: getSpaceLabel(currentProject.name),
-        orgId: currentProject.orgId,
-        orgName: currentProject.orgName || "",
-        conversationId: conversation.controllerId ?? null,
-        localConversationId: conversation.localId,
-        title: conversation.title || "Conversation",
-        preview: usablePreview(getConversationPreview(conversation)),
-        updatedAt: new Date(conversation.messages.at(-1)?.timestamp ?? conversation.createdAt).toISOString(),
-        actor: resolveConversationActor(conversation),
-      }));
-  }, [activeProjectId, conversations, currentProject]);
-
-  useEffect(() => {
-    if (projectList.length === 0) {
-      setRecentConversations([]);
-      return;
-    }
-    let cancelled = false;
-    const load = async () => {
-      setRecentLoading(true);
-      try {
-        const prioritized = [...projectList].sort((a, b) => {
-          if (a.id === activeProjectId) return -1;
-          if (b.id === activeProjectId) return 1;
-          return getSpaceLabel(a.name).localeCompare(getSpaceLabel(b.name));
-        });
-        const perSpace = await Promise.all(
-          prioritized.slice(0, RECENT_SPACE_FAN_OUT).map(async (project) => {
-            const rows =
-              (await controllerClient.conversations.listForProject({
-                projectId: project.id,
-                rootsOnly: true,
-                limit: RECENT_PER_SPACE,
-              })) ?? [];
-            return rows.map<HomeFeedRecentConversation>((conversation) => ({
-              projectId: project.id,
-              projectName: getSpaceLabel(project.name),
-              orgId: project.orgId,
-              orgName: project.orgName,
-              conversationId: conversation.id,
-              localConversationId: null,
-              title: extractConversationTitle(conversation),
-              preview: usablePreview(conversation.lastMessagePreview),
-              updatedAt: conversation.updatedAt || conversation.lastMessageAt || conversation.createdAt,
-            }));
-          }),
-        );
-        const seen = new Set<string>();
-        const merged = [...perSpace.flat(), ...localRecentConversations].filter((entry) => {
-          const key = entry.conversationId?.trim().toLowerCase() || `${entry.projectId}:${entry.localConversationId ?? entry.title}`;
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        });
-        if (!cancelled) {
-          setRecentConversations(merged.slice(0, RECENT_LIMIT * 2));
-        }
-      } finally {
-        if (!cancelled) {
-          setRecentLoading(false);
-        }
-      }
-    };
-    void load();
-    return () => {
-      cancelled = true;
-    };
-  }, [activeProjectId, localRecentConversations, projectList]);
-
   const attentionEntries = useMemo(
     () => buildHomeAttentionEntries({ conversations, inboxItems: sharedInboxItems, currentSpaceName }),
     [conversations, currentSpaceName, sharedInboxItems],
@@ -407,15 +457,17 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
     () =>
       buildHomeFeed({
         attentionEntries: visibleAttentionEntries,
-        recentConversations,
+        recentConversations: [],
+        activity: activityItems,
+        serverLastSeenEventId,
         organizations,
         projects: projectList,
         activeProject: currentProject,
         conversations,
         teamFilter,
-        lastSeenAt,
+        lastSeenAt: null,
       }),
-    [conversations, currentProject, lastSeenAt, organizations, projectList, recentConversations, teamFilter, visibleAttentionEntries],
+    [activityItems, conversations, currentProject, organizations, projectList, serverLastSeenEventId, teamFilter, visibleAttentionEntries],
   );
   const activityTotal = useMemo(() => feed.activity.reduce((count, day) => count + day.events.length, 0), [feed.activity]);
   const activityEvents = useMemo(
@@ -435,6 +487,20 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
     [showStatus],
   );
 
+  const openConversationById = useCallback(
+    (projectId: string, conversationId: string | null) => {
+      if (conversationId && projectId === activeProjectId) {
+        const local = conversations.find((conversation) => (conversation.controllerId ?? "").trim() === conversationId);
+        if (local) {
+          openConversationTab(local.localId);
+          return;
+        }
+      }
+      navigate(buildRouteToConversation(projectId, conversationId));
+    },
+    [activeProjectId, conversations, navigate, openConversationTab],
+  );
+
   const openEvent = useCallback(
     (event: HomeFeedEvent) => {
       requestUrlPush();
@@ -450,14 +516,14 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
         void acknowledgeInbox(conversationId).then((ok) => {
           if (ok) void refreshInbox?.({ force: true });
         });
-        if (projectId === activeProjectId) {
-          const local = conversations.find((conversation) => (conversation.controllerId ?? "").trim() === conversationId);
-          if (local) {
-            openConversationTab(local.localId);
-            return;
-          }
-        }
-        navigate(buildRouteToConversation(projectId, conversationId));
+        openConversationById(projectId, conversationId);
+        return;
+      }
+      if (event.source.type === "activity") {
+        const item = event.source.item;
+        const projectId = item.project?.id;
+        if (!projectId) return;
+        openConversationById(projectId, item.conversation?.id ?? null);
         return;
       }
       if (event.source.type === "recent") {
@@ -473,12 +539,12 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
         navigate(buildRouteToConversation(target.projectId, target.conversationControllerId));
       }
     },
-    [acknowledgeInbox, activeProjectId, conversations, navigate, openConversationTab, refreshInbox, requestUrlPush],
+    [acknowledgeInbox, activeProjectId, conversations, navigate, openConversationById, openConversationTab, refreshInbox, requestUrlPush],
   );
 
   const dismissEvent = useCallback(
     async (event: HomeFeedEvent): Promise<boolean> => {
-      if (event.source.type === "recent") return false;
+      if (event.source.type === "recent" || event.source.type === "activity") return false;
       const entry: HomeAttentionEntry = event.source.entry;
       setLocallyDismissedKeys((current) => (current.includes(entry.key) ? current : [...current, entry.key]));
       if (entry.source === "conversation") {
@@ -554,15 +620,39 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
   const visibleNeeds = needsExpanded ? feed.needs : feed.needs.slice(0, NEEDS_PREVIEW_LIMIT);
   const hiddenNeeds = feed.needs.length - visibleNeeds.length;
   const filteredTeam = feed.teams.find((team) => team.key === feed.teamFilter) ?? null;
-  const lanesEmpty = feed.needs.length === 0 && activityEvents.length === 0 && !recentLoading;
+  const lanesEmpty = feed.needs.length === 0 && activityEvents.length === 0 && !activityLoading;
   const filteredTeamHasSpaces =
     filteredTeam !== null && projectList.some((project) => teamKeyForOrgId(project.orgId) === filteredTeam.key);
+  const canShowMoreRecent = activityTotal > recentLimit || activityHasMore;
+  const handleShowMoreRecent = useCallback(() => {
+    if (activityTotal > recentLimit) {
+      setRecentLimit((limit) => limit + RECENT_LIMIT);
+      return;
+    }
+    void loadMoreActivity().then(() => setRecentLimit((limit) => limit + RECENT_LIMIT));
+  }, [activityTotal, loadMoreActivity, recentLimit]);
 
   const renderRow = (event: HomeFeedEvent, options: { divider: boolean }) => {
     const when = formatRelativeTimestamp(event.at);
     const teamSuffix = showTeamOnRows && !personalTeamKeys.has(event.team.key) ? ` · ${event.team.name}` : "";
     const where = spansSpaces ? `${event.project.name}${teamSuffix}` : null;
-    const rest = statusSubtitle(event) ?? usablePreview(event.preview);
+    // A folded thread says how much is behind its newest state.
+    const updates =
+      event.group && event.group.count > 1
+        ? event.group.newCount > 0
+          ? `${event.group.newCount} new of ${event.group.count} updates`
+          : `${event.group.count} updates`
+        : null;
+    // A scheduled conversation says so once, ahead of its state.
+    const scheduled =
+      event.source.type === "activity" &&
+      event.source.item.conversation?.threadKind === "automation" &&
+      event.kind !== "conversation"
+        ? "Scheduled"
+        : null;
+    const rest =
+      [scheduled, updates, statusSubtitle(event, viewerUserId), usablePreview(event.preview)].filter(Boolean).join(" · ") ||
+      null;
     return (
       <div key={event.key} className={[ROW_HOVER_CLASS, options.divider ? ROW_DIVIDER_CLASS : ""].filter(Boolean).join(" ")}>
         <FeedRow
@@ -693,7 +783,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
           </MenuTrigger>
         </header>
 
-        {feed.isEmpty && !recentLoading ? (
+        {feed.isEmpty && !activityLoading ? (
           <section className="space-y-3" data-testid="home-empty">
             <Heading level={2} variant="subtitle">
               Nothing here yet
@@ -768,8 +858,8 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
             ) : null}
 
             <section data-testid="home-recent-section">
-              <LaneHeader label="Recent" action={recentLoading ? <Spinner size="xs" /> : null} />
-              {activityEvents.length === 0 && !recentLoading ? (
+              <LaneHeader label="Recent" action={activityLoading ? <Spinner size="xs" /> : null} />
+              {activityEvents.length === 0 && !activityLoading ? (
                 <Text as="p" variant="body" tone="muted" className={`py-2 ${LANE_INSET_CLASS}`} data-testid="home-recent-empty">
                   Quiet so far.
                 </Text>
@@ -816,12 +906,8 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
                   );
                 });
               })()}
-              {activityTotal > recentLimit ? (
-                <LaneMore
-                  label="Show more"
-                  onPress={() => setRecentLimit((limit) => limit + RECENT_LIMIT)}
-                  testId="home-recent-show-more"
-                />
+              {canShowMoreRecent ? (
+                <LaneMore label="Show more" onPress={handleShowMoreRecent} testId="home-recent-show-more" />
               ) : null}
             </section>
           </div>
