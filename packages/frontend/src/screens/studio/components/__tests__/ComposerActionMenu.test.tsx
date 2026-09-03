@@ -40,7 +40,14 @@ describe("ComposerActionMenu", () => {
   async function renderMenu(
     showNewBrowserAction: boolean,
     showInviteAction = true,
-    sendActions: { onQueueMessage?: () => void; onStashDraft?: () => void } = {},
+    sendActions: {
+      onQueueMessage?: () => void;
+      onStashDraft?: () => void;
+      onUploadImage?: () => void;
+      uploadImageDisabled?: boolean;
+      onInsertSuggestion?: () => void;
+      mutationDisabled?: boolean;
+    } = {},
   ) {
     await act(async () => {
       root.render(
@@ -53,11 +60,47 @@ describe("ComposerActionMenu", () => {
           onOpenInvite={vi.fn()}
           onImportGithubRepo={vi.fn()}
           onInsertCommand={vi.fn()}
+          triggerIconClassName="h-[22px] w-[22px]"
           {...sendActions}
         />,
       );
     });
   }
+
+  it("omits the folded composer controls unless the composer hands them over", async () => {
+    await renderMenu(true);
+
+    expect(container.querySelector('[data-testid="composer-action-menu-upload-image"]')).toBeNull();
+    expect(container.querySelector('[data-testid="composer-action-menu-insert-suggestion"]')).toBeNull();
+  });
+
+  it("offers Upload image and Insert suggestion when the narrow composer folds them in", async () => {
+    const onUploadImage = vi.fn();
+    const onInsertSuggestion = vi.fn();
+    await renderMenu(true, true, { onUploadImage, onInsertSuggestion });
+
+    const upload = container.querySelector('[data-testid="composer-action-menu-upload-image"]') as HTMLButtonElement;
+    const suggestion = container.querySelector(
+      '[data-testid="composer-action-menu-insert-suggestion"]',
+    ) as HTMLButtonElement;
+    expect(upload.textContent).toContain("Upload image");
+    expect(suggestion.textContent).toContain("Insert suggestion");
+
+    await act(async () => upload.click());
+    await act(async () => suggestion.click());
+    expect(onUploadImage).toHaveBeenCalledTimes(1);
+    expect(onInsertSuggestion).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the folded image upload gated like the inline button", async () => {
+    await renderMenu(true, true, { onUploadImage: vi.fn(), uploadImageDisabled: true });
+    expect(
+      container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-upload-image"]')?.disabled,
+    ).toBe(true);
+
+    await renderMenu(true, true, { onUploadImage: vi.fn(), mutationDisabled: true });
+    expect(container.querySelector('[data-testid="composer-action-menu-upload-image"]')).toBeNull();
+  });
 
   it("labels the additional-page action as Shared-specific", async () => {
     await renderMenu(true);
