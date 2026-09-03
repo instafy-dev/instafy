@@ -38,9 +38,14 @@ import { shouldRenderLocalCapabilityStatusAsTimeline } from "./chatMessagePresen
 import { resolveProxyUpstreamErrorGuidance } from "./proxyError";
 import { RunFailureMessageBody } from "./RunFailureNotice";
 import {
+  resolveControllerNoticeActionHandler,
+  useControllerNoticeActions,
+} from "./ControllerNoticeActions";
+import {
   getControllerConversationNoticeKind,
   resolveControllerConversationNoticeContent,
   resolveControllerConversationNoticeLabel,
+  resolveControllerConversationNoticeAction,
 } from "./controllerConversationNotice";
 import { resolveSpineToneFromStatus, ThreadSpine, type ThreadSpineTone } from "./ThreadSpine";
 import { buildAgentThreadBranchRows } from "./agentThreadBranchRows";
@@ -463,6 +468,11 @@ function ControllerConversationNoticeEntry({
     ? "border-secondary-200/80 bg-secondary-50/80 text-secondary-900 shadow-sm dark:border-secondary-400/25 dark:bg-secondary-500/10 dark:text-secondary-100"
     : "border-rose-200/80 bg-rose-50/80 text-rose-900 shadow-sm dark:border-rose-400/25 dark:bg-rose-500/10 dark:text-rose-100";
   const displayContent = resolveControllerConversationNoticeContent(message);
+  // Without the provider (thread previews, tests) the card keeps its old
+  // button-free shape rather than throwing.
+  const noticeActions = useControllerNoticeActions();
+  const noticeAction = resolveControllerConversationNoticeAction(message);
+  const handleNoticeAction = resolveControllerNoticeActionHandler(noticeAction, noticeActions);
 
   return (
     <NotchedMessageShell
@@ -509,6 +519,22 @@ function ControllerConversationNoticeEntry({
               mentionableAgentHandles={mentionableAgentHandles}
             />
           </div>
+          {noticeAction && handleNoticeAction ? (
+            <div className="mt-2">
+              <button
+                type="button"
+                data-testid="chat-controller-notice-action"
+                onClick={handleNoticeAction}
+                className={`inline-flex flex-none items-center justify-center rounded-full border px-2.5 py-1 text-xs font-medium transition focus:outline-none focus-visible:ring-2 ${
+                  isRuntimeAlert
+                    ? "border-secondary-300/70 text-secondary-800 hover:bg-secondary-100/70 focus-visible:ring-secondary-400 dark:border-secondary-400/30 dark:text-secondary-100 dark:hover:bg-secondary-500/15"
+                    : "border-rose-300/70 text-rose-800 hover:bg-rose-100/70 focus-visible:ring-rose-400 dark:border-rose-400/30 dark:text-rose-100 dark:hover:bg-rose-500/15"
+                }`}
+              >
+                {noticeAction.label}
+              </button>
+            </div>
+          ) : null}
         </div>
       )}
     </NotchedMessageShell>

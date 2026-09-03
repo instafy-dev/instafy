@@ -160,6 +160,13 @@ interface RuntimeMenuOptionsListProps {
   onTerminateRuntime?: (runtimeId: string | null) => void;
   onRemoveRuntime?: (runtimeId: string | null) => void;
   onStartRuntime?: (runtimeId: string | null) => void;
+  /**
+   * Opens the self-host dialog. A self-hosted machine cannot be started from
+   * the browser — Start/Stop/Remove are all gated on `!isLikelyLocal` — so an
+   * offline self-hosted row otherwise carries no control at all, and anything
+   * that sends the reader here just moves the dead end.
+   */
+  onShowSelfHostHelp?: () => void;
   className?: string;
   optionClassName?: string;
   selectedOptionClassName?: string;
@@ -297,6 +304,7 @@ export function RuntimeMenuOptionsList({
   onTerminateRuntime,
   onRemoveRuntime,
   onStartRuntime,
+  onShowSelfHostHelp,
   className = "mt-1 max-h-64 overflow-auto",
   optionClassName = DEFAULT_OPTION_CLASS,
   selectedOptionClassName = "bg-slate-100 font-medium text-slate-900",
@@ -435,7 +443,10 @@ export function RuntimeMenuOptionsList({
           Boolean(option.id) &&
           !option.isLikelyLocal &&
           option.state === "offline";
-        const hasActions = hasDetails || canStart || canTerminate || canRemove;
+        const canShowSelfHostHelp =
+          Boolean(onShowSelfHostHelp) && option.isLikelyLocal && option.state === "offline";
+        const hasActions =
+          hasDetails || canStart || canTerminate || canRemove || canShowSelfHostHelp;
 
         return (
           <div
@@ -632,6 +643,25 @@ export function RuntimeMenuOptionsList({
                     {lifecycleRow ? (
                       <RuntimeValueRow label={lifecycleRow.label} value={lifecycleRow.value} />
                     ) : null}
+                  </div>
+                ) : null}
+                {canShowSelfHostHelp ? (
+                  <div className="flex flex-col gap-1.5">
+                    <p className="text-xxs text-slate-500 dark:text-slate-400">
+                      Self-hosted machines start from the computer they run on.
+                    </p>
+                    <div>
+                      <Button
+                        onPress={() => onShowSelfHostHelp?.()}
+                        variant="outline"
+                        size="xs"
+                        radius="full"
+                        className="gap-1.5 text-xxs"
+                      >
+                        <Play className="h-3.5 w-3.5 text-primary-500" aria-hidden="true" />
+                        How to start it
+                      </Button>
+                    </div>
                   </div>
                 ) : null}
                 {!headerActions && (canStart || canTerminate || canRemove) ? (

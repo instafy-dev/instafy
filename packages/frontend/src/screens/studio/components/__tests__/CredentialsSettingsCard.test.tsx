@@ -194,7 +194,7 @@ describe("CredentialsSettingsCard", () => {
 
     expect(mocks.testCredential).toHaveBeenCalledWith("cred-old");
     expect(container.textContent).toContain("Needs reconnect");
-    expect(container.textContent).toContain("The selected upstream AI login/token is stale.");
+    expect(container.textContent).toContain("The saved AI login is stale. Reconnect it below, then test again.");
     expect(container.querySelector('[data-testid="credentials-connection-reconnect-cred-old"]')).not.toBeNull();
   });
 
