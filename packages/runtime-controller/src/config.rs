@@ -107,6 +107,22 @@ impl std::fmt::Debug for CredentialEncryptionKey {
     }
 }
 
+/// The value USER_TOKEN_SECRET falls back to when unset. Published in this
+/// repository, so it is only ever acceptable under DEV_MODE — Config::from_env
+/// refuses to start with it otherwise.
+const DEV_USER_TOKEN_SECRET: &str = "dev-user-token-secret";
+
+/// Whether this signing secret may be used in this mode. Split out so the
+/// policy is testable and so the boot guard reads as one call.
+fn signing_secret_rejection(dev_mode: bool, user_token_secret: &str) -> Option<&'static str> {
+    (!dev_mode && user_token_secret == DEV_USER_TOKEN_SECRET).then_some(
+        "USER_TOKEN_SECRET is not set, so the controller fell back to its published development \
+         value. That secret signs user session tokens and derives the credential encryption key. \
+         Set USER_TOKEN_SECRET to a strong random value (and CREDENTIAL_ENCRYPTION_KEY alongside \
+         it), or set DEV_MODE=1 for local work.",
+    )
+}
+
 pub(crate) const DEFAULT_SERVICE_RUNTIME_USER_EMAIL: &str = "service-runtime@instafy.dev";
 
 fn parse_browser_profile_persist_project_ids(raw: &str) -> anyhow::Result<Vec<Uuid>> {
@@ -665,7 +681,7 @@ impl AppConfig {
             .ok()
             .map(|raw| raw.trim().to_string())
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "dev-user-token-secret".to_string());
+            .unwrap_or_else(|| DEV_USER_TOKEN_SECRET.to_string());
         let user_token_ttl_seconds = std::env::var("USER_TOKEN_TTL_SECONDS")
             .ok()
             .and_then(|raw| raw.parse::<i64>().ok())
@@ -737,6 +753,7 @@ impl AppConfig {
             .filter(|ttl| *ttl > 0)
             .unwrap_or(1800);
 
+        let mut credential_encryption_key_configured = false;
         let credential_encryption_key = match std::env::var("CREDENTIAL_ENCRYPTION_KEY") {
             Ok(value) => {
                 let trimmed = value.trim();
@@ -750,6 +767,7 @@ impl AppConfig {
         }
         // Keep credential storage working even when deployments forget to provide a dedicated key.
         // Operators can still override with `CREDENTIAL_ENCRYPTION_KEY` for independent rotation.
+        .inspect(|_| credential_encryption_key_configured = true)
         .or_else(|| {
             Some(CredentialEncryptionKey::derive_from_user_token_secret(
                 &user_token_secret,
@@ -913,6 +931,23 @@ impl AppConfig {
             .map(|value| matches!(value.as_str(), "1" | "true" | "yes" | "on"))
             .unwrap_or(false);
         let configured_public_app_url = read_first_env(&["PUBLIC_APP_URL", "VITE_PUBLIC_APP_URL"]);
+        // USER_TOKEN_SECRET signs controller session tokens: authenticate_request
+        // accepts any token that verifies against it and hands back a full user
+        // session for whatever `sub` it names. It ALSO derives the credential
+        // encryption key whenever CREDENTIAL_ENCRYPTION_KEY is unset. Falling
+        // back to a value published in this repository therefore means anyone
+        // who can reach the controller can mint a session as any user, and a
+        // copy of the database decrypts. Refuse to start instead of running
+        // that way silently.
+        if let Some(message) = signing_secret_rejection(dev_mode, &user_token_secret) {
+            return Err(anyhow::anyhow!(message));
+        }
+        if !dev_mode && !credential_encryption_key_configured {
+            tracing::warn!(
+                "CREDENTIAL_ENCRYPTION_KEY is not set; stored credentials are encrypted under a \
+                 key derived from USER_TOKEN_SECRET. Rotating one silently invalidates the other."
+            );
+        }
         let public_app_url =
             normalize_public_app_url(configured_public_app_url.as_deref(), dev_mode)?;
         let managed_ai_startup_check = std::env::var("MANAGED_AI_STARTUP_CHECK")
@@ -1261,7 +1296,7 @@ impl StripeConfig {
 mod tests {
     use super::{
         database_pool_size_from_values, normalize_public_app_url,
-        parse_browser_profile_persist_project_ids,
+        parse_browser_profile_persist_project_ids, signing_secret_rejection,
     };
     use uuid::Uuid;
 
@@ -1415,5 +1450,25 @@ mod tests {
                 "expected {value:?} to be rejected"
             );
         }
+    }
+
+    #[test]
+    fn the_published_dev_signing_secret_is_refused_outside_dev_mode() {
+        // USER_TOKEN_SECRET signs session tokens AND derives the credential
+        // encryption key, so falling back to a value published in this repo
+        // means anyone who can reach the controller mints a session as any
+        // user, and a database copy decrypts. The guard is the only thing that
+        // makes forgetting the variable loud instead of silent.
+        // Pins the POLICY. It does not exercise Config::from_env, so it cannot
+        // catch the call site being deleted — that deletion is visible in review.
+        let refuses =
+            |dev_mode: bool, secret: &str| signing_secret_rejection(dev_mode, secret).is_some();
+
+        assert!(refuses(false, super::DEV_USER_TOKEN_SECRET));
+        // Local work keeps the fallback.
+        assert!(!refuses(true, super::DEV_USER_TOKEN_SECRET));
+        // A real secret boots in either mode.
+        assert!(!refuses(false, "a-real-random-secret"));
+        assert!(!refuses(true, "a-real-random-secret"));
     }
 }
