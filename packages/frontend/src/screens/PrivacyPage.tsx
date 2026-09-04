@@ -135,55 +135,7 @@ export function PrivacyPage() {
 
           <section className="space-y-4">
             <Heading level={2} variant="title" className="tracking-tight">
-              5. Google OAuth and Google user data
-            </Heading>
-            <Text variant="bodyLg" tone="secondary" className="max-w-prose">
-              If you choose Google OAuth to connect Gemini, we request the Google scopes you approve
-              during sign-in. Depending on the configured Gemini mode, this can include profile/email scopes
-              and cloud-platform access scopes needed for the requested Gemini flow.
-            </Text>
-            <Text variant="bodyLg" tone="secondary" className="max-w-prose">
-              We use Google user data only to authenticate your account connection, securely store and refresh
-              your OAuth credential, and call Google/Gemini APIs to fulfill actions you request in the Service.
-              We do not sell Google user data or use it for advertising.
-            </Text>
-            <Text variant="bodyLg" tone="secondary" className="max-w-prose">
-              Our use and transfer of information received from Google APIs adheres to the{" "}
-              <a
-                className="font-semibold underline decoration-slate-300 underline-offset-4 transition hover:decoration-slate-500 dark:decoration-slate-700"
-                href="https://developers.google.com/terms/api-services-user-data-policy"
-                target="_blank"
-                rel="noreferrer"
-              >
-                Google API Services User Data Policy
-              </a>
-              , including the Limited Use requirements.
-            </Text>
-            <Text variant="bodyLg" tone="secondary" className="max-w-prose">
-              You can revoke access at any time by removing the Gemini connection in Instafy settings,
-              revoking app access in your Google account permissions at{" "}
-              <a
-                className="font-semibold underline decoration-slate-300 underline-offset-4 transition hover:decoration-slate-500 dark:decoration-slate-700"
-                href="https://myaccount.google.com/permissions"
-                target="_blank"
-                rel="noreferrer"
-              >
-                myaccount.google.com/permissions
-              </a>
-              , or contacting us at{" "}
-              <a
-                className="font-semibold underline decoration-slate-300 underline-offset-4 transition hover:decoration-slate-500 dark:decoration-slate-700"
-                href={`mailto:${CONTACT_EMAIL}`}
-              >
-                {CONTACT_EMAIL}
-              </a>
-              .
-            </Text>
-          </section>
-
-          <section className="space-y-4">
-            <Heading level={2} variant="title" className="tracking-tight">
-              6. Data retention
+              5. Data retention
             </Heading>
             <Text variant="bodyLg" tone="secondary" className="max-w-prose">
               We retain information for as long as needed to provide the Service, comply with legal
@@ -195,7 +147,7 @@ export function PrivacyPage() {
 
           <section className="space-y-4">
             <Heading level={2} variant="title" className="tracking-tight">
-              7. Security
+              6. Security
             </Heading>
             <Text variant="bodyLg" tone="secondary" className="max-w-prose">
               We use reasonable administrative, technical, and organizational safeguards designed to protect
@@ -205,7 +157,7 @@ export function PrivacyPage() {
 
           <section className="space-y-4">
             <Heading level={2} variant="title" className="tracking-tight">
-              8. Your choices and rights
+              7. Your choices and rights
             </Heading>
             <Text variant="bodyLg" tone="secondary" className="max-w-prose">
               Depending on where you live, you may have rights to access, correct, delete, or object to
@@ -222,7 +174,7 @@ export function PrivacyPage() {
 
           <section className="space-y-4">
             <Heading level={2} variant="title" className="tracking-tight">
-              9. Children’s privacy
+              8. Children’s privacy
             </Heading>
             <Text variant="bodyLg" tone="secondary" className="max-w-prose">
               The Service is not directed to children, and we do not knowingly collect personal information
@@ -232,7 +184,7 @@ export function PrivacyPage() {
 
           <section className="space-y-4">
             <Heading level={2} variant="title" className="tracking-tight">
-              10. Changes to this policy
+              9. Changes to this policy
             </Heading>
             <Text variant="bodyLg" tone="secondary" className="max-w-prose">
               We may update this Privacy Policy from time to time. We’ll update the “Last updated” date
@@ -242,7 +194,7 @@ export function PrivacyPage() {
 
           <section className="space-y-4">
             <Heading level={2} variant="title" className="tracking-tight">
-              11. Contact
+              10. Contact
             </Heading>
             <Text variant="bodyLg" tone="secondary" className="max-w-prose">
               Questions about privacy? Email{" "}

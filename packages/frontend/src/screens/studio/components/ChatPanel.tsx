@@ -373,7 +373,7 @@ function formatCredentialConnectionFailure(raw: string | null | undefined): stri
     lowered.includes("access_token_scope_insufficient") ||
     lowered.includes("insufficient authentication scopes")
   ) {
-    return "Google login is missing required scopes. Reconnect Gemini and grant all requested permissions.";
+    return "This Gemini connection used Google login, which is no longer supported. Replace it with a Gemini API key.";
   }
   if (
     lowered.includes("service_disabled") ||
@@ -543,17 +543,45 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     (effectiveProjectRole === "viewer" || canWriteProject === false);
   const latestProjectAccessRef = useRef({ projectReadOnly, projectWriteDisabled });
   latestProjectAccessRef.current = { projectReadOnly, projectWriteDisabled };
+  // Written further down, once useChatOrgMembers has resolved this user's org
+  // role. Only an org member reaches a useful Team settings -> Members list; a
+  // project guest lands on the "you have access as a guest" notice there, so a
+  // guest gets copy naming someone they can actually reach instead of a button
+  // into a dead end.
+  const latestOrgMembershipRef = useRef(false);
   const ensureProjectWriteAccess = useCallback(() => {
     const latestAccess = latestProjectAccessRef.current;
     if (!latestAccess.projectWriteDisabled) {
       return true;
     }
+    if (!latestAccess.projectReadOnly) {
+      showStatus("Checking your access to this space. Try again in a moment.", "warning", 3500);
+      return false;
+    }
+    if (!latestOrgMembershipRef.current) {
+      showStatus(
+        "This space is read-only for your account. Ask whoever shared it with you for edit access.",
+        "warning",
+        3500,
+      );
+      return false;
+    }
     showStatus(
-      latestAccess.projectReadOnly
-        ? "This space is read-only for your account. Ask an admin for edit access."
-        : "Checking your access to this space. Try again in a moment.",
+      "This space is read-only for your account. Ask an admin for edit access.",
       "warning",
-      3500,
+      6000,
+      {
+        actionLabel: "Open team settings",
+        onAction: () => {
+          if (typeof window === "undefined") {
+            return;
+          }
+          // WorkspaceTabsProvider is mounted below the providers this panel runs
+          // in, so route the tab open through StudioLayout the same way
+          // "instafy:open-source-control" does.
+          window.dispatchEvent(new CustomEvent("instafy:open-org-members"));
+        },
+      },
     );
     return false;
   }, [showStatus]);
@@ -923,6 +951,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   }, [activeProjectId, projectList]);
   const {
     canShareProject,
+    currentUserRole: orgMembersCurrentUserRole,
     error: orgMembersError,
     loading: orgMembersLoading,
     members: orgMembers,
@@ -931,6 +960,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     currentUserId,
     enabled: runtimeControllerEnabled,
   });
+  // A resolved org role is the gate SettingsPanel itself uses (`isOrgMember`)
+  // to decide whether Team settings renders the member list or the guest
+  // notice. Read above by ensureProjectWriteAccess, which is declared before
+  // this hook runs.
+  latestOrgMembershipRef.current = Boolean(orgMembersCurrentUserRole);
   const effectiveCanShareProject =
     projectCapabilitiesResolved === true
       ? serverCanShareProject === true
@@ -4034,12 +4068,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     personalBrowserActive:
       browserTransport === "personal" &&
       browserSessionOpen,
-    personalBrowserAgentError:
-      personalBrowser.status?.state === "ready" &&
-      !personalBrowser.status.agentControlEnabled
-        ? "Personal Browser agent control is paused. Resume it before sending this browser task."
-        : personalBrowser.agentError,
+    personalBrowserAgentControlEnabled: personalBrowser.status?.agentControlEnabled ?? false,
+    personalBrowserAgentError: personalBrowser.agentError,
+    personalBrowserAgentPhase: personalBrowser.agentPhase,
+    personalBrowserAgentSurfaceReady: personalBrowser.status?.state === "ready",
+    personalBrowserRetryAgentControl: personalBrowser.retryAgentControl,
     personalBrowserRuntimeOverride: personalBrowser.runtimeOverride,
+    personalBrowserSetAgentControlEnabled: personalBrowser.setAgentControlEnabled,
     preferredBrowserPage,
     preferredRuntimeId,
     revealAiGatesForCurrentDraft,
