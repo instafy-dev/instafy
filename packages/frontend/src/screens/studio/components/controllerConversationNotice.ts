@@ -49,9 +49,9 @@ function extractMessageDetails(
 
 /// Mirrors `runtime_alert_fallback_message` in
 /// packages/runtime-controller/src/dispatch.rs. Both sides used to say "Use the
-/// Runtime button by the composer"; that button's only renderer
-/// (`RuntimeSelectorCompact`) lost its last importer, so the copy pointed at a
-/// control that does not exist. Machines is where runtimes live now, and
+/// Runtime button by the composer"; that button's only renderer lost its last
+/// importer and has since been deleted, so the copy pointed at a control that
+/// does not exist. Machines is where runtimes live now, and
 /// `resolveControllerConversationNoticeAction` puts a button on the card.
 function resolveRuntimeAlertContent(
   metadata: Record<string, unknown> | null,
