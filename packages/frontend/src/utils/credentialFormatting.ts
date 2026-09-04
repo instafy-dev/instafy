@@ -54,7 +54,10 @@ export function formatCredentialKind(
       provider === "google-gemini"
     ) {
       if (source === "google_oauth") {
-        return "Gemini Google login";
+        // Google no longer permits this login, so a credential stored this way
+        // can never refresh again. Say so on the row rather than waiting for
+        // the reader to press Test and find out.
+        return "Gemini Google login (no longer supported)";
       }
       return "Gemini API key";
     }
