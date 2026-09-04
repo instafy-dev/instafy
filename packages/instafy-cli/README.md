@@ -35,6 +35,7 @@ Run Instafy spaces locally and connect them back to Instafy Studio — from any 
 - `instafy conversation show "<title-or-id>"` — inspect one conversation’s messages so you can reuse earlier context in a new chat.
 - `instafy conversation create --parent <conversationId> --thread-kind agent --title "Octo coordination"` — create a linked child thread for conversation-native agent coordination.
 - `instafy chat --conversation <threadId> "@octo ..." --no-wait` — involve another agent by posting a normal message into a normal conversation/thread. Use non-blocking posts from inside an active runtime turn.
+  - Like an ordinary Studio chat, the CLI marks the turn as potentially workspace-writing. Controller and member permissions still apply, and read-only questions do not require a file change.
 - `instafy agents list` — list available top-level agents.
 - `instafy agents context list --query "<topic>"` — inspect optional compact scoped context-card hints for cross-agent coordination.
 - `instafy agents context put --agent @octo "<summary>"` — save/update a compact context card for the current conversation when `INSTAFY_CONVERSATION_ID` is set.
