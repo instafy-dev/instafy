@@ -25709,6 +25709,33 @@ mod billing_service_tests {
         };
 
         let app = runtime::router().with_state(state.clone());
+        let unsupported_scope = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/projects/{}/runtime/token",
+                        project_id.to_string()
+                    ))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        "Bearer service-role-token",
+                    )
+                    .body(Body::from(serde_json::to_vec(
+                        &json!({ "scopes": ["agent.secrets"] }),
+                    )?))?,
+            )
+            .await?;
+        assert_eq!(unsupported_scope.status(), StatusCode::BAD_REQUEST);
+        let unsupported_scope_body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(unsupported_scope.into_body(), usize::MAX).await?)?;
+        assert_eq!(
+            unsupported_scope_body["message"],
+            "unsupported runtime token scope requested"
+        );
+
         let response = app
             .oneshot(
                 Request::builder()
