@@ -31,7 +31,7 @@ ARG BUILD_PROFILE=dev
 ARG BUILD_ARTIFACT_DIR=debug
 # Runtime base should have glibc >= the builder image; Debian trixie is newer than bookworm.
 ARG RUNTIME_BASE=debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
-ARG CHROMIUM_MIN_VERSION=151.0.7922.173-1~deb13u1
+ARG CHROMIUM_MIN_VERSION=152.0.7977.75-1~deb13u1
 ARG WEBDEV_BASE=mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
 
 ########################

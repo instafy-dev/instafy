@@ -50,12 +50,25 @@ type UseCredentialsConnectFlowOptions = {
   formatCredentialTestFailureMessage: (raw: string | null | undefined) => string | null;
   /** Surfaces outside AI Manager pass this so a completion warning can jump there. */
   onOpenAiManager?: () => void;
+  /**
+   * Whether a credential is the default RIGHT NOW. Replacing has to decide
+   * promotion when it finishes, not when the button was pressed: the default
+   * can move while the modal is open (another row's "Make default", the chat
+   * wizard, a second tab), and promoting on a stale snapshot can retire the
+   * live default and leave the workspace with none.
+   */
+  isCredentialDefault?: (credentialId: string) => boolean;
 };
 
 type UseCredentialsConnectFlowResult = {
   canManageAiConnections: boolean;
   openConnectModal: () => void;
   openConnectModalAtStep: (step: CredentialsConnectModalStep) => void;
+  /** Opens the modal to replace an existing credential rather than add one. */
+  openConnectModalToReplace: (
+    credential: { id: string; label: string },
+    step: CredentialsConnectModalStep,
+  ) => void;
   connectModalProps: CredentialsConnectModalProps;
 };
 
@@ -66,6 +79,7 @@ export function useCredentialsConnectFlow({
   showStatus,
   formatCredentialTestFailureMessage,
   onOpenAiManager,
+  isCredentialDefault,
 }: UseCredentialsConnectFlowOptions): UseCredentialsConnectFlowResult {
   const [connectPending, setConnectPending] = useState(false);
   const [labelDraft, setLabelDraft] = useState("");
@@ -73,6 +87,11 @@ export function useCredentialsConnectFlow({
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [connectModalOpen, setConnectModalOpen] = useState(false);
   const [connectModalStep, setConnectModalStep] = useState<CredentialsConnectModalStep>("picker");
+  // A ref, not state: handleConnectApiKey has a long explicit dependency array,
+  // and a state value read inside it would be captured stale — the replace
+  // would silently degrade into a plain add, leaving two live credentials with
+  // the dead one still default.
+  const replaceTargetRef = useRef<{ id: string; label: string } | null>(null);
   const [apiKeyPendingProvider, setApiKeyPendingProvider] = useState<CredentialsConnectApiKeyProvider | null>(null);
   const [openaiApiKeyDraft, setOpenaiApiKeyDraft] = useState("");
   const [openaiLabelDraft, setOpenaiLabelDraft] = useState("");
@@ -147,6 +166,7 @@ export function useCredentialsConnectFlow({
   }, []);
 
   const closeConnectModal = useCallback(() => {
+    replaceTargetRef.current = null;
     if (connectInteractionBusy) {
       return;
     }
@@ -178,6 +198,7 @@ export function useCredentialsConnectFlow({
 
   const openConnectModalAtStep = useCallback(
     (step: CredentialsConnectModalStep) => {
+      replaceTargetRef.current = null;
       setConnectModalOpen(true);
       setConnectModalStep(step);
       setShowAdvanced(false);
@@ -186,6 +207,22 @@ export function useCredentialsConnectFlow({
     },
     [resetDeviceAuthFlow],
   );
+
+  const openConnectModalToReplace = useCallback(
+    (credential: { id: string; label: string }, step: CredentialsConnectModalStep) => {
+      openConnectModalAtStep(step);
+      replaceTargetRef.current = credential;
+    },
+    [openConnectModalAtStep],
+  );
+
+  // Leaving the provider step abandons the replace. Without this, a replace
+  // opened on one provider that lands on another through any step change would
+  // retire a healthy credential of the first provider.
+  const handleConnectModalStepChange = useCallback((step: CredentialsConnectModalStep) => {
+    replaceTargetRef.current = null;
+    setConnectModalStep(step);
+  }, []);
 
   const handleConnectModalBack = useCallback(() => {
     if (connectInteractionBusy) {
@@ -458,6 +495,53 @@ export function useCredentialsConnectFlow({
     [loadCredentials, showStatus],
   );
 
+  /**
+   * Retire the credential this connection replaced.
+   *
+   * Order matters and there is only one safe one: create (never default) →
+   * test → promote → revoke. `revoke_my_credential` sets is_default = false
+   * and promotes nothing, so retiring first — or retiring a credential that is
+   * currently the default without promoting — leaves the workspace with no
+   * default at all and drops chat into needs_default.
+   *
+   * Promotion is decided HERE, from the live list, because the default can
+   * move while the modal is open.
+   */
+  const finalizeCredentialReplacement = useCallback(
+    async (replacementId: string) => {
+      const target = replaceTargetRef.current;
+      replaceTargetRef.current = null;
+      if (!target) {
+        return;
+      }
+      // Only when the outgoing credential is the live default. A user on
+      // managed AI has zero defaults deliberately; promoting here would flip
+      // them into BYOC behind their back.
+      if (isCredentialDefault?.(target.id)) {
+        const promoted = await setDefaultCredential(replacementId).catch(() => null);
+        if (!promoted?.success) {
+          showStatus(
+            "Connected, but it could not be made the default. Choose it below, then remove the old one.",
+            "warning",
+            7000,
+          );
+          return;
+        }
+      }
+      const revoked = await revokeMyCredential(target.id).catch(() => null);
+      if (!revoked?.success) {
+        showStatus(
+          `Connected, but "${target.label}" could not be removed. Remove it below.`,
+          "warning",
+          7000,
+        );
+        return;
+      }
+      showStatus("Connection replaced. Agents pinned to the old one now use the default.", "success", 4500);
+    },
+    [isCredentialDefault, showStatus],
+  );
+
   const handleConnectApiKey = useCallback(
     async (provider: CredentialsConnectApiKeyProvider): Promise<boolean> => {
       if (!runtimeControllerEnabled || !controllerBaseUrl) {
@@ -507,10 +591,16 @@ export function useCredentialsConnectFlow({
       setApiKeyPendingProvider(provider);
       let createdCredentialId: string | null = null;
       try {
+        const replacing = replaceTargetRef.current !== null;
         const result = await createCodexCredential({
           authJson: { OPENAI_API_KEY: apiKey },
           label,
           provider,
+          // Explicit false while replacing: the controller otherwise
+          // auto-defaults a new credential whenever the user has none, which
+          // would flip a managed-AI user into BYOC. Promotion is decided in
+          // finalizeCredentialReplacement instead.
+          ...(replacing ? { makeDefault: false } : {}),
         });
         if (!result.success || !result.credentialId) {
           showStatus(result.error ?? "Unable to save credentials.", "error", 5000);
@@ -555,7 +645,11 @@ export function useCredentialsConnectFlow({
           setGeminiLabelDraft("");
         }
 
-        showStatus("Credential verified.", "success", 3500);
+        if (replaceTargetRef.current) {
+          await finalizeCredentialReplacement(result.credentialId);
+        } else {
+          showStatus("Credential verified.", "success", 3500);
+        }
         await loadCredentials({ silent: true });
         notifyAiConfigChanged(`${provider}_api_key_connected`);
         return true;
@@ -581,6 +675,7 @@ export function useCredentialsConnectFlow({
       notifyAiConfigChanged,
       openaiApiKeyDraft,
       openaiLabelDraft,
+      finalizeCredentialReplacement,
       reportUnverifiedCredential,
       showStatus,
       userPresent,
@@ -593,6 +688,7 @@ export function useCredentialsConnectFlow({
     canManageAiConnections,
     openConnectModal,
     openConnectModalAtStep,
+    openConnectModalToReplace,
     connectModalProps: {
       canManageAiConnections,
       canUseDesktopConnect,
@@ -618,7 +714,7 @@ export function useCredentialsConnectFlow({
       fileInputRef,
       onClose: closeConnectModal,
       onBack: handleConnectModalBack,
-      onStepChange: setConnectModalStep,
+      onStepChange: handleConnectModalStepChange,
       onShowAdvancedChange: setShowAdvanced,
       onLabelDraftChange: setLabelDraft,
       onOpenaiApiKeyDraftChange: setOpenaiApiKeyDraft,
