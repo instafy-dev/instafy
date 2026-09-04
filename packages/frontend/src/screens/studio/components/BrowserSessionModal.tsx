@@ -2749,7 +2749,7 @@ export function BrowserSessionModal({
                           radius="full"
                           data-testid="browser-session-error-retry"
                         >
-                          Try again
+                          Retry
                         </Button>
                       </div>
                     </div>

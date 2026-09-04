@@ -27,6 +27,7 @@ import {
   AccessSectionLabel,
 } from "./AccessDecisionCard";
 import { ChatGptDeviceCodePrerequisite } from "./ChatGptDeviceCodePrerequisite";
+import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
 import { ChatActivityBubble } from "./ChatActivityBubble";
 import {
   isLikelyDesktopDevice,
@@ -263,13 +264,15 @@ export function AiCredentialsStatusBubble({
       case "checking":
         return null;
       case "needs_default":
-        return connectedCredentials.length > 0
-          ? "Choose one below — you can change it anytime."
-          : "Open AI Manager and set one as default.";
+        // effectiveState normalizes the zero-credential case to "missing", so
+        // this branch always has credentials to choose from.
+        return "Choose one below — you can change it anytime.";
       case "unavailable":
         return "Retry in a moment. Your AI credentials may still be fine.";
       case "error":
-        return "Try again, or manage AI connections in AI Manager.";
+        // The Retry button beside this is real; there is no link to AI Manager
+        // from here, so the sentence no longer sends the reader looking for one.
+        return "Try again — your AI connections are unchanged.";
       default:
         if (intent === "connect" && managedAi?.available && connectedCredentials.length === 0) {
           const burnLabel =
@@ -557,7 +560,7 @@ export function AiCredentialsStatusBubble({
         radius="2xl"
         shadow="sm"
         data-testid="credentials-status-indicator"
-        className="max-w-[min(85%,30rem)] px-3 py-2.5 text-sm"
+        className={`${CHAT_BUBBLE_MAX_WIDTH.status} px-3 py-2.5 text-sm`}
         aria-live="polite"
       >
         <div className="flex min-w-0 flex-wrap items-center gap-3">
@@ -640,7 +643,7 @@ export function AiCredentialsStatusBubble({
             aria-label="Close AI connect"
             onPress={() => void handleClose()}
             isDisabled={wizardBusy}
-            className="text-slate-400 hover:text-slate-700 data-[hovered]:text-slate-700"
+            className="text-slate-400 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-500 dark:hover:text-slate-200 dark:data-[hovered]:text-slate-200"
           >
             <Xmark className="h-4 w-4" aria-hidden="true" />
           </IconButton>
@@ -833,7 +836,7 @@ export function AiCredentialsStatusBubble({
                 </Button>
               </div>
               <Text as="div" variant="caption" tone="muted" className="text-xs">
-                Google subscription login is disabled for now to keep credential handling simple.
+                Gemini connects with an API key. Google login is no longer supported.
               </Text>
             </div>
           ) : null}

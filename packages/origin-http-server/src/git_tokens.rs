@@ -38,6 +38,13 @@ pub async fn mint_git_access_token(
     let caller_token = origin_access_token
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    // Resolved at call time, not from the spawn-time snapshot: this crate runs
+    // inside a long-lived runtime agent whose controller credential is renewed
+    // underneath it (issue #144).
+    let machine_token = config
+        .current_controller_token()
+        .map(|token| token.trim().to_string())
+        .filter(|token| !token.is_empty());
 
     if requests_write {
         // The controller's internal credential is shared by the gateway and
@@ -50,12 +57,7 @@ pub async fn mint_git_access_token(
         token_candidates.push(token);
     } else {
         // Keep machine bootstrap/fetch behavior for read-only Git access.
-        if let Some(token) = config
-            .controller_internal_token
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
+        if let Some(token) = machine_token.as_deref() {
             token_candidates.push(token);
         }
 
@@ -202,6 +204,7 @@ mod tests {
             bind_port: 0,
             controller_base_url: controller_base_url.clone(),
             controller_internal_token: Some("internal-token".to_string()),
+            controller_token_source: None,
             jwks_url: controller_base_url,
             skip_auth: true,
             enable_presence_heartbeat: false,

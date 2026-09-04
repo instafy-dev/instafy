@@ -237,6 +237,7 @@ pub(crate) fn build_app_config(private_key: &str, public_key: &str, key_id: &str
         stripe: None,
         operator_console_org_id: None,
         operator_console_allowed_user_ids: vec![],
+        bug_reports_operator_user_ids: vec![],
         desktop_release_github_owner: None,
         desktop_release_github_repo: None,
         desktop_release_github_token: None,
@@ -1584,6 +1585,10 @@ async fn create_conversation_tables(client: &mut tokio_postgres::Client) -> anyh
 }
 
 pub(crate) async fn setup_origin_test_pool() -> anyhow::Result<Option<PgPool>> {
+    setup_origin_test_pool_with_max_size(5).await
+}
+
+async fn setup_origin_test_pool_with_max_size(max_size: u32) -> anyhow::Result<Option<PgPool>> {
     let url = match std::env::var("TEST_DATABASE_URL") {
         Ok(value) => value,
         Err(_) => return Ok(None),
@@ -1727,7 +1732,7 @@ pub(crate) async fn setup_origin_test_pool() -> anyhow::Result<Option<PgPool>> {
         PostgresConnectionManager::new_from_stringlike(&url, crate::config::database_tls())
             .map_err(|error| anyhow::anyhow!("failed to create test pool manager: {error}"))?;
     let pool = bb8::Pool::builder()
-        .max_size(5)
+        .max_size(max_size)
         .build(manager)
         .await
         .map_err(|error| anyhow::anyhow!("failed to build test pool: {error}"))?;
@@ -3208,7 +3213,10 @@ async fn bug_report_creation_authorizes_project_and_linked_resources() -> anyhow
         .token;
     let state = build_test_state(pool.clone(), config);
     let mut events_rx = state.events.subscribe();
-    let app = crate::bug_reports::router().with_state(state);
+    // Keep `state` (and with it the events sender) alive past the final
+    // request: the closed-channel error from a dropped sender would satisfy
+    // the "no broadcast" timeout check below without proving anything.
+    let app = crate::bug_reports::router().with_state(state.clone());
 
     for (body, expected_status) in [
         (
@@ -3315,29 +3323,12 @@ async fn bug_report_creation_authorizes_project_and_linked_resources() -> anyhow
             .ok_or_else(|| anyhow::anyhow!("bug report response omitted id"))?,
     )?;
 
-    let submitted_event = timeout(std::time::Duration::from_secs(1), events_rx.recv()).await??;
-    assert_eq!(submitted_event.kind, "telemetry.bug_report.submitted");
-    assert_eq!(submitted_event.project_id, Some(allowed_project_id));
-    assert_eq!(submitted_event.data["bugReportId"], json!(bug_report_id));
-    assert_eq!(submitted_event.data["status"], "open");
-    assert_eq!(submitted_event.data["screenshotCount"], 0);
-    for sensitive_key in [
-        "message",
-        "details",
-        "reporterEmail",
-        "reporter_email",
-        "metadata",
-        "logs",
-    ] {
-        assert!(
-            submitted_event.data.get(sensitive_key).is_none(),
-            "project event leaked {sensitive_key}"
-        );
-    }
-    let serialized_event = serde_json::to_string(&submitted_event)?;
-    assert!(!serialized_event.contains("Authorized project context"));
-    assert!(!serialized_event.contains("Sensitive support details"));
-    assert!(!serialized_event.contains(&format!("controller-test+{reporter_user_id}@example.com")));
+    assert!(
+        timeout(std::time::Duration::from_millis(100), events_rx.recv())
+            .await
+            .is_err(),
+        "customer bug reports must not be broadcast to project event subscribers"
+    );
 
     let stored = pool
         .get()
@@ -3384,6 +3375,828 @@ async fn bug_report_creation_authorizes_project_and_linked_resources() -> anyhow
     cleanup_org(&pool, &allowed_org_id).await?;
     cleanup_test_user(&pool, &owner_user_id).await?;
     cleanup_test_user(&pool, &reporter_user_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn support_report_routes_enforce_customer_privacy_boundary() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("support report route privacy test").await?;
+
+    fn assert_exact_json_keys(value: &serde_json::Value, expected: &[&str], label: &str) {
+        let mut actual = value
+            .as_object()
+            .unwrap_or_else(|| panic!("{label} must be a JSON object"))
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        actual.sort_unstable();
+        let mut expected = expected.to_vec();
+        expected.sort_unstable();
+        assert_eq!(actual, expected, "{label} field boundary changed");
+    }
+
+    let reporter_a_id = Uuid::new_v4();
+    let reporter_b_id = Uuid::new_v4();
+    ensure_test_user(&pool, &reporter_a_id).await?;
+    ensure_test_user(&pool, &reporter_b_id).await?;
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "support-report-privacy-boundary",
+    );
+    let reporter_a_token = crate::auth::issue_controller_token(&config, &reporter_a_id)
+        .map_err(|error| controller_error("issue support reporter A token", error))?
+        .token;
+    let reporter_b_token = crate::auth::issue_controller_token(&config, &reporter_b_id)
+        .map_err(|error| controller_error("issue support reporter B token", error))?
+        .token;
+    let runtime_id = Uuid::new_v4();
+    let scoped_token = mint_scoped_token(
+        &config,
+        ScopedTokenRequest {
+            audience: runtime_id.to_string(),
+            subject: reporter_a_id.to_string(),
+            project_id: Uuid::new_v4().to_string(),
+            origin_id: None,
+            runtime_id: Some(runtime_id.to_string()),
+            protocol: None,
+            scopes: vec!["telemetry.write".to_string()],
+            lease_id: None,
+            run_id: None,
+            prefer_runtime: None,
+            ttl_seconds: Some(300),
+        },
+    )
+    .map_err(|error| controller_error("mint scoped support rejection token", error))?
+    .token;
+    let app = crate::bug_reports::router().with_state(build_test_state(pool.clone(), config));
+
+    let png_signature = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    let create_a = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/support/reports")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_a_token}"),
+                )
+                .body(Body::from(
+                    json!({
+                        "message": "Reporter A support issue",
+                        "details": "Details submitted by reporter A",
+                        "metadata": { "customerContext": "submitted" },
+                        "logs": [{ "message": "customer diagnostic" }],
+                        "screenshots": [{
+                            "fileName": "screen.png",
+                            "mediaType": "image/png",
+                            "dataBase64": STANDARD.encode(&png_signature),
+                            "byteLength": png_signature.len()
+                        }]
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(create_a.status(), StatusCode::CREATED);
+    let create_a_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(create_a.into_body(), usize::MAX).await?)?;
+    let report_a_id = Uuid::parse_str(
+        create_a_payload["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("support create response omitted report A id"))?,
+    )?;
+
+    let create_b = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/support/reports")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_b_token}"),
+                )
+                .body(Body::from(
+                    json!({ "message": "Reporter B support issue" }).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(create_b.status(), StatusCode::CREATED);
+    let create_b_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(create_b.into_body(), usize::MAX).await?)?;
+    let report_b_id = Uuid::parse_str(
+        create_b_payload["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("support create response omitted report B id"))?,
+    )?;
+
+    pool.get()
+        .await?
+        .execute(
+            "update bug_reports
+                set priority = 'urgent',
+                    assignee = 'internal-operator',
+                    labels = '[\"security\"]'::jsonb,
+                    github_issue_url = 'https://example.invalid/internal/123',
+                    metadata = '{\"triageSecret\":\"internal-only\"}'::jsonb,
+                    logs = '[{\"secret\":\"internal-only\"}]'::jsonb,
+                    updated_at = now()
+              where id = $1",
+            &[&report_a_id],
+        )
+        .await?;
+
+    let list_a = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/support/reports?mine=false&limit=100")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_a_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(list_a.status(), StatusCode::OK);
+    let list_a_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(list_a.into_body(), usize::MAX).await?)?;
+    let reporter_a_reports = list_a_payload["reports"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("support list response omitted reports"))?;
+    assert_eq!(reporter_a_reports.len(), 1);
+    assert_eq!(reporter_a_reports[0]["id"], report_a_id.to_string());
+    assert_ne!(reporter_a_reports[0]["id"], report_b_id.to_string());
+    assert_eq!(reporter_a_reports[0]["screenshotCount"], 1);
+    assert_exact_json_keys(
+        &reporter_a_reports[0],
+        &[
+            "id",
+            "createdAt",
+            "updatedAt",
+            "message",
+            "status",
+            "projectId",
+            "screenshotCount",
+        ],
+        "customer support list item",
+    );
+
+    let show_a = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/support/reports/{report_a_id}"))
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_a_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(show_a.status(), StatusCode::OK);
+    let show_a_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(show_a.into_body(), usize::MAX).await?)?;
+    assert_eq!(show_a_payload["id"], report_a_id.to_string());
+    assert_eq!(show_a_payload["details"], "Details submitted by reporter A");
+    assert_exact_json_keys(
+        &show_a_payload,
+        &[
+            "id",
+            "createdAt",
+            "updatedAt",
+            "message",
+            "details",
+            "status",
+            "projectId",
+            "runtimeId",
+            "runId",
+            "conversationId",
+            "screenshots",
+        ],
+        "customer support detail",
+    );
+    let customer_attachments = show_a_payload["screenshots"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("support detail omitted attachment descriptors"))?;
+    assert_eq!(customer_attachments.len(), 1);
+    assert_eq!(customer_attachments[0]["fileName"], "screen.png");
+    assert_eq!(customer_attachments[0]["mediaType"], "image/png");
+    assert_eq!(customer_attachments[0]["byteSize"], png_signature.len());
+    assert_exact_json_keys(
+        &customer_attachments[0],
+        &["id", "fileName", "mediaType", "byteSize"],
+        "customer support attachment",
+    );
+
+    let cross_customer_show = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/support/reports/{report_b_id}"))
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_a_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(cross_customer_show.status(), StatusCode::NOT_FOUND);
+
+    let service_support_list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/support/reports")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    "Bearer service-role-token",
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(service_support_list.status(), StatusCode::UNAUTHORIZED);
+
+    let service_support_create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/support/reports")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    "Bearer service-role-token",
+                )
+                .body(Body::from(
+                    json!({ "message": "must not be accepted" }).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(service_support_create.status(), StatusCode::UNAUTHORIZED);
+
+    let scoped_support_list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/support/reports")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {scoped_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(scoped_support_list.status(), StatusCode::UNAUTHORIZED);
+
+    let legacy_customer_show = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/bug-reports/{report_a_id}"))
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_a_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(legacy_customer_show.status(), StatusCode::OK);
+    let legacy_customer_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(legacy_customer_show.into_body(), usize::MAX).await?)?;
+    assert_exact_json_keys(
+        &legacy_customer_payload,
+        &[
+            "id",
+            "createdAt",
+            "updatedAt",
+            "message",
+            "details",
+            "status",
+            "projectId",
+            "runtimeId",
+            "runId",
+            "conversationId",
+            "screenshots",
+        ],
+        "legacy customer bug report detail",
+    );
+    assert_exact_json_keys(
+        &legacy_customer_payload["screenshots"][0],
+        &["id", "fileName", "mediaType", "byteSize"],
+        "legacy customer bug report attachment",
+    );
+
+    let operator_show = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/bug-reports/{report_a_id}"))
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    "Bearer service-role-token",
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(operator_show.status(), StatusCode::OK);
+    let operator_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(operator_show.into_body(), usize::MAX).await?)?;
+    assert_eq!(operator_payload["priority"], "urgent");
+    assert_eq!(operator_payload["assignee"], "internal-operator");
+    assert_eq!(
+        operator_payload["metadata"]["triageSecret"],
+        "internal-only"
+    );
+    assert_eq!(operator_payload["logs"][0]["secret"], "internal-only");
+    assert_eq!(
+        operator_payload["screenshots"][0]["dataBase64"],
+        STANDARD.encode(&png_signature)
+    );
+
+    pool.get()
+        .await?
+        .execute(
+            "delete from bug_reports where id in ($1, $2)",
+            &[&report_a_id, &report_b_id],
+        )
+        .await?;
+    cleanup_test_user(&pool, &reporter_b_id).await?;
+    cleanup_test_user(&pool, &reporter_a_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn bug_report_operator_allowlist_grants_only_bug_report_routes() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("bug report operator allowlist test").await?;
+
+    let reporter_id = Uuid::new_v4();
+    let bug_report_operator_id = Uuid::new_v4();
+    ensure_test_user(&pool, &reporter_id).await?;
+    ensure_test_user(&pool, &bug_report_operator_id).await?;
+
+    // The bug-reports-only role must work on its own: no operator org and no
+    // full operator allowlist are configured here.
+    let mut config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "bug-report-operator-allowlist",
+    );
+    config.operator_console_org_id = None;
+    config.operator_console_allowed_user_ids = vec![];
+    config.bug_reports_operator_user_ids = vec![bug_report_operator_id];
+
+    let reporter_token = crate::auth::issue_controller_token(&config, &reporter_id)
+        .map_err(|error| controller_error("issue bug report reporter token", error))?
+        .token;
+    let bug_report_operator_token =
+        crate::auth::issue_controller_token(&config, &bug_report_operator_id)
+            .map_err(|error| controller_error("issue bug report operator token", error))?
+            .token;
+    let scoped_runtime_id = Uuid::new_v4();
+    let bug_report_operator_scoped_token = mint_scoped_token(
+        &config,
+        ScopedTokenRequest {
+            audience: scoped_runtime_id.to_string(),
+            subject: bug_report_operator_id.to_string(),
+            project_id: Uuid::new_v4().to_string(),
+            origin_id: None,
+            runtime_id: Some(scoped_runtime_id.to_string()),
+            protocol: None,
+            scopes: vec!["telemetry.write".to_string()],
+            lease_id: None,
+            run_id: None,
+            prefer_runtime: None,
+            ttl_seconds: Some(300),
+        },
+    )
+    .map_err(|error| controller_error("mint scoped bug report operator token", error))?
+    .token;
+
+    let state = build_test_state(pool.clone(), config);
+    let app = crate::bug_reports::router().with_state(state.clone());
+    let operator_admin_app = crate::operator_admin::router().with_state(state.clone());
+    let ota_app = crate::ota::router().with_state(state);
+
+    let unique_message = format!("Allowlist triage {}", Uuid::new_v4());
+    let png_signature = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    let create = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/support/reports")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_token}"),
+                )
+                .body(Body::from(
+                    json!({
+                        "message": unique_message,
+                        "details": "Details from the reporter",
+                        "screenshots": [{
+                            "fileName": "screen.png",
+                            "mediaType": "image/png",
+                            "dataBase64": STANDARD.encode(&png_signature),
+                            "byteLength": png_signature.len()
+                        }]
+                    })
+                    .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(create.status(), StatusCode::CREATED);
+    let create_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(create.into_body(), usize::MAX).await?)?;
+    let report_id = Uuid::parse_str(
+        create_payload["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("support create response omitted report id"))?,
+    )?;
+
+    pool.get()
+        .await?
+        .execute(
+            "update bug_reports
+                set priority = 'urgent',
+                    metadata = '{\"triageSecret\":\"internal-only\"}'::jsonb,
+                    logs = '[{\"secret\":\"internal-only\"}]'::jsonb,
+                    updated_at = now()
+              where id = $1",
+            &[&report_id],
+        )
+        .await?;
+
+    // A user in BUG_REPORTS_OPERATOR_USER_IDS gets the operator projection on list,
+    // including reports filed by other users and the internal triage fields.
+    let operator_list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!(
+                    "/bug-reports?limit=100&search={}",
+                    urlencoding::encode(&unique_message)
+                ))
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {bug_report_operator_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(operator_list.status(), StatusCode::OK);
+    let operator_list_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(operator_list.into_body(), usize::MAX).await?)?;
+    let operator_reports = operator_list_payload["reports"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("operator list response omitted reports"))?;
+    let listed = operator_reports
+        .iter()
+        .find(|report| report["id"] == report_id.to_string())
+        .ok_or_else(|| {
+            anyhow::anyhow!("bug-report operator must see reports filed by other users")
+        })?;
+    assert_eq!(listed["priority"], "urgent");
+    assert_eq!(listed["userId"], reporter_id.to_string());
+    assert_eq!(listed["metadata"]["triageSecret"], "internal-only");
+    assert_eq!(listed["screenshotCount"], 1);
+
+    // ...the full detail on get...
+    let operator_show = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/bug-reports/{report_id}"))
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {bug_report_operator_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(operator_show.status(), StatusCode::OK);
+    let operator_show_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(operator_show.into_body(), usize::MAX).await?)?;
+    assert_eq!(operator_show_payload["id"], report_id.to_string());
+    assert_eq!(operator_show_payload["priority"], "urgent");
+    assert_eq!(operator_show_payload["userId"], reporter_id.to_string());
+    assert_eq!(
+        operator_show_payload["metadata"]["triageSecret"],
+        "internal-only"
+    );
+    assert_eq!(operator_show_payload["logs"][0]["secret"], "internal-only");
+    assert_eq!(
+        operator_show_payload["screenshots"][0]["dataBase64"],
+        STANDARD.encode(&png_signature)
+    );
+
+    // ...and can PATCH triage fields.
+    let operator_patch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/bug-reports/{report_id}"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {bug_report_operator_token}"),
+                )
+                .body(Body::from(
+                    json!({ "status": "in_progress", "assignee": "bug-report-operator" })
+                        .to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(operator_patch.status(), StatusCode::OK);
+    let operator_patch_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(operator_patch.into_body(), usize::MAX).await?)?;
+    assert_eq!(operator_patch_payload["id"], report_id.to_string());
+    assert_eq!(operator_patch_payload["status"], "in_progress");
+    assert_eq!(operator_patch_payload["assignee"], "bug-report-operator");
+
+    // The role authenticates like the full operator gate: a runtime-scoped token
+    // for the same user is not an interactive operator session.
+    let scoped_patch = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/bug-reports/{report_id}"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {bug_report_operator_scoped_token}"),
+                )
+                .body(Body::from(json!({ "status": "resolved" }).to_string()))?,
+        )
+        .await?;
+    assert_eq!(scoped_patch.status(), StatusCode::FORBIDDEN);
+
+    // The same user is refused on operator-only routes outside bug reports.
+    let operator_search = operator_admin_app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/operator/projects/search?q=allowlist&limit=10")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {bug_report_operator_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(operator_search.status(), StatusCode::FORBIDDEN);
+
+    let ota_releases = ota_app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ota/releases")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {bug_report_operator_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(ota_releases.status(), StatusCode::FORBIDDEN);
+
+    // A user in neither list still gets the customer projection and cannot PATCH.
+    let customer_list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/bug-reports?limit=100")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(customer_list.status(), StatusCode::OK);
+    let customer_list_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(customer_list.into_body(), usize::MAX).await?)?;
+    let customer_reports = customer_list_payload["reports"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("customer list response omitted reports"))?;
+    assert_eq!(customer_reports.len(), 1);
+    assert_eq!(customer_reports[0]["id"], report_id.to_string());
+    assert_eq!(customer_reports[0]["status"], "in_progress");
+    for operator_only_key in ["priority", "assignee", "metadata", "logs", "userId"] {
+        assert!(
+            customer_reports[0].get(operator_only_key).is_none(),
+            "customer list projection leaked {operator_only_key}"
+        );
+    }
+
+    let customer_show = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/bug-reports/{report_id}"))
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(customer_show.status(), StatusCode::OK);
+    let customer_show_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(customer_show.into_body(), usize::MAX).await?)?;
+    assert_eq!(customer_show_payload["id"], report_id.to_string());
+    for operator_only_key in ["priority", "assignee", "metadata", "logs", "userId"] {
+        assert!(
+            customer_show_payload.get(operator_only_key).is_none(),
+            "customer detail projection leaked {operator_only_key}"
+        );
+    }
+    assert!(customer_show_payload["screenshots"][0]
+        .get("dataBase64")
+        .is_none());
+
+    let customer_patch = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/bug-reports/{report_id}"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {reporter_token}"),
+                )
+                .body(Body::from(json!({ "status": "resolved" }).to_string()))?,
+        )
+        .await?;
+    assert_eq!(customer_patch.status(), StatusCode::FORBIDDEN);
+
+    pool.get()
+        .await?
+        .execute("delete from bug_reports where id = $1", &[&report_id])
+        .await?;
+    cleanup_test_user(&pool, &bug_report_operator_id).await?;
+    cleanup_test_user(&pool, &reporter_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn support_report_routes_enforce_request_and_daily_limits() -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("support report request limit test").await?;
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "support-report-request-limits",
+    );
+    let quota_user_id = Uuid::new_v4();
+    let malformed_user_id = Uuid::new_v4();
+    let large_body_user_id = Uuid::new_v4();
+    let quota_user_token = crate::auth::issue_controller_token(&config, &quota_user_id)
+        .map_err(|error| controller_error("issue support quota token", error))?
+        .token;
+    let malformed_user_token = crate::auth::issue_controller_token(&config, &malformed_user_id)
+        .map_err(|error| controller_error("issue support malformed-body token", error))?
+        .token;
+    let large_body_user_token = crate::auth::issue_controller_token(&config, &large_body_user_id)
+        .map_err(|error| controller_error("issue support large-body token", error))?
+        .token;
+    let app = crate::bug_reports::router().with_state(build_test_state(pool.clone(), config));
+
+    let initial_quota_report = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/support/reports")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {quota_user_token}"),
+                )
+                .body(Body::from(
+                    json!({ "message": "Daily quota seed" }).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(initial_quota_report.status(), StatusCode::CREATED);
+
+    {
+        let connection = pool.get().await?;
+        for ordinal in 1..20 {
+            connection
+                .execute(
+                    "insert into bug_reports (id, user_id, message, created_at)
+                     values ($1, $2, $3, now())",
+                    &[
+                        &Uuid::new_v4(),
+                        &quota_user_id,
+                        &format!("Daily quota seed {ordinal}"),
+                    ],
+                )
+                .await?;
+        }
+    }
+
+    let daily_quota_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/support/reports")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {quota_user_token}"),
+                )
+                .body(Body::from(
+                    json!({ "message": "Must exceed daily quota" }).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(daily_quota_response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    for attempt in 1..=6 {
+        let malformed_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/support/reports")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {malformed_user_token}"),
+                    )
+                    .body(Body::from("{"))?,
+            )
+            .await?;
+        assert_eq!(
+            malformed_response.status(),
+            if attempt <= 5 {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::TOO_MANY_REQUESTS
+            },
+            "unexpected status for malformed support attempt {attempt}"
+        );
+    }
+
+    let oversized_body = vec![b'x'; 20 * 1024 * 1024 + 1];
+    let oversized_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/support/reports")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {large_body_user_token}"),
+                )
+                .body(Body::from(oversized_body))?,
+        )
+        .await?;
+    assert_eq!(oversized_response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    let anonymous_oversized_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/support/reports")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(vec![b'x'; 20 * 1024 * 1024 + 1]))?,
+        )
+        .await?;
+    assert_eq!(
+        anonymous_oversized_response.status(),
+        StatusCode::UNAUTHORIZED,
+        "support route must authenticate before buffering a large request body"
+    );
+
+    pool.get()
+        .await?
+        .execute(
+            "delete from bug_reports where user_id = $1",
+            &[&quota_user_id],
+        )
+        .await?;
     Ok(())
 }
 
@@ -7880,6 +8693,51 @@ async fn hosted_runtime_sweep_burns_credits() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn hosted_runtime_sweep_pool_pressure_escalates_after_sustained_failure() {
+    let timeout = anyhow::anyhow!("Timed out in bb8")
+        .context("failed to acquire connection for hosted runtime billing");
+    let started_at = std::time::Instant::now();
+    let mut transient_failure_started_at = None;
+
+    assert!(!runtime::should_report_hosted_runtime_credit_sweep_error(
+        &timeout,
+        &mut transient_failure_started_at,
+        started_at,
+    ));
+    assert!(!runtime::should_report_hosted_runtime_credit_sweep_error(
+        &timeout,
+        &mut transient_failure_started_at,
+        started_at + std::time::Duration::from_secs(14 * 60),
+    ));
+    assert!(runtime::should_report_hosted_runtime_credit_sweep_error(
+        &timeout,
+        &mut transient_failure_started_at,
+        started_at + std::time::Duration::from_secs(15 * 60),
+    ));
+
+    let persistent_error = anyhow::anyhow!("relation does not exist")
+        .context("failed to select active hosted runtimes for billing");
+    assert!(runtime::should_report_hosted_runtime_credit_sweep_error(
+        &persistent_error,
+        &mut transient_failure_started_at,
+        started_at,
+    ));
+    assert!(transient_failure_started_at.is_none());
+
+    assert!(!runtime::should_report_hosted_runtime_credit_sweep_error(
+        &timeout,
+        &mut transient_failure_started_at,
+        started_at,
+    ));
+    runtime::reset_hosted_runtime_credit_sweep_pool_pressure(&mut transient_failure_started_at);
+    assert!(!runtime::should_report_hosted_runtime_credit_sweep_error(
+        &timeout,
+        &mut transient_failure_started_at,
+        started_at + std::time::Duration::from_secs(16 * 60),
+    ));
+}
+
 #[tokio::test]
 async fn tunnel_broker_acl_hook_burns_credits() -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {
@@ -8203,6 +9061,139 @@ async fn tunnel_request_burns_credits_when_not_using_broker_hook() -> anyhow::Re
     }
 
     cleanup_org(&pool, &org_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn tunnel_request_rejects_insufficient_credits_without_reporting_a_burn_failure(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping tunnel entitlement billing test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let project_id = Uuid::new_v4();
+    let runtime_id = Uuid::new_v4();
+    let lease_id = Uuid::new_v4();
+    let burn_amount: i32 = 1_000_000_000;
+
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "INSERT INTO projects (id, project_type, status) VALUES ($1, 'customer', 'active')",
+                &[&project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "INSERT INTO runtimes (
+                     id, project_id, provider, status, idle_ttl_seconds, last_seen_at
+                 ) VALUES ($1, $2, 'self-hosted', 'ready', 600, now())",
+                &[&runtime_id, &project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "INSERT INTO runtime_leases (
+                     id, project_id, runtime_id, status, requested_at, launched_at
+                 ) VALUES ($1, $2, $3, 'active', now() - interval '1 minute', now())",
+                &[&lease_id, &project_id, &runtime_id],
+            )
+            .await?;
+    }
+
+    let mut config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "test-origin-key",
+    );
+    config.tunnel_credit_burn_amount = burn_amount;
+    config.tunnel_broker_hook_secret = None;
+
+    let mut provider_configs = HashMap::new();
+    provider_configs.insert(
+        "default".to_string(),
+        RuntimeProviderConfig {
+            id: "default".to_string(),
+            display_name: "Default".to_string(),
+            kind: "noop".to_string(),
+            owner_org_id: None,
+            allowed_org_ids: vec![],
+            endpoint: None,
+            auth_token: None,
+            metadata: None,
+        },
+    );
+    let provider_registry =
+        crate::state::ProviderRegistry::new(provider_configs, "default".to_string());
+    let ota_registry = test_ota_registry(&config);
+    let tunnel_broker: DynTunnelBroker = Arc::new(StubTunnelBroker::default());
+    let state = AppState {
+        config,
+        pool: pool.clone(),
+        rate_limiter: RateLimiter::new(),
+        connection_limiter: ConnectionLimiter::new(),
+        events: crate::state::EventHub::new(),
+        http_client: reqwest::Client::new(),
+        origin_proxy_client: reqwest::Client::new(),
+        runtime_activity: crate::state::RuntimeActivityTracker::new(150),
+        local_workspaces: crate::state::LocalWorkspaceRegistry::new(),
+        runtime_preferences: crate::state::RuntimePreferenceRegistry::new(),
+        runtime_resource_usage: crate::state::RuntimeResourceUsageRegistry::new(),
+        provider_registry,
+        tunnel_broker: Some(tunnel_broker.clone()),
+        device_auth_sessions: crate::device_auth::DeviceAuthRegistry::new(),
+        ota_registry,
+        desktop_update_registry: crate::desktop_updates::DesktopUpdateRegistry::new_in_memory(),
+        credential_refresh_locks: crate::state::CredentialRefreshLocks::new(),
+    };
+
+    let request_body = json!({
+        "runtimeId": runtime_id.to_string(),
+        "runtimeLeaseId": lease_id.to_string()
+    });
+    let response = tunnels::router()
+        .with_state(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/projects/{project_id}/tunnels/request"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    "Bearer service-role-token",
+                )
+                .body(Body::from(request_body.to_string()))?,
+        )
+        .await?;
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+
+    assert_eq!(status, StatusCode::PAYMENT_REQUIRED);
+    let body: serde_json::Value = serde_json::from_slice(&bytes)?;
+    assert_eq!(
+        body["message"].as_str(),
+        Some("insufficient credits available for requested burn")
+    );
+
+    {
+        let connection = pool.get().await?;
+        let report_count: i64 = connection
+            .query_one(
+                "SELECT count(*)
+                 FROM bug_reports
+                 WHERE project_id = $1
+                   AND runtime_id = $2
+                   AND message = 'Tunnel credit burn failed'",
+                &[&project_id, &runtime_id],
+            )
+            .await?
+            .get(0);
+        assert_eq!(report_count, 0);
+    }
+
+    cleanup_origin_project(&pool, &project_id).await?;
     Ok(())
 }
 
@@ -8604,6 +9595,252 @@ async fn targeted_conversation_message_is_leased_by_its_ready_runtime() -> anyho
 }
 
 #[tokio::test]
+async fn dispatch_keeps_ready_private_runtime_without_runtime_type() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping private runtime dispatch regression: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let user_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let preferred_conversation_id = Uuid::new_v4();
+    let explicit_conversation_id = Uuid::new_v4();
+    let runtime_id = Uuid::new_v4();
+    let credential_id = Uuid::new_v4();
+
+    let test_result: anyhow::Result<()> = async {
+        ensure_test_user(&pool, &user_id).await?;
+        let mut capabilities = json!({
+            "agent": true,
+            "origin": true,
+        });
+        runtime::set_self_hosted_access_attestation(
+            capabilities
+                .as_object_mut()
+                .expect("runtime capabilities are an object"),
+            user_id,
+        );
+
+        {
+            let connection = pool.get().await?;
+            connection
+                .execute(
+                    "insert into organizations (id, slug, name)
+                     values ($1, $2, 'Private preferred runtime regression')",
+                    &[&org_id, &format!("private-preferred-runtime-{org_id}")],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into org_memberships (org_id, user_id, role)
+                     values ($1, $2, 'owner')",
+                    &[&org_id, &user_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into projects (id, org_id, owner_user_id, project_type, status)
+                     values ($1, $2, $3, 'customer', 'active')",
+                    &[&project_id, &org_id, &user_id],
+                )
+                .await?;
+            for conversation_id in [preferred_conversation_id, explicit_conversation_id] {
+                connection
+                    .execute(
+                        "insert into conversations (id, project_id, created_by, metadata, visibility)
+                         values ($1, $2, $3, '{}'::jsonb, 'public')",
+                        &[&conversation_id, &project_id, &user_id],
+                    )
+                    .await?;
+            }
+            connection
+                .execute(
+                    "insert into runtimes (
+                         id, project_id, provider, status, endpoint_url, task_ref,
+                         idle_ttl_seconds, last_seen_at, capabilities
+                     ) values (
+                         $1, $2, 'self-hosted', 'ready', 'http://runtime.invalid',
+                         $3, 600, now(), $4
+                     )",
+                    &[
+                        &runtime_id,
+                        &project_id,
+                        &format!("private-preferred-runtime-{runtime_id}"),
+                        &PgJson(capabilities),
+                    ],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into user_credentials (
+                         id, user_id, kind, label, nonce_b64, ciphertext_b64,
+                         metadata, is_default
+                     ) values (
+                         $1, $2, 'openai_api_key', 'Private preferred runtime regression',
+                         'test-nonce', 'test-ciphertext', '{}'::jsonb, true
+                     )",
+                    &[&credential_id, &user_id],
+                )
+                .await?;
+        }
+
+        let mut config = build_app_config(
+            test_origin_private_key(),
+            test_origin_public_key(),
+            "private-preferred-runtime-dispatch",
+        );
+        config.runtime_providers = vec![RuntimeProviderConfig {
+            id: "instafy-cloud".to_string(),
+            display_name: "Instafy Cloud".to_string(),
+            kind: "noop".to_string(),
+            owner_org_id: None,
+            allowed_org_ids: vec![],
+            endpoint: None,
+            auth_token: None,
+            metadata: None,
+        }];
+        let state = build_test_state(pool.clone(), config);
+        state
+            .runtime_preferences
+            .set_private(
+                project_id,
+                user_id,
+                Some(runtime_id),
+                Some("private-test".to_string()),
+                Some("Private runtime".to_string()),
+            )
+            .await;
+
+        for (selection, conversation_id, explicit_runtime_id) in [
+            ("preference", preferred_conversation_id, None),
+            ("explicit", explicit_conversation_id, Some(runtime_id)),
+        ] {
+            let mut normalized = dispatch::normalize_dispatch_request(DispatchPromptRequest {
+                project_id: Some(project_id.to_string()),
+                session_id: None,
+                prompt_text: Some("Report the current workspace status.".to_string()),
+                intent: Some("question".to_string()),
+                plan_seed: None,
+                metadata: Some(json!({
+                    "agentSelection": {
+                        "active": ["octo"],
+                        "mentions": ["octo"]
+                    }
+                })),
+                conversation_metadata: None,
+                parent_conversation_id: None,
+                thread_kind: None,
+                tool_limits: None,
+                repo: None,
+                ui: None,
+                priority: None,
+                runtime_type: None,
+                idle_ttl_seconds: None,
+                conversation_id: Some(conversation_id.to_string()),
+                runtime_id: explicit_runtime_id.map(|value| value.to_string()),
+                runtime_display_name: None,
+                prefer_runtime: None,
+            })
+            .map_err(|error| controller_error("normalize private runtime dispatch", error))?;
+            if explicit_runtime_id.is_some() {
+                // This is the scheduler's `auto` shape after it has selected a
+                // viable existing runtime: an exact runtime ID, no runtime
+                // type, and an automation-owned selection source.
+                normalized.runtime_source = Some("automation".to_string());
+            }
+
+            let response = dispatch::process_dispatch_prompt(
+                &state,
+                &RequestContext {
+                    user_id: Some(user_id),
+                    is_service_role: false,
+                    scoped_claims: None,
+                },
+                normalized,
+            )
+            .await
+            .map_err(|error| controller_error("process private runtime dispatch", error))?;
+
+            let run_id = response.run_id.expect("private runtime run id");
+            let job_id = response.job_id.expect("private runtime job id");
+            let connection = pool.get().await?;
+            let job = connection
+                .query_one(
+                    "select target_runtime_id from agent_jobs where id = $1 and project_id = $2",
+                    &[&job_id, &project_id],
+                )
+                .await?;
+            assert_eq!(
+                job.get::<_, Option<Uuid>>("target_runtime_id"),
+                Some(runtime_id),
+                "ready private {selection} runtime must remain pinned"
+            );
+
+            let run_metadata: PgJson<serde_json::Value> = connection
+                .query_one("select metadata from runs where id = $1", &[&run_id])
+                .await?
+                .get("metadata");
+            assert_eq!(
+                run_metadata.0["jobId"],
+                json!(job_id.to_string()),
+                "ready private {selection} dispatch must persist the exact run job id"
+            );
+            assert!(
+                run_metadata.0.get("runtimeAlert").is_none(),
+                "ready private {selection} runtime must not produce an alert: {}",
+                run_metadata.0
+            );
+            let runtime_alert_count: i64 = connection
+                .query_one(
+                    "select count(*)::bigint
+                     from conversation_messages
+                     where conversation_id = $1 and metadata->>'kind' = 'runtime_alert'",
+                    &[&conversation_id],
+                )
+                .await?
+                .get(0);
+            assert_eq!(
+                runtime_alert_count, 0,
+                "ready private {selection} runtime must not persist an alert"
+            );
+        }
+
+        let connection = pool.get().await?;
+        let runtime = connection
+            .query_one(
+                "select provider, status from runtimes where id = $1 and project_id = $2",
+                &[&runtime_id, &project_id],
+            )
+            .await?;
+        assert_eq!(runtime.get::<_, String>("provider"), "self-hosted");
+        assert_eq!(runtime.get::<_, String>("status"), "ready");
+        assert_eq!(
+            state
+                .runtime_preferences
+                .get_private(&project_id, &user_id)
+                .await
+                .and_then(|entry| entry.runtime_id),
+            Some(runtime_id),
+            "dispatch must not clear the private runtime preference"
+        );
+
+        Ok(())
+    }
+    .await;
+
+    let project_cleanup = cleanup_origin_project(&pool, &project_id).await;
+    let org_cleanup = cleanup_org(&pool, &org_id).await;
+    let user_cleanup = cleanup_test_user(&pool, &user_id).await;
+    test_result?;
+    project_cleanup?;
+    org_cleanup?;
+    user_cleanup?;
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn shared_browser_internal_token_is_inert_for_workspace_write_routes() -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {
         eprintln!(
@@ -8924,6 +10161,9 @@ async fn lease_next_agent_job_leases_queued_work() -> anyhow::Result<()> {
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );",
@@ -9016,6 +10256,9 @@ async fn lease_next_agent_job_can_filter_for_read_only_batches() -> anyhow::Resu
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );",
@@ -9120,6 +10363,9 @@ async fn lease_next_agent_job_scopes_read_only_batch_to_same_team_group() -> any
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );",
@@ -9223,6 +10469,9 @@ async fn lease_next_agent_job_can_lease_runtime_spread_jobs_when_preference_pinn
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );",
@@ -9325,6 +10574,9 @@ async fn lease_next_agent_job_never_spreads_personal_browser_work_off_target() -
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );",
@@ -9470,6 +10722,9 @@ async fn lease_next_agent_job_never_spreads_shared_browser_work_off_target() -> 
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );",
@@ -9573,6 +10828,9 @@ async fn lease_next_agent_job_scopes_grouped_runtime_spread_to_plan_runtimes() -
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );
@@ -9718,6 +10976,9 @@ async fn lease_next_agent_job_yields_spread_group_to_unused_group_runtime() -> a
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );",
@@ -9854,6 +11115,9 @@ async fn lease_next_agent_job_batches_exact_write_scoped_siblings() -> anyhow::R
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );",
@@ -9988,6 +11252,9 @@ async fn lease_next_agent_job_excludes_runtime_spread_jobs_from_secondary_batch_
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );",
@@ -10066,6 +11333,9 @@ async fn lease_next_agent_job_skips_runtime_spread_when_runtime_is_busy() -> any
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 target_runtime_id uuid,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );",
@@ -13906,6 +15176,1264 @@ async fn post_agent_endpoint(
 }
 
 #[tokio::test]
+async fn automation_silence_is_opt_in_success_only_and_keeps_runs_observable() -> anyhow::Result<()>
+{
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping silent automation test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let owner_user_id = Uuid::new_v4();
+    let teammate_user_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let credential_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
+    ensure_test_user(&pool, &teammate_user_id).await?;
+    seed_group_participation_project(
+        &pool,
+        &org_id,
+        &project_id,
+        &owner_user_id,
+        &teammate_user_id,
+        "Silent automation test",
+    )
+    .await?;
+
+    struct CompletionCase {
+        name: &'static str,
+        silent: bool,
+        stream_plain_text_decline: bool,
+        outcome: &'static str,
+        summary: Option<&'static str>,
+        error: Option<&'static str>,
+        expected_content: Option<&'static str>,
+    }
+
+    let cases = [
+        CompletionCase {
+            name: "opt out sentinel",
+            silent: false,
+            stream_plain_text_decline: false,
+            outcome: "succeeded",
+            summary: Some("NO_RESPONSE"),
+            error: None,
+            expected_content: Some("NO_RESPONSE"),
+        },
+        CompletionCase {
+            name: "quiet success",
+            silent: true,
+            stream_plain_text_decline: false,
+            outcome: "succeeded",
+            summary: Some("NO_RESPONSE"),
+            error: None,
+            expected_content: None,
+        },
+        CompletionCase {
+            name: "quiet streamed plain-text success",
+            silent: true,
+            stream_plain_text_decline: true,
+            outcome: "succeeded",
+            summary: Some("NO_RESPONSE"),
+            error: None,
+            expected_content: None,
+        },
+        CompletionCase {
+            name: "real finding",
+            silent: true,
+            stream_plain_text_decline: false,
+            outcome: "succeeded",
+            summary: Some("Dependency lockfile changed."),
+            error: None,
+            expected_content: Some("Dependency lockfile changed."),
+        },
+        CompletionCase {
+            name: "failed check",
+            silent: true,
+            stream_plain_text_decline: false,
+            outcome: "failed",
+            summary: Some("NO_RESPONSE"),
+            error: Some("Automation check failed."),
+            expected_content: Some("Automation check failed."),
+        },
+        CompletionCase {
+            name: "missing output",
+            silent: true,
+            stream_plain_text_decline: false,
+            outcome: "succeeded",
+            summary: None,
+            error: None,
+            expected_content: Some("finished with status success"),
+        },
+    ];
+
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into user_credentials (
+                     id, user_id, kind, label, nonce_b64, ciphertext_b64, metadata, is_default
+                 ) values ($1, $2, 'openai_api_key', 'Silent automation test',
+                           'test-nonce', 'test-ciphertext', '{}'::jsonb, true)",
+                &[&credential_id, &owner_user_id],
+            )
+            .await?;
+    }
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "silent-automation",
+    );
+    let state = build_test_state(pool.clone(), config.clone());
+    let token = mint_agent_message_token(&config, &project_id)?;
+
+    // Dispatch sequentially. The scheduler itself supports concurrency, but
+    // concurrently bootstrapping several default-agent rows for the same new
+    // test user would test profile races rather than automation silence.
+    for case in cases.iter() {
+        let automation_id = Uuid::new_v4();
+        let conversation_id = Uuid::new_v4();
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into conversations (
+                     id, project_id, created_by, metadata, visibility, thread_kind
+                 ) values ($1, $2, $3, $4::jsonb, 'private', 'automation')",
+                &[
+                    &conversation_id,
+                    &project_id,
+                    &owner_user_id,
+                    &PgJson(&json!({ "title": case.name })),
+                ],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into conversation_participants (
+                     conversation_id, user_id, role, added_by
+                 ) values ($1, $2, 'owner', $2)",
+                &[&conversation_id, &owner_user_id],
+            )
+            .await?;
+        if case.silent {
+            connection
+                .execute(
+                    "insert into automations (
+                         id, project_id, user_id, name, prompt_text, schedule_kind,
+                         interval_hours, timezone, runtime_mode, conversation_id, status,
+                         next_run_at, silent_when_nothing_to_report
+                     ) values (
+                         $1, $2, $3, $4, 'Check the project and report meaningful changes.',
+                         'hourly', 24, 'UTC', 'existing', $5, 'active', now(), true
+                     )",
+                    &[
+                        &automation_id,
+                        &project_id,
+                        &owner_user_id,
+                        &case.name,
+                        &conversation_id,
+                    ],
+                )
+                .await?;
+        } else {
+            // Omit the new column to prove the database default preserves
+            // the historical always-report behavior.
+            connection
+                .execute(
+                    "insert into automations (
+                         id, project_id, user_id, name, prompt_text, schedule_kind,
+                         interval_hours, timezone, runtime_mode, conversation_id, status,
+                         next_run_at
+                     ) values (
+                         $1, $2, $3, $4, 'Check the project and report meaningful changes.',
+                         'hourly', 24, 'UTC', 'existing', $5, 'active', now()
+                     )",
+                    &[
+                        &automation_id,
+                        &project_id,
+                        &owner_user_id,
+                        &case.name,
+                        &conversation_id,
+                    ],
+                )
+                .await?;
+        }
+        drop(connection);
+
+        automations::automation_scheduler_tick(&state).await?;
+        let connection = pool.get().await?;
+        let job_row = connection
+            .query_one(
+                "select id, run_id, payload from agent_jobs where conversation_id = $1",
+                &[&conversation_id],
+            )
+            .await?;
+        let job_id: Uuid = job_row.get("id");
+        let run_id: Uuid = job_row
+            .get::<_, Option<Uuid>>("run_id")
+            .expect("automation run id");
+        let job_payload: PgJson<serde_json::Value> = job_row.get("payload");
+        assert_eq!(
+            job_payload.0["metadata"]["groupParticipation"]["decision"]
+                == json!("agent_evaluation"),
+            case.silent,
+            "unexpected evaluation marker for {}",
+            case.name
+        );
+        if case.silent {
+            assert_eq!(
+                job_payload.0["metadata"]["groupParticipation"]["reason"],
+                json!(crate::group_participation::AUTOMATION_NOTHING_TO_REPORT_REASON)
+            );
+            assert_ne!(
+                job_payload.0["metadata"]["managedAiBillingDeferred"],
+                json!(true),
+                "automation silence must not opt into ambient deferred billing"
+            );
+            assert!(job_payload.0["prompt_text"]
+                .as_str()
+                .is_some_and(|prompt| prompt.contains("Scheduled automation run")));
+        }
+        if case.stream_plain_text_decline {
+            connection
+                .execute(
+                    "update agent_jobs set status = 'leased' where id = $1",
+                    &[&job_id],
+                )
+                .await?;
+        }
+        drop(connection);
+
+        // Ignore any dispatch-time delivery attempts; the assertions below
+        // cover only the streamed/final result paths.
+        crate::notifications::take_test_push_enqueue_count(conversation_id);
+
+        if case.stream_plain_text_decline {
+            let status = post_agent_endpoint(
+                &state,
+                &token,
+                "/agent/message",
+                json!({
+                    "job_id": job_id,
+                    "content": "NO_RESPONSE",
+                    "message_type": "status",
+                    "metadata": {
+                        "kind": "agent_message",
+                        "event": {
+                            "type": "item.completed",
+                            "item": { "type": "agent_message", "text": "NO_RESPONSE" }
+                        }
+                    }
+                }),
+            )
+            .await?;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "streamed plain-text decline failed for {}",
+                case.name
+            );
+            assert_eq!(
+                crate::notifications::take_test_push_enqueue_count(conversation_id),
+                0,
+                "streamed decline must not enqueue a push for {}",
+                case.name
+            );
+        }
+
+        let mut completion = json!({
+            "job_id": job_id,
+            "outcome": case.outcome,
+        });
+        if let Some(summary) = case.summary {
+            completion["summary"] = json!(summary);
+        }
+        if let Some(error) = case.error {
+            completion["error_message"] = json!(error);
+        }
+        let status = post_agent_endpoint(&state, &token, "/agent/complete", completion).await?;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "completion failed for {}",
+            case.name
+        );
+        assert_eq!(
+            crate::notifications::take_test_push_enqueue_count(conversation_id),
+            usize::from(case.expected_content.is_some()),
+            "unexpected completion push enqueue count for {}",
+            case.name
+        );
+
+        let connection = pool.get().await?;
+        let assistant_contents: Vec<String> = connection
+            .query(
+                "select content from conversation_messages
+                 where conversation_id = $1
+                   and role = 'assistant'
+                   and coalesce(metadata ->> 'kind', '') <> 'runtime_alert'
+                   and lower(coalesce(metadata ->> 'messageType', '')) <> 'token_usage'
+                 order by created_at",
+                &[&conversation_id],
+            )
+            .await?
+            .into_iter()
+            .map(|row| row.get("content"))
+            .collect();
+        match case.expected_content {
+            Some(expected) => {
+                assert_eq!(
+                    assistant_contents.len(),
+                    1,
+                    "{} must stay visible",
+                    case.name
+                );
+                assert!(
+                    assistant_contents[0].contains(expected),
+                    "unexpected message for {}: {:?}",
+                    case.name,
+                    assistant_contents
+                );
+            }
+            None => assert!(
+                assistant_contents.is_empty(),
+                "{} must not persist a completion message",
+                case.name
+            ),
+        }
+
+        let job = connection
+            .query_one(
+                "select status, payload from agent_jobs where id = $1",
+                &[&job_id],
+            )
+            .await?;
+        assert_eq!(
+            job.get::<_, String>("status"),
+            if case.outcome == "succeeded" {
+                "completed"
+            } else {
+                "failed"
+            }
+        );
+        let run = connection
+            .query_one(
+                "select status, metadata from runs where id = $1",
+                &[&run_id],
+            )
+            .await?;
+        assert_eq!(
+            run.get::<_, String>("status"),
+            if case.outcome == "succeeded" {
+                "success"
+            } else {
+                "failed"
+            }
+        );
+        let automation = connection
+            .query_one(
+                "select last_run_at, last_error from automations where id = $1",
+                &[&automation_id],
+            )
+            .await?;
+        assert!(automation
+            .get::<_, Option<chrono::DateTime<Utc>>>("last_run_at")
+            .is_some());
+        assert!(automation.get::<_, Option<String>>("last_error").is_none());
+
+        if case.expected_content.is_none() {
+            let job_payload: PgJson<serde_json::Value> = job.get("payload");
+            let run_metadata: PgJson<serde_json::Value> = run.get("metadata");
+            assert_eq!(
+                job_payload.0["metadata"]["groupParticipation"]["decision"],
+                json!("silent")
+            );
+            assert_eq!(
+                run_metadata.0["groupParticipation"]["decision"],
+                json!("silent")
+            );
+        }
+    }
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_org(&pool, &org_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
+    cleanup_test_user(&pool, &teammate_user_id).await?;
+    Ok(())
+}
+
+async fn automation_json_request(
+    app: &axum::Router,
+    method: &str,
+    path: &str,
+    token: &str,
+    body: serde_json::Value,
+) -> anyhow::Result<(StatusCode, serde_json::Value)> {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(path)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(body.to_string()))?,
+        )
+        .await?;
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+    let payload = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    Ok((status, payload))
+}
+
+#[tokio::test]
+async fn automation_update_keeps_identity_and_reschedules_only_on_schedule_change(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping automation update test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let owner_user_id = Uuid::new_v4();
+    let teammate_user_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
+    ensure_test_user(&pool, &teammate_user_id).await?;
+    seed_group_participation_project(
+        &pool,
+        &org_id,
+        &project_id,
+        &owner_user_id,
+        &teammate_user_id,
+        "Automation update test",
+    )
+    .await?;
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "automation-update",
+    );
+    let owner_token = crate::auth::issue_controller_token(&config, &owner_user_id)
+        .map_err(|error| controller_error("issue automation owner token", error))?
+        .token;
+    let teammate_token = crate::auth::issue_controller_token(&config, &teammate_user_id)
+        .map_err(|error| controller_error("issue automation teammate token", error))?
+        .token;
+    let state = build_test_state(pool.clone(), config);
+    let app = automations::router().with_state(state);
+
+    let (status, created) = automation_json_request(
+        &app,
+        "POST",
+        &format!("/projects/{project_id}/automations"),
+        &owner_token,
+        json!({
+            "name": "Dependency check",
+            "promptText": "Report dependency changes.",
+            "scheduleKind": "hourly",
+            "intervalHours": 24,
+            "timezone": "UTC",
+            "runtimeMode": "existing"
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "create failed: {created}");
+    let automation_id = created["id"].as_str().expect("automation id").to_string();
+    let conversation_id = created["conversationId"]
+        .as_str()
+        .expect("automation conversation id")
+        .to_string();
+    let initial_next_run_at = created["nextRunAt"]
+        .as_str()
+        .expect("initial next run")
+        .to_string();
+    let automation_path = format!("/automations/{automation_id}");
+
+    // A prompt/runtime-settings edit keeps the automation identity, its private
+    // conversation, and its pending next run.
+    let (status, updated) = automation_json_request(
+        &app,
+        "PATCH",
+        &automation_path,
+        &owner_token,
+        json!({
+            "promptText": "Report dependency and license changes.",
+            "silentWhenNothingToReport": true
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "prompt update failed: {updated}");
+    assert_eq!(updated["id"], json!(automation_id));
+    assert_eq!(updated["conversationId"], json!(conversation_id));
+    assert_eq!(
+        updated["promptText"],
+        json!("Report dependency and license changes.")
+    );
+    assert_eq!(updated["silentWhenNothingToReport"], json!(true));
+    assert_eq!(updated["scheduleKind"], json!("hourly"));
+    assert_eq!(updated["intervalHours"], json!(24));
+    assert_eq!(updated["status"], json!("active"));
+    assert_eq!(
+        updated["nextRunAt"],
+        json!(initial_next_run_at),
+        "prompt edits must not reschedule the pending run"
+    );
+
+    // A schedule change recomputes the next run with the new schedule and keeps
+    // the previously edited prompt.
+    let (status, rescheduled) = automation_json_request(
+        &app,
+        "PATCH",
+        &automation_path,
+        &owner_token,
+        json!({
+            "scheduleKind": "weekly",
+            "byDay": ["we", "mo"],
+            "byHour": 7,
+            "byMinute": 30,
+            "timezone": "Europe/Vienna"
+        }),
+    )
+    .await?;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "schedule update failed: {rescheduled}"
+    );
+    assert_eq!(rescheduled["id"], json!(automation_id));
+    assert_eq!(rescheduled["conversationId"], json!(conversation_id));
+    assert_eq!(rescheduled["scheduleKind"], json!("weekly"));
+    assert_eq!(rescheduled["byDay"], json!(["mo", "we"]));
+    assert_eq!(rescheduled["byHour"], json!(7));
+    assert_eq!(rescheduled["byMinute"], json!(30));
+    assert_eq!(rescheduled["timezone"], json!("Europe/Vienna"));
+    assert_eq!(rescheduled["intervalHours"], serde_json::Value::Null);
+    assert_eq!(
+        rescheduled["promptText"],
+        json!("Report dependency and license changes.")
+    );
+    assert_ne!(rescheduled["nextRunAt"], json!(initial_next_run_at));
+    let next_run_at = chrono::DateTime::parse_from_rfc3339(
+        rescheduled["nextRunAt"]
+            .as_str()
+            .expect("rescheduled next run"),
+    )?
+    .with_timezone(&Utc);
+    let now = Utc::now();
+    assert!(next_run_at > now);
+    assert!(next_run_at <= now + ChronoDuration::days(8));
+    let local_next_run = next_run_at.with_timezone(&chrono_tz::Europe::Vienna);
+    assert!(matches!(
+        chrono::Datelike::weekday(&local_next_run),
+        chrono::Weekday::Mon | chrono::Weekday::Wed
+    ));
+    assert_eq!(chrono::Timelike::hour(&local_next_run), 7);
+    assert_eq!(chrono::Timelike::minute(&local_next_run), 30);
+    let weekly_next_run_at = rescheduled["nextRunAt"].clone();
+
+    // Pause/resume semantics are unchanged: pausing keeps the pending run and
+    // resuming recomputes it from the current schedule.
+    let (status, paused) = automation_json_request(
+        &app,
+        "PATCH",
+        &automation_path,
+        &owner_token,
+        json!({ "status": "paused" }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "pause failed: {paused}");
+    assert_eq!(paused["status"], json!("paused"));
+    assert_eq!(paused["nextRunAt"], weekly_next_run_at);
+    let (status, resumed) = automation_json_request(
+        &app,
+        "PATCH",
+        &automation_path,
+        &owner_token,
+        json!({ "status": "active" }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "resume failed: {resumed}");
+    assert_eq!(resumed["status"], json!("active"));
+    let resumed_next_run_at = chrono::DateTime::parse_from_rfc3339(
+        resumed["nextRunAt"].as_str().expect("resumed next run"),
+    )?
+    .with_timezone(&Utc);
+    assert!(resumed_next_run_at > Utc::now());
+    assert_eq!(
+        chrono::Timelike::hour(&resumed_next_run_at.with_timezone(&chrono_tz::Europe::Vienna)),
+        7
+    );
+
+    // Nothing to update is a client error rather than a silent rewrite.
+    let (status, rejected) =
+        automation_json_request(&app, "PATCH", &automation_path, &owner_token, json!({})).await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "empty update: {rejected}");
+
+    // Project teammates who do not own the automation cannot edit it.
+    let (status, denied) = automation_json_request(
+        &app,
+        "PATCH",
+        &automation_path,
+        &teammate_token,
+        json!({ "promptText": "Exfiltrate the repository." }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::FORBIDDEN, "teammate update: {denied}");
+
+    let row = pool
+        .get()
+        .await?
+        .query_one(
+            "select prompt_text, conversation_id, schedule_kind
+             from automations where id = $1",
+            &[&Uuid::from_str(&automation_id)?],
+        )
+        .await?;
+    assert_eq!(
+        row.get::<_, String>("prompt_text"),
+        "Report dependency and license changes."
+    );
+    assert_eq!(
+        row.get::<_, Option<Uuid>>("conversation_id"),
+        Some(Uuid::from_str(&conversation_id)?)
+    );
+    assert_eq!(row.get::<_, String>("schedule_kind"), "weekly");
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_org(&pool, &org_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
+    cleanup_test_user(&pool, &teammate_user_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn automation_result_visibility_controls_team_thread_access() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping automation result visibility test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let owner_user_id = Uuid::new_v4();
+    let teammate_user_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
+    ensure_test_user(&pool, &teammate_user_id).await?;
+    seed_group_participation_project(
+        &pool,
+        &org_id,
+        &project_id,
+        &owner_user_id,
+        &teammate_user_id,
+        "Automation result visibility",
+    )
+    .await?;
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "automation-result-visibility",
+    );
+    let owner_token = crate::auth::issue_controller_token(&config, &owner_user_id)
+        .map_err(|error| controller_error("issue owner token", error))?
+        .token;
+    let teammate_token = crate::auth::issue_controller_token(&config, &teammate_user_id)
+        .map_err(|error| controller_error("issue teammate token", error))?
+        .token;
+    let app = automations::router()
+        .merge(conversations::router())
+        .with_state(build_test_state(pool.clone(), config));
+
+    // Owner creates an automation that shares its result thread with the team.
+    let create_team = |body: serde_json::Value| {
+        let app = app.clone();
+        let owner_token = owner_token.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/projects/{project_id}/automations"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {owner_token}"),
+                    )
+                    .body(Body::from(body.to_string()))
+                    .expect("build create request"),
+            )
+            .await
+        }
+    };
+
+    let team_response = create_team(json!({
+        "name": "Team dependency check",
+        "scheduleKind": "hourly",
+        "intervalHours": 24,
+        "timezone": "UTC",
+        "resultVisibility": "team",
+    }))
+    .await?;
+    assert_eq!(team_response.status(), StatusCode::OK);
+    let team_body = to_bytes(team_response.into_body(), usize::MAX).await?;
+    let team_json: serde_json::Value = serde_json::from_slice(&team_body)?;
+    assert_eq!(team_json["resultVisibility"], json!("team"));
+    let team_conversation_id = team_json["conversationId"]
+        .as_str()
+        .expect("team automation conversation id")
+        .to_string();
+
+    // Owner creates a default automation; its result thread stays private.
+    let private_response = create_team(json!({
+        "name": "Private dependency check",
+        "scheduleKind": "hourly",
+        "intervalHours": 24,
+        "timezone": "UTC",
+    }))
+    .await?;
+    assert_eq!(private_response.status(), StatusCode::OK);
+    let private_body = to_bytes(private_response.into_body(), usize::MAX).await?;
+    let private_json: serde_json::Value = serde_json::from_slice(&private_body)?;
+    assert_eq!(private_json["resultVisibility"], json!("private"));
+    let private_automation_id = private_json["id"]
+        .as_str()
+        .expect("private automation id")
+        .to_string();
+    let private_conversation_id = private_json["conversationId"]
+        .as_str()
+        .expect("private automation conversation id")
+        .to_string();
+
+    // A non-owner teammate lists the project's automation threads.
+    let list_automation_conversations = |token: String| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!(
+                            "/projects/{project_id}/conversations?threadKind=automation"
+                        ))
+                        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .expect("build list request"),
+                )
+                .await
+                .expect("list conversations");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read list body");
+            let value: serde_json::Value = serde_json::from_slice(&body).expect("parse list body");
+            value
+                .as_array()
+                .expect("conversation list array")
+                .iter()
+                .filter_map(|entry| entry["id"].as_str().map(str::to_string))
+                .collect::<Vec<String>>()
+        }
+    };
+
+    let teammate_before = list_automation_conversations(teammate_token.clone()).await;
+    assert!(
+        teammate_before.contains(&team_conversation_id),
+        "teammate must see the team-visible automation thread"
+    );
+    assert!(
+        !teammate_before.contains(&private_conversation_id),
+        "teammate must not see the private automation thread"
+    );
+
+    // Owner flips the private automation to team visibility. A visibility-only
+    // PATCH must not reset the active automation's schedule anchor.
+    let next_run_at_before = private_json["nextRunAt"]
+        .as_str()
+        .expect("active automation must have nextRunAt")
+        .to_string();
+    let patch_automation = |body: serde_json::Value| {
+        let app = app.clone();
+        let owner_token = owner_token.clone();
+        let private_automation_id = private_automation_id.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("PATCH")
+                        .uri(format!("/automations/{private_automation_id}"))
+                        .header(axum::http::header::CONTENT_TYPE, "application/json")
+                        .header(
+                            axum::http::header::AUTHORIZATION,
+                            format!("Bearer {owner_token}"),
+                        )
+                        .body(Body::from(body.to_string()))
+                        .expect("build patch request"),
+                )
+                .await
+                .expect("patch automation");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read patch body");
+            serde_json::from_slice::<serde_json::Value>(&body).expect("parse patch body")
+        }
+    };
+
+    let patch_json = patch_automation(json!({ "resultVisibility": "team" })).await;
+    assert_eq!(patch_json["resultVisibility"], json!("team"));
+    assert_eq!(
+        patch_json["nextRunAt"],
+        json!(next_run_at_before),
+        "a visibility-only update must leave nextRunAt untouched"
+    );
+
+    // Changing the effective schedule must recompute nextRunAt.
+    let reschedule_json = patch_automation(json!({ "intervalHours": 6 })).await;
+    assert_eq!(reschedule_json["intervalHours"], json!(6));
+    let next_run_at_after = reschedule_json["nextRunAt"]
+        .as_str()
+        .expect("rescheduled automation must have nextRunAt");
+    assert_ne!(
+        next_run_at_after, next_run_at_before,
+        "a schedule change must recompute nextRunAt"
+    );
+
+    let teammate_after = list_automation_conversations(teammate_token.clone()).await;
+    assert!(
+        teammate_after.contains(&private_conversation_id),
+        "the flipped automation thread must become visible to the teammate"
+    );
+
+    // Invalid enum values are rejected.
+    let invalid_response = create_team(json!({
+        "name": "Invalid visibility",
+        "scheduleKind": "hourly",
+        "intervalHours": 24,
+        "timezone": "UTC",
+        "resultVisibility": "everyone",
+    }))
+    .await?;
+    assert_eq!(invalid_response.status(), StatusCode::BAD_REQUEST);
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_org(&pool, &org_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
+    cleanup_test_user(&pool, &teammate_user_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn automation_list_and_get_are_space_scoped_for_team_visible_automations(
+) -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping automation space scoping test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let owner_user_id = Uuid::new_v4();
+    let teammate_user_id = Uuid::new_v4();
+    let outsider_user_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
+    ensure_test_user(&pool, &teammate_user_id).await?;
+    ensure_test_user(&pool, &outsider_user_id).await?;
+    seed_group_participation_project(
+        &pool,
+        &org_id,
+        &project_id,
+        &owner_user_id,
+        &teammate_user_id,
+        "Automation space scoping",
+    )
+    .await?;
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "automation-space-scoping",
+    );
+    let owner_token = crate::auth::issue_controller_token(&config, &owner_user_id)
+        .map_err(|error| controller_error("issue owner token", error))?
+        .token;
+    let teammate_token = crate::auth::issue_controller_token(&config, &teammate_user_id)
+        .map_err(|error| controller_error("issue teammate token", error))?
+        .token;
+    let outsider_token = crate::auth::issue_controller_token(&config, &outsider_user_id)
+        .map_err(|error| controller_error("issue outsider token", error))?
+        .token;
+    let app = automations::router().with_state(build_test_state(pool.clone(), config));
+    let list_path = format!("/projects/{project_id}/automations");
+
+    let (status, team_json) = automation_json_request(
+        &app,
+        "POST",
+        &list_path,
+        &owner_token,
+        json!({
+            "name": "Team hourly check",
+            "promptText": "Check the space hourly.",
+            "scheduleKind": "hourly",
+            "intervalHours": 1,
+            "timezone": "UTC",
+            "runtimeMode": "existing",
+            "resultVisibility": "team",
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "team create failed: {team_json}");
+    let team_automation_id = team_json["id"].as_str().expect("team id").to_string();
+
+    let (status, private_json) = automation_json_request(
+        &app,
+        "POST",
+        &list_path,
+        &owner_token,
+        json!({
+            "name": "Private hourly check",
+            "promptText": "Check privately.",
+            "scheduleKind": "hourly",
+            "intervalHours": 1,
+            "timezone": "UTC",
+            "runtimeMode": "existing",
+        }),
+    )
+    .await?;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "private create failed: {private_json}"
+    );
+    let private_automation_id = private_json["id"].as_str().expect("private id").to_string();
+
+    let list_ids = |payload: &serde_json::Value| -> Vec<String> {
+        payload
+            .as_array()
+            .expect("automation list array")
+            .iter()
+            .filter_map(|entry| entry["id"].as_str().map(str::to_string))
+            .collect()
+    };
+
+    // The creator keeps seeing everything they created.
+    let (status, owner_list) =
+        automation_json_request(&app, "GET", &list_path, &owner_token, json!({})).await?;
+    assert_eq!(status, StatusCode::OK, "owner list failed: {owner_list}");
+    let owner_ids = list_ids(&owner_list);
+    assert!(owner_ids.contains(&team_automation_id));
+    assert!(owner_ids.contains(&private_automation_id));
+
+    // A space member sees the space's team-visible automations even though a
+    // different user created them; private automations stay creator-only.
+    let (status, teammate_list) =
+        automation_json_request(&app, "GET", &list_path, &teammate_token, json!({})).await?;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "teammate list failed: {teammate_list}"
+    );
+    let teammate_ids = list_ids(&teammate_list);
+    assert!(
+        teammate_ids.contains(&team_automation_id),
+        "space member must see the team-visible automation: {teammate_list}"
+    );
+    assert!(
+        !teammate_ids.contains(&private_automation_id),
+        "private automations must stay creator-only: {teammate_list}"
+    );
+
+    // A non-member cannot list the space's automations at all.
+    let (status, outsider_list) =
+        automation_json_request(&app, "GET", &list_path, &outsider_token, json!({})).await?;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "outsider list: {outsider_list}"
+    );
+
+    // Direct reads follow the same scoping.
+    let team_path = format!("/automations/{team_automation_id}");
+    let private_path = format!("/automations/{private_automation_id}");
+    let (status, teammate_get) =
+        automation_json_request(&app, "GET", &team_path, &teammate_token, json!({})).await?;
+    assert_eq!(status, StatusCode::OK, "teammate get: {teammate_get}");
+    assert_eq!(teammate_get["name"], json!("Team hourly check"));
+    let (status, denied_get) =
+        automation_json_request(&app, "GET", &private_path, &teammate_token, json!({})).await?;
+    assert_eq!(status, StatusCode::FORBIDDEN, "private get: {denied_get}");
+    let (status, outsider_get) =
+        automation_json_request(&app, "GET", &team_path, &outsider_token, json!({})).await?;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "outsider get: {outsider_get}"
+    );
+
+    // No enumeration oracle: a non-member probing automation ids must receive
+    // the exact same project-access denial (status AND body) whether the
+    // automation is private or team-visible, so responses cannot be used to
+    // learn an automation's visibility.
+    let (outsider_private_status, outsider_private_get) =
+        automation_json_request(&app, "GET", &private_path, &outsider_token, json!({})).await?;
+    assert_eq!(
+        outsider_private_status,
+        StatusCode::FORBIDDEN,
+        "outsider private get: {outsider_private_get}"
+    );
+    assert_eq!(
+        (outsider_private_status, &outsider_private_get),
+        (status, &outsider_get),
+        "non-members must get identical denials for private and team-visible ids"
+    );
+    assert_eq!(
+        outsider_get["message"],
+        json!("You do not have access to this project"),
+        "non-member denial must be the project-access error, not the visibility error"
+    );
+
+    // Visibility does not grant mutation rights: pause/edit stay gated on the
+    // creator (can_access_owned_automation), matching the pre-existing
+    // mutation authorization.
+    let (status, teammate_pause) = automation_json_request(
+        &app,
+        "PATCH",
+        &team_path,
+        &teammate_token,
+        json!({ "status": "paused" }),
+    )
+    .await?;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "teammate pause: {teammate_pause}"
+    );
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_org(&pool, &org_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
+    cleanup_test_user(&pool, &teammate_user_id).await?;
+    cleanup_test_user(&pool, &outsider_user_id).await?;
+    Ok(())
+}
+
+/// Pins `include_team_visible = active_job.is_none()` in the list route: an
+/// active-job token stays scoped to the automations its subject user owns and
+/// must never receive another creator's team-visible automation, even though
+/// a human member of the same space does. Forcing team visibility on for job
+/// tokens previously survived the whole suite (adversarial authz review nit 1
+/// on instafy-dev/instafy#181).
+#[tokio::test]
+async fn automation_list_with_active_job_token_excludes_team_visible_siblings() -> anyhow::Result<()>
+{
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping automation job token scoping test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    ensure_conversation_event_test_tables(&pool).await?;
+
+    let owner_user_id = Uuid::new_v4();
+    let subject_user_id = Uuid::new_v4();
+    let org_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let runtime_id = Uuid::new_v4();
+    let runtime_lease_id = Uuid::new_v4();
+    let conversation_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    let job_id = Uuid::new_v4();
+    ensure_test_user(&pool, &owner_user_id).await?;
+    ensure_test_user(&pool, &subject_user_id).await?;
+    seed_group_participation_project(
+        &pool,
+        &org_id,
+        &project_id,
+        &owner_user_id,
+        &subject_user_id,
+        "Automation job token scoping",
+    )
+    .await?;
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "automation-job-token-scoping",
+    );
+    let owner_token = crate::auth::issue_controller_token(&config, &owner_user_id)
+        .map_err(|error| controller_error("issue owner token", error))?
+        .token;
+    let subject_token = crate::auth::issue_controller_token(&config, &subject_user_id)
+        .map_err(|error| controller_error("issue subject token", error))?
+        .token;
+    let app = automations::router().with_state(build_test_state(pool.clone(), config.clone()));
+    let list_path = format!("/projects/{project_id}/automations");
+
+    let (status, sibling_json) = automation_json_request(
+        &app,
+        "POST",
+        &list_path,
+        &owner_token,
+        json!({
+            "name": "Team sibling check",
+            "promptText": "Check the space hourly.",
+            "scheduleKind": "hourly",
+            "intervalHours": 1,
+            "timezone": "UTC",
+            "runtimeMode": "existing",
+            "resultVisibility": "team",
+        }),
+    )
+    .await?;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "sibling create failed: {sibling_json}"
+    );
+    let sibling_automation_id = sibling_json["id"].as_str().expect("sibling id").to_string();
+
+    let (status, own_json) = automation_json_request(
+        &app,
+        "POST",
+        &list_path,
+        &subject_token,
+        json!({
+            "name": "Subject-owned check",
+            "promptText": "Check my own automation hourly.",
+            "scheduleKind": "hourly",
+            "intervalHours": 1,
+            "timezone": "UTC",
+            "runtimeMode": "existing",
+        }),
+    )
+    .await?;
+    assert_eq!(status, StatusCode::OK, "own create failed: {own_json}");
+    let own_automation_id = own_json["id"].as_str().expect("own id").to_string();
+
+    let list_ids = |payload: &serde_json::Value| -> Vec<String> {
+        payload
+            .as_array()
+            .expect("automation list array")
+            .iter()
+            .filter_map(|entry| entry["id"].as_str().map(str::to_string))
+            .collect()
+    };
+
+    // Sanity: as a plain space member the subject user DOES see the sibling
+    // team-visible automation, so the exclusion below is attributable to the
+    // active-job token, not to a broken seed.
+    let (status, member_list) =
+        automation_json_request(&app, "GET", &list_path, &subject_token, json!({})).await?;
+    assert_eq!(status, StatusCode::OK, "member list failed: {member_list}");
+    let member_ids = list_ids(&member_list);
+    assert!(member_ids.contains(&own_automation_id));
+    assert!(member_ids.contains(&sibling_automation_id));
+
+    // Seed a live leased job for the subject user and mint its prompt token.
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into runtimes (id, project_id, provider, status)
+                 values ($1, $2, 'default', 'running')",
+                &[&runtime_id, &project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runtime_leases (id, project_id, runtime_id, status, launched_at)
+                 values ($1, $2, $3, 'active', now())",
+                &[&runtime_lease_id, &project_id, &runtime_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "update runtimes set active_lease_id = $2 where id = $1",
+                &[&runtime_id, &runtime_lease_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into conversations (id, project_id, created_by, metadata, visibility)
+                 values ($1, $2, $3, '{}'::jsonb, 'public')",
+                &[&conversation_id, &project_id, &subject_user_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runs (id, project_id, conversation_id, run_type, status)
+                 values ($1, $2, $3, 'prompt', 'in_progress')",
+                &[&run_id, &project_id, &conversation_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into agent_jobs (
+                    id, project_id, run_id, conversation_id, status, payload,
+                    leased_by_runtime_id, leased_at, lease_expires_at
+                 ) values ($1, $2, $3, $4, 'leased', $5, $6,
+                           now(), now() + interval '5 minutes')",
+                &[
+                    &job_id,
+                    &project_id,
+                    &run_id,
+                    &conversation_id,
+                    &PgJson(json!({ "user_id": subject_user_id })),
+                    &runtime_id,
+                ],
+            )
+            .await?;
+    }
+    let job_token = mint_scoped_token(
+        &config,
+        ScopedTokenRequest {
+            audience: runtime_id.to_string(),
+            subject: subject_user_id.to_string(),
+            project_id: project_id.to_string(),
+            origin_id: None,
+            runtime_id: Some(runtime_id.to_string()),
+            protocol: None,
+            scopes: vec![
+                "prompt.execute".to_string(),
+                "job.token.workspace-separated".to_string(),
+            ],
+            lease_id: Some(runtime_lease_id.to_string()),
+            run_id: Some(run_id.to_string()),
+            prefer_runtime: None,
+            ttl_seconds: Some(300),
+        },
+    )
+    .map_err(|error| controller_error("mint active job token", error))?
+    .token;
+
+    // The active-job token keeps its subject's own automation (current
+    // behavior) but must not receive the other creator's team-visible row.
+    let (status, job_list) =
+        automation_json_request(&app, "GET", &list_path, &job_token, json!({})).await?;
+    assert_eq!(status, StatusCode::OK, "job token list failed: {job_list}");
+    let job_ids = list_ids(&job_list);
+    assert!(
+        job_ids.contains(&own_automation_id),
+        "job token must keep listing its subject's own automations: {job_list}"
+    );
+    assert!(
+        !job_ids.contains(&sibling_automation_id),
+        "job token must not receive another creator's team-visible automation: {job_list}"
+    );
+
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute("delete from runs where id = $1", &[&run_id])
+            .await?;
+    }
+    cleanup_origin_project(&pool, &project_id).await?;
+    cleanup_org(&pool, &org_id).await?;
+    cleanup_test_user(&pool, &owner_user_id).await?;
+    cleanup_test_user(&pool, &subject_user_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn skill_mode_ambient_turn_dispatches_evaluation_and_swallows_decline() -> anyhow::Result<()>
 {
     let Some(pool) = setup_origin_test_pool().await? else {
@@ -14126,6 +16654,21 @@ async fn skill_mode_ambient_turn_dispatches_evaluation_and_swallows_decline() ->
         .await?
         .get(0);
     assert_eq!(sentinel_rows, 0, "the sentinel must never be persisted");
+    let conversational_assistant_rows: i64 = connection
+        .query_one(
+            "select count(*)::bigint from conversation_messages
+             where conversation_id = $1
+               and role = 'assistant'
+               and coalesce(metadata ->> 'kind', '') <> 'runtime_alert'
+               and lower(coalesce(metadata ->> 'messageType', '')) <> 'token_usage'",
+            &[&conversation_id],
+        )
+        .await?
+        .get(0);
+    assert_eq!(
+        conversational_assistant_rows, 0,
+        "completion after a streamed decline must not invent a placeholder"
+    );
     drop(connection);
 
     cleanup_origin_project(&pool, &project_id).await?;
@@ -14220,7 +16763,18 @@ async fn skill_mode_answered_evaluation_bills_on_first_visible_message() -> anyh
         "/agent/message",
         json!({
             "job_id": job_id,
-            "content": "The blue version keeps the contrast ratio above 4.5:1."
+            "content": "The blue version keeps the contrast ratio above 4.5:1.",
+            "message_type": "status",
+            "metadata": {
+                "kind": "agent_message",
+                "event": {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "agent_message",
+                        "text": "The blue version keeps the contrast ratio above 4.5:1."
+                    }
+                }
+            }
         }),
     )
     .await?;
@@ -14277,7 +16831,18 @@ async fn skill_mode_answered_evaluation_bills_on_first_visible_message() -> anyh
         &state,
         &token,
         "/agent/message",
-        json!({ "job_id": job_id, "content": "NO_RESPONSE" }),
+        json!({
+            "job_id": job_id,
+            "content": "NO_RESPONSE",
+            "message_type": "status",
+            "metadata": {
+                "kind": "agent_message",
+                "event": {
+                    "type": "item.completed",
+                    "item": { "type": "agent_message", "text": "NO_RESPONSE" }
+                }
+            }
+        }),
     )
     .await?;
     assert_eq!(status, StatusCode::OK);
@@ -16081,23 +18646,20 @@ async fn dispatch_prompt_dedupes_nested_client_message_id() -> anyhow::Result<()
         runtime_display_name: None,
         prefer_runtime: None,
     };
+    let build_expected_idle_request = || {
+        let mut request = dispatch::normalize_dispatch_request(build_request())
+            .map_err(|error| controller_error("normalize expected-idle dispatch", error))?;
+        request.expected_lane_idle = true;
+        Ok::<_, anyhow::Error>(request)
+    };
 
-    let first = dispatch::process_dispatch_prompt(
-        &state,
-        &context,
-        dispatch::normalize_dispatch_request(build_request())
-            .map_err(|error| controller_error("normalize first dispatch request", error))?,
-    )
-    .await
-    .map_err(|error| controller_error("process first dispatch prompt", error))?;
-    let second = dispatch::process_dispatch_prompt(
-        &state,
-        &context,
-        dispatch::normalize_dispatch_request(build_request())
-            .map_err(|error| controller_error("normalize second dispatch request", error))?,
-    )
-    .await
-    .map_err(|error| controller_error("process second dispatch prompt", error))?;
+    let first = dispatch::process_dispatch_prompt(&state, &context, build_expected_idle_request()?)
+        .await
+        .map_err(|error| controller_error("process first dispatch prompt", error))?;
+    let second =
+        dispatch::process_dispatch_prompt(&state, &context, build_expected_idle_request()?)
+            .await
+            .map_err(|error| controller_error("process second dispatch prompt", error))?;
 
     assert_eq!(second.run_id, first.run_id);
     assert_eq!(second.prompt_id, first.prompt_id);
@@ -16130,9 +18692,25 @@ async fn dispatch_prompt_dedupes_nested_client_message_id() -> anyhow::Result<()
         )
         .await?
         .get(0);
+    let job_count: i64 = connection
+        .query_one(
+            "SELECT count(*) FROM agent_jobs WHERE conversation_id = $1",
+            &[&conversation_id],
+        )
+        .await?
+        .get(0);
+    let queue_count: i64 = connection
+        .query_one(
+            "SELECT count(*) FROM conversation_send_queue WHERE conversation_id = $1",
+            &[&conversation_id],
+        )
+        .await?
+        .get(0);
 
     assert_eq!(message_count, 1);
     assert_eq!(run_count, 1);
+    assert_eq!(job_count, 1);
+    assert_eq!(queue_count, 0, "an idempotent retry must not autoqueue");
 
     cleanup_origin_project(&pool, &project_id).await?;
     Ok(())
@@ -16324,14 +18902,22 @@ async fn dispatch_prompt_persists_canonical_shared_browser_authority() -> anyhow
 }
 
 #[tokio::test]
-async fn dispatch_prompt_keeps_owned_personal_browser_runtime_pinned() -> anyhow::Result<()> {
-    let pool = require_origin_test_pool("Personal Browser dispatch pinning regression").await?;
+async fn conversation_message_dispatch_uses_one_pool_connection() -> anyhow::Result<()> {
+    let pool = setup_origin_test_pool_with_max_size(1)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "conversation message pool regression requires TEST_DATABASE_URL; run it through `pnpm test:controller`"
+            )
+        })?;
 
     let user_id = Uuid::new_v4();
     let org_id = Uuid::new_v4();
     let project_id = Uuid::new_v4();
     let conversation_id = Uuid::new_v4();
+    let unavailable_conversation_id = Uuid::new_v4();
     let runtime_id = Uuid::new_v4();
+    let unavailable_runtime_id = Uuid::new_v4();
     let credential_id = Uuid::new_v4();
     ensure_test_user(&pool, &user_id).await?;
 
@@ -16347,6 +18933,16 @@ async fn dispatch_prompt_keeps_owned_personal_browser_runtime_pinned() -> anyhow
         capabilities
             .as_object_mut()
             .expect("Personal Browser capabilities are an object"),
+        user_id,
+    );
+    let mut unavailable_capabilities = json!({
+        "agent": true,
+        "origin": true,
+    });
+    runtime::set_self_hosted_access_attestation(
+        unavailable_capabilities
+            .as_object_mut()
+            .expect("unavailable runtime capabilities are an object"),
         user_id,
     );
 
@@ -16374,6 +18970,16 @@ async fn dispatch_prompt_keeps_owned_personal_browser_runtime_pinned() -> anyhow
                 &[&project_id, &org_id, &user_id],
             )
             .await?;
+        for conversation_id in [conversation_id, unavailable_conversation_id] {
+            connection
+                .execute(
+                    "INSERT INTO conversations (
+                         id, project_id, created_by, metadata
+                     ) VALUES ($1, $2, $3, '{}'::jsonb)",
+                    &[&conversation_id, &project_id, &user_id],
+                )
+                .await?;
+        }
         connection
             .execute(
                 "INSERT INTO runtimes (
@@ -16388,6 +18994,23 @@ async fn dispatch_prompt_keeps_owned_personal_browser_runtime_pinned() -> anyhow
                     &project_id,
                     &format!("personal-browser-dispatch-{runtime_id}"),
                     &PgJson(capabilities),
+                ],
+            )
+            .await?;
+        connection
+            .execute(
+                "INSERT INTO runtimes (
+                     id, project_id, provider, status, endpoint_url, task_ref,
+                     idle_ttl_seconds, last_seen_at, capabilities, updated_at
+                 ) VALUES (
+                     $1, $2, 'self-hosted', 'offline', null,
+                     $3, 600, now() - interval '1 hour', $4, now()
+                 )",
+                &[
+                    &unavailable_runtime_id,
+                    &project_id,
+                    &format!("unavailable-dispatch-{unavailable_runtime_id}"),
+                    &PgJson(unavailable_capabilities),
                 ],
             )
             .await?;
@@ -16420,6 +19043,9 @@ async fn dispatch_prompt_keeps_owned_personal_browser_runtime_pinned() -> anyhow
         auth_token: None,
         metadata: None,
     }];
+    let user_token = crate::auth::issue_controller_token(&config, &user_id)
+        .map_err(|error| controller_error("issue Personal Browser controller token", error))?
+        .token;
     let state = build_test_state(pool.clone(), config);
     assert!(
         crate::provider_identifiers::is_trusted_instafy_cloud_provider_id(
@@ -16427,49 +19053,62 @@ async fn dispatch_prompt_keeps_owned_personal_browser_runtime_pinned() -> anyhow
         )
     );
 
-    let normalized = dispatch::normalize_dispatch_request(DispatchPromptRequest {
-        project_id: Some(project_id.to_string()),
-        session_id: None,
-        prompt_text: Some("Use my signed-in browser to inspect the visible page.".to_string()),
-        intent: Some("browser".to_string()),
-        plan_seed: None,
-        metadata: Some(json!({
-            "browserTransport": "desktop-personal",
-            "agentSelection": {
-                "active": ["octo"],
-                "mentions": ["octo"]
-            }
-        })),
-        conversation_metadata: None,
-        parent_conversation_id: None,
-        thread_kind: None,
-        tool_limits: None,
-        repo: None,
-        ui: None,
-        priority: None,
-        runtime_type: None,
-        idle_ttl_seconds: None,
-        conversation_id: Some(conversation_id.to_string()),
-        runtime_id: Some(runtime_id.to_string()),
-        runtime_display_name: None,
-        prefer_runtime: Some(true),
-    })
-    .map_err(|error| controller_error("normalize Personal Browser dispatch", error))?;
-
-    let response = dispatch::process_dispatch_prompt(
-        &state,
-        &RequestContext {
-            user_id: Some(user_id),
-            is_service_role: false,
-            scoped_claims: None,
-        },
-        normalized,
+    let response = timeout(
+        std::time::Duration::from_secs(10),
+        conversations::router().with_state(state.clone()).oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/conversations/{conversation_id}/messages"))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {user_token}"),
+                )
+                .body(Body::from(
+                    json!({
+                        "promptText": "Use my signed-in browser to inspect the visible page.",
+                        "intent": "browser",
+                        "metadata": {
+                            "browserTransport": "desktop-personal",
+                            "agentSelection": {
+                                "active": ["octo"],
+                                "mentions": ["octo"]
+                            }
+                        },
+                        "runtimeId": runtime_id,
+                        "preferRuntime": true
+                    })
+                    .to_string(),
+                ))?,
+        ),
     )
     .await
-    .map_err(|error| controller_error("process Personal Browser dispatch", error))?;
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "conversation message dispatch did not complete with a single available pool connection"
+        )
+    })??;
 
-    let run_id = response.run_id.expect("Personal Browser run id");
-    let job_id = response.job_id.expect("Personal Browser job id");
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await?;
+    if status != StatusCode::OK {
+        anyhow::bail!(
+            "conversation message dispatch failed with status {status}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    let response: serde_json::Value = serde_json::from_slice(&body)?;
+
+    let run_id = Uuid::parse_str(
+        response["runId"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Personal Browser response omitted runId"))?,
+    )?;
+    let job_id = Uuid::parse_str(
+        response["jobId"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Personal Browser response omitted jobId"))?,
+    )?;
     let connection = pool.get().await?;
     let job = connection
         .query_one(
@@ -16516,6 +19155,69 @@ async fn dispatch_prompt_keeps_owned_personal_browser_runtime_pinned() -> anyhow
         .await?
         .get("provider");
     assert_eq!(provider, "self-hosted");
+    drop(connection);
+
+    let unavailable_response = timeout(
+        std::time::Duration::from_secs(10),
+        conversations::router().with_state(state).oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!(
+                    "/conversations/{unavailable_conversation_id}/messages"
+                ))
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {user_token}"),
+                )
+                .body(Body::from(
+                    json!({
+                        "promptText": "Report the current workspace status.",
+                        "intent": "question",
+                        "metadata": {
+                            "agentSelection": {
+                                "active": ["octo"],
+                                "mentions": ["octo"]
+                            }
+                        },
+                        "runtimeId": unavailable_runtime_id,
+                        "preferRuntime": true
+                    })
+                    .to_string(),
+                ))?,
+        ),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "unavailable-runtime dispatch did not release its connection before reconnect"
+        )
+    })??;
+    let unavailable_status = unavailable_response.status();
+    let unavailable_body = to_bytes(unavailable_response.into_body(), usize::MAX).await?;
+    anyhow::ensure!(
+        unavailable_status == StatusCode::OK,
+        "unavailable-runtime dispatch failed with status {unavailable_status}: {}",
+        String::from_utf8_lossy(&unavailable_body)
+    );
+    let unavailable_payload: serde_json::Value = serde_json::from_slice(&unavailable_body)?;
+    let unavailable_run_id = Uuid::parse_str(
+        unavailable_payload["runId"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("unavailable-runtime response omitted runId"))?,
+    )?;
+    let connection = pool.get().await?;
+    let unavailable_run_metadata: PgJson<serde_json::Value> = connection
+        .query_one(
+            "SELECT metadata FROM runs WHERE id = $1",
+            &[&unavailable_run_id],
+        )
+        .await?
+        .get("metadata");
+    assert_eq!(
+        unavailable_run_metadata.0["runtimeAlert"]["reason"],
+        json!("runtime_not_ready")
+    );
     drop(connection);
 
     cleanup_origin_project(&pool, &project_id).await?;
@@ -17692,6 +20394,34 @@ async fn create_runtime_tables(client: &mut tokio_postgres::Client) -> anyhow::R
                 leased_by_runtime_id uuid,
                 heartbeat_at timestamptz,
                 completed_at timestamptz,
+                active_input_ready_runtime_id uuid,
+                active_input_ready_expires_at timestamptz,
+                active_input_ready_turn_id text,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                updated_at timestamptz NOT NULL DEFAULT now()
+            );
+            CREATE TEMP TABLE agent_job_inputs (
+                id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                project_id uuid NOT NULL,
+                conversation_id uuid NOT NULL,
+                job_id uuid NOT NULL,
+                run_id uuid,
+                message_id uuid,
+                created_by uuid,
+                client_send_id text NOT NULL,
+                lease_attempt integer NOT NULL,
+                target_turn_id text NOT NULL,
+                sequence bigint NOT NULL,
+                kind text NOT NULL DEFAULT 'active_turn_input',
+                request jsonb NOT NULL,
+                status text NOT NULL DEFAULT 'pending',
+                claimed_by_runtime_id uuid,
+                claimed_at timestamptz,
+                applied_at timestamptz,
+                rejected_at timestamptz,
+                rejected_by text,
+                codex_turn_id text,
+                error_message text,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 updated_at timestamptz NOT NULL DEFAULT now()
             );
@@ -21633,6 +24363,78 @@ async fn persist_prompt_and_run_ai_access_metadata_override_client_claims() -> a
 }
 
 #[tokio::test]
+async fn persist_run_job_identity_overrides_client_metadata_in_dispatch_transaction(
+) -> anyhow::Result<()> {
+    let Some((mut client, connection_handle)) = connect_test_db().await? else {
+        eprintln!("skipping run job identity test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    client
+        .batch_execute(
+            "CREATE TEMP TABLE runs (
+                id uuid PRIMARY KEY,
+                project_id uuid NOT NULL,
+                metadata jsonb
+            );",
+        )
+        .await?;
+
+    let run_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let client_claimed_job_id = Uuid::new_v4();
+    let authoritative_job_id = Uuid::new_v4();
+    client
+        .execute(
+            "INSERT INTO runs (id, project_id, metadata) VALUES ($1, $2, $3::jsonb)",
+            &[
+                &run_id,
+                &project_id,
+                &PgJson(json!({
+                    "custom": true,
+                    "jobId": client_claimed_job_id,
+                })),
+            ],
+        )
+        .await?;
+
+    let transaction = client.transaction().await?;
+    crate::dispatch::persist_run_job_identity(
+        &transaction,
+        &project_id,
+        &run_id,
+        &authoritative_job_id,
+    )
+    .await
+    .expect("persist authoritative run job identity");
+
+    let in_transaction_metadata: serde_json::Value = transaction
+        .query_one("SELECT metadata FROM runs WHERE id = $1", &[&run_id])
+        .await?
+        .get::<_, PgJson<serde_json::Value>>("metadata")
+        .0;
+    assert_eq!(in_transaction_metadata["custom"], json!(true));
+    assert_eq!(
+        in_transaction_metadata["jobId"],
+        json!(authoritative_job_id.to_string())
+    );
+    transaction.commit().await?;
+
+    let hydrated_metadata: serde_json::Value = client
+        .query_one("SELECT metadata FROM runs WHERE id = $1", &[&run_id])
+        .await?
+        .get::<_, PgJson<serde_json::Value>>("metadata")
+        .0;
+    assert_eq!(
+        hydrated_metadata["jobId"],
+        json!(authoritative_job_id.to_string())
+    );
+
+    connection_handle.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn persist_run_managed_ai_credit_metadata_merges_trace_details() -> anyhow::Result<()> {
     let Some((mut client, connection_handle)) = connect_test_db().await? else {
         eprintln!("skipping managed AI credit trace test: TEST_DATABASE_URL not set");
@@ -23393,4 +26195,490 @@ mod billing_service_tests {
         tx.rollback().await?;
         Ok(())
     }
+}
+
+#[tokio::test]
+async fn credential_usage_report_refuses_revoked_credentials() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping revoked-credential usage test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let user_id = Uuid::new_v4();
+    ensure_test_user(&pool, &user_id).await?;
+
+    // A revoked pinned credential AND a live same-provider default: revoke
+    // means stop, so the default must NOT inherit the revoked credential's
+    // usage snapshots — the default serves new jobs, not cut-off ones (#115).
+    let pinned_id = Uuid::new_v4();
+    let default_id = Uuid::new_v4();
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into user_credentials
+                   (id, user_id, kind, nonce_b64, ciphertext_b64, metadata, is_default, revoked_at)
+                 values
+                   ($1, $3, 'codex_auth_json', 'nonce', 'ciphertext', '{}'::jsonb, false, now()),
+                   ($2, $3, 'codex_auth_json', 'nonce', 'ciphertext', '{}'::jsonb, true, null)",
+                &[&pinned_id, &default_id, &user_id],
+            )
+            .await?;
+    }
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "revoked-credential-usage-test",
+    );
+    let state = build_test_state(pool.clone(), config);
+
+    let response = crate::credentials::router()
+        .with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/internal/credentials/{pinned_id}/usage"))
+                .header("authorization", "Bearer credential-lease")
+                .header("content-type", "application/json")
+                .body(Body::from(json!({ "planName": "Codex" }).to_string()))?,
+        )
+        .await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "usage for a revoked credential must be refused, not redirected"
+    );
+
+    {
+        let connection = pool.get().await?;
+        for id in [pinned_id, default_id] {
+            let row = connection
+                .query_one(
+                    "select subscription_usage from user_credentials where id = $1",
+                    &[&id],
+                )
+                .await?;
+            let stored: Option<PgJson<serde_json::Value>> = row.get("subscription_usage");
+            assert!(
+                stored.is_none(),
+                "no credential may accumulate usage from a revoked id"
+            );
+        }
+    }
+
+    cleanup_test_user(&pool, &user_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn credential_lease_refuses_revoked_credentials_even_with_a_default() -> anyhow::Result<()> {
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping revoked-credential lease test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+
+    let user_id = Uuid::new_v4();
+    ensure_test_user(&pool, &user_id).await?;
+
+    let pinned_id = Uuid::new_v4();
+    let default_id = Uuid::new_v4();
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into user_credentials
+                   (id, user_id, kind, nonce_b64, ciphertext_b64, metadata, is_default, revoked_at)
+                 values
+                   ($1, $3, 'codex_auth_json', 'nonce', 'ciphertext', '{}'::jsonb, false, now()),
+                   ($2, $3, 'codex_auth_json', 'nonce', 'ciphertext', '{}'::jsonb, true, null)",
+                &[&pinned_id, &default_id, &user_id],
+            )
+            .await?;
+    }
+
+    let mut config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "revoked-credential-lease-test",
+    );
+    config.credential_encryption_key = Some(crate::config::CredentialEncryptionKey::for_test(
+        "revoked-credential-lease-test-key",
+    ));
+    let state = build_test_state(pool.clone(), config);
+
+    // Revoking a credential is the user's stop lever: the lease must 404 even
+    // though a live same-provider default exists — no silent continuation.
+    let response = crate::credentials::router()
+        .with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/internal/credentials/{pinned_id}"))
+                .header("authorization", "Bearer credential-lease")
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "a revoked credential must stop serving leases"
+    );
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024).await?;
+    let message = String::from_utf8_lossy(&body);
+    assert!(
+        message.contains("credential not found"),
+        "the studio's reconnect-credentials classifier keys on this prefix; got: {message}"
+    );
+
+    cleanup_test_user(&pool, &user_id).await?;
+    Ok(())
+}
+
+async fn get_activity_json(
+    app: &axum::Router,
+    token: &str,
+    uri: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await?;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "GET {uri}: {}",
+        String::from_utf8_lossy(&body)
+    );
+    Ok(serde_json::from_slice(&body)?)
+}
+
+#[tokio::test]
+async fn activity_feed_respects_conversation_privacy_and_current_membership() -> anyhow::Result<()>
+{
+    let Some(pool) = setup_origin_test_pool().await? else {
+        eprintln!("skipping activity feed test: TEST_DATABASE_URL not set");
+        return Ok(());
+    };
+    ensure_conversation_event_test_tables(&pool).await?;
+
+    let owner_user_id = Uuid::new_v4();
+    let participant_user_id = Uuid::new_v4();
+    let bystander_user_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let private_conversation_id = Uuid::new_v4();
+    let child_conversation_id = Uuid::new_v4();
+    for user_id in [&owner_user_id, &participant_user_id, &bystander_user_id] {
+        ensure_test_user(&pool, user_id).await?;
+    }
+
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into projects (id, name, project_type, owner_user_id, status)
+                 values ($1, 'Activity feed test', 'customer', $2, 'active')",
+                &[&project_id, &owner_user_id],
+            )
+            .await?;
+        for user_id in [&participant_user_id, &bystander_user_id] {
+            connection
+                .execute(
+                    "insert into project_memberships (project_id, user_id, role)
+                     values ($1, $2, 'builder')",
+                    &[&project_id, user_id],
+                )
+                .await?;
+        }
+        connection
+            .execute(
+                "insert into conversations (id, project_id, created_by, metadata, visibility)
+                 values ($1, $2, $3, '{\"title\":\"Private plan\"}'::jsonb, 'private')",
+                &[&private_conversation_id, &project_id, &owner_user_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into conversation_participants (conversation_id, user_id, role, added_by)
+                 values ($1, $2, 'member', $3)",
+                &[
+                    &private_conversation_id,
+                    &participant_user_id,
+                    &owner_user_id,
+                ],
+            )
+            .await?;
+        // A public child under the private root: Phase 1 writes no rows for it.
+        connection
+            .execute(
+                "insert into conversations (
+                     id, project_id, created_by, metadata, visibility,
+                     parent_conversation_id, root_conversation_id
+                 ) values ($1, $2, $3, '{}'::jsonb, 'public', $4, $4)",
+                &[
+                    &child_conversation_id,
+                    &project_id,
+                    &owner_user_id,
+                    &private_conversation_id,
+                ],
+            )
+            .await?;
+    }
+
+    let agent_metadata = serde_json::json!({
+        "agent": {
+            "handle": "octo",
+            "displayName": "Octo",
+            "avatarSeed": "seed-octo",
+            "description": "never stored"
+        }
+    });
+    let (first_id, second_id, third_id) = {
+        let mut connection = pool.get().await?;
+        let transaction = connection.transaction().await?;
+        let first = crate::activity::record_reply_if_visible(
+            &transaction,
+            &project_id,
+            &private_conversation_id,
+            None,
+            None,
+            "first private reply",
+            &agent_metadata,
+        )
+        .await;
+        let second = crate::activity::record_reply_if_visible(
+            &transaction,
+            &project_id,
+            &private_conversation_id,
+            None,
+            None,
+            "second private reply",
+            &agent_metadata,
+        )
+        .await;
+        let third = crate::activity::record_reply_if_visible(
+            &transaction,
+            &project_id,
+            &private_conversation_id,
+            None,
+            None,
+            "third private reply",
+            &agent_metadata,
+        )
+        .await;
+        let notice = crate::activity::record_reply_if_visible(
+            &transaction,
+            &project_id,
+            &private_conversation_id,
+            None,
+            None,
+            "Agent job cancelled by user",
+            &serde_json::json!({ "kind": "run_cancellation" }),
+        )
+        .await;
+        let child = crate::activity::record_reply_if_visible(
+            &transaction,
+            &project_id,
+            &child_conversation_id,
+            None,
+            None,
+            "child reply",
+            &agent_metadata,
+        )
+        .await;
+        transaction.commit().await?;
+        assert!(notice.is_none(), "a controller notice is not a reply");
+        assert!(child.is_none(), "child threads get no rows in phase 1");
+        (
+            first.expect("first reply row"),
+            second.expect("second reply row"),
+            third.expect("third reply row"),
+        )
+    };
+    assert!(first_id < second_id && second_id < third_id);
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "activity-feed",
+    );
+    let owner_token = crate::auth::issue_controller_token(&config, &owner_user_id)
+        .map_err(|error| controller_error("issue activity owner token", error))?
+        .token;
+    let participant_token = crate::auth::issue_controller_token(&config, &participant_user_id)
+        .map_err(|error| controller_error("issue activity participant token", error))?
+        .token;
+    let bystander_token = crate::auth::issue_controller_token(&config, &bystander_user_id)
+        .map_err(|error| controller_error("issue activity bystander token", error))?
+        .token;
+    let state = build_test_state(pool.clone(), config);
+    let app = crate::activity::router().with_state(state);
+
+    // The creator sees every reply, newest first, with the allow-listed actor.
+    let owner_feed = get_activity_json(&app, &owner_token, "/me/activity").await?;
+    let owner_items = owner_feed["items"].as_array().cloned().unwrap_or_default();
+    assert_eq!(owner_items.len(), 3);
+    assert_eq!(
+        owner_items[0]["id"].as_str(),
+        Some(third_id.to_string().as_str())
+    );
+    assert_eq!(owner_items[0]["kind"].as_str(), Some("conversation.reply"));
+    assert_eq!(owner_items[0]["title"].as_str(), Some("Private plan"));
+    assert_eq!(
+        owner_items[0]["preview"].as_str(),
+        Some("third private reply")
+    );
+    assert_eq!(owner_items[0]["actor"]["kind"].as_str(), Some("agent"));
+    assert_eq!(owner_items[0]["actor"]["handle"].as_str(), Some("octo"));
+    assert_eq!(
+        owner_items[0]["actor"]["avatarSeed"].as_str(),
+        Some("seed-octo")
+    );
+    assert!(owner_items[0]["actor"].get("description").is_none());
+    assert_eq!(owner_items[0]["needsYou"].as_bool(), Some(true));
+    assert_eq!(owner_items[0]["seen"].as_bool(), Some(false));
+    assert_eq!(
+        owner_items[0]["project"]["id"].as_str(),
+        Some(project_id.to_string().as_str())
+    );
+    assert_eq!(owner_feed["hasMore"].as_bool(), Some(false));
+
+    // A participant sees it too; a project member who is not a participant does not.
+    let participant_feed = get_activity_json(&app, &participant_token, "/me/activity").await?;
+    assert_eq!(participant_feed["items"].as_array().map(Vec::len), Some(3));
+    let bystander_feed = get_activity_json(&app, &bystander_token, "/me/activity").await?;
+    assert_eq!(bystander_feed["items"].as_array().map(Vec::len), Some(0));
+
+    // Keyset paging: newest-first history, then an ascending catch-up.
+    let page = get_activity_json(&app, &owner_token, "/me/activity?limit=2").await?;
+    assert_eq!(page["items"].as_array().map(Vec::len), Some(2));
+    assert_eq!(page["hasMore"].as_bool(), Some(true));
+    assert_eq!(
+        page["nextBefore"].as_str(),
+        Some(second_id.to_string().as_str())
+    );
+    let rest = get_activity_json(
+        &app,
+        &owner_token,
+        &format!("/me/activity?limit=2&before={second_id}"),
+    )
+    .await?;
+    let rest_items = rest["items"].as_array().cloned().unwrap_or_default();
+    assert_eq!(rest_items.len(), 1);
+    assert_eq!(
+        rest_items[0]["id"].as_str(),
+        Some(first_id.to_string().as_str())
+    );
+    assert_eq!(rest["hasMore"].as_bool(), Some(false));
+    let catch_up = get_activity_json(
+        &app,
+        &owner_token,
+        &format!("/me/activity?since={first_id}"),
+    )
+    .await?;
+    let catch_up_ids: Vec<i64> = catch_up["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|item| item["id"].as_str().and_then(|id| id.parse::<i64>().ok()))
+        .collect();
+    assert!(
+        catch_up_ids.windows(2).all(|pair| pair[0] > pair[1]),
+        "every page is newest-first, catch-up included"
+    );
+    assert!(catch_up_ids.contains(&third_id));
+
+    // A caller far behind must still be handed the NEWEST rows plus a way
+    // back: an ascending catch-up whose page filled with rows the caller
+    // already had left no continuation, so newer rows were never reached.
+    let narrow_catch_up = get_activity_json(
+        &app,
+        &owner_token,
+        &format!("/me/activity?since={first_id}&limit=1"),
+    )
+    .await?;
+    let narrow_items = narrow_catch_up["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(narrow_items.len(), 1);
+    assert_eq!(
+        narrow_items[0]["id"].as_str(),
+        Some(third_id.to_string().as_str()),
+        "a one-row catch-up returns the newest row, never the oldest"
+    );
+    assert_eq!(narrow_catch_up["hasMore"].as_bool(), Some(true));
+    assert_eq!(
+        narrow_catch_up["nextBefore"].as_str(),
+        Some(third_id.to_string().as_str()),
+        "catch-up hands back a cursor to walk the remainder"
+    );
+
+    // The needs lane, then the cross-device cut.
+    let needs = get_activity_json(&app, &owner_token, "/me/activity?lane=needs").await?;
+    assert_eq!(needs["items"].as_array().map(Vec::len), Some(3));
+    let seen_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/me/activity/seen")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {owner_token}"),
+                )
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "lastSeenEventId": second_id.to_string() }).to_string(),
+                ))?,
+        )
+        .await?;
+    assert_eq!(seen_response.status(), StatusCode::OK);
+    let after_seen = get_activity_json(&app, &owner_token, "/me/activity").await?;
+    assert_eq!(
+        after_seen["lastSeenEventId"].as_str(),
+        Some(second_id.to_string().as_str())
+    );
+    let after_seen_items = after_seen["items"].as_array().cloned().unwrap_or_default();
+    assert_eq!(after_seen_items[0]["seen"].as_bool(), Some(false));
+    assert_eq!(after_seen_items[1]["seen"].as_bool(), Some(true));
+    assert_eq!(after_seen_items[2]["seen"].as_bool(), Some(true));
+
+    // Revoking the participant's project membership hides the history at once,
+    // even though their stale participant row is still there.
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "delete from project_memberships where project_id = $1 and user_id = $2",
+                &[&project_id, &participant_user_id],
+            )
+            .await?;
+    }
+    let revoked_feed = get_activity_json(&app, &participant_token, "/me/activity").await?;
+    assert_eq!(revoked_feed["items"].as_array().map(Vec::len), Some(0));
+
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "delete from activity_seen where user_id = $1",
+                &[&owner_user_id],
+            )
+            .await?;
+    }
+    cleanup_origin_project(&pool, &project_id).await?;
+    for user_id in [&owner_user_id, &participant_user_id, &bystander_user_id] {
+        cleanup_test_user(&pool, user_id).await?;
+    }
+    Ok(())
 }

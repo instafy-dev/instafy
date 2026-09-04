@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import kleur from "kleur";
 import {
   resolveControllerUrl,
@@ -20,11 +22,15 @@ type AutomationRecord = {
   timezone: string;
   runtimeMode: string;
   runtimeProvider: string | null;
+  silentWhenNothingToReport: boolean;
+  resultVisibility: "private" | "team";
   status: string;
   nextRunAt: string | null;
   lastRunAt: string | null;
   lastError: string | null;
 };
+
+type ResultVisibility = "private" | "team";
 
 type AutomationsCommonOptions = {
   project?: string;
@@ -45,7 +51,26 @@ export type AutomationsCreateOptions = AutomationsCommonOptions & {
   timezone?: string;
   runtimeMode?: "auto" | "hosted" | "existing";
   runtimeProvider?: string;
+  silentWhenNothingToReport?: boolean;
+  resultVisibility?: ResultVisibility;
   paused?: boolean;
+};
+
+export type AutomationsUpdateOptions = AutomationsCommonOptions & {
+  automationId: string;
+  name?: string;
+  prompt?: string;
+  promptFile?: string;
+  scheduleKind?: "weekly" | "hourly" | "once";
+  runAt?: string;
+  intervalHours?: number;
+  days?: string;
+  time?: string;
+  timezone?: string;
+  runtimeMode?: "auto" | "hosted" | "existing";
+  runtimeProvider?: string;
+  silentWhenNothingToReport?: boolean;
+  resultVisibility?: ResultVisibility;
 };
 
 export type AutomationsUpdateStatusOptions = AutomationsCommonOptions & {
@@ -118,7 +143,7 @@ function resolveControllerAuth(
     throw formatAuthRequiredError({
       retryCommand,
       advancedHint:
-        "pass --access-token, or set INSTAFY_ACCESS_TOKEN / CONTROLLER_ACCESS_TOKEN",
+        "pass --access-token, or set INSTAFY_ACCESS_TOKEN / SUPABASE_ACCESS_TOKEN",
     });
   }
 
@@ -206,6 +231,8 @@ function normalizeAutomationRecord(input: unknown): AutomationRecord | null {
     timezone: typeof record.timezone === "string" ? record.timezone : "UTC",
     runtimeMode: typeof record.runtimeMode === "string" ? record.runtimeMode : "auto",
     runtimeProvider: toMaybeString(record.runtimeProvider),
+    silentWhenNothingToReport: record.silentWhenNothingToReport === true,
+    resultVisibility: record.resultVisibility === "team" ? "team" : "private",
     status: typeof record.status === "string" ? record.status : "active",
     nextRunAt: toMaybeString(record.nextRunAt),
     lastRunAt: toMaybeString(record.lastRunAt),
@@ -317,8 +344,15 @@ export async function automationsList(options: AutomationsCommonOptions) {
     })();
     const status = record.status === "paused" ? kleur.gray("paused") : kleur.green("active");
     const next = record.nextRunAt ? kleur.cyan(record.nextRunAt) : kleur.gray("n/a");
+    const delivery = record.silentWhenNothingToReport ? " · findings only" : "";
+    const sharing =
+      record.resultVisibility === "team"
+        ? ` · ${kleur.cyan("team-visible")}`
+        : "";
     console.log(`${kleur.bold(record.name)}  ${kleur.gray(record.id)}`);
-    console.log(`  ${schedule} · ${record.runtimeMode} · ${status} · next ${next}`);
+    console.log(
+      `  ${schedule} · ${record.runtimeMode}${delivery}${sharing} · ${status} · next ${next}`,
+    );
     if (record.lastError) {
       console.log(`  ${kleur.red(record.lastError)}`);
     }
@@ -348,6 +382,8 @@ export async function automationsCreate(options: AutomationsCreateOptions) {
     timezone,
     runtimeMode: options.runtimeMode ?? "auto",
     runtimeProvider: options.runtimeProvider?.trim() || undefined,
+    silentWhenNothingToReport: options.silentWhenNothingToReport ?? false,
+    resultVisibility: options.resultVisibility ?? undefined,
     status: options.paused ? "paused" : "active",
   };
 
@@ -387,6 +423,175 @@ export async function automationsCreate(options: AutomationsCreateOptions) {
     return;
   }
   console.log(`${kleur.green("Created")} ${kleur.bold(record.name)} (${record.id})`);
+}
+
+const SCHEDULE_KINDS = new Set(["weekly", "hourly", "once"]);
+const RUNTIME_MODES = new Set(["auto", "hosted", "existing"]);
+
+const UPDATE_FIELD_FLAGS =
+  "--name, --prompt, --prompt-file, --schedule-kind, --run-at, --interval-hours, --days, --time, " +
+  "--timezone, --runtime-mode, --runtime-provider, --silent-when-nothing-to-report, " +
+  "--no-silent-when-nothing-to-report, --share-results, --no-share-results, " +
+  "--result-visibility";
+
+function readUpdatePrompt(
+  options: Pick<AutomationsUpdateOptions, "prompt" | "promptFile">,
+  cwd: string,
+): string | undefined {
+  const hasPrompt = typeof options.prompt === "string";
+  const hasPromptFile = typeof options.promptFile === "string";
+  if (hasPrompt && hasPromptFile) {
+    throw new Error("Pass either --prompt or --prompt-file, not both");
+  }
+  if (hasPromptFile) {
+    const promptPath = path.resolve(cwd, (options.promptFile ?? "").trim());
+    let raw: string;
+    try {
+      raw = fs.readFileSync(promptPath, "utf8");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Unable to read --prompt-file ${promptPath}: ${message}`);
+    }
+    const promptText = raw.trim();
+    if (!promptText) {
+      throw new Error(`--prompt-file ${promptPath} is empty`);
+    }
+    return promptText;
+  }
+  if (hasPrompt) {
+    const promptText = (options.prompt ?? "").trim();
+    if (!promptText) {
+      throw new Error("--prompt must not be empty");
+    }
+    return promptText;
+  }
+  return undefined;
+}
+
+function buildAutomationUpdateBody(
+  options: AutomationsUpdateOptions,
+  cwd: string,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+
+  if (typeof options.name === "string") {
+    const name = options.name.trim();
+    if (!name) {
+      throw new Error("--name must not be empty");
+    }
+    body.name = name;
+  }
+
+  const promptText = readUpdatePrompt(options, cwd);
+  if (promptText !== undefined) {
+    body.promptText = promptText;
+  }
+
+  if (typeof options.scheduleKind === "string") {
+    const scheduleKind = options.scheduleKind.trim().toLowerCase();
+    if (!SCHEDULE_KINDS.has(scheduleKind)) {
+      throw new Error("--schedule-kind must be weekly, hourly, or once");
+    }
+    body.scheduleKind = scheduleKind;
+  }
+
+  if (typeof options.runAt === "string") {
+    const runAt = options.runAt.trim();
+    if (!runAt) {
+      throw new Error("--run-at must not be empty");
+    }
+    body.runAt = runAt;
+  }
+
+  if (options.intervalHours !== undefined) {
+    const interval = Number(options.intervalHours);
+    if (!Number.isFinite(interval) || interval < 1) {
+      throw new Error("--interval-hours must be >= 1");
+    }
+    body.intervalHours = interval;
+  }
+
+  if (typeof options.days === "string") {
+    body.byDay = normalizeDays(options.days);
+  }
+
+  if (typeof options.time === "string") {
+    const { hour, minute } = parseTime(options.time);
+    body.byHour = hour;
+    body.byMinute = minute;
+  }
+
+  if (typeof options.timezone === "string") {
+    const timezone = options.timezone.trim();
+    if (!timezone) {
+      throw new Error("--timezone must not be empty");
+    }
+    body.timezone = timezone;
+  }
+
+  if (typeof options.runtimeMode === "string") {
+    const runtimeMode = options.runtimeMode.trim().toLowerCase();
+    if (!RUNTIME_MODES.has(runtimeMode)) {
+      throw new Error("--runtime-mode must be auto, hosted, or existing");
+    }
+    body.runtimeMode = runtimeMode;
+  }
+
+  if (typeof options.runtimeProvider === "string") {
+    const runtimeProvider = options.runtimeProvider.trim();
+    if (!runtimeProvider) {
+      throw new Error("--runtime-provider must not be empty");
+    }
+    body.runtimeProvider = runtimeProvider;
+  }
+
+  if (typeof options.silentWhenNothingToReport === "boolean") {
+    body.silentWhenNothingToReport = options.silentWhenNothingToReport;
+  }
+
+  if (options.resultVisibility !== undefined) {
+    body.resultVisibility = options.resultVisibility;
+  }
+
+  return body;
+}
+
+export async function automationsUpdate(options: AutomationsUpdateOptions) {
+  const automationId = normalizeUuidParam(options.automationId);
+  if (!automationId) {
+    throw new Error("automationId must be a UUID");
+  }
+
+  const cwd = options.cwd ?? process.cwd();
+  const body = buildAutomationUpdateBody(options, cwd);
+  if (Object.keys(body).length === 0) {
+    throw new Error(`Nothing to update. Pass at least one of ${UPDATE_FIELD_FLAGS}.`);
+  }
+
+  const auth = resolveControllerAuth(options, "instafy login");
+  const payload = await controllerJsonRequest(auth, "instafy login", {
+    method: "PATCH",
+    path: `/automations/${automationId}`,
+    body,
+  });
+
+  if (options.json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+
+  const record = normalizeAutomationRecord(payload);
+  if (!record) {
+    console.log(kleur.green("Automation updated."));
+    return;
+  }
+  const sharing =
+    record.resultVisibility === "team"
+      ? " · results shared with the team"
+      : record.resultVisibility === "private"
+        ? " · results kept private"
+        : "";
+  console.log(`${kleur.green("Updated")} ${kleur.bold(record.name)} (${record.id})${sharing}`);
 }
 
 export async function automationsUpdateStatus(options: AutomationsUpdateStatusOptions) {

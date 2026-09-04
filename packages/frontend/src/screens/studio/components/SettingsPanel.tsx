@@ -910,7 +910,7 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
     }
     try {
       await writeClipboardText(inviteLinkUrl);
-      showStatus("Invite link copied.", "success", 2000);
+      showStatus("Invite link copied.", "success", 2000, { presentation: "confirmation" });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to copy invite link.";
       showStatus(message, "error", 3000);

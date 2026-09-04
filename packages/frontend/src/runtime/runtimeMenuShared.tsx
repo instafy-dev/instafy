@@ -83,6 +83,21 @@ export function RuntimeStateIndicator({
       </span>
     );
   }
+  if (styles.live) {
+    return (
+      <span
+        className={`relative inline-flex h-2.5 w-2.5 ${baseClass}`.trim()}
+        aria-hidden="true"
+      >
+        <span
+          className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-30 [animation-duration:2.5s] motion-reduce:animate-none ${styles.indicatorClass}`}
+        />
+        <span
+          className={`relative inline-flex h-2.5 w-2.5 rounded-full ${styles.indicatorClass}`}
+        />
+      </span>
+    );
+  }
   return (
     <span
       className={`inline-flex h-2.5 w-2.5 rounded-full ${styles.indicatorClass} ${baseClass}`.trim()}
@@ -95,15 +110,21 @@ interface RuntimeStateStyle {
   badgeClass: string;
   indicator: "dot" | "spinner" | "ring";
   indicatorClass: string;
+  /** Adds a soft ping halo — a heartbeat for machines that are actually up. */
+  live?: boolean;
 }
 
 export function resolveRuntimeStateStyles(state: RuntimeStatusState): RuntimeStateStyle {
   switch (state) {
     case "online":
+      // Green = healthy, matching the product's success color everywhere else
+      // (the old brand-blue dot read as decoration, not state). `live` adds the
+      // gentle heartbeat halo.
       return {
-        badgeClass: "bg-primary-50 text-primary-600",
+        badgeClass: "bg-emerald-50 text-emerald-600",
         indicator: "dot",
-        indicatorClass: "bg-primary-500",
+        indicatorClass: "bg-emerald-500",
+        live: true,
       };
     case "idle":
       return {
@@ -144,6 +165,40 @@ function writeClipboardTextWithDomFallback(value: string): void {
   if (!copied) {
     throw new Error("Clipboard unavailable");
   }
+}
+
+export function formatCpuPct(value: number | null | undefined): string | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return null;
+  }
+  return `${Math.round(value)}%`;
+}
+
+export function formatBytesCompact(bytes: number): string {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const decimals = unitIndex === 0 ? 0 : value < 10 ? 1 : 0;
+  const rounded = Math.round(value * 10 ** decimals) / 10 ** decimals;
+  return `${rounded} ${units[unitIndex]}`;
+}
+
+export function formatUsagePair(
+  used: number | null | undefined,
+  limit: number | null | undefined,
+): string | null {
+  if (typeof used !== "number" || Number.isNaN(used) || used < 0) {
+    return null;
+  }
+  const usedLabel = formatBytesCompact(used);
+  if (typeof limit !== "number" || Number.isNaN(limit) || limit <= 0) {
+    return usedLabel;
+  }
+  return `${usedLabel} / ${formatBytesCompact(limit)}`;
 }
 
 export async function writeClipboardText(value: string): Promise<void> {

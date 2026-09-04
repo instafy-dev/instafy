@@ -167,6 +167,8 @@ jobs:
             scripts/check-production-image-inputs.test.mjs \
             scripts/check-production-services-workflow.test.mjs \
             scripts/check-public-release-workflows.test.mjs \
+            scripts/check-changesets.test.mjs \
+            scripts/verify-changeset-pack.test.mjs \
             scripts/lib/codexMachineAuthExpiry.test.mjs \
             scripts/check-supabase-migrations.test.mjs \
             scripts/test-supabase-migrations-empty-db.test.mjs \
@@ -202,6 +204,13 @@ jobs:
 
       - name: Test CLI package artifact
         run: pnpm --filter @instafy/cli test:package
+
+      - name: Validate provider contract package artifact
+        working-directory: packages/provider-contract
+        run: npm pack --dry-run --ignore-scripts
+
+      - name: Test CLI automations
+        run: pnpm --filter @instafy/cli exec vitest run test/automations.e2e.spec.ts
 
       - name: Build and test desktop runtime
         run: |
@@ -263,3 +272,115 @@ jobs:
           cargo check --locked --tests --manifest-path packages/git-service/Cargo.toml
           cargo check --locked --tests --manifest-path packages/runtime-provider-service/Cargo.toml
           cargo check --locked --tests --manifest-path packages/tunnel-broker/Cargo.toml
+
+  # Formatting ran nowhere in CI, so main drifted out of `cargo fmt` shape and
+  # every branch cut from it inherited the failure — reviewers then charged the
+  # violations to whichever PR happened to be measured. rustfmt only parses, so
+  # this reports in about a minute rather than after the 45-minute test job.
+  rust-fmt:
+    name: Rust formatting
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Set up stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add rustfmt
+
+      # Crates are discovered, not listed: a new crate cannot silently escape
+      # the gate the way it can with a hand-maintained list. `--all` is
+      # required because packages/tunnel-broker is a virtual workspace manifest
+      # with no targets of its own — without it that crate errors instead of
+      # being checked. Every manifest is checked before failing, so one run
+      # names every offending file.
+      - name: Check formatting
+        run: |
+          fmt_status=0
+          for manifest in packages/*/Cargo.toml; do
+            echo "== $manifest"
+            cargo fmt --all --manifest-path "$manifest" --check || fmt_status=1
+          done
+          exit $fmt_status
+
+  # The `rust` job above only type-checks, and the Controller DB Tests
+  # workflow covers only the runtime-controller suite. This job executes the
+  # remaining Rust test suites — contracts, runtime-agent, openai-proxy,
+  # origin-http-server, git-service — which otherwise run nowhere in CI
+  # (issue #142's other half). None of them need a database.
+  rust-tests:
+    name: Rust tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      # One target dir for all five suites: the crates share most of their
+      # dependency graph, and per-package target dirs overflowed the runner
+      # disk when this job also compiled the controller.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/.cargo-target
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      # The shared-browser tests spawn node against a pinned playwright
+      # fixture from the workspace's node_modules.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Set up stable Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      # Hosted runners keep ~14GB free on /; five crates of test builds plus
+      # the restored cache need headroom. Drop toolchains this job never uses.
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      # Test builds are much heavier than the check job's; cache the registry
+      # and the shared target dir keyed on the lockfiles so warm runs skip
+      # most of the compile. v2 namespace: the v1 cache carried the full
+      # controller build and ENOSPC'd the runner during restore.
+      - name: Restore cargo cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .cargo-target
+          key: rust-tests-v2-${{ runner.os }}-${{ hashFiles('packages/*/Cargo.lock') }}
+          restore-keys: |
+            rust-tests-v2-${{ runner.os }}-
+
+      - name: Run database-free Rust test suites
+        run: |
+          cargo test --manifest-path packages/runtime-contracts/Cargo.toml
+          cargo test --manifest-path packages/runtime-agent/Cargo.toml --no-run
+          cargo test --manifest-path packages/runtime-agent/Cargo.toml --lib --test controller_client -- --test-threads=1
+          cargo test --manifest-path packages/openai-proxy-server/Cargo.toml
+          cargo test --manifest-path packages/origin-http-server/Cargo.toml
+          cargo test --manifest-path packages/git-service/Cargo.toml

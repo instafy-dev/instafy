@@ -1,0 +1,7 @@
+interface:
+  display_name: "Instafy Diagnostics"
+  short_description: "Diagnose Instafy runs and support issues"
+  default_prompt: "Use $instafy-diagnostics to diagnose this Instafy run safely."
+
+policy:
+  allow_implicit_invocation: true

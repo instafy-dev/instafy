@@ -6,10 +6,12 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::task::JoinHandle;
 use tracing::warn;
 
+use crate::active_turn_input::ActiveTurnInputReceiver;
 use crate::config::Config;
 use crate::controller::{ControllerClient, LeaseJob, Registration};
 use crate::job_cancel::JobCancelSignal;
 use crate::jobs::{JobExecution, JobMessage, JobProcessor, JobProgress};
+use crate::origin::LocalOriginSync;
 
 /// Shared agent execution helper that can be reused by hosted and self-hosted runtimes.
 /// It owns a JobProcessor and wraps the progress/streaming plumbing.
@@ -29,12 +31,20 @@ impl AgentExecutor {
         self.processor.clone()
     }
 
+    /// Publish (or clear, with None) the locally hosted origin's identity and
+    /// loopback endpoint so workspace sync can bypass the tunnel data path
+    /// when a job's origin is served by this very process (#153).
+    pub fn set_local_origin_sync(&self, value: Option<LocalOriginSync>) {
+        self.processor.set_local_origin_sync(value);
+    }
+
     pub async fn run_apply_with_progress(
         &self,
         client: Arc<ControllerClient>,
         registration: &Registration,
         job: &LeaseJob,
         lease_lost_signal: Option<JobCancelSignal>,
+        active_turn_input: Option<ActiveTurnInputReceiver>,
     ) -> Result<JobExecution> {
         let (progress_tx, progress_status, progress_task) =
             spawn_progress_dispatch(client, registration, job.id, lease_lost_signal.clone());
@@ -51,6 +61,7 @@ impl AgentExecutor {
                 true,
                 Some(progress_handle),
                 lease_lost_signal.clone(),
+                active_turn_input,
             )
             .await;
 

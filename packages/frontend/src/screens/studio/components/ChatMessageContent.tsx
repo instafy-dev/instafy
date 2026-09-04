@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { ChatBubble, GitBranch, QuoteMessage } from "iconoir-react";
+import { requestAgentProfile } from "./agentProfileOpen";
 import { useConversations } from "../../../conversations/ConversationsProvider";
 import { useConversation } from "../../../conversations/useConversation";
 import {
@@ -29,7 +30,9 @@ import {
   parseMessageContentBlocks,
   parseTeamFlowLine,
   tokenizeChatLine,
+  type ChatLineTokenChunk,
   type ConversationReferenceDescriptor,
+  type MessageListItem,
   type WorkspaceFileReferenceDescriptor,
 } from "./chatMessageDialect";
 import { resolveProxyUpstreamErrorGuidance } from "./proxyError";
@@ -120,9 +123,26 @@ const WORKSPACE_FILE_ACTION_MENU_WIDTH_PX = 176;
 const WORKSPACE_FILE_ACTION_MENU_HEIGHT_ESTIMATE_PX = 96;
 const WORKSPACE_FILE_ACTION_MENU_PADDING_PX = 12;
 const WORKSPACE_FILE_PREVIEW_INTENT_EVENT = "instafy:workspace-file-preview-intent";
+// Punctuation that reads as part of the chip before it and must not wrap alone.
+const CHIP_TRAILING_PUNCTUATION_REGEX = /^[:;,.!?)\]]+/;
 const INLINE_CODE_TOKEN_CLASS = [
   "inline-flex items-center rounded-[0.34rem] bg-slate-950/[0.035] px-1.5 py-[0.08em] font-mono text-[0.92em] leading-[1.18] text-slate-700 ring-1 ring-inset ring-slate-900/10 shadow-[inset_0_-1px_0_rgba(15,23,42,0.07)] align-baseline",
   "dark:bg-white/[0.055] dark:text-slate-200 dark:ring-white/[0.08] dark:shadow-[inset_0_-1px_0_rgba(255,255,255,0.045)]",
+].join(" ");
+const CODE_BLOCK_CLASS = [
+  "block max-w-full overflow-x-auto whitespace-pre rounded-xl bg-slate-950/[0.035] px-3 py-2 font-mono text-[0.85em] leading-normal text-slate-700 ring-1 ring-inset ring-slate-900/10 shadow-[inset_0_-1px_0_rgba(15,23,42,0.07)]",
+  "dark:bg-white/[0.055] dark:text-slate-200 dark:ring-white/[0.08] dark:shadow-[inset_0_-1px_0_rgba(255,255,255,0.045)]",
+].join(" ");
+// Comfortable reading measure for prose only (#207): even after the bubble
+// shell stops overflowing, its own max-width still lets a line run to ~96
+// characters. 70ch keeps paragraphs and list items in the 45–75ch range
+// `leading-relaxed` was tuned for. Deliberately not applied to code blocks,
+// command/output blocks, diff or file-change lists, tables, or image rows —
+// those want the full bubble width.
+const PROSE_MEASURE_CLASS = "max-w-[70ch]";
+const GITHUB_REFERENCE_TOKEN_CLASS = [
+  "inline-flex items-center gap-1 rounded-[0.34rem] bg-slate-950/[0.035] px-1.5 py-[0.08em] font-mono text-[0.92em] leading-[1.18] text-slate-700 no-underline ring-1 ring-inset ring-slate-900/10 shadow-[inset_0_-1px_0_rgba(15,23,42,0.07)] align-baseline transition hover:bg-slate-950/[0.06] hover:text-slate-900",
+  "dark:bg-white/[0.055] dark:text-slate-200 dark:ring-white/[0.08] dark:shadow-[inset_0_-1px_0_rgba(255,255,255,0.045)] dark:hover:bg-white/[0.09] dark:hover:text-slate-50",
 ].join(" ");
 const WORKSPACE_FILE_REFERENCE_TOKEN_CLASS = [
   "inline-flex min-w-0 max-w-[14rem] items-center overflow-hidden rounded-[0.34rem] bg-primary-50/70 px-1.5 py-[0.08em] font-mono text-[0.92em] leading-[1.18] text-primary-700 ring-1 ring-inset ring-primary-200/80 shadow-[inset_0_-1px_0_rgba(0,122,204,0.08)] align-baseline sm:max-w-[24rem]",
@@ -875,9 +895,18 @@ function WorkspaceFileReferenceChip({
       }
       setPreviewOpen(false);
     };
+    // Escape mirrors the action-menu sibling below — every dismissible
+    // floating surface answers the keyboard.
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPreviewOpen(false);
+      }
+    };
     document.addEventListener("pointerdown", handlePointerDownOutside, true);
+    document.addEventListener("keydown", handleKeyDown);
     return () => {
       document.removeEventListener("pointerdown", handlePointerDownOutside, true);
+      document.removeEventListener("keydown", handleKeyDown);
     };
   }, [previewOpen]);
 
@@ -1262,6 +1291,28 @@ function WorkspaceFileReferenceChip({
   );
 }
 
+// Octicon-style glyphs (git-pull-request / issue-opened) inlined so the chip
+// needs no icon-font or remote asset; the paths inherit the chip's text color.
+function GitHubReferenceGlyph({ kind }: { kind: "pull" | "issue" }) {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      aria-hidden="true"
+      data-testid="chat-message-github-reference-glyph"
+      className="h-[0.92em] w-[0.92em] flex-none fill-current opacity-75"
+    >
+      {kind === "pull" ? (
+        <path d="M1.5 3.25a2.25 2.25 0 1 1 3 2.122v5.256a2.251 2.251 0 1 1-1.5 0V5.372A2.25 2.25 0 0 1 1.5 3.25Zm5.677-.177L9.573.677A.25.25 0 0 1 10 .854V2.5h1A2.5 2.5 0 0 1 13.5 5v5.628a2.251 2.251 0 1 1-1.5 0V5a1 1 0 0 0-1-1h-1v1.646a.25.25 0 0 1-.427.177L7.177 3.427a.25.25 0 0 1 0-.354ZM3.75 2.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm0 9.5a.75.75 0 1 0 0 1.5.75.75 0 0 0 0-1.5Zm8.25.75a.75.75 0 1 0 1.5 0 .75.75 0 0 0-1.5 0Z" />
+      ) : (
+        <>
+          <path d="M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z" />
+          <path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z" />
+        </>
+      )}
+    </svg>
+  );
+}
+
 export type MessageContentProps = {
   content: string;
   className?: string;
@@ -1470,8 +1521,11 @@ export function MessageContent({
     );
   };
 
-  const renderInlineTokens = (line: string, keyPrefix: string): ReactNode[] =>
-    tokenizeChatLine(line, agentMentionHandles).map((token, tokenIndex) => {
+  const renderInlineToken = (
+    token: ChatLineTokenChunk,
+    tokenIndex: number,
+    keyPrefix: string,
+  ): ReactNode => {
       if (token.type === "text") {
         return token.value;
       }
@@ -1496,6 +1550,26 @@ export function MessageContent({
           </code>
         );
       }
+      if (token.type === "github-reference") {
+        const reference = token.value;
+        const label = `${reference.owner}/${reference.repo}#${reference.number}`;
+        return (
+          <a
+            key={`${keyPrefix}-${reference.url}-${tokenIndex}`}
+            href={reference.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={reference.url}
+            aria-label={`Open GitHub ${reference.kind === "pull" ? "pull request" : "issue"} ${label}`}
+            data-testid="chat-message-github-reference"
+            data-github-ref-kind={reference.kind}
+            className={GITHUB_REFERENCE_TOKEN_CLASS}
+          >
+            <GitHubReferenceGlyph kind={reference.kind} />
+            <span className="whitespace-nowrap">{label}</span>
+          </a>
+        );
+      }
       if (token.type === "link") {
         const reference = token.value;
         return (
@@ -1512,18 +1586,24 @@ export function MessageContent({
           </a>
         );
       }
-      if (token.type === "assistant-mention") {
+      if (token.type === "assistant-mention" || token.type === "agent-mention") {
+        // A mention is the agent's name — clicking it opens the agent's
+        // profile (ChatPanel hosts the card for these anchor-less opens).
+        const mentionClass =
+          token.type === "assistant-mention"
+            ? getAssistantMentionClass(token.value)
+            : agentMentionClass;
         return (
-          <span key={`${keyPrefix}-${token.value}-${tokenIndex}`} className={getAssistantMentionClass(token.value)}>
+          <button
+            key={`${keyPrefix}-${token.value}-${tokenIndex}`}
+            type="button"
+            onClick={() => requestAgentProfile(token.value)}
+            className={`${mentionClass} cursor-pointer text-left align-baseline [font:inherit] hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40`}
+            title={`View profile for ${token.value}`}
+            data-testid="chat-agent-mention"
+          >
             {token.value}
-          </span>
-        );
-      }
-      if (token.type === "agent-mention") {
-        return (
-          <span key={`${keyPrefix}-${token.value}-${tokenIndex}`} className={agentMentionClass}>
-            {token.value}
-          </span>
+          </button>
         );
       }
       if (token.type === "conversation-reference") {
@@ -1542,7 +1622,115 @@ export function MessageContent({
           previewCacheRef={workspaceFilePreviewCacheRef}
         />
       );
-    });
+  };
+
+  // An inline chip and the punctuation right after it are one unit: "`AGENTS.md`:"
+  // must never wrap with the ":" orphaned on the next line (#191). A chip token
+  // followed by punctuation renders inside a no-break span with that punctuation.
+  const renderInlineTokens = (line: string, keyPrefix: string): ReactNode[] => {
+    const tokens = tokenizeChatLine(line, agentMentionHandles);
+    const nodes: ReactNode[] = [];
+    for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex += 1) {
+      const token = tokens[tokenIndex];
+      if (!token) {
+        continue;
+      }
+      const rendered = renderInlineToken(token, tokenIndex, keyPrefix);
+      const nextToken = tokens[tokenIndex + 1];
+      const gluedPunctuation =
+        (token.type === "inline-code" ||
+          token.type === "workspace-file" ||
+          token.type === "conversation-reference" ||
+          token.type === "github-reference") &&
+        nextToken?.type === "text"
+          ? (nextToken.value.match(CHIP_TRAILING_PUNCTUATION_REGEX)?.[0] ?? "")
+          : "";
+      if (!gluedPunctuation || nextToken?.type !== "text") {
+        nodes.push(rendered);
+        continue;
+      }
+      nodes.push(
+        <span
+          key={`${keyPrefix}-chip-glue-${tokenIndex}`}
+          data-testid="chat-message-chip-glue"
+          className="whitespace-nowrap"
+        >
+          {rendered}
+          {gluedPunctuation}
+        </span>,
+      );
+      const remainder = nextToken.value.slice(gluedPunctuation.length);
+      if (remainder) {
+        nodes.push(remainder);
+      }
+      tokenIndex += 1;
+    }
+    return nodes;
+  };
+
+  // One list grammar at every depth (#167): a fixed 1.25rem indent step,
+  // ordered markers a shade darker than bullets (they carry sequence), bullet
+  // glyphs stepping disc → circle → square so levels read distinctly, and the
+  // sublist sitting on the same half-step rhythm as sibling items so the
+  // indent, not extra air, does the grouping (#191).
+  const renderListLevel = (
+    items: MessageListItem[],
+    depth: number,
+    keyPrefix: string,
+    start: number | undefined,
+    spacingClassName: string,
+  ): ReactNode => {
+    const ordered = items[0]?.ordered ?? false;
+    const ListElement = ordered ? "ol" : "ul";
+    const renderedItems: ReactNode[] = [];
+    let index = 0;
+    while (index < items.length) {
+      const item = items[index];
+      if (!item || item.depth < depth) {
+        break;
+      }
+      const itemKey = `${keyPrefix}-item-${index}`;
+      let nextIndex = index + 1;
+      while (nextIndex < items.length && (items[nextIndex]?.depth ?? 0) > depth) {
+        nextIndex += 1;
+      }
+      const nestedItems = items.slice(index + 1, nextIndex);
+      renderedItems.push(
+        <li
+          key={itemKey}
+          className={`pl-1 ${PROSE_MEASURE_CLASS} whitespace-pre-wrap break-words [overflow-wrap:anywhere]`}
+        >
+          {renderInlineTokens(item.text, itemKey)}
+          {nestedItems.length > 0
+            ? renderListLevel(nestedItems, depth + 1, `${itemKey}-sub`, undefined, "mt-0.5")
+            : null}
+        </li>,
+      );
+      index = nextIndex;
+    }
+    const markerClassName = ordered
+      ? "list-decimal marker:font-medium marker:text-slate-500 dark:marker:text-slate-400"
+      : `${
+          depth === 0
+            ? "list-disc"
+            : depth === 1
+              ? "[list-style-type:circle]"
+              : "[list-style-type:square]"
+        } marker:text-slate-400 dark:marker:text-slate-500`;
+    return (
+      <ListElement
+        key={keyPrefix}
+        start={ordered ? start : undefined}
+        data-testid={depth === 0 ? "chat-message-list" : "chat-message-sublist"}
+        data-list-depth={depth}
+        className={[spacingClassName, markerClassName, "space-y-0.5 pl-5"]
+          .filter(Boolean)
+          .join(" ")}
+      >
+        {renderedItems}
+      </ListElement>
+    );
+  };
 
   return (
     <div className={className ?? "text-sm leading-relaxed break-words [overflow-wrap:anywhere]"}>
@@ -1608,30 +1796,36 @@ export function MessageContent({
             </blockquote>
           );
         }
-        if (block.kind === "list") {
-          const ListElement = block.ordered ? "ol" : "ul";
+        if (block.kind === "code") {
+          // A fence that opened inside a list item keeps the item's content
+          // indent and sits closer to the line that introduced it (#167).
+          const codeSpacingClassName =
+            blockIndex > 0 ? (block.inListItem ? "mt-1.5" : "mt-2") : "";
           return (
-            <ListElement
-              key={`list-${blockIndex}`}
-              start={block.ordered ? block.start : undefined}
-              data-testid="chat-message-list"
+            <pre
+              key={`code-${blockIndex}`}
+              data-testid="chat-message-code-block"
+              data-code-language={block.language ?? undefined}
+              data-in-list-item={block.inListItem ? "true" : undefined}
               className={[
-                blockSpacingClassName,
-                block.ordered ? "list-decimal" : "list-disc",
-                "space-y-0.5 pl-5 marker:text-slate-400 dark:marker:text-slate-500",
+                codeSpacingClassName,
+                block.inListItem ? "ml-5" : "",
+                CODE_BLOCK_CLASS,
               ]
                 .filter(Boolean)
                 .join(" ")}
             >
-              {block.items.map((item, itemIndex) => (
-                <li
-                  key={`list-${blockIndex}-item-${itemIndex}`}
-                  className="pl-1 whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
-                >
-                  {renderInlineTokens(item, `list-${blockIndex}-item-${itemIndex}`)}
-                </li>
-              ))}
-            </ListElement>
+              <code>{block.lines.join("\n")}</code>
+            </pre>
+          );
+        }
+        if (block.kind === "list") {
+          return renderListLevel(
+            block.items,
+            0,
+            `list-${blockIndex}`,
+            block.ordered ? block.start : undefined,
+            blockSpacingClassName,
           );
         }
 
@@ -1641,7 +1835,11 @@ export function MessageContent({
             key={`paragraph-${blockIndex}`}
             variant="body"
             tone="inherit"
-            className={[blockSpacingClassName, "whitespace-pre-wrap break-words [overflow-wrap:anywhere]"]
+            className={[
+              blockSpacingClassName,
+              PROSE_MEASURE_CLASS,
+              "whitespace-pre-wrap break-words [overflow-wrap:anywhere]",
+            ]
               .filter(Boolean)
               .join(" ")}
           >

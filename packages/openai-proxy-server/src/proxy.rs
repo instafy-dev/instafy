@@ -1,6 +1,7 @@
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
@@ -78,13 +79,15 @@ impl ProxyCompletion {
     }
 }
 
+// Model contract: an ABSENT (empty) request model resolves to the
+// credential's default; an explicit model id is honored verbatim on OpenAI
+// endpoints. There is deliberately no magic model id that means "use the
+// default" — when DEFAULT_MODEL was that sentinel, an explicit pick of the
+// same id was silently rewritten to the credential default (issue #116).
+// Cross-provider mismatches (an OpenAI-shaped id sent at a BYOC provider)
+// still resolve to the credential default so requests don't 404 upstream.
 fn resolve_model_for_credentials(requested_model: &str, credentials: &Credentials) -> String {
     let requested = requested_model.trim();
-    let requested = if requested.is_empty() {
-        DEFAULT_MODEL
-    } else {
-        requested
-    };
     let endpoint = credentials.endpoint();
     let default_model = credentials
         .default_model()
@@ -98,7 +101,10 @@ fn resolve_model_for_credentials(requested_model: &str, credentials: &Credential
             return default_model.to_string();
         }
 
-        if credentials.is_chatgpt() && looks_like_non_chatgpt_model_id(requested) {
+        if !requested.is_empty()
+            && credentials.is_chatgpt()
+            && looks_like_non_chatgpt_model_id(requested)
+        {
             return default_model.to_string();
         }
 
@@ -107,16 +113,17 @@ fn resolve_model_for_credentials(requested_model: &str, credentials: &Credential
         }
     }
 
+    if requested.is_empty() {
+        // Last resort: a model-less request against a credential that carries
+        // no default (local/dev auth.json paths).
+        return DEFAULT_MODEL.to_string();
+    }
     requested.to_string()
 }
 
 fn should_use_default_model_for_request(requested_model: &str, endpoint: &str) -> bool {
     let requested = requested_model.trim();
     if requested.is_empty() {
-        return true;
-    }
-
-    if requested == DEFAULT_MODEL {
         return true;
     }
 
@@ -185,9 +192,6 @@ fn looks_like_openai_model_id(model: &str) -> bool {
     }
 
     let lowered = trimmed.to_ascii_lowercase();
-    if lowered == DEFAULT_MODEL {
-        return true;
-    }
     if lowered.contains("codex") {
         return true;
     }
@@ -871,23 +875,82 @@ async fn complete_with_optional_controller_refresh(
     }
 }
 
+/// Caps how many best-effort usage reports may be in flight at once. If the
+/// controller degrades, excess reports are dropped rather than accumulating
+/// detached tasks and sockets — the report is telemetry, not correctness.
+static USAGE_REPORT_SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+
+fn usage_report_slots() -> &'static Arc<tokio::sync::Semaphore> {
+    USAGE_REPORT_SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(16)))
+}
+
+/// Best-effort report of the BYOC subscription-usage snapshot captured from the
+/// upstream response headers to the controller, so it can be surfaced on
+/// `GET /me/credentials`. This is strictly fire-and-forget: it spawns a detached
+/// task and never blocks or fails the user's response, and errors are dropped
+/// (logged only when `PROXY_DEBUG_USAGE=1`). No-ops unless we have a controller,
+/// a credential id, and a captured snapshot. Concurrency is bounded (see
+/// `USAGE_REPORT_SLOTS`) and each report is time-bounded by the controller
+/// client, so a slow controller can't cause unbounded task/socket growth.
+fn spawn_credential_usage_report(
+    controller: Option<&ControllerIntegration>,
+    credential_id: Option<&str>,
+    completion: &CodexCompletion,
+) {
+    let (Some(controller), Some(credential_id)) = (controller, credential_id) else {
+        return;
+    };
+    let Some(snapshot) = completion.rate_limits.clone() else {
+        return;
+    };
+    // Drop this report if the in-flight budget is exhausted (controller likely
+    // struggling) instead of piling another detached task on top.
+    let Ok(permit) = usage_report_slots().clone().try_acquire_owned() else {
+        return;
+    };
+    let controller = controller.clone();
+    let credential_id = credential_id.to_string();
+    tokio::spawn(async move {
+        // Held for the report's lifetime; released to the pool on drop.
+        let _permit = permit;
+        if let Err(error) = controller
+            .post_credential_usage(&credential_id, &snapshot)
+            .await
+        {
+            if std::env::var("PROXY_DEBUG_USAGE").as_deref() == Ok("1") {
+                eprintln!("[proxy] credential usage report failed: {error:#}");
+            }
+        }
+    });
+}
+
 async fn create_response(
     State(state): State<ProxyState>,
     AuthenticatedProxyClaims(claims): AuthenticatedProxyClaims,
     Json(payload): Json<Value>,
 ) -> Result<impl IntoResponse, AppError> {
+    // Empty = absent: resolve_model_for_credentials substitutes the
+    // credential's default; an explicit id is honored verbatim.
     let model = payload
         .get("model")
         .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or(DEFAULT_MODEL)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
         .to_string();
 
     let input_items = extract_input_items(&payload).map_err(AppError::bad_request)?;
 
     let auth_mode = proxy_auth_mode(&state.backend, claims.as_ref());
     let mut credit_guard = if let Some(ref claims) = claims {
-        state.begin_credit_burn(claims, &model).await?
+        // Credit burn is keyed before credential resolution, so an absent
+        // model uses the crate default as its ledger dimension.
+        let burn_model = if model.is_empty() {
+            DEFAULT_MODEL
+        } else {
+            &model
+        };
+        state.begin_credit_burn(claims, burn_model).await?
     } else {
         None
     };
@@ -965,7 +1028,14 @@ async fn create_response(
             )
             .await
             {
-                Ok((response, _upstream_model)) => ProxyCompletion::Remote(response),
+                Ok((response, _upstream_model)) => {
+                    spawn_credential_usage_report(
+                        state.controller.as_ref(),
+                        credential_id,
+                        &response,
+                    );
+                    ProxyCompletion::Remote(response)
+                }
                 Err(error) => {
                     if let Some(burn) = credit_guard.take() {
                         if let Err(err) = burn.refund("proxy upstream failure").await {
@@ -1013,7 +1083,10 @@ async fn create_response(
             )
             .await
             {
-                Ok((response, _upstream_model)) => ProxyCompletion::Remote(response),
+                Ok((response, _upstream_model)) => {
+                    spawn_credential_usage_report(Some(controller), Some(credential_id), &response);
+                    ProxyCompletion::Remote(response)
+                }
                 Err(error) => {
                     if let Some(burn) = credit_guard.take() {
                         if let Err(err) = burn.refund("proxy upstream failure").await {
@@ -1058,18 +1131,28 @@ async fn create_chat_completion(
     AuthenticatedProxyClaims(claims): AuthenticatedProxyClaims,
     Json(payload): Json<Value>,
 ) -> Result<Response, AppError> {
+    // Empty = absent: resolve_model_for_credentials substitutes the
+    // credential's default; an explicit id is honored verbatim.
     let requested_model = payload
         .get("model")
         .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or(DEFAULT_MODEL)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
         .to_string();
 
     let input_items = parse_chat_completion_inputs(&payload).map_err(AppError::bad_request)?;
 
     let auth_mode = proxy_auth_mode(&state.backend, claims.as_ref());
     let mut credit_guard = if let Some(ref claims) = claims {
-        state.begin_credit_burn(claims, &requested_model).await?
+        // Credit burn is keyed before credential resolution, so an absent
+        // model uses the crate default as its ledger dimension.
+        let burn_model = if requested_model.is_empty() {
+            DEFAULT_MODEL
+        } else {
+            &requested_model
+        };
+        state.begin_credit_burn(claims, burn_model).await?
     } else {
         None
     };
@@ -1136,6 +1219,7 @@ async fn create_chat_completion(
                 }
             };
 
+            spawn_credential_usage_report(state.controller.as_ref(), credential_id, &completion);
             build_remote_chat_response(&payload, completion, upstream_model, credit_guard).await
         }
         ProxyBackend::RemoteDynamic => {
@@ -1186,6 +1270,7 @@ async fn create_chat_completion(
                 }
             };
 
+            spawn_credential_usage_report(Some(controller), Some(credential_id), &completion);
             build_remote_chat_response(&payload, completion, upstream_model, credit_guard).await
         }
     }
@@ -2658,6 +2743,59 @@ mod tests {
             "gpt-5.5"
         );
         assert_eq!(resolve_model_for_credentials("gpt-5.5", &creds), "gpt-5.5");
+    }
+
+    #[test]
+    fn resolve_model_honors_explicit_model_over_credential_default() {
+        // Issue #116: DEFAULT_MODEL used to double as a "use the credential
+        // default" sentinel, so an explicit pick of that id was silently
+        // rewritten to the credential default (gpt-5.6-sol in production).
+        let creds = Credentials::ChatGpt {
+            access_token: "test".to_string(),
+            refresh_token: None,
+            account_id: None,
+            default_model: Some("gpt-5.6-sol".to_string()),
+            auth_path: None,
+        };
+
+        assert_eq!(resolve_model_for_credentials("gpt-5.5", &creds), "gpt-5.5");
+        assert_eq!(
+            resolve_model_for_credentials("gpt-5.6-sol", &creds),
+            "gpt-5.6-sol"
+        );
+        assert_eq!(
+            resolve_model_for_credentials("gpt-5.5-mini", &creds),
+            "gpt-5.5-mini"
+        );
+    }
+
+    #[test]
+    fn resolve_model_uses_credential_default_only_when_model_absent() {
+        let creds = Credentials::ChatGpt {
+            access_token: "test".to_string(),
+            refresh_token: None,
+            account_id: None,
+            default_model: Some("gpt-5.6-sol".to_string()),
+            auth_path: None,
+        };
+
+        assert_eq!(resolve_model_for_credentials("", &creds), "gpt-5.6-sol");
+        assert_eq!(resolve_model_for_credentials("   ", &creds), "gpt-5.6-sol");
+    }
+
+    #[test]
+    fn resolve_model_falls_back_to_crate_default_without_credential_default() {
+        let creds = Credentials::ApiKey {
+            key: "test".to_string(),
+            endpoint: Some("https://api.openai.com/v1/responses".to_string()),
+            default_model: None,
+        };
+
+        assert_eq!(resolve_model_for_credentials("", &creds), DEFAULT_MODEL);
+        assert_eq!(
+            resolve_model_for_credentials("gpt-5.6-sol", &creds),
+            "gpt-5.6-sol"
+        );
     }
 
     #[test]

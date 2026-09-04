@@ -70,7 +70,7 @@ Key environment variables (see `AppConfig::from_env` for defaults):
 - `WORKSPACE_ROOT` — runtime/controller root directory containing per-project workspaces. In local-canonical desktop mode, the source-of-truth folder can live outside this hosted layout. In git-canonical hosted mode, this root holds the materialized working copies.
 - `PROXY_BASE_URL`/`PROXY_SIGNING_SECRET` — optional AI proxy envelope support.
 - `MANAGED_AI_ENABLED` — enables the platform-managed AI lane when the proxy is available with static credentials.
-- `MANAGED_AI_MODEL_ID` — upstream model id used for managed AI turns (defaults to `gpt-5.5`).
+- `MANAGED_AI_MODEL_ID` — upstream model id used for managed AI turns (defaults to `gpt-5.6-sol`).
 - `MANAGED_AI_STARTUP_CHECK` — when `true`, controller boot fails unless `PROXY_BASE_URL/healthz` reports `requiresCredential=false` (that is, the proxy has static credentials such as `OPENAI_API_KEY` or `auth.json`). Defaults to on outside `DEV_MODE`.
 - Shared Browser managed TURN (optional; unset the TURN values to disable):
   - `CONTROLLER_BROWSER_TURN_URLS` — comma-separated `turn:`/`turns:` URLs advertised to WebRTC clients (maximum 4; credentials must not be embedded in a URL).
@@ -86,6 +86,9 @@ Key environment variables (see `AppConfig::from_env` for defaults):
   - If your orchestration layer can’t pass multiline PEM values (e.g., `--env-file`), use `RUNTIME_SIGNING_PRIVATE_KEY_B64` / `RUNTIME_SIGNING_PUBLIC_KEY_B64` (base64-encoded PEM).
   - Set `RUNTIME_SIGNING_TOKEN_TTL_SECONDS` to control token lifetime (seconds).
 - `ORIGIN_INTERNAL_TOKEN` — reused as the bearer credential desktop agents/origins send when registering themselves via `POST /origin/register`.
+- Operator access (all unset by default; the service-role bearer always qualifies):
+  - `OPERATOR_CONSOLE_ORG_ID` / `OPERATOR_CONSOLE_ALLOWED_USER_IDS` — owners/admins of that organization, or the comma-separated user UUIDs, pass every operator gate (OTA, desktop updates, telemetry, edge downloads, `/operator/*`, bug-report triage).
+  - `BUG_REPORTS_OPERATOR_USER_IDS` — comma-separated user UUIDs granted the operator projection and `PATCH` triage on `/bug-reports` only; the list grants nothing on any other operator route.
 - Push notifications:
   - `WEB_PUSH_VAPID_PUBLIC_KEY` / `WEB_PUSH_VAPID_PRIVATE_KEY` / `WEB_PUSH_VAPID_SUBJECT` — enable PWA Web Push (service-worker based) notifications.
   - `APNS_KEY_ID` / `APNS_TEAM_ID` / `APNS_BUNDLE_ID` / `APNS_PRIVATE_KEY` (or `APNS_PRIVATE_KEY_B64`) / `APNS_USE_SANDBOX` — enable native iOS push via APNs.

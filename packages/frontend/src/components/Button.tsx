@@ -1,4 +1,4 @@
-import { forwardRef } from "react";
+import { forwardRef, useCallback, type ForwardedRef } from "react";
 import {
   Button as AriaButton,
   composeRenderProps,
@@ -54,6 +54,14 @@ export type ButtonProps = Omit<AriaButtonProps, "className"> & {
   title?: string;
 };
 
+function assignForwardedRef<T>(ref: ForwardedRef<T>, value: T | null) {
+  if (typeof ref === "function") {
+    ref(value);
+  } else if (ref) {
+    ref.current = value;
+  }
+}
+
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
   {
     variant = "secondary",
@@ -61,14 +69,32 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
     radius = "lg",
     fullWidth = false,
     className,
+    title,
     ...props
   },
   ref
 ) {
+  // react-aria-components filters the native `title` attribute even though
+  // our shared Button API exposes it. Apply it through the DOM ref so icon
+  // controls keep their hover affordance alongside the accessible label.
+  const buttonRef = useCallback(
+    (node: HTMLButtonElement | null) => {
+      if (node) {
+        if (title) {
+          node.title = title;
+        } else {
+          node.removeAttribute("title");
+        }
+      }
+      assignForwardedRef(ref, node);
+    },
+    [ref, title],
+  );
+
   return (
     <AriaButton
       {...props}
-      ref={ref}
+      ref={buttonRef}
       className={composeRenderProps(className, (value) =>
         [
           BASE,

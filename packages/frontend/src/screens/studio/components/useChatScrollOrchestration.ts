@@ -13,7 +13,21 @@ const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 24;
 const SCROLL_SNAPSHOT_INTERVAL_MS = 250;
 const HISTORY_SCROLL_ANCHOR_SETTLE_MS = 1_200;
 const HISTORY_SCROLL_USER_MOVE_THRESHOLD_PX = 4;
-const HISTORY_AUTO_FILL_MAX_PAGES = 3;
+// Auto-fill keeps pulling older pages while the window is underfilled, but it
+// has to stop somewhere or a long thread would page itself in entirely. Page
+// count is the wrong brake — an automation thread's command_execution run
+// updates collapse to almost no rendered height, so three pages can add nothing
+// visible while a normal thread would have filled in one. Brake on rendered
+// progress instead: a page that fails to grow the scroll content by at least
+// HISTORY_AUTO_FILL_MIN_PROGRESS_PX counts as stalled, and
+// HISTORY_AUTO_FILL_MAX_STALLED_PAGES consecutive stalled pages stop the loop.
+// HISTORY_AUTO_FILL_SAFETY_CAP_PAGES is the hard backstop that bounds a
+// pathological thread which keeps growing just enough to look like progress, so
+// the loop can never fetch unboundedly. Either brake marks auto-fill exhausted,
+// which is what surfaces the manual "View earlier messages" button.
+const HISTORY_AUTO_FILL_SAFETY_CAP_PAGES = 15;
+const HISTORY_AUTO_FILL_MAX_STALLED_PAGES = 2;
+const HISTORY_AUTO_FILL_MIN_PROGRESS_PX = 4;
 const HISTORY_UNDERFILL_THRESHOLD_PX = 4;
 
 type ScrollToBottomOptions = {
@@ -65,6 +79,7 @@ export function useChatScrollController({
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const [scrollContentNode, setScrollContentNode] = useState<HTMLDivElement | null>(null);
   const [historyWindowUnderfilled, setHistoryWindowUnderfilled] = useState(false);
+  const [historyAutoFillExhausted, setHistoryAutoFillExhausted] = useState(false);
   const autoScrollSuspendedRef = useRef(false);
   const shouldAutoScrollRef = useRef(true);
   const autoScrollPendingRef = useRef(false);
@@ -73,13 +88,23 @@ export function useChatScrollController({
   const scrollAnimationFrameRef = useRef<number | null>(null);
   const scrollAnimationStartRef = useRef<number | null>(null);
   const scrollAnimationStartTopRef = useRef(0);
-  const historyAutoFillRef = useRef<{ conversationId: string | null; attempts: number }>({
+  const historyAutoFillRef = useRef<{
+    conversationId: string | null;
+    attempts: number;
+    stalledPages: number;
+    pendingPage: { messages: ChatMessage[]; scrollHeight: number } | null;
+  }>({
     conversationId: null,
     attempts: 0,
+    stalledPages: 0,
+    pendingPage: null,
   });
-  const historyPaginationRef = useRef<{ pending: boolean; scrollTop: number; scrollHeight: number }>({
+  // Only the request-time scrollHeight is remembered: the landing offsets the
+  // container's *current* scrollTop by how much the content grew. Storing the
+  // request-time scrollTop too would snap the user back to wherever they were
+  // when the page was asked for, undoing any scrolling they did while it loaded.
+  const historyPaginationRef = useRef<{ pending: boolean; scrollHeight: number }>({
     pending: false,
-    scrollTop: 0,
     scrollHeight: 0,
   });
   const activeConversationIdRef = useRef<string | null>(activeConversationId);
@@ -315,14 +340,13 @@ export function useChatScrollController({
     }
     historyPaginationRef.current = {
       pending: true,
-      scrollTop: container.scrollTop,
       scrollHeight: container.scrollHeight,
     };
     shouldAutoScrollRef.current = false;
     const result = loadOlderMessages();
     if (result && typeof (result as Promise<unknown>).catch === "function") {
       (result as Promise<unknown>).catch(() => {
-        historyPaginationRef.current = { pending: false, scrollTop: 0, scrollHeight: 0 };
+        historyPaginationRef.current = { pending: false, scrollHeight: 0 };
       });
     }
   }, [hasMoreHistory, isHistoryLoading, loadOlderMessages]);
@@ -448,14 +472,17 @@ export function useChatScrollController({
     }
     const container = scrollContainerRef.current;
     if (!container) {
-      historyPaginationRef.current = { pending: false, scrollTop: 0, scrollHeight: 0 };
+      historyPaginationRef.current = { pending: false, scrollHeight: 0 };
       return;
     }
-    const { scrollTop, scrollHeight } = historyPaginationRef.current;
+    const { scrollHeight } = historyPaginationRef.current;
     const delta = Math.max(0, container.scrollHeight - scrollHeight);
-    container.scrollTop = scrollTop + delta;
+    // Offset from where the user is *now*, not where they were at request time:
+    // trackpad momentum keeps them moving while the page is in flight, and the
+    // prepend must keep the text under their eyes wherever that carried them.
+    container.scrollTop = container.scrollTop + delta;
     lastScrollHeightRef.current = container.scrollHeight;
-    historyPaginationRef.current = { pending: false, scrollTop: 0, scrollHeight: 0 };
+    historyPaginationRef.current = { pending: false, scrollHeight: 0 };
     startHistoryScrollAnchor(container);
   }, [isHistoryLoading, messages, startHistoryScrollAnchor]);
 
@@ -463,7 +490,13 @@ export function useChatScrollController({
     if (historyAutoFillRef.current.conversationId === activeConversationId) {
       return;
     }
-    historyAutoFillRef.current = { conversationId: activeConversationId, attempts: 0 };
+    historyAutoFillRef.current = {
+      conversationId: activeConversationId,
+      attempts: 0,
+      stalledPages: 0,
+      pendingPage: null,
+    };
+    setHistoryAutoFillExhausted(false);
   }, [activeConversationId]);
 
   useLayoutEffect(() => {
@@ -473,18 +506,48 @@ export function useChatScrollController({
     if (historyPaginationRef.current.pending) {
       return;
     }
-    if (historyAutoFillRef.current.attempts >= HISTORY_AUTO_FILL_MAX_PAGES) {
-      return;
-    }
     const node = scrollContainerRef.current;
     if (!node) {
       return;
     }
+
+    const autoFill = historyAutoFillRef.current;
+
+    // Score the page auto-fill last asked for before deciding anything else.
+    // The page has integrated once a new `messages` array arrives; comparing
+    // identity (not length) keeps an unrelated effect re-run from being scored
+    // as a stalled page, and still scores a page that came back empty.
+    if (autoFill.pendingPage && autoFill.pendingPage.messages !== messages) {
+      const grewBy = node.scrollHeight - autoFill.pendingPage.scrollHeight;
+      autoFill.stalledPages =
+        grewBy > HISTORY_AUTO_FILL_MIN_PROGRESS_PX ? 0 : autoFill.stalledPages + 1;
+      autoFill.pendingPage = null;
+    }
+
     if (!measureHistoryWindowUnderfill()) {
       return;
     }
 
-    historyAutoFillRef.current.attempts += 1;
+    if (
+      autoFill.stalledPages >= HISTORY_AUTO_FILL_MAX_STALLED_PAGES ||
+      autoFill.attempts >= HISTORY_AUTO_FILL_SAFETY_CAP_PAGES
+    ) {
+      // Consecutive pages added no measurable height, or the safety cap is
+      // spent. Either way the window will not fill on its own and an
+      // underfilled container cannot be scrolled, so surface the manual
+      // affordance instead of dead-ending with history still unreachable.
+      setHistoryAutoFillExhausted(true);
+      return;
+    }
+
+    if (autoFill.pendingPage) {
+      // The page auto-fill asked for has not integrated yet — wait for it
+      // rather than stacking another request on top of it.
+      return;
+    }
+
+    autoFill.attempts += 1;
+    autoFill.pendingPage = { messages, scrollHeight: node.scrollHeight };
     requestOlderMessages();
   }, [
     activeConversationId,
@@ -494,6 +557,12 @@ export function useChatScrollController({
     messages,
     requestOlderMessages,
   ]);
+
+  // Hide the manual affordance while auto-fill is still expected to satisfy an
+  // underfilled window, but never once auto-fill has given up with history
+  // remaining — at that point the button is the only way left to reach it.
+  const showHistoryLoadButton =
+    hasMoreHistory && (!historyWindowUnderfilled || historyAutoFillExhausted);
 
   return {
     autoScrollSuspendedRef,
@@ -508,6 +577,7 @@ export function useChatScrollController({
     scrollToBottom,
     setAutoScrollSuspended,
     shouldAutoScrollRef,
+    showHistoryLoadButton,
   };
 }
 

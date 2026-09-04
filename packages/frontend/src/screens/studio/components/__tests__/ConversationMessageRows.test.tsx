@@ -6,10 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "../../types";
 import { ConversationMessageRows } from "../ConversationMessageRows";
 import { RunFailureRetryProvider } from "../RunFailureNotice";
+import { ControllerNoticeActionsProvider } from "../ControllerNoticeActions";
 import {
   CHAT_SPEAKER_MARKER_SELECTOR,
-  readStickyAssistantSpeakerMarker,
-  type StickyAssistantSpeaker,
+  readStickyChatSpeakerMarker,
+  type StickyChatSpeaker,
 } from "../chatSpeakerMarker";
 
 const workspaceTabsMocks = vi.hoisted(() => ({
@@ -82,9 +83,9 @@ function findTextNode(root: Node, value: string): Text {
   throw new Error(`Text node not found: ${value}`);
 }
 
-function resolveReachedStickySpeaker(markers: Element[]): StickyAssistantSpeaker | null {
-  return markers.reduce<StickyAssistantSpeaker | null>(
-    (_speaker, marker) => readStickyAssistantSpeakerMarker(marker),
+function resolveReachedStickySpeaker(markers: Element[]): StickyChatSpeaker | null {
+  return markers.reduce<StickyChatSpeaker | null>(
+    (_speaker, marker) => readStickyChatSpeakerMarker(marker),
     null,
   );
 }
@@ -141,6 +142,144 @@ describe("ConversationMessageRows", () => {
       );
     });
   }
+
+  async function renderWithNoticeActions(
+    messages: ChatMessage[],
+    actions: {
+      onOpenMachines: () => void;
+      onShowSelfHostHelp: () => void;
+      onOpenCredits: () => void;
+      onRunAutomation?: (automationId: string) => void;
+      viewerUserId?: string | null;
+    },
+  ) {
+    await act(async () => {
+      root.render(
+        <ControllerNoticeActionsProvider
+          value={{
+            onRunAutomation: vi.fn(),
+            viewerUserId: null,
+            ...actions,
+          }}
+        >
+          <ConversationMessageRows
+            messages={messages}
+            currentUserId="user-1"
+            chatClientSessionId="session-1"
+            projectId="project-1"
+            runtimeId={null}
+            conversationLocalId="conversation-local"
+            conversationControllerId="conversation-controller"
+            firstPlanMessageId={null}
+            humanLabelByUserId={new Map()}
+            runAgentIdentityByRunId={new Map()}
+            runAgentHandleByRunId={new Map()}
+            renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
+            assistantAvatarPlaceholder={<span aria-hidden="true" className="h-8 w-8" />}
+            onRequestActions={vi.fn()}
+            onRequestActionsAtPoint={vi.fn()}
+            onCancelTerminalCommand={null}
+            onMessageContextMenu={vi.fn()}
+          />
+        </ControllerNoticeActionsProvider>,
+      );
+    });
+  }
+
+  it("gives a scheduled-run failure a working way out", async () => {
+    // The reported bug: this card was text-only, so a reader told to "start or
+    // repair the runtime" had nothing to click.
+    const onOpenMachines = vi.fn();
+    const onShowSelfHostHelp = vi.fn();
+    const notice = createMessage({
+      id: "automation-launch-failed",
+      role: "assistant",
+      authorId: null,
+      content:
+        "This scheduled run couldn't start: no self-hosted runtime was online for this space; " +
+        "this schedule is pinned to a self-hosted machine, so start Instafy on that machine and " +
+        "the next scheduled run will pick it up",
+      metadata: {
+        source: "controller",
+        kind: "runtime_alert",
+        details: { reason: "automation_launch_failed", automationId: "automation-1" },
+      },
+    });
+
+    await renderWithNoticeActions([notice], {
+      onOpenMachines,
+      onShowSelfHostHelp,
+      onOpenCredits: vi.fn(),
+    });
+
+    const action = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-controller-notice-action"]',
+    );
+    expect(action).not.toBeNull();
+    expect(action?.textContent).toContain("How to start it");
+    await act(async () => {
+      action?.click();
+    });
+    expect(onShowSelfHostHelp).toHaveBeenCalledTimes(1);
+    expect(onOpenMachines).not.toHaveBeenCalled();
+  });
+
+  it("routes an out-of-credits failure to credits rather than Machines", async () => {
+    const onOpenMachines = vi.fn();
+    const onOpenCredits = vi.fn();
+    const notice = createMessage({
+      id: "automation-out-of-credits",
+      role: "assistant",
+      authorId: null,
+      content: "This scheduled run couldn't start: this team is out of credits for today",
+      metadata: {
+        source: "controller",
+        kind: "runtime_alert",
+        details: {
+          reason: "automation_launch_failed",
+          automationId: "automation-1",
+          failureCode: "insufficient_credits",
+        },
+      },
+    });
+
+    await renderWithNoticeActions([notice], {
+      onOpenMachines,
+      onShowSelfHostHelp: vi.fn(),
+      onOpenCredits,
+    });
+
+    const action = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-controller-notice-action"]',
+    );
+    expect(action?.textContent).toContain("Open credits");
+    await act(async () => {
+      action?.click();
+    });
+    expect(onOpenCredits).toHaveBeenCalledTimes(1);
+    expect(onOpenMachines).not.toHaveBeenCalled();
+  });
+
+  it("leaves the notice button-free when no action provider is mounted", async () => {
+    // Thread previews and other hosts render this card without the provider;
+    // it must degrade to its old shape rather than throw.
+    const notice = createMessage({
+      id: "runtime-unavailable",
+      role: "assistant",
+      authorId: null,
+      content: "Runtime is unavailable.",
+      metadata: {
+        source: "controller",
+        kind: "runtime_alert",
+        details: { reason: "runtime_unavailable" },
+      },
+    });
+
+    await renderSpeakerBoundaryMessages([notice]);
+
+    expect(container.querySelector('[data-testid="chat-controller-notice"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="chat-controller-notice-action"]')).toBeNull();
+  });
 
   it("renders normal chat messages without decorative corner notches", async () => {
     const shortPrompt = createMessage({
@@ -259,7 +398,7 @@ describe("ConversationMessageRows", () => {
     expect(speakerIdentityNodes).toEqual(["chat-speaker-marker", "chat-speaker-inline"]);
   });
 
-  it("clears the sticky assistant speaker at an assistant-to-human boundary", async () => {
+  it("hands the sticky speaker to the human author at an assistant-to-human boundary", async () => {
     const assistantMessage = createMessage({
       id: "assistant-response",
       role: "assistant",
@@ -280,14 +419,111 @@ describe("ConversationMessageRows", () => {
     const markers = Array.from(container.querySelectorAll(CHAT_SPEAKER_MARKER_SELECTOR));
     expect(markers.map((marker) => marker.getAttribute("data-chat-speaker-kind"))).toEqual([
       "assistant",
-      "boundary",
+      "human",
     ]);
-    expect(markers[1]?.getAttribute("data-testid")).toBe("chat-speaker-boundary");
-    expect(readStickyAssistantSpeakerMarker(markers[0] ?? null)).toEqual({
+    expect(markers[1]?.getAttribute("data-testid")).toBe("chat-speaker-human-marker");
+    expect(readStickyChatSpeakerMarker(markers[0] ?? null)).toEqual({
+      kind: "assistant",
       handle: "octo",
       avatarSeed: "octo-seed",
     });
-    expect(resolveReachedStickySpeaker(markers)).toBeNull();
+    expect(resolveReachedStickySpeaker(markers)).toEqual({
+      kind: "human",
+      label: "Teammate",
+      avatarSeed: "user-1",
+    });
+  });
+
+  it("renders a sticky human speaker marker for a user-authored long message", async () => {
+    const ownerPrompt = createMessage({
+      id: "owner-runbook-prompt",
+      role: "user",
+      authorId: "user-2",
+      content: [
+        "Inspect the demo files for the no-hardware preparatory patch.",
+        "Stay read-only and do not edit files.",
+        "Return the smallest patch plan, test, stop condition, and any reason not to implement this now.",
+      ].join("\n\n"),
+      timestamp: 1,
+    });
+
+    await act(async () => {
+      root.render(
+        <ConversationMessageRows
+          messages={[ownerPrompt]}
+          currentUserId="user-1"
+          chatClientSessionId="session-1"
+          projectId="project-1"
+          runtimeId={null}
+          conversationLocalId="conversation-local"
+          conversationControllerId="conversation-controller"
+          firstPlanMessageId={null}
+          humanLabelByUserId={new Map([["user-2", "Owner"]])}
+          runAgentIdentityByRunId={new Map()}
+          runAgentHandleByRunId={new Map()}
+          renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
+          assistantAvatarPlaceholder={<span aria-hidden="true" className="h-8 w-8" />}
+          onRequestActions={vi.fn()}
+          onRequestActionsAtPoint={vi.fn()}
+          onCancelTerminalCommand={null}
+          onMessageContextMenu={vi.fn()}
+        />,
+      );
+    });
+
+    const marker = container.querySelector('[data-testid="chat-speaker-human-marker"]');
+    expect(marker).toBeInstanceOf(HTMLElement);
+    expect(marker?.getAttribute("data-chat-speaker-kind")).toBe("human");
+    expect(marker?.getAttribute("data-human-label")).toBe("Owner");
+    expect(marker?.getAttribute("data-human-avatar-seed")).toBe("user-2");
+    expect(readStickyChatSpeakerMarker(marker)).toEqual({
+      kind: "human",
+      label: "Owner",
+      avatarSeed: "user-2",
+    });
+  });
+
+  it("renders a sticky human speaker marker for the current user's own long message", async () => {
+    const ownPrompt = createMessage({
+      id: "own-long-prompt",
+      role: "user",
+      authorId: "user-1",
+      content:
+        "Now inspect the exact Demo files for the no-hardware preparatory patch. Stay read-only and do not edit files.",
+      timestamp: 1,
+    });
+
+    await act(async () => {
+      root.render(
+        <ConversationMessageRows
+          messages={[ownPrompt]}
+          currentUserId="user-1"
+          chatClientSessionId="session-1"
+          projectId="project-1"
+          runtimeId={null}
+          conversationLocalId="conversation-local"
+          conversationControllerId="conversation-controller"
+          firstPlanMessageId={null}
+          humanLabelByUserId={new Map([["user-1", "Owner"]])}
+          runAgentIdentityByRunId={new Map()}
+          runAgentHandleByRunId={new Map()}
+          renderAssistantAvatar={() => <span data-testid="assistant-avatar" />}
+          assistantAvatarPlaceholder={<span aria-hidden="true" className="h-8 w-8" />}
+          onRequestActions={vi.fn()}
+          onRequestActionsAtPoint={vi.fn()}
+          onCancelTerminalCommand={null}
+          onMessageContextMenu={vi.fn()}
+        />,
+      );
+    });
+
+    const marker = container.querySelector('[data-testid="chat-speaker-human-marker"]');
+    expect(marker).toBeInstanceOf(HTMLElement);
+    expect(readStickyChatSpeakerMarker(marker)).toEqual({
+      kind: "human",
+      label: "Owner",
+      avatarSeed: "user-1",
+    });
   });
 
   it("clears the sticky assistant speaker at an assistant-to-controller boundary", async () => {
@@ -324,7 +560,7 @@ describe("ConversationMessageRows", () => {
     const notice = container.querySelector('[data-testid="chat-controller-notice"]');
     expect(notice).not.toBeNull();
     expect(notice?.textContent).toContain("Workspace unavailable");
-    expect(notice?.textContent).toContain("Use the Runtime button by the composer");
+    expect(notice?.textContent).toContain("Open Machines");
     const inlineSpeakers = Array.from(container.querySelectorAll('[data-testid="chat-speaker-inline"]'));
     expect(inlineSpeakers).toHaveLength(2);
     expect(inlineSpeakers[1]?.textContent).toContain("octo");
@@ -537,6 +773,11 @@ describe("ConversationMessageRows", () => {
     expect(container.querySelector('[data-testid="agent-thread-preview-header"]')).toBeNull();
     expect(container.querySelector('[data-testid="agent-thread-owner-badge"]')).toBeNull();
     expect(container.querySelector('[data-testid="agent-job-thread-avatar"]')).toBeNull();
+    // Run status folds into the speaker header beside author and timestamp,
+    // and the preview drops its duplicate content-level caption (#145).
+    const runStatus = speaker?.querySelector('[data-testid="chat-speaker-run-status"]');
+    expect(runStatus?.textContent).toBe("Run failed");
+    expect(container.querySelector('[data-testid="agent-thread-terminal-status"]')).toBeNull();
   });
 
   it("animates only the active job thread speaker avatar", async () => {
@@ -668,7 +909,14 @@ describe("ConversationMessageRows", () => {
     expect(labels[1]?.querySelector('[data-testid="chat-avatar-human"]')).not.toBeNull();
     expect(labels[0]?.querySelector("time")).not.toBeNull();
     expect(labels[1]?.querySelector("time")).not.toBeNull();
-    expect(container.querySelectorAll('[data-testid="chat-avatar-human"]')).toHaveLength(2);
+    // Each teammate group head shows one face twice in the DOM: in the avatar
+    // gutter (desktop) and inside the label (narrow layouts, where the gutter
+    // collapses); only one is visible per breakpoint.
+    expect(container.querySelectorAll('[data-testid="chat-avatar-human"]')).toHaveLength(4);
+    for (const label of labels) {
+      const labelAvatarWrapper = label.querySelector('[data-testid="chat-avatar-human"]')?.parentElement;
+      expect(labelAvatarWrapper?.className).toContain("sm:hidden");
+    }
   });
 
   it("deduplicates narrow inline speaker identity until the assistant changes", async () => {
@@ -799,7 +1047,7 @@ describe("ConversationMessageRows", () => {
     ).toEqual(["octo", "octo"]);
   });
 
-  it("uses inline assistant identity without reserving avatar gutter for ordinary rows", async () => {
+  it("reserves the avatar gutter on assistant rows with faces at speaker heads", async () => {
     const firstOcto = createMessage({
       id: "first-octo",
       role: "assistant",
@@ -869,8 +1117,17 @@ describe("ConversationMessageRows", () => {
       );
     });
 
-    expect(container.querySelectorAll('[data-testid="assistant-avatar"]')).toHaveLength(0);
-    expect(container.querySelectorAll('[data-testid="assistant-avatar-placeholder"]')).toHaveLength(0);
+    // Slack-style grammar (#177): speaker heads carry the face in the gutter,
+    // continuation rows keep an empty spacer so header, body, and chip rows
+    // all share one left alignment line.
+    const gutterAvatars = Array.from(container.querySelectorAll('[data-testid="assistant-avatar"]'));
+    expect(gutterAvatars.map((node) => node.getAttribute("data-agent-handle"))).toEqual([
+      "octo",
+      "octo",
+      "reviewer",
+      "octo",
+    ]);
+    expect(container.querySelectorAll('[data-testid="assistant-avatar-placeholder"]')).toHaveLength(1);
     const inlineSpeakers = Array.from(container.querySelectorAll('[data-testid="chat-speaker-inline"]'));
     expect(
       inlineSpeakers.map((node) => node.querySelector("[data-agent-handle]")?.getAttribute("data-agent-handle")),
@@ -880,6 +1137,12 @@ describe("ConversationMessageRows", () => {
       "reviewer",
       "octo",
     ]);
+    // The label's own avatar only serves narrow layouts where the gutter
+    // collapses; desktop shows the gutter face instead.
+    for (const inlineSpeaker of inlineSpeakers) {
+      const profileDoor = inlineSpeaker.querySelector('[data-testid="chat-speaker-agent-profile"]');
+      expect(profileDoor?.className).toContain("sm:hidden");
+    }
   });
 
   it("trims layout-only trailing blank lines when copying selected bubble text from document copy", async () => {

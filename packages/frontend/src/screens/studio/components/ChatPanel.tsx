@@ -31,7 +31,7 @@ import {
   resolveChatInputRequiresAi,
 } from "./chatInputAiIntent";
 import { resolveGettingStartedAiChoices } from "./gettingStartedAiChoices";
-import { shouldSendMessageOnEnter } from "./chat-input/enterBehavior";
+import { resolveComposerEnterAction } from "./chat-input/enterBehavior";
 import {
   useConversation,
   type SubmitConversationRuntimeOverride,
@@ -53,7 +53,7 @@ import {
 } from "../../../conversations/conversationGoals";
 import { resolveRunFailureRetryPrompt } from "../../../conversations/runFailurePresentation";
 import { isRunActivelyProgressing } from "../../../conversations/runLiveness";
-import { useRuntimeMenuOptions } from "../../../runtime/useRuntimeMenu";
+import { useRuntimeMenuOptions, type RuntimeMenuOption } from "../../../runtime/useRuntimeMenu";
 import {
   shouldPinChatMessagesToBottom,
   shouldShowBrowserSessionPageStripInComposer,
@@ -111,8 +111,9 @@ import { ChatBubbleRow } from "./ChatBubbleRow";
 import {
   CHAT_SPEAKER_MARKER_SELECTOR,
   isAssistantSpeakerMarker,
-  readStickyAssistantSpeakerMarker,
-  type StickyAssistantSpeaker,
+  isHumanSpeakerMarker,
+  readStickyChatSpeakerMarker,
+  type StickyChatSpeaker,
 } from "./chatSpeakerMarker";
 import { ChatColumn } from "./ChatColumn";
 import { useOctoSilenceHint } from "./useOctoSilenceHint";
@@ -121,6 +122,7 @@ import {
   AssistantMessageEntry,
   extractImageAttachments,
   UserMessageBubble,
+  ChatRuntimeActivityContext,
 } from "./ChatMessageEntries";
 import { RunFailureRetryProvider, type RunFailureRetryContextValue } from "./RunFailureNotice";
 import { useRunFailureAutoRetry } from "./useRunFailureAutoRetry";
@@ -173,6 +175,12 @@ import { useChatCredentialGate } from "./useChatCredentialGate";
 import { useAmbientCredentialGatePresentation } from "./useAmbientCredentialGatePresentation";
 import { canUseDesktopCodexAuthJson } from "./desktopCodexAuthJson";
 import { CredentialsConnectModal } from "./CredentialsConnectModal";
+import { StudioDialogModal } from "../../../components/aria/StudioModal";
+import { AgentProfileCardContent } from "./AssistantAvatarPopover";
+import {
+  OPEN_AGENT_PROFILE_EVENT,
+  type OpenAgentProfileDetail,
+} from "./agentProfileOpen";
 import { emitAiConfigChanged } from "./aiConfigEvents";
 import { formatProxyUpstreamErrorSummary } from "./proxyError";
 import { useCredentialsConnectFlow } from "./useCredentialsConnectFlow";
@@ -197,6 +205,7 @@ import {
 } from "./chatAssistantIdentity";
 import { useStudioNavigationPosture } from "../useStudioNavigationPosture";
 import {
+  toBrowserSessionPageTarget,
   type BrowserSessionPageTarget,
 } from "./browserSessionPages";
 import { truncate } from "./chatContentHelpers";
@@ -205,7 +214,11 @@ import { useChatInvitePromptHandlers } from "./useChatInvitePromptHandlers";
 import { useChatComposerAttachments } from "./useChatComposerAttachments";
 import { useChatSendQueueActions } from "./useChatSendQueueActions";
 import { useChatSendQueuePresentation } from "./useChatSendQueuePresentation";
-import { useChatServerSendQueue } from "./useChatServerSendQueue";
+import {
+  isServerQueuedChatSendItem,
+  useChatServerSendQueue,
+} from "./useChatServerSendQueue";
+import { useChatMessageStashes } from "./useChatMessageStashes";
 import { useChatSubmitDispatch } from "./useChatSubmitDispatch";
 import { useChatSubmitFlow, type SubmitMessageFn } from "./useChatSubmitFlow";
 import { useChatVoiceComposerController } from "./useChatVoiceComposerController";
@@ -216,11 +229,27 @@ import {
 } from "./gettingStartedConversationContext";
 import {
   resolveConversationRosterHumans,
-  shouldShowConversationRoster,
   type ConversationRosterAgent,
-  type ConversationRosterHuman,
 } from "./conversationRosterMembers";
 import { ConversationRoster } from "./ConversationRoster";
+import {
+  clearChatParticipants,
+  publishChatParticipants,
+  type ParticipantAgent,
+  type ParticipantCredentialState,
+  type ParticipantEditingContext,
+  type ParticipantRuntimeInfo,
+} from "./chatParticipantsStore";
+import { updateMyAgent } from "../../../services/runtimeController/agents";
+import { formatProviderLabel } from "./CreditsUsageRates";
+import { parseSubscriptionUsage } from "./subscriptionUsageFormat";
+import { resolveCredentialLabel } from "../../../utils/credentialFormatting";
+import {
+  modelOptionsForProvider,
+  normalizeAiModelId,
+  normalizeAiProviderId,
+  type AiProviderId,
+} from "../../../utils/aiProviderModels";
 import { useChatComposerLayoutState } from "./useChatComposerLayoutState";
 import { useChatAutoScrollSync, useChatScrollController } from "./useChatScrollOrchestration";
 import {
@@ -233,6 +262,10 @@ import {
   type MessageSelectionReplyAction,
   type MessageSelectionReplyContext,
 } from "./messageSelectionReply";
+import {
+  createMessageUndoRequestHandler,
+  REQUEST_MESSAGE_UNDO_EVENT,
+} from "./messageUndoRequest";
 import {
   collapseLifecycleMessages,
   extractAgentJobId,
@@ -254,6 +287,24 @@ import {
   resolveHumanChatIdentity,
 } from "./chatHumanIdentity";
 import { ChatComposerSurface } from "./ChatComposerSurface";
+import type { ControllerMessageStash } from "../../../services/runtimeController/messageStashes";
+import {
+  createConversationClientSendId,
+  createConversationSendIntentAttemptKey,
+  sendConversationIntent,
+} from "../../../services/runtimeController/sendIntents";
+import { ControllerApiError } from "../../../services/runtimeController/core";
+import { normalizeChatMessageStashEnvelope } from "./chatMessageStashEnvelope";
+import {
+  requireExpectedJobForSteer,
+  resolveComposerPrimaryActionMode,
+  resolveExpectedSteerJobId,
+  resolveSteerableComposerRuns,
+} from "./composerSendMode";
+import {
+  resolveMessageStashRestoreBlock,
+  shouldDeleteRestoredMessageStashAfterAction,
+} from "./messageStashLifecycle";
 import { BrowserSessionModal } from "./BrowserSessionModal";
 import type { SharedBrowserChromeProps } from "./SharedBrowserChrome";
 import { resolveSharedBrowserViewerKind } from "./sharedBrowserViewer";
@@ -271,9 +322,7 @@ import {
   readBrowserTransportPreference,
   writeBrowserTransportPreference,
 } from "./browserTransportPreference";
-import {
-  AssistantSpeakerIdentityPill,
-} from "./AssistantSpeakerIdentityPill";
+import { ChatSpeakerStickyOverlay, ChatTranscriptViewport } from "./ChatTranscriptViewport";
 import { resolveSharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import { useSharedBrowserApprovalTransport } from "./useSharedBrowserApprovalTransport";
 
@@ -324,7 +373,7 @@ function formatCredentialConnectionFailure(raw: string | null | undefined): stri
     lowered.includes("access_token_scope_insufficient") ||
     lowered.includes("insufficient authentication scopes")
   ) {
-    return "Google login is missing required scopes. Reconnect Gemini and grant all requested permissions.";
+    return "This Gemini connection used Google login, which is no longer supported. Replace it with a Gemini API key.";
   }
   if (
     lowered.includes("service_disabled") ||
@@ -352,39 +401,28 @@ function formatCredentialConnectionFailure(raw: string | null | undefined): stri
     : `${compact.slice(0, maxChars - 1).trimEnd()}…`;
 }
 
-const SPEAKER_OVERLAY_SELECTOR = '[data-chat-speaker-overlay="true"]';
 const NARROW_SPEAKER_INLINE_SELECTOR = '[data-chat-speaker-inline="true"]';
-const SPEAKER_STICKY_FALLBACK_TOP_PX = 8;
+// The scroll container's own top padding (`pt-2`) — where its content
+// actually starts painting. The pill now lives in the roster row above the
+// transcript rather than overlapping it, so this edge (not the pill's own
+// position) is the only stable line left to compare marker positions against.
+const CHAT_TRANSCRIPT_VISIBLE_TOP_INSET_PX = 8;
 
-function speakersEqual(left: StickyAssistantSpeaker | null, right: StickyAssistantSpeaker | null): boolean {
-  return left?.handle === right?.handle && left?.avatarSeed === right?.avatarSeed;
-}
-
-function AssistantSpeakerStickyOverlay({
-  speaker,
-}: {
-  speaker: StickyAssistantSpeaker | null;
-}) {
+function speakersEqual(left: StickyChatSpeaker | null, right: StickyChatSpeaker | null): boolean {
+  if (left === null || right === null) {
+    return left === right;
+  }
+  if (left.kind === "assistant") {
+    return (
+      right.kind === "assistant" &&
+      left.handle === right.handle &&
+      left.avatarSeed === right.avatarSeed
+    );
+  }
   return (
-    <div
-      aria-hidden={speaker ? undefined : "true"}
-      data-chat-speaker-overlay="true"
-      data-testid="chat-speaker-sticky-overlay"
-    >
-      <div
-        className={[
-          "w-fit max-w-full transition-[opacity,transform] duration-150 ease-out",
-          speaker ? "translate-y-0 opacity-100" : "-translate-y-1 opacity-0",
-        ].join(" ")}
-      >
-        {speaker ? (
-          <AssistantSpeakerIdentityPill
-            handle={speaker.handle}
-            agentIdentity={{ handle: speaker.handle, avatarSeed: speaker.avatarSeed }}
-          />
-        ) : null}
-      </div>
-    </div>
+    right.kind === "human" &&
+    left.label === right.label &&
+    left.avatarSeed === right.avatarSeed
   );
 }
 
@@ -422,6 +460,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     ensureHostedRuntime,
     hostedRuntimeEnsuring,
     runtimeEnsureError,
+    runtimeEnsureLimit,
     runs,
   } = runtimeContext;
   const {
@@ -441,7 +480,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     extraAgentHandles,
     agentHandles,
     onAssistantEnabledChange,
-    onAddAgentHandle,
     onRemoveAgentHandle,
     isAssistantTyping,
     hasMoreHistory,
@@ -505,17 +543,45 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     (effectiveProjectRole === "viewer" || canWriteProject === false);
   const latestProjectAccessRef = useRef({ projectReadOnly, projectWriteDisabled });
   latestProjectAccessRef.current = { projectReadOnly, projectWriteDisabled };
+  // Written further down, once useChatOrgMembers has resolved this user's org
+  // role. Only an org member reaches a useful Team settings -> Members list; a
+  // project guest lands on the "you have access as a guest" notice there, so a
+  // guest gets copy naming someone they can actually reach instead of a button
+  // into a dead end.
+  const latestOrgMembershipRef = useRef(false);
   const ensureProjectWriteAccess = useCallback(() => {
     const latestAccess = latestProjectAccessRef.current;
     if (!latestAccess.projectWriteDisabled) {
       return true;
     }
+    if (!latestAccess.projectReadOnly) {
+      showStatus("Checking your access to this space. Try again in a moment.", "warning", 3500);
+      return false;
+    }
+    if (!latestOrgMembershipRef.current) {
+      showStatus(
+        "This space is read-only for your account. Ask whoever shared it with you for edit access.",
+        "warning",
+        3500,
+      );
+      return false;
+    }
     showStatus(
-      latestAccess.projectReadOnly
-        ? "This space is read-only for your account. Ask an admin for edit access."
-        : "Checking your access to this space. Try again in a moment.",
+      "This space is read-only for your account. Ask an admin for edit access.",
       "warning",
-      3500,
+      6000,
+      {
+        actionLabel: "Open team settings",
+        onAction: () => {
+          if (typeof window === "undefined") {
+            return;
+          }
+          // WorkspaceTabsProvider is mounted below the providers this panel runs
+          // in, so route the tab open through StudioLayout the same way
+          // "instafy:open-source-control" does.
+          window.dispatchEvent(new CustomEvent("instafy:open-org-members"));
+        },
+      },
     );
     return false;
   }, [showStatus]);
@@ -683,11 +749,28 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     enqueueServerSendQueueItem,
     refreshServerSendQueue,
     removeServerSendQueueEntry,
+    reorderServerSendQueueEntry,
+    serverQueueReordering,
+    serverQueueHydrated,
     serverSendQueueItems,
   } = useChatServerSendQueue({
     conversationControllerId: activeConversationEntry?.controllerId ?? null,
     runtimeControllerEnabled,
   });
+  const {
+    createStash: createServerMessageStash,
+    mutating: messageStashMutating,
+    removeStash: removeServerMessageStash,
+    stashes: messageStashes,
+  } = useChatMessageStashes({
+    conversationControllerId: activeConversationEntry?.controllerId ?? null,
+    enabled: runtimeControllerEnabled,
+  });
+  const [restoredMessageStash, setRestoredMessageStash] =
+    useState<ControllerMessageStash | null>(null);
+  useEffect(() => {
+    setRestoredMessageStash(null);
+  }, [activeConversationEntry?.controllerId]);
   const combinedChatSendQueue = useMemo<QueuedChatSendItem[]>(
     () =>
       serverSendQueueItems.length > 0
@@ -868,6 +951,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   }, [activeProjectId, projectList]);
   const {
     canShareProject,
+    currentUserRole: orgMembersCurrentUserRole,
     error: orgMembersError,
     loading: orgMembersLoading,
     members: orgMembers,
@@ -876,6 +960,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     currentUserId,
     enabled: runtimeControllerEnabled,
   });
+  // A resolved org role is the gate SettingsPanel itself uses (`isOrgMember`)
+  // to decide whether Team settings renders the member list or the guest
+  // notice. Read above by ensureProjectWriteAccess, which is declared before
+  // this hook runs.
+  latestOrgMembershipRef.current = Boolean(orgMembersCurrentUserRole);
   const effectiveCanShareProject =
     projectCapabilitiesResolved === true
       ? serverCanShareProject === true
@@ -1481,6 +1570,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     primaryAgentHandleForPopover,
     refreshAvailableAgents,
     renderAssistantAvatar,
+    resolveAgentProfileCardProps,
     runAgentHandleByRunId,
     runAgentIdentityByRunId,
   } = useChatAgentRoster({
@@ -1561,6 +1651,27 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   );
   const clearInputEditor = useCallback(() => {
     chatInputRef.current?.clear();
+  }, []);
+  // Surfaces outside the chat tree (the agent profile card, panels) hand
+  // keyboard focus to the composer after navigating here — without this the
+  // popover's focus restore lands on <body> once its trigger unmounts.
+  useEffect(() => {
+    const handler = () => focusInput({ force: true });
+    window.addEventListener("instafy:focus-composer", handler);
+    return () => window.removeEventListener("instafy:focus-composer", handler);
+  }, [focusInput]);
+  // Anchor-less profile opens: inline mention chips and narrow speaker labels
+  // dispatch a handle; this panel owns agent resolution, so it hosts the card.
+  const [agentProfileModalHandle, setAgentProfileModalHandle] = useState<string | null>(null);
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const handle = (event as CustomEvent<OpenAgentProfileDetail>).detail?.handle;
+      if (typeof handle === "string" && handle) {
+        setAgentProfileModalHandle(handle);
+      }
+    };
+    window.addEventListener(OPEN_AGENT_PROFILE_EVENT, handler);
+    return () => window.removeEventListener(OPEN_AGENT_PROFILE_EVENT, handler);
   }, []);
   // This identity belongs to one mounted Shared Browser surface. Keeping it in
   // memory avoids duplicate tabs or side-by-side surfaces replacing each other,
@@ -1728,7 +1839,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     autoScrollSuspendedRef,
     autoScrollPendingRef,
     handleScrollContentRef,
-    historyWindowUnderfilled,
     lastComposerScrollTopRef,
     lastScrollHeightRef,
     recordScrollPosition,
@@ -1737,6 +1847,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     scrollToBottom,
     setAutoScrollSuspended,
     shouldAutoScrollRef,
+    showHistoryLoadButton,
   } = useChatScrollController({
     activeConversationId,
     hasMoreHistory,
@@ -1744,7 +1855,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     loadOlderMessages,
     messages,
   });
-  const showHistoryLoadButton = hasMoreHistory && !historyWindowUnderfilled;
 
   const activeConversation = useMemo(
     () => conversations.find((conversation) => conversation.localId === activeConversationId) ?? null,
@@ -1861,23 +1971,45 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const [goalDetailsCollapseToken, setGoalDetailsCollapseToken] = useState(0);
 
   const submitMessageRef = useRef<SubmitMessageFn>(async () => false);
+  const composerPrimaryActionRef = useRef<{
+    mode: "send" | "steer";
+    expectedActiveJobId: string | null;
+  }>({ mode: "send", expectedActiveJobId: null });
+  const sendIntentAttemptRef = useRef<{ key: string; clientSendId: string } | null>(null);
   const invokeSubmitMessage = useCallback<SubmitMessageFn>(async (override, options) => {
     if (!ensureProjectWriteAccess()) {
       return false;
     }
+    const restoredStash = override ? null : restoredMessageStash;
+    const restoredEnvelope = restoredStash
+      ? normalizeChatMessageStashEnvelope(restoredStash.composerEnvelope)
+      : null;
+    const baseOverride =
+      override ??
+      (restoredStash && restoredEnvelope
+        ? {
+            message: latestInputValueRef.current ?? restoredStash.text,
+            editorState: latestInputEditorStateRef.current,
+            targetAgentHandles: restoredEnvelope.targetAgentHandles,
+            browserPageTarget: restoredEnvelope.browserPageTarget,
+            browserLaunchMode: restoredEnvelope.browserLaunchMode,
+            metadata: restoredEnvelope.metadata,
+            runtimeOverride: restoredEnvelope.runtimeOverride,
+          }
+        : undefined);
     const overrideHasMetadata = Boolean(
-      override && Object.prototype.hasOwnProperty.call(override, "metadata"),
+      baseOverride && Object.prototype.hasOwnProperty.call(baseOverride, "metadata"),
     );
     const optionsHasMetadata = Boolean(
       options && Object.prototype.hasOwnProperty.call(options, "metadata"),
     );
     const explicitMetadata = overrideHasMetadata
-      ? (override?.metadata ?? null)
+      ? (baseOverride?.metadata ?? null)
       : optionsHasMetadata
         ? (options?.metadata ?? null)
         : undefined;
     const pendingReplyContext = pendingReplyContextRef.current;
-    const candidateMessage = override?.message ?? latestInputValueRef.current ?? "";
+    const candidateMessage = baseOverride?.message ?? latestInputValueRef.current ?? "";
     const metadata =
       explicitMetadata !== undefined
         ? explicitMetadata
@@ -1885,12 +2017,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           ? { replyContext: pendingReplyContext }
           : undefined;
     const nextOverride =
-      override && metadata !== undefined
+      baseOverride && metadata !== undefined
         ? {
-            ...override,
+            ...baseOverride,
             metadata,
           }
-        : override;
+        : baseOverride;
     const nextOptions =
       metadata !== undefined
         ? {
@@ -1902,8 +2034,52 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     if (submitted && pendingReplyContextRef.current === pendingReplyContext) {
       pendingReplyContextRef.current = null;
     }
+    if (
+      restoredStash &&
+      shouldDeleteRestoredMessageStashAfterAction({
+        submitted,
+        action: options?.intent ?? "send",
+      })
+    ) {
+      try {
+        const removed = await removeServerMessageStash(restoredStash.id);
+        if (removed) {
+          setRestoredMessageStash((current) =>
+            current?.id === restoredStash.id ? null : current,
+          );
+        }
+      } catch (error) {
+        console.warn("[chat] sent restored stash but could not delete it:", error);
+      }
+    }
     return submitted;
-  }, [ensureProjectWriteAccess]);
+  }, [ensureProjectWriteAccess, removeServerMessageStash, restoredMessageStash]);
+
+  // Conversational undo (#165): the Undo chip on an agent message dispatches a
+  // window event; this panel owns the composer, so it turns the request into a
+  // normal user message (with the target-message reference in metadata) and
+  // sends it. The handler serializes rapid requests, and the standard submit
+  // preflight queues the message when the assistant is busy — the intent is
+  // never dropped and never double-sent.
+  useEffect(() => {
+    const handler = createMessageUndoRequestHandler(async ({ message, metadata }) =>
+      invokeSubmitMessage({ message, editorState: null, metadata }),
+    );
+    window.addEventListener(REQUEST_MESSAGE_UNDO_EVENT, handler);
+    return () => window.removeEventListener(REQUEST_MESSAGE_UNDO_EVENT, handler);
+  }, [invokeSubmitMessage]);
+
+  const invokeComposerPrimaryAction = useCallback<SubmitMessageFn>(
+    async (override, options) => {
+      const primaryAction = composerPrimaryActionRef.current;
+      return await invokeSubmitMessage(override, {
+        ...options,
+        intent: primaryAction.mode,
+        expectedActiveJobId: primaryAction.expectedActiveJobId,
+      });
+    },
+    [invokeSubmitMessage],
+  );
 
   const submitGoalCommand = useCallback(
     (command: "/goal pause" | "/goal resume" | "/goal clear") => {
@@ -2002,19 +2178,24 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     void invokeSubmitMessage();
   };
+  const scheduleComposerPrimaryAction = () => {
+    if (typeof window !== "undefined" && typeof window.setTimeout === "function") {
+      window.setTimeout(() => {
+        void invokeComposerPrimaryAction();
+      }, 0);
+      return;
+    }
+    void invokeComposerPrimaryAction();
+  };
   const {
-    captureTouchLikePressTarget,
     handleChatVoiceTap,
-    handleSendButtonPointerDown,
     handleSendButtonPress,
-    handleSendButtonPressEnd,
-    handleSendButtonPressStart,
     handleStartVoiceInputHold,
     handleStopVoiceInputHold,
     providerTriggerNoticeProps,
     recordingIndicatorLabel,
-    releaseCapturedPressTarget,
     showVoicePrimaryAction,
+    showVoiceSecondaryAction,
     showVoiceStatus,
     voiceActionActive,
     voiceDebugState,
@@ -2027,15 +2208,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     activeConversationId,
     activeProjectId,
     chatInputRef,
-    focusInput,
     imageAttachmentCount: imageAttachments.length,
     inputValue,
-    invokeSubmitMessage,
+    invokeSubmitMessage: invokeComposerPrimaryAction,
     isAssistantTyping,
     latestInputValueRef,
     messages,
     onInputChange,
-    scheduleSubmitMessage,
+    scheduleSubmitMessage: scheduleComposerPrimaryAction,
     sendingAttachment,
     showStatus,
     touchLikeInput,
@@ -2116,27 +2296,52 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         return;
       }
     }
-    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-      if (hasOpenComposerMenu) {
-        if (acceptOpenComposerMenuSelection()) {
-          event.preventDefault();
-          event.stopPropagation();
-          event.nativeEvent.stopImmediatePropagation?.();
-        }
-        return;
+    const enterAction = resolveComposerEnterAction({
+      key: event.key,
+      shiftKey: event.shiftKey,
+      metaKey: event.metaKey,
+      ctrlKey: event.ctrlKey,
+      altKey: event.altKey,
+      isComposing: event.nativeEvent.isComposing,
+      hasOpenMenu: hasOpenComposerMenu,
+      hasActiveMatchingAgent: composerPrimaryActionRef.current.mode === "steer",
+      touchLikeInput,
+    });
+    if (enterAction === "menu") {
+      if (acceptOpenComposerMenuSelection()) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.nativeEvent.stopImmediatePropagation?.();
       }
-      if (!shouldSendMessageOnEnter(inputValue)) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      event.nativeEvent.stopImmediatePropagation?.();
-      if (parseInviteCommandRequest(inputValue.trim())) {
-        scheduleSubmitMessage();
-        return;
-      }
-      void invokeSubmitMessage();
+      return;
     }
+    if (
+      enterAction === "ignore" ||
+      enterAction === "newline"
+    ) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    event.nativeEvent.stopImmediatePropagation?.();
+    if (enterAction === "stash") {
+      void handleStashDraft();
+      return;
+    }
+    if (
+      (enterAction === "send" || enterAction === "steer") &&
+      parseInviteCommandRequest(inputValue.trim())
+    ) {
+      scheduleSubmitMessage();
+      return;
+    }
+    void invokeSubmitMessage(undefined, {
+      intent: enterAction,
+      expectedActiveJobId:
+        enterAction === "steer"
+          ? composerPrimaryActionRef.current.expectedActiveJobId
+          : null,
+    });
   };
 
   useEffect(() => {
@@ -2315,22 +2520,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     return rosterAgents;
   }, [agentByHandle, agentHandles]);
-
-  // "Who is in this room", scoped to the conversation it describes: rendered at
-  // the top of the chat surface itself rather than in workspace chrome, so it
-  // travels with the active conversation instead of drifting with the tab strip
-  // — and so it exists at every viewport width. `null` means "show nothing".
-  const conversationRosterPresence = useMemo<{
-    agents: readonly ConversationRosterAgent[];
-    humans: readonly ConversationRosterHuman[];
-  } | null>(() => {
-    return shouldShowConversationRoster({
-      agents: conversationRosterAgents,
-      humans: conversationRosterHumans,
-    })
-      ? { agents: conversationRosterAgents, humans: conversationRosterHumans }
-      : null;
-  }, [conversationRosterAgents, conversationRosterHumans]);
 
   const peerTypingLabel = useMemo(() => {
     const peerIds = Object.keys(peerTypingActivity);
@@ -2522,6 +2711,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   }, [activeConversationEntry?.controllerId, activeConversationEntry?.pendingRunIds, messages, runs]);
   const activeConversationRun = activeConversationRuns[0] ?? null;
   const showOutOfCreditsNotice = outOfCredits && activeConversationRuns.length === 0;
+  // Keep the complete active-handle set for existing busy/queue overlap
+  // behavior. Steer discovery applies the narrower silent-evaluation guard
+  // below without changing dispatch concurrency semantics.
   const activeConversationRunAgentHandles = useMemo(() => {
     const handles = new Set<string>();
     for (const run of activeConversationRuns) {
@@ -2533,6 +2725,72 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     return handles;
   }, [activeConversationRuns]);
+  const steerableActiveConversationRuns = useMemo(
+    () => resolveSteerableComposerRuns(activeConversationRuns, messages),
+    [activeConversationRuns, messages],
+  );
+  const steerableActiveConversationRunAgentHandles = useMemo(() => {
+    const handles = new Set<string>();
+    for (const run of steerableActiveConversationRuns) {
+      const metadata = run.metadata && isRecord(run.metadata) ? run.metadata : null;
+      const identity = extractAgentIdentityFromMetadata(metadata);
+      if (identity) {
+        handles.add(identity.handle);
+      }
+    }
+    return handles;
+  }, [steerableActiveConversationRuns]);
+  const composerTargetAgentHandles = useMemo(() => {
+    const prompt = inputValue.trim().length > 0
+      ? inputValue
+      : (softPrefillSuggestion ?? "");
+    return resolvePromptAgentTargets(prompt, {
+      useSticky: true,
+      updateSticky: false,
+    }).targetHandles;
+  }, [inputValue, resolvePromptAgentTargets, softPrefillSuggestion]);
+  const candidateComposerPrimaryActionMode = resolveComposerPrimaryActionMode({
+    // Queue-dispatched and cross-device runs can become active without going
+    // through this tab's optimistic typing state. The reconciled controller
+    // run set is already conversation-scoped, terminal-filtered, and bounded
+    // by the active-run freshness policy, so it is the authoritative fallback
+    // for exposing Steer in those cases.
+    isAssistantActive: isAssistantTyping || steerableActiveConversationRuns.length > 0,
+    targetAgentHandles: composerTargetAgentHandles,
+    activeAgentHandles: steerableActiveConversationRunAgentHandles,
+  });
+  const composerHasActiveMatchingAgent = candidateComposerPrimaryActionMode === "steer";
+  const expectedSteerRun = useMemo(() => {
+    if (!composerHasActiveMatchingAgent) {
+      return null;
+    }
+    const matchingRuns = steerableActiveConversationRuns.filter((run) => {
+      if (steerableActiveConversationRunAgentHandles.size === 0) {
+        return true;
+      }
+      const metadata = run.metadata && isRecord(run.metadata) ? run.metadata : null;
+      const identity = extractAgentIdentityFromMetadata(metadata);
+      return Boolean(identity && composerTargetAgentHandles.includes(identity.handle));
+    });
+    return matchingRuns.length === 1 ? matchingRuns[0] : null;
+  }, [
+    composerHasActiveMatchingAgent,
+    composerTargetAgentHandles,
+    steerableActiveConversationRunAgentHandles,
+    steerableActiveConversationRuns,
+  ]);
+  const expectedActiveJobId = resolveExpectedSteerJobId(expectedSteerRun, messages);
+  // True steering is an exact-job CAS. If older run metadata cannot identify
+  // that job unambiguously, fall back to ordinary Send/Queue behavior rather
+  // than risk steering a replacement run on the same agent lane.
+  const composerPrimaryActionMode = requireExpectedJobForSteer(
+    candidateComposerPrimaryActionMode,
+    expectedActiveJobId,
+  );
+  composerPrimaryActionRef.current = {
+    mode: composerPrimaryActionMode,
+    expectedActiveJobId,
+  };
 
   const typingIndicatorFallback = useMemo<{ phase: TypingIndicatorPhase; label: string | null } | null>(() => {
     if (!isAssistantTyping) {
@@ -2671,6 +2929,15 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     return "thinking";
   }, [activeConversationRuns, hasMultipleTypingAgents, typingIndicatorState?.phase]);
+  const chatRuntimeActivityValue = useMemo(
+    () => ({
+      workspaceStarting:
+        waitingForPreferredRuntime ||
+        hostedRuntimeEnsuring ||
+        (!runtimeReady && activeConversationRun?.status === "queued"),
+    }),
+    [activeConversationRun?.status, hostedRuntimeEnsuring, runtimeReady, waitingForPreferredRuntime],
+  );
   const waitingActivityCopy = resolveAgentWaitingActivityCopy({
     displayNames: hasMultipleTypingAgents
       ? typingAgents.map((agent) => agent.displayName)
@@ -2680,6 +2947,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       hostedRuntimeEnsuring ||
       (!runtimeReady && activeConversationRun?.status === "queued"),
     queued: activeConversationRun?.status === "queued",
+    runtimeLimit:
+      !runtimeReady && runtimeEnsureLimit?.limitReached
+        ? {
+            limitReached: true,
+            blockerProjectLabel: runtimeEnsureLimit.blockerProjectLabel,
+            blockerRuntimeLabel: runtimeEnsureLimit.blockerRuntimeLabel,
+          }
+        : null,
   });
   const typingStatusLabel = hasMultipleTypingAgents
     ? (multiTypingPhase === "waiting" ? waitingActivityCopy.label : "Thinking…")
@@ -2830,34 +3105,41 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     setIsThinkingLabelExpanded(false);
   }, [typingIndicatorState?.label, isAssistantTyping]);
 
-  const [stickyAssistantSpeaker, setStickyAssistantSpeaker] =
-    useState<StickyAssistantSpeaker | null>(null);
+  const [stickyChatSpeaker, setStickyChatSpeaker] =
+    useState<StickyChatSpeaker | null>(null);
+  // Rendered in the roster row above the transcript (never inside the
+  // scroller), so the ref stays valid for as long as the chat panel is
+  // mounted — the sticky-speaker effect below no longer reads its rect (see
+  // CHAT_TRANSCRIPT_VISIBLE_TOP_INSET_PX), but ChatSpeakerStickyOverlay still
+  // takes a ref, so this stays the one it's given.
+  const stickySpeakerOverlayRef = useRef<HTMLDivElement>(null);
 
   useLayoutEffect(() => {
     const scrollContainer = scrollContainerRef.current;
     if (!scrollContainer) {
-      setStickyAssistantSpeaker(null);
+      setStickyChatSpeaker(null);
       return;
     }
 
     let animationFrameId: number | null = null;
     const readAndApplySpeaker = () => {
+      // The pill lives in the roster row now, physically separate from the
+      // transcript, so its own rect can no longer mark the handoff line — a
+      // marker's inline label only needs to hide once it has actually
+      // scrolled past the transcript's own visible top edge.
       const containerRect = scrollContainer.getBoundingClientRect();
-      const overlay = scrollContainer.querySelector(SPEAKER_OVERLAY_SELECTOR);
-      const overlayRect = overlay?.getBoundingClientRect();
-      const thresholdTop = overlayRect
-        ? overlayRect.top
-        : containerRect.top + SPEAKER_STICKY_FALLBACK_TOP_PX;
+      const thresholdTop = containerRect.top + CHAT_TRANSCRIPT_VISIBLE_TOP_INSET_PX;
       const markers = Array.from(
         scrollContainer.querySelectorAll(CHAT_SPEAKER_MARKER_SELECTOR),
       );
-      let nextSpeaker: StickyAssistantSpeaker | null = null;
+      let nextSpeaker: StickyChatSpeaker | null = null;
       for (const marker of markers) {
         const markerTop = marker.getBoundingClientRect().top;
         const hasReachedStickyLine = markerTop <= thresholdTop;
-        const inlineSpeaker = isAssistantSpeakerMarker(marker)
-          ? marker.nextElementSibling
-          : null;
+        const inlineSpeaker =
+          isAssistantSpeakerMarker(marker) || isHumanSpeakerMarker(marker)
+            ? marker.nextElementSibling
+            : null;
         if (inlineSpeaker instanceof HTMLElement && inlineSpeaker.matches(NARROW_SPEAKER_INLINE_SELECTOR)) {
           if (hasReachedStickyLine) {
             inlineSpeaker.dataset.chatSpeakerCovered = "true";
@@ -2866,10 +3148,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           }
         }
         if (hasReachedStickyLine) {
-          nextSpeaker = readStickyAssistantSpeakerMarker(marker);
+          nextSpeaker = readStickyChatSpeakerMarker(marker);
         }
       }
-      setStickyAssistantSpeaker((currentSpeaker) =>
+      setStickyChatSpeaker((currentSpeaker) =>
         speakersEqual(currentSpeaker, nextSpeaker) ? currentSpeaker : nextSpeaker,
       );
     };
@@ -3091,7 +3373,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     try {
       await writeClipboardText(content);
-      showStatus("Copied message.", "success", 2000);
+      showStatus("Copied message.", "success", 2000, { presentation: "confirmation" });
       closeMessageMenu();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -3110,7 +3392,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
     try {
       await writeClipboardText(transcript);
-      showStatus("Copied conversation.", "success", 2000);
+      showStatus("Copied conversation.", "success", 2000, { presentation: "confirmation" });
       closeMessageMenu();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -3136,7 +3418,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     const summary = `Message stats — input: ${selectedMessageTokenUsage.inputTokens}, cached: ${selectedMessageTokenUsage.cachedInputTokens}, output: ${selectedMessageTokenUsage.outputTokens}${contextSummary}`;
     try {
       await writeClipboardText(summary);
-      showStatus("Copied message stats.", "success", 2000);
+      showStatus("Copied message stats.", "success", 2000, { presentation: "confirmation" });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       showStatus(`Unable to copy message stats: ${message}`, "error", 4000);
@@ -3349,6 +3631,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     notifyAiConfigChanged: emitAiConfigChanged,
     showStatus,
     formatCredentialTestFailureMessage: formatCredentialConnectionFailure,
+    onOpenAiManager: openAiManager,
   });
   const {
     beginGithubDeviceAuth,
@@ -3463,6 +3746,22 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     showStatus,
   });
 
+  // The invite prompt dismisses on backdrop tap; Escape must work too.
+  useEffect(() => {
+    if (!invitePrompt || invitePromptBusy) {
+      return;
+    }
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        handleInvitePromptClose();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [handleInvitePromptClose, invitePrompt, invitePromptBusy]);
+
   useEffect(() => {
     if (typeof window === "undefined") {
       return;
@@ -3559,22 +3858,41 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     [removeServerSendQueueEntry, serverSendQueueItems],
   );
 
-  const moveChatSendQueueItem = useCallback((id: string, direction: -1 | 1) => {
-    setChatSendQueue((previous) => {
-      const index = previous.findIndex((item) => item.id === id);
-      if (index === -1) {
-        return previous;
+  const reorderChatSendQueueItem = useCallback(
+    (id: string, targetIndex: number) => {
+      const currentIndex = combinedChatSendQueue.findIndex((item) => item.id === id);
+      const boundedTargetIndex = Math.max(
+        0,
+        Math.min(targetIndex, combinedChatSendQueue.length - 1),
+      );
+      if (currentIndex < 0 || currentIndex === boundedTargetIndex) {
+        return;
       }
-      const nextIndex = index + direction;
-      if (nextIndex < 0 || nextIndex >= previous.length) {
-        return previous;
+      const desiredOrder = [...combinedChatSendQueue];
+      const [movingItem] = desiredOrder.splice(currentIndex, 1);
+      if (!movingItem) {
+        return;
       }
-      const copy = [...previous];
-      const [removed] = copy.splice(index, 1);
-      copy.splice(nextIndex, 0, removed);
-      return copy;
-    });
-  }, []);
+      desiredOrder.splice(boundedTargetIndex, 0, movingItem);
+
+      if (isServerQueuedChatSendItem(movingItem)) {
+        const desiredServerOrder = desiredOrder.filter(isServerQueuedChatSendItem);
+        const serverIndex = desiredServerOrder.findIndex((item) => item.id === id);
+        const beforeEntryId = desiredServerOrder[serverIndex + 1]?.id ?? null;
+        void reorderServerSendQueueEntry(id, beforeEntryId).then((reordered) => {
+          if (!reordered) {
+            showStatus("Couldn’t reorder the queue. The saved order was restored.");
+          }
+        });
+        return;
+      }
+
+      setChatSendQueue(
+        desiredOrder.filter((item) => !isServerQueuedChatSendItem(item)),
+      );
+    },
+    [combinedChatSendQueue, reorderServerSendQueueEntry, showStatus],
+  );
 
   const targetsOverlapActiveRuns = useCallback(
     (targetAgentHandles: string[]) => {
@@ -3595,6 +3913,89 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       return false;
     },
     [activeConversationRunAgentHandles, isAssistantTyping],
+  );
+
+  const submitSendIntent = useCallback(
+    async ({
+      mode,
+      request,
+      targetAgentHandles,
+      expectedActiveJobId,
+    }: {
+      mode: "queue" | "steer";
+      request: Record<string, unknown>;
+      targetAgentHandles: string[];
+      expectedActiveJobId: string | null;
+    }): Promise<boolean> => {
+      const conversationId = activeConversationEntry?.controllerId ?? null;
+      if (!conversationId) {
+        return false;
+      }
+      const attemptKey = createConversationSendIntentAttemptKey({
+        conversationId,
+        mode,
+        request,
+        expectedActiveJobId,
+        targetAgentHandles,
+      });
+      const clientSendId =
+        sendIntentAttemptRef.current?.key === attemptKey
+          ? sendIntentAttemptRef.current.clientSendId
+          : createConversationClientSendId();
+      sendIntentAttemptRef.current = { key: attemptKey, clientSendId };
+      try {
+        const result = await sendConversationIntent({
+          conversationId,
+          clientSendId,
+          mode,
+          request,
+          expectedActiveJobId,
+          targetAgentHandles,
+        });
+        if (!result) {
+          showStatus("Unable to reach the message controller right now.", "warning", 4500);
+          return false;
+        }
+        if (sendIntentAttemptRef.current?.key === attemptKey) {
+          sendIntentAttemptRef.current = null;
+        }
+        if (mode === "queue") {
+          void refreshServerSendQueue();
+          showStatus("Message queued.", "success", 2500);
+        } else {
+          showStatus("Steer added to the current reply.", "success", 3000);
+        }
+        return true;
+      } catch (error) {
+        if (error instanceof ControllerApiError) {
+          if (sendIntentAttemptRef.current?.key === attemptKey) {
+            sendIntentAttemptRef.current = null;
+          }
+          const message = (() => {
+            switch (error.code) {
+              case "no_active_job":
+                return "That reply finished before the steer arrived. Your message is still in the composer.";
+              case "ambiguous_active_job":
+                return "More than one matching reply is active. Mention one agent, then try Steer again.";
+              case "active_job_conflict":
+                return "The active reply changed before the steer arrived. Review the current reply and try again.";
+              case "active_turn_input_unavailable":
+                return "This agent cannot accept Steer during its current turn. Queue the message instead.";
+              case "send_intent_idempotency_conflict":
+                return "This message conflicts with an earlier send attempt. Edit it slightly and try again.";
+              default:
+                return error.message;
+            }
+          })();
+          showStatus(message, "warning", 5500);
+          return false;
+        }
+        const message = error instanceof Error ? error.message : "Unable to apply this message action.";
+        showStatus(message, "error", 5000);
+        return false;
+      }
+    },
+    [activeConversationEntry?.controllerId, refreshServerSendQueue, showStatus],
   );
 
   const requestRuntimeRecovery = useCallback(() => {
@@ -3667,12 +4068,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     personalBrowserActive:
       browserTransport === "personal" &&
       browserSessionOpen,
-    personalBrowserAgentError:
-      personalBrowser.status?.state === "ready" &&
-      !personalBrowser.status.agentControlEnabled
-        ? "Personal Browser agent control is paused. Resume it before sending this browser task."
-        : personalBrowser.agentError,
+    personalBrowserAgentControlEnabled: personalBrowser.status?.agentControlEnabled ?? false,
+    personalBrowserAgentError: personalBrowser.agentError,
+    personalBrowserAgentPhase: personalBrowser.agentPhase,
+    personalBrowserAgentSurfaceReady: personalBrowser.status?.state === "ready",
+    personalBrowserRetryAgentControl: personalBrowser.retryAgentControl,
     personalBrowserRuntimeOverride: personalBrowser.runtimeOverride,
+    personalBrowserSetAgentControlEnabled: personalBrowser.setAgentControlEnabled,
     preferredBrowserPage,
     preferredRuntimeId,
     revealAiGatesForCurrentDraft,
@@ -3689,9 +4091,187 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     showStatus,
     shouldAutoScrollRef,
     softPrefillSuggestion,
+    submitSendIntent,
     targetsOverlapActiveRuns,
   });
   submitMessageRef.current = submitMessage;
+
+  const handleStashDraft = useCallback(async (): Promise<boolean> => {
+    if (!ensureProjectWriteAccess()) {
+      return false;
+    }
+    if (imageAttachments.length > 0) {
+      showStatus(
+        "Stash currently supports text only. Remove image attachments first.",
+        "info",
+        4500,
+      );
+      focusInput();
+      return false;
+    }
+    const conversationId = activeConversationEntry?.controllerId ?? null;
+    if (!conversationId || !activeConversationId) {
+      showStatus(
+        "Send the first message normally before stashing drafts in this conversation.",
+        "info",
+        4500,
+      );
+      return false;
+    }
+    const text = latestInputValueRef.current ?? "";
+    if (!text.trim()) {
+      showStatus("Write something before stashing this draft.", "info", 3000);
+      focusInput();
+      return false;
+    }
+
+    const restoredEnvelope = restoredMessageStash
+      ? normalizeChatMessageStashEnvelope(restoredMessageStash.composerEnvelope)
+      : null;
+    const pendingReplyContext = pendingReplyContextRef.current;
+    const metadata = restoredEnvelope?.metadata ??
+      (shouldAttachPendingReplyContext(pendingReplyContext, text)
+        ? { replyContext: pendingReplyContext }
+        : null);
+    const targetAgentHandles = restoredEnvelope?.targetAgentHandles ??
+      resolvePromptAgentTargets(text, {
+        useSticky: true,
+        updateSticky: false,
+      }).targetHandles;
+    const browserPageTarget = restoredEnvelope?.browserPageTarget ??
+      (preferredBrowserPage ? toBrowserSessionPageTarget(preferredBrowserPage) : null);
+    const browserLaunchMode = restoredEnvelope?.browserLaunchMode ?? pendingBrowserLaunchMode;
+    const runtimeOverride = restoredEnvelope?.runtimeOverride ??
+      (browserTransport === "personal" && personalBrowser.runtimeOverride?.runtimeId
+        ? personalBrowser.runtimeOverride
+        : browserTransport === "shared" && browserModeActive && resolvedBrowserRuntimeId
+          ? {
+              runtimeId: resolvedBrowserRuntimeId,
+              runtimeDisplayName: null,
+              preferRuntime: true,
+            }
+          : null);
+
+    try {
+      const stash = await createServerMessageStash({
+        text,
+        editorState: latestInputEditorStateRef.current,
+        composerEnvelope: {
+          targetAgentHandles,
+          browserPageTarget,
+          browserLaunchMode,
+          metadata,
+          runtimeOverride,
+        },
+      });
+      if (!stash) {
+        showStatus("Unable to stash this draft right now.", "warning", 4000);
+        return false;
+      }
+      latestInputValueRef.current = "";
+      latestInputEditorStateRef.current = null;
+      onInputChange(activeConversationId, "", null);
+      clearInputEditor?.();
+      pendingReplyContextRef.current = null;
+      setPendingBrowserLaunchMode(null);
+      setRestoredMessageStash(null);
+      showStatus("Draft stashed privately.", "success", 2500);
+      focusInput();
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to stash this draft.";
+      showStatus(message, "error", 4500);
+      return false;
+    }
+  }, [
+    activeConversationEntry?.controllerId,
+    activeConversationId,
+    browserModeActive,
+    browserTransport,
+    clearInputEditor,
+    createServerMessageStash,
+    ensureProjectWriteAccess,
+    focusInput,
+    imageAttachments.length,
+    onInputChange,
+    pendingBrowserLaunchMode,
+    personalBrowser.runtimeOverride,
+    preferredBrowserPage,
+    resolvePromptAgentTargets,
+    resolvedBrowserRuntimeId,
+    restoredMessageStash,
+    setPendingBrowserLaunchMode,
+    showStatus,
+  ]);
+
+  const handleRestoreMessageStash = useCallback(
+    (stash: ControllerMessageStash) => {
+      const restoreBlock = resolveMessageStashRestoreBlock({
+        composerText: latestInputValueRef.current ?? "",
+        attachmentCount: imageAttachments.length,
+      });
+      if (restoreBlock === "attachments") {
+        showStatus(
+          "Remove image attachments before restoring a stashed draft.",
+          "info",
+          4000,
+        );
+        return;
+      }
+      if (restoreBlock === "composer_text") {
+        showStatus(
+          "Stash or clear the current draft before restoring another one.",
+          "info",
+          4500,
+        );
+        focusInput();
+        return;
+      }
+      if (!activeConversationId) {
+        return;
+      }
+      const envelope = normalizeChatMessageStashEnvelope(stash.composerEnvelope);
+      const editorState =
+        typeof stash.editorState === "string"
+          ? stash.editorState
+          : stash.editorState
+            ? JSON.stringify(stash.editorState)
+            : null;
+      latestInputValueRef.current = stash.text;
+      latestInputEditorStateRef.current = editorState;
+      onInputChange(activeConversationId, stash.text, editorState);
+      setPendingBrowserLaunchMode(envelope.browserLaunchMode);
+      setRestoredMessageStash(stash);
+      chatInputRef.current?.focusAfterValueSync();
+      focusInput();
+      showStatus("Draft restored. It stays stashed until you send or delete it.", "info", 3500);
+    },
+    [
+      activeConversationId,
+      focusInput,
+      imageAttachments.length,
+      onInputChange,
+      setPendingBrowserLaunchMode,
+      showStatus,
+    ],
+  );
+
+  const handleDeleteMessageStash = useCallback(
+    async (stashId: string) => {
+      try {
+        const removed = await removeServerMessageStash(stashId);
+        if (!removed) {
+          showStatus("Unable to delete this stashed draft.", "warning", 3500);
+          return;
+        }
+        setRestoredMessageStash((current) => current?.id === stashId ? null : current);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unable to delete this stashed draft.";
+        showStatus(message, "error", 4000);
+      }
+    },
+    [removeServerMessageStash, showStatus],
+  );
 
   const handleAcceptGhostSuggestion = useCallback(() => {
     const remainder = composerGhostSuggestion?.remainder ?? "";
@@ -3706,11 +4286,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const {
     chatSendQueueDisplay,
     collapsedQueuedMessageSummary,
-    queueQuickSendItem,
-    queuedByAgentHandle,
     queuedSummaryItems,
     queuedTargetHandlesByItemId,
-    queueStatusAction,
     queueStatusLabel,
     resolveQueuedItemTargets,
     totalQueuedCount,
@@ -3729,6 +4306,248 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     sendingAttachment,
     waitingForPreferredRuntime,
   });
+
+  // Mirror the roster, run state, and queue depth for surfaces outside the
+  // chat surface (the participants drawer is a StudioLayout sibling, so props
+  // cannot reach it). ChatPanel stays the single writer.
+  const participantsSnapshotConversationId = activeConversationEntry?.controllerId ?? null;
+  // Enrich each roster agent with the model, provider, and credential it draws
+  // from, resolving pinned-vs-default and stale credentials the same way the
+  // Runtime & AI panel does — so the drawer can show it without re-deriving.
+  const participantAgents = useMemo<ParticipantAgent[]>(() => {
+    const credentialsById = new Map(
+      availableCredentials.map((credential) => [credential.id, credential]),
+    );
+    // The provider the workspace default credential routes to. A built-in
+    // agent stores provider "assistant" / no model, so its effective provider
+    // and model come from the default credential, not the profile.
+    const defaultCredentialProviderId: AiProviderId = (() => {
+      if (!defaultAiCredential || defaultAiCredential.kind === "codex_auth_json") {
+        return "openai";
+      }
+      const metadata = defaultAiCredential.metadata as Record<string, unknown> | null | undefined;
+      return normalizeAiProviderId(typeof metadata?.provider === "string" ? metadata.provider : "");
+    })();
+    // Static machine size ("2 vCPU · 4 GB") from a runtime option's capacity.
+    const formatRuntimeCapacity = (
+      resources: RuntimeMenuOption["resources"],
+    ): string | null => {
+      if (!resources) return null;
+      const parts: string[] = [];
+      const cores = resources.cpuLimitCores;
+      if (typeof cores === "number" && cores > 0) {
+        parts.push(`${Number.isInteger(cores) ? cores : cores.toFixed(1)} vCPU`);
+      }
+      const mem = resources.memoryLimitBytes;
+      if (typeof mem === "number" && mem > 0) {
+        const gb = mem / 1024 ** 3;
+        parts.push(`${gb >= 1 ? Math.round(gb) : gb.toFixed(1)} GB`);
+      }
+      return parts.length > 0 ? parts.join(" · ") : null;
+    };
+    // Resolve the machine an agent runs in: its pinned runtime if it has one,
+    // otherwise the workspace's current (shared) runtime. `native` = a local
+    // self-hosted machine, `dedicated` = a pinned cloud box, `shared` = the
+    // default. The id is the grouping key that clusters agents by machine.
+    const resolveRuntime = (runtimeId: string | null): ParticipantRuntimeInfo | null => {
+      const pinnedId = (runtimeId ?? "").trim() || null;
+      let option =
+        (pinnedId ? runtimeMenu.runtimeOptionsById.get(pinnedId) : null) ??
+        runtimeMenu.currentRuntime;
+      // "Auto (best available)" is a policy, not a machine. The roster groups
+      // agents by machine, so when the workspace rides auto, name the concrete
+      // runtime that is actually ready to serve it; fall back to the auto label
+      // only when nothing concrete is up yet.
+      if (!pinnedId && option?.isAuto) {
+        const concrete = runtimeMenu.runtimeOptions.find(
+          (candidate) =>
+            Boolean(candidate.id) &&
+            !candidate.isAuto &&
+            ["ready", "online", "healthy"].includes(
+              String(candidate.state ?? "").toLowerCase(),
+            ),
+        );
+        if (concrete) option = concrete;
+      }
+      if (!option) return null;
+      const kind: ParticipantRuntimeInfo["kind"] = option.isLikelyLocal
+        ? "native"
+        : pinnedId
+          ? "dedicated"
+          : "shared";
+      return {
+        id: option.id ?? pinnedId ?? "shared-runtime",
+        label: option.label,
+        kind,
+        status: String(option.state ?? "unknown"),
+        resourcesSummary: formatRuntimeCapacity(option.resources),
+      };
+    };
+    return conversationRosterAgents.map((rosterAgent) => {
+      const profile = agentByHandle.get(rosterAgent.handle) ?? null;
+      const providerRaw = (profile?.provider ?? "").trim().toLowerCase();
+      const providerId: AiProviderId =
+        !providerRaw || providerRaw === "assistant"
+          ? defaultCredentialProviderId
+          : normalizeAiProviderId(providerRaw);
+      // Explicit model, or the provider's default (the first option in
+      // modelOptionsForProvider) when the agent pins none.
+      const model =
+        normalizeAiModelId(providerId, profile?.model) ??
+        modelOptionsForProvider(providerId)[0]?.id ??
+        null;
+      let credentialLabel: string | null = null;
+      let credentialState: ParticipantCredentialState = "none";
+      // The credential whose live usage applies to this agent: the pinned one
+      // when it resolves, otherwise the workspace default. Stays null for the
+      // broken states (missing/revoked) — there's no live snapshot to show.
+      let effectiveCredential: (typeof availableCredentials)[number] | null = null;
+      if (profile?.credentialId) {
+        const pinned = credentialsById.get(profile.credentialId) ?? null;
+        if (!pinned) {
+          credentialState = "missing";
+        } else if (pinned.revokedAt) {
+          credentialState = "revoked";
+          credentialLabel = resolveCredentialLabel(pinned);
+        } else {
+          credentialState = "pinned";
+          credentialLabel = resolveCredentialLabel(pinned);
+          effectiveCredential = pinned;
+        }
+      } else if (defaultAiCredential) {
+        credentialState = "default";
+        credentialLabel = resolveCredentialLabel(defaultAiCredential);
+        effectiveCredential = defaultAiCredential;
+      }
+      // Read `subscriptionUsage` defensively: it's a recent addition to the
+      // controller payload, so tolerate its absence rather than hard-depend on
+      // the field being present in the credential type.
+      const subscriptionUsage = parseSubscriptionUsage(
+        (effectiveCredential as { subscriptionUsage?: unknown } | null)?.subscriptionUsage,
+      );
+      return {
+        ...rosterAgent,
+        agentId: profile?.id ?? null,
+        providerId,
+        model,
+        reasoningEffort: profile?.reasoningEffort ?? null,
+        runtime: resolveRuntime(profile?.runtimeId ?? null),
+        providerLabel: formatProviderLabel(providerId),
+        credentialId: effectiveCredential?.id ?? null,
+        credentialLabel,
+        credentialKind: effectiveCredential?.kind ?? null,
+        credentialState,
+        subscriptionUsage,
+      };
+    });
+  }, [
+    agentByHandle,
+    availableCredentials,
+    conversationRosterAgents,
+    defaultAiCredential,
+    runtimeMenu,
+  ]);
+  // Amber dot on the roster facepile when any agent's credential needs
+  // attention — visible without opening the drawer.
+  const participantAgentsHaveCredentialWarning = participantAgents.some(
+    (agent) =>
+      agent.credentialState === "missing" ||
+      agent.credentialState === "revoked" ||
+      agent.credentialState === "none",
+  );
+  // Editing capability handed to the drawer so its agent rows are two-way.
+  // ChatPanel owns the update + refresh; the drawer just calls saveAgent.
+  const participantsEditing = useMemo<ParticipantEditingContext>(
+    () => ({
+      credentials: availableCredentials.map((credential) => ({
+        id: credential.id,
+        label: resolveCredentialLabel(credential),
+        kind: credential.kind,
+        revoked: Boolean(credential.revokedAt),
+      })),
+      saveAgent: async (agentId, patch) => {
+        const result = await updateMyAgent(agentId, patch);
+        if (result.success) {
+          // Same refresh the chip's edits use, so the drawer's displayed
+          // values reflect the saved change on the next published snapshot.
+          void refreshCredentials();
+          void refreshAvailableAgents({ silent: true });
+        }
+        return result.success;
+      },
+      onManageAgents: openAiManager,
+    }),
+    [availableCredentials, openAiManager, refreshAvailableAgents, refreshCredentials],
+  );
+  // The conversation's assistant switch, published for the participants panel —
+  // same semantics as the composer chip's toggle: enabling with no AI connected
+  // routes through onboarding first; disabling also clears invited agents.
+  const participantsAssistant = useMemo(() => {
+    const conversationId = activeConversationId;
+    if (!conversationId) return null;
+    const aiSetupState =
+      activeAiCredentials.length === 0
+        ? "missing"
+        : !defaultAiCredential
+          ? "needs_default"
+          : "ready";
+    const aiControlsReady = credentialsReady || aiSetupState === "ready";
+    const enabled = assistantEnabled || extraAgentHandles.length > 0;
+    return {
+      enabled,
+      hint: aiControlsReady
+        ? null
+        : aiSetupState === "needs_default"
+          ? "Pick a default AI to resume replies."
+          : "Connect AI first.",
+      onToggle: (nextEnabled: boolean) => {
+        if (nextEnabled) {
+          if (enabled) return;
+          if (!aiControlsReady) {
+            openAiOnboarding();
+            return;
+          }
+          onAssistantEnabledChange(conversationId, true);
+          return;
+        }
+        if (!enabled) return;
+        for (const handle of extraAgentHandles) {
+          onRemoveAgentHandle(conversationId, handle);
+        }
+        onAssistantEnabledChange(conversationId, false);
+      },
+    };
+  }, [
+    activeAiCredentials.length,
+    activeConversationId,
+    assistantEnabled,
+    credentialsReady,
+    defaultAiCredential,
+    extraAgentHandles,
+    onAssistantEnabledChange,
+    onRemoveAgentHandle,
+    openAiOnboarding,
+  ]);
+  useEffect(() => {
+    publishChatParticipants({
+      conversationId: participantsSnapshotConversationId,
+      humans: conversationRosterHumans,
+      agents: participantAgents,
+      runningAgentHandles: Array.from(activeConversationRunAgentHandles),
+      totalQueuedCount,
+      editing: participantsEditing,
+      assistant: participantsAssistant,
+    });
+    return () => clearChatParticipants(participantsSnapshotConversationId);
+  }, [
+    activeConversationRunAgentHandles,
+    conversationRosterHumans,
+    participantAgents,
+    participantsAssistant,
+    participantsEditing,
+    participantsSnapshotConversationId,
+    totalQueuedCount,
+  ]);
 
   const {
     browserModalBottomInset,
@@ -3854,6 +4673,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     resolveQueuedItemTargets,
     runtimeReady,
     sendingAttachment,
+    serverQueueHydrated,
     serverSendQueueItems,
     setChatSendQueue,
     setChatSendQueueExpanded,
@@ -3873,11 +4693,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const enableNotificationsFromChat = useCallback(async () => {
     return await enableMessageNotifications();
   }, []);
-
-  const refreshAgentCredentialData = useCallback(() => {
-    void refreshCredentials();
-    void refreshAvailableAgents({ silent: true });
-  }, [refreshAvailableAgents, refreshCredentials]);
 
   useEffect(() => {
     if (notificationsNudgeOpen) {
@@ -4041,17 +4856,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   onGithubImportSuccessRef.current = dismissGettingStarted;
 
   const {
-    composerActionButtonClass,
     composerActionIconClass,
-    composerOutlinedActionClass,
+    composerGhostActionClass,
     composerPrimaryActionClass,
-    composerRuntimeTriggerClass,
     queueCanSendNow,
     sendButtonDisabled,
     sendButtonVariant,
     showMobileGhostSuggestionAcceptButton,
   } = resolveChatComposerAffordances({
-    compactBrowserViewport,
     composerGhostSuggestionRemainder: composerGhostSuggestion?.remainder ?? null,
     credentialsReady,
     activeConversationControllerId: activeConversationEntry?.controllerId ?? null,
@@ -4433,6 +5245,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   return (
     <RunFailureRetryProvider value={runFailureRetryContextValue}>
+    <ChatRuntimeActivityContext.Provider value={chatRuntimeActivityValue}>
     <div
       ref={rootRef}
       className="relative flex h-full min-h-0 flex-col overflow-hidden"
@@ -4524,42 +5337,52 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         hidden={browserSubtab !== "chat"}
         className={browserSubtab === "chat" ? "flex min-h-0 flex-1 flex-col" : "hidden"}
       >
-      {conversationRosterPresence ? (
-        // Presence belongs to the conversation, so it sits at the top of the
-        // conversation surface: one placement at every width, a flow row (never
-        // an overlay) so it cannot cover message text, and outside the scroller
-        // so it never scrolls away. Horizontal padding matches the scroll
-        // container below it.
-        <div
-          className="flex flex-none items-center justify-end px-3 pt-2 sm:px-4"
-          data-testid="chat-conversation-roster-row"
-        >
-          <ConversationRoster
-            agents={conversationRosterPresence.agents}
-            humans={conversationRosterPresence.humans}
-          />
-        </div>
-      ) : null}
+      {/* Presence belongs to the conversation, so it sits at the top of the
+          conversation surface: one placement at every width, a flow row (never
+          an overlay) so it cannot cover message text, and outside the scroller
+          so it never scrolls away. Always rendered — the roster collapses to a
+          plain "open participants" icon when no one has joined, so the
+          participants/config panel is reachable even on a brand-new chat. */}
       <div
-        className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-3 pb-4 pt-2 sm:px-4 sm:pb-2"
-        data-testid="chat-message-scroll"
-        aria-label={conversationLabel}
-        role="log"
+        className="flex-none px-3 pt-2 sm:px-4"
+        data-testid="chat-conversation-roster-row"
+      >
+        {/* Constrain to the shared 56rem chat column so the roster's right
+            edge lands on the message column, not the panel edge. The sticky
+            speaker pill takes the column's left side (fading in/out as the
+            transcript scrolls) and the roster stays right-aligned; both are
+            always rendered, so the roster never shifts when the pill appears
+            or disappears. */}
+        <ChatColumn className="flex items-center justify-between gap-2">
+          <ChatSpeakerStickyOverlay ref={stickySpeakerOverlayRef} speaker={stickyChatSpeaker} />
+          <ConversationRoster
+            agents={conversationRosterAgents}
+            humans={conversationRosterHumans}
+            hasCredentialWarning={participantAgentsHaveCredentialWarning}
+          />
+        </ChatColumn>
+      </div>
+      <ChatTranscriptViewport
+        ariaLabel={conversationLabel}
         onScroll={handleScroll}
         onContextMenu={handleConversationContextMenu}
-        ref={scrollContainerRef}
-        style={chatScrollPaddingBottom ? { paddingBottom: chatScrollPaddingBottom } : undefined}
+        scrollContainerRef={scrollContainerRef}
+        scrollPaddingBottom={chatScrollPaddingBottom}
       >
         <OctoScrollMotionScope
           sourceRef={scrollContainerRef}
           resetKey={activeConversationId ?? "no-conversation"}
         >
-          <ChatColumn className="pointer-events-none sticky top-0 z-30 h-0">
-            <AssistantSpeakerStickyOverlay speaker={stickyAssistantSpeaker} />
-          </ChatColumn>
           <div ref={handleScrollContentRef} className="flex min-h-full flex-col gap-2.5">
+          {pinChatMessagesToBottom && !gettingStartedTopAnchorActive ? (
+            <div className="flex-1" />
+          ) : null}
+          {/* Sits after the bottom-anchoring spacer so it rides directly above
+              the oldest rendered message. Placed before it, an underfilled
+              thread reads as [button][empty void][messages] and looks like it
+              is asking for a click that the visible room says is unnecessary. */}
           {showHistoryLoadButton ? (
-            <div className="flex justify-center pt-1">
+            <div className="flex justify-center">
               <Button
                 onPress={requestOlderMessages}
                 isDisabled={isHistoryLoading}
@@ -4578,9 +5401,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 )}
               </Button>
             </div>
-          ) : null}
-          {pinChatMessagesToBottom && !gettingStartedTopAnchorActive ? (
-            <div className="flex-1" />
           ) : null}
           <ChatColumn className="space-y-2.5">
             {shouldShowGettingStarted ? (
@@ -4718,7 +5538,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           </ChatColumn>
           </div>
         </OctoScrollMotionScope>
-      </div>
+      </ChatTranscriptViewport>
       </div>
 
       <ChatMessageMenuOverlay
@@ -4765,10 +5585,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         accessNotice={
           projectReadOnly
             ? "Read-only access — you can review this space, but you can’t send messages or change files."
-            : projectCapabilitiesResolved === false
-              ? "Checking your access…"
-              : null
+            : null
         }
+        accessChecking={!projectReadOnly && projectCapabilitiesResolved === false}
         browserDockProps={{
           browserModalBottomInset,
           browserSessionOpen,
@@ -4800,22 +5619,32 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           editingQueuedItem,
           chatSendQueueExpanded,
           collapsedQueuedMessageSummary,
-          queueQuickSendItemId: queueQuickSendItem?.id ?? null,
           queueCanSendNow,
-          queueStatusLabel,
-          queueStatusAction,
           chatSendQueueDisplay,
           sendingAttachment,
           inputValue,
           onToggleExpanded: () => setChatSendQueueExpanded((current) => !current),
           onSendQueuedMessageNow: handleSendQueuedMessageNow,
-          onRequestRuntimeRecovery: requestRuntimeRecovery,
           onRemoveQueuedItem: removeChatSendQueueItem,
-          onMoveQueuedItem: moveChatSendQueueItem,
+          onReorderQueuedItem: reorderChatSendQueueItem,
+          reorderDisabled:
+            serverQueueReordering ||
+            (serverSendQueueItems.length > 0 && chatSendQueue.length > 0),
           onEditQueuedMessage: handleEditQueuedMessage,
           onCancelQueuedEdit: handleCancelQueuedEdit,
           onRequeueEditedMessage: handleRequeueEditedMessage,
           onSendEditedMessageNow: handleSendEditedMessageNow,
+        }}
+        stashTrayProps={{
+          stashes: messageStashes,
+          restoredStashId: restoredMessageStash?.id ?? null,
+          busy: messageStashMutating,
+          onRestore: handleRestoreMessageStash,
+          onDelete: (stashId) => {
+            if (ensureProjectWriteAccess()) {
+              void handleDeleteMessageStash(stashId);
+            }
+          },
         }}
         activeGoal={activeConversationEntry?.activeGoal ?? null}
         activeGoalHealth={activeGoalHealth}
@@ -4859,36 +5688,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         }}
         homeAttentionCount={homeAttentionCount}
         homeAttentionBadge={homeAttentionBadge}
-        octoAgentChipProps={{
-          runtimeMenu,
-          runtimeReady,
-          assistantEnabled,
-          conversationId: activeConversationId,
-          onAssistantEnabledChange,
-          extraAgentHandles,
-          availableAgents,
-          onAddAgentHandle,
-          onRemoveAgentHandle,
-          onEditAgentProfile: openAgentProfileSettings,
-          credentials: availableCredentials,
-          credentialsReady,
-          onCredentialsRefresh: refreshAgentCredentialData,
-          onOpenAiOnboarding: openAiOnboarding,
-          onOpenAiManager: openAiManager,
-          onOpenCredits: () => openPanelTab("credits", { activate: true }),
-          projectId: activeProjectId,
-          pendingByAgentHandle: queuedByAgentHandle,
-          suppressLoadingIndicator: Boolean(
-            presentedCredentialGateStateForBubble ||
-              aiOnboardingOpen ||
-              gettingStartedConnectModalProps.connectModalOpen,
-          ),
-          isDisabled:
-            projectWriteDisabled ||
-            sendingAttachment ||
-            (onboardingInputLocked && !(presentedCredentialGateStateForBubble || aiOnboardingOpen)),
-          triggerClassName: composerRuntimeTriggerClass,
-        }}
         composerActionMenuProps={{
           // The pre-AI lock gates sending, not the "+" actions (import a repo,
           // open a browser, invite) — none of which need AI connected. Keeping
@@ -4906,13 +5705,32 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           onOpenInvite: () => setAddMenuOpen(true),
           onImportGithubRepo: beginGithubImport,
           onInsertCommand: handleInsertSlashCommand,
-          triggerClassName: composerOutlinedActionClass,
+          onQueueMessage: () => {
+            void invokeSubmitMessage(undefined, { intent: "queue" });
+          },
+          onStashDraft: () => {
+            void handleStashDraft();
+          },
+          queueDisabled:
+            submissionPending ||
+            !inputValue.trim() ||
+            imageAttachments.length > 0 ||
+            !activeConversationId ||
+            !activeConversationEntry?.controllerId,
+          stashDisabled:
+            messageStashMutating ||
+            submissionPending ||
+            !inputValue.trim() ||
+            imageAttachments.length > 0 ||
+            !activeConversationId ||
+            !activeConversationEntry?.controllerId,
         }}
         onOpenImagePicker={openImagePicker}
         sendingAttachment={sendingAttachment}
         showMobileGhostSuggestionAcceptButton={showMobileGhostSuggestionAcceptButton}
         onAcceptGhostSuggestion={handleAcceptGhostSuggestion}
         showVoicePrimaryAction={showVoicePrimaryAction}
+        showVoiceSecondaryAction={showVoiceSecondaryAction}
         voiceConversationActionStripProps={{
           showVoiceRepliesToggle: false,
           voiceActionActive,
@@ -4929,24 +5747,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           onVoicePressStart: handleStartVoiceInputHold,
           onVoicePressEnd: handleStopVoiceInputHold,
           onVoiceTap: handleChatVoiceTap,
-          onPointerCaptureStart: captureTouchLikePressTarget,
-          onPointerCaptureEnd: releaseCapturedPressTarget,
-          primaryActionClassName: composerPrimaryActionClass,
-          outlinedActionClassName: composerOutlinedActionClass,
-          actionIconClassName: composerActionIconClass,
         }}
         sendButtonDisabled={projectWriteDisabled || sendButtonDisabled}
         sendButtonVariant={sendButtonVariant}
-        onSendButtonPointerDown={handleSendButtonPointerDown}
-        onSendButtonPointerUp={releaseCapturedPressTarget}
-        onSendButtonPointerCancel={releaseCapturedPressTarget}
-        onSendButtonPressStart={handleSendButtonPressStart}
-        onSendButtonPressEnd={handleSendButtonPressEnd}
+        primaryActionMode={composerPrimaryActionMode}
         onSendButtonPress={handleSendButtonPress}
-        composerOutlinedActionClass={composerOutlinedActionClass}
+        composerGhostActionClass={composerGhostActionClass}
         composerPrimaryActionClass={composerPrimaryActionClass}
         composerActionIconClass={composerActionIconClass}
-        composerActionButtonClass={composerActionButtonClass}
         inviteModalProps={{
           isOpen: addMenuOpen,
           onOpenChange: setAddMenuOpen,
@@ -4968,7 +5776,27 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           onOpenProjectSettings,
         }}
       />
+      {agentProfileModalHandle ? (
+        // By-handle profile opens (mention chips, narrow speaker labels) have
+        // no anchor, so the card presents as a centered modal at every width.
+        <StudioDialogModal
+          isOpen
+          isDismissable
+          onOpenChange={(open) => {
+            if (!open) setAgentProfileModalHandle(null);
+          }}
+          className="h-[100dvh] min-h-0 overflow-hidden"
+          modalClassName="min-h-0 max-h-full w-full max-w-sm overflow-y-auto overscroll-contain"
+          dialogAriaLabel={`Agent profile: @${agentProfileModalHandle}`}
+        >
+          <AgentProfileCardContent
+            {...resolveAgentProfileCardProps(agentProfileModalHandle)}
+            onRequestClose={() => setAgentProfileModalHandle(null)}
+          />
+        </StudioDialogModal>
+      ) : null}
         </div>
+    </ChatRuntimeActivityContext.Provider>
     </RunFailureRetryProvider>
       );
   }

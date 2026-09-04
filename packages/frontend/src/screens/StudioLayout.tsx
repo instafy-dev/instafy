@@ -25,16 +25,27 @@ import { buildGithubImportRetryIdentity } from "./studio/components/githubImport
 import { GitDiffView } from "./studio/components/GitDiffView";
 import { GitReviewView } from "./studio/components/GitReviewView";
 import { SourceControlDrawer } from "./studio/components/SourceControlDrawer";
+import { ParticipantsDrawer } from "./studio/components/ParticipantsDrawer";
+import {
+  setParticipantsDrawerOpen,
+  useParticipantsDrawerOpen,
+} from "./studio/components/chatParticipantsStore";
 import { StudioSidebar } from "./studio/components/StudioSidebar";
 import { StudioTopBar } from "./studio/components/StudioTopBar";
 import { MobileBottomDock } from "./studio/components/MobileBottomDock";
 import { ProjectLauncher } from "./studio/components/ProjectLauncher";
 import { ChatPanel } from "./studio/components/ChatPanel";
+import {
+  ControllerNoticeActionsProvider,
+  type ControllerNoticeActionsContextValue,
+} from "./studio/components/ControllerNoticeActions";
 import { ProjectPickerPanel } from "./studio/components/ProjectPickerPanel";
 import { SettingsPanel } from "./studio/components/SettingsPanel";
 import { SecretsPanel } from "./studio/components/SecretsPanel";
 import { AiPanel } from "./studio/components/AiPanel";
 import { AutomationsPanel } from "./studio/components/AutomationsPanel";
+import { MachinesPanel } from "./studio/components/MachinesPanel";
+import { setMachinesPanelFocus } from "./studio/components/machinesPanelStore";
 import { ExtensionsPanel } from "./studio/components/ExtensionsPanel";
 import { SkillsPanel } from "./studio/components/SkillsPanel";
 import { HomePanel } from "./studio/components/HomePanel";
@@ -109,6 +120,7 @@ const navMoreItems: StudioNavItem[] = [
   { id: "secrets", label: "Secrets", icon: Lock, accent: sidebarPrimaryAccentClass },
   { id: "skills", label: "Skills", icon: Puzzle, accent: sidebarPrimaryAccentClass },
   { id: "ai", label: "AI Manager", icon: Cpu, accent: sidebarPrimaryAccentClass },
+  { id: "machines", label: "Machines", icon: Cube, accent: sidebarPrimaryAccentClass },
   { id: "automations", label: "Automations", icon: Clock, accent: sidebarPrimaryAccentClass }
 ];
 
@@ -251,6 +263,8 @@ function StudioLayoutInner() {
   const requestHistoryPush = useCallback(() => {
     requestUrlNavigation("push");
   }, [requestUrlNavigation]);
+
+
   const { showStatus } = useStatus();
   const {
     projectInitialized,
@@ -260,7 +274,9 @@ function StudioLayoutInner() {
     activeProjectId,
   } = useProject();
   const { billing: creditBilling, controllerEnabled: creditsControllerEnabled } = useCredits();
-  const { runtime, runtimeReady, effectiveRuntimeId, runtimeStatuses } = useRuntime();
+  const { runtime, runtimeReady, effectiveRuntimeId, runtimeStatuses, showDesktopRuntimeHelp } =
+    useRuntime();
+
   const controllerProjectMissing =
     runtime.controllerProjectMissing || projectAccessBlockedFromProject;
   const projectReadyForWorkspace = projectInitialized && !projectAccessPending;
@@ -308,6 +324,43 @@ function StudioLayoutInner() {
     return conversations.find((conversation) => conversation.localId === activeConversationId) ?? null;
   }, [activeConversationId, conversations]);
   const currentUserId = user?.id ?? null;
+
+  // Controller notices ("Workspace unavailable", "Scheduled run couldn't
+  // start") used to be text-only cards naming a composer Runtime button that no
+  // longer exists. They get their action here, where both the Machines route
+  // and the self-host dialog already live.
+  const controllerNoticeActionsValue = useMemo<ControllerNoticeActionsContextValue>(
+    () => ({
+      onOpenMachines: () => {
+        // Push before opening, or the ?panel= reconciliation snaps the
+        // workspace straight back to the chat surface.
+        requestHistoryPush();
+        openPanelTab("machines", { activate: true });
+      },
+      onShowSelfHostHelp: showDesktopRuntimeHelp,
+      onOpenCredits: () => {
+        requestHistoryPush();
+        openPanelTab("credits", { activate: true });
+      },
+      onRunAutomation: (automationId: string) => {
+        void (async () => {
+          try {
+            const started = await controllerClient.automations.runNow({ automationId });
+            if (started) {
+              showStatus("Running the schedule now…", "info", 3500);
+              return;
+            }
+            showStatus("Couldn't start that run. Try again in a moment.", "error", 4500);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            showStatus(`Couldn't start that run: ${message}`, "error", 5000);
+          }
+        })();
+      },
+      viewerUserId: currentUserId,
+    }),
+    [currentUserId, openPanelTab, requestHistoryPush, showDesktopRuntimeHelp, showStatus],
+  );
   const [mobileHomeReturnTarget, setMobileHomeReturnTarget] = useState<{
     tabId: string;
     fallbackPanel: StudioPanel;
@@ -319,6 +372,9 @@ function StudioLayoutInner() {
     activeWorkspaceTab?.kind === "conversation" ||
     activeWorkspaceTab?.kind === "jobThread" ||
     (activeWorkspaceTab?.kind === "panel" && activeWorkspaceTab.panel === "chat");
+  // The participants drawer is an overlay opened from the chat roster facepile,
+  // so it needs no width gate — it renders over the workspace content when open.
+  const participantsDrawerOpen = useParticipantsDrawerOpen();
   const visibleConversationControllerId = useMemo((): string | null => {
     if (!isChatSurfaceVisible) {
       return null;
@@ -449,13 +505,15 @@ function StudioLayoutInner() {
 
   const homeAttentionCount = useMemo(() => {
     const currentSpaceName = (activeProjectName ?? "").trim() || "Choose a Space";
+    // The badge counts what Home's "Needs you" lane shows: replies waiting on
+    // the user. Work in flight is progress, not a demand — it lives in Recent.
     return buildHomeAttentionEntries({
       conversations,
       inboxItems: visibleHomeAttentionInboxItems,
       currentSpaceName,
       visibleConversationLocalId,
       visibleConversationControllerId,
-    }).length;
+    }).filter((entry) => entry.kind === "reply").length;
   }, [
     activeProjectName,
     conversations,
@@ -1084,6 +1142,26 @@ function StudioLayoutInner() {
     if (typeof window === "undefined") {
       return;
     }
+    const handler = () => {
+      // Runtime toasts are raised above WorkspaceTabsProvider and cannot open a
+      // tab themselves, so "Open Machines" arrives here as an event. Push before
+      // opening, or the ?panel= reconciliation snaps the workspace straight back.
+      requestHistoryPush();
+      openPanelTab("machines", { activate: true });
+      if (!isLargeScreen) {
+        setMobileSidebarOpen(false);
+      }
+    };
+    window.addEventListener("instafy:open-machines", handler as EventListener);
+    return () => {
+      window.removeEventListener("instafy:open-machines", handler as EventListener);
+    };
+  }, [isLargeScreen, openPanelTab, requestHistoryPush, setMobileSidebarOpen]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
     const handler = (event: Event) => {
       const custom = event as CustomEvent<GitReviewOpenDetail>;
       const review = custom.detail?.review ?? null;
@@ -1144,6 +1222,20 @@ function StudioLayoutInner() {
     openGitReviewTab(mobileGitReviewSheet);
     setMobileGitReviewSheet(null);
   }, [isLargeScreen, mobileGitReviewSheet, openGitReviewTab, requestHistoryPush, setMobileGitReviewSheet]);
+
+  // The sheet dismisses on backdrop tap; Escape must work too.
+  useEffect(() => {
+    if (isLargeScreen || !mobileGitReviewSheet) {
+      return;
+    }
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMobileGitReviewSheet(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isLargeScreen, mobileGitReviewSheet, setMobileGitReviewSheet]);
 
   const handleToggleSidebar = useCallback(() => {
     if (isLargeScreen) {
@@ -1483,6 +1575,22 @@ function StudioLayoutInner() {
     });
   }, [handleOpenSettingsTab, orgSettingsTitle]);
 
+  // ChatPanel's read-only notice cannot open a workspace tab itself —
+  // WorkspaceTabsProvider is mounted below the providers that panel runs in — so
+  // it asks here, the same way "instafy:open-source-control" does.
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+    const handler = () => {
+      handleOpenOrgSettings();
+    };
+    window.addEventListener("instafy:open-org-members", handler);
+    return () => {
+      window.removeEventListener("instafy:open-org-members", handler);
+    };
+  }, [handleOpenOrgSettings]);
+
   const handleOpenProjectSettings = useCallback(() => {
     handleOpenSettingsTab("project", {
       title: "Space settings",
@@ -1816,6 +1924,8 @@ function StudioLayoutInner() {
             <AiPanel />
           ) : activeWorkspaceTab.panel === "automations" ? (
             <AutomationsPanel />
+          ) : activeWorkspaceTab.panel === "machines" ? (
+            <MachinesPanel />
           ) : null}
         </div>
       );
@@ -1867,10 +1977,8 @@ function StudioLayoutInner() {
     </div>
   );
 
-
-
   return (
-    <>
+    <ControllerNoticeActionsProvider value={controllerNoticeActionsValue}>
       {shouldRenderFilesExplorerPortal ? (
         <FilesPanel
           renderMode="portal"
@@ -1991,7 +2099,10 @@ function StudioLayoutInner() {
             inert={showMobileLeftDrawerOverlay || undefined}
           >
             <StudioTopBar />
-            <div className="flex flex-1 min-h-0 min-w-0">
+            {/* relative: the participants drawer overlays the right edge of the
+                workspace content rather than pushing it, so it never competes
+                with the code/preview panel for width. */}
+            <div className="relative flex flex-1 min-h-0 min-w-0">
               <div
                 className={
                   isLargeScreen
@@ -2013,6 +2124,17 @@ function StudioLayoutInner() {
                   <div className="flex-none">{sidePaneNode}</div>
                 ) : null}
               </div>
+              {isChatSurfaceVisible && participantsDrawerOpen ? (
+                <ParticipantsDrawer
+                  onClose={() => setParticipantsDrawerOpen(false)}
+                  onOpenMachine={(runtimeId) => {
+                    // Deep-link: focus that machine on the Machines page, then
+                    // open the page (which replaces the chat surface).
+                    setMachinesPanelFocus(runtimeId);
+                    openPanelTab("machines", { activate: true });
+                  }}
+                />
+              ) : null}
             </div>
           </div>
 
@@ -2146,7 +2268,7 @@ function StudioLayoutInner() {
       <ProviderBindingApprovalHost />
       <Status />
       <DesktopRuntimeHelpDialog />
-    </>
+    </ControllerNoticeActionsProvider>
   );
 }
 
@@ -2168,6 +2290,20 @@ function DesktopRuntimeHelpDialog() {
     typeof window !== "undefined" &&
     typeof window.instafyDesktop?.startDesktopRuntime === "function" &&
     typeof window.instafyDesktop?.desktopRuntimeStatus === "function";
+
+  // The dialog otherwise only closes via its (x); Escape must work too.
+  useEffect(() => {
+    if (!isDesktopRuntimeHelpVisible) {
+      return;
+    }
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        hideDesktopRuntimeHelp();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [hideDesktopRuntimeHelp, isDesktopRuntimeHelpVisible]);
 
   useEffect(() => {
     if (!isDesktopRuntimeHelpVisible || !canUseDesktopApp) {
@@ -2205,7 +2341,7 @@ function DesktopRuntimeHelpDialog() {
   const handleCopyCliCommand = async () => {
     try {
       await writeClipboardText(cliCommand);
-      showStatus("CLI command copied.", "success", 2500);
+      showStatus("CLI command copied.", "success", 2500, { presentation: "confirmation" });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to copy.";
       showStatus(message, "error", 3500);
@@ -2304,7 +2440,7 @@ function DesktopRuntimeHelpDialog() {
             aria-label="Close"
             onPress={hideDesktopRuntimeHelp}
           >
-            <Xmark className="h-5 w-5" aria-hidden="true" />
+            <Xmark className="h-4 w-4" aria-hidden="true" />
           </IconButton>
         </div>
 

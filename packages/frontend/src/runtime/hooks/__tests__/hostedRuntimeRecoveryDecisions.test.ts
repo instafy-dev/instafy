@@ -77,8 +77,7 @@ describe("hostedRuntimeRecoveryDecisions", () => {
     expect(
       shouldAutoEnsureHostedForEmptyState({
         disableAutoRuntimeEnsure: false,
-        projectInitialized: true,
-        projectReadyForRuntime: true,
+        projectAccessResolved: true,
         runtimeControllerEnabled: true,
         activeProjectId: "project-1",
         runtimeReady: false,
@@ -89,6 +88,40 @@ describe("hostedRuntimeRecoveryDecisions", () => {
         runtimeStatusCount: 0,
       }),
     ).toBe(true);
+
+    // A brand-new project that is still materializing its workspace must
+    // still warm the runtime: boot and workspace init are independent, and
+    // serializing them costs every first reply ~10 seconds.
+    expect(
+      shouldAutoEnsureHostedForEmptyState({
+        disableAutoRuntimeEnsure: false,
+        projectAccessResolved: true,
+        runtimeControllerEnabled: true,
+        activeProjectId: "project-just-created",
+        runtimeReady: false,
+        runtimeStatusesResolved: true,
+        hostedRuntimeEnsuring: false,
+        hasHostedRuntimeInProgress: false,
+        hasLocalRuntime: false,
+        runtimeStatusCount: 0,
+      }),
+    ).toBe(true);
+
+    // Pending or blocked access must never launch a runtime.
+    expect(
+      shouldAutoEnsureHostedForEmptyState({
+        disableAutoRuntimeEnsure: false,
+        projectAccessResolved: false,
+        runtimeControllerEnabled: true,
+        activeProjectId: "project-1",
+        runtimeReady: false,
+        runtimeStatusesResolved: true,
+        hostedRuntimeEnsuring: false,
+        hasHostedRuntimeInProgress: false,
+        hasLocalRuntime: false,
+        runtimeStatusCount: 0,
+      }),
+    ).toBe(false);
 
     expect(
       shouldAutoEnsureHostedForFallback({

@@ -62,6 +62,7 @@ type UseChatSendQueueActionsOptions = {
   runtimeReady: boolean;
   sendingAttachment: boolean;
   serverSendQueueItems: ServerQueuedChatSendItem[];
+  serverQueueHydrated: boolean;
   setChatSendQueue: Dispatch<SetStateAction<QueuedChatSendItem[]>>;
   setChatSendQueueExpanded: Dispatch<SetStateAction<boolean>>;
   setEditingQueuedItem: Dispatch<SetStateAction<EditingQueuedChatItem | null>>;
@@ -97,6 +98,7 @@ export function useChatSendQueueActions({
   runtimeReady,
   sendingAttachment,
   serverSendQueueItems,
+  serverQueueHydrated,
   setChatSendQueue,
   setChatSendQueueExpanded,
   setEditingQueuedItem,
@@ -411,6 +413,9 @@ export function useChatSendQueueActions({
     if (chatSendQueueDrainRef.current || editingQueuedItem || !activeConversationId) {
       return;
     }
+    if (!serverQueueHydrated || serverSendQueueItems.length > 0) {
+      return;
+    }
     if (invitePromptOpen || sendingAttachment) {
       return;
     }
@@ -461,6 +466,8 @@ export function useChatSendQueueActions({
     isAssistantTyping,
     runtimeReady,
     sendingAttachment,
+    serverQueueHydrated,
+    serverSendQueueItems.length,
     setChatSendQueue,
     submitMessage,
     waitingForPreferredRuntime,

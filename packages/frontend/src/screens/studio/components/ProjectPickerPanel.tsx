@@ -358,7 +358,7 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
       if (action === "copy-id") {
         try {
           await writeClipboardText(projectId);
-          showStatus("Space ID copied.", "success", 2200);
+          showStatus("Space ID copied.", "success", 2200, { presentation: "confirmation" });
         } catch {
           showStatus("Unable to copy space ID.", "error", 3000);
         }

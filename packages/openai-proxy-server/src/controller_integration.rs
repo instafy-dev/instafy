@@ -53,8 +53,7 @@ impl ControllerIntegration {
         let validator = ProxyTokenValidator::from_env(true).ok_or_else(|| {
             anyhow!("controller integration requires proxy token validation configuration")
         })?;
-        let client =
-            ControllerClient::new(base_url, service_bearer, credential_lease_bearer);
+        let client = ControllerClient::new(base_url, service_bearer, credential_lease_bearer);
 
         let credential_cache_ttl = Duration::from_secs(
             read_env("PROXY_CREDENTIAL_CACHE_SECONDS")
@@ -142,6 +141,18 @@ impl ControllerIntegration {
                 credential_id,
                 CredentialLeasePurpose::AfterUpstreamRejection,
             )
+            .await
+    }
+
+    /// Forward a BYOC subscription-usage snapshot to the controller. Used
+    /// fire-and-forget by the proxy; never gates the user's response.
+    pub async fn post_credential_usage(
+        &self,
+        credential_id: &str,
+        snapshot: &serde_json::Value,
+    ) -> Result<()> {
+        self.client
+            .post_credential_usage(credential_id, snapshot)
             .await
     }
 }

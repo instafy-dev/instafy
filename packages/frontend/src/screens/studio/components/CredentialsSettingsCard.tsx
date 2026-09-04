@@ -35,7 +35,10 @@ import {
   normalizeAiProviderId,
   type AiProviderId,
 } from "../../../utils/aiProviderModels";
-import { CredentialsConnectModal } from "./CredentialsConnectModal";
+import {
+  CredentialsConnectModal,
+  type CredentialsConnectApiKeyProvider,
+} from "./CredentialsConnectModal";
 import { AgentProfileModal, type AgentProfileModalMode } from "./AgentProfileModal";
 import {
   clearPendingAgentProfileTarget,
@@ -49,7 +52,7 @@ import {
   StudioListSurface,
 } from "./StudioListSection";
 import { useCredentialsConnectFlow } from "./useCredentialsConnectFlow";
-import { isExpiredCredentialProxyError, resolveProxyUpstreamErrorGuidance } from "./proxyError";
+import { isExpiredCredentialProxyError } from "./proxyError";
 
 const {
   create: createMyAgent,
@@ -129,7 +132,7 @@ type CredentialTestFeedback = {
 function formatAiModeErrorDetail(raw: string | null | undefined): string {
   const normalized = typeof raw === "string" ? raw.replace(/\s+/g, " ").trim() : "";
   if (!normalized) {
-    return "AI runtime status is unavailable. Retry after the runtime reconnects.";
+    return "AI runtime status is unavailable right now.";
   }
 
   const lowered = normalized.toLowerCase();
@@ -138,7 +141,7 @@ function formatAiModeErrorDetail(raw: string | null | undefined): string {
     lowered.includes("connection refused") ||
     lowered.includes("/healthz")
   ) {
-    return "AI runtime is not reachable. Start or reconnect the runtime controller, then retry.";
+    return "Instafy can't reach the AI runtime right now.";
   }
 
   const compact = normalized.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
@@ -166,7 +169,7 @@ function formatCredentialTestFailureMessage(raw: string | null | undefined): str
     lowered.includes("access_token_scope_insufficient") ||
     lowered.includes("insufficient authentication scopes")
   ) {
-    return "Google login is missing required scopes. Reconnect Gemini and grant all requested permissions.";
+    return "This Gemini connection used Google login, which is no longer supported. Replace it with a Gemini API key.";
   }
   if (
     lowered.includes("service_disabled") ||
@@ -190,16 +193,48 @@ function formatCredentialTestFailureMessage(raw: string | null | undefined): str
   return `${compact.slice(0, CREDENTIAL_TEST_FAILURE_MAX_CHARS - 1).trimEnd()}…`;
 }
 
+/**
+ * Reconnect-in-place re-uploads an auth.json, so it only exists for that kind.
+ */
+function canReconnectCredentialInPlace(
+  credential: { kind?: string | null } | null | undefined,
+): boolean {
+  return credential?.kind === "codex_auth_json";
+}
+
+/**
+ * Everything else is an API key, which cannot be re-uploaded — it is replaced:
+ * a new key is entered, verified, promoted if the old one was the default, and
+ * only then is the old one retired. The copy on the row derives from the same
+ * two predicates as the buttons, so they cannot drift apart again.
+ */
+/** The API-key step a replacement for this credential should open on. */
+function connectStepForCredential(
+  credential: Pick<ControllerCredentialListItem, "kind" | "metadata">,
+): CredentialsConnectApiKeyProvider {
+  const provider = resolveCredentialProviderId(credential);
+  return provider === "deepseek" || provider === "zai" || provider === "gemini"
+    ? provider
+    : "openai";
+}
+
+function canReplaceCredential(
+  credential: { kind?: string | null; revokedAt?: string | null } | null | undefined,
+): boolean {
+  return Boolean(credential) && !credential?.revokedAt && !canReconnectCredentialInPlace(credential);
+}
+
 function resolveCredentialTestFailureFeedback(
   raw: string | null | undefined,
+  canReconnect: boolean,
 ): Omit<CredentialTestFeedback, "testedAt"> {
   const detail = formatCredentialTestFailureMessage(raw);
   if (typeof raw === "string" && isExpiredCredentialProxyError(raw)) {
     return {
       status: "needs_reconnect",
-      detail:
-        resolveProxyUpstreamErrorGuidance(raw)?.detail ??
-        "The saved AI login is stale. Reconnect the credential, then retry.",
+      detail: canReconnect
+        ? "The saved AI login is stale. Reconnect it below, then test again."
+        : "The saved AI login is stale. Replace it below with a fresh key.",
     };
   }
   return { status: "fail", detail };
@@ -405,6 +440,7 @@ export function CredentialsSettingsCard() {
     canManageAiConnections,
     openConnectModal,
     openConnectModalAtStep,
+    openConnectModalToReplace,
     connectModalProps,
   } = useCredentialsConnectFlow({
     userPresent: Boolean(user),
@@ -412,6 +448,10 @@ export function CredentialsSettingsCard() {
     notifyAiConfigChanged,
     showStatus,
     formatCredentialTestFailureMessage,
+    // Read at finalize time, not when the button was pressed: the default can
+    // move while the connect modal is open.
+    isCredentialDefault: (credentialId: string) =>
+      Boolean(credentialsById.get(credentialId)?.isDefault),
   });
 
   const handleTestCredential = useCallback(
@@ -419,6 +459,7 @@ export function CredentialsSettingsCard() {
       if (credentialTestPendingId) {
         return;
       }
+      const canReconnect = canReconnectCredentialInPlace(credentialsById.get(credentialId));
       setCredentialTestPendingId(credentialId);
       setCredentialTestFeedback((prev) => {
         if (!prev[credentialId]) {
@@ -431,7 +472,7 @@ export function CredentialsSettingsCard() {
       try {
         const result = await testMyCredential(credentialId);
         if (!result.success) {
-          const feedback = resolveCredentialTestFailureFeedback(result.error);
+          const feedback = resolveCredentialTestFailureFeedback(result.error, canReconnect);
           setCredentialTestFeedback((prev) => ({
             ...prev,
             [credentialId]: { ...feedback, testedAt: Date.now() },
@@ -445,14 +486,14 @@ export function CredentialsSettingsCard() {
           }));
           return;
         }
-        const feedback = resolveCredentialTestFailureFeedback(result.output);
+        const feedback = resolveCredentialTestFailureFeedback(result.output, canReconnect);
         setCredentialTestFeedback((prev) => ({
           ...prev,
           [credentialId]: { ...feedback, testedAt: Date.now() },
         }));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const feedback = resolveCredentialTestFailureFeedback(message);
+        const feedback = resolveCredentialTestFailureFeedback(message, canReconnect);
         setCredentialTestFeedback((prev) => ({
           ...prev,
           [credentialId]: { ...feedback, testedAt: Date.now() },
@@ -461,7 +502,7 @@ export function CredentialsSettingsCard() {
         setCredentialTestPendingId(null);
       }
     },
-    [credentialTestPendingId],
+    [credentialTestPendingId, credentialsById],
   );
 
   const handleMakeDefault = useCallback(
@@ -523,7 +564,7 @@ export function CredentialsSettingsCard() {
         const hint = credential ? resolveCredentialAccountHint(credential) : null;
         const detail = [kind, hint].filter(Boolean).join(" · ");
         const confirmed = window.confirm(
-          `Remove ${label}${detail ? ` (${detail})` : ""}?\n\nHosted agents will stop using it.`,
+          `Remove ${label}${detail ? ` (${detail})` : ""}?\n\nAgents stop using it immediately — running work pinned to it will fail.`,
         );
         if (!confirmed) {
           return;
@@ -1265,7 +1306,8 @@ export function CredentialsSettingsCard() {
                           : "text-slate-900 dark:text-slate-50";
                   const pending = actionPendingId === credential.id;
                   const testPending = credentialTestPendingId === credential.id;
-                  const canReconnectAuthJson = credential.kind === "codex_auth_json";
+                  const canReconnectAuthJson = canReconnectCredentialInPlace(credential);
+                  const canReplace = canReplaceCredential(credential);
                   const testFeedbackEntry = credentialTestFeedback[credential.id] ?? null;
                   const testFeedbackState = testFeedbackEntry?.status ?? null;
                   const testFeedbackLabel = testFeedbackState
@@ -1395,6 +1437,35 @@ export function CredentialsSettingsCard() {
                                 {testPending ? "Testing…" : testFeedbackEntry ? "Retest" : "Test"}
                               </Button>
 
+                              {canReplace ? (
+                                <Button
+                                  onPress={() =>
+                                    openConnectModalToReplace(
+                                      {
+                                        id: credential.id,
+                                        label:
+                                          resolveCredentialLabel(credential) || "this connection",
+                                      },
+                                      connectStepForCredential(credential),
+                                    )
+                                  }
+                                  isDisabled={pending || testPending}
+                                  variant={testFeedbackState === "needs_reconnect" ? "outline" : "ghost"}
+                                  size="xs"
+                                  radius="full"
+                                  className={[
+                                    "gap-1.5",
+                                    testFeedbackState === "needs_reconnect"
+                                      ? "border-secondary-200 bg-secondary-50 text-secondary-800 hover:bg-secondary-100 dark:bg-secondary-500/10 dark:text-secondary-100 dark:hover:bg-secondary-500/15"
+                                      : null,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(" ")}
+                                  data-testid={`credentials-connection-replace-${credential.id}`}
+                                >
+                                  Replace
+                                </Button>
+                              ) : null}
                               {canReconnectAuthJson ? (
                                 <Button
                                   onPress={() => handleTriggerReconnectCredential(credential.id)}

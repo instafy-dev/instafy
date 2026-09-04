@@ -27,6 +27,14 @@ use crate::{
 
 const DEFAULT_TIMEZONE: &str = "UTC";
 const DEFAULT_HOURLY_INTERVAL: i32 = 24;
+// Result-thread visibility (public API words). `private` keeps automation result
+// conversations owner-only; `team` makes them visible to anyone with project access.
+const RESULT_VISIBILITY_PRIVATE: &str = "private";
+const RESULT_VISIBILITY_TEAM: &str = "team";
+// Conversation visibility values (from conversations.rs). `team` maps onto `public`,
+// which the conversation list gate exposes to anyone with project access.
+const CONVERSATION_VISIBILITY_PRIVATE: &str = "private";
+const CONVERSATION_VISIBILITY_PUBLIC: &str = "public";
 const AUTOMATION_SCHEDULER_TICK_SECONDS: u64 = 30;
 const AUTOMATION_SCHEDULER_LOCK_SECONDS: i64 = 10 * 60;
 const AUTOMATION_SCHEDULER_BATCH_SIZE: i64 = 10;
@@ -58,6 +66,10 @@ struct CreateAutomationBody {
     runtime_provider: Option<String>,
     #[serde(default)]
     status: Option<String>,
+    #[serde(default)]
+    silent_when_nothing_to_report: bool,
+    #[serde(default)]
+    result_visibility: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -89,23 +101,36 @@ struct UpdateAutomationBody {
     runtime_provider: Option<String>,
     #[serde(default)]
     status: Option<String>,
+    #[serde(default)]
+    silent_when_nothing_to_report: Option<bool>,
+    #[serde(default)]
+    result_visibility: Option<String>,
 }
 
 impl UpdateAutomationBody {
+    fn has_settings_updates(&self) -> bool {
+        self.name.is_some()
+            || self.prompt_text.is_some()
+            || self.metadata.is_some()
+            || self.schedule_kind.is_some()
+            || self.run_at.is_some()
+            || self.interval_hours.is_some()
+            || self.by_day.is_some()
+            || self.by_hour.is_some()
+            || self.by_minute.is_some()
+            || self.timezone.is_some()
+            || self.runtime_mode.is_some()
+            || self.runtime_provider.is_some()
+            || self.silent_when_nothing_to_report.is_some()
+            || self.result_visibility.is_some()
+    }
+
     fn is_status_only(&self) -> bool {
-        self.status.is_some()
-            && self.name.is_none()
-            && self.prompt_text.is_none()
-            && self.metadata.is_none()
-            && self.schedule_kind.is_none()
-            && self.run_at.is_none()
-            && self.interval_hours.is_none()
-            && self.by_day.is_none()
-            && self.by_hour.is_none()
-            && self.by_minute.is_none()
-            && self.timezone.is_none()
-            && self.runtime_mode.is_none()
-            && self.runtime_provider.is_none()
+        self.status.is_some() && !self.has_settings_updates()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.status.is_none() && !self.has_settings_updates()
     }
 }
 
@@ -116,6 +141,27 @@ fn can_access_owned_automation(
     is_active_job: bool,
 ) -> bool {
     owner_user_id == actor_user_id || (is_service_role && !is_active_job)
+}
+
+/// Read visibility for an automation record. Mirrors the conversation-list
+/// gate (#90): the creator always sees their own automation, service-role
+/// callers see everything, and a `team`-result automation is shared with the
+/// whole space — project membership itself is enforced separately via
+/// `ensure_project_access`, so this never widens visibility beyond space
+/// members. Active job tokens stay pinned to the automation they run for.
+/// Mutations (edit/pause/delete/run) deliberately keep the stricter
+/// `can_access_owned_automation` creator gate.
+fn can_view_automation(
+    result_visibility: &str,
+    owner_user_id: Uuid,
+    actor_user_id: Uuid,
+    is_service_role: bool,
+    is_active_job: bool,
+) -> bool {
+    if can_access_owned_automation(owner_user_id, actor_user_id, is_service_role, is_active_job) {
+        return true;
+    }
+    !is_active_job && result_visibility == RESULT_VISIBILITY_TEAM
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -136,6 +182,8 @@ struct AutomationPayload {
     timezone: String,
     runtime_mode: String,
     runtime_provider: Option<String>,
+    silent_when_nothing_to_report: bool,
+    result_visibility: String,
     conversation_id: Option<String>,
     status: String,
     locked_until: Option<String>,
@@ -163,6 +211,8 @@ struct AutomationRecord {
     timezone: String,
     runtime_mode: String,
     runtime_provider: Option<String>,
+    silent_when_nothing_to_report: bool,
+    result_visibility: String,
     conversation_id: Option<Uuid>,
     status: String,
     locked_until: Option<DateTime<Utc>>,
@@ -193,6 +243,33 @@ fn normalize_status(raw: Option<String>) -> String {
     raw.map(|value| value.trim().to_ascii_lowercase())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "active".to_string())
+}
+
+fn normalize_result_visibility(
+    raw: Option<String>,
+) -> Result<String, (StatusCode, Json<ApiError>)> {
+    match raw {
+        None => Ok(RESULT_VISIBILITY_PRIVATE.to_string()),
+        Some(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            match normalized.as_str() {
+                RESULT_VISIBILITY_PRIVATE | RESULT_VISIBILITY_TEAM => Ok(normalized),
+                _ => Err(bad_request("resultVisibility must be private or team")),
+            }
+        }
+    }
+}
+
+/// Map a stored automation `result_visibility` enum onto the conversation `visibility`
+/// value used when the automation's result thread is created. `team` becomes the
+/// first-class `public` visibility (visible to anyone with project access via the
+/// conversation list gate); anything else stays owner-only `private`.
+fn conversation_visibility_for_result_visibility(result_visibility: &str) -> &'static str {
+    if result_visibility == RESULT_VISIBILITY_TEAM {
+        CONVERSATION_VISIBILITY_PUBLIC
+    } else {
+        CONVERSATION_VISIBILITY_PRIVATE
+    }
 }
 
 fn normalize_schedule_kind(raw: &str) -> Result<String, (StatusCode, Json<ApiError>)> {
@@ -414,6 +491,8 @@ fn row_to_record(row: &tokio_postgres::Row) -> AutomationRecord {
         timezone: row.get("timezone"),
         runtime_mode: row.get("runtime_mode"),
         runtime_provider: row.get("runtime_provider"),
+        silent_when_nothing_to_report: row.get("silent_when_nothing_to_report"),
+        result_visibility: row.get("result_visibility"),
         conversation_id: row.get("conversation_id"),
         status: row.get("status"),
         locked_until: row.get("locked_until"),
@@ -442,6 +521,8 @@ fn record_to_payload(record: AutomationRecord) -> AutomationPayload {
         timezone: record.timezone,
         runtime_mode: record.runtime_mode,
         runtime_provider: record.runtime_provider,
+        silent_when_nothing_to_report: record.silent_when_nothing_to_report,
+        result_visibility: record.result_visibility,
         conversation_id: record.conversation_id.map(|value| value.to_string()),
         status: record.status,
         locked_until: record.locked_until.map(|value| value.to_rfc3339()),
@@ -481,7 +562,7 @@ pub(crate) fn spawn_automation_scheduler(state: AppState) {
     });
 }
 
-async fn automation_scheduler_tick(state: &AppState) -> anyhow::Result<()> {
+pub(crate) async fn automation_scheduler_tick(state: &AppState) -> anyhow::Result<()> {
     let claimed = claim_due_automations(state).await?;
     if claimed.is_empty() {
         return Ok(());
@@ -547,6 +628,8 @@ async fn claim_due_automations(state: &AppState) -> anyhow::Result<Vec<Automatio
                        timezone,
                        runtime_mode,
                        runtime_provider,
+                       silent_when_nothing_to_report,
+                       result_visibility,
                        conversation_id,
                        status,
                        locked_until,
@@ -589,14 +672,14 @@ async fn execute_automation_once(
         )
     };
 
-    if let Err((_, Json(api_error))) = authorize_automation_execution(state, record).await {
+    if let Err((status, Json(api_error))) = authorize_automation_execution(state, record).await {
         finalize_automation_attempt(
             state,
-            record.id,
+            record,
             now,
             next_run_at,
             status_override,
-            Some(api_error.message),
+            Some(AutomationLaunchFailure::from_api_error(status, api_error)),
         )
         .await?;
         return Ok(());
@@ -638,14 +721,14 @@ async fn execute_automation_once(
             if !hosted_automation_provider_is_managed(&runtime_provider, provider_is_self_hosted) {
                 finalize_automation_attempt(
                     state,
-                    record.id,
+                    record,
                     now,
                     next_run_at,
                     status_override,
-                    Some(
-                        "Hosted automations require a controller-managed runtime provider"
-                            .to_string(),
-                    ),
+                    Some(AutomationLaunchFailure::minted(
+                        "Hosted automations require a controller-managed runtime provider",
+                        CODE_HOSTED_PROVIDER_UNSUPPORTED,
+                    )),
                 )
                 .await?;
                 return Ok(());
@@ -664,15 +747,29 @@ async fn execute_automation_once(
             )
             .await;
             match response {
-                Ok(response) => Some(Uuid::from_str(&response.runtime_id)?),
-                Err((_, Json(api_error))) => {
+                Ok(response) => match Uuid::from_str(&response.runtime_id) {
+                    Ok(runtime_id) => Some(runtime_id),
+                    Err(error) => {
+                        finalize_automation_attempt(
+                            state,
+                            record,
+                            now,
+                            next_run_at,
+                            status_override,
+                            Some(unusable_runtime_id_failure(&response.runtime_id, &error)),
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+                },
+                Err((status, Json(api_error))) => {
                     finalize_automation_attempt(
                         state,
-                        record.id,
+                        record,
                         now,
                         next_run_at,
                         status_override,
-                        Some(api_error.message),
+                        Some(AutomationLaunchFailure::from_api_error(status, api_error)),
                     )
                     .await?;
                     return Ok(());
@@ -680,16 +777,59 @@ async fn execute_automation_once(
             }
         }
         "auto" => {
-            if let Some(runtime_id) = select_viable_runtime_id(
+            let viable_runtime_id = match select_viable_runtime_id(
                 state,
                 record.project_id,
                 record.user_id,
                 record.runtime_provider.as_deref(),
             )
-            .await?
+            .await
             {
+                Ok(runtime_id) => runtime_id,
+                Err(error) => {
+                    finalize_automation_attempt(
+                        state,
+                        record,
+                        now,
+                        next_run_at,
+                        status_override,
+                        Some(AutomationLaunchFailure::minted(
+                            format!(
+                                "the controller could not check which machines are available: {error}"
+                            ),
+                            CODE_CONTROLLER_UNAVAILABLE,
+                        )),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            };
+            if let Some(runtime_id) = viable_runtime_id {
                 Some(runtime_id)
             } else {
+                let requested_provider = record
+                    .runtime_provider
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                let provider_is_self_hosted = requested_provider.is_some_and(|provider| {
+                    crate::runtime::provider_is_private_self_hosted_or_quarantined(state, provider)
+                });
+                if let Some(message) = no_live_self_hosted_runtime_error(provider_is_self_hosted) {
+                    finalize_automation_attempt(
+                        state,
+                        record,
+                        now,
+                        next_run_at,
+                        status_override,
+                        Some(AutomationLaunchFailure::minted(
+                            message,
+                            CODE_SELF_HOSTED_RUNTIME_OFFLINE,
+                        )),
+                    )
+                    .await?;
+                    return Ok(());
+                }
                 let response = crate::runtime::ensure_runtime_for_automation(
                     state,
                     record.project_id,
@@ -704,15 +844,29 @@ async fn execute_automation_once(
                 )
                 .await;
                 match response {
-                    Ok(response) => Some(Uuid::from_str(&response.runtime_id)?),
-                    Err((_, Json(api_error))) => {
+                    Ok(response) => match Uuid::from_str(&response.runtime_id) {
+                        Ok(runtime_id) => Some(runtime_id),
+                        Err(error) => {
+                            finalize_automation_attempt(
+                                state,
+                                record,
+                                now,
+                                next_run_at,
+                                status_override,
+                                Some(unusable_runtime_id_failure(&response.runtime_id, &error)),
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                    },
+                    Err((status, Json(api_error))) => {
                         finalize_automation_attempt(
                             state,
-                            record.id,
+                            record,
                             now,
                             next_run_at,
                             status_override,
-                            Some(api_error.message),
+                            Some(AutomationLaunchFailure::from_api_error(status, api_error)),
                         )
                         .await?;
                         return Ok(());
@@ -766,6 +920,7 @@ async fn execute_automation_once(
                 record.user_id,
                 record.id,
                 record.name.as_str(),
+                conversation_visibility_for_result_visibility(&record.result_visibility),
             )),
             parent_conversation_id: None,
             thread_kind: Some("automation".to_string()),
@@ -788,6 +943,9 @@ async fn execute_automation_once(
             runtime_updated_at: runtime_id.map(|_| now),
             runtime_display_name: None,
             prefer_runtime: runtime_id.is_some(),
+            expected_lane_idle: false,
+            dispatch_queue_entry_id: None,
+            allow_silent_automation_decline: record.silent_when_nothing_to_report,
         },
     )
     .await;
@@ -796,20 +954,32 @@ async fn execute_automation_once(
         Ok(result) => {
             if record.conversation_id.is_none() {
                 if let Some(conversation_id) = result.conversation_id {
-                    attach_automation_conversation(state, record.id, conversation_id).await?;
+                    // The run succeeded; only the link back to its thread
+                    // failed. Bailing here used to discard the success too,
+                    // leaving the schedule with no last_run_at and no trace.
+                    if let Err(error) =
+                        attach_automation_conversation(state, record.id, conversation_id).await
+                    {
+                        warn!(
+                            automation_id = %record.id,
+                            conversation_id = %conversation_id,
+                            ?error,
+                            "automation ran but its conversation could not be attached"
+                        );
+                    }
                 }
             }
-            finalize_automation_attempt(state, record.id, now, next_run_at, status_override, None)
+            finalize_automation_attempt(state, record, now, next_run_at, status_override, None)
                 .await?;
         }
-        Err((_, Json(api_error))) => {
+        Err((status, Json(api_error))) => {
             finalize_automation_attempt(
                 state,
-                record.id,
+                record,
                 now,
                 next_run_at,
                 status_override,
-                Some(api_error.message),
+                Some(AutomationLaunchFailure::from_api_error(status, api_error)),
             )
             .await?;
         }
@@ -846,16 +1016,19 @@ async fn authorize_automation_execution(
     Ok(())
 }
 
+// A scheduled conversation is an ordinary conversation that a schedule opens
+// on the owner's behalf: it stays visible in the space's list (its origin is
+// its thread kind and `automationId`), so what it did and where it failed
+// can be read like any other thread.
 fn build_automation_conversation_metadata(
-    user_id: Uuid,
+    _user_id: Uuid,
     automation_id: Uuid,
     name: &str,
+    conversation_visibility: &str,
 ) -> JsonValue {
-    let lifecycle_key = format!("instafy_conversation_lifecycle_v1_{user_id}");
     json!({
         "title": name,
-        "visibility": "private",
-        lifecycle_key: "hidden",
+        "visibility": conversation_visibility,
         "automationId": automation_id.to_string(),
     })
 }
@@ -877,13 +1050,16 @@ async fn attach_automation_conversation(
 
 async fn finalize_automation_attempt(
     state: &AppState,
-    automation_id: Uuid,
+    record: &AutomationRecord,
     attempted_at: DateTime<Utc>,
     next_run_at: Option<DateTime<Utc>>,
     status_override: Option<&str>,
-    error: Option<String>,
+    failure: Option<AutomationLaunchFailure>,
 ) -> anyhow::Result<()> {
-    let connection = state.pool.get().await?;
+    let automation_id = record.id;
+    let mut connection = state.pool.get().await?;
+    let failure_code = failure.as_ref().and_then(|failure| failure.code.clone());
+    let error = failure.map(|failure| failure.message);
     let error_value = error
         .as_deref()
         .map(|value| value.trim())
@@ -900,7 +1076,8 @@ async fn finalize_automation_attempt(
         .map(|value| value.trim())
         .filter(|value| !value.is_empty());
 
-    connection
+    let transaction = connection.transaction().await?;
+    transaction
         .execute(
             "update automations
              set locked_until = null,
@@ -919,6 +1096,70 @@ async fn finalize_automation_attempt(
             ],
         )
         .await?;
+
+    // A launch failure is told where the work would have happened: a notice in
+    // the scheduled conversation (like a runtime alert), and a failed-run row
+    // in the owner's feed. Before this the only trace was a side field on the
+    // automation, visible only in that space's Automations panel.
+    // Published only after the commit below: a subscriber that refetches on the
+    // event must not be able to beat the row into existence.
+    let mut notice_to_publish: Option<crate::conversations::ConversationMessageRow> = None;
+    if let (Some(error_text), Some(conversation_id)) =
+        (stored_error.as_deref(), record.conversation_id)
+    {
+        let content = format!("This scheduled run couldn't start: {error_text}");
+        // `reason` must stay the literal "automation_launch_failed": the
+        // frontend's content resolver replaces the message with canned copy on
+        // any reason it does not recognise. The cause goes in its own field, so
+        // a notice with no code renders exactly as one written before this.
+        let metadata = json!({
+            "source": "controller",
+            "kind": "runtime_alert",
+            "messageType": "runtime_alert",
+            "details": build_launch_failure_details(record, failure_code.as_deref()),
+        });
+        match crate::agent::record_agent_conversation_message(
+            &transaction,
+            &record.project_id,
+            &conversation_id,
+            None,
+            None,
+            None,
+            content,
+            metadata,
+        )
+        .await
+        {
+            Ok(message_row) => notice_to_publish = Some(message_row),
+            Err((_, Json(api_error))) => {
+                tracing::warn!(
+                    automation_id = %automation_id,
+                    error = %api_error.message,
+                    "failed to record automation launch failure notice"
+                );
+            }
+        }
+        crate::activity::record_launch_failure(
+            &transaction,
+            &record.project_id,
+            &conversation_id,
+            record.user_id,
+            &automation_id,
+            error_text,
+            failure_code.as_deref(),
+        )
+        .await;
+    }
+
+    transaction.commit().await?;
+
+    // Every other producer of a controller notice publishes; this one never
+    // did, so a scheduled run that could not start stayed invisible until the
+    // next history fetch. Deliberately no push notification: worth seeing when
+    // the thread is open, not worth waking someone for.
+    if let Some(message_row) = notice_to_publish {
+        crate::conversations::publish_conversation_message_event(&state.events, &message_row);
+    }
     Ok(())
 }
 
@@ -987,6 +1228,115 @@ fn hosted_automation_provider_is_managed(provider: &str, configured_as_self_host
     !configured_as_self_hosted && !crate::provider_identifiers::is_self_hosted_provider_id(provider)
 }
 
+/// Scheduled runs cannot launch a self-hosted runtime on demand: the launch
+/// path requires an explicit owner-bound runtimeId that only a direct API
+/// caller can supply. When no live self-hosted runtime matched the automation,
+/// fail the run with an actionable operator message instead of leaking the
+/// launch-path refusal into lastError (instafy-dev/instafy#105).
+///
+/// The wording has to be specific about *which* machine. `select_viable_runtime_id`
+/// matches `provider = $2` exactly, so a runtime started on some other machine
+/// registers under a different provider and the next run fails identically —
+/// "start or repair the runtime" invited exactly that wasted trip. The frontend
+/// recognises SELF_HOSTED_LAUNCH_MARKER inside this sentence to offer the
+/// "How to start it" dialog, so the two must be edited together.
+#[cfg(test)]
+pub(crate) const SELF_HOSTED_LAUNCH_MARKER: &str =
+    "no self-hosted runtime was online for this space";
+
+/// Machine-readable causes for a launch failure. The frontend switches on these
+/// in packages/frontend/src/screens/studio/components/controllerConversationNotice.ts
+/// to pick a per-cause action; a code it does not know falls back to the generic
+/// one, so adding a code here is safe on its own. A test on each side pins the
+/// vocabulary, so renaming one half fails CI.
+pub(crate) const CODE_SELF_HOSTED_RUNTIME_OFFLINE: &str = "self_hosted_runtime_offline";
+pub(crate) const CODE_HOSTED_PROVIDER_UNSUPPORTED: &str = "hosted_provider_unsupported";
+pub(crate) const CODE_AUTOMATION_ACCESS_DENIED: &str = "automation_access_denied";
+pub(crate) const CODE_CONTROLLER_UNAVAILABLE: &str = "controller_unavailable";
+
+/// The prose plus, where we know it, a machine-readable cause. Before this the
+/// choke point took `Option<String>`, which forced every call site to flatten a
+/// perfectly good `ApiError` down to its message and throw the code away.
+pub(crate) struct AutomationLaunchFailure {
+    pub(crate) message: String,
+    pub(crate) code: Option<String>,
+}
+
+impl AutomationLaunchFailure {
+    /// A cause the controller states itself, with no upstream error behind it.
+    fn minted(message: impl Into<String>, code: &'static str) -> Self {
+        Self {
+            message: message.into(),
+            code: Some(code.to_string()),
+        }
+    }
+
+    /// Prefer the code the refusal already set; otherwise infer one from the
+    /// status, which is the only signal a bare `ApiError::new` leaves behind.
+    fn from_api_error(status: StatusCode, api_error: ApiError) -> Self {
+        Self {
+            message: api_error.message,
+            code: api_error
+                .code
+                .or_else(|| fallback_code_for_status(status).map(|code| code.to_string())),
+        }
+    }
+}
+
+/// The notice's `details` object.
+///
+/// `reason` must stay the literal "automation_launch_failed": the frontend's
+/// content resolver replaces the message with canned copy on any reason it does
+/// not recognise, so the cause goes in its own field. `failureCode` is omitted
+/// rather than null when unknown, which makes an uncoded new notice
+/// byte-identical to one written before this existed.
+fn build_launch_failure_details(
+    record: &AutomationRecord,
+    failure_code: Option<&str>,
+) -> JsonValue {
+    let mut details = json!({
+        "reason": "automation_launch_failed",
+        "automationId": record.id.to_string(),
+        "automationName": record.name,
+        // Re-running an automation is owner-gated
+        // (`can_access_owned_automation`) while this notice is visible to every
+        // conversation participant, so an owner-only action needs the owner id
+        // on the row to know whether it may render at all.
+        "automationOwnerId": record.user_id.to_string(),
+    });
+    if let (Some(code), Some(object)) = (failure_code, details.as_object_mut()) {
+        object.insert("failureCode".into(), JsonValue::String(code.to_string()));
+    }
+    details
+}
+
+/// The provider answered, but with a runtime id we cannot parse. Nothing the
+/// reader can press fixes that, so it carries the code that renders no button.
+fn unusable_runtime_id_failure(raw: &str, error: &uuid::Error) -> AutomationLaunchFailure {
+    AutomationLaunchFailure::minted(
+        format!("the runtime the provider returned could not be identified ({raw:?}): {error}"),
+        CODE_CONTROLLER_UNAVAILABLE,
+    )
+}
+
+fn fallback_code_for_status(status: StatusCode) -> Option<&'static str> {
+    match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND => {
+            Some(CODE_AUTOMATION_ACCESS_DENIED)
+        }
+        StatusCode::SERVICE_UNAVAILABLE => Some(CODE_CONTROLLER_UNAVAILABLE),
+        _ => None,
+    }
+}
+
+fn no_live_self_hosted_runtime_error(provider_is_self_hosted: bool) -> Option<&'static str> {
+    provider_is_self_hosted.then_some(
+        "no self-hosted runtime was online for this space; this schedule is pinned to a \
+         self-hosted machine, so start Instafy on that machine and the next scheduled run \
+         will pick it up",
+    )
+}
+
 async fn list_project_automations(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1027,6 +1377,11 @@ async fn list_project_automations(
     let project = crate::load_project_record(&transaction, &project_id).await?;
     crate::ensure_project_access(&transaction, &project, &access_context, None).await?;
 
+    // Automations are a property of the space: every space member sees the
+    // team-visible ones alongside their own, matching how the conversation
+    // list already shares non-private automation threads (#90). Active job
+    // tokens stay scoped to the automations their subject user owns.
+    let include_team_visible = active_job.is_none();
     let rows = transaction
         .query(
             "select id,
@@ -1042,9 +1397,11 @@ async fn list_project_automations(
 	                    by_hour,
 	                    by_minute,
 	                    timezone,
-                    runtime_mode,
-                    runtime_provider,
-                    conversation_id,
+	                    runtime_mode,
+	                    runtime_provider,
+	                    silent_when_nothing_to_report,
+	                    result_visibility,
+	                    conversation_id,
                     status,
                     locked_until,
                     last_run_at,
@@ -1053,9 +1410,10 @@ async fn list_project_automations(
                     created_at,
                     updated_at
              from automations
-             where project_id = $1 and user_id = $2
+             where project_id = $1
+               and (user_id = $2 or ($3 and result_visibility = 'team'))
              order by created_at desc",
-            &[&project_id, &user_id],
+            &[&project_id, &user_id, &include_team_visible],
         )
         .await
         .map_err(|error| internal_error(format!("failed to list automations: {error}")))?;
@@ -1123,6 +1481,8 @@ async fn get_automation(
                     timezone,
                     runtime_mode,
                     runtime_provider,
+                    silent_when_nothing_to_report,
+                    result_visibility,
                     conversation_id,
                     status,
                     locked_until,
@@ -1145,7 +1505,19 @@ async fn get_automation(
     if let Some(active_job) = active_job.as_ref() {
         active_job.ensure_project_id(&record.project_id)?;
     }
-    if !can_access_owned_automation(
+    // Plain user callers must clear project membership before any visibility
+    // logic runs, matching the list route's order. Answering visibility first
+    // would let a non-member probing automation ids distinguish a private
+    // automation ("automation not found") from a team-visible one (the
+    // project-access denial) — an enumeration oracle. Service-role and
+    // active-job callers keep the pre-existing check order unchanged.
+    let plain_user_caller = !access_context.is_service_role && active_job.is_none();
+    if plain_user_caller {
+        let project = crate::load_project_record(&transaction, &record.project_id).await?;
+        crate::ensure_project_access(&transaction, &project, &access_context, None).await?;
+    }
+    if !can_view_automation(
+        record.result_visibility.as_str(),
         record.user_id,
         user_id,
         access_context.is_service_role,
@@ -1153,9 +1525,10 @@ async fn get_automation(
     ) {
         return Err(crate::forbidden("automation not found"));
     }
-
-    let project = crate::load_project_record(&transaction, &record.project_id).await?;
-    crate::ensure_project_access(&transaction, &project, &access_context, None).await?;
+    if !plain_user_caller {
+        let project = crate::load_project_record(&transaction, &record.project_id).await?;
+        crate::ensure_project_access(&transaction, &project, &access_context, None).await?;
+    }
 
     transaction
         .commit()
@@ -1194,6 +1567,7 @@ async fn create_project_automation(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
     let status = normalize_status(body.status);
+    let result_visibility = normalize_result_visibility(body.result_visibility)?;
 
     let now = Utc::now();
 
@@ -1292,18 +1666,40 @@ async fn create_project_automation(
 
     let automation_id = Uuid::new_v4();
     let conversation_id = Uuid::new_v4();
-    let conversation_metadata =
-        build_automation_conversation_metadata(user_id, automation_id, name.as_str());
+    let conversation_visibility =
+        conversation_visibility_for_result_visibility(&result_visibility).to_string();
+    let conversation_metadata = build_automation_conversation_metadata(
+        user_id,
+        automation_id,
+        name.as_str(),
+        conversation_visibility.as_str(),
+    );
     let conversation_metadata_param = PgJson(&conversation_metadata);
 
     transaction
         .execute(
             "insert into conversations (id, project_id, created_by, metadata, visibility, thread_kind)
-             values ($1, $2, $3, $4::jsonb, 'private', 'automation')",
-            &[&conversation_id, &project_id, &user_id, &conversation_metadata_param],
+             values ($1, $2, $3, $4::jsonb, $5, 'automation')",
+            &[
+                &conversation_id,
+                &project_id,
+                &user_id,
+                &conversation_metadata_param,
+                &conversation_visibility,
+            ],
         )
         .await
         .map_err(|error| internal_error(format!("failed to insert automation conversation: {error}")))?;
+    // Home's feed: the scheduled conversation exists from now on.
+    crate::activity::record_conversation_created_raw(
+        &transaction,
+        &project_id,
+        &conversation_id,
+        Some(user_id),
+        Some(name.as_str()),
+        Some("automation"),
+    )
+    .await;
     transaction
         .execute(
             "insert into conversation_participants (conversation_id, user_id, role, added_by)
@@ -1334,10 +1730,12 @@ async fn create_project_automation(
 	                 timezone,
 	                 runtime_mode,
 	                 runtime_provider,
+	                 silent_when_nothing_to_report,
 	                 conversation_id,
 	                 status,
 	                 run_at,
-	                 next_run_at
+	                 next_run_at,
+	                 result_visibility
 	             ) values (
 	                 $1,
 	                 $2,
@@ -1356,7 +1754,9 @@ async fn create_project_automation(
 	                 $15,
 	                 $16,
 	                 $17,
-	                 $18
+	                 $18,
+	                 $19,
+	                 $20
 	             )
 	             returning id,
 	                       project_id,
@@ -1373,6 +1773,8 @@ async fn create_project_automation(
 	                       timezone,
                        runtime_mode,
                        runtime_provider,
+                       silent_when_nothing_to_report,
+                       result_visibility,
                        conversation_id,
                        status,
                        locked_until,
@@ -1396,10 +1798,12 @@ async fn create_project_automation(
                 &timezone,
                 &runtime_mode,
                 &runtime_provider,
+                &body.silent_when_nothing_to_report,
                 &conversation_id,
                 &status,
                 &run_at,
                 &next_run_at,
+                &result_visibility,
             ],
         )
         .await
@@ -1422,6 +1826,11 @@ async fn update_automation(
     let context = authenticate_request(&state.config, &headers).await?;
     let automation_id = Uuid::from_str(automation_id_raw.trim())
         .map_err(|_| bad_request("automationId must be a valid UUID"))?;
+    if body.is_empty() {
+        return Err(bad_request(
+            "at least one automation field must be provided",
+        ));
+    }
 
     let mut connection = state
         .pool
@@ -1468,9 +1877,11 @@ async fn update_automation(
 	                    by_hour,
 	                    by_minute,
 	                    timezone,
-                    runtime_mode,
-                    runtime_provider,
-                    conversation_id,
+	                    runtime_mode,
+	                    runtime_provider,
+	                    silent_when_nothing_to_report,
+	                    result_visibility,
+	                    conversation_id,
                     status,
                     locked_until,
                     last_run_at,
@@ -1605,6 +2016,17 @@ async fn update_automation(
         .filter(|value| !value.is_empty())
         .or(existing_record.runtime_provider.clone());
 
+    let silent_when_nothing_to_report = body
+        .silent_when_nothing_to_report
+        .unwrap_or(existing_record.silent_when_nothing_to_report);
+
+    let result_visibility = match body.result_visibility {
+        Some(value) => normalize_result_visibility(Some(value))?,
+        None => existing_record.result_visibility.clone(),
+    };
+    let conversation_visibility =
+        conversation_visibility_for_result_visibility(&result_visibility).to_string();
+
     let status = if body.status.is_some() {
         normalize_status(body.status).trim().to_string()
     } else {
@@ -1614,8 +2036,22 @@ async fn update_automation(
         return Err(bad_request("status must be active or paused"));
     }
 
+    // Only reschedule when the effective schedule or status changed. Editing the
+    // prompt, name, result visibility, or runtime settings must not push an
+    // active automation's next run further out.
+    let schedule_changed = schedule_kind != existing_record.schedule_kind
+        || interval_hours != existing_record.interval_hours
+        || by_day != existing_record.by_day
+        || by_hour != existing_record.by_hour
+        || by_minute != existing_record.by_minute
+        || timezone != existing_record.timezone
+        || run_at != existing_record.run_at;
+    let status_changed = status != existing_record.status;
+
     let now = Utc::now();
-    let next_run_at = if status == "active" {
+    let next_run_at = if status == "active"
+        && (schedule_changed || status_changed || existing_record.next_run_at.is_none())
+    {
         match schedule_kind.as_str() {
             "once" => {
                 let run_at = run_at.expect("once schedules require runAt");
@@ -1638,13 +2074,17 @@ async fn update_automation(
     };
 
     if let Some(conversation_id) = existing_record.conversation_id {
-        let meta =
-            build_automation_conversation_metadata(user_id, existing_record.id, name.as_str());
+        let meta = build_automation_conversation_metadata(
+            user_id,
+            existing_record.id,
+            name.as_str(),
+            conversation_visibility.as_str(),
+        );
         let meta_param = PgJson(&meta);
         transaction
             .execute(
-                "update conversations set metadata = $2::jsonb, updated_at = now() where id = $1",
-                &[&conversation_id, &meta_param],
+                "update conversations set metadata = $2::jsonb, visibility = $3, updated_at = now() where id = $1",
+                &[&conversation_id, &meta_param, &conversation_visibility],
             )
             .await
             .map_err(|error| {
@@ -1672,6 +2112,8 @@ async fn update_automation(
 	                 status = $13,
 	                 run_at = $14,
 	                 next_run_at = $15,
+	                 silent_when_nothing_to_report = $16,
+	                 result_visibility = $17,
 	                 updated_at = now()
 	             where id = $1
 	             returning id,
@@ -1689,6 +2131,8 @@ async fn update_automation(
 	                       timezone,
                        runtime_mode,
                        runtime_provider,
+                       silent_when_nothing_to_report,
+                       result_visibility,
                        conversation_id,
                        status,
                        locked_until,
@@ -1713,6 +2157,8 @@ async fn update_automation(
                 &status,
                 &run_at,
                 &next_run_at,
+                &silent_when_nothing_to_report,
+                &result_visibility,
             ],
         )
         .await
@@ -1851,9 +2297,11 @@ async fn run_automation_now(
 	                    by_hour,
 	                    by_minute,
 	                    timezone,
-                    runtime_mode,
-                    runtime_provider,
-                    conversation_id,
+	                    runtime_mode,
+	                    runtime_provider,
+	                    silent_when_nothing_to_report,
+	                    result_visibility,
+	                    conversation_id,
                     status,
                     locked_until,
                     last_run_at,
@@ -1921,10 +2369,20 @@ async fn run_automation_now(
 #[cfg(test)]
 mod tests {
     use super::{
-        automation_runtime_is_selectable, can_access_owned_automation,
-        hosted_automation_provider_is_managed, UpdateAutomationBody,
+        automation_runtime_is_selectable, build_launch_failure_details,
+        can_access_owned_automation, can_view_automation,
+        conversation_visibility_for_result_visibility, fallback_code_for_status,
+        hosted_automation_provider_is_managed, no_live_self_hosted_runtime_error,
+        normalize_result_visibility, unusable_runtime_id_failure, AutomationLaunchFailure,
+        AutomationRecord, UpdateAutomationBody, CODE_AUTOMATION_ACCESS_DENIED,
+        CODE_CONTROLLER_UNAVAILABLE, CODE_HOSTED_PROVIDER_UNSUPPORTED,
+        CODE_SELF_HOSTED_RUNTIME_OFFLINE, DEFAULT_TIMEZONE, RESULT_VISIBILITY_TEAM,
+        SELF_HOSTED_LAUNCH_MARKER,
     };
-    use serde_json::json;
+    use crate::errors::ApiError;
+    use axum::http::StatusCode;
+    use chrono::Utc;
+    use serde_json::{json, Value as JsonValue};
     use uuid::Uuid;
 
     #[test]
@@ -1935,6 +2393,29 @@ mod tests {
         assert!(!can_access_owned_automation(owner, actor, true, true));
         assert!(can_access_owned_automation(owner, actor, true, false));
         assert!(can_access_owned_automation(owner, owner, false, true));
+    }
+
+    #[test]
+    fn team_automations_are_viewable_by_non_owners_but_private_ones_are_not() {
+        let owner = Uuid::new_v4();
+        let teammate = Uuid::new_v4();
+
+        // A team-visible automation is readable by any authenticated caller
+        // that also passes the project membership gate.
+        assert!(can_view_automation("team", owner, teammate, false, false));
+        // Private automations stay creator-only.
+        assert!(!can_view_automation(
+            "private", owner, teammate, false, false
+        ));
+        // The creator always sees their own automation.
+        assert!(can_view_automation("private", owner, owner, false, false));
+        // Active job tokens stay pinned to their own automation even for
+        // team-visible records.
+        assert!(!can_view_automation("team", owner, teammate, false, true));
+        assert!(!can_view_automation("team", owner, teammate, true, true));
+        assert!(can_view_automation("team", owner, owner, false, true));
+        // Service role (non-job) retains full read access.
+        assert!(can_view_automation("private", owner, teammate, true, false));
     }
 
     #[test]
@@ -1959,6 +2440,114 @@ mod tests {
             ..UpdateAutomationBody::default()
         }
         .is_status_only());
+        assert!(!UpdateAutomationBody {
+            status: Some("active".to_string()),
+            silent_when_nothing_to_report: Some(true),
+            ..UpdateAutomationBody::default()
+        }
+        .is_status_only());
+        assert!(!UpdateAutomationBody {
+            status: Some("active".to_string()),
+            result_visibility: Some("team".to_string()),
+            ..UpdateAutomationBody::default()
+        }
+        .is_status_only());
+    }
+
+    #[test]
+    fn result_visibility_defaults_private_and_validates_enum() {
+        assert_eq!(normalize_result_visibility(None).unwrap(), "private");
+        assert_eq!(
+            normalize_result_visibility(Some("  Team ".to_string())).unwrap(),
+            "team"
+        );
+        assert_eq!(
+            normalize_result_visibility(Some("PRIVATE".to_string())).unwrap(),
+            "private"
+        );
+
+        let error = normalize_result_visibility(Some("public".to_string()))
+            .expect_err("public is not a valid automation result visibility word");
+        assert_eq!(error.0, axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn team_result_visibility_maps_to_public_conversation_visibility() {
+        // `team` is the product word; the conversation layer stores it as `public`,
+        // which the conversation list gate exposes to anyone with project access.
+        assert_eq!(
+            conversation_visibility_for_result_visibility("team"),
+            "public"
+        );
+        assert_eq!(
+            conversation_visibility_for_result_visibility("private"),
+            "private"
+        );
+        // Unknown values fail closed to owner-only private.
+        assert_eq!(
+            conversation_visibility_for_result_visibility("bogus"),
+            "private"
+        );
+    }
+
+    #[test]
+    fn automation_result_visibility_defaults_private_and_accepts_team_opt_in() {
+        let defaulted: super::CreateAutomationBody = serde_json::from_value(json!({
+            "name": "Daily check",
+            "scheduleKind": "hourly"
+        }))
+        .expect("deserialize default automation result visibility");
+        assert!(defaulted.result_visibility.is_none());
+        assert_eq!(
+            normalize_result_visibility(defaulted.result_visibility).unwrap(),
+            "private"
+        );
+
+        let opted_in: super::CreateAutomationBody = serde_json::from_value(json!({
+            "name": "Daily check",
+            "scheduleKind": "hourly",
+            "resultVisibility": "team"
+        }))
+        .expect("deserialize automation result visibility opt-in");
+        assert_eq!(opted_in.result_visibility.as_deref(), Some("team"));
+    }
+
+    #[test]
+    fn automation_update_body_is_empty_only_without_any_field() {
+        assert!(UpdateAutomationBody::default().is_empty());
+        assert!(!UpdateAutomationBody {
+            status: Some("paused".to_string()),
+            ..UpdateAutomationBody::default()
+        }
+        .is_empty());
+        assert!(!UpdateAutomationBody {
+            prompt_text: Some("Report dependency changes.".to_string()),
+            ..UpdateAutomationBody::default()
+        }
+        .is_empty());
+        assert!(!UpdateAutomationBody {
+            silent_when_nothing_to_report: Some(false),
+            ..UpdateAutomationBody::default()
+        }
+        .is_empty());
+    }
+
+    #[test]
+    fn automation_silence_defaults_off_and_accepts_explicit_opt_in() {
+        let defaulted: super::CreateAutomationBody = serde_json::from_value(json!({
+            "name": "Daily check",
+            "scheduleKind": "hourly"
+        }))
+        .expect("deserialize default automation silence");
+        assert!(!defaulted.silent_when_nothing_to_report);
+
+        let opted_in: super::CreateAutomationBody = serde_json::from_value(json!({
+            "name": "Daily check",
+            "scheduleKind": "hourly",
+            "silentWhenNothingToReport": true
+        }))
+        .expect("deserialize automation silence opt-in");
+        assert!(opted_in.silent_when_nothing_to_report);
     }
 
     #[test]
@@ -2005,6 +2594,28 @@ mod tests {
     }
 
     #[test]
+    fn auto_dispatch_without_live_self_hosted_runtime_fails_with_operator_message() {
+        // Pin the exact wording: it becomes the automation's lastError and must
+        // point the operator at the offline runtime, not at a runtimeId field
+        // (instafy-dev/instafy#105).
+        assert_eq!(
+            no_live_self_hosted_runtime_error(true),
+            Some(
+                "no self-hosted runtime was online for this space; this schedule is pinned to a \
+                 self-hosted machine, so start Instafy on that machine and the next scheduled run \
+                 will pick it up"
+            )
+        );
+        // The frontend keys its "How to start it" action off this substring;
+        // editing the sentence without editing controllerConversationNotice.ts
+        // silently drops the button.
+        assert!(no_live_self_hosted_runtime_error(true)
+            .is_some_and(|message| message.contains(SELF_HOSTED_LAUNCH_MARKER)));
+        // Managed providers keep falling through to the launch path.
+        assert_eq!(no_live_self_hosted_runtime_error(false), None);
+    }
+
+    #[test]
     fn hosted_automation_mode_rejects_builtin_and_custom_self_hosted_providers() {
         assert!(!hosted_automation_provider_is_managed("self-hosted", true,));
         assert!(!hosted_automation_provider_is_managed(
@@ -2015,5 +2626,138 @@ mod tests {
             "instafy-cloud",
             false,
         ));
+    }
+
+    fn launch_failure_record() -> AutomationRecord {
+        let now = Utc::now();
+        AutomationRecord {
+            id: Uuid::nil(),
+            project_id: Uuid::nil(),
+            user_id: Uuid::nil(),
+            name: "Weekly receipts".to_string(),
+            prompt_text: String::new(),
+            metadata: JsonValue::Null,
+            schedule_kind: "interval".to_string(),
+            run_at: None,
+            interval_hours: Some(24),
+            by_day: Vec::new(),
+            by_hour: None,
+            by_minute: None,
+            timezone: DEFAULT_TIMEZONE.to_string(),
+            runtime_mode: "auto".to_string(),
+            runtime_provider: None,
+            silent_when_nothing_to_report: false,
+            result_visibility: RESULT_VISIBILITY_TEAM.to_string(),
+            conversation_id: None,
+            status: "active".to_string(),
+            locked_until: None,
+            last_run_at: None,
+            next_run_at: None,
+            last_error: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn launch_failure_prefers_the_code_the_refusal_already_set() {
+        // The whole point of the carrier: these codes existed upstream and were
+        // being thrown away when the call site flattened the error to prose.
+        let failure = AutomationLaunchFailure::from_api_error(
+            StatusCode::PAYMENT_REQUIRED,
+            ApiError::with_details("out of credits", "insufficient_credits", json!({})),
+        );
+        assert_eq!(failure.code.as_deref(), Some("insufficient_credits"));
+        assert_eq!(failure.message, "out of credits");
+    }
+
+    #[test]
+    fn launch_failure_falls_back_to_the_status_when_no_code_was_set() {
+        // A bare ApiError::new leaves the status as the only signal.
+        for (status, expected) in [
+            (StatusCode::FORBIDDEN, Some(CODE_AUTOMATION_ACCESS_DENIED)),
+            (StatusCode::NOT_FOUND, Some(CODE_AUTOMATION_ACCESS_DENIED)),
+            (
+                StatusCode::UNAUTHORIZED,
+                Some(CODE_AUTOMATION_ACCESS_DENIED),
+            ),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Some(CODE_CONTROLLER_UNAVAILABLE),
+            ),
+            (StatusCode::INTERNAL_SERVER_ERROR, None),
+        ] {
+            assert_eq!(
+                fallback_code_for_status(status),
+                expected,
+                "status {status}"
+            );
+            let failure =
+                AutomationLaunchFailure::from_api_error(status, ApiError::new("something broke"));
+            assert_eq!(failure.code.as_deref(), expected, "status {status}");
+        }
+    }
+
+    #[test]
+    fn launch_failure_details_keep_the_reason_the_frontend_matches_on() {
+        // Changing `reason` would route the notice into the frontend's default
+        // arm, which replaces the controller's sentence with canned copy.
+        let record = launch_failure_record();
+        for code in [None, Some(CODE_SELF_HOSTED_RUNTIME_OFFLINE)] {
+            let details = build_launch_failure_details(&record, code);
+            assert_eq!(
+                details.get("reason").and_then(JsonValue::as_str),
+                Some("automation_launch_failed")
+            );
+        }
+    }
+
+    #[test]
+    fn launch_failure_details_omit_the_code_rather_than_writing_null() {
+        // An uncoded new notice must be byte-identical to a legacy one, so the
+        // frontend has two shapes to handle, not three.
+        let record = launch_failure_record();
+        let uncoded = build_launch_failure_details(&record, None);
+        assert!(!uncoded
+            .as_object()
+            .expect("details object")
+            .contains_key("failureCode"));
+
+        let coded = build_launch_failure_details(&record, Some(CODE_SELF_HOSTED_RUNTIME_OFFLINE));
+        assert_eq!(
+            coded.get("failureCode").and_then(JsonValue::as_str),
+            Some("self_hosted_runtime_offline")
+        );
+    }
+
+    #[test]
+    fn launch_failure_codes_match_the_frontend_vocabulary() {
+        // Mirrored in
+        // packages/frontend/src/screens/studio/components/controllerConversationNotice.ts.
+        // A rename on one side must fail CI rather than silently drop a button.
+        assert_eq!(
+            CODE_SELF_HOSTED_RUNTIME_OFFLINE,
+            "self_hosted_runtime_offline"
+        );
+        assert_eq!(
+            CODE_HOSTED_PROVIDER_UNSUPPORTED,
+            "hosted_provider_unsupported"
+        );
+        assert_eq!(CODE_AUTOMATION_ACCESS_DENIED, "automation_access_denied");
+        assert_eq!(CODE_CONTROLLER_UNAVAILABLE, "controller_unavailable");
+    }
+
+    #[test]
+    fn an_unusable_provider_runtime_id_is_recorded_rather_than_swallowed() {
+        // This used to bail with `?`, so the schedule showed no last_error, no
+        // notice and no ledger row — it just looked like nothing had run.
+        let error = Uuid::parse_str("not-a-uuid").expect_err("must not parse");
+        let failure = unusable_runtime_id_failure("not-a-uuid", &error);
+
+        assert_eq!(failure.code.as_deref(), Some(CODE_CONTROLLER_UNAVAILABLE));
+        assert!(failure.message.contains("not-a-uuid"));
+        // The card renders no button for this code: nothing the reader presses
+        // fixes a provider that answered with an id we cannot parse.
+        assert_eq!(CODE_CONTROLLER_UNAVAILABLE, "controller_unavailable");
     }
 }

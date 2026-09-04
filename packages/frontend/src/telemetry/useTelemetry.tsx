@@ -33,6 +33,10 @@ export function useTelemetry() {
 
       let message: string | null = null;
       let intent: StatusIntent = "info";
+      // This hook runs inside RuntimeOperationsProvider, which is mounted above
+      // WorkspaceTabsProvider, so it cannot open a tab itself. Toasts that name a
+      // destination ask the workspace for it through a window event instead.
+      let toastOptions: { actionLabel: string; onAction: () => void } | undefined;
 
       if (kind === "runtime.login") {
         return;
@@ -123,8 +127,14 @@ export function useTelemetry() {
         if (reason === "no_runtime_connected") {
           message =
             providedMessage ??
-            "No runtime is connected. Start or reconnect a runtime from Runtime & AI to process queued jobs.";
+            "No runtime is connected. Open Machines to start one and process queued jobs.";
           intent = "error";
+          toastOptions = {
+            actionLabel: "Open Machines",
+            onAction: () => {
+              window.dispatchEvent(new CustomEvent("instafy:open-machines"));
+            },
+          };
         } else {
           message =
             providedMessage ??
@@ -137,7 +147,7 @@ export function useTelemetry() {
       }
 
       if (message) {
-        showStatus(message, intent, 6000);
+        showStatus(message, intent, toastOptions ? 9000 : 6000, toastOptions);
       }
     },
     [showStatus]

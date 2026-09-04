@@ -4,6 +4,7 @@ import {
   Clock,
   Coins,
   Cpu,
+  Cube,
   DotsGrid3x3,
   Folder,
   GitBranch,
@@ -181,6 +182,11 @@ export const PANEL_META: Record<
   automations: {
     title: "Automations",
     icon: <Clock className={TAB_ICON_CLASS} aria-hidden="true" />,
+    closable: true,
+  },
+  machines: {
+    title: "Machines",
+    icon: <Cube className={TAB_ICON_CLASS} aria-hidden="true" />,
     closable: true,
   },
   sourceControl: {

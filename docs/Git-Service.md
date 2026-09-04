@@ -92,14 +92,6 @@ git clone "<git-base>/<uuid>.git"
 
 `instafy login` installs a git credential helper which mints short-lived scoped tokens automatically when Git asks for credentials.
 
-Advanced (mint token + clone):
-
-```bash
-instafy api post "/projects/<uuid>/git/access_token" --access-token "$INSTAFY_ACCESS_TOKEN" --json '{"scopes":["git.read","git.write"],"ttlSeconds":600}'
-# copy the `token` field from the response:
-git -c "http.extraHeader=Authorization: Bearer <token>" clone "<git-base>/<uuid>.git"
-```
-
 ### Controller-only disposable repository cleanup
 
 Trusted backend automation can remove an exact disposable project repository without SSH access

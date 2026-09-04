@@ -13,9 +13,9 @@ use codex_core::config::{
 };
 use codex_core::test_support::EmptyUserInstructionsProvider;
 use codex_core::{
-    CodexAppsToolsCache, CodexThread, NewThread, ThreadManager, build_models_manager,
-    init_state_db, local_agent_graph_store_from_state_db, resolve_installation_id,
-    thread_store_from_config,
+    CodexAppsToolsCache, CodexThread, NewThread, SteerInputError, ThreadManager,
+    build_models_manager, init_state_db, local_agent_graph_store_from_state_db,
+    resolve_installation_id, thread_store_from_config,
 };
 use codex_exec_server::{EnvironmentManager, LOCAL_ENVIRONMENT_ID, LOCAL_FS};
 use codex_extension_api::empty_extension_registry;
@@ -44,6 +44,10 @@ use serde_json::{Value as JsonValue, json};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
+use crate::active_turn_input::{
+    ActiveTurnInputCommand, ActiveTurnInputOutcome, ActiveTurnInputReceiver,
+};
+
 use crate::job_cancel::JobCancelSignal;
 use crate::model_environment::{
     INTERNAL_CREDENTIAL_ENV_KEYS, MODEL_CHILD_ONLY_EXCLUDED_ENV_KEYS,
@@ -66,7 +70,7 @@ use crate::shared_browser::{
     TRUSTED_NODE_MODULES_ROOT_ENV as SHARED_BROWSER_TRUSTED_NODE_MODULES_ROOT_ENV,
 };
 
-const DEFAULT_CODEX_MODEL: &str = "gpt-5.5";
+const DEFAULT_CODEX_MODEL: &str = "gpt-5.6-sol";
 const DEFAULT_CODEX_RUN_TIMEOUT_SECONDS: u64 = 600;
 const DEFAULT_CODEX_MAX_RUN_RETRIES: usize = 1;
 const DEFAULT_CODEX_RETRY_BASE_DELAY_MS: u64 = 1500;
@@ -592,6 +596,7 @@ pub struct CodexRunOptions {
     pub plain_text_write_mode: bool,
     pub require_first_tool_call: bool,
     pub cancel_signal: Option<JobCancelSignal>,
+    pub active_turn_input: Option<ActiveTurnInputReceiver>,
 }
 
 async fn run_on_fresh_task<T, F>(future: F) -> T
@@ -1158,6 +1163,21 @@ impl CodexClient {
             );
             config.model_reasoning_effort = Some(target);
         }
+        // A per-agent reasoning effort (the controller emits it as
+        // CODEX_AGENT_REASONING_EFFORT from the agent's `reasoning_effort` column)
+        // wins over the runtime clamp and the per-job heuristic above. Applied last
+        // so it is authoritative; when the env is absent/empty/unparseable this is a
+        // no-op and the existing per-job / global behavior is preserved untouched.
+        if let Some(agent_effort) = agent_reasoning_effort_override()
+            && config.model_reasoning_effort.as_ref() != Some(&agent_effort)
+        {
+            tracing::info!(
+                from = ?config.model_reasoning_effort,
+                to = ?agent_effort,
+                "applied per-agent Codex reasoning effort override"
+            );
+            config.model_reasoning_effort = Some(agent_effort);
+        }
         if options.disable_shell_tool {
             // For browser-session jobs we want MCP-first behavior and to avoid shell-script fallbacks.
             // Disable both shell modes (legacy shell + unified exec) and freeform patching.
@@ -1452,7 +1472,7 @@ impl CodexClient {
         });
 
         let bounded_browser_mode = personal_browser_mode || shared_browser_mode;
-        conversation
+        let active_turn_id = conversation
             .submit(Op::UserInput {
                 items,
                 final_output_json_schema,
@@ -1496,18 +1516,55 @@ impl CodexClient {
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(5usize);
         let mut stream_error_count: usize = 0;
+        let mut active_turn_input = options.active_turn_input.clone();
+        let mut active_turn_input_readiness: Option<ActiveTurnInputReadinessGuard> = None;
 
         loop {
-            let event = next_codex_event(
-                &conversation,
-                cancel_signal.as_ref(),
-                options.shared_browser,
-            )
-            .await?;
+            let event = if let Some(receiver) = active_turn_input.as_ref() {
+                tokio::select! {
+                    command = receiver.recv() => {
+                        match command {
+                            Some(command) => {
+                                apply_active_turn_input(&conversation, command).await;
+                                continue;
+                            }
+                            None => {
+                                active_turn_input = None;
+                                continue;
+                            }
+                        }
+                    }
+                    event = next_codex_event(
+                        &conversation,
+                        cancel_signal.as_ref(),
+                        options.shared_browser,
+                    ) => event?,
+                }
+            } else {
+                next_codex_event(
+                    &conversation,
+                    cancel_signal.as_ref(),
+                    options.shared_browser,
+                )
+                .await?
+            };
             if browser_mode && bool_from_env("CODEX_DEBUG_BROWSER_EVENTS").unwrap_or(false) {
                 eprintln!("[codex-browser-events] event_msg={:?}", &event.msg);
             }
             tracing::debug!(msg = ?event.msg, "received Codex event");
+
+            // `submit` only confirms that the Op reached Codex's channel. Do
+            // not advertise steering until Codex proves that this exact
+            // submission ID became the live regular turn.
+            if active_turn_input_readiness.is_none()
+                && event.id == active_turn_id
+                && matches!(&event.msg, EventMsg::TurnStarted(_))
+            {
+                active_turn_input_readiness = Some(ActiveTurnInputReadinessGuard::new(
+                    options.active_turn_input.clone(),
+                    &active_turn_id,
+                ));
+            }
 
             collect_events(&mut aggregator, &event, &mut events, on_event)?;
 
@@ -1584,8 +1641,13 @@ impl CodexClient {
                             }
                             _ => None,
                         });
-                    let fail_fast = matches!(stream_status_code, Some(401 | 403));
-                    if fatal_stream_error.is_none() && fail_fast {
+                    if fatal_stream_error.is_none()
+                        && should_terminate_codex_stream(
+                            stream_status_code,
+                            stream_error_count,
+                            max_stream_retries,
+                        )
+                    {
                         fatal_stream_error = err
                             .additional_details
                             .clone()
@@ -1601,19 +1663,19 @@ impl CodexClient {
                     }
 
                     stream_error_count = stream_error_count.saturating_add(1);
-                    let is_fatal_message = err.message.contains("error sending request for url");
-                    let exceeded_retries = stream_error_count > max_stream_retries;
-                    if fatal_stream_error.is_none() && (is_fatal_message || exceeded_retries) {
-                        let message = if is_fatal_message {
-                            err.message.clone()
-                        } else {
-                            format!(
-                                "Codex stream aborted after {} retries (limit {}): {}",
-                                stream_error_count.saturating_sub(1),
-                                max_stream_retries,
-                                err.message
-                            )
-                        };
+                    if fatal_stream_error.is_none()
+                        && should_terminate_codex_stream(
+                            stream_status_code,
+                            stream_error_count,
+                            max_stream_retries,
+                        )
+                    {
+                        let message = format!(
+                            "Codex stream aborted after {} retries (limit {}): {}",
+                            stream_error_count.saturating_sub(1),
+                            max_stream_retries,
+                            err.message
+                        );
                         fatal_stream_error = Some(message);
                         if !options.shared_browser && !shutdown_requested {
                             conversation
@@ -1708,6 +1770,63 @@ impl CodexClient {
 
         run_result
     }
+}
+
+struct ActiveTurnInputReadinessGuard {
+    receiver: Option<ActiveTurnInputReceiver>,
+}
+
+impl ActiveTurnInputReadinessGuard {
+    fn new(receiver: Option<ActiveTurnInputReceiver>, turn_id: &str) -> Self {
+        if let Some(receiver) = receiver.as_ref() {
+            receiver.set_ready(Some(turn_id.to_string()));
+        }
+        Self { receiver }
+    }
+}
+
+impl Drop for ActiveTurnInputReadinessGuard {
+    fn drop(&mut self) {
+        if let Some(receiver) = self.receiver.as_ref() {
+            receiver.set_ready(None);
+        }
+    }
+}
+
+async fn apply_active_turn_input(conversation: &CodexThread, command: ActiveTurnInputCommand) {
+    let command_id = command.command_id;
+    let items = vec![UserInput::Text {
+        text: command.content.clone(),
+        text_elements: Vec::new(),
+    }];
+    let outcome = match conversation
+        .steer_input(
+            items,
+            Default::default(),
+            Some(&command.expected_turn_id),
+            Some(command_id.to_string()),
+            None,
+        )
+        .await
+    {
+        Ok(codex_turn_id) => ActiveTurnInputOutcome::Applied { codex_turn_id },
+        Err(error) => {
+            let error_message = match error {
+                SteerInputError::NoActiveTurn(_) => "Codex turn completed before input submission",
+                SteerInputError::ExpectedTurnMismatch { .. } => {
+                    "Codex active turn changed before input submission"
+                }
+                SteerInputError::ActiveTurnNotSteerable { .. } => {
+                    "Codex active turn does not accept steering input"
+                }
+                SteerInputError::EmptyInput => "Codex rejected empty steering input",
+            };
+            ActiveTurnInputOutcome::Rejected {
+                error_message: error_message.to_string(),
+            }
+        }
+    };
+    command.acknowledge(outcome);
 }
 
 async fn confirm_shared_browser_shutdown(conversation: &CodexThread) -> Result<()> {
@@ -2717,6 +2836,24 @@ fn clamp_runtime_reasoning_effort(config: &mut Config) {
     }
 }
 
+/// Parse the per-agent reasoning effort the controller emits as
+/// `CODEX_AGENT_REASONING_EFFORT`. Only the four supported values
+/// (minimal|low|medium|high, case-insensitive) are honored, mapping to the real
+/// `ReasoningEffort` variants; anything else (including unset/empty) yields None
+/// so callers fall back to the existing per-job / global reasoning behavior.
+/// Note: we intentionally match explicitly rather than `str::parse::<ReasoningEffort>()`,
+/// whose FromStr is case-sensitive and coerces unknown strings into a Custom variant.
+fn agent_reasoning_effort_override() -> Option<ReasoningEffort> {
+    let raw = optional_env("CODEX_AGENT_REASONING_EFFORT")?;
+    match raw.to_ascii_lowercase().as_str() {
+        "minimal" => Some(ReasoningEffort::Minimal),
+        "low" => Some(ReasoningEffort::Low),
+        "medium" => Some(ReasoningEffort::Medium),
+        "high" => Some(ReasoningEffort::High),
+        _ => None,
+    }
+}
+
 fn cleanup_workspace_local_shell_snapshots(workspace_dir: &Path) {
     let mut codex_homes = HashSet::from([
         workspace_dir.join(".codex"),
@@ -3441,6 +3578,15 @@ fn should_retry_codex_run(message: &str) -> bool {
         || normalized.contains("codex turn aborted")
 }
 
+fn should_terminate_codex_stream(
+    http_status_code: Option<u16>,
+    stream_error_count: usize,
+    max_stream_retries: usize,
+) -> bool {
+    // Transport disconnects are retried by Codex itself; only auth failures bypass that budget.
+    matches!(http_status_code, Some(401 | 403)) || stream_error_count > max_stream_retries
+}
+
 fn resolve_codex_home(workspace_dir: &Path) -> PathBuf {
     optional_env("CODEX_HOME")
         .map(PathBuf::from)
@@ -4108,12 +4254,18 @@ mod tests {
 
     #[test]
     fn normalize_runtime_codex_model_id_migrates_retired_codex_slugs() {
-        assert_eq!(normalize_runtime_codex_model_id("gpt-5-codex"), "gpt-5.5");
-        assert_eq!(normalize_runtime_codex_model_id("gpt-5.2"), "gpt-5.5");
-        assert_eq!(normalize_runtime_codex_model_id("gpt-5.3-codex"), "gpt-5.5");
-        assert_eq!(normalize_runtime_codex_model_id("gpt-5.3"), "gpt-5.5");
-        assert_eq!(normalize_runtime_codex_model_id("gpt-5.4"), "gpt-5.5");
-        assert_eq!(normalize_runtime_codex_model_id("  "), "gpt-5.5");
+        assert_eq!(
+            normalize_runtime_codex_model_id("gpt-5-codex"),
+            "gpt-5.6-sol"
+        );
+        assert_eq!(normalize_runtime_codex_model_id("gpt-5.2"), "gpt-5.6-sol");
+        assert_eq!(
+            normalize_runtime_codex_model_id("gpt-5.3-codex"),
+            "gpt-5.6-sol"
+        );
+        assert_eq!(normalize_runtime_codex_model_id("gpt-5.3"), "gpt-5.6-sol");
+        assert_eq!(normalize_runtime_codex_model_id("gpt-5.4"), "gpt-5.6-sol");
+        assert_eq!(normalize_runtime_codex_model_id("  "), "gpt-5.6-sol");
     }
 
     #[test]
@@ -4604,6 +4756,19 @@ mod tests {
             "unexpected status 429 Too Many Requests"
         ));
         assert!(should_retry_codex_run("Codex turn aborted (interrupted)"));
+    }
+
+    #[test]
+    fn transient_stream_transport_errors_use_the_bounded_retry_budget() {
+        assert!(!should_terminate_codex_stream(None, 0, 5));
+        assert!(!should_terminate_codex_stream(None, 5, 5));
+        assert!(should_terminate_codex_stream(None, 6, 5));
+    }
+
+    #[test]
+    fn stream_auth_errors_still_fail_fast() {
+        assert!(should_terminate_codex_stream(Some(401), 0, 5));
+        assert!(should_terminate_codex_stream(Some(403), 0, 5));
     }
 
     #[test]

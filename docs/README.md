@@ -5,6 +5,7 @@ These docs reflect the current product scope: a chat-first filesystem workspace 
 ## Maps
 - Product overview: `docs/Product.md`
 - Brand colors, logo variants, and asset rules: `docs/Brand.md`
+- Scheduled automations and quiet runs: `docs/Automations.md`
 - Runtime architecture: `docs/Architecture.md`
 - Runtime pooling plan (shared vs dedicated): `docs/runtime-plan-shared-vs-dedicated.md`
 - Git-canonical storage: `docs/Git-Service.md`
@@ -13,6 +14,8 @@ These docs reflect the current product scope: a chat-first filesystem workspace 
 - Chat-first onboarding + benchmarking: `docs/Onboarding-Benchmarking.md`
 - /learn and benchmark system: `docs/Learn-Benchmarking.md`
 - Multi-agent evaluation: `docs/Multi-Agent-Evaluation.md`
+- AI-driven diagnostics and support consent: `docs/Agent-Diagnostics.md`
+- npm package versioning and release automation: `docs/Package-Releases.md`
 - Credits and billing: `docs/Credits-Billing.md`
 - Local development: `docs/Local-Dev.md`
 - Testing: `docs/Testing.md`

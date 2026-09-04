@@ -1,8 +1,10 @@
-import { DialogTrigger } from "react-aria-components";
+import { Group } from "iconoir-react";
 import { Button } from "../../../components/Button";
-import { Text } from "../../../components/Text";
-import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
+import {
+  toggleParticipantsDrawer,
+  useParticipantsDrawerOpen,
+} from "./chatParticipantsStore";
 import type {
   ConversationRosterAgent,
   ConversationRosterHuman,
@@ -13,31 +15,47 @@ const MAX_STACK_AVATARS = 5;
 /**
  * "Who is in this room": a compact overlapping avatar stack pinned to the top
  * right of the conversation surface — humans first, then AI participants —
- * with a "+N" overflow after
- * {@link MAX_STACK_AVATARS}. Clicking it opens a popover listing every member;
- * AI members carry a muted "AI · listening" descriptor, which absorbs the old
- * OctoPresenceChip semantics: in skill-mode group conversations agents
- * evaluate every ambient turn and usually stay silent, and this is the quiet
- * trace of that. The roster is static presence — it never hides while someone
- * is typing (the typing indicator is a separate surface).
+ * with a "+N" overflow after {@link MAX_STACK_AVATARS}. It is the entry point
+ * for the participants drawer: clicking it opens/closes the drawer (which
+ * lists every member with their model, credential, and status, plus the shared
+ * budget). An amber dot rides the stack when an agent's credential needs
+ * attention, so that state is visible without opening anything.
  *
- * Styling is deliberately ambient: the trigger is a bare, transparent avatar
- * stack (no panel, border, shadow or blur) so it reads as passive information
- * rather than a control. Each avatar carries a thin ring painted in the chat
- * surface's own background — white in light mode, `--color-studio-dark-panel`
- * in dark (see the workspace surface in StudioLayout) — purely to separate
- * overlapping faces.
+ * Styling is deliberately ambient: a bare, transparent avatar stack (no panel,
+ * border, shadow or blur) so it reads as passive information with a control
+ * affordance. Each avatar carries a thin ring painted in the chat surface's
+ * own background to separate overlapping faces.
  */
 export function ConversationRoster({
   agents,
   humans,
+  hasCredentialWarning = false,
 }: {
   agents: readonly ConversationRosterAgent[];
   humans: readonly ConversationRosterHuman[];
+  hasCredentialWarning?: boolean;
 }) {
+  const drawerOpen = useParticipantsDrawerOpen();
   const totalCount = humans.length + agents.length;
+  // Persistent entry point: even before anyone has joined (a brand-new chat),
+  // keep a plain icon so the participants/config panel is always reachable —
+  // otherwise there is no way to open it until a member appears.
   if (totalCount === 0) {
-    return null;
+    return (
+      <Button
+        type="button"
+        variant="ghost"
+        size="xs"
+        radius="full"
+        aria-label="Open participants"
+        aria-expanded={drawerOpen}
+        data-testid="conversation-roster"
+        onPress={() => toggleParticipantsDrawer()}
+        className="border-0 bg-transparent px-1 py-0.5 text-slate-400 shadow-none hover:text-slate-600 data-[hovered]:text-slate-600 dark:text-slate-500 dark:hover:text-slate-300 dark:data-[hovered]:text-slate-300"
+      >
+        <Group className="h-4 w-4" aria-hidden="true" />
+      </Button>
+    );
   }
 
   const stackEntries = [
@@ -62,89 +80,42 @@ export function ConversationRoster({
   const overflowCount = totalCount - visibleStackEntries.length;
 
   return (
-    <DialogTrigger>
-      <Button
-        type="button"
-        variant="ghost"
-        size="xs"
-        radius="full"
-        aria-label={`Conversation members (${totalCount})`}
-        data-testid="conversation-roster"
-        className="gap-1 border-0 bg-transparent px-1 py-0.5 shadow-none"
-      >
-        <span className="flex items-center -space-x-1.5">
-          {visibleStackEntries.map((entry) => (
-            <span
-              key={entry.key}
-              className="rounded-full ring-1 ring-white dark:ring-[var(--color-studio-dark-panel)]"
-            >
-              {entry.avatar}
-            </span>
-          ))}
-        </span>
-        {overflowCount > 0 ? (
+    <Button
+      type="button"
+      variant="ghost"
+      size="xs"
+      radius="full"
+      aria-label={`Conversation members (${totalCount})`}
+      aria-expanded={drawerOpen}
+      data-testid="conversation-roster"
+      onPress={() => toggleParticipantsDrawer()}
+      className="relative gap-1 border-0 bg-transparent px-1 py-0.5 shadow-none"
+    >
+      <span className="flex items-center -space-x-1.5">
+        {visibleStackEntries.map((entry) => (
           <span
-            className="pr-0.5 text-xxs font-medium text-slate-500 dark:text-slate-400"
-            data-testid="conversation-roster-overflow"
+            key={entry.key}
+            className="rounded-full ring-1 ring-white dark:ring-[var(--color-studio-dark-panel)]"
           >
-            +{overflowCount}
+            {entry.avatar}
           </span>
-        ) : null}
-      </Button>
-      <StudioDialogPopover placement="bottom end" offset={6} className="w-64 overflow-hidden p-0">
-        <div
-          data-testid="conversation-roster-popover"
-          className="max-h-80 overflow-y-auto p-2"
+        ))}
+      </span>
+      {overflowCount > 0 ? (
+        <span
+          className="pr-0.5 text-xxs font-medium text-slate-500 dark:text-slate-400"
+          data-testid="conversation-roster-overflow"
         >
-          <ul className="space-y-0.5">
-            {humans.map((human) => (
-              <li
-                key={`human:${human.userId}`}
-                className="flex items-center gap-2.5 rounded-xl px-2 py-1.5"
-                data-testid="conversation-roster-human"
-              >
-                <ChatMessageAvatar
-                  kind="human"
-                  seed={human.userId}
-                  label={human.label}
-                  size="xs"
-                />
-                <div className="min-w-0 flex-1">
-                  <Text as="div" variant="bodyStrong" tone="inherit" className="truncate text-sm">
-                    {human.label}
-                  </Text>
-                  {human.isSelf && human.label !== "You" ? (
-                    <Text as="div" variant="caption" tone="muted" className="text-xs">
-                      You
-                    </Text>
-                  ) : null}
-                </div>
-              </li>
-            ))}
-            {agents.map((agent) => (
-              <li
-                key={`agent:${agent.handle}`}
-                className="flex items-center gap-2.5 rounded-xl px-2 py-1.5"
-                data-testid="conversation-roster-agent"
-              >
-                <ChatMessageAvatar
-                  kind="assistant"
-                  agent={{ handle: agent.handle, avatarSeed: agent.avatarSeed }}
-                  size="xs"
-                />
-                <div className="min-w-0 flex-1">
-                  <Text as="div" variant="bodyStrong" tone="inherit" className="truncate text-sm">
-                    {agent.displayName}
-                  </Text>
-                  <Text as="div" variant="caption" tone="muted" className="text-xs">
-                    AI · listening
-                  </Text>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </div>
-      </StudioDialogPopover>
-    </DialogTrigger>
+          +{overflowCount}
+        </span>
+      ) : null}
+      {hasCredentialWarning ? (
+        <span
+          aria-hidden="true"
+          data-testid="conversation-roster-warning"
+          className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-white bg-secondary-500 dark:border-[var(--color-studio-dark-panel)]"
+        />
+      ) : null}
+    </Button>
   );
 }

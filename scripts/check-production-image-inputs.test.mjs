@@ -59,6 +59,15 @@ function dockerfileFromReferences(source) {
   );
 }
 
+function dockerfileStage(source, stageName) {
+  const stages = [...source.matchAll(/^FROM(?: --platform=\S+)? \S+ AS (\S+)$/gmu)];
+  const index = stages.findIndex((match) => match[1] === stageName);
+  assert.notEqual(index, -1, `Dockerfile is missing stage ${stageName}`);
+  const start = stages[index].index;
+  const end = stages[index + 1]?.index ?? source.length;
+  return source.slice(start, end);
+}
+
 function assertPinnedChecksumArgument(source, name, expected, relativePath) {
   const actual = argumentDefaults(source).get(name);
   assert.match(
@@ -105,6 +114,68 @@ test("every repository Dockerfile pins external base images by digest", () => {
   }
 });
 
+test("runtime image inputs reject the vulnerable Chromium and Go crypto baselines", () => {
+  const runtimePath = "docker/runtime/Dockerfile";
+  const runtimeSource = read(runtimePath);
+  const runtimeDefaults = argumentDefaults(runtimeSource);
+
+  assert.equal(
+    runtimeDefaults.get("RUNTIME_BASE"),
+    "debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132",
+  );
+  assert.equal(
+    runtimeDefaults.get("CHROMIUM_MIN_VERSION"),
+    "152.0.7977.75-1~deb13u1",
+  );
+  assert.match(
+    dockerfileStage(runtimeSource, "runtime"),
+    /^ARG CHROMIUM_MIN_VERSION$/mu,
+  );
+  assert.match(
+    dockerfileStage(runtimeSource, "runtime"),
+    /test -n "\$\{CHROMIUM_MIN_VERSION\}"/u,
+  );
+  assert.match(
+    dockerfileStage(runtimeSource, "runtime"),
+    /dpkg --compare-versions[\s\S]*chromium\)" ge "\$\{CHROMIUM_MIN_VERSION\}"/u,
+  );
+
+  assert.match(
+    read("packages/browser-webrtc-sender/go.mod"),
+    /^\s*golang\.org\/x\/crypto v0\.55\.0 \/\/ indirect$/mu,
+  );
+});
+
+test("affected runtime images refresh every util-linux security binary", () => {
+  const expectedStages = new Map([
+    ["docker/git-edge/Dockerfile", ["runtime"]],
+    ["docker/git-shard/Dockerfile", ["runtime"]],
+    ["docker/origin-gateway/Dockerfile", ["runtime"]],
+    ["docker/runtime/Dockerfile", ["runtime", "runtime-webdev"]],
+    ["docker/git-services-dev/Dockerfile", ["runtime"]],
+  ]);
+  const securityPackages = ["bsdutils", "login", "mount", "util-linux"];
+
+  for (const [relativePath, stageNames] of expectedStages) {
+    const source = read(relativePath);
+    for (const stageName of stageNames) {
+      const installLines = dockerfileStage(source, stageName)
+        .split("\n")
+        .map((line) => line.trim());
+      for (const packageName of securityPackages) {
+        const actualCount = installLines.filter(
+          (line) => line === packageName || line === `${packageName} \\`,
+        ).length;
+        assert.equal(
+          actualCount,
+          1,
+          `${relativePath} stage ${stageName} must install ${packageName} exactly once`,
+        );
+      }
+    }
+  }
+});
+
 test("provider service pins the complete Docker CLI toolchain", () => {
   const relativePath = "docker/provider-service/Dockerfile";
   const source = read(relativePath);
@@ -113,12 +184,15 @@ test("provider service pins the complete Docker CLI toolchain", () => {
     source,
     /^FROM alpine:3\.23@sha256:fd791d74b68913cbb027c6546007b3f0d3bc45125f797758156952bc2d6daf40$/mu,
   );
+  assert.equal(argumentDefaults(source).get("OPENSSL_VERSION"), "3.5.8-r0");
   assert.equal(argumentDefaults(source).get("DOCKER_CLI_VERSION"), "29.5.2-r0");
   assert.equal(argumentDefaults(source).get("DOCKER_BUILDX_VERSION"), "0.30.1-r6");
   assert.equal(argumentDefaults(source).get("DOCKER_COMPOSE_VERSION"), "2.40.3-r6");
   assertOrdered(
     source,
     relativePath,
+    '"libcrypto3=${OPENSSL_VERSION}"',
+    '"libssl3=${OPENSSL_VERSION}"',
     '"docker-cli=${DOCKER_CLI_VERSION}"',
     '"docker-cli-buildx=${DOCKER_BUILDX_VERSION}"',
     '"docker-cli-compose=${DOCKER_COMPOSE_VERSION}"',
@@ -162,18 +236,29 @@ test("runtime downloads verify architecture-bound checksums before extraction", 
   );
   assert.equal(
     [...source.matchAll(/sha256sum --check --status/gu)].length,
-    7,
+    9,
     "runtime and webdev downloads must each verify their archive",
   );
   assert.equal(
     [...source.matchAll(/curl --proto '=https' --tlsv1\.2/gu)].length,
-    7,
+    9,
     "runtime release downloads must enforce HTTPS and TLS 1.2+",
   );
+
+  // pnpm 11.24.0 vendors node-tar 7.5.22. Earlier images carried
+  // vulnerable 7.5.19/7.5.20 copies (CVE-2026-73566).
+  assert.equal(argumentDefaults(source).get("PNPM_VERSION"), "11.24.0");
 
   // npm's vendored vulnerable packages must stay pinned by exact version and
   // tarball checksum, and both runtime flavors must verify every replaced
   // module's version after extraction.
+  assert.equal(argumentDefaults(source).get("NPM_TAR_VERSION"), "7.5.22");
+  assertPinnedChecksumArgument(
+    source,
+    "NPM_TAR_SHA256",
+    "b792c2d1c7fc770910522ca1ffc29eee02ee38de4fa3a01e7832eb705879c6c6",
+    relativePath,
+  );
   assert.equal(
     argumentDefaults(source).get("BRACE_EXPANSION_VERSION"),
     "5.0.9",
@@ -194,6 +279,18 @@ test("runtime downloads verify architecture-bound checksums before extraction", 
   // Patch EVERY npm installation in the image, not one hardcoded prefix: the
   // webdev (Playwright) base ships a second npm at /usr/lib/node_modules that
   // the /usr/local-only patch missed (run 30750744597, webdev cells only).
+  assert.equal(
+    [...source.matchAll(
+      /for nt_dir in \$\(find \/usr -type d -path '\*\/node_modules\/npm\/node_modules\/tar'/gu,
+    )].length,
+    2,
+    "both runtime flavors must patch every npm root's tar",
+  );
+  assert.doesNotMatch(
+    source,
+    /tar -xzf \/tmp\/npm-tar\.tgz -C \/usr\/local/u,
+    "the patch must not target a single hardcoded npm prefix",
+  );
   assert.equal(
     [...source.matchAll(
       /for be_dir in \$\(find \/usr -type d -path '\*\/node_modules\/npm\/node_modules\/brace-expansion'/gu,
@@ -219,6 +316,11 @@ test("runtime downloads verify architecture-bound checksums before extraction", 
     "the patch must not target a single hardcoded npm prefix",
   );
   // Each flavor fails the build if any vendored copy is left unpatched.
+  assert.equal(
+    [...source.matchAll(/unpatched npm tar copies/gu)].length,
+    2,
+    "both runtime flavors must fail closed on a remaining vulnerable copy",
+  );
   assert.equal(
     [...source.matchAll(/unpatched brace-expansion copies/gu)].length,
     2,

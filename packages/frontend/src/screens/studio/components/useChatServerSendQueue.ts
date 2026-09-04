@@ -8,6 +8,7 @@ import {
   dispatchSendQueueEntryNow,
   enqueueSendQueueEntry,
   listSendQueue,
+  reorderSendQueueEntry,
   type ControllerSendQueueEntry,
   type ControllerSendQueueEntryStatus,
   type ConversationSendQueueEventDetail,
@@ -32,6 +33,59 @@ export function isServerQueuedChatSendItem(
   item: QueuedChatSendItem,
 ): item is ServerQueuedChatSendItem {
   return (item as Partial<ServerQueuedChatSendItem>).source === "server";
+}
+
+export function reorderServerQueueEntries(
+  entries: ControllerSendQueueEntry[],
+  entryId: string,
+  beforeEntryId: string | null,
+): ControllerSendQueueEntry[] {
+  const currentIndex = entries.findIndex((entry) => entry.id === entryId);
+  if (currentIndex < 0 || beforeEntryId === entryId) {
+    return entries;
+  }
+  const next = entries.filter((entry) => entry.id !== entryId);
+  const moving = entries[currentIndex];
+  if (beforeEntryId === null) {
+    next.push(moving);
+  } else {
+    const anchorIndex = next.findIndex((entry) => entry.id === beforeEntryId);
+    if (anchorIndex < 0) {
+      return entries;
+    }
+    next.splice(anchorIndex, 0, moving);
+  }
+  return next.every((entry, index) => entry.id === entries[index]?.id) ? entries : next;
+}
+
+function sortServerQueueEntriesByPosition(
+  entries: ControllerSendQueueEntry[],
+): ControllerSendQueueEntry[] {
+  return entries
+    .map((entry, index) => ({ entry, index }))
+    .sort((left, right) => {
+      const leftPosition = left.entry.queuePosition ?? Number.MAX_SAFE_INTEGER;
+      const rightPosition = right.entry.queuePosition ?? Number.MAX_SAFE_INTEGER;
+      return leftPosition - rightPosition || left.index - right.index;
+    })
+    .map(({ entry }) => entry);
+}
+
+export function reconcileServerQueueEntryPositions(
+  current: ControllerSendQueueEntry[],
+  authoritative: ControllerSendQueueEntry[],
+): ControllerSendQueueEntry[] {
+  const positions = new Map(
+    authoritative.map((entry) => [entry.id, entry.queuePosition] as const),
+  );
+  return sortServerQueueEntriesByPosition(
+    current.map((entry) => {
+      const queuePosition = positions.get(entry.id);
+      return queuePosition !== undefined && queuePosition !== entry.queuePosition
+        ? { ...entry, queuePosition }
+        : entry;
+    }),
+  );
 }
 
 // Mirrors the prompt body that useConversationControllerDispatch would have
@@ -124,14 +178,16 @@ export function useChatServerSendQueue({
   const [serverSendQueueEntries, setServerSendQueueEntries] = useState<
     ControllerSendQueueEntry[]
   >([]);
+  const [serverQueueReordering, setServerQueueReordering] = useState(false);
+  const [hydratedConversationId, setHydratedConversationId] = useState<string | null>(null);
+  const reorderInFlightRef = useRef<symbol | null>(null);
   const refreshEpochRef = useRef(0);
   const queueGenerationRef = useRef(0);
   const conversationControllerIdRef = useRef(conversationControllerId);
   const serverQueueEnabled = runtimeControllerEnabled && Boolean(conversationControllerId);
-
-  useEffect(() => {
-    conversationControllerIdRef.current = conversationControllerId;
-  }, [conversationControllerId]);
+  const serverQueueHydrated =
+    !serverQueueEnabled || hydratedConversationId === conversationControllerId;
+  conversationControllerIdRef.current = conversationControllerId;
 
   // Optimistic mutations resolve asynchronously, so a slow response can land
   // after a conversation switch. Capture the queue generation and the
@@ -162,13 +218,25 @@ export function useChatServerSendQueue({
   }, []);
 
   const refreshServerSendQueue = useCallback(async () => {
-    const epoch = ++refreshEpochRef.current;
-    if (!runtimeControllerEnabled || !conversationControllerId) {
-      setServerSendQueueEntries([]);
+    const conversationId = conversationControllerId;
+    if (!runtimeControllerEnabled || !conversationId) {
+      if (conversationControllerIdRef.current === conversationId) {
+        setServerSendQueueEntries([]);
+        setHydratedConversationId(null);
+      }
       return;
     }
-    const entries = await listSendQueue({ conversationId: conversationControllerId });
-    if (entries && refreshEpochRef.current === epoch) {
+    if (conversationControllerIdRef.current !== conversationId) {
+      return;
+    }
+    const generation = queueGenerationRef.current;
+    const epoch = ++refreshEpochRef.current;
+    const entries = await listSendQueue({ conversationId });
+    const currentQueue =
+      queueGenerationRef.current === generation &&
+      conversationControllerIdRef.current === conversationId;
+    if (entries && currentQueue && refreshEpochRef.current === epoch) {
+      setHydratedConversationId(conversationId);
       setServerSendQueueEntries(entries);
     }
   }, [conversationControllerId, runtimeControllerEnabled]);
@@ -176,6 +244,9 @@ export function useChatServerSendQueue({
   useEffect(() => {
     refreshEpochRef.current += 1;
     queueGenerationRef.current += 1;
+    reorderInFlightRef.current = null;
+    setServerQueueReordering(false);
+    setHydratedConversationId(null);
     setServerSendQueueEntries([]);
     if (!serverQueueEnabled) {
       return;
@@ -290,6 +361,11 @@ export function useChatServerSendQueue({
       if (!result) {
         return false;
       }
+      if (result.outcome === "queued") {
+        mutation.commit((previous) => previous);
+        void refreshServerSendQueue();
+        return false;
+      }
       mutation.commit((previous) => previous.filter((entry) => entry.id !== entryId));
       if (result.outcome !== "dispatched") {
         // The server drain already dispatched the entry, or it was removed
@@ -300,6 +376,59 @@ export function useChatServerSendQueue({
       return true;
     },
     [beginQueueMutation, conversationControllerId, refreshServerSendQueue, runtimeControllerEnabled],
+  );
+
+  const reorderServerSendQueueEntry = useCallback(
+    async (entryId: string, beforeEntryId: string | null): Promise<boolean> => {
+      if (
+        !runtimeControllerEnabled ||
+        !conversationControllerId ||
+        reorderInFlightRef.current !== null
+      ) {
+        return false;
+      }
+      const conversationId = conversationControllerId;
+      const mutation = beginQueueMutation(conversationId);
+      const reorderToken = Symbol("send-queue-reorder");
+      reorderInFlightRef.current = reorderToken;
+      setServerQueueReordering(true);
+      mutation.commit((previous) =>
+        reorderServerQueueEntries(previous, entryId, beforeEntryId),
+      );
+      try {
+        const result = await reorderSendQueueEntry({
+          conversationId,
+          entryId,
+          beforeEntryId,
+        });
+        if (!result?.ok) {
+          mutation.commit(sortServerQueueEntriesByPosition);
+          await refreshServerSendQueue();
+          return false;
+        }
+        mutation.commit((previous) =>
+          reconcileServerQueueEntryPositions(previous, result.entries),
+        );
+        return true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn("[chat] server send queue reorder failed:", message);
+        mutation.commit(sortServerQueueEntriesByPosition);
+        await refreshServerSendQueue();
+        return false;
+      } finally {
+        if (reorderInFlightRef.current === reorderToken) {
+          reorderInFlightRef.current = null;
+          setServerQueueReordering(false);
+        }
+      }
+    },
+    [
+      beginQueueMutation,
+      conversationControllerId,
+      refreshServerSendQueue,
+      runtimeControllerEnabled,
+    ],
   );
 
   const serverSendQueueItems = useMemo(
@@ -315,7 +444,10 @@ export function useChatServerSendQueue({
     enqueueServerSendQueueItem,
     refreshServerSendQueue,
     removeServerSendQueueEntry,
+    reorderServerSendQueueEntry,
+    serverQueueReordering,
     serverQueueEnabled,
+    serverQueueHydrated,
     serverSendQueueItems,
   };
 }

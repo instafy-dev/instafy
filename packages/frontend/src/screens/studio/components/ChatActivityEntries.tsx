@@ -14,6 +14,7 @@ import type {
   ChatMessageCommitRange,
   ChatMessageFileChange,
 } from "../types";
+import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
 import { extractMessageDetails } from "./chatMessageMetadata";
 import { resolveTimelineStatusBadge } from "./chatMessageDetailHelpers";
 import { normalizeActivityText, splitActivityLeadAndDetails, truncate } from "./chatContentHelpers";
@@ -41,6 +42,8 @@ type ChatFileChangeListProps = {
   files: ChatMessageFileChange[];
   projectId?: string | null;
   commitRange?: ChatMessageCommitRange | null;
+  messageId?: string | null;
+  messageTimestamp?: number | null;
 };
 
 type SharedRenderProps = {
@@ -94,7 +97,7 @@ export function ReasoningEntry({
     <div
       data-testid="chat-bubble-assistant"
       data-message-type="reasoning"
-      className="max-w-[min(100%,42rem)] px-1.5 py-1 text-sm text-slate-600 dark:text-slate-300"
+      className={`${CHAT_BUBBLE_MAX_WIDTH.notice} py-1 text-sm text-slate-600 dark:text-slate-300`}
     >
       <div className="flex flex-wrap items-center gap-1.5">
         {hasLongContent ? (
@@ -141,7 +144,7 @@ export function ReasoningEntry({
         {display}
       </Text>
       {message.files && message.files.length > 0 ? (
-        <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} />
+        <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
       ) : null}
     </div>
   );
@@ -235,7 +238,7 @@ export function LocalCapabilityInlineEntry({
           ) : null}
           {message.files && message.files.length > 0 ? (
             <div className="mt-2">
-              <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} />
+              <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
             </div>
           ) : null}
         </div>
@@ -358,7 +361,7 @@ export function StatusActivityEntry({
         shadow="sm"
         data-testid="chat-bubble-assistant"
         data-message-type="status"
-        className="max-w-[min(100%,42rem)] px-3 py-2.5 text-sm text-slate-600"
+        className={`${CHAT_BUBBLE_MAX_WIDTH.notice} px-3 py-2.5 text-sm text-slate-600`}
       >
         <div className="flex flex-wrap items-center gap-1.5">
           {hasLongContent ? (
@@ -439,7 +442,7 @@ export function StatusActivityEntry({
         ) : null}
         {message.files && message.files.length > 0 ? (
           <div className="mt-3">
-            <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} />
+            <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
           </div>
         ) : null}
       </Surface>

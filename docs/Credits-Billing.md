@@ -8,12 +8,12 @@ The important product rule is that Instafy keeps one shared team balance and one
 
 The current controller still stores that balance as integer billing units. The Credits panel can now render those units directly or approximate them in USD using `BILLING_UNITS_PER_USD`, which keeps the accounting integer-safe while making the UI easier to reason about.
 
-The default managed-AI model is currently `gpt-5.5`, served by OpenAI — the controller pins `CODEX_MODEL_PROVIDER=openai` for managed turns (`secrets.rs`), so the model users see is the model that runs. The pricing envs define the rates users are actually charged; the defaults are still calibrated to the OpenAI `GPT-5 mini` API pricing baseline as published on March 21, 2026:
+The default managed-AI model is currently `gpt-5.6-sol`, served by OpenAI — the controller pins `CODEX_MODEL_PROVIDER=openai` for managed turns (`secrets.rs`), so the model users see is the model that runs. The pricing envs define the rates users are actually charged; the defaults are still calibrated to the OpenAI `GPT-5 mini` API pricing baseline as published on March 21, 2026:
 - input: `$0.25 / 1M`
 - cached input: `$0.025 / 1M`
 - output: `$2.00 / 1M`
 
-Pre-launch TODO: recalibrate these defaults to the real `gpt-5.5` API rates (or explicitly decide to subsidize and say so in pricing copy) — the charged rates currently track a cheaper model than the one being served, which is a margin decision that should be deliberate, not inherited.
+Pre-launch TODO: recalibrate these defaults to the real `gpt-5.6-sol` API rates (or explicitly decide to subsidize and say so in pricing copy) — the charged rates currently track a cheaper model than the one being served, which is a margin decision that should be deliberate, not inherited.
 
 If you point the managed path at a different provider/model, update the pricing envs accordingly.
 
