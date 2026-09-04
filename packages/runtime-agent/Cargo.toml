@@ -42,6 +42,9 @@ sysinfo = "0.30"
 zip = { version = "1", default-features = false, features = ["deflate"] }
 rmcp = { version = "1.7.0", default-features = false, features = ["server", "transport-async-rw"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
@@ -53,7 +56,6 @@ path = "src/lib.rs"
 axum = { version = "0.7", default-features = false, features = ["json", "tokio", "http1"] }
 openai-proxy-server = { path = "../openai-proxy-server" }
 futures-util = "0.3"
-libc = "0.2"
 ring = { version = "0.17", features = ["std"] }
 
 [patch.crates-io]

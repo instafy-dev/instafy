@@ -212,6 +212,10 @@ impl Config {
                 conversation_map.insert("activeTurnInput".to_string(), serde_json::json!(true));
             }
         }
+        apply_local_browser_capability(
+            &mut capabilities,
+            crate::local_browser::registration_capability(),
+        );
 
         let metadata = std::env::var("RUNTIME_METADATA")
             .ok()
@@ -532,6 +536,18 @@ impl Config {
     }
 }
 
+fn apply_local_browser_capability(capabilities: &mut Value, local_browser: Option<Value>) {
+    let Some(map) = capabilities.as_object_mut() else {
+        return;
+    };
+    // This key describes a capability owned and validated by this process. Do not trust a
+    // caller-provided value, but leave every unrelated deployment capability untouched.
+    map.remove("localBrowser");
+    if let Some(capability) = local_browser {
+        map.insert("localBrowser".to_string(), capability);
+    }
+}
+
 fn detect_rathole_use_subcommands(bin: &str) -> bool {
     let Ok(output) = Command::new(bin).arg("--help").output() else {
         return false;
@@ -551,7 +567,8 @@ fn detect_rathole_use_subcommands(bin: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_lease_max_jobs;
+    use super::{apply_local_browser_capability, normalize_lease_max_jobs};
+    use serde_json::json;
 
     #[test]
     fn lease_max_jobs_defaults_to_read_only_batch_capacity() {
@@ -568,5 +585,25 @@ mod tests {
     #[test]
     fn lease_max_jobs_strict_mode_forces_single_job_leases() {
         assert_eq!(normalize_lease_max_jobs(Some("3"), true), 1);
+    }
+
+    #[test]
+    fn local_browser_registration_is_process_owned_and_additive() {
+        let mut capabilities = json!({
+            "custom": { "preserved": true },
+            "localBrowser": { "enabled": "untrusted" }
+        });
+        apply_local_browser_capability(&mut capabilities, None);
+        assert_eq!(capabilities, json!({ "custom": { "preserved": true } }));
+
+        apply_local_browser_capability(
+            &mut capabilities,
+            Some(json!({ "enabled": true, "tools": ["observe"] })),
+        );
+        assert_eq!(capabilities["custom"], json!({ "preserved": true }));
+        assert_eq!(
+            capabilities["localBrowser"],
+            json!({ "enabled": true, "tools": ["observe"] })
+        );
     }
 }

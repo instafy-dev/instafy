@@ -11,7 +11,8 @@ use codex_arg0::arg0_dispatch;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use runtime_agent::{
-    agent::RuntimeAgent, config::Config, personal_browser, process_hardening, shared_browser,
+    agent::RuntimeAgent, config::Config, local_browser, personal_browser, process_hardening,
+    shared_browser,
 };
 use tokio::signal;
 use tracing::{Level, error, info, warn};
@@ -49,6 +50,10 @@ fn main() -> anyhow::Result<()> {
     if shared_browser::is_shared_browser_mcp_command(&args) {
         let runtime = build_cli_tokio_runtime()?;
         return runtime.block_on(shared_browser::run_mcp_stdio());
+    }
+    if local_browser::is_mcp_command(&args) {
+        let runtime = build_cli_tokio_runtime()?;
+        return runtime.block_on(local_browser::run_mcp_stdio());
     }
     personal_browser::capture_and_scrub_process_capability()?;
 
