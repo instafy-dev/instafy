@@ -296,7 +296,7 @@ export function useCredentialsConnectFlow({
 
     void (async () => {
       await loadCredentials({ silent: true });
-      notifyAiConfigChanged(deviceAuthProvider === "gemini" ? "gemini_oauth_connected" : "codex_oauth_connected");
+      notifyAiConfigChanged("codex_oauth_connected");
       if (deviceAuthCompletionWarning) {
         showStatus(
           deviceAuthCompletionWarning,
@@ -310,11 +310,7 @@ export function useCredentialsConnectFlow({
             : undefined,
         );
       } else {
-        showStatus(
-          deviceAuthProvider === "gemini" ? "Gemini credentials connected." : "ChatGPT credentials connected.",
-          "success",
-          3500,
-        );
+        showStatus("ChatGPT credentials connected.", "success", 3500);
       }
       closeConnectModal();
     })();

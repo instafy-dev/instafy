@@ -836,7 +836,7 @@ export function AiCredentialsStatusBubble({
                 </Button>
               </div>
               <Text as="div" variant="caption" tone="muted" className="text-xs">
-                Google subscription login is disabled for now to keep credential handling simple.
+                Gemini connects with an API key. Google login is no longer supported.
               </Text>
             </div>
           ) : null}
