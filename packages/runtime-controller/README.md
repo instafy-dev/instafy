@@ -107,6 +107,12 @@ Controller user/session and service-role credentials must be sent as
 `Authorization: Bearer <token>`. Standard controller API endpoints do not authenticate those
 credentials from query parameters or JSON request bodies. Scoped tokens accepted by these APIs
 use the same header; endpoint-specific origin capability transports remain documented separately.
+The runtime-token endpoint accepts only the controller's built-in runtime-machine scopes:
+`agent.lease`, `agent.heartbeat`, `agent.message`, `agent.complete`, `agent.stop`,
+`origin.register`, `origin.presence`, `origin.apply`, `git.read`, `git.write`,
+`telemetry.write`, `git.token.mint`, `workspace.lease.read`, and `personal_browser.control`.
+Omitting `scopes` issues the standard bundle; empty or unknown scope sets are rejected, and
+`personal_browser.control` requires the explicit `personalBrowser: true` request flag.
 
 `pnpm controller:up` inherits the current shell environment. For a local TURN test, export the
 three `CONTROLLER_BROWSER_TURN_*` values before starting it; do not put the coturn shared secret
