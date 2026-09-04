@@ -32,6 +32,7 @@ import type { PendingConversationInvitePrompt } from "./useChatInvitePromptHandl
 import type { ChatSubmitDispatchPayload } from "./useChatSubmitDispatch";
 import type { EnqueueServerSendQueuePayload } from "./useChatServerSendQueue";
 import { buildServerSendQueuePromptBody } from "./useChatServerSendQueue";
+import type { PersonalBrowserAgentPhase } from "./usePersonalBrowserBridge";
 import type { PreparedEmailInvite } from "../../../sharing/preparedEmailInvite";
 
 export type SubmitMessageFn = (
@@ -62,7 +63,51 @@ export function resolvePersonalBrowserSubmitRouting(input: {
   return { kind: "personal", runtimeOverride: input.runtimeOverride };
 }
 
-type ShowStatus = (message: string, intent?: StatusIntent, durationMs?: number) => void;
+export function resolvePersonalBrowserAgentBlockNotice(input: {
+  agentControlEnabled: boolean;
+  agentError: string | null;
+  agentPhase: PersonalBrowserAgentPhase;
+  surfaceReady: boolean;
+}): { message: string; action: "retry" | "resume" | null } {
+  // Mirrors the controls PersonalBrowserSurface actually renders: nothing while
+  // the browser itself is not ready, "Retry agent control" while the agent is
+  // unavailable, and "Resume agent control" only while it is paused.
+  if (!input.surfaceReady) {
+    return {
+      message:
+        input.agentError ??
+        "Personal Browser is still opening on this device. Wait for it to be ready before sending this browser task.",
+      action: null,
+    };
+  }
+  if (input.agentPhase === "unavailable") {
+    return {
+      message:
+        input.agentError ??
+        "Personal Browser agent control is unavailable. Retry agent control before sending this browser task.",
+      action: "retry",
+    };
+  }
+  if (!input.agentControlEnabled) {
+    return {
+      message:
+        "Personal Browser agent control is paused. Resume it before sending this browser task.",
+      action: "resume",
+    };
+  }
+  return {
+    message:
+      "Personal Browser agent control is still starting. Wait for it to be ready before sending this browser task.",
+    action: null,
+  };
+}
+
+type ShowStatus = (
+  message: string,
+  intent?: StatusIntent,
+  durationMs?: number,
+  options?: { actionLabel?: string; onAction?: () => void },
+) => void;
 
 type ConversationEntryLike = {
   controllerId?: string | null;
@@ -110,8 +155,13 @@ export function useChatSubmitFlow({
   pendingTypingBroadcastRef,
   performSubmit,
   personalBrowserActive,
+  personalBrowserAgentControlEnabled,
   personalBrowserAgentError,
+  personalBrowserAgentPhase,
+  personalBrowserAgentSurfaceReady,
+  personalBrowserRetryAgentControl,
   personalBrowserRuntimeOverride,
+  personalBrowserSetAgentControlEnabled,
   preferredBrowserPage,
   preferredRuntimeId,
   revealAiGatesForCurrentDraft,
@@ -206,8 +256,13 @@ export function useChatSubmitFlow({
   } | null>;
   performSubmit: (payload: ChatSubmitDispatchPayload) => Promise<void>;
   personalBrowserActive: boolean;
+  personalBrowserAgentControlEnabled: boolean;
   personalBrowserAgentError: string | null;
+  personalBrowserAgentPhase: PersonalBrowserAgentPhase;
+  personalBrowserAgentSurfaceReady: boolean;
+  personalBrowserRetryAgentControl: () => void | Promise<unknown>;
   personalBrowserRuntimeOverride: SubmitConversationRuntimeOverride | null;
+  personalBrowserSetAgentControlEnabled: (enabled: boolean) => void | Promise<unknown>;
   preferredBrowserPage: BrowserSessionPage | null;
   preferredRuntimeId: string | null;
   revealAiGatesForCurrentDraft: () => boolean;
@@ -338,11 +393,31 @@ export function useChatSubmitFlow({
     const usePersonalBrowserRuntime = personalBrowserRouting.kind === "personal";
     const useSharedBrowserRuntime = sharedBrowserRouting.kind === "shared";
     if (personalBrowserRouting.kind === "blocked") {
+      const agentBlockNotice = resolvePersonalBrowserAgentBlockNotice({
+        agentControlEnabled: personalBrowserAgentControlEnabled,
+        agentError: personalBrowserAgentError,
+        agentPhase: personalBrowserAgentPhase,
+        surfaceReady: personalBrowserAgentSurfaceReady,
+      });
       showStatus(
-        personalBrowserAgentError ??
-          "Personal Browser agent control is still starting. Resume it before sending this browser task.",
+        agentBlockNotice.message,
         "warning",
         5000,
+        agentBlockNotice.action === "retry"
+          ? {
+              actionLabel: "Retry agent control",
+              onAction: () => {
+                void personalBrowserRetryAgentControl();
+              },
+            }
+          : agentBlockNotice.action === "resume"
+            ? {
+                actionLabel: "Resume agent control",
+                onAction: () => {
+                  void personalBrowserSetAgentControlEnabled(true);
+                },
+              }
+            : undefined,
       );
       return false;
     }
@@ -473,10 +548,18 @@ export function useChatSubmitFlow({
       if (!runtimeEntryIsDispatchable(browserRuntimeEntry)) {
         showStatus(
           usePersonalBrowserRuntime
-            ? "Personal Browser is still available for manual browsing, but its agent is unavailable. Resume agent control before sending this task."
+            ? "Personal Browser is still available for manual browsing, but its agent is unavailable. Retry agent control before sending this task."
             : "Shared Browser is visible, but its agent runtime isn't ready yet. Wait for it to come up before sending this task.",
           "warning",
           5500,
+          usePersonalBrowserRuntime && personalBrowserAgentSurfaceReady
+            ? {
+                actionLabel: "Retry agent control",
+                onAction: () => {
+                  void personalBrowserRetryAgentControl();
+                },
+              }
+            : undefined,
         );
         return false;
       }
@@ -693,8 +776,13 @@ export function useChatSubmitFlow({
     pendingTypingBroadcastRef,
     performSubmit,
     personalBrowserActive,
+    personalBrowserAgentControlEnabled,
     personalBrowserAgentError,
+    personalBrowserAgentPhase,
+    personalBrowserAgentSurfaceReady,
+    personalBrowserRetryAgentControl,
     personalBrowserRuntimeOverride,
+    personalBrowserSetAgentControlEnabled,
     preferredBrowserPage,
     preferredRuntimeId,
     revealAiGatesForCurrentDraft,
