@@ -54,11 +54,10 @@ pub(crate) const RUNTIME_TOKEN_GIT_MINT_SCOPE: &str = "git.token.mint";
 pub(crate) const RUNTIME_TOKEN_WORKSPACE_LEASE_READ_SCOPE: &str = "workspace.lease.read";
 pub(crate) const PERSONAL_BROWSER_RUNTIME_SCOPE: &str = "personal_browser.control";
 pub(crate) const RUNTIME_TOKEN_GENERATION_CAPABILITY: &str = "_instafyRuntimeTokenGeneration";
-// Delegated scoped-token machinery from the GitHub-import hardening work. The
-// merged `mint_runtime_access_token` follows the shipped collaboration path,
-// which rejects scoped minting, so this cluster is retained but not wired into
-// a production call site; its own tests still exercise it.
-#[allow(dead_code)]
+/// Scopes that a user or service caller may request from the public runtime
+/// token endpoint. Agent-only capabilities such as `agent.secrets` and
+/// `agent.browser_profile` are issued only after controller-authorized runtime
+/// registration and must not be self-selected here.
 const RUNTIME_TOKEN_ALLOWED_SCOPES: &[&str] = &[
     "agent.lease",
     "agent.heartbeat",
@@ -70,6 +69,9 @@ const RUNTIME_TOKEN_ALLOWED_SCOPES: &[&str] = &[
     "origin.apply",
     "git.read",
     "git.write",
+    RUNTIME_TOKEN_TELEMETRY_SCOPE,
+    RUNTIME_TOKEN_GIT_MINT_SCOPE,
+    RUNTIME_TOKEN_WORKSPACE_LEASE_READ_SCOPE,
     PERSONAL_BROWSER_RUNTIME_SCOPE,
 ];
 
@@ -99,8 +101,8 @@ pub(crate) fn default_runtime_token_scopes() -> Vec<String> {
 }
 
 /// Normalize, deduplicate and allowlist a caller-requested runtime-token scope
-/// set. Used to harden delegated/scoped mint requests: the personal browser
-/// control scope may only be granted with an explicit `personalBrowser=true`.
+/// set. The personal browser control scope may only be granted with an
+/// explicit `personalBrowser=true`.
 fn normalize_runtime_token_scopes(
     requested: Option<Vec<String>>,
     personal_browser: bool,
@@ -108,10 +110,7 @@ fn normalize_runtime_token_scopes(
     let mut scopes = match requested {
         Some(list) if list.is_empty() => return Err(bad_request("scopes must not be empty")),
         Some(list) => list,
-        None => RUNTIME_TOKEN_DEFAULT_SCOPES
-            .iter()
-            .map(|scope| scope.to_string())
-            .collect(),
+        None => default_runtime_token_scopes(),
     };
     scopes = scopes
         .into_iter()
@@ -432,11 +431,7 @@ pub(super) async fn mint_runtime_access_token(
         )
     };
 
-    let mut scopes = match body.scopes {
-        Some(list) if !list.is_empty() => list,
-        _ => default_runtime_token_scopes(),
-    };
-    add_personal_browser_scope(&mut scopes, body.personal_browser);
+    let scopes = normalize_runtime_token_scopes(body.scopes, body.personal_browser)?;
     // A human/service mint is the authoritative self-hosted generation
     // rotation boundary. Registration renewals preserve this value. Identity is
     // recognised by the required baseline agent scopes only; the additive
@@ -681,6 +676,8 @@ mod tests {
 
     #[test]
     fn runtime_token_scope_allowlist_rejects_unknown_or_implicit_personal_scope() {
+        assert!(normalize_runtime_token_scopes(Some(Vec::new()), false).is_err());
+        assert!(normalize_runtime_token_scopes(Some(vec!["   ".to_string()]), false).is_err());
         assert!(
             normalize_runtime_token_scopes(Some(vec!["admin.everything".to_string()]), false)
                 .is_err()
