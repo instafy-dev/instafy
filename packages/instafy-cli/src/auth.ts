@@ -69,13 +69,25 @@ async function loginWithPassword(params: {
   email: string;
   password: string;
 }): Promise<CliLoginPayload> {
-  const response = await fetch(`${params.supabaseUrl}/auth/v1/token?grant_type=password`, {
+  const baseUrl = new URL(`${params.supabaseUrl.replace(/\/$/, "")}/`);
+  if (
+    (baseUrl.protocol !== "http:" && baseUrl.protocol !== "https:") ||
+    baseUrl.username ||
+    baseUrl.password
+  ) {
+    throw new Error("Supabase login URL must be HTTP(S) without embedded credentials.");
+  }
+  const timeoutValue = Number(process.env["INSTAFY_HTTP_TIMEOUT_MS"] ?? 60_000);
+  const timeoutMs = Number.isFinite(timeoutValue) && timeoutValue > 0 ? timeoutValue : 60_000;
+  const response = await fetch(new URL("auth/v1/token?grant_type=password", baseUrl), {
     method: "POST",
     headers: {
       apikey: params.supabaseAnonKey,
       "content-type": "application/json",
     },
     body: JSON.stringify({ email: params.email, password: params.password }),
+    redirect: "error",
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!response.ok) {
     const text = await response.text().catch(() => "");
@@ -122,7 +134,7 @@ async function isStudioHealthy(studioUrl: string, timeoutMs: number): Promise<bo
 }
 
 async function resolveDefaultStudioUrl(controllerUrl: string): Promise<string> {
-  const hosted = "https://staging.instafy.dev";
+  const hosted = "https://instafy.dev";
   if (isStagingCli) {
     return hosted;
   }
@@ -348,11 +360,13 @@ export async function login(options: {
   json?: boolean;
   waitForBrowser?: boolean;
 }): Promise<void> {
+  if (options.json && options.waitForBrowser) {
+    throw new Error("--json cannot be combined with --wait-for-browser");
+  }
   const profile = typeof options.profile === "string" && options.profile.trim() ? options.profile.trim() : null;
   const explicitControllerUrl =
     normalizeUrl(options.controllerUrl ?? null) ??
     normalizeUrl(process.env["INSTAFY_SERVER_URL"] ?? null) ??
-    normalizeUrl(process.env["CONTROLLER_BASE_URL"] ?? null) ??
     (isStagingCli ? null : resolveConfiguredControllerUrl({ profile }));
 
   const defaultLocalControllerUrl = "http://127.0.0.1:8788";
@@ -381,12 +395,6 @@ export async function login(options: {
     !normalizeToken(options.email ?? null) &&
     !normalizeToken(process.env["INSTAFY_LOGIN_EMAIL"] ?? null);
   if (jsonWantsUrlOnly) {
-    // No credentials were supplied, so there is nothing to log in WITH; emit
-    // the login URL for the caller to open. When credentials ARE supplied,
-    // --json is purely an output format: the login below runs for real and
-    // reports its result as JSON. It used to short-circuit here regardless,
-    // which made `login --token <t> --json` a silent no-op with exit 0 -- an
-    // agent's most natural invocation reported success without authenticating.
     console.log(
       JSON.stringify({
         url: url.toString(),
@@ -432,10 +440,6 @@ export async function login(options: {
   }
 
   if (!authPayload && !input.isTTY && !options.waitForBrowser) {
-    // Fail fast: without a TTY nobody can paste a token, and waiting on the
-    // browser callback blocked headless callers for up to ten minutes before
-    // dying with a bare "No token provided." An agent's shell timeout usually
-    // killed the process before that error ever printed, teaching it nothing.
     throw new Error(
       [
         "Non-interactive session and no credentials were provided.",
@@ -476,7 +480,7 @@ export async function login(options: {
       console.log("2) After you sign in, copy the token shown on that page.");
     }
     console.log("");
-  } else if (usedPasswordGrant) {
+  } else if (usedPasswordGrant && !options.json) {
     console.log(kleur.gray("Authenticated via email/password."));
     console.log("");
   }
@@ -562,8 +566,6 @@ export async function login(options: {
       try {
         authPayload = await callbackServer.waitForToken(10 * 60_000);
       } catch (error) {
-        // Without a TTY there is no manual fallback to fall back to; the
-        // timeout message is the only diagnostic the caller will ever see.
         if (!input.isTTY) {
           console.error(error instanceof Error ? error.message : String(error));
         }
@@ -631,9 +633,9 @@ export async function login(options: {
       controllerUrl,
       studioUrl,
       accessToken: authPayload.accessToken,
-      refreshToken: authPayload.refreshToken ?? undefined,
-      supabaseUrl: authPayload.supabaseUrl ?? undefined,
-      supabaseAnonKey: authPayload.supabaseAnonKey ?? undefined,
+      refreshToken: authPayload.refreshToken,
+      supabaseUrl: authPayload.supabaseUrl,
+      supabaseAnonKey: authPayload.supabaseAnonKey,
     };
     if (profile) {
       writeInstafyProfileConfig(profile, update);

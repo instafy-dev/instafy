@@ -4,14 +4,17 @@ import { MenuTrigger } from "react-aria-components";
 import { ChatsIcon } from "../components/AppIcons";
 import { IconButton } from "../components/Button";
 import { EntityRow } from "../components/EntityRow";
+import { Input } from "../components/Input";
 import { ToolbarMenuSelect } from "../components/ToolbarMenuSelect";
 import { TreeDisclosureButton, TreeRowMarkerSlot } from "../components/TreeDisclosureButton";
 import { useConversations } from "../conversations/ConversationsProvider";
+import { isEmptyConversationPlaceholder } from "../conversations/conversationState";
 import type { ConversationLifecycleStatus } from "../conversations/ConversationsProvider";
 import { MenuItemContent } from "../components/MenuItemContent";
 import { StudioPopover } from "../components/aria/StudioPopover";
 import { StudioMenu, StudioMenuItem, StudioMenuSeparator } from "../components/aria/StudioMenu";
 import { DRAWER_ICON_BUTTON_TONE_CLASS } from "../components/listRowStyles";
+import { controllerClient } from "../sdk/instafy";
 import { useWorkspaceTabs } from "./WorkspaceTabsProvider";
 import { useStatus } from "../status/useStatus";
 import { useBreakpoint } from "../hooks/useBreakpoint";
@@ -28,7 +31,13 @@ export function ConversationHistoryTab({
   onRequestClose,
   onStartNewConversation,
 }: ConversationHistoryTabProps = {}) {
-  const { conversations, activeConversationId, setConversationLifecycleStatus } = useConversations();
+  const {
+    conversations,
+    activeConversationId,
+    setConversationLifecycleStatus,
+    setConversationTitle,
+    remoteConversationHistoryResolved,
+  } = useConversations();
   const { tabs, closeTab, openConversationTab, requestUrlPush } = useWorkspaceTabs();
   const { showStatus } = useStatus();
   const isLargeScreen = useBreakpoint("lg");
@@ -38,6 +47,24 @@ export function ConversationHistoryTab({
   const [filter, setFilter] = useState<ConversationLifecycleStatus>("active");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [mobileSearchOpen, setMobileSearchOpen] = useState(() => query.trim().length > 0);
+  // Inline rename is only reachable through the row's "…" menu: the edit state
+  // borrows the real Input look (border + focus ring) so it reads as editable,
+  // while plain selection stays a fill (EntityRow selected) — see #139.
+  const [rename, setRename] = useState<{ conversationId: string; draft: string } | null>(null);
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const renameIgnoreBlurRef = useRef(false);
+
+  useEffect(() => {
+    const renamingConversationId = rename?.conversationId;
+    if (!renamingConversationId) {
+      return;
+    }
+    const frameId = window.requestAnimationFrame(() => {
+      renameInputRef.current?.focus();
+      renameInputRef.current?.select();
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, [rename?.conversationId]);
 
   useEffect(() => {
     if (isLargeScreen) {
@@ -212,6 +239,31 @@ export function ConversationHistoryTab({
     return rows;
   }, [activeThreadPath, expanded, filteredTree, query]);
 
+  // A space we have not opened yet starts with a single local placeholder
+  // while its real conversations are still being fetched. Listing that
+  // placeholder — or worse, "No conversations found." — makes an org the
+  // viewer does have chats in look empty until they reload.
+  const historyPending = useMemo(
+    () => !remoteConversationHistoryResolved && conversations.every(isEmptyConversationPlaceholder),
+    [conversations, remoteConversationHistoryResolved],
+  );
+
+  // The marker gutter exists for structure (disclosure arrows, nesting, the
+  // private-chat lock). A flat list of public chats — the common case — should
+  // not pay a whole column for it; the active dot alone never reserves the
+  // gutter and is overlaid on the row edge instead (#139).
+  const showMarkerGutter = useMemo(
+    () =>
+      visibleRows.some((row) => {
+        if (row.hasChildren || row.depth > 0) {
+          return true;
+        }
+        const conversation = conversationTreeIndex.byId.get(row.id);
+        return conversation?.visibility === "private";
+      }),
+    [conversationTreeIndex.byId, visibleRows],
+  );
+
   const handleCloseConversationTab = (conversationId: string) => {
     const tabId = openConversationTabs.tabIdByConversationId.get(conversationId);
     if (!tabId) {
@@ -303,6 +355,69 @@ export function ConversationHistoryTab({
         });
       }
     });
+  };
+
+  const beginRename = (conversationId: string) => {
+    const conversation = conversations.find((entry) => entry.localId === conversationId) ?? null;
+    if (!conversation) {
+      return;
+    }
+    renameIgnoreBlurRef.current = false;
+    setRename({ conversationId, draft: conversation.title });
+  };
+
+  const cancelRename = (options?: { ignoreBlur?: boolean }) => {
+    if (options?.ignoreBlur) {
+      renameIgnoreBlurRef.current = true;
+    }
+    setRename(null);
+  };
+
+  const commitRename = async () => {
+    if (!rename) {
+      return;
+    }
+    const nextTitle = rename.draft.trim();
+    if (!nextTitle) {
+      showStatus("Conversation name can't be empty.", "error", 4000);
+      return;
+    }
+    const conversation = conversations.find((entry) => entry.localId === rename.conversationId) ?? null;
+    if (!conversation) {
+      setRename(null);
+      return;
+    }
+    if (nextTitle === conversation.title) {
+      setRename(null);
+      return;
+    }
+
+    const previousTitle = conversation.title;
+    setConversationTitle(conversation.localId, nextTitle);
+    renameIgnoreBlurRef.current = false;
+    setRename(null);
+
+    if (!conversation.controllerId) {
+      return;
+    }
+
+    const updated = await controllerClient.conversations.updateMetadata({
+      conversationId: conversation.controllerId,
+      metadata: { title: nextTitle },
+    });
+
+    if (!updated) {
+      setConversationTitle(conversation.localId, previousTitle);
+      showStatus("Unable to rename conversation. Try again.", "error", 4000);
+    }
+  };
+
+  const handleRenameBlur = () => {
+    if (renameIgnoreBlurRef.current) {
+      renameIgnoreBlurRef.current = false;
+      return;
+    }
+    void commitRename();
   };
 
   const handleToggleMobileSearch = () => {
@@ -420,7 +535,14 @@ export function ConversationHistoryTab({
       ) : null}
 
       <div className={["flex-1 overflow-y-auto pr-1", touchDrawer ? "mt-4" : "mt-3"].join(" ")}>
-        {visibleRows.length === 0 ? (
+        {historyPending ? (
+          <div
+            className="flex h-full items-center justify-center px-4 py-10"
+            data-testid="conversation-history-loading"
+          >
+            <span className="text-sm text-slate-500 dark:text-slate-400">Loading conversations…</span>
+          </div>
+        ) : visibleRows.length === 0 ? (
           <div className="flex h-full items-center justify-center px-4 py-10">
             <span className="text-sm text-slate-500 dark:text-slate-400">No conversations found.</span>
           </div>
@@ -447,7 +569,7 @@ export function ConversationHistoryTab({
                   onRequestClose?.();
                 }
               };
-              const leadingMarker = (
+              const leadingMarker = showMarkerGutter ? (
                 <TreeRowMarkerSlot depth={row.depth} className={touchDrawer ? "h-8 w-8" : undefined}>
                   {row.hasChildren ? (
                     <TreeDisclosureButton
@@ -469,25 +591,82 @@ export function ConversationHistoryTab({
                     <Lock className={touchDrawer ? "h-5 w-5 text-slate-400 dark:text-slate-500" : "h-4 w-4 text-slate-400 dark:text-slate-500"} aria-hidden="true" />
                   ) : null}
                 </TreeRowMarkerSlot>
-              );
+              ) : null;
+              // Without the gutter, the active dot rides the row's own edge so
+              // it costs no width. The row's left padding (below) is sized so
+              // the title glyphs keep a clear ~6px gap from the dot.
+              const overlayActiveDot = !showMarkerGutter && isActive ? (
+                <span
+                  className={[
+                    "absolute left-1 top-1/2 -translate-y-1/2 rounded-full bg-primary-500",
+                    touchDrawer ? "h-2 w-2" : "h-1.5 w-1.5",
+                  ].join(" ")}
+                  aria-hidden="true"
+                />
+              ) : null;
+              if (rename?.conversationId === conversation.localId) {
+                return (
+                  <div
+                    key={conversation.localId}
+                    className="flex min-w-0 items-center"
+                    data-testid="conversation-history-rename-row"
+                  >
+                    {leadingMarker ? <div className="flex shrink-0 items-center">{leadingMarker}</div> : null}
+                    <Input
+                      ref={renameInputRef}
+                      value={rename.draft}
+                      onChange={(event) => setRename({ ...rename, draft: event.target.value })}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void commitRename();
+                        } else if (event.key === "Escape") {
+                          event.preventDefault();
+                          cancelRename({ ignoreBlur: true });
+                        }
+                      }}
+                      onBlur={handleRenameBlur}
+                      size="sm"
+                      radius="xl"
+                      tone="default"
+                      aria-label={`Rename ${conversation.title}`}
+                      data-testid="conversation-history-rename-input"
+                    />
+                  </div>
+                );
+              }
               return (
                 <EntityRow
                   key={conversation.localId}
                   containerClassName="gap-0"
                   leadingAccessory={leadingMarker}
-                  title={conversation.title}
+                  title={
+                    overlayActiveDot ? (
+                      <>
+                        {overlayActiveDot}
+                        {conversation.title}
+                      </>
+                    ) : (
+                      conversation.title
+                    )
+                  }
                   pressable
-                  surface={isActive ? "plain" : undefined}
+                  selected={isActive}
                   density={touchDrawer ? "rich" : "dense"}
                   onPress={() => openConversation()}
                   isDisabled={isDeleted}
                   data-testid="conversation-history-item"
                   aria-current={isActive ? "page" : undefined}
                   titleClassName={isDeleted ? "line-through text-slate-400 dark:text-slate-500" : ""}
+                  end={
+                    // A conversation a schedule opens says so; nothing else changes.
+                    conversation.threadKind === "automation" ? (
+                      <span className="text-xxs text-slate-400 dark:text-slate-500">Scheduled</span>
+                    ) : undefined
+                  }
                   className={
                     [
-                      "pl-0",
-                      isActive ? "bg-slate-50/85 dark:bg-[var(--color-studio-dark-active)]" : "",
+                      showMarkerGutter ? "pl-0" : touchDrawer ? "relative pl-[1.125rem]" : "relative pl-4",
                       touchDrawer ? "rounded-2xl" : "",
                       isDeleted ? "opacity-70" : "",
                     ]
@@ -520,7 +699,9 @@ export function ConversationHistoryTab({
                               aria-label="Conversation actions"
                               onAction={(key) => {
                                 const action = String(key);
-                                if (action === "restore") {
+                                if (action === "rename") {
+                                  beginRename(conversation.localId);
+                                } else if (action === "restore") {
                                   handleConversationLifecycleChange(conversation.localId, "active");
                                 } else if (action === "archive") {
                                   handleConversationLifecycleChange(conversation.localId, "archived");
@@ -533,6 +714,11 @@ export function ConversationHistoryTab({
                                 }
                               }}
                             >
+                              {conversation.lifecycleStatus !== "deleted" ? (
+                                <StudioMenuItem id="rename" data-testid="conversation-history-menu-rename">
+                                  <MenuItemContent>Rename</MenuItemContent>
+                                </StudioMenuItem>
+                              ) : null}
                               {conversation.lifecycleStatus === "archived" ||
                               conversation.lifecycleStatus === "hidden" ||
                               conversation.lifecycleStatus === "deleted" ? (

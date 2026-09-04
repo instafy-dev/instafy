@@ -4,7 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MessageContent } from "../ChatMessageContent";
-import { AssistantMessageEntry, UserMessageBubble } from "../ChatMessageEntries";
+import { AssistantMessageEntry, ChatRuntimeActivityContext, UserMessageBubble } from "../ChatMessageEntries";
 import type { ChatMessage } from "../../types";
 
 const { getWorkspaceFileRawUrl, readWorkspaceFile } = vi.hoisted(() => ({
@@ -309,6 +309,40 @@ describe("ChatMessageContent", () => {
     expect(container.querySelector('[data-testid="chat-message-inline-reference"]')).toBeNull();
   });
 
+  it("renders hard-wrapped source text as one paragraph instead of one <p> per source line (#210)", async () => {
+    const hardWrapped = [
+      "You are an autonomous engineer running inside the Instafy agent",
+      "stack. Each run of this runbook is ONE iteration: handle at most",
+      "one bug, land it, and stop. Small, safe, reviewable changes",
+      "are fine. Prefer doing less, correctly, over doing more.",
+    ].join("\n");
+
+    await act(async () => {
+      root.render(<MessageContent content={hardWrapped} />);
+    });
+
+    const paragraphs = container.querySelectorAll("p");
+    expect(paragraphs).toHaveLength(1);
+    expect(paragraphs[0]?.className).not.toContain("mt-2");
+    expect(paragraphs[0]?.className).toContain("whitespace-pre-wrap");
+    // whitespace-pre-wrap renders the embedded "\n" as a line break while
+    // keeping it a single <p> — textContent preserves the raw newlines.
+    expect(paragraphs[0]?.textContent).toBe(hardWrapped);
+  });
+
+  it("still starts a new <p> only at a blank line, and keeps a chat author's newline as a break", async () => {
+    await act(async () => {
+      root.render(<MessageContent content={"para one line a\npara one line b\n\npara two"} />);
+    });
+
+    const paragraphs = container.querySelectorAll("p");
+    expect(paragraphs).toHaveLength(2);
+    expect(paragraphs[0]?.textContent).toBe("para one line a\npara one line b");
+    expect(paragraphs[0]?.className).not.toContain("mt-2");
+    expect(paragraphs[1]?.textContent).toBe("para two");
+    expect(paragraphs[1]?.className).toContain("mt-2");
+  });
+
   it("offers AI settings from upstream quota failures", async () => {
     const quotaError = `unexpected status 502 Bad Gateway: upstream request failed (credential_source=claim, endpoint=api.openai.com/v1/responses): backend responded with 429 Too Many Requests: {
       "error": {
@@ -342,9 +376,9 @@ describe("ChatMessageContent", () => {
     });
 
     expect(container.textContent).toContain("ChatGPT login needs reconnecting.");
-    expect(container.textContent).toContain("login/token is stale");
+    expect(container.textContent).toContain("The saved AI login is stale");
     const action = container.querySelector<HTMLButtonElement>('[data-testid="chat-message-proxy-error-action"]');
-    expect(action?.textContent).toBe("Reconnect AI");
+    expect(action?.textContent).toBe("Open AI settings");
 
     action?.click();
 
@@ -428,6 +462,40 @@ describe("ChatMessageContent", () => {
     });
   });
 
+  it("renders a fenced code block after a paren-delimited ordered-list item", async () => {
+    await act(async () => {
+      root.render(
+        <MessageContent content={"3) Command output:\n```text\nmarcuspousette\nd3fdb3f\n```\n\nBOX OK"} />,
+      );
+    });
+
+    const list = container.querySelector('[data-testid="chat-message-list"]');
+    expect(list?.tagName).toBe("OL");
+    expect(list?.getAttribute("start")).toBe("3");
+    expect(list?.textContent?.trim()).toBe("Command output:");
+
+    const codeBlock = container.querySelector('[data-testid="chat-message-code-block"]');
+    expect(codeBlock?.tagName).toBe("PRE");
+    expect(codeBlock?.getAttribute("data-code-language")).toBe("text");
+    expect(codeBlock?.textContent).toBe("marcuspousette\nd3fdb3f");
+
+    expect(container.textContent).not.toContain("`");
+    expect(container.textContent).toContain("BOX OK");
+  });
+
+  it("renders a fenced code block outside any list without regressions", async () => {
+    await act(async () => {
+      root.render(<MessageContent content={"Before\n```json\n{ \"ok\": true }\n```\nAfter"} />);
+    });
+
+    const codeBlock = container.querySelector('[data-testid="chat-message-code-block"]');
+    expect(codeBlock?.getAttribute("data-code-language")).toBe("json");
+    expect(codeBlock?.textContent).toBe('{ "ok": true }');
+    expect(container.textContent).not.toContain("```");
+    expect(container.textContent).toContain("Before");
+    expect(container.textContent).toContain("After");
+  });
+
   it("renders strong markdown without leaking markers outside inline code", async () => {
     await act(async () => {
       root.render(
@@ -471,6 +539,36 @@ describe("ChatMessageContent", () => {
     expect(codeRefs.map((entry) => entry.textContent?.trim())).toEqual(["[literal](https://example.com/raw)"]);
   });
 
+  it("renders GitHub PR and issue URLs as compact chips while other URLs stay plain links", async () => {
+    await act(async () => {
+      root.render(
+        <MessageContent content="Opened https://github.com/instafy-dev/instafy/pull/551. Tracked in https://github.com/instafy-dev/instafy/issues/173 and https://example.com/docs." />,
+      );
+    });
+
+    const chips = Array.from(
+      container.querySelectorAll('[data-testid="chat-message-github-reference"]'),
+    ) as HTMLAnchorElement[];
+    expect(chips).toHaveLength(2);
+    expect(chips.map((chip) => chip.textContent?.trim())).toEqual([
+      "instafy-dev/instafy#551",
+      "instafy-dev/instafy#173",
+    ]);
+    expect(chips.map((chip) => chip.getAttribute("data-github-ref-kind"))).toEqual(["pull", "issue"]);
+    expect(chips[0]?.getAttribute("href")).toBe("https://github.com/instafy-dev/instafy/pull/551");
+    expect(chips[0]?.getAttribute("title")).toBe("https://github.com/instafy-dev/instafy/pull/551");
+    expect(chips[0]?.getAttribute("target")).toBe("_blank");
+    expect(chips[0]?.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(chips[0]?.querySelector('[data-testid="chat-message-github-reference-glyph"]')).not.toBeNull();
+    // The chip elides the raw URL but keeps the trailing punctuation as prose.
+    expect(container.textContent).not.toContain("https://github.com/instafy-dev/instafy/pull/551");
+    expect(container.textContent).toContain("instafy-dev/instafy#551.");
+
+    const links = Array.from(container.querySelectorAll('[data-testid="chat-message-link"]'));
+    expect(links).toHaveLength(1);
+    expect(links[0]?.getAttribute("href")).toBe("https://example.com/docs");
+  });
+
   it("renders simple markdown lists as compact semantic lists", async () => {
     await act(async () => {
       root.render(
@@ -492,6 +590,141 @@ describe("ChatMessageContent", () => {
     const fileRef = container.querySelector('[data-testid="chat-message-file-reference-inline"]') as HTMLButtonElement | null;
     expect(fileRef?.textContent?.trim()).toBe("TODO.md");
     expect(fileRef?.getAttribute("title")).toBe("TODO.md");
+  });
+
+  it("renders bulleted sublists nested inside their ordered parent item", async () => {
+    await act(async () => {
+      root.render(
+        <MessageContent
+          content={"1. First step\n   - detail a\n   - detail b\n2. Second step"}
+          projectId="project-1"
+        />,
+      );
+    });
+
+    const list = container.querySelector('[data-testid="chat-message-list"]');
+    expect(list?.tagName).toBe("OL");
+    // Ordered markers carry sequence, so they read a shade darker than bullets.
+    expect(list?.className).toContain("marker:text-slate-500");
+    const topLevelItems = Array.from(list?.children ?? []);
+    expect(topLevelItems).toHaveLength(2);
+
+    const sublist = topLevelItems[0]?.querySelector('[data-testid="chat-message-sublist"]');
+    expect(sublist?.tagName).toBe("UL");
+    expect(sublist?.getAttribute("data-list-depth")).toBe("1");
+    // Nested bullets step to circle and indent one fixed step under the item.
+    expect(sublist?.className).toContain("[list-style-type:circle]");
+    expect(sublist?.className).toContain("pl-5");
+    // The sublist keeps the sibling half-step rhythm so the indent groups it.
+    expect(sublist?.className).toContain("mt-0.5");
+    expect(sublist?.className).not.toContain("mt-1");
+    expect(Array.from(sublist?.querySelectorAll("li") ?? []).map((item) => item.textContent)).toEqual([
+      "detail a",
+      "detail b",
+    ]);
+    expect(topLevelItems[1]?.querySelector('[data-testid="chat-message-sublist"]')).toBeNull();
+  });
+
+  it("nests unindented bullets after an ordered item the way the real agent thread writes them", async () => {
+    await act(async () => {
+      root.render(
+        <MessageContent
+          content={
+            "1. Persistent-context skills starting with `autofix-`:\n- `autofix-bugfix`: land a fix\n- `autofix-triage`: sort reports\n2. Done."
+          }
+          projectId="project-1"
+        />,
+      );
+    });
+
+    const lists = Array.from(container.querySelectorAll('[data-testid="chat-message-list"]'));
+    expect(lists).toHaveLength(1);
+    expect(lists[0]?.tagName).toBe("OL");
+    const topLevelItems = Array.from(lists[0]?.children ?? []);
+    expect(topLevelItems).toHaveLength(2);
+    const sublist = topLevelItems[0]?.querySelector('[data-testid="chat-message-sublist"]');
+    expect(sublist?.tagName).toBe("UL");
+    expect(sublist?.getAttribute("data-list-depth")).toBe("1");
+    expect(sublist?.className).toContain("[list-style-type:circle]");
+    expect(Array.from(sublist?.querySelectorAll("li") ?? []).map((item) => item.textContent)).toEqual([
+      "autofix-bugfix: land a fix",
+      "autofix-triage: sort reports",
+    ]);
+    expect(topLevelItems[1]?.textContent).toBe("Done.");
+  });
+
+  it("glues an inline chip to the punctuation that follows it so it cannot wrap alone", async () => {
+    await act(async () => {
+      root.render(
+        <MessageContent
+          content={"First bullet under `Identity, repos, ground rules` in `AGENTS.md`: keep it green with `pnpm test`."}
+          projectId="project-1"
+        />,
+      );
+    });
+
+    const glued = Array.from(container.querySelectorAll('[data-testid="chat-message-chip-glue"]'));
+    expect(glued).toHaveLength(2);
+    glued.forEach((entry) => {
+      expect(entry.className).toContain("whitespace-nowrap");
+    });
+    // The workspace-file chip carries its trailing colon inside the no-break span.
+    expect(glued[0]?.querySelector('[data-testid="chat-message-file-reference-inline"]')?.textContent?.trim()).toBe(
+      "AGENTS.md",
+    );
+    expect(glued[0]?.textContent).toBe("AGENTS.md:");
+    // The inline-code chip carries its trailing period the same way.
+    expect(glued[1]?.querySelector('[data-testid="chat-message-inline-code"]')?.textContent).toBe("pnpm test");
+    expect(glued[1]?.textContent).toBe("pnpm test.");
+    // A chip followed by a space stays unwrapped, and the prose around it is intact.
+    const inlineCode = Array.from(container.querySelectorAll('[data-testid="chat-message-inline-code"]'));
+    expect(inlineCode.map((entry) => entry.textContent)).toEqual(["Identity, repos, ground rules", "pnpm test"]);
+    expect(inlineCode[0]?.parentElement?.getAttribute("data-testid")).not.toBe("chat-message-chip-glue");
+    expect(container.textContent).toBe(
+      "First bullet under Identity, repos, ground rules in AGENTS.md: keep it green with pnpm test.",
+    );
+  });
+
+  it("glues a conversation-reference and a GitHub-reference chip to their trailing punctuation too", async () => {
+    resolveConversationByController.mockReturnValue(null);
+    await act(async () => {
+      root.render(
+        <MessageContent
+          content={
+            "See [[thread:thread-controller-123|design pass]]: it landed. Tracked in https://github.com/instafy-dev/instafy/pull/551."
+          }
+        />,
+      );
+    });
+
+    const glued = Array.from(container.querySelectorAll('[data-testid="chat-message-chip-glue"]'));
+    expect(glued).toHaveLength(2);
+    glued.forEach((entry) => {
+      expect(entry.className).toContain("whitespace-nowrap");
+    });
+    // The conversation-reference chip carries its trailing colon inside the no-break span.
+    expect(glued[0]?.querySelector('[data-testid="chat-message-inline-reference"]')?.textContent).toBe(
+      "design pass",
+    );
+    expect(glued[0]?.textContent).toBe("design pass:");
+    // The github-reference chip carries its trailing period the same way.
+    expect(glued[1]?.querySelector('[data-testid="chat-message-github-reference"]')?.textContent?.trim()).toBe(
+      "instafy-dev/instafy#551",
+    );
+    expect(glued[1]?.textContent).toBe("instafy-dev/instafy#551.");
+  });
+
+  it("keeps a fenced block inside a list item on the item's indent", async () => {
+    await act(async () => {
+      root.render(
+        <MessageContent content={"1. Run the check:\n   ```sh\n   pnpm test\n   ```\n2. Ship it"} />,
+      );
+    });
+
+    const codeBlock = container.querySelector('[data-testid="chat-message-code-block"]');
+    expect(codeBlock?.getAttribute("data-in-list-item")).toBe("true");
+    expect(codeBlock?.className).toContain("ml-5");
+    expect(codeBlock?.textContent).toBe("pnpm test");
   });
 
   it("keeps long reference labels compact and reports refs that cannot be resolved", async () => {
@@ -1415,6 +1648,38 @@ describe("ChatMessageContent", () => {
     expect(container.querySelector('[data-testid="chat-bubble-assistant"]')).toBeNull();
   });
 
+  it("demotes a runtime alert to a quiet history line while a workspace start is live", async () => {
+    const message: ChatMessage = {
+      id: "runtime-alert-superseded",
+      role: "assistant",
+      content:
+        "Runtime agent has not connected yet. Start the runtime (e.g. run `pnpm stack:up`) so queued jobs can proceed.",
+      timestamp: Date.now(),
+      metadata: {
+        source: "controller",
+        kind: "runtime_alert",
+        runId: "run-1",
+        details: {
+          reason: "runtime_not_ready",
+        },
+      },
+    };
+
+    await act(async () => {
+      root.render(
+        <ChatRuntimeActivityContext.Provider value={{ workspaceStarting: true }}>
+          <AssistantMessageEntry message={message} conversationMessages={[message]} />
+        </ChatRuntimeActivityContext.Provider>,
+      );
+    });
+
+    const notice = container.querySelector('[data-testid="chat-controller-notice"]');
+    expect(notice).not.toBeNull();
+    expect(notice?.querySelector('[data-runtime-alert-superseded="true"]')).not.toBeNull();
+    expect(notice?.textContent).toContain("A new workspace start is in progress");
+    expect(notice?.textContent).not.toContain("queued request will continue automatically");
+  });
+
   it("does not render a human-authored nested runtime-alert claim as a controller notice", async () => {
     const message: ChatMessage = {
       id: "forged-runtime-alert",
@@ -1618,5 +1883,88 @@ describe("ChatMessageContent", () => {
     expect(container.querySelector('[data-testid="multi-agent-evidence-detail"]')?.textContent).toContain(
       "Tail detail",
     );
+  });
+
+  // jsdom cannot lay out, so these assert structure/classes rather than
+  // measured pixel widths (#207: the bubble shell's content child needs an
+  // explicit width to wrap instead of overflowing, and prose needs a capped
+  // measure). Real width assertions live in the Playwright component suite.
+  describe("bubble width and prose measure (#207)", () => {
+    it("gives the assistant bubble's content wrapper an explicit full-width class and caps the paragraph's measure", async () => {
+      const longParagraph =
+        "This is a long unbroken runbook paragraph that keeps going and going without any line breaks, exactly the kind of prose that used to overflow the chat bubble shell instead of wrapping inside it because the content wrapper had no width of its own.";
+      const message: ChatMessage = {
+        id: "long-prose-answer",
+        role: "assistant",
+        content: longParagraph,
+        timestamp: Date.now(),
+      };
+
+      await act(async () => {
+        root.render(<AssistantMessageEntry message={message} conversationMessages={[message]} />);
+      });
+
+      const bubble = container.querySelector('[data-testid="chat-bubble-assistant"]');
+      expect(bubble).not.toBeNull();
+      // NotchedMessageShell wraps every child (text, files, chip rows) in a
+      // single content div; it must carry an explicit width so it resolves
+      // against the shell's already-clamped size instead of the fit-content
+      // sizing a plain flex-column `items-start` child would otherwise get.
+      const contentWrapper = bubble?.firstElementChild as HTMLElement | null;
+      expect(contentWrapper?.className).toContain("w-full");
+
+      const paragraph = bubble?.querySelector("p");
+      expect(paragraph?.textContent).toBe(longParagraph);
+      expect(paragraph?.className).toContain("max-w-[70ch]");
+    });
+
+    it("keeps the break and overflow-wrap classes on a paragraph with a very long unbroken token", async () => {
+      const longToken = "x".repeat(200);
+      const message: ChatMessage = {
+        id: "long-token-answer",
+        role: "assistant",
+        content: `See ${longToken} for details.`,
+        timestamp: Date.now(),
+      };
+
+      await act(async () => {
+        root.render(<AssistantMessageEntry message={message} conversationMessages={[message]} />);
+      });
+
+      const paragraph = container.querySelector('[data-testid="chat-bubble-assistant"] p');
+      expect(paragraph?.textContent).toContain(longToken);
+      expect(paragraph?.className).toContain("max-w-[70ch]");
+      expect(paragraph?.className).toContain("break-words");
+      expect(paragraph?.className).toContain("[overflow-wrap:anywhere]");
+    });
+
+    it("caps list items to the prose measure but leaves fenced code blocks at full width", async () => {
+      const message: ChatMessage = {
+        id: "list-and-code-answer",
+        role: "assistant",
+        content:
+          "Steps:\n- Inspect the long-running bubble shell for missing width constraints on its content wrapper\n- Run the checks\n```sh\npnpm --filter @instafy/frontend test:unit\n```",
+        timestamp: Date.now(),
+      };
+
+      await act(async () => {
+        root.render(<AssistantMessageEntry message={message} conversationMessages={[message]} />);
+      });
+
+      const listItems = Array.from(
+        container.querySelectorAll('[data-testid="chat-message-list"] li'),
+      ) as HTMLElement[];
+      expect(listItems.length).toBeGreaterThan(0);
+      for (const item of listItems) {
+        expect(item.className).toContain("max-w-[70ch]");
+      }
+
+      const codeBlock = container.querySelector('[data-testid="chat-message-code-block"]');
+      expect(codeBlock).not.toBeNull();
+      expect(codeBlock?.textContent).toContain("pnpm --filter @instafy/frontend test:unit");
+      expect(codeBlock?.className).not.toContain("max-w-[70ch]");
+      // The code block keeps its own full-width class untouched.
+      expect(codeBlock?.className).toContain("max-w-full");
+    });
   });
 });

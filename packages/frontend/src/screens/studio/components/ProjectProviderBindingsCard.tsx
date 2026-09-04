@@ -30,6 +30,7 @@ import {
   ProviderBindingApprovalModal,
   type ProviderBindingApprovalDefaults,
 } from "./ProviderBindingApprovalModal";
+import { buildDesktopStudioDeepLink } from "./desktopStudioDeepLink";
 import { SettingsSection } from "./SettingsSection";
 import { SettingsSurface } from "./SettingsSurface";
 
@@ -287,30 +288,6 @@ function resolveRuntimeHostGrantScope(
   }
 }
 
-function buildDesktopStudioDeepLink(projectId: string | null): string {
-  const params = new URLSearchParams();
-  let hash = "";
-
-  if (typeof window !== "undefined") {
-    try {
-      const current = new URL(window.location.href);
-      current.searchParams.forEach((value, key) => {
-        params.set(key, value);
-      });
-      hash = current.hash;
-    } catch {
-      // Fall back to a plain Studio deep link below.
-    }
-  }
-
-  if (projectId && !params.has("projectId")) {
-    params.set("projectId", projectId);
-  }
-
-  const query = params.toString();
-  return `instafy://studio${query ? `?${query}` : ""}${hash}`;
-}
-
 function groupHardwareBindingsByHost(
   bindings: LocalHardwareBinding[],
 ): HardwareHostBindingGroup[] {
@@ -340,7 +317,7 @@ export function ProjectProviderBindingsCard({
   canManageAccess = true,
 }: ProjectProviderBindingsCardProps) {
   const { showStatus } = useStatus();
-  const { localWorkspace } = useRuntime();
+  const { localWorkspace, showDesktopRuntimeHelp } = useRuntime();
   const workspaceSummary = useMemo(
     () => resolveProjectWorkspaceSummary(localWorkspace),
     [localWorkspace],
@@ -395,13 +372,20 @@ export function ProjectProviderBindingsCard({
         path: result.path,
         defaultPath: current?.defaultPath ?? "",
       }));
-      showStatus(
-        result.runtimeRestartRequired
-          ? "Folder linked. Restart the local runtime to start using it."
-          : "Folder linked. The local runtime will use it for this space's files.",
-        "success",
-        4000,
-      );
+      if (result.runtimeRestartRequired) {
+        showStatus(
+          "Folder linked. Restart the local runtime to start using it.",
+          "success",
+          8000,
+          { actionLabel: "Runtime controls", onAction: showDesktopRuntimeHelp },
+        );
+      } else {
+        showStatus(
+          "Folder linked. The local runtime will use it for this space's files.",
+          "success",
+          4000,
+        );
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       showStatus(message, "error", 5000);
@@ -417,7 +401,10 @@ export function ProjectProviderBindingsCard({
       setWorkspaceFolderBinding((current) =>
         current ? { ...current, path: null } : current,
       );
-      showStatus("Reset to the managed folder. Restart the local runtime to apply.", "info", 4000);
+      showStatus("Reset to the managed folder. Restart the local runtime to apply.", "info", 8000, {
+        actionLabel: "Runtime controls",
+        onAction: showDesktopRuntimeHelp,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       showStatus(message, "error", 5000);

@@ -8,6 +8,22 @@ import { VoiceConversationActionStrip } from "../VoiceConversationActionStrip";
 const PointerEventCtor =
   typeof globalThis.PointerEvent === "function" ? globalThis.PointerEvent : MouseEvent;
 
+function pointerEvent(
+  type: string,
+  {
+    pointerId = 1,
+    button = 0,
+    isPrimary = true,
+  }: { pointerId?: number; button?: number; isPrimary?: boolean } = {},
+) {
+  const event = new PointerEventCtor(type, { bubbles: true, button });
+  Object.defineProperties(event, {
+    pointerId: { configurable: true, value: pointerId },
+    isPrimary: { configurable: true, value: isPrimary },
+  });
+  return event;
+}
+
 describe("VoiceConversationActionStrip", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -31,8 +47,6 @@ describe("VoiceConversationActionStrip", () => {
     const onToggleVoiceReplies = vi.fn();
     const onVoicePressStart = vi.fn();
     const onVoicePressEnd = vi.fn();
-    const onPointerCaptureStart = vi.fn();
-    const onPointerCaptureEnd = vi.fn();
 
     await act(async () => {
       root.render(
@@ -51,10 +65,8 @@ describe("VoiceConversationActionStrip", () => {
           disabled={false}
           onVoicePressStart={onVoicePressStart}
           onVoicePressEnd={onVoicePressEnd}
-          onPointerCaptureStart={onPointerCaptureStart}
-          onPointerCaptureEnd={onPointerCaptureEnd}
           primaryActionClassName="primary"
-          outlinedActionClassName="outline"
+          ghostActionClassName="ghost"
           actionIconClassName="icon"
         />,
       );
@@ -78,22 +90,10 @@ describe("VoiceConversationActionStrip", () => {
     expect(onToggleVoiceReplies).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      voiceButton?.dispatchEvent(
-        new PointerEventCtor("pointerdown", {
-          bubbles: true,
-          button: 0,
-        }),
-      );
-      voiceButton?.dispatchEvent(
-        new PointerEventCtor("pointerup", {
-          bubbles: true,
-          button: 0,
-        }),
-      );
+      voiceButton?.dispatchEvent(pointerEvent("pointerdown"));
+      voiceButton?.dispatchEvent(pointerEvent("pointerup"));
     });
 
-    expect(onPointerCaptureStart).toHaveBeenCalledTimes(1);
-    expect(onPointerCaptureEnd).toHaveBeenCalledTimes(1);
     expect(onVoicePressStart).toHaveBeenCalledTimes(1);
     expect(onVoicePressEnd).toHaveBeenCalledTimes(1);
 
@@ -104,6 +104,137 @@ describe("VoiceConversationActionStrip", () => {
 
     expect(onVoicePressStart).toHaveBeenCalledTimes(2);
     expect(onVoicePressEnd).toHaveBeenCalledTimes(2);
+  });
+
+  it("owns one primary pointer hold and ends it exactly once", async () => {
+    const onVoicePressStart = vi.fn();
+    const onVoicePressEnd = vi.fn();
+
+    await act(async () => {
+      root.render(
+        <VoiceConversationActionStrip
+          showVoiceRepliesToggle={false}
+          voiceActionActive={false}
+          voiceListening={false}
+          voiceStarting={false}
+          voiceTranscribing={false}
+          voiceState="idle"
+          voiceRoute="provider"
+          voiceCapture="hosted"
+          onVoicePressStart={onVoicePressStart}
+          onVoicePressEnd={onVoicePressEnd}
+          onVoiceTap={vi.fn()}
+          primaryActionClassName="primary"
+          ghostActionClassName="ghost"
+          actionIconClassName="icon"
+        />,
+      );
+    });
+    const voiceButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-voice-input-button"]',
+    );
+
+    await act(async () => {
+      voiceButton?.focus();
+      voiceButton?.dispatchEvent(pointerEvent("pointerup", { pointerId: 8 }));
+      voiceButton?.dispatchEvent(pointerEvent("pointerdown", { button: 2 }));
+      voiceButton?.dispatchEvent(
+        pointerEvent("pointerdown", { pointerId: 2, isPrimary: false }),
+      );
+      voiceButton?.dispatchEvent(pointerEvent("pointerdown", { pointerId: 7 }));
+      voiceButton?.blur();
+      voiceButton?.dispatchEvent(pointerEvent("pointerdown", { pointerId: 8 }));
+      voiceButton?.dispatchEvent(pointerEvent("pointerup", { pointerId: 8 }));
+      window.dispatchEvent(pointerEvent("pointerup", { pointerId: 7 }));
+      voiceButton?.dispatchEvent(pointerEvent("pointercancel", { pointerId: 7 }));
+    });
+
+    expect(onVoicePressStart).toHaveBeenCalledTimes(1);
+    expect(onVoicePressEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores repeat and stray keyboard events and ends the owned key once", async () => {
+    const onVoicePressStart = vi.fn();
+    const onVoicePressEnd = vi.fn();
+
+    await act(async () => {
+      root.render(
+        <VoiceConversationActionStrip
+          showVoiceRepliesToggle={false}
+          voiceActionActive={false}
+          voiceListening={false}
+          voiceStarting={false}
+          voiceTranscribing={false}
+          voiceState="idle"
+          voiceRoute="provider"
+          voiceCapture="hosted"
+          onVoicePressStart={onVoicePressStart}
+          onVoicePressEnd={onVoicePressEnd}
+          onVoiceTap={vi.fn()}
+          primaryActionClassName="primary"
+          ghostActionClassName="ghost"
+          actionIconClassName="icon"
+        />,
+      );
+    });
+    const voiceButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-voice-input-button"]',
+    );
+
+    await act(async () => {
+      voiceButton?.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Enter" }));
+      voiceButton?.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: "Enter" }));
+      voiceButton?.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, key: "Enter", repeat: true }),
+      );
+      voiceButton?.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: " " }));
+      voiceButton?.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Enter" }));
+      voiceButton?.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: "Enter" }));
+    });
+
+    expect(onVoicePressStart).toHaveBeenCalledTimes(1);
+    expect(onVoicePressEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses virtual activation as the screen-reader toggle fallback in hold mode", async () => {
+    const onVoiceTap = vi.fn();
+    const onVoicePressStart = vi.fn();
+    const onVoicePressEnd = vi.fn();
+
+    await act(async () => {
+      root.render(
+        <VoiceConversationActionStrip
+          showVoiceRepliesToggle={false}
+          voiceActionActive={false}
+          voiceListening={false}
+          voiceStarting={false}
+          voiceTranscribing={false}
+          voiceState="idle"
+          voiceRoute="provider"
+          voiceCapture="hosted"
+          onVoicePressStart={onVoicePressStart}
+          onVoicePressEnd={onVoicePressEnd}
+          onVoiceTap={onVoiceTap}
+          primaryActionClassName="primary"
+          ghostActionClassName="ghost"
+          actionIconClassName="icon"
+        />,
+      );
+    });
+    const voiceButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="chat-voice-input-button"]',
+    );
+
+    expect(voiceButton?.getAttribute("aria-label")).toBe(
+      "Start voice input; hold to talk or activate to toggle",
+    );
+    await act(async () => {
+      voiceButton?.click();
+    });
+
+    expect(onVoiceTap).toHaveBeenCalledTimes(1);
+    expect(onVoicePressStart).not.toHaveBeenCalled();
+    expect(onVoicePressEnd).not.toHaveBeenCalled();
   });
 
   it("uses click-to-toggle in tap mode", async () => {
@@ -131,7 +262,7 @@ describe("VoiceConversationActionStrip", () => {
           onVoicePressEnd={onVoicePressEnd}
           onVoiceTap={onVoiceTap}
           primaryActionClassName="primary"
-          outlinedActionClassName="outline"
+          ghostActionClassName="ghost"
           actionIconClassName="icon"
         />,
       );
@@ -175,7 +306,7 @@ describe("VoiceConversationActionStrip", () => {
           onVoicePressEnd={() => {}}
           onVoiceTap={onVoiceTap}
           primaryActionClassName="primary"
-          outlinedActionClassName="outline"
+          ghostActionClassName="ghost"
           actionIconClassName="icon"
         />,
       );

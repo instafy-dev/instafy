@@ -1,0 +1,340 @@
+name: npm Package Releases
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: npm-release-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'main' }}
+  cancel-in-progress: false
+  queue: max
+
+permissions: {}
+
+jobs:
+  pull-request-policy:
+    name: Require reviewed Changeset release intent
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout the exact pull request commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+          submodules: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+
+      - name: Install the exact dependency graph without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Validate ordinary or generated release changes
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          PULL_REQUEST_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          args=(--base "$BASE_SHA" --head "$HEAD_SHA")
+          if [[ "$HEAD_REPOSITORY" == "$GITHUB_REPOSITORY" && \
+                "$HEAD_REF" == "changeset-release/main" && \
+                "$PULL_REQUEST_AUTHOR" == "instafy-bot" ]]; then
+            args+=(--version-pr)
+          fi
+          node scripts/check-changeset-pr.mjs "${args[@]}"
+
+  select:
+    name: Select version or publish mode
+    if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      mode: ${{ steps.mode.outputs.mode }}
+      publish-plan-artifact-id: ${{ steps.mode.outputs.publish-plan-artifact-id }}
+
+    steps:
+      - name: Checkout the exact protected-main event commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          submodules: false
+
+      - name: Require this event to remain current protected main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          test "$current_sha" = "$GITHUB_SHA"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+
+      - name: Install the exact dependency graph without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Select Changesets mode and create an immutable publish plan
+        id: mode
+        uses: changesets/action/select-mode@198f833dd7d863100ea6e28967bc9a9fdefadb0a # v2.1.0
+
+  version:
+    name: Create or update the signed version pull request
+    needs: select
+    if: ${{ needs.select.outputs.mode == 'version' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout the exact protected-main event commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          submodules: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+
+      - name: Install the exact dependency graph without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Require the dedicated instafy-bot credential
+        env:
+          INSTAFY_BOT_TOKEN: ${{ secrets.INSTAFY_BOT_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$INSTAFY_BOT_TOKEN"
+
+      - name: Create or update the Changesets version pull request
+        uses: changesets/action/version@198f833dd7d863100ea6e28967bc9a9fdefadb0a # v2.1.0
+        with:
+          github-token: ${{ secrets.INSTAFY_BOT_TOKEN }}
+          script: pnpm release:version
+          commit-message: "chore(release): version npm packages"
+          pr-title: "chore(release): version npm packages"
+          pr-draft: create
+          pr-base-branch: main
+          push-with-git-cli: false
+
+  pack:
+    name: Test and pack exact npm artifacts
+    needs: select
+    if: ${{ needs.select.outputs.mode == 'publish' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+
+    steps:
+      - name: Checkout the exact protected-main event commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          submodules: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+
+      - name: Install the exact dependency graph without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Download the exact publish plan selected for this commit
+        # select-mode uploads the plan as a raw skipArchive artifact. v8+ detects
+        # non-ZIP artifacts instead of repeatedly trying to extract them.
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.select.outputs.publish-plan-artifact-id }}
+          path: ${{ runner.temp }}/changeset-plan
+
+      - name: Test both publishable package artifacts
+        run: |
+          set -euo pipefail
+          pnpm --filter @instafy/cli test:package
+          (cd packages/provider-contract && npm pack --dry-run --ignore-scripts)
+
+      - name: Pack the immutable Changesets release artifacts
+        run: |
+          set -euo pipefail
+          pnpm changeset pack \
+            --from-publish-plan "$RUNNER_TEMP/changeset-plan/publish-plan.json" \
+            --out-dir "$RUNNER_TEMP/changeset-pack"
+
+      - name: Verify the exact pack boundary and recorded SHA-256 values
+        run: |
+          set -euo pipefail
+          node scripts/verify-changeset-pack.mjs \
+            "$RUNNER_TEMP/changeset-pack" \
+            --source-sha "$GITHUB_SHA" \
+            --registry none \
+            --output "$RUNNER_TEMP/pack-verification.json"
+
+      - name: Upload the verified immutable pack
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: changeset-pack-${{ github.sha }}
+          path: ${{ runner.temp }}/changeset-pack
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  publish:
+    name: Publish the already-verified npm artifacts
+    needs: pack
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: npm-release
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout only the exact release verifier and lockfile
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          submodules: false
+
+      - name: Require the approved commit to remain current protected main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')"
+          test "$current_sha" = "$GITHUB_SHA"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+
+      - name: Seal publication to the canonical npm registry
+        run: |
+          set -euo pipefail
+          test ! -e .npmrc
+          test ! -e packages/.npmrc
+          test ! -e packages/instafy-cli/.npmrc
+          test ! -e packages/provider-contract/.npmrc
+          npm_userconfig="$RUNNER_TEMP/instafy-empty-npmrc"
+          install -m 0600 /dev/null "$npm_userconfig"
+          export NPM_CONFIG_USERCONFIG="$npm_userconfig"
+          export NPM_CONFIG_REGISTRY="https://registry.npmjs.org/"
+          test "$(pnpm config get registry)" = "https://registry.npmjs.org/"
+          test "$(pnpm config get '@instafy:registry')" = "undefined"
+          echo "NPM_CONFIG_USERCONFIG=$npm_userconfig" >> "$GITHUB_ENV"
+          echo "NPM_CONFIG_REGISTRY=https://registry.npmjs.org/" >> "$GITHUB_ENV"
+
+      - name: Install the exact release toolchain without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Require the reviewed npm CLI version
+        run: |
+          set -euo pipefail
+          test "$(pnpm exec npm --version)" = "11.19.0"
+          test -z "${NPM_TOKEN:-}"
+          test -z "${NODE_AUTH_TOKEN:-}"
+
+      - name: Download the exact tested pack by immutable artifact id
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.pack.outputs.artifact-id }}
+          path: ${{ runner.temp }}/changeset-pack
+
+      - name: Refuse registry collisions before publishing
+        run: |
+          set -euo pipefail
+          node scripts/verify-changeset-pack.mjs \
+            "$RUNNER_TEMP/changeset-pack" \
+            --source-sha "$GITHUB_SHA" \
+            --registry before \
+            --output "$RUNNER_TEMP/prepublish-receipt.json"
+
+      - name: Publish the unchanged tarballs with npm trusted publishing
+        env:
+          NPM_CONFIG_AUDIT: "false"
+          NPM_CONFIG_FUND: "false"
+          NPM_CONFIG_IGNORE_SCRIPTS: "true"
+        run: >-
+          pnpm changeset publish
+          --from-pack-dir "$RUNNER_TEMP/changeset-pack"
+          --no-git-tag
+
+      - name: Verify npm exposes the exact published bytes
+        run: |
+          set -euo pipefail
+          node scripts/verify-changeset-pack.mjs \
+            "$RUNNER_TEMP/changeset-pack" \
+            --source-sha "$GITHUB_SHA" \
+            --registry after \
+            --output "$RUNNER_TEMP/npm-release-receipt.json"
+
+      - name: Upload the immutable release receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: npm-release-receipt-${{ github.sha }}
+          path: ${{ runner.temp }}/npm-release-receipt.json
+          if-no-files-found: error
+          retention-days: 90

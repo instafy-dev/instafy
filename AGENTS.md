@@ -32,6 +32,11 @@ release signing and deployment configuration do not belong here.
   escapes, and preserve the existing permission checks.
 - Treat public pull requests as untrusted. Public CI must use hosted runners and must not
   receive repository, deployment or production secrets.
+- Protected local credentials may intentionally cover both `instafy-dev/instafy` and
+  `instafy-dev/instafy-internal` for explicitly authorized cross-repository release or operations
+  work. That cross-repository scope is allowed: target authenticated commands at an explicit
+  repository and exact ref, keep credential values out of output and tracked files, and never
+  expose them to public CI or untrusted code.
 - Database changes require ordered, additive migrations. Never reset or destructively rewrite
   a shared database.
 
@@ -46,6 +51,11 @@ release signing and deployment configuration do not belong here.
    handing off.
 5. Report commands that actually ran, any checks that remain, and any behavior or compatibility
    change. Do not claim a no-op command as validation.
+
+Changesets are mandatory release intent for publishable npm packages. Add a changeset for every
+user-visible or contract change to `@instafy/cli` or `@instafy/provider-contract`; do not edit
+their versions or changelogs manually. Changes confined to a package's `test/` directory are
+exempt because they cannot enter the npm artifact. See [Package Releases](docs/Package-Releases.md).
 
 Useful frontend checks:
 
@@ -104,6 +114,17 @@ project needs two independent opt-ins — `--target remote` **and**
 `INSTAFY_MINT_TEST_USER_ALLOW_REMOTE=<project-ref>` naming that exact project. Do not add a way
 around this.
 
+## Release automation
+
+The protected-main image workflow in `.github/workflows/continuous-image-publication.yml`
+publishes immutable service and runtime images only after the exact public-main commit passes
+the required Public Build. It also refreshes an exact commit manifest when fewer than 14 days of
+retention remain. Manifests are retained for 90 days; mutable image tags are not release
+authority. Image publication makes an artifact deployable but does not deploy the hosted product.
+
+Hosted rollout authority lives in the private operations repository. Public CI must not receive
+its credentials, decide production rollout policy or bypass the exact-commit manifest boundary.
+
 ## Code conventions
 
 - Frontend code uses React, TypeScript, Vite and the existing component primitives. Preserve
@@ -123,8 +144,11 @@ around this.
 - Review the diff for credential material, personal paths and provider-specific implementation
   that belongs outside the generic core.
 - Verify new package, workflow, Docker and script references exist in a clean checkout.
+- Verify every publishable-package change has the correct Changeset and that package versions
+  were not edited outside the generated version pull request.
 - Update public documentation when behavior or setup changes.
-- Do not publish packages, push release tags, deploy services or change repository visibility
-  as part of an ordinary code change.
+- Do not publish packages, push release tags, deploy services or change repository visibility as
+  part of an ordinary code change. Perform those operations only when the user explicitly
+  authorizes the release or operations task and its exact repository and ref are verified.
 
 Contributions are licensed under [AGPL-3.0-only](LICENSE).

@@ -7,10 +7,12 @@ ARG NODE_IMAGE=node:24-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b12
 ARG CLI_NODE_IMAGE=node:22-bookworm-slim@sha256:6c74791e557ce11fc957704f6d4fe134a7bc8d6f5ca4403205b2966bd488f6b3
 ARG PLAYWRIGHT_VERSION=1.61.1
 ARG NPM_VERSION=12.0.1
-ARG PNPM_VERSION=11.17.0
-# npm (through 12.0.2) vendors vulnerable brace-expansion and ip-address
+ARG PNPM_VERSION=11.24.0
+# npm (through 12.0.2) vendors vulnerable brace-expansion, ip-address, and tar
 # versions. Replace every vendored copy with exact fixed tarballs whose
-# checksums are committed here until npm ships both fixes itself.
+# checksums are committed here until npm ships the fixes itself.
+ARG NPM_TAR_VERSION=7.5.22
+ARG NPM_TAR_SHA256=b792c2d1c7fc770910522ca1ffc29eee02ee38de4fa3a01e7832eb705879c6c6
 ARG BRACE_EXPANSION_VERSION=5.0.9
 ARG BRACE_EXPANSION_SHA256=5d06001fddd25cbee90c96db4dc5b7b57711b984c3141e28d10f143deb52dbaf
 ARG IP_ADDRESS_VERSION=10.3.1
@@ -28,7 +30,8 @@ ARG BUILD_PROFILE=dev
 # Cargo's dev profile outputs to target/debug.
 ARG BUILD_ARTIFACT_DIR=debug
 # Runtime base should have glibc >= the builder image; Debian trixie is newer than bookworm.
-ARG RUNTIME_BASE=debian:trixie-slim@sha256:3a39a0592364683e6bab97937b72cad5a8fa6dcbbee90edb3bb48c7f8e94f258
+ARG RUNTIME_BASE=debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132
+ARG CHROMIUM_MIN_VERSION=152.0.7977.75-1~deb13u1
 ARG WEBDEV_BASE=mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
 
 ########################
@@ -184,6 +187,7 @@ COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandb
 ########################
 FROM ${RUNTIME_BASE} AS runtime
 
+ARG CHROMIUM_MIN_VERSION
 ARG RATHOLE_VERSION=0.5.0
 ARG RATHOLE_SHA256_AMD64
 ARG RATHOLE_SHA256_ARM64
@@ -191,34 +195,54 @@ ARG TARGETARCH
 ARG PLAYWRIGHT_VERSION
 ARG NPM_VERSION
 ARG PNPM_VERSION
+ARG NPM_TAR_VERSION
+ARG NPM_TAR_SHA256
 ARG BRACE_EXPANSION_VERSION
 ARG BRACE_EXPANSION_SHA256
 ARG IP_ADDRESS_VERSION
 ARG IP_ADDRESS_SHA256
 
 COPY --from=node-runtime /usr/local/ /usr/local/
-RUN apt-get update && \
+RUN test -n "${CHROMIUM_MIN_VERSION}" && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
       bash \
+      bsdutils \
       ca-certificates \
       chromium \
       curl \
       git \
       less \
+      login \
+      mount \
       procps \
       ripgrep \
       unzip \
       openssh-client \
       python-is-python3 \
       python3 \
-      python3-pip && \
-    rm -rf /var/lib/apt/lists/*
+      python3-pip \
+      util-linux \
+    && dpkg --compare-versions \
+      "$(dpkg-query -W -f='${Version}' chromium)" ge "${CHROMIUM_MIN_VERSION}" \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g "npm@${NPM_VERSION}" && \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g "playwright@${PLAYWRIGHT_VERSION}" "@playwright/test@${PLAYWRIGHT_VERSION}" && \
     npm install -g "pnpm@${PNPM_VERSION}" && \
     ln -sf /usr/local/bin/pnpm /usr/local/bin/pnpx && \
     if [ ! -e /usr/local/bin/npx ] && [ -x /usr/bin/npx ]; then ln -s /usr/bin/npx /usr/local/bin/npx; fi && \
+    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+      "https://registry.npmjs.org/tar/-/tar-${NPM_TAR_VERSION}.tgz" \
+      --output /tmp/npm-tar.tgz && \
+    printf '%s  %s\n' "${NPM_TAR_SHA256}" /tmp/npm-tar.tgz | sha256sum --check --status && \
+    for nt_dir in $(find /usr -type d -path '*/node_modules/npm/node_modules/tar' 2>/dev/null); do \
+      rm -rf "$nt_dir" && mkdir -p "$nt_dir" && \
+      tar -xzf /tmp/npm-tar.tgz -C "$nt_dir" --strip-components=1; \
+    done && \
+    rm /tmp/npm-tar.tgz && \
+    unpatched="$(find /usr -type f -path '*/node_modules/npm/node_modules/tar/package.json' -exec grep -L "\"version\": \"${NPM_TAR_VERSION}\"" {} + 2>/dev/null || true)" && \
+    if [ -n "$unpatched" ]; then echo "unpatched npm tar copies: $unpatched" >&2; exit 1; fi && \
     curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
       "https://registry.npmjs.org/brace-expansion/-/brace-expansion-${BRACE_EXPANSION_VERSION}.tgz" \
       --output /tmp/brace-expansion.tgz && \
@@ -319,6 +343,8 @@ ARG TARGETARCH
 ARG PLAYWRIGHT_VERSION
 ARG NPM_VERSION
 ARG PNPM_VERSION
+ARG NPM_TAR_VERSION
+ARG NPM_TAR_SHA256
 ARG BRACE_EXPANSION_VERSION
 ARG BRACE_EXPANSION_SHA256
 ARG IP_ADDRESS_VERSION
@@ -332,10 +358,13 @@ ARG UBOLITE_SHA256_ARM64
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       bash \
+      bsdutils \
       ca-certificates \
       curl \
       git \
       less \
+      login \
+      mount \
       procps \
       ripgrep \
       fluxbox \
@@ -347,13 +376,25 @@ RUN apt-get update && \
       openssh-client \
       python-is-python3 \
       python3 \
-      python3-pip && \
-    rm -rf /var/lib/apt/lists/*
+      python3-pip \
+      util-linux \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN npm install -g "npm@${NPM_VERSION}" && \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install -g "playwright@${PLAYWRIGHT_VERSION}" "@playwright/test@${PLAYWRIGHT_VERSION}" && \
     npm install -g "pnpm@${PNPM_VERSION}" && \
     if [ ! -e /usr/local/bin/npx ] && [ -x /usr/bin/npx ]; then ln -s /usr/bin/npx /usr/local/bin/npx; fi && \
+    curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+      "https://registry.npmjs.org/tar/-/tar-${NPM_TAR_VERSION}.tgz" \
+      --output /tmp/npm-tar.tgz && \
+    printf '%s  %s\n' "${NPM_TAR_SHA256}" /tmp/npm-tar.tgz | sha256sum --check --status && \
+    for nt_dir in $(find /usr -type d -path '*/node_modules/npm/node_modules/tar' 2>/dev/null); do \
+      rm -rf "$nt_dir" && mkdir -p "$nt_dir" && \
+      tar -xzf /tmp/npm-tar.tgz -C "$nt_dir" --strip-components=1; \
+    done && \
+    rm /tmp/npm-tar.tgz && \
+    unpatched="$(find /usr -type f -path '*/node_modules/npm/node_modules/tar/package.json' -exec grep -L "\"version\": \"${NPM_TAR_VERSION}\"" {} + 2>/dev/null || true)" && \
+    if [ -n "$unpatched" ]; then echo "unpatched npm tar copies: $unpatched" >&2; exit 1; fi && \
     curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
       "https://registry.npmjs.org/brace-expansion/-/brace-expansion-${BRACE_EXPANSION_VERSION}.tgz" \
       --output /tmp/brace-expansion.tgz && \

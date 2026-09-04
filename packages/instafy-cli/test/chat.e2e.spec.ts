@@ -139,7 +139,7 @@ describe("chat command", () => {
       "title",
       "--space",
       projectId,
-      "--controller-url",
+      "--server-url",
       `http://127.0.0.1:${port}`,
       "--access-token",
       "chat-token",
@@ -196,7 +196,7 @@ describe("chat command", () => {
       "up",
       "--conversation",
       conversationId,
-      "--controller-url",
+      "--server-url",
       `http://127.0.0.1:${port}`,
       "--access-token",
       "chat-token",
@@ -259,7 +259,7 @@ describe("chat command", () => {
       "double-check",
       "--conversation",
       conversationId,
-      "--controller-url",
+      "--server-url",
       `http://127.0.0.1:${port}`,
       "--access-token",
       "chat-token",
@@ -318,7 +318,7 @@ describe("chat command", () => {
         "8+1?",
         "--conversation",
         conversationId,
-        "--controller-url",
+        "--server-url",
         `http://127.0.0.1:${port}`,
         "--access-token",
         "chat-token",
@@ -343,5 +343,118 @@ describe("chat command", () => {
       status: "queued",
     });
     expect(captured).toHaveLength(1);
+  });
+
+  it("uses the runtime-injected controller binding for a scoped job credential", async () => {
+    const conversationId = randomUUID();
+    const captured: CapturedRequest[] = [];
+    const server = startMockController((req) => {
+      captured.push(req);
+      return {
+        status: 200,
+        body: {
+          conversationId,
+          runId: randomUUID(),
+          promptId: randomUUID(),
+          status: "queued",
+        },
+      };
+    });
+    await once(server, "listening");
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+
+    const result = await execCli(
+      ["chat", "runtime-bound", "--conversation", conversationId, "--json"],
+      {
+        env: {
+          INSTAFY_ACCESS_TOKEN: "",
+          SUPABASE_ACCESS_TOKEN: "",
+          RUNTIME_ID: randomUUID(),
+          INSTAFY_CONVERSATION_ID: conversationId,
+          CONTROLLER_ACCESS_TOKEN: "runtime-scoped-token",
+          RUNTIME_ACCESS_TOKEN: "runtime-machine-token",
+          CONTROLLER_BASE_URL: `http://127.0.0.1:${port}`,
+        },
+      },
+    );
+    server.close();
+
+    expect(result.code).toBe(0);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]?.auth).toBe("Bearer runtime-scoped-token");
+  });
+
+  it("refuses to send a scoped runtime credential to an overridden controller origin", async () => {
+    const conversationId = randomUUID();
+    const captured: CapturedRequest[] = [];
+    const server = startMockController((req) => {
+      captured.push(req);
+      return { status: 500, body: { error: "must not be reached" } };
+    });
+    await once(server, "listening");
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+
+    const result = await execCli(
+      [
+        "chat",
+        "do-not-send",
+        "--conversation",
+        conversationId,
+        "--server-url",
+        `http://127.0.0.1:${port}`,
+        "--json",
+      ],
+      {
+        env: {
+          INSTAFY_ACCESS_TOKEN: "",
+          SUPABASE_ACCESS_TOKEN: "",
+          RUNTIME_ID: randomUUID(),
+          INSTAFY_CONVERSATION_ID: conversationId,
+          CONTROLLER_ACCESS_TOKEN: "runtime-scoped-token",
+          CONTROLLER_BASE_URL: "http://127.0.0.1:1",
+        },
+      },
+    );
+    server.close();
+
+    expect(result.code).toBe(1);
+    expect(captured).toHaveLength(0);
+    expect(result.stderr).toContain(
+      "Refusing to send a runtime-scoped credential to a controller origin other than CONTROLLER_BASE_URL",
+    );
+  });
+
+  it("does not fall back to a user credential when a runtime job is missing its scoped token", async () => {
+    const conversationId = randomUUID();
+    const captured: CapturedRequest[] = [];
+    const server = startMockController((req) => {
+      captured.push(req);
+      return { status: 500, body: { error: "must not be reached" } };
+    });
+    await once(server, "listening");
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+
+    const result = await execCli(
+      ["chat", "do-not-fallback", "--conversation", conversationId, "--json"],
+      {
+        env: {
+          INSTAFY_ACCESS_TOKEN: "user-token-must-not-be-used",
+          RUNTIME_ID: randomUUID(),
+          INSTAFY_CONVERSATION_ID: conversationId,
+          CONTROLLER_ACCESS_TOKEN: "",
+          CONTROLLER_BASE_URL: `http://127.0.0.1:${port}`,
+        },
+      },
+    );
+    server.close();
+
+    expect(result.code).toBe(1);
+    expect(captured).toHaveLength(0);
+    expect(result.stderr).toContain(
+      "active runtime job is missing its scoped controller credential",
+    );
   });
 });

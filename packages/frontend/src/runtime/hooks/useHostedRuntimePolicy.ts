@@ -12,6 +12,7 @@ const runtimeControllerEnabled = controllerClient.core.enabled;
 interface UseHostedRuntimePolicyArgs {
   activeProjectId: string | null;
   projectInitialized: boolean;
+  projectAccessResolved: boolean;
   projectReadyForRuntime: boolean;
   state: RuntimeStoreState;
   dispatch: Dispatch<RuntimeAction>;
@@ -44,6 +45,7 @@ interface UseHostedRuntimePolicyArgs {
 export function useHostedRuntimePolicy({
   activeProjectId,
   projectInitialized,
+  projectAccessResolved,
   projectReadyForRuntime,
   state,
   dispatch,
@@ -98,6 +100,7 @@ export function useHostedRuntimePolicy({
   useHostedRuntimeRecoveryEffects({
     activeProjectId,
     projectInitialized,
+    projectAccessResolved,
     projectReadyForRuntime,
     runtimeControllerEnabled: runtimeControllerEnabled && runtimeMutationEnabled,
     runtimeStatuses: state.runtimeStatuses,

@@ -8,7 +8,7 @@ Do not route desktop updates through the Capacitor/Capawesome OTA control plane.
 
 Use a standard Electron binary updater flow instead:
 
-- signed desktop binaries
+- signed desktop binaries where a signing lane is available
 - installer-compatible targets
 - channel-aware release feed
 - `electron-updater` on the app side
@@ -56,7 +56,11 @@ available for in-progress downloads.
 Desktop has two operational destinations:
 
 - `internal` for unsigned/manual engineering builds on macOS, Windows, and Linux;
-- `stable` for signed macOS and Windows tag builds.
+- `stable` for signed and notarized macOS builds plus currently unsigned Windows tag builds.
+
+The Windows installer is still verified from its final packaged bytes and covered by the updater
+metadata checks, but it must not be described as code-signed until a Windows signing identity is
+wired into the release lane.
 
 A stable pointer can only be written by a fresh `desktop-app-v*` tag build; the
 promotion workflow cannot copy an unsigned internal artifact into stable.
@@ -81,17 +85,23 @@ policy belong to the deployment operator.
 A deployment release pipeline should:
 
 1. build desktop binaries
-2. sign them
-3. verify the final packaged installers and the local Electron SHA-512 metadata
+2. sign and notarize the macOS binaries
+3. verify the final packaged macOS and unsigned Windows installers and the local Electron SHA-512 metadata
 4. upload immutable tag-scoped payloads, blockmaps, updater YAML, and strict `latest.json`
 5. maintain non-authoritative channel compatibility copies for operations tooling
 6. verify the complete immutable candidate through `https://downloads.instafy.dev`
 7. select stable with one monotonic `stable-release.json` pointer write
 8. verify both live aliases and feeds through `https://downloads.instafy.dev`
-9. create the GitHub release only after the public verification passes
 
-The stable tag must equal `desktop-app-v<package-version>`, and its commit must
-be reachable from the current `origin/main`. The packaged runtime manifest and
+The object-store release selected by `stable-release.json` is the distribution authority. The
+Git tag identifies the source, but the pipeline does not create a GitHub Release or use GitHub
+release assets as a second download surface.
+
+The version in `packages/desktop-app/package.json` is the sole Desktop version
+authority. A deployment coordinator may read that exact value to prepare
+release intent, but it must not maintain a second release-number literal. The
+stable tag must equal `desktop-app-v<package-version>`, and its commit must be
+reachable from the current `origin/main`. The packaged runtime manifest and
 public `latest.json` both record the full source commit.
 Release verification recalculates updater SHA-512 entries and extracts or
 mounts the final installer/archive to verify the bundled runtime from shipped
@@ -117,17 +127,20 @@ of the following are true:
 - an immutable artifact answers a `bytes=0-0` request with a valid `206`,
   `Content-Range`, one-byte body, and `Accept-Ranges: bytes`
 
-The checks retry boundedly for edge propagation. A failed gate blocks the
-GitHub release. Do not replace immutable tag objects to repair a failure; fix
-the worker or publication configuration and rerun the same tag only when the
-already-published bytes are identical.
+The checks retry boundedly for edge propagation. A failed gate prevents a
+successful stable publication. Do not replace immutable tag objects to repair
+a failure; fix the worker or publication configuration and rerun the same tag
+only when the already-published bytes are identical.
 
-Before tagging, run a non-publishing readiness build that exercises the same
-macOS signing/notarization, Windows signing, final signed-artifact verification,
-and packaged Personal Browser canary as the release build. Deployment-specific
-workflow wiring and credentials stay outside the public core. Do not run a
-packaged drain-aware canary until migration `20260000000064` and its matching
-controller behavior have been verified in that deployment.
+A non-publishing readiness build can exercise macOS signing/notarization,
+unsigned Windows packaging, final-artifact verification, and the packaged
+Personal Browser canary without publishing. It is useful for diagnosis, but it
+is not a prerequisite for a new stable tag. Stable publication must rebuild and
+repeat those gates independently; it must not promote readiness artifacts or
+require a prior readiness success. Deployment-specific workflow wiring and
+credentials stay outside the public core. Do not run a packaged drain-aware
+canary until migration `20260000000064` and its matching controller behavior
+have been verified in that deployment.
 
 An operator can run the same gate independently when diagnosing a release:
 
@@ -189,7 +202,9 @@ and new controller generations for this incompatible boundary.
 
 The generic Electron provider sets `useMultipleRangeRequest: false`. Its
 differential downloader therefore issues sequential single byte-range requests,
-which the downloads worker serves directly from R2. The worker supports bounded,
+which the downloads worker serves directly from the configured object store (R2 in the hosted
+deployment). The stable pointer and those objects—not GitHub release assets—are authoritative.
+The worker supports bounded,
 open-ended, and suffix single ranges; returns `416` plus
 `Content-Range: bytes */<size>` for an unsatisfiable single range; and ignores
 unknown, malformed, or multipart range forms by returning the full `200`

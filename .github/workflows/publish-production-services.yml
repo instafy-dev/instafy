@@ -19,6 +19,9 @@ jobs:
   authorize:
     name: Authorize exact release source
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
     outputs:
       commit_sha: ${{ steps.release.outputs.commit_sha }}
     steps:
@@ -46,6 +49,49 @@ jobs:
             exit 1
           fi
           echo "commit_sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse duplicate exact-SHA publication
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ steps.release.outputs.commit_sha }}
+          RELEASE_WORKFLOW: publish-production-services.yml
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_RUN_ATTEMPT" != "1" ]]; then
+            echo "::error::Release runs are immutable; use a fresh dispatch after a failed attempt."
+            exit 1
+          fi
+          runs="$(gh api --method GET \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/${RELEASE_WORKFLOW}/runs" \
+            -f event=workflow_dispatch \
+            -f head_sha="$RELEASE_COMMIT" \
+            -f status=success \
+            -f per_page=100)"
+          if [[ "$(jq -er '.total_count' <<<"$runs")" -gt 100 ]]; then
+            echo "::error::Exact release history is unbounded."
+            exit 1
+          fi
+          sealed_count="$(jq -er \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg path ".github/workflows/${RELEASE_WORKFLOW}" \
+            --arg sha "$RELEASE_COMMIT" '
+              [.workflow_runs[] | select(
+                .repository.full_name == $repository and
+                .path == $path and
+                .event == "workflow_dispatch" and
+                .head_branch == "main" and
+                .head_sha == $sha and
+                .status == "completed" and
+                .conclusion == "success"
+              )] | length
+            ' <<<"$runs")"
+          if [[ "$sealed_count" != "0" ]]; then
+            echo "::error::This exact protected-main release already has a sealed successful publication."
+            exit 1
+          fi
 
   release-approval:
     name: Approve the exact release once
@@ -77,6 +123,9 @@ jobs:
       - authorize
       - release-approval
     runs-on: ubuntu-latest
+    # Normal service cells finish in under 15 minutes. Bound a wedged BuildKit
+    # worker before it can consume the hosted-runner allowance for six hours.
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
@@ -202,7 +251,34 @@ jobs:
         run: |
           set -euo pipefail
           push_log="$RUNNER_TEMP/${IMAGE_KEY}-push.log"
-          docker push "$RELEASE_TAG" | tee "$push_log"
+          # GHCR can transiently reject a content-addressed push after accepting
+          # some layers. Retry only this already-scanned local image; never rebuild.
+          push_succeeded=false
+          for attempt in 1 2 3 4; do
+            attempt_log="${push_log}.attempt-${attempt}"
+            if docker push "$RELEASE_TAG" 2>&1 | tee "$attempt_log"; then
+              mv "$attempt_log" "$push_log"
+              push_succeeded=true
+              break
+            fi
+            terminal_error="$(
+              tr -d '\r' < "$attempt_log" |
+                awk 'NF { terminal = $0 } END { print terminal }'
+            )"
+            if [[ "$terminal_error" != "unknown blob" ]]; then
+              echo "::error::GHCR push failed with a non-retryable response."
+              exit 1
+            fi
+            if [[ "$attempt" != "4" ]]; then
+              delay_seconds=$((attempt * 5))
+              echo "::warning::GHCR returned the retryable unknown-blob response on attempt ${attempt}; retrying the same scanned image in ${delay_seconds}s."
+              sleep "$delay_seconds"
+            fi
+          done
+          if [[ "$push_succeeded" != "true" ]]; then
+            echo "::error::GHCR rejected all bounded attempts to push the scanned image."
+            exit 1
+          fi
           digest="$(
             node scripts/lib/dockerPushDigest.mjs "$push_log"
           )"
@@ -212,7 +288,23 @@ jobs:
           fi
           repository="${RELEASE_TAG%%:*}"
           immutable_ref="${repository}@${digest}"
-          docker buildx imagetools inspect "$immutable_ref" >/dev/null
+          # A successful push can precede digest visibility by a few seconds.
+          registry_visible=false
+          for attempt in 1 2 3 4 5 6; do
+            if docker buildx imagetools inspect "$immutable_ref" >/dev/null; then
+              registry_visible=true
+              break
+            fi
+            if [[ "$attempt" != "6" ]]; then
+              delay_seconds=$((1 << attempt))
+              echo "::warning::GHCR has not exposed ${immutable_ref} yet; retrying in ${delay_seconds}s."
+              sleep "$delay_seconds"
+            fi
+          done
+          if [[ "$registry_visible" != "true" ]]; then
+            echo "::error::GHCR did not expose the pushed immutable image within the bounded visibility window."
+            exit 1
+          fi
           jq -n \
             --arg key "$IMAGE_KEY" \
             --arg coreCommit "$RELEASE_COMMIT" \
@@ -332,4 +424,4 @@ jobs:
             production-service-release-manifest.json
             production-service-release-manifest.sha256
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90

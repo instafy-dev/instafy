@@ -47,14 +47,11 @@ const INLINE_COMPLETION_MAX_OUTPUT_TOKENS: u32 = 128;
 const CONVERSATION_TITLE_MAX_INPUT_CHARS: usize = 600;
 const CONVERSATION_TITLE_MAX_OUTPUT_TOKENS: u32 = 32;
 const CONVERSATION_TITLE_MAX_CHARS: usize = 48;
-const GOOGLE_OAUTH_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const CODEX_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR: &str = "CODEX_REFRESH_TOKEN_URL_OVERRIDE";
 const CODEX_ACCESS_TOKEN_REFRESH_MAX_AGE_SECONDS: i64 = 60 * 60;
 const INTERNAL_CREDENTIAL_LEASE_SECONDS: u64 = 60;
-const GEMINI_AUTH_MODE_CODE_ASSIST: &str = "code_assist";
-const GEMINI_AUTH_MODE_CODE_ASSIST_CLI: &str = "code_assist_cli";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -102,6 +99,9 @@ struct CredentialListItem {
     label: Option<String>,
     is_default: bool,
     metadata: JsonValue,
+    // Latest BYOC subscription-usage snapshot; `null` until a usage report lands.
+    // Serialized as `subscriptionUsage` for the frontend usage meters.
+    subscription_usage: Option<JsonValue>,
     last_used_at: Option<String>,
     revoked_at: Option<String>,
     created_at: String,
@@ -111,6 +111,11 @@ struct CredentialListItem {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct InternalCredentialResponse {
+    /// The credential backing this lease — always the requested id today
+    /// (a revoked credential refuses to lease rather than substituting
+    /// another), kept on the wire so usage/telemetry consumers key on an
+    /// explicit id instead of assuming one.
+    credential_id: String,
     kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     access_token: Option<String>,
@@ -175,6 +180,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/internal/credentials/:credential_id",
             get(get_internal_credential),
+        )
+        .route(
+            "/internal/credentials/:credential_id/usage",
+            post(set_internal_credential_usage),
         )
 }
 
@@ -306,6 +315,8 @@ pub(crate) async fn insert_user_credential(
         label.as_deref(),
         None,
         agent_model,
+        // New credential-seeded agents inherit reasoning effort (null) until set.
+        None,
         &agent_provider,
     )
     .await?;
@@ -494,7 +505,7 @@ pub(crate) async fn ensure_managed_ai_proxy_ready(
         if requirements.error.is_none() && !requirements.requires_user_credentials {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        sleep_managed_ai_startup_retry(attempt).await;
         requirements =
             fetch_proxy_credential_requirements(client, proxy_base_url, Duration::from_secs(2))
                 .await;
@@ -519,6 +530,20 @@ pub(crate) async fn ensure_managed_ai_proxy_ready(
     }
 
     Ok(())
+}
+
+fn managed_ai_startup_retry_delay(attempt: u32) -> Duration {
+    Duration::from_millis(500 * 2_u64.pow(attempt.min(4)))
+}
+
+async fn sleep_managed_ai_startup_retry(attempt: u32) {
+    #[cfg(not(test))]
+    tokio::time::sleep(managed_ai_startup_retry_delay(attempt)).await;
+
+    #[cfg(test)]
+    let _ = attempt;
+    #[cfg(test)]
+    tokio::task::yield_now().await;
 }
 
 pub(crate) async fn count_recent_managed_ai_prompts(
@@ -1571,7 +1596,7 @@ async fn list_my_credentials(
 
     let rows = connection
         .query(
-            "select id, kind, label, metadata, is_default, last_used_at, revoked_at, created_at, updated_at
+            "select id, kind, label, metadata, is_default, subscription_usage, last_used_at, revoked_at, created_at, updated_at
              from user_credentials
              where user_id = $1
              order by created_at desc, id desc
@@ -1589,6 +1614,9 @@ async fn list_my_credentials(
             let label: Option<String> = row.get("label");
             let metadata: JsonValue = row.get::<_, PgJson<JsonValue>>("metadata").0;
             let is_default: bool = row.get("is_default");
+            let subscription_usage: Option<JsonValue> = row
+                .get::<_, Option<PgJson<JsonValue>>>("subscription_usage")
+                .map(|value| value.0);
             let last_used_at: Option<DateTime<Utc>> = row.get("last_used_at");
             let revoked_at: Option<DateTime<Utc>> = row.get("revoked_at");
             let created_at: DateTime<Utc> = row.get("created_at");
@@ -1600,6 +1628,7 @@ async fn list_my_credentials(
                 label,
                 is_default,
                 metadata,
+                subscription_usage,
                 last_used_at: last_used_at.map(|dt| dt.to_rfc3339()),
                 revoked_at: revoked_at.map(|dt| dt.to_rfc3339()),
                 created_at: created_at.to_rfc3339(),
@@ -1912,24 +1941,37 @@ async fn get_internal_credential(
         .await
         .map_err(|error| internal_error(format!("failed to load credential: {error}")))?;
 
+    // Revoked (or unknown) means STOP: revoking a credential is the user's
+    // stop lever for work pinned to it, so a lease for a revoked id is refused
+    // rather than silently redirected to the owner's current default — the
+    // default credential serves NEW jobs, not jobs the user just cut off
+    // (issue #115). The "credential not found" prefix is load-bearing: the
+    // studio classifies it as a reconnect-credentials failure.
     let Some(row) = row else {
-        return Err(not_found("credential not found"));
+        return Err(not_found(
+            "credential not found: it was revoked or removed; running work \
+             pinned to it stops here — reconnect a credential and retry",
+        ));
     };
+    let effective_credential_id = credential_id;
 
     let kind: String = row.get("kind");
     let nonce_b64: String = row.get("nonce_b64");
     let ciphertext_b64: String = row.get("ciphertext_b64");
     let metadata: JsonValue = row.get::<_, PgJson<JsonValue>>("metadata").0;
 
-    let mut parsed =
-        decode_authoritative_credential_payload(key, &nonce_b64, &ciphertext_b64)?;
+    let mut parsed = decode_authoritative_credential_payload(key, &nonce_b64, &ciphertext_b64)?;
 
-    let auth_json_to_persist = if let Some(updated_auth_json) =
+    // Pick the refresher by the credential's kind, not by the shape of its
+    // payload. maybe_refresh_codex_oauth_access_token keys only off
+    // tokens.refresh_token, and a Gemini Google-OAuth credential carries
+    // exactly that — so an untyped call sent a GOOGLE refresh token to
+    // https://auth.openai.com/oauth/token, and the resulting failure was
+    // reported to the user as a Codex problem.
+    let auth_json_to_persist = if kind == CREDENTIAL_KIND_CODEX_AUTH_JSON {
         maybe_refresh_codex_oauth_access_token(&state, &parsed, query.force_refresh).await?
-    {
-        Some(updated_auth_json)
     } else {
-        maybe_refresh_gemini_oauth_access_token(&state, &metadata, &parsed).await?
+        maybe_refresh_gemini_oauth_access_token(&metadata).await?
     };
 
     if let Some(updated_auth_json) = auth_json_to_persist {
@@ -1949,7 +1991,11 @@ async fn get_internal_credential(
                 "update user_credentials
                  set nonce_b64 = $2, ciphertext_b64 = $3, updated_at = now()
                  where id = $1",
-                &[&credential_id, &updated_nonce_b64, &updated_ciphertext_b64],
+                &[
+                    &effective_credential_id,
+                    &updated_nonce_b64,
+                    &updated_ciphertext_b64,
+                ],
             )
             .await
             .map_err(|error| {
@@ -1960,12 +2006,13 @@ async fn get_internal_credential(
         parsed = updated_auth_json;
     }
 
-    let response = materialize_internal_credential(&kind, &parsed, &metadata)?;
+    let response =
+        materialize_internal_credential(effective_credential_id, &kind, &parsed, &metadata)?;
 
     transaction
         .execute(
             "update user_credentials set last_used_at = now(), updated_at = now() where id = $1",
-            &[&credential_id],
+            &[&effective_credential_id],
         )
         .await
         .map_err(|error| {
@@ -1980,15 +2027,53 @@ async fn get_internal_credential(
     Ok(Json(response))
 }
 
-#[derive(Debug, Deserialize)]
-struct GoogleOauthRefreshResponse {
-    access_token: Option<String>,
-    refresh_token: Option<String>,
-    expires_in: Option<u64>,
-    token_type: Option<String>,
-    scope: Option<String>,
-    error: Option<String>,
-    error_description: Option<String>,
+/// Store the latest BYOC subscription-usage snapshot for a credential. Called
+/// by the proxy (fire-and-forget) after it captures OpenAI's x-codex-* rate
+/// limit headers. Guarded by the same proxy credential-lease token as the
+/// internal credential lease endpoint. The body is the opaque `subscriptionUsage`
+/// contract JSON produced by the proxy; the controller persists it verbatim and
+/// re-exposes it on GET /me/credentials.
+async fn set_internal_credential_usage(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(credential_id_raw): AxumPath<String>,
+    Json(usage): Json<JsonValue>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    require_proxy_credential_lease_token(&state.config, &headers)?;
+
+    let credential_id = Uuid::from_str(credential_id_raw.trim())
+        .map_err(|_| bad_request("credentialId must be a valid UUID"))?;
+
+    let connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+
+    // Consistent with the lease path above: a revoked credential no longer
+    // serves requests, so nothing legitimate reports usage under its id — a
+    // late fire-and-forget snapshot from a lease that predates the revoke is
+    // dropped rather than attributed to the owner's default (issue #115).
+    let usage_param = PgJson(&usage);
+    let updated = connection
+        .execute(
+            "update user_credentials
+             set subscription_usage = $1, subscription_usage_updated_at = now()
+             where id = $2 and revoked_at is null",
+            &[&usage_param, &credential_id],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to persist credential subscription usage: {error}"
+            ))
+        })?;
+
+    if updated == 0 {
+        return Err(not_found("credential not found"));
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Debug, Deserialize)]
@@ -2259,215 +2344,29 @@ fn codex_oauth_token_url() -> String {
         .unwrap_or_else(|_| CODEX_OAUTH_TOKEN_URL.to_string())
 }
 
+/// Google no longer permits the OAuth login Gemini used, so a credential
+/// stored that way can never be refreshed again. Say that plainly instead of
+/// attempting a refresh that cannot succeed — the row is replaced with an API
+/// key from the AI connections card.
 async fn maybe_refresh_gemini_oauth_access_token(
-    state: &AppState,
     metadata: &JsonValue,
-    auth_json: &JsonValue,
 ) -> Result<Option<JsonValue>, (StatusCode, Json<ApiError>)> {
     let metadata_map = metadata.as_object();
-    let provider = metadata_map
-        .and_then(|map| map.get("provider"))
-        .and_then(JsonValue::as_str)
-        .map(|value| value.trim().to_ascii_lowercase())
-        .unwrap_or_default();
-    if provider != PROVIDER_GEMINI {
-        return Ok(None);
-    }
-
-    let source = metadata_map
-        .and_then(|map| map.get("source"))
-        .and_then(JsonValue::as_str)
-        .map(|value| value.trim().to_ascii_lowercase())
-        .unwrap_or_default();
-    if source != "google_oauth" {
-        return Ok(None);
-    }
-
-    let auth_mode = metadata_map
-        .and_then(|map| map.get("auth_mode"))
-        .and_then(JsonValue::as_str)
-        .map(|value| value.trim().to_ascii_lowercase())
-        .unwrap_or_default();
-    if !is_gemini_code_assist_mode(auth_mode.as_str()) {
-        return Ok(None);
-    }
-
-    let auth_map = auth_json.as_object().ok_or_else(|| {
-        internal_error("credential payload must be a JSON object for OAuth refresh")
-    })?;
-    let tokens = auth_map
-        .get("tokens")
-        .and_then(JsonValue::as_object)
-        .ok_or_else(|| internal_error("credential payload missing tokens object"))?;
-
-    let refresh_token = tokens
-        .get("refresh_token")
-        .and_then(JsonValue::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| internal_error("credential payload missing tokens.refresh_token"))?;
-
-    let expires_at = tokens
-        .get("expires_at")
-        .and_then(JsonValue::as_str)
-        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| value.with_timezone(&Utc));
-    if let Some(expires_at) = expires_at {
-        if expires_at > Utc::now() + chrono::Duration::seconds(60) {
-            return Ok(None);
-        }
-    }
-
-    let (client_id, client_secret) = if auth_mode == GEMINI_AUTH_MODE_CODE_ASSIST_CLI {
-        let client_id = read_env_trimmed("GEMINI_OAUTH_CLI_CLIENT_ID")
-            .or_else(|| read_env_trimmed("GEMINI_OAUTH_CLIENT_ID"))
-            .or_else(|| read_env_trimmed("GOOGLE_OAUTH_CLIENT_ID"))
-            .ok_or_else(|| {
-                internal_error(
-                    "Gemini Google login refresh is not enabled. Reconnect Gemini with an API key.",
-                )
-            })?;
-        let client_secret = read_env_trimmed("GEMINI_OAUTH_CLI_CLIENT_SECRET")
-            .or_else(|| read_env_trimmed("GEMINI_OAUTH_CLIENT_SECRET"))
-            .or_else(|| read_env_trimmed("GOOGLE_OAUTH_CLIENT_SECRET"));
-        (client_id, client_secret)
-    } else {
-        let client_id = read_env_trimmed("GEMINI_OAUTH_CLIENT_ID")
-            .or_else(|| read_env_trimmed("GOOGLE_OAUTH_CLIENT_ID"))
-            .ok_or_else(|| {
-                internal_error(
-                    "Gemini OAuth refresh is not configured. Set GEMINI_OAUTH_CLIENT_ID (or GOOGLE_OAUTH_CLIENT_ID).",
-                )
-            })?;
-        let client_secret = read_env_trimmed("GEMINI_OAUTH_CLIENT_SECRET")
-            .or_else(|| read_env_trimmed("GOOGLE_OAUTH_CLIENT_SECRET"));
-        (client_id, client_secret)
+    let field = |name: &str| {
+        metadata_map
+            .and_then(|map| map.get(name))
+            .and_then(JsonValue::as_str)
+            .map(|value| value.trim().to_ascii_lowercase())
+            .unwrap_or_default()
     };
-
-    let mut form = vec![
-        ("grant_type", "refresh_token".to_string()),
-        ("refresh_token", refresh_token.to_string()),
-        ("client_id", client_id),
-    ];
-    if let Some(secret) = client_secret
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        form.push(("client_secret", secret.to_string()));
+    if field("provider") != PROVIDER_GEMINI || field("source") != "google_oauth" {
+        return Ok(None);
     }
 
-    let request = state
-        .http_client
-        .post(GOOGLE_OAUTH_TOKEN_URL)
-        .header("accept", "application/json")
-        .form(&form);
-    let response = timeout(Duration::from_secs(12), request.send())
-        .await
-        .map_err(|_| internal_error("Gemini OAuth refresh request timed out"))?
-        .map_err(|error| internal_error(format!("Gemini OAuth refresh request failed: {error}")))?;
-
-    let status = response.status();
-    let payload: GoogleOauthRefreshResponse = response.json().await.map_err(|error| {
-        internal_error(format!("Gemini OAuth refresh response invalid: {error}"))
-    })?;
-
-    if !status.is_success() {
-        let message = payload
-            .error_description
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .or_else(|| {
-                payload
-                    .error
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-            })
-            .unwrap_or("OAuth refresh failed");
-        return Err(internal_error(format!(
-            "Gemini OAuth refresh failed: {message}"
-        )));
-    }
-
-    let access_token = payload
-        .access_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| internal_error("Gemini OAuth refresh returned no access_token"))?;
-
-    let expires_in = payload.expires_in.unwrap_or(3600);
-    let expires_at =
-        Utc::now() + chrono::Duration::seconds(i64::try_from(expires_in).unwrap_or(3600));
-
-    let mut refreshed = auth_map.clone();
-    refreshed.insert(
-        "OPENAI_API_KEY".to_string(),
-        JsonValue::String(access_token.to_string()),
-    );
-
-    let mut refreshed_tokens = tokens.clone();
-    refreshed_tokens.insert(
-        "access_token".to_string(),
-        JsonValue::String(access_token.to_string()),
-    );
-    refreshed_tokens.insert(
-        "expires_in".to_string(),
-        JsonValue::Number(serde_json::Number::from(expires_in)),
-    );
-    refreshed_tokens.insert(
-        "expires_at".to_string(),
-        JsonValue::String(expires_at.to_rfc3339()),
-    );
-    if let Some(refresh_token) = payload
-        .refresh_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        refreshed_tokens.insert(
-            "refresh_token".to_string(),
-            JsonValue::String(refresh_token.to_string()),
-        );
-    }
-    if let Some(token_type) = payload
-        .token_type
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        refreshed_tokens.insert(
-            "token_type".to_string(),
-            JsonValue::String(token_type.to_string()),
-        );
-    }
-    if let Some(scope) = payload
-        .scope
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        refreshed_tokens.insert("scope".to_string(), JsonValue::String(scope.to_string()));
-    }
-    refreshed.insert("tokens".to_string(), JsonValue::Object(refreshed_tokens));
-
-    Ok(Some(JsonValue::Object(refreshed)))
-}
-
-fn read_env_trimmed(key: &str) -> Option<String> {
-    std::env::var(key)
-        .ok()
-        .map(|raw| raw.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-fn is_gemini_code_assist_mode(mode: &str) -> bool {
-    matches!(
-        mode.trim().to_ascii_lowercase().as_str(),
-        GEMINI_AUTH_MODE_CODE_ASSIST | GEMINI_AUTH_MODE_CODE_ASSIST_CLI
-    )
+    Err(bad_request(
+        "This Gemini connection used Google login, which is no longer supported. \
+         Replace it with a Gemini API key.",
+    ))
 }
 
 fn require_proxy_credential_lease_token(
@@ -2535,6 +2434,7 @@ fn classify_auth_json(
 }
 
 fn materialize_internal_credential(
+    effective_credential_id: Uuid,
     kind: &str,
     auth_json: &JsonValue,
     metadata: &JsonValue,
@@ -2590,6 +2490,7 @@ fn materialize_internal_credential(
             .ok_or_else(|| internal_error("credential missing OPENAI_API_KEY"))?;
 
         return Ok(InternalCredentialResponse {
+            credential_id: effective_credential_id.to_string(),
             kind: CREDENTIAL_KIND_OPENAI_API_KEY.to_string(),
             access_token: None,
             account_id: None,
@@ -2623,6 +2524,7 @@ fn materialize_internal_credential(
         .filter(|value| !value.is_empty());
 
     Ok(InternalCredentialResponse {
+        credential_id: effective_credential_id.to_string(),
         kind: CREDENTIAL_KIND_CODEX_AUTH_JSON.to_string(),
         access_token: Some(access_token),
         account_id,
@@ -2795,7 +2697,7 @@ mod provider_metadata_tests {
 
     #[test]
     fn provider_defaults_use_latest_general_openai_model_for_api_keys() {
-        assert_eq!(default_model_for_provider(PROVIDER_OPENAI), "gpt-5.5");
+        assert_eq!(default_model_for_provider(PROVIDER_OPENAI), "gpt-5.6-sol");
     }
 
     #[test]
@@ -3023,13 +2925,14 @@ mod codex_refresh_tests {
 #[cfg(test)]
 mod credential_lease_contract_tests {
     use super::{
+        decode_authoritative_credential_payload, encrypt_secret_payload,
+        materialize_internal_credential, require_proxy_credential_lease_token,
         CREDENTIAL_KIND_CODEX_AUTH_JSON, CREDENTIAL_KIND_OPENAI_API_KEY,
-        INTERNAL_CREDENTIAL_LEASE_SECONDS, decode_authoritative_credential_payload,
-        encrypt_secret_payload, materialize_internal_credential,
-        require_proxy_credential_lease_token,
+        INTERNAL_CREDENTIAL_LEASE_SECONDS,
     };
     use axum::http::{HeaderMap, HeaderValue};
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
+    use uuid::Uuid;
 
     use crate::tests::build_app_config;
 
@@ -3090,7 +2993,9 @@ mod credential_lease_contract_tests {
 
     #[test]
     fn delegated_lease_is_short_lived_and_keeps_renewal_in_controller() {
+        let effective_id = Uuid::new_v4();
         let response = materialize_internal_credential(
+            effective_id,
             CREDENTIAL_KIND_CODEX_AUTH_JSON,
             &json!({
                 "tokens": {
@@ -3112,13 +3017,21 @@ mod credential_lease_contract_tests {
             wire.get("renewalAuthority").and_then(Value::as_str),
             Some("controller")
         );
+        // The wire names the credential backing the lease explicitly so
+        // usage/telemetry consumers never have to assume an id.
+        assert_eq!(
+            wire.get("credentialId").and_then(Value::as_str),
+            Some(effective_id.to_string().as_str())
+        );
         assert!(wire.get("accessToken").is_some());
         assert!(wire.get("refreshToken").is_none());
     }
 
     #[test]
     fn api_key_lease_preserves_api_key_material_and_routing_summary() {
+        let effective_id = Uuid::new_v4();
         let response = materialize_internal_credential(
+            effective_id,
             CREDENTIAL_KIND_OPENAI_API_KEY,
             &json!({ "OPENAI_API_KEY": "test-api-key" }),
             &json!({
@@ -3130,6 +3043,10 @@ mod credential_lease_contract_tests {
         .expect("credential should materialize");
         let wire = serde_json::to_value(response).expect("response should serialize");
 
+        assert_eq!(
+            wire.get("credentialId").and_then(Value::as_str),
+            Some(effective_id.to_string().as_str())
+        );
         assert!(wire.get("openaiApiKey").is_some());
         assert_eq!(wire.get("provider").and_then(Value::as_str), Some("openai"));
         assert_eq!(
@@ -3376,6 +3293,23 @@ mod requirement_tests {
                 .contains("proxy reports requiresCredential=true"),
             "unexpected error: {error}"
         );
+        assert_eq!(mock.hits_async().await, 15);
+    }
+
+    #[test]
+    fn managed_ai_startup_retries_back_off_for_slow_proxy_dns() {
+        let delays = (0..14)
+            .map(super::managed_ai_startup_retry_delay)
+            .collect::<Vec<_>>();
+
+        assert_eq!(delays[0], std::time::Duration::from_millis(500));
+        assert_eq!(delays[1], std::time::Duration::from_secs(1));
+        assert_eq!(delays[2], std::time::Duration::from_secs(2));
+        assert_eq!(delays[3], std::time::Duration::from_secs(4));
+        assert!(delays[4..]
+            .iter()
+            .all(|delay| *delay == std::time::Duration::from_secs(8)));
+        assert_eq!(delays.iter().sum::<std::time::Duration>().as_secs(), 87);
     }
 }
 

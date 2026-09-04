@@ -24,6 +24,17 @@ function run(command, args, cwd) {
   });
 }
 
+function assertCommandRejected(command, args, cwd) {
+  assert.throws(
+    () => run(command, args, cwd),
+    (error) => {
+      assert.equal(error.status, 1);
+      assert.match(String(error.stderr), /unknown (?:command|option)/);
+      return true;
+    },
+  );
+}
+
 test("npm artifact installs and runs without workspace dependencies", () => {
   const tempRoot = mkdtempSync(path.join(tmpdir(), "instafy-cli-package-"));
 
@@ -103,6 +114,9 @@ test("npm artifact installs and runs without workspace dependencies", () => {
     }
     const packedCli = readFileSync(path.join(installedPackage, "dist", "cli.js"), "utf8");
     assert.doesNotMatch(packedCli, /@instafy\//);
+    assert.doesNotMatch(packedCli, /\/operator\/projects/);
+    assert.doesNotMatch(packedCli, /\/ota\/releases/);
+    assert.doesNotMatch(packedCli, /\/desktop-updates\/promotions/);
 
     const installedCli = path.join(
       installedPackage,
@@ -113,9 +127,35 @@ test("npm artifact installs and runs without workspace dependencies", () => {
       run(process.execPath, [installedCli, "--version"], installDirectory).trim(),
       packageVersion,
     );
+    const installedHelp = run(
+      process.execPath,
+      [installedCli, "--help"],
+      installDirectory,
+    );
+    assert.match(installedHelp, /Usage: instafy/);
+    assert.match(installedHelp, /diagnostics/);
+    assert.match(installedHelp, /support/);
     assert.match(
-      run(process.execPath, [installedCli, "--help"], installDirectory),
-      /Usage: instafy/,
+      run(process.execPath, [installedCli, "diagnostics", "--help"], installDirectory),
+      /runtime-events/,
+    );
+    assert.match(
+      run(process.execPath, [installedCli, "support", "--help"], installDirectory),
+      /report/,
+    );
+    for (const removedCommand of ["ops", "api", "ota", "desktop-updates"]) {
+      assertCommandRejected(
+        process.execPath,
+        [installedCli, removedCommand],
+        installDirectory,
+      );
+    }
+    assert.doesNotMatch(installedHelp, /--service-token/);
+    assert.doesNotMatch(installedHelp, /--controller-(?:url|access-token|token)/);
+    assertCommandRejected(
+      process.execPath,
+      [installedCli, "support", "list", "--controller-url", "https://legacy.invalid"],
+      installDirectory,
     );
 
     run("tar", ["-xf", tarball, "-C", unpackDirectory], packageRoot);

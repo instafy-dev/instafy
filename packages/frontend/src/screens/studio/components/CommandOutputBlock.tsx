@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Copy, Eye, NavArrowRight, Terminal, Xmark } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
@@ -15,6 +15,13 @@ const RUNNING_STATUSES = new Set([
 ]);
 
 const COLLAPSED_TAIL_CHARS = 3_200;
+// Body-only mode caps the visible tail at this many lines until the reader
+// asks for the rest; a terminal shows its tail, and so does a streaming run.
+export const COMMAND_OUTPUT_BODY_LINE_CAP = 12;
+// Even after "Show all" the body never dumps more than this many lines into
+// the chat DOM: a huge build log renders its tail inside a scroll box behind a
+// muted "… N earlier lines not shown" note (copy still takes the full output).
+export const COMMAND_OUTPUT_BODY_MAX_LINES = 400;
 
 type OutputWindow = {
   text: string;
@@ -31,11 +38,44 @@ interface CommandOutputBlockProps {
   collapsible?: boolean;
   defaultOutputVisible?: boolean;
   subtle?: boolean;
+  /**
+   * Render only the output body: no command header, no copy/eye/stop
+   * controls, no outer ring or fill. The host supplies the chrome (the
+   * command panel in AgentJobThreadPreviewLayout already names the command in
+   * its header and carries the copy control in its trailing cluster).
+   */
+  bodyOnly?: boolean;
   onCancel?: (() => void | Promise<void>) | null;
 }
 
 function normalizeLineBreaks(value: string): string {
   return value.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+export function normalizeCommandOutputText(output: string | null | undefined): string {
+  return normalizeLineBreaks(typeof output === "string" ? output : "").trimEnd();
+}
+
+type ShowStatus = ReturnType<typeof useStatus>["showStatus"];
+
+async function copyCommandOutput(output: string, showStatus: ShowStatus): Promise<void> {
+  try {
+    await writeClipboardText(normalizeCommandOutputText(output));
+    showStatus("Copied output.", "success", 2000, { presentation: "confirmation" });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to copy output.";
+    showStatus(message, "error", 3500);
+  }
+}
+
+/**
+ * Copies a command's output to the clipboard and reports through the status
+ * bar. For hosts that draw their own copy control; the block itself shares its
+ * single status subscription with copyCommandOutput instead.
+ */
+export function useCopyCommandOutput(output: string): () => Promise<void> {
+  const { showStatus } = useStatus();
+  return useCallback(() => copyCommandOutput(output, showStatus), [output, showStatus]);
 }
 
 function buildCollapsedWindow(value: string): OutputWindow {
@@ -73,22 +113,34 @@ export function CommandOutputBlock({
   collapsible = false,
   defaultOutputVisible = true,
   subtle = false,
+  bodyOnly = false,
   onCancel = null,
 }: CommandOutputBlockProps) {
-  const normalized = useMemo(() => normalizeLineBreaks(output).trimEnd(), [output]);
+  const normalized = useMemo(() => normalizeCommandOutputText(output), [output]);
   const commandText = typeof command === "string" ? command.trim() : "";
   const statusNormalized = typeof status === "string" ? status.trim().toLowerCase() : "";
   const isRunning = RUNNING_STATUSES.has(statusNormalized);
+  // One status subscription for the block: copy and cancel both report
+  // through it.
   const { showStatus } = useStatus();
+  const handleCopy = useCallback(() => copyCommandOutput(normalized, showStatus), [normalized, showStatus]);
 
   const [viewerOpen, setViewerOpen] = useState(false);
   const [outputVisible, setOutputVisible] = useState(collapsible ? defaultOutputVisible : true);
   const [cancelPending, setCancelPending] = useState(false);
+  const [showAllLines, setShowAllLines] = useState(false);
   const closeViewer = () => setViewerOpen(false);
 
   useEffect(() => {
     setOutputVisible(collapsible ? defaultOutputVisible : true);
   }, [collapsible, defaultOutputVisible, commandText, normalized]);
+
+  // "Show all" belongs to one command's output: a later command in the same
+  // host resets to the capped tail. Hosts pass the command through (bodyOnly
+  // never renders it) or remount the block under a per-run key.
+  useEffect(() => {
+    setShowAllLines(false);
+  }, [commandText]);
 
   useEffect(() => {
     if (!viewerOpen) {
@@ -102,16 +154,6 @@ export function CommandOutputBlock({
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
   }, [viewerOpen]);
-
-  const handleCopy = async () => {
-    try {
-      await writeClipboardText(normalized);
-      showStatus("Copied output.", "success", 2000);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Unable to copy output.";
-      showStatus(message, "error", 3500);
-    }
-  };
 
   const canCancel = isRunning && typeof onCancel === "function";
 
@@ -131,9 +173,54 @@ export function CommandOutputBlock({
   };
 
   const collapsedWindow = useMemo(() => buildCollapsedWindow(normalized), [normalized]);
+  const lines = useMemo(() => (normalized ? normalized.split("\n") : []), [normalized]);
 
   if (!normalized) {
     return null;
+  }
+
+  if (bodyOnly) {
+    // Headerless body for hosts that already name the command: the tail of
+    // the output in the code-block text tones, long lines scroll sideways,
+    // and past the line cap an inline text control reveals the rest.
+    const lineCapped = !showAllLines && lines.length > COMMAND_OUTPUT_BODY_LINE_CAP;
+    // Tail semantics throughout: the capped view shows the last 12 lines and
+    // "Show all" grows to at most the last 400, never the whole log.
+    const visibleLineCount = lineCapped ? COMMAND_OUTPUT_BODY_LINE_CAP : COMMAND_OUTPUT_BODY_MAX_LINES;
+    const earlierLinesNotShown = showAllLines ? Math.max(0, lines.length - COMMAND_OUTPUT_BODY_MAX_LINES) : 0;
+    const visibleText =
+      lines.length > visibleLineCount ? lines.slice(-visibleLineCount).join("\n") : normalized;
+    return (
+      <div
+        className={`min-w-0 ${className ?? ""}`}
+        data-testid="chat-command-output"
+        data-body-only="true"
+        data-streaming={isRunning ? "true" : undefined}
+      >
+        {earlierLinesNotShown > 0 ? (
+          <div
+            data-testid="chat-command-output-earlier-lines"
+            className="font-mono text-xxs leading-snug text-slate-500 dark:text-slate-400"
+          >
+            … {earlierLinesNotShown.toLocaleString()} earlier line{earlierLinesNotShown === 1 ? "" : "s"} not shown
+          </div>
+        ) : null}
+        <pre
+          className={`${showAllLines ? "max-h-96 overflow-y-auto" : ""} overflow-x-auto whitespace-pre font-mono text-xxs leading-snug text-slate-700 dark:text-slate-200`}
+        >
+          {visibleText}
+        </pre>
+        {lineCapped ? (
+          <button
+            type="button"
+            onClick={() => setShowAllLines(true)}
+            className="mt-1 text-xxs text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-100"
+          >
+            Show all {lines.length.toLocaleString()} lines
+          </button>
+        ) : null}
+      </div>
+    );
   }
 
   const maxHeightClass = compact ? (isRunning ? "max-h-52" : "max-h-28") : isRunning ? "max-h-72" : "max-h-44";

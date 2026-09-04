@@ -91,7 +91,7 @@ pub(crate) struct DispatchPromptRequest {
     pub(crate) prefer_runtime: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DispatchPromptRepo {
     pub(crate) owner: Option<String>,
@@ -113,7 +113,7 @@ pub(crate) struct DispatchPromptRepoNormalized {
     pub(crate) working_branch: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DispatchPromptUi {
     pub(crate) requested_preview: Option<bool>,
@@ -176,6 +176,15 @@ pub(crate) struct DispatchPromptNormalized {
     pub(crate) runtime_updated_at: Option<DateTime<Utc>>,
     pub(crate) runtime_display_name: Option<String>,
     pub(crate) prefer_runtime: bool,
+    /// Optimistic admission fence used by interactive composer sends. Callers
+    /// that intentionally allow overlapping work leave this false.
+    pub(crate) expected_lane_idle: bool,
+    /// Controller-private queue reservation ignored by that entry's own lane
+    /// admission check. Browser payloads can never set this field.
+    pub(crate) dispatch_queue_entry_id: Option<Uuid>,
+    /// Trusted internal opt-in set only by the automation scheduler. This is
+    /// deliberately absent from the public dispatch request shape.
+    pub(crate) allow_silent_automation_decline: bool,
 }
 
 fn normalize_agent_handle(raw: &str) -> Option<String> {
@@ -785,7 +794,7 @@ pub(crate) async fn process_dispatch_prompt(
         };
     let project_runtime_preference = if let Some(preference) = selected_runtime_preference {
         let accessible = if let Some(runtime_id) = preference.runtime_id {
-            workspace::fetch_runtime_candidate(&state.pool, &project.id, &runtime_id)
+            workspace::fetch_runtime_candidate_with_client(&*connection, &project.id, &runtime_id)
                 .await?
                 .is_some_and(|candidate| {
                     runtime::self_hosted_runtime_is_accessible_to_user(
@@ -841,6 +850,24 @@ pub(crate) async fn process_dispatch_prompt(
     let conversation =
         conversations::ensure_conversation_record(&transaction, &project, &mut request, context)
             .await?;
+
+    // Every dispatch that can create an agent job crosses this fence. Most
+    // internal callers intentionally retain their existing overlap policy,
+    // but interactive sends and send-queue drains perform their authoritative
+    // lane-idle comparison while holding the same lock as job insertion. This
+    // closes the stale-client/drain race across controller processes.
+    let dispatch_fence_key = format!("conversation-dispatch:{}", conversation.id);
+    transaction
+        .query_one(
+            "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&dispatch_fence_key],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to acquire conversation dispatch fence: {error}"
+            ))
+        })?;
 
     let mut existing_recorded_message = None;
     if !should_suppress_dispatch_user_message(&request.metadata) {
@@ -899,6 +926,91 @@ pub(crate) async fn process_dispatch_prompt(
                 }
                 existing_recorded_message = Some(existing);
             }
+        }
+    }
+
+    // Idempotent retries must win before the optimistic lane comparison. A
+    // retry of a successfully admitted message naturally finds its own active
+    // job and must return that run, never enqueue a duplicate follow-up.
+    if request.expected_lane_idle {
+        let requested_handles = extract_agent_selection_handles(&request.metadata);
+        let rows = transaction
+            .query(
+                "select payload from agent_jobs
+                 where conversation_id = $1
+                   and status in ('queued','leased')",
+                &[&conversation.id],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!(
+                    "failed to verify dispatch lane availability: {error}"
+                ))
+            })?;
+        let mut active_handles = HashSet::new();
+        let mut has_unknown_active_lane = false;
+        for row in rows {
+            let payload = row.get::<_, PgJson<JsonValue>>("payload").0;
+            let handle = payload
+                .get("metadata")
+                .and_then(JsonValue::as_object)
+                .and_then(|metadata| metadata.get("agent"))
+                .and_then(JsonValue::as_object)
+                .and_then(|agent| agent.get("handle"))
+                .and_then(JsonValue::as_str)
+                .and_then(normalize_agent_handle);
+            if let Some(handle) = handle {
+                active_handles.insert(handle);
+            } else {
+                has_unknown_active_lane = true;
+            }
+        }
+        let reservation_rows = transaction
+            .query(
+                "select request
+                 from conversation_send_queue
+                 where conversation_id = $1
+                   and (
+                     (
+                       status = 'dispatched'
+                       and dispatched_run_id is null
+                       and dispatched_at >= now() - interval '10 minutes'
+                       and ($2::uuid is null or id <> $2)
+                     )
+                     or ($2::uuid is null and status = 'queued')
+                   )",
+                &[&conversation.id, &request.dispatch_queue_entry_id],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!(
+                    "failed to verify queued lane reservations: {error}"
+                ))
+            })?;
+        for row in reservation_rows {
+            let queued_request = row.get::<_, PgJson<JsonValue>>("request").0;
+            let metadata = queued_request
+                .get("metadata")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            active_handles.extend(extract_agent_selection_handles(&metadata));
+        }
+        if has_unknown_active_lane
+            || requested_handles
+                .iter()
+                .any(|handle| active_handles.contains(handle))
+        {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ApiError::with_details(
+                    "The selected agent lane became busy before this message was dispatched.",
+                    "dispatch_lane_busy",
+                    json!({
+                        "conversationId": conversation.id,
+                        "targetAgentHandles": requested_handles,
+                    }),
+                )),
+            ));
         }
     }
 
@@ -969,6 +1081,7 @@ pub(crate) async fn process_dispatch_prompt(
                 coverage => coverage,
             };
             let mut canceled_arithmetic_coverage = None;
+            let mut canceled_job_input_state_updates = Vec::new();
             let mut participation = match arithmetic_coverage {
                 Some(coverage)
                     if coverage.action
@@ -982,6 +1095,14 @@ pub(crate) async fn process_dispatch_prompt(
                     )
                     .await?
                     {
+                        canceled_job_input_state_updates.extend(
+                            crate::send_intents::reject_unacknowledged_inputs_for_job(
+                                &transaction,
+                                &coverage.job_id,
+                                "agent job was canceled before input acknowledgement",
+                            )
+                            .await?,
+                        );
                         canceled_arithmetic_coverage = Some(coverage);
                         crate::group_participation::apply_arithmetic_coverage(
                             base_participation,
@@ -1068,6 +1189,10 @@ pub(crate) async fn process_dispatch_prompt(
                         "failed to finalize ambient human-only message: {error}"
                     ))
                 })?;
+                crate::send_intents::publish_job_input_state_updates(
+                    state,
+                    &canceled_job_input_state_updates,
+                );
                 if let Some(message) = user_message.as_ref() {
                     conversations::publish_conversation_message_event(&state.events, message);
                     crate::notifications::enqueue_message_push_notifications(
@@ -1097,6 +1222,20 @@ pub(crate) async fn process_dispatch_prompt(
                 return Ok(recorded_dispatch_response(conversation.id));
             }
         }
+    }
+
+    // Scheduled automations can explicitly opt in to the same authenticated
+    // NO_RESPONSE decline protocol as ambient evaluations. Keep this outside
+    // the ambient gate: automations are ordinary billed runs and must not gain
+    // ambient roster or deferred-billing semantics.
+    if should_mark_silent_automation_decline(
+        request.allow_silent_automation_decline,
+        request.thread_kind.as_deref(),
+        conversation.thread_kind.as_deref(),
+    ) {
+        crate::group_participation::inject_automation_agent_evaluation_metadata(
+            &mut request.metadata,
+        );
     }
 
     let default_credential_id =
@@ -1143,7 +1282,7 @@ pub(crate) async fn process_dispatch_prompt(
         }
     }
 
-    ensure_runtime_target_owner(
+    let selected_runtime_provider = ensure_runtime_target_owner(
         &state,
         &transaction,
         &project.id,
@@ -1271,6 +1410,7 @@ pub(crate) async fn process_dispatch_prompt(
     let runtime_type = request
         .runtime_type
         .as_deref()
+        .or(selected_runtime_provider.as_deref())
         .unwrap_or(default_provider_id.as_str());
 
     let runtime_record = if let Some(record) = strict_browser_runtime_record {
@@ -1728,6 +1868,13 @@ pub(crate) async fn process_dispatch_prompt(
             provider_conversation_state.as_ref(),
         )
         .await?;
+        if let Some(job_uuid) = job_id {
+            // The run is the frontend's authoritative live-activity record,
+            // while the job is the controller's exact steer CAS target. Keep
+            // that one-to-one identity durable in the same transaction as the
+            // enqueue so initial hydration and reconnect cannot lose it.
+            persist_run_job_identity(&transaction, &project.id, run_id, &job_uuid).await?;
+        }
         dispatches.push((
             *run_id,
             job_id,
@@ -1855,7 +2002,9 @@ pub(crate) async fn process_dispatch_prompt(
     let mut runtime_alert_detail: Option<String> = None;
 
     if let Some(record) = runtime_record.as_ref() {
-        match workspace::fetch_runtime_candidate(&state.pool, &project.id, &record.id).await {
+        match workspace::fetch_runtime_candidate_with_client(&*connection, &project.id, &record.id)
+            .await
+        {
             Ok(candidate_opt) => {
                 let status_viable = matches!(record.status.as_str(), "ready" | "running");
                 let candidate_recent_strict = candidate_opt
@@ -2003,14 +2152,20 @@ pub(crate) async fn process_dispatch_prompt(
                             detail.contains("lastSeen=") && !detail.contains("lastSeen=unknown")
                         })
                         .unwrap_or(false);
-                match runtime::ensure_runtime_for_dispatch_reconnect(
+                // Reconnect owns its database lifecycle and may wait on a
+                // provider. Do not pin the dispatch connection while it runs.
+                drop(connection);
+                let reconnect_result = runtime::ensure_runtime_for_dispatch_reconnect(
                     state,
                     record,
                     "dispatch_runtime_alert",
                     force_new_lease,
                 )
-                .await
-                {
+                .await;
+                connection = state.pool.get().await.map_err(|error| {
+                    internal_error(format!("failed to get connection: {error}"))
+                })?;
+                match reconnect_result {
                     Ok(response) => {
                         reconnect_metadata = Some(json!({
                             "status": "requested",
@@ -2382,6 +2537,9 @@ pub(crate) fn normalize_dispatch_request(
         runtime_updated_at,
         runtime_display_name,
         prefer_runtime,
+        expected_lane_idle: false,
+        dispatch_queue_entry_id: None,
+        allow_silent_automation_decline: false,
     })
 }
 
@@ -2738,6 +2896,16 @@ fn should_enforce_ambient_group_participation(input: AmbientDispatchGateInput<'_
     // falls back to the default agent when the selection is empty, so every
     // remaining selection qualifies.
     true
+}
+
+fn should_mark_silent_automation_decline(
+    opted_in: bool,
+    request_thread_kind: Option<&str>,
+    conversation_thread_kind: Option<&str>,
+) -> bool {
+    opted_in
+        && request_thread_kind.is_some_and(|kind| kind.eq_ignore_ascii_case("automation"))
+        && conversation_thread_kind.is_some_and(|kind| kind.eq_ignore_ascii_case("automation"))
 }
 
 fn extract_explicit_agent_mention_handles(metadata: &JsonValue) -> Vec<String> {
@@ -3446,22 +3614,28 @@ fn should_persist_runtime_alert_conversation_message(
     )
 }
 
+/// These sentences name the surface the reader can actually reach. They used to
+/// say "the Runtime button by the composer"; that button's only renderer lost
+/// its last importer and has since been deleted, so the copy was pointing at a
+/// control that no longer exists. Machines is where runtimes live now.
+/// The frontend mirrors these in `controllerConversationNotice.ts` and renders
+/// an "Open Machines" action beside them.
 fn runtime_alert_fallback_message(reason: &str, terminal_alert: bool) -> &'static str {
     match reason {
         "runtime_not_ready" if terminal_alert => {
-            "Workspace startup failed. Use the Runtime button by the composer to reconnect Instafy Cloud."
+            "Workspace startup failed. Open Machines to reconnect Instafy Cloud."
         }
         "runtime_not_ready" => {
             "Starting the workspace. Your queued request will continue automatically."
         }
         "runtime_unavailable" => {
-            "No runtime is connected for this space. Use the Runtime button by the composer to start Instafy Cloud."
+            "No runtime is connected for this space. Open Machines to start Instafy Cloud."
         }
         "runtime_inspection_failed" => {
-            "The workspace runtime could not be verified. Use the Runtime button by the composer to inspect or reconnect it."
+            "The workspace runtime could not be verified. Open Machines to inspect or reconnect it."
         }
         _ => {
-            "The workspace runtime could not be reached. Use the Runtime button by the composer to inspect or reconnect it."
+            "The workspace runtime could not be reached. Open Machines to inspect or reconnect it."
         }
     }
 }
@@ -3671,9 +3845,9 @@ pub(crate) async fn ensure_runtime_target_owner(
     requesting_user_id: Option<Uuid>,
     is_service_role: bool,
     personal_browser_job: bool,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
+) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
     let Some(runtime_id) = runtime_id else {
-        return Ok(());
+        return Ok(None);
     };
     let row = transaction
         .query_opt(
@@ -3690,7 +3864,7 @@ pub(crate) async fn ensure_runtime_target_owner(
             ))
         })?;
     let Some(row) = row else {
-        return Ok(());
+        return Ok(None);
     };
     let provider: String = row.get("provider");
     let capabilities: JsonValue = row.get("capabilities");
@@ -3710,7 +3884,7 @@ pub(crate) async fn ensure_runtime_target_owner(
             "Personal Browser runtime is not available to the current user",
         ));
     }
-    Ok(())
+    Ok(Some(provider))
 }
 
 fn target_runtime_for_agent_job(
@@ -3755,6 +3929,41 @@ async fn build_managed_ai_reserve_trace(
             "delta": -(reserve_units.abs()),
         }))
     }))
+}
+
+pub(crate) async fn persist_run_job_identity(
+    transaction: &Transaction<'_>,
+    project_id: &Uuid,
+    run_id: &Uuid,
+    job_id: &Uuid,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let updated = transaction
+        .execute(
+            "update runs
+             set metadata =
+                 (case
+                    when jsonb_typeof(metadata) = 'object' then metadata
+                    else '{}'::jsonb
+                  end)
+                 || jsonb_build_object('jobId', $3::uuid)
+             where id = $1
+               and project_id = $2",
+            &[run_id, project_id, job_id],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to persist authoritative agent job identity onto run: {error}"
+            ))
+        })?;
+
+    if updated != 1 {
+        return Err(internal_error(
+            "failed to persist authoritative agent job identity: run not found in project",
+        ));
+    }
+
+    Ok(())
 }
 
 pub(crate) async fn persist_run_managed_ai_credit_metadata(
@@ -4586,6 +4795,7 @@ mod tests {
         assert!(normalized.runtime_id.is_none());
         assert!(normalized.runtime_source.is_none());
         assert!(!normalized.prefer_runtime);
+        assert!(!normalized.allow_silent_automation_decline);
         let metadata_map = normalized.metadata.as_object().expect("metadata object");
         assert_eq!(
             metadata_map
@@ -5685,5 +5895,29 @@ mod tests {
 
         assert_eq!(merged["aiAccessMode"], json!("managed"));
         assert_eq!(merged["managedAiUsed"], json!(true));
+    }
+
+    #[test]
+    fn silent_decline_opt_in_is_restricted_to_automation_threads() {
+        assert!(should_mark_silent_automation_decline(
+            true,
+            Some("automation"),
+            Some("automation"),
+        ));
+        assert!(!should_mark_silent_automation_decline(
+            false,
+            Some("automation"),
+            Some("automation"),
+        ));
+        assert!(!should_mark_silent_automation_decline(
+            true,
+            None,
+            Some("automation"),
+        ));
+        assert!(!should_mark_silent_automation_decline(
+            true,
+            Some("automation"),
+            Some("standard"),
+        ));
     }
 }

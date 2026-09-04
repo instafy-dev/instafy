@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Computer, NavArrowDown, ShareAndroid, Upload } from "iconoir-react";
+import { Computer, FloppyDisk, NavArrowDown, ShareAndroid, Upload } from "iconoir-react";
 import { Button } from "../../../components/Button";
 import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
@@ -20,6 +20,11 @@ type CodexAdvancedConnectionOptionsProps = {
   onExpandedChange: (expanded: boolean) => void;
   onLabelChange: (label: string) => void;
   onChooseAuthJson: () => void;
+  // Dev-only: seed this machine's Codex login. Handled by the connect flow so
+  // completion (loadCredentials + close) and busy state match every other path.
+  canDevSeed?: boolean;
+  busy?: boolean;
+  onDevSeed?: () => void;
 };
 
 const ADVANCED_OPTIONS_ID = "credentials-codex-advanced-options";
@@ -31,6 +36,9 @@ export function CodexAdvancedConnectionOptions({
   onExpandedChange,
   onLabelChange,
   onChooseAuthJson,
+  canDevSeed = false,
+  busy = false,
+  onDevSeed,
 }: CodexAdvancedConnectionOptionsProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const [desktopSetupShareFailed, setDesktopSetupShareFailed] = useState(false);
@@ -83,6 +91,33 @@ export function CodexAdvancedConnectionOptions({
         >
           {allowAuthJsonImport ? (
             <>
+              {canDevSeed && onDevSeed ? (
+                <div className="space-y-1.5 border-b border-slate-200 pb-3 dark:border-slate-800">
+                  <div className="space-y-0.5">
+                    <Text variant="bodyStrong" tone="secondary" className="text-sm">
+                      Seed from this machine (dev)
+                    </Text>
+                    <Text variant="caption" tone="muted">
+                      Connects ~/.codex/auth.json via the local dev server and makes
+                      it the default, replacing any earlier dev seed. Always current
+                      — no upload needed.
+                    </Text>
+                  </div>
+                  <Button
+                    type="button"
+                    onPress={onDevSeed}
+                    variant="outline"
+                    size="sm"
+                    radius="full"
+                    isDisabled={busy}
+                    className="min-h-11 w-full sm:w-auto"
+                    data-testid="credentials-codex-dev-seed"
+                  >
+                    <FloppyDisk className="h-4 w-4" aria-hidden="true" />
+                    {busy ? "Seeding…" : "Use local Codex login (dev)"}
+                  </Button>
+                </div>
+              ) : null}
               <div className="space-y-0.5">
                 <Text variant="bodyStrong" tone="secondary" className="text-sm">
                   Import an existing Codex login

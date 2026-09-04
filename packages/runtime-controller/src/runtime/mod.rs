@@ -39,10 +39,13 @@ pub(crate) use status::{
     load_runtime_status_response, runtime_supports_agent_and_origin,
     runtime_supports_conversation_state, RuntimeStatusResponse,
 };
+pub(crate) use status::{runtime_logs, RuntimeLogEntry, RuntimeLogsQuery};
 pub(crate) use stop::runtime_mark_offline;
 pub(crate) use stop::{stop_runtime_for_project, RuntimeStopResponse};
 pub(crate) use sweeps::{
-    prune_expired_runtime_events, sweep_hosted_runtime_credit_usage, sweep_idle_activity,
+    prune_expired_runtime_events, reset_hosted_runtime_credit_sweep_pool_pressure,
+    should_report_hosted_runtime_credit_sweep_error, sweep_hosted_runtime_credit_usage,
+    sweep_idle_activity,
 };
 pub(crate) use token::{
     ensure_bound_runtime_generation_matches, ensure_runtime_generation_matches,

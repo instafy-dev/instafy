@@ -532,6 +532,13 @@ function mapEnsureRuntimeResult(
 
 export interface DesktopRuntimeRequestOptions {
   projectId: string;
+  /**
+   * The already-registered self-hosted runtime this request is about. The
+   * controller refuses a self-hosted request that names no runtime — such a
+   * machine only exists once it has called POST /runtime/register itself — so
+   * omitting this is a guaranteed 400, not a way to ask for a new one.
+   */
+  runtimeId?: string | null;
   displayName?: string | null;
   idleTtlSeconds?: number | null;
   metadata?: Record<string, unknown> | null;
@@ -576,6 +583,7 @@ export async function requestDesktopRuntime(
   const idleTtlSeconds = coerceControllerRuntimeIdleTtlSeconds(params.idleTtlSeconds);
   const payload: Record<string, unknown> = {
     provider: "self-hosted",
+    runtimeId: params.runtimeId ?? undefined,
     display_name: params.displayName ?? undefined,
     idle_ttl_seconds: idleTtlSeconds,
     metadata: params.metadata ?? undefined,

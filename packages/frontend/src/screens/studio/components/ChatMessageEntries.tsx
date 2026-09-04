@@ -3,14 +3,15 @@ import {
   type MouseEvent,
   type PointerEvent,
   type ReactNode,
+  createContext,
   useCallback,
+  useContext,
   useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
-import { MoreHoriz } from "iconoir-react";
-import { Badge } from "../../../components/Badge";
+import { MoreHoriz, WarningTriangle } from "iconoir-react";
 import { Button } from "../../../components/Button";
 import { Surface } from "../../../components/Surface";
 import { useConversations } from "../../../conversations/ConversationsProvider";
@@ -18,6 +19,7 @@ import { controllerClient } from "../../../sdk/instafy";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import type { ChatMessage } from "../types";
 import { ActionRequestEntry } from "./ActionRequestEntry";
+import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
 import {
   LocalCapabilityInlineEntry,
   ReasoningEntry,
@@ -36,9 +38,14 @@ import { shouldRenderLocalCapabilityStatusAsTimeline } from "./chatMessagePresen
 import { resolveProxyUpstreamErrorGuidance } from "./proxyError";
 import { RunFailureMessageBody } from "./RunFailureNotice";
 import {
+  resolveControllerNoticeActionHandler,
+  useControllerNoticeActions,
+} from "./ControllerNoticeActions";
+import {
   getControllerConversationNoticeKind,
   resolveControllerConversationNoticeContent,
   resolveControllerConversationNoticeLabel,
+  resolveControllerConversationNoticeAction,
 } from "./controllerConversationNotice";
 import { resolveSpineToneFromStatus, ThreadSpine, type ThreadSpineTone } from "./ThreadSpine";
 import { buildAgentThreadBranchRows } from "./agentThreadBranchRows";
@@ -91,8 +98,13 @@ export function NotchedMessageShell({
   onClickCapture,
   children,
 }: NotchedMessageShellProps) {
-  const widthClassName = width === "full" ? "w-full max-w-[56rem]" : "w-fit max-w-[min(92%,56rem)]";
-  const paddingClassName = padding === "none" ? "" : "px-1.5 py-1";
+  const widthClassName =
+    width === "full"
+      ? `w-full ${CHAT_BUBBLE_MAX_WIDTH.messageFull}`
+      : `w-fit ${CHAT_BUBBLE_MAX_WIDTH.message}`;
+  // No horizontal padding: the shell's left edge IS the chat alignment line —
+  // speaker header, body text, and chip rows all start on it (#177).
+  const paddingClassName = padding === "none" ? "" : "py-1";
 
   return (
     <div
@@ -109,7 +121,19 @@ export function NotchedMessageShell({
       onContextMenu={onContextMenu}
       onClickCapture={onClickCapture}
     >
-      <div className={`${width === "full" ? "w-full" : ""} min-w-0`.trim()}>{children}</div>
+      {/*
+        Always full width, not just for `width="full"`: the shell above is a
+        column flex container with `items-start`, so a cross-axis (width)
+        auto-sized flex item ignores the shell's own max-width and grows to
+        its content's max-content size instead of wrapping (#207). Giving
+        this single content child an explicit width resolves it against the
+        shell's already-clamped size, which is what actually makes long
+        prose wrap at the shell's max-width instead of overflowing it. Short
+        content is unaffected: percentage widths are treated as `auto` when
+        the shell itself computes its own fit-content size, so narrow
+        bubbles still hug their content exactly as before.
+      */}
+      <div className="w-full min-w-0">{children}</div>
     </div>
   );
 }
@@ -331,7 +355,7 @@ export function UserMessageBubble({
       ) : null}
       {hasFileChanges ? (
         <div className="mt-2">
-          <ChatFileChangeList files={fileChanges} projectId={projectId} commitRange={message.commitRange ?? null} />
+          <ChatFileChangeList files={fileChanges} projectId={projectId} commitRange={message.commitRange ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
         </div>
       ) : null}
     </NotchedMessageShell>
@@ -346,6 +370,7 @@ function AgentJobThreadPreviewEntry({
   showHeaderAvatar = true,
   showHeaderIdentity = true,
   hideThreadSpine = false,
+  runStatusShownInEntryHeader = false,
 }: {
   message: ChatMessage;
   projectId?: string | null;
@@ -354,6 +379,7 @@ function AgentJobThreadPreviewEntry({
   showHeaderAvatar?: boolean;
   showHeaderIdentity?: boolean;
   hideThreadSpine?: boolean;
+  runStatusShownInEntryHeader?: boolean;
 }) {
   const previewState = useAgentJobThreadPreviewState({
     message,
@@ -392,9 +418,18 @@ function AgentJobThreadPreviewEntry({
       ChatFileChangeList={ChatFileChangeList}
       onMessageContextMenu={onMessageContextMenu}
       showHeaderIdentity={showHeaderIdentity}
+      runStatusShownInEntryHeader={runStatusShownInEntryHeader}
     />
   );
 }
+
+// Live runtime activity, provided by ChatPanel, so persisted runtime alerts
+// can tell when a newer workspace start supersedes them: a 45-minute-old
+// "startup failed" card above a live "starting its workspace…" row reads as a
+// contradiction, not as history.
+export const ChatRuntimeActivityContext = createContext<{ workspaceStarting: boolean }>({
+  workspaceStarting: false,
+});
 
 function ControllerConversationNoticeEntry({
   message,
@@ -422,12 +457,24 @@ function ControllerConversationNoticeEntry({
   onClickCapture?: (event: MouseEvent<HTMLDivElement>) => void;
 }) {
   const isRuntimeAlert = messageType === "runtime_alert";
+  const { workspaceStarting } = useContext(ChatRuntimeActivityContext);
+  // While a workspace start is live, the activity row by the composer is the
+  // source of truth; older runtime alerts demote to a quiet history line so
+  // the transcript never says "failed" and "starting" at full volume at once.
+  const superseded = isRuntimeAlert && workspaceStarting;
   const spineTone: ThreadSpineTone = isRuntimeAlert ? "warning" : "danger";
   const label = resolveControllerConversationNoticeLabel(message);
   const noticeClassName = isRuntimeAlert
     ? "border-secondary-200/80 bg-secondary-50/80 text-secondary-900 shadow-sm dark:border-secondary-400/25 dark:bg-secondary-500/10 dark:text-secondary-100"
     : "border-rose-200/80 bg-rose-50/80 text-rose-900 shadow-sm dark:border-rose-400/25 dark:bg-rose-500/10 dark:text-rose-100";
   const displayContent = resolveControllerConversationNoticeContent(message);
+  // Without the provider (thread previews, tests) the card keeps its old
+  // button-free shape rather than throwing.
+  const noticeActions = useControllerNoticeActions();
+  const noticeAction = resolveControllerConversationNoticeAction(message, {
+    viewerUserId: noticeActions?.viewerUserId ?? null,
+  });
+  const handleNoticeAction = resolveControllerNoticeActionHandler(noticeAction, noticeActions);
 
   return (
     <NotchedMessageShell
@@ -449,21 +496,49 @@ function ControllerConversationNoticeEntry({
         className={`pointer-events-none absolute top-0 h-full ${CHAT_LEFT_SPINE_OFFSET_CLASS}`}
         notches={[{ maskLine: true }]}
       />
-      <div className={`max-w-[min(100%,42rem)] rounded-2xl border px-3 py-2.5 text-sm ${noticeClassName}`}>
-        <Badge tone={isRuntimeAlert ? "warning" : "danger"} size="xs" className="mb-1.5">
-          {label}
-        </Badge>
-        <MessageContent
-          content={displayContent}
-          metadata={
-            message.metadata && isRecord(message.metadata)
-              ? (message.metadata as Record<string, unknown>)
-              : null
-          }
-          projectId={projectId ?? null}
-          mentionableAgentHandles={mentionableAgentHandles}
-        />
-      </div>
+      {superseded ? (
+        <div
+          className={`${CHAT_BUBBLE_MAX_WIDTH.notice} px-1 py-0.5 text-xs text-slate-500 dark:text-slate-400`}
+          data-runtime-alert-superseded="true"
+        >
+          Earlier: {label.toLowerCase()}. A new workspace start is in progress below.
+        </div>
+      ) : (
+        <div className={`${CHAT_BUBBLE_MAX_WIDTH.notice} rounded-xl border px-3 py-2 text-sm ${noticeClassName}`}>
+          <div className="flex items-center gap-1.5 text-xs font-semibold">
+            <WarningTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            {label}
+          </div>
+          <div className="mt-0.5">
+            <MessageContent
+              content={displayContent}
+              metadata={
+                message.metadata && isRecord(message.metadata)
+                  ? (message.metadata as Record<string, unknown>)
+                  : null
+              }
+              projectId={projectId ?? null}
+              mentionableAgentHandles={mentionableAgentHandles}
+            />
+          </div>
+          {noticeAction && handleNoticeAction ? (
+            <div className="mt-2">
+              <button
+                type="button"
+                data-testid="chat-controller-notice-action"
+                onClick={handleNoticeAction}
+                className={`inline-flex flex-none items-center justify-center rounded-full border px-2.5 py-1 text-xs font-medium transition focus:outline-none focus-visible:ring-2 ${
+                  isRuntimeAlert
+                    ? "border-secondary-300/70 text-secondary-800 hover:bg-secondary-100/70 focus-visible:ring-secondary-400 dark:border-secondary-400/30 dark:text-secondary-100 dark:hover:bg-secondary-500/15"
+                    : "border-rose-300/70 text-rose-800 hover:bg-rose-100/70 focus-visible:ring-rose-400 dark:border-rose-400/30 dark:text-rose-100 dark:hover:bg-rose-500/15"
+                }`}
+              >
+                {noticeAction.label}
+              </button>
+            </div>
+          ) : null}
+        </div>
+      )}
     </NotchedMessageShell>
   );
 }
@@ -485,6 +560,12 @@ export type AssistantMessageEntryProps = {
   mentionableAgentHandles?: string[] | null;
   useOuterWorkflowSpine?: boolean;
   renderContext?: "conversation" | "runTrace";
+  /**
+   * True when the surrounding row's speaker header already carries the
+   * terminal run-status marker, so job-thread previews skip the duplicate
+   * content-level status caption (#145).
+   */
+  runStatusShownInEntryHeader?: boolean;
 };
 
 export function AssistantMessageEntry({
@@ -504,6 +585,7 @@ export function AssistantMessageEntry({
   mentionableAgentHandles,
   useOuterWorkflowSpine = false,
   renderContext = "conversation",
+  runStatusShownInEntryHeader = false,
 }: AssistantMessageEntryProps) {
   const messageType = getMessageType(message);
   const details = extractMessageDetails(message.metadata);
@@ -703,6 +785,7 @@ export function AssistantMessageEntry({
         showHeaderAvatar={showAgentIdentityAvatar}
         showHeaderIdentity={showAgentThreadHeaderIdentity}
         hideThreadSpine={useOuterWorkflowSpine}
+        runStatusShownInEntryHeader={runStatusShownInEntryHeader}
       />
     );
   }
@@ -825,7 +908,7 @@ export function AssistantMessageEntry({
           />
           {message.files && message.files.length > 0 ? (
             <div className="mt-2">
-              <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} />
+              <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
             </div>
           ) : null}
         </div>
@@ -869,7 +952,7 @@ export function AssistantMessageEntry({
         shadow="sm"
         data-testid="chat-bubble-assistant"
         data-message-type={messageType ?? undefined}
-        className="max-w-[min(80%,42rem)] px-4 py-3 text-sm text-rose-700"
+        className={`${CHAT_BUBBLE_MAX_WIDTH.alert} px-4 py-3 text-sm text-rose-700`}
       >
         {runFailurePresentation ? (
           <RunFailureMessageBody message={message} presentation={runFailurePresentation} />
@@ -883,7 +966,7 @@ export function AssistantMessageEntry({
         )}
         {message.files && message.files.length > 0 ? (
           <div className="mt-2">
-            <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} />
+            <ChatFileChangeList files={message.files} projectId={projectId} commitRange={message.commitRange ?? null} messageId={message.id} messageTimestamp={message.timestamp} />
           </div>
         ) : null}
       </Surface>

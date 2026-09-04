@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Play, Refresh, WarningTriangle, Xmark } from "iconoir-react";
 import type { RuntimeMenuOption } from "../useRuntimeMenu";
 import { RuntimeMenuOptionsList } from "./RuntimeMenuOptionsList";
@@ -30,9 +30,18 @@ interface RuntimeMenuPanelProps {
   onTerminateRuntime?: (runtimeId: string | null) => void;
   onRemoveRuntime?: (runtimeId: string | null) => void;
   onStartRuntime?: (runtimeId: string | null) => void;
+  onShowSelfHostHelp?: () => void;
   onCopyTunnel?: (mode: TunnelCopyMode, runtimeId?: string | null) => void;
   listClassName?: string;
   emptyStateMessage?: string;
+  /** Option whose details start expanded (page-style hosts). */
+  defaultExpandedOptionId?: string | null;
+  /** Extra host content rendered inside an option's expanded details. */
+  renderOptionExtras?: (option: RuntimeMenuOption) => ReactNode;
+  /** Trend size: compact mini-sparklines (menus) or full-row plots (pages). */
+  sparklineVariant?: "compact" | "page";
+  /** Lifecycle controls as header icon buttons (page-style hosts). */
+  headerActions?: boolean;
 }
 
 export function RuntimeMenuPanel({
@@ -53,9 +62,14 @@ export function RuntimeMenuPanel({
   onTerminateRuntime,
   onRemoveRuntime,
   onStartRuntime,
+  onShowSelfHostHelp,
   onCopyTunnel,
   listClassName = "mt-2 max-h-60 overflow-auto",
   emptyStateMessage = "No runtimes available yet.",
+  defaultExpandedOptionId = null,
+  renderOptionExtras,
+  sparklineVariant = "compact",
+  headerActions = false,
 }: RuntimeMenuPanelProps) {
   const [showErrorDetails, setShowErrorDetails] = useState(false);
   const [cachedRuntimeEnsureError, setCachedRuntimeEnsureError] = useState<string | null>(null);
@@ -201,7 +215,7 @@ export function RuntimeMenuPanel({
               radius="full"
               onPress={onClose}
               aria-label="Close runtimes menu"
-              className="text-slate-400 hover:text-slate-700 data-[hovered]:text-slate-700"
+              className="text-slate-400 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-500 dark:hover:text-slate-200 dark:data-[hovered]:text-slate-200"
             >
               <Xmark className="h-4 w-4" aria-hidden="true" />
             </IconButton>
@@ -214,11 +228,11 @@ export function RuntimeMenuPanel({
           radius="xl"
           shadow="none"
           padding="sm"
-          className="mt-2 flex items-start gap-2 py-2 text-[12px] text-secondary-800"
+          className="mt-2 flex items-start gap-2 py-2 text-xs text-secondary-800"
         >
           <WarningTriangle className="mt-0.5 h-4 w-4 text-secondary-500" aria-hidden="true" />
           <div className="flex-1">
-            <Text as="p" variant="caption" tone="inherit" className="text-[12px] font-medium">
+            <Text as="p" variant="caption" tone="inherit" className="font-medium">
               {errorHeadline}
             </Text>
             <Text as="p" variant="caption" tone="inherit" className="text-xxs leading-snug">
@@ -252,7 +266,7 @@ export function RuntimeMenuPanel({
                 as="pre"
                 variant="mono"
                 tone="inherit"
-                className="mt-2 overflow-x-auto whitespace-pre-wrap break-words rounded-xl bg-secondary-100/80 p-2 text-3xs leading-snug text-secondary-900 dark:bg-secondary-950/40 dark:text-secondary-100"
+                className="mt-2 overflow-x-auto whitespace-pre-wrap break-words rounded-md bg-secondary-100/80 p-2 text-3xs leading-snug text-secondary-900 dark:bg-secondary-950/40 dark:text-secondary-100"
               >
                 {displayedRuntimeEnsureError}
               </Text>
@@ -320,12 +334,12 @@ export function RuntimeMenuPanel({
           radius="xl"
           shadow="none"
           padding="sm"
-          className="mt-2 flex items-start gap-2 py-2 text-[12px] text-secondary-800"
+          className="mt-2 flex items-start gap-2 py-2 text-xs text-secondary-800"
           data-testid="runtime-connection-warning"
         >
           <WarningTriangle className="mt-0.5 h-4 w-4 text-secondary-500" aria-hidden="true" />
           <div className="flex-1">
-            <Text as="p" variant="caption" tone="inherit" className="text-[12px] font-medium">
+            <Text as="p" variant="caption" tone="inherit" className="font-medium">
               Live runtime status is temporarily stale
             </Text>
             <Text as="p" variant="caption" tone="inherit" className="text-xxs leading-snug">
@@ -372,19 +386,24 @@ export function RuntimeMenuPanel({
           onTerminateRuntime={onTerminateRuntime}
           onRemoveRuntime={onRemoveRuntime}
           onStartRuntime={onStartRuntime}
+          onShowSelfHostHelp={onShowSelfHostHelp}
           className={listClassName}
           selectedOptionClassName="bg-slate-100 font-medium text-slate-900 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-50"
           emptyStateMessage={emptyStateMessage}
           onCopyTunnel={onCopyTunnel}
           copyDisabled={false}
+          defaultExpandedOptionId={defaultExpandedOptionId}
+          renderOptionExtras={renderOptionExtras}
+          sparklineVariant={sparklineVariant}
+          headerActions={headerActions}
         />
       ) : (
         <Card
-          tone="muted"
+          tone="raised"
           radius="xl"
           shadow="none"
           padding="sm"
-          className="mt-2 border-dashed py-4 text-center text-[12px] text-slate-500 dark:text-slate-300"
+          className="mt-2 border-dashed py-4 text-center text-xs text-slate-500 dark:text-slate-300"
         >
           <Text as="p" variant="caption" tone="inherit" className="leading-relaxed">
             {emptyStateMessage}

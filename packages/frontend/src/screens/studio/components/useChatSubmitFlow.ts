@@ -31,11 +31,18 @@ import {
 import type { PendingConversationInvitePrompt } from "./useChatInvitePromptHandlers";
 import type { ChatSubmitDispatchPayload } from "./useChatSubmitDispatch";
 import type { EnqueueServerSendQueuePayload } from "./useChatServerSendQueue";
+import { buildServerSendQueuePromptBody } from "./useChatServerSendQueue";
+import type { PersonalBrowserAgentPhase } from "./usePersonalBrowserBridge";
 import type { PreparedEmailInvite } from "../../../sharing/preparedEmailInvite";
 
 export type SubmitMessageFn = (
   override?: ChatSubmitOverride,
-  options?: { allowWhileBusy?: boolean; metadata?: Record<string, unknown> | null },
+  options?: {
+    allowWhileBusy?: boolean;
+    metadata?: Record<string, unknown> | null;
+    intent?: "send" | "queue" | "steer";
+    expectedActiveJobId?: string | null;
+  },
 ) => Promise<boolean>;
 
 export function resolvePersonalBrowserSubmitRouting(input: {
@@ -56,7 +63,51 @@ export function resolvePersonalBrowserSubmitRouting(input: {
   return { kind: "personal", runtimeOverride: input.runtimeOverride };
 }
 
-type ShowStatus = (message: string, intent?: StatusIntent, durationMs?: number) => void;
+export function resolvePersonalBrowserAgentBlockNotice(input: {
+  agentControlEnabled: boolean;
+  agentError: string | null;
+  agentPhase: PersonalBrowserAgentPhase;
+  surfaceReady: boolean;
+}): { message: string; action: "retry" | "resume" | null } {
+  // Mirrors the controls PersonalBrowserSurface actually renders: nothing while
+  // the browser itself is not ready, "Retry agent control" while the agent is
+  // unavailable, and "Resume agent control" only while it is paused.
+  if (!input.surfaceReady) {
+    return {
+      message:
+        input.agentError ??
+        "Personal Browser is still opening on this device. Wait for it to be ready before sending this browser task.",
+      action: null,
+    };
+  }
+  if (input.agentPhase === "unavailable") {
+    return {
+      message:
+        input.agentError ??
+        "Personal Browser agent control is unavailable. Retry agent control before sending this browser task.",
+      action: "retry",
+    };
+  }
+  if (!input.agentControlEnabled) {
+    return {
+      message:
+        "Personal Browser agent control is paused. Resume it before sending this browser task.",
+      action: "resume",
+    };
+  }
+  return {
+    message:
+      "Personal Browser agent control is still starting. Wait for it to be ready before sending this browser task.",
+    action: null,
+  };
+}
+
+type ShowStatus = (
+  message: string,
+  intent?: StatusIntent,
+  durationMs?: number,
+  options?: { actionLabel?: string; onAction?: () => void },
+) => void;
 
 type ConversationEntryLike = {
   controllerId?: string | null;
@@ -104,8 +155,13 @@ export function useChatSubmitFlow({
   pendingTypingBroadcastRef,
   performSubmit,
   personalBrowserActive,
+  personalBrowserAgentControlEnabled,
   personalBrowserAgentError,
+  personalBrowserAgentPhase,
+  personalBrowserAgentSurfaceReady,
+  personalBrowserRetryAgentControl,
   personalBrowserRuntimeOverride,
+  personalBrowserSetAgentControlEnabled,
   preferredBrowserPage,
   preferredRuntimeId,
   revealAiGatesForCurrentDraft,
@@ -122,6 +178,7 @@ export function useChatSubmitFlow({
   showStatus,
   shouldAutoScrollRef,
   softPrefillSuggestion,
+  submitSendIntent,
   targetsOverlapActiveRuns,
 }: {
   activeConversationEntry: ConversationEntryLike;
@@ -199,8 +256,13 @@ export function useChatSubmitFlow({
   } | null>;
   performSubmit: (payload: ChatSubmitDispatchPayload) => Promise<void>;
   personalBrowserActive: boolean;
+  personalBrowserAgentControlEnabled: boolean;
   personalBrowserAgentError: string | null;
+  personalBrowserAgentPhase: PersonalBrowserAgentPhase;
+  personalBrowserAgentSurfaceReady: boolean;
+  personalBrowserRetryAgentControl: () => void | Promise<unknown>;
   personalBrowserRuntimeOverride: SubmitConversationRuntimeOverride | null;
+  personalBrowserSetAgentControlEnabled: (enabled: boolean) => void | Promise<unknown>;
   preferredBrowserPage: BrowserSessionPage | null;
   preferredRuntimeId: string | null;
   revealAiGatesForCurrentDraft: () => boolean;
@@ -225,6 +287,12 @@ export function useChatSubmitFlow({
   showStatus: ShowStatus;
   shouldAutoScrollRef: MutableRefObject<boolean>;
   softPrefillSuggestion: string | null | undefined;
+  submitSendIntent: (input: {
+    mode: "queue" | "steer";
+    request: Record<string, unknown>;
+    targetAgentHandles: string[];
+    expectedActiveJobId: string | null;
+  }) => Promise<boolean>;
   targetsOverlapActiveRuns: (targetAgentHandles: string[]) => boolean;
 }) {
   const submitMessageInFlightRef = useRef(false);
@@ -235,6 +303,7 @@ export function useChatSubmitFlow({
     }
 
     const allowWhileBusy = options?.allowWhileBusy ?? false;
+    const requestedIntent = options?.intent ?? "send";
     const baseSubmitMetadata = override?.metadata ?? options?.metadata ?? null;
     const {
       agentSelection,
@@ -324,11 +393,31 @@ export function useChatSubmitFlow({
     const usePersonalBrowserRuntime = personalBrowserRouting.kind === "personal";
     const useSharedBrowserRuntime = sharedBrowserRouting.kind === "shared";
     if (personalBrowserRouting.kind === "blocked") {
+      const agentBlockNotice = resolvePersonalBrowserAgentBlockNotice({
+        agentControlEnabled: personalBrowserAgentControlEnabled,
+        agentError: personalBrowserAgentError,
+        agentPhase: personalBrowserAgentPhase,
+        surfaceReady: personalBrowserAgentSurfaceReady,
+      });
       showStatus(
-        personalBrowserAgentError ??
-          "Personal Browser agent control is still starting. Resume it before sending this browser task.",
+        agentBlockNotice.message,
         "warning",
         5000,
+        agentBlockNotice.action === "retry"
+          ? {
+              actionLabel: "Retry agent control",
+              onAction: () => {
+                void personalBrowserRetryAgentControl();
+              },
+            }
+          : agentBlockNotice.action === "resume"
+            ? {
+                actionLabel: "Resume agent control",
+                onAction: () => {
+                  void personalBrowserSetAgentControlEnabled(true);
+                },
+              }
+            : undefined,
       );
       return false;
     }
@@ -357,6 +446,80 @@ export function useChatSubmitFlow({
             runtimeId: submitRuntimeOverride.runtimeId,
           })
       : resolvedBaseSubmitMetadata;
+    const queuedSubmitMetadata = {
+      ...(submitMetadata ?? {}),
+      agentSelection: {
+        active: effectiveTargetAgentHandles,
+        mentions:
+          agentSelection.mentionedHandles.length > 0
+            ? effectiveTargetAgentHandles
+            : [],
+      },
+    };
+    const consumeBrowserComposerTarget = () => {
+      if (shouldConsumeNewBrowserLaunch) {
+        clearPendingBrowserLaunchMode();
+      }
+    };
+    const effectiveIntent =
+      requestedIntent === "steer" &&
+      (participationRecordOnly || effectiveTargetAgentHandles.length === 0)
+        ? "send"
+        : requestedIntent;
+
+    if (effectiveIntent === "queue" || effectiveIntent === "steer") {
+      if (imageFiles.length > 0) {
+        showStatus(
+          effectiveIntent === "steer"
+            ? "Steer currently supports text only. Remove image attachments first."
+            : "Queue currently supports text only. Remove image attachments first.",
+          "info",
+          4500,
+        );
+        focusInput();
+        return false;
+      }
+      if (!activeConversationEntry?.controllerId) {
+        showStatus(
+          "Send the first message normally before using Queue or Steer.",
+          "info",
+          4500,
+        );
+        focusInput();
+        return false;
+      }
+      const accepted = await submitSendIntent({
+        mode: effectiveIntent,
+        request: buildServerSendQueuePromptBody({
+          message: dispatchedMessage,
+          targetAgentHandles: effectiveTargetAgentHandles,
+          metadata: queuedSubmitMetadata,
+          runtimeOverride: submitRuntimeOverride,
+          intent: terminalRequest ? "terminal_command" : null,
+        }),
+        targetAgentHandles: effectiveTargetAgentHandles,
+        expectedActiveJobId: options?.expectedActiveJobId ?? null,
+      });
+      if (!accepted) {
+        return false;
+      }
+      consumeBrowserComposerTarget();
+      if (activeConversationId) {
+        if (effectiveIntent === "queue") {
+          clearComposerAfterQueue(activeConversationId, messageToSend);
+        } else {
+          clearComposerIfUnchanged(activeConversationId, messageToSend);
+        }
+      }
+      pendingTypingBroadcastRef.current = null;
+      if (localTypingStateRef.current.isTyping) {
+        localTypingStateRef.current.isTyping = false;
+        localTypingStateRef.current.lastSentAt = Date.now();
+        broadcastTyping(false, activeConversationEntry.controllerId);
+      }
+      focusInput();
+      return true;
+    }
     if (
       usePersonalBrowserRuntime &&
       !allowWhileBusy &&
@@ -385,20 +548,22 @@ export function useChatSubmitFlow({
       if (!runtimeEntryIsDispatchable(browserRuntimeEntry)) {
         showStatus(
           usePersonalBrowserRuntime
-            ? "Personal Browser is still available for manual browsing, but its agent is unavailable. Resume agent control before sending this task."
-            : "Shared Browser is visible, but its agent runtime is unavailable. Reconnect the browser before sending this task.",
+            ? "Personal Browser is still available for manual browsing, but its agent is unavailable. Retry agent control before sending this task."
+            : "Shared Browser is visible, but its agent runtime isn't ready yet. Wait for it to come up before sending this task.",
           "warning",
           5500,
+          usePersonalBrowserRuntime && personalBrowserAgentSurfaceReady
+            ? {
+                actionLabel: "Retry agent control",
+                onAction: () => {
+                  void personalBrowserRetryAgentControl();
+                },
+              }
+            : undefined,
         );
         return false;
       }
     }
-
-    const consumeBrowserComposerTarget = () => {
-      if (shouldConsumeNewBrowserLaunch) {
-        clearPendingBrowserLaunchMode();
-      }
-    };
 
     const pinToBottom = () => {
       shouldAutoScrollRef.current = true;
@@ -412,7 +577,7 @@ export function useChatSubmitFlow({
         targetAgentHandles: effectiveTargetAgentHandles,
         browserPageTarget: shouldApplyBrowserPageTarget ? browserPageTarget : null,
         browserLaunchMode: shouldApplyNewBrowserLaunch ? browserLaunchMode : null,
-        metadata: submitMetadata,
+        metadata: queuedSubmitMetadata,
         runtimeOverride: submitRuntimeOverride,
       });
     };
@@ -421,7 +586,7 @@ export function useChatSubmitFlow({
       return await enqueueServerSendQueueItem({
         message: dispatchedMessage,
         targetAgentHandles: effectiveTargetAgentHandles,
-        metadata: submitMetadata,
+        metadata: queuedSubmitMetadata,
         runtimeOverride: submitRuntimeOverride,
         intent: terminalRequest ? "terminal_command" : null,
       });
@@ -464,9 +629,15 @@ export function useChatSubmitFlow({
       allowWhileBusy: allowWhileBusy || participationBypassesBusySerialization,
       appendMessages,
       attachedImageCount: imageFiles.length,
+      // Clearing is conditional on the composer still holding the text that was
+      // queued — the same match performSubmit and the steer path make. Passing
+      // the live composer value instead would always match itself and so wipe
+      // whatever the user had typed when the queued message came from somewhere
+      // else (a programmatic send like the conversational-undo request, whose
+      // text never came from the composer).
       clearQueuedComposerDraft: () => {
         if (activeConversationId) {
-          clearComposerAfterQueue(activeConversationId, inputValue);
+          clearComposerAfterQueue(activeConversationId, messageToSend);
         }
       },
       clearSubmittedComposerDraft: () => {
@@ -537,6 +708,7 @@ export function useChatSubmitFlow({
       isPrivateConversation: activeConversationEntry?.visibility === "private",
       listConversationParticipants: listConversationParticipants,
       message: messageToSend,
+      expectedLaneIdle: !allowWhileBusy && !participationBypassesBusySerialization,
     });
     if (invitePromptRequest) {
       if (usePersonalBrowserRuntime) {
@@ -559,6 +731,7 @@ export function useChatSubmitFlow({
       imageFiles: submitImageFiles,
       metadata: submitMetadata,
       runtimeOverride: submitRuntimeOverride,
+      expectedLaneIdle: !allowWhileBusy && !participationBypassesBusySerialization,
     });
     consumeBrowserComposerTarget();
     return true;
@@ -603,8 +776,13 @@ export function useChatSubmitFlow({
     pendingTypingBroadcastRef,
     performSubmit,
     personalBrowserActive,
+    personalBrowserAgentControlEnabled,
     personalBrowserAgentError,
+    personalBrowserAgentPhase,
+    personalBrowserAgentSurfaceReady,
+    personalBrowserRetryAgentControl,
     personalBrowserRuntimeOverride,
+    personalBrowserSetAgentControlEnabled,
     preferredBrowserPage,
     preferredRuntimeId,
     revealAiGatesForCurrentDraft,
@@ -621,6 +799,7 @@ export function useChatSubmitFlow({
     showStatus,
     shouldAutoScrollRef,
     softPrefillSuggestion,
+    submitSendIntent,
     targetsOverlapActiveRuns,
   ]);
 

@@ -17,6 +17,7 @@ import {
   type ConversationState,
 } from "../conversations/ConversationsProvider";
 import { useProject } from "../projects/useProject";
+import { isEmptyConversationPlaceholder } from "../conversations/conversationState";
 import { isUUID } from "../utils/uuid";
 import type { WorkspaceGitReviewSource } from "./gitReviewTypes";
 import { useWorkspaceTabController } from "./useWorkspaceTabController";
@@ -103,7 +104,9 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
     activeConversationId,
     selectConversation,
     markConversationRead,
-    createConversation
+    createConversation,
+    remoteConversationHistoryResolved,
+    projectKey: conversationsProjectKey
   } = useConversations();
   const { activeProjectId } = useProject();
   const workspaceProjectId = useMemo(() => {
@@ -188,6 +191,22 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
   const activeConversationIdRef = useRef<string | null>(activeConversationId);
   const seenConversationIdsRef = useRef<Set<string>>(new Set());
   const conversationAutoOpenStartRef = useRef<number>(Date.now());
+
+  // A space we have not opened before starts with a single local placeholder
+  // while its real conversations are still being fetched. Giving that
+  // placeholder a tab puts a generic "Conversation 1" in the strip, which on
+  // an org switch reads as the previous org's tab surviving. Hold the strip
+  // until the real conversations land.
+  const conversationHistoryPending =
+    !remoteConversationHistoryResolved && conversations.every(isEmptyConversationPlaceholder);
+
+  // ConversationsProvider swaps its reducer state one commit after the active
+  // project changes, so there is always a commit where workspaceProjectId is
+  // already the new space while `conversations` still holds the old one's.
+  // Building or persisting tabs from that pairing puts the previous org's chat
+  // in the strip and writes its ids into the new space's saved tab list.
+  const conversationsMatchProject =
+    workspaceProjectId === null || conversationsProjectKey === workspaceProjectId;
 
   useEffect(() => {
     seenConversationIdsRef.current = new Set();
@@ -321,7 +340,7 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
   }, [conversations, setActiveTabInternal, workspaceProjectId]);
 
   useEffect(() => {
-    if (!workspaceProjectId) {
+    if (!workspaceProjectId || !conversationsMatchProject) {
       return;
     }
     const persisted = persistedStateRef.current;
@@ -335,6 +354,25 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
           ? conversations.find((entry) => entry.localId === targetConversationId)
           : null) ?? conversations[0] ?? null;
       if (!conversation) {
+        return;
+      }
+      if (conversationHistoryPending) {
+        if (nonConversationTabs.length !== tabsRef.current.length) {
+          tabsRef.current = nonConversationTabs;
+          setTabs(nonConversationTabs);
+          const stillActive = activeTabIdRef.current
+            ? nonConversationTabs.find((tab) => tab.id === activeTabIdRef.current) ?? null
+            : null;
+          if (!stillActive) {
+            const fallback = nonConversationTabs[0] ?? null;
+            if (fallback) {
+              setActiveTabInternal(fallback, { syncPanel: false, syncConversation: false });
+            } else {
+              activeTabIdRef.current = null;
+              setActiveTabId(null);
+            }
+          }
+        }
         return;
       }
       const conversationTabs = [createTabForConversation(conversation)];
@@ -369,9 +407,20 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
 
     applyPersistedTabs();
     appliedProjectRef.current = workspaceProjectId;
-  }, [activeConversationId, applyPersistedTabs, conversations, setActiveTabInternal, workspaceProjectId]);
+  }, [
+    activeConversationId,
+    applyPersistedTabs,
+    conversationHistoryPending,
+    conversations,
+    conversationsMatchProject,
+    setActiveTabInternal,
+    workspaceProjectId,
+  ]);
 
   useEffect(() => {
+    if (!conversationsMatchProject) {
+      return;
+    }
     const currentTabs = tabsRef.current;
     const conversationLookup = new Map(conversations.map((conversation) => [conversation.localId, conversation]));
     const nonConversationTabs = currentTabs.filter((tab) => tab.kind !== "conversation");
@@ -466,7 +515,10 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
 
     const hadConversationTabs = currentTabs.some((tab) => tab.kind === "conversation");
     const shouldEnsureFallback =
-      nextConversationTabs.length === 0 && conversations.length > 0 && (hadConversationTabs || persistedOrder === null);
+      nextConversationTabs.length === 0 &&
+      conversations.length > 0 &&
+      !conversationHistoryPending &&
+      (hadConversationTabs || persistedOrder === null);
     if (shouldEnsureFallback) {
       const fallback = conversations[0] ?? null;
       if (fallback) {
@@ -484,8 +536,27 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
     if (orderChanged || payloadChanged || changed) {
       tabsRef.current = nextTabs;
       setTabs(nextTabs);
+      // Pruning a stale tab can leave activeTabId pointing at nothing, and the
+      // repair below only runs on the chat panel — on Home the workspace would
+      // sit blank until the next click.
+      const activeId = activeTabIdRef.current;
+      if (activeId && !nextTabs.some((tab) => tab.id === activeId)) {
+        const fallback = nextTabs[0] ?? null;
+        if (fallback) {
+          setActiveTabInternal(fallback, { syncPanel: false, syncConversation: false });
+        } else {
+          activeTabIdRef.current = null;
+          setActiveTabId(null);
+        }
+      }
     }
-  }, [conversations, workspaceProjectId]);
+  }, [
+    conversationHistoryPending,
+    conversations,
+    conversationsMatchProject,
+    setActiveTabInternal,
+    workspaceProjectId,
+  ]);
 
   useEffect(() => {
     const resolvedActiveConversationId = activeConversationIdRef.current ?? activeConversationId;
@@ -569,7 +640,7 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
     if (!workspaceProjectId) {
       return;
     }
-    if (appliedProjectRef.current !== workspaceProjectId) {
+    if (appliedProjectRef.current !== workspaceProjectId || !conversationsMatchProject) {
       return;
     }
     const conversationTabs = tabsRef.current.filter(
@@ -591,10 +662,10 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
     };
     persistedStateRef.current = nextState;
     persistWorkspaceTabsState(nextState);
-  }, [activeTabId, tabs, workspaceProjectId]);
+  }, [activeTabId, conversationsMatchProject, tabs, workspaceProjectId]);
 
   useEffect(() => {
-    if (!workspaceProjectId) {
+    if (!workspaceProjectId || !conversationsMatchProject) {
       return;
     }
     const gitReviewTabs = tabsRef.current.filter(
@@ -615,7 +686,7 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
     };
     persistedGitReviewStateRef.current = nextState;
     persistWorkspaceGitReviewState(nextState);
-  }, [tabs, workspaceProjectId]);
+  }, [conversationsMatchProject, tabs, workspaceProjectId]);
 
   useEffect(() => {
     const suppressedPanel = suppressPanelSyncRef.current;

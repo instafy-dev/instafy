@@ -1,4 +1,10 @@
-import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+} from "react";
 import { Microphone, SoundHigh, SoundOff } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
 import { Spinner } from "../../../components/Spinner";
@@ -24,10 +30,8 @@ export type VoiceConversationActionStripProps = {
   onVoicePressStart: () => void | Promise<void>;
   onVoicePressEnd: () => void;
   onVoiceTap?: () => void | Promise<void>;
-  onPointerCaptureStart?: (event: ReactPointerEvent<HTMLButtonElement>) => void;
-  onPointerCaptureEnd?: (event: ReactPointerEvent<HTMLButtonElement>) => void;
   primaryActionClassName: string;
-  outlinedActionClassName: string;
+  ghostActionClassName: string;
   actionIconClassName: string;
   voiceRepliesTestId?: string;
   voiceInputTestId?: string;
@@ -54,30 +58,72 @@ export function VoiceConversationActionStrip({
   onVoicePressStart,
   onVoicePressEnd,
   onVoiceTap,
-  onPointerCaptureStart,
-  onPointerCaptureEnd,
   primaryActionClassName,
-  outlinedActionClassName,
+  ghostActionClassName,
   actionIconClassName,
   voiceRepliesTestId = "chat-voice-replies-toggle",
   voiceInputTestId = "chat-voice-input-button",
 }: VoiceConversationActionStripProps) {
   const tapLikeMode = voiceInteractionMode !== "hold";
+  const activePointerIdRef = useRef<number | null>(null);
+  const activeKeyboardKeyRef = useRef<" " | "Enter" | null>(null);
+  const removePointerListenersRef = useRef<(() => void) | null>(null);
+  const onVoicePressEndRef = useRef(onVoicePressEnd);
+  onVoicePressEndRef.current = onVoicePressEnd;
 
-  const handlePointerStart = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (tapLikeMode) {
+  const finishOwnedPointerHold = (pointerId: number | null) => {
+    if (
+      activePointerIdRef.current === null ||
+      (pointerId !== null && activePointerIdRef.current !== pointerId)
+    ) {
       return;
     }
-    onPointerCaptureStart?.(event);
-    void onVoicePressStart();
+    activePointerIdRef.current = null;
+    removePointerListenersRef.current?.();
+    removePointerListenersRef.current = null;
+    onVoicePressEndRef.current();
   };
 
-  const handlePointerEnd = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (tapLikeMode) {
+  useEffect(
+    () => () => {
+      const ownedHold =
+        activePointerIdRef.current !== null || activeKeyboardKeyRef.current !== null;
+      activePointerIdRef.current = null;
+      activeKeyboardKeyRef.current = null;
+      removePointerListenersRef.current?.();
+      removePointerListenersRef.current = null;
+      if (ownedHold) {
+        onVoicePressEndRef.current();
+      }
+    },
+    [],
+  );
+
+  const handlePointerStart = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (
+      tapLikeMode ||
+      event.button !== 0 ||
+      event.isPrimary === false ||
+      activePointerIdRef.current !== null ||
+      activeKeyboardKeyRef.current !== null
+    ) {
       return;
     }
-    onPointerCaptureEnd?.(event);
-    onVoicePressEnd();
+    activePointerIdRef.current = event.pointerId;
+    const ownerWindow = event.currentTarget.ownerDocument.defaultView ?? window;
+    const handlePointerEnd = (nativeEvent: PointerEvent) => {
+      finishOwnedPointerHold(nativeEvent.pointerId);
+    };
+    const handleWindowBlur = () => finishOwnedPointerHold(null);
+    ownerWindow.addEventListener("pointerup", handlePointerEnd, true);
+    ownerWindow.addEventListener("pointercancel", handlePointerEnd, true);
+    ownerWindow.addEventListener("blur", handleWindowBlur);
+    removePointerListenersRef.current = () => {
+      ownerWindow.removeEventListener("pointerup", handlePointerEnd, true);
+      ownerWindow.removeEventListener("pointercancel", handlePointerEnd, true);
+      ownerWindow.removeEventListener("blur", handleWindowBlur);
+    };
+    void onVoicePressStart();
   };
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
@@ -86,6 +132,14 @@ export function VoiceConversationActionStrip({
     }
     if (event.key === " " || event.key === "Enter") {
       event.preventDefault();
+      if (
+        event.repeat ||
+        activeKeyboardKeyRef.current !== null ||
+        activePointerIdRef.current !== null
+      ) {
+        return;
+      }
+      activeKeyboardKeyRef.current = event.key;
       void onVoicePressStart();
     }
   };
@@ -94,10 +148,31 @@ export function VoiceConversationActionStrip({
     if (tapLikeMode) {
       return;
     }
-    if (event.key === " " || event.key === "Enter") {
+    if (event.key === activeKeyboardKeyRef.current) {
       event.preventDefault();
+      activeKeyboardKeyRef.current = null;
       onVoicePressEnd();
     }
+  };
+
+  const handleBlur = () => {
+    const ownedHold = activeKeyboardKeyRef.current !== null;
+    activeKeyboardKeyRef.current = null;
+    if (ownedHold) {
+      onVoicePressEnd();
+    }
+  };
+
+  const handleVirtualPress = (event: { pointerType: string }) => {
+    if (
+      tapLikeMode ||
+      event.pointerType !== "virtual" ||
+      activePointerIdRef.current !== null ||
+      activeKeyboardKeyRef.current !== null
+    ) {
+      return;
+    }
+    void onVoiceTap?.();
   };
 
   const handleTapToggle = () => {
@@ -105,6 +180,12 @@ export function VoiceConversationActionStrip({
       return;
     }
     void onVoiceTap?.();
+  };
+
+  const handleContextMenu = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    if (activePointerIdRef.current !== null) {
+      event.preventDefault();
+    }
   };
 
   const voiceButtonLabel =
@@ -123,6 +204,14 @@ export function VoiceConversationActionStrip({
         : voiceInteractionMode === "tap"
           ? "Tap to talk"
           : "Hold to talk";
+  const voiceButtonAccessibleLabel =
+    voiceInteractionMode !== "hold"
+      ? voiceButtonLabel
+      : voiceTranscribing
+        ? voiceButtonLabel
+        : voiceListening || voiceStarting || voiceActionActive
+          ? "Stop voice input; release or activate to stop"
+          : "Start voice input; hold to talk or activate to toggle";
 
   return (
     <>
@@ -130,7 +219,7 @@ export function VoiceConversationActionStrip({
         <IconButton
           type="button"
           onPress={onToggleVoiceReplies}
-          variant={voiceRepliesEnabled ? "primary" : "outline"}
+          variant={voiceRepliesEnabled ? "primary" : "ghost"}
           size="md"
           radius="xl"
           aria-label={
@@ -151,7 +240,7 @@ export function VoiceConversationActionStrip({
           data-voice-replies-speaking={replySpeaking ? "true" : "false"}
           data-voice-replies-backend={replyBackendLabel ?? ""}
           data-voice-replies-error={replyError ?? ""}
-          className={voiceRepliesEnabled ? primaryActionClassName : outlinedActionClassName}
+          className={voiceRepliesEnabled ? primaryActionClassName : ghostActionClassName}
         >
           <span className="sr-only">
             {voiceRepliesEnabled
@@ -159,7 +248,7 @@ export function VoiceConversationActionStrip({
               : "Turn on spoken assistant replies"}
           </span>
           {replySpeaking ? (
-            <Spinner aria-hidden="true" tone="primary" size="xs" className="h-[22px] w-[22px]" />
+            <Spinner aria-hidden="true" tone="primary" size="xs" className={actionIconClassName} />
           ) : voiceRepliesEnabled ? (
             <SoundHigh className={actionIconClassName} aria-hidden="true" />
           ) : (
@@ -170,17 +259,18 @@ export function VoiceConversationActionStrip({
       <IconButton
         type="button"
         onPointerDown={handlePointerStart}
-        onPointerUp={handlePointerEnd}
-        onPointerCancel={handlePointerEnd}
-        onPointerLeave={handlePointerEnd}
         onKeyDown={handleKeyDown}
         onKeyUp={handleKeyUp}
+        onBlur={handleBlur}
+        onPress={handleVirtualPress}
         onClick={handleTapToggle}
+        onContextMenu={handleContextMenu}
+        style={{ touchAction: "none" }}
         aria-pressed={voiceActionActive}
-        variant={voiceActionActive ? "primary" : "outline"}
+        variant={voiceActionActive ? "primary" : "ghost"}
         size="md"
         radius="xl"
-        aria-label={voiceButtonLabel}
+        aria-label={voiceButtonAccessibleLabel}
         title={voiceButtonLabel}
         isDisabled={disabled}
         data-testid={voiceInputTestId}
@@ -189,7 +279,7 @@ export function VoiceConversationActionStrip({
         data-voice-state={voiceState}
         data-voice-backend={voiceBackendLabel ?? ""}
         data-voice-error={voiceError ?? ""}
-        className={voiceActionActive ? primaryActionClassName : outlinedActionClassName}
+        className={voiceActionActive ? primaryActionClassName : ghostActionClassName}
       >
         {voiceActionActive ? (
           <Microphone className={`${actionIconClassName} animate-pulse`} aria-hidden="true" />

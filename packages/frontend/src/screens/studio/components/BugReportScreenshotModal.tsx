@@ -239,6 +239,20 @@ export function BugReportScreenshotModal({
     return hasAnnotations ? "Drag to mark the screenshot. Save to attach the markup." : "Draw directly on the screenshot with the red marker.";
   }, [canAnnotate, hasAnnotations]);
 
+  // Backdrop-dismissable dialogs answer Escape too.
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onOpenChange(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen, onOpenChange]);
+
   if (!isOpen || !src) {
     return null;
   }

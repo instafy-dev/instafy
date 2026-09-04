@@ -65,7 +65,13 @@ export function RuntimeOptionMeta({
           </Badge>
         ) : null}
         {showRuntimeIdBadge && runtimeIdShort ? (
-          <Badge size="xs" className="border-transparent bg-slate-100 text-slate-600">
+          // The badge is the machine's one visible identity (the details grid
+          // carries no separate ID row); hover reveals the full id.
+          <Badge
+            size="xs"
+            title={option.id ?? undefined}
+            className="border-transparent bg-slate-100 text-slate-600"
+          >
             rt:{runtimeIdShort}
           </Badge>
         ) : null}

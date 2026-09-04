@@ -18,7 +18,7 @@ instafy login
 
 This prints a Studio URL where you can sign in. After you finish logging in, the Studio page will send the token back to the CLI automatically (no copy/paste). If that callback fails, you can still copy the token from the page and paste it into the terminal.
 
-If you haven't configured a server/studio yet, `instafy login` will use `http://localhost:5173` only when it can reach it (and a local controller is selected); otherwise it will use `https://staging.instafy.dev` with `https://controller.instafy.dev`.
+If you haven't configured a server/studio yet, `instafy login` will use `http://localhost:5173` only when it can reach it (and a local controller is selected); otherwise it will use `https://instafy.dev` with `https://controller.instafy.dev`.
 
 By default, `instafy login` also installs a git credential helper so `git clone` / `git push` works with Instafy Git Service without copying tokens. Disable with `instafy login --no-git-setup`.
 
@@ -157,10 +157,12 @@ The CLI stores defaults under `~/.instafy/config.json`. Manage it with:
 ```bash
 instafy config list
 instafy config set controller-url https://controller.instafy.dev
-instafy config set studio-url https://staging.instafy.dev
+instafy config set studio-url https://instafy.dev
 ```
 
 Profiles are stored under `~/.instafy/profiles/<name>.json` and are selected by `.instafy/space.json` (`profile`) or `INSTAFY_PROFILE`.
+Changing or unsetting the saved controller origin clears the saved login session; run
+`instafy login` again for the new controller.
 
 ## Auth & tokens
 
@@ -170,7 +172,11 @@ The CLI supports a few ways to authenticate, depending on what you have availabl
 - **Studio access token** (recommended): pass `--access-token` or set `INSTAFY_ACCESS_TOKEN`.
 - **Supabase session token** (convenient): pass `--supabase-access-token` / `--supabase-access-token-file` or set `SUPABASE_ACCESS_TOKEN`. The CLI will exchange this session for server + runtime/origin tokens automatically.
 - **Pre-minted runtime/origin token**: pass `--runtime-token` / `RUNTIME_ACCESS_TOKEN` (also reused for origin), or `--origin-token` / `ORIGIN_INTERNAL_TOKEN`.
-- **Service token (advanced)**: `--service-token` / `INSTAFY_SERVICE_TOKEN` (kept for compatibility).
+
+Public commands use an interactive user token from `instafy login` (or an explicit user access
+token). Hosted service credentials belong to the separate `instafy-ops` distribution. A runtime
+may still pass its narrowly scoped child-process credential to commands invoked inside an active
+agent job; that internal runtime contract is not a public shell credential fallback.
 
 ### How token minting works
 
@@ -332,83 +338,273 @@ The runtime origin serves space files over HTTP. When the origin is reachable fr
 
 - Do **not** run with `ORIGIN_SKIP_AUTH=1` for any non-local usage.
 
-<details>
-<summary>Legacy environment variable names</summary>
+## AI-readable diagnostics
 
-Older scripts may use `CONTROLLER_BASE_URL`, `CONTROLLER_ACCESS_TOKEN`, or `CONTROLLER_TOKEN`. They are still supported.
-
-</details>
-
-## Controller API utilities
-
-Use these when you want to query controller data/metadata (conversations, messages, runs, etc) without adding one-off endpoints.
-
-Examples:
+`instafy diagnostics` exposes existing, user-authorized diagnostic records as stable JSON for
+local agents and scripts. It is intentionally CLI-first; no dashboard is required for this
+workflow.
 
 ```bash
-# List conversations for a space
-instafy api get "/projects/<spaceId>/conversations?limit=50" --access-token "$INSTAFY_ACCESS_TOKEN"
+# Sanitized persisted events for the linked space
+instafy diagnostics runtime-events --limit 50
 
-# Pull the most recent messages (includes message metadata)
-instafy api get "/conversations/<conversationId>/messages?limit=100" --access-token "$INSTAFY_ACCESS_TOKEN"
+# Optional event filters
+instafy diagnostics runtime-events \
+  --space <spaceId> \
+  --runtime-id <runtimeId> \
+  --kind <eventKind> \
+  --since 2026-08-15T12:00:00Z
 
-# Pagination (cursor is a message id from nextCursor)
-instafy api get "/conversations/<conversationId>/messages?limit=100" --query cursor=<messageId> --access-token "$INSTAFY_ACCESS_TOKEN"
-
-# List runs for a conversation
-instafy api get "/conversations/<conversationId>/runs?limit=50" --access-token "$INSTAFY_ACCESS_TOKEN"
+# Authorized persisted result and artifacts for one run
+instafy diagnostics run-result <runId>
 ```
 
-Request bodies (JSON):
+On success, both commands emit an `instafy-diagnostics-v1` JSON envelope. On failure they exit
+non-zero, leave stdout empty, and write a human-readable error to stderr. They accept a signed-in
+user session or explicit user access token, but not ambient service-role or runtime credentials.
+The controller enforces space and private-conversation access for run results. Runtime events come
+from the bounded, sanitized runtime-event store and retain its private-runtime visibility checks.
+For `run-result`, a top-level `status` of `ready` means the persisted result is available; agents
+must inspect the nested result status or outcome before deciding whether the run succeeded.
+
+The v1 success envelopes are:
+
+- `runtime-events`: `schemaVersion`, `kind`, `spaceId`, and newest-first `events`. Each event has
+  `runtimeId`, `kind`, `createdAt`, and sanitized but otherwise open JSON `data`.
+- `run-result`: `schemaVersion`, `kind`, `runId`, nullable `conversationId`, `status`
+  (`pending`, `ready`, or `error`), and nullable open JSON `result`.
+
+Diagnostic reads never submit a bug report and never attach data to an existing report. An agent
+must invoke `instafy support report` explicitly, with explicit diagnostic flags, before anything
+is uploaded to support.
+
+## Customer support reports
+
+Use `instafy support` to send a report and review the reports created by your signed-in user:
 
 ```bash
-instafy api patch "/conversations/<conversationId>" --json '{"metadata":{"title":"New name"}}' --access-token "$INSTAFY_ACCESS_TOKEN"
+instafy support report "Runtime stops after launch"
+instafy support list --json
+instafy support show <reportId> --json
 ```
 
-## OTA control plane
+The controller enforces customer mode for these requests: `list` and `show` can access only the
+current user's reports, even though the underlying support system is also used by operators. A
+report can default to the space linked by `.instafy/space.json`; use `--space <spaceId>` to select
+one explicitly or `--no-linked-space` to omit space context.
 
-Use the CLI as the rollout interface for mobile OTA and desktop promotion work. Human operators, AI agents, and GitHub Actions should all call the same commands rather than reimplementing rollout logic in ad hoc scripts.
-
-Examples:
+Only the summary and selected context are submitted by default. Extra diagnostics require explicit
+flags:
 
 ```bash
-# List mobile OTA releases
-instafy ota releases list --platform ios --channel beta --service-token "$INSTAFY_SERVICE_TOKEN"
-
-# Register a release payload rendered by scripts/render-ota-release-payload.mjs
-instafy ota releases register \
-  --file tmp/ota/ios-beta-2026.03.19.release.json \
-  --controller-url https://controller.instafy.dev \
-  --service-token "$INSTAFY_SERVICE_TOKEN"
-
-# Move a channel pointer to a registered release
-instafy ota channels activate \
-  --platform ios \
-  --channel beta \
-  --release-id ios-beta-2026-03-19T120000Z-deadbeef \
-  --activated-by github-actions
-
-# Roll back the channel to the previous healthy release
-instafy ota channels rollback \
-  --platform ios \
-  --channel beta \
-  --activated-by ops@instafy.dev
-
-# Request a desktop feed promotion
-instafy desktop-updates promotions request \
-  --source-channel internal \
-  --target-channel beta \
-  --requested-by github-actions
+instafy support report "Build fails on startup" \
+  --details-file ./support-details.txt \
+  --metadata-file ./support-metadata.json \
+  --logs-file ./support-logs.json \
+  --screenshot ./failure.png
 ```
 
-Preferred automation path:
+The metadata file must contain a JSON object, the logs file must contain a JSON array, and each
+screenshot must be a PNG, JPEG, or WebP file. Attachment inputs must remain inside the active
+Instafy workspace; outside paths and symlink escapes are rejected. Nothing discovers or attaches
+logs, metadata, or screenshots automatically. Before uploading, inspect a bounded description of
+the payload without sending it:
 
-- build the artifact in GitHub Actions
-- render the release payload
-- call `instafy ota ...`
-- let AI agents and internal tools use the same command surface
+```bash
+instafy support report "Build fails on startup" \
+  --logs-file ./support-logs.json \
+  --screenshot ./failure.png \
+  --preview
+```
+
+`support show` returns only the customer-safe report view. Stored metadata, logs, internal triage
+fields, and screenshot bytes are never returned by the customer endpoint; screenshot descriptors
+show which images were attached. The controller applies the same minimized projection to legacy
+bug-report reads made by ordinary users; only operator/service authorization (or a user listed in
+the controller's `BUG_REPORTS_OPERATOR_USER_IDS`, which grants bug-report triage and nothing else)
+can retrieve the full triage record and attachment bytes.
+
+## Teams and invitations
+
+Manage team (organization) membership and invitations with `instafy team`. Every subcommand
+resolves the team from `--team-id <uuid|slug>`. If you omit it and belong to a single team, that
+team is used automatically; otherwise the command asks you to pass `--team-id` and points you at
+`instafy team list`.
+
+List teams and their members:
+
+```bash
+instafy team list
+instafy team members --team-id acme
+```
+
+There are two ways to bring someone in:
+
+- An **email invitation** targets one address. The person must sign in to Instafy with that exact
+  email to accept.
+- An **invite link** is a shareable token. Anyone who opens it and signs in — with any sign-in
+  method — can join, so treat it like a shared secret. Links expire 30 days after creation
+  (server-controlled).
+
+```bash
+# Email invitation (roles: owner, admin, builder, viewer; default builder).
+# Only owners can assign the owner role.
+instafy team invite teammate@example.com --role builder --team-id acme
+
+# Shareable invite link (roles: builder or viewer; default builder).
+instafy team invite-link --role builder --team-id acme
+```
+
+`instafy team invite-link` prints the full accept URL and the token. The URL is the Studio base
+(from config, `INSTAFY_STUDIO_URL`, `--studio-url`, or the default `https://instafy.dev`) joined
+with the controller-returned accept path, for example:
+
+```
+https://instafy.dev/invite?token=<uuid>&panel=chat
+```
+
+If the invitee already has an Instafy account, add them directly instead of emailing an invite:
+
+```bash
+instafy team add-member --user-id <uuid> --role builder --team-id acme
+```
+
+Review and clean up pending invitations and links:
+
+```bash
+instafy team invites --team-id acme
+instafy team revoke-invite <invitation-id> --team-id acme --yes
+instafy team revoke-link <invite-link-id> --team-id acme --yes
+```
+
+`revoke-invite` and `revoke-link` ask for confirmation on an interactive terminal; pass `--yes` to
+skip the prompt (required when there is no TTY).
+
+Accept an invitation or invite link as the account you are currently signed in with:
+
+```bash
+instafy team accept <token>
+```
+
+Add `--json` to any of these commands for machine-readable output.
+
+## Scheduled automations
+
+Create and manage scheduled project prompts with `instafy automations`. When no local space
+manifest is available, pass `--space` to the project-scoped `list` and `create` commands.
+
+For checks that should report only findings, opt in at creation time:
+
+```bash
+instafy automations create --json \
+  --space "<Project ID>" \
+  --name "Dependency change check" \
+  --prompt "Check whether dependency versions changed and report the changes." \
+  --schedule-kind weekly \
+  --days mo,tu,we,th,fr \
+  --time 08:00 \
+  --timezone "Europe/Vienna" \
+  --silent-when-nothing-to-report
+```
+
+The flag is default-off. It suppresses only the completion result message and result notification
+for a successful run that explicitly finds nothing to report; results, errors, unexpected empty
+output, and execution records remain visible. See
+[Automations](Automations.md) for the controller semantics and audit behavior.
+
+Change an existing automation in place with `instafy automations update <automation-id>`. Pass only
+the fields to change; the automation keeps its id, its private conversation thread, and its run
+history. `--prompt-file` reads the new prompt from a file, and
+`--no-silent-when-nothing-to-report` turns quiet runs back off:
+
+```bash
+instafy automations update <automation-id> \
+  --prompt-file ./prompts/dependency-check.md \
+  --schedule-kind weekly \
+  --days mo,we \
+  --time 07:30 \
+  --timezone "Europe/Vienna"
+```
+
+The next run is recomputed only when the schedule or status changes; editing the name, prompt, or
+runtime settings leaves the pending run where it is. Use `pause` and `resume` to change status.
+
+### Share results with your team
+
+By default an automation's result conversations are private to the person who created it: other
+members see the automation record (status, next run, last error) but not the result threads. Add
+`--share-results` to make a new automation's result threads visible to anyone with access to the
+space:
+
+```bash
+instafy automations create --json \
+  --space "<Project ID>" \
+  --name "Dependency change check" \
+  --prompt "Check whether dependency versions changed and report the changes." \
+  --schedule-kind weekly \
+  --days mo,tu,we,th,fr \
+  --time 08:00 \
+  --timezone "Europe/Vienna" \
+  --share-results
+```
+
+The visibility is stored as `resultVisibility` (`private` by default, `team` when shared) and is
+shown in `automations list`/`--json` output. Flip an existing automation with `automations update`:
+
+```bash
+# Share an existing automation's results with the team
+instafy automations update "<Automation ID>" --share-results
+
+# Return it to owner-only
+instafy automations update "<Automation ID>" --no-share-results
+
+# Or set it explicitly
+instafy automations update "<Automation ID>" --result-visibility team
+```
+
+`--share-results` maps to `--result-visibility team`; `--no-share-results` to `--result-visibility
+private`. "Team" here means visible to anyone with access to the space, not world-readable. The
+same flags are accepted by `automations create`.
+
+## Credentials
+
+`instafy credentials` shows which AI provider credentials (bring-your-own keys and Codex logins)
+your account holds, lets you verify one actually works, and picks the default that jobs use when
+no credential is chosen explicitly. Secret material is never returned or printed.
+
+```bash
+instafy credentials list                 # active credentials; add --all to include revoked
+instafy credentials test <id-or-prefix>  # probe one credential through the proxy (exit 1 on failure)
+instafy credentials default <id-or-prefix>
+instafy credentials default --clear
+instafy credentials revoke <id-or-prefix> --yes
+```
+
+- `list` prints the short id, kind, provider, default model, default marker, last-used and
+  revoked timestamps. Revoked credentials are hidden unless `--all` is passed.
+- `test` calls the upstream provider through the configured proxy, so it can take up to a minute
+  and counts as real usage of the credential. It prints `ok` or `failed`, the provider and model,
+  and the first ~300 characters of the model output.
+- `default` sets the credential jobs fall back to; `--clear` removes the default so nothing is
+  picked automatically.
+- `revoke` disconnects agents bound to the credential and stops jobs from using it. It asks for
+  confirmation in a terminal and requires `--yes` when run non-interactively.
+
+Every command accepts a full credential UUID or a unique id prefix (as shown by `list`), plus
+`--json`. Ambiguous or unknown prefixes fail with an error rather than guessing.
+
+## Public and operator CLI boundary
+
+The published `@instafy/cli` package is the customer and self-hoster CLI. Hosted Instafy staff
+operations, including cross-customer investigation and rollout administration, belong in a
+separate, non-public `instafy-ops` distribution. That private distribution is not packaged by this
+repository.
+
+The former `instafy ops`, raw `instafy api`, `instafy ota`, and `instafy desktop-updates` command
+groups are not included in the public artifact. Public automation should use typed customer or
+self-hoster commands; hosted operational tooling must live in `instafy-ops`.
 
 ## Help
 
-- Command reference: `instafy --help`
+- Public command reference: `instafy --help`
 - Per-command options: `instafy <command> --help`

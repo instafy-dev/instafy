@@ -2322,6 +2322,10 @@ async function startProxyIfNeeded(runtimeRepoHost, proxyConfig) {
     CONTROLLER_INTERNAL_TOKEN:
       process.env.CONTROLLER_INTERNAL_TOKEN || "dev-internal-token",
     PROXY_SIGNING_SECRET: process.env.PROXY_SIGNING_SECRET || "dev-proxy-secret",
+    // The proxy hard-requires this shared secret for controller credential
+    // leases; default it like its siblings so a bare dev launch works.
+    PROXY_CREDENTIAL_LEASE_TOKEN:
+      process.env.PROXY_CREDENTIAL_LEASE_TOKEN || "dev-proxy-credential-lease-token",
     CODEX_PROXY_ADDR: bindAddr,
     CODEX_HOME: proxyCodexHome,
     PROXY_WORKSPACE_DIR: runtimeRepoHost,
@@ -3038,6 +3042,10 @@ async function startControllerIfNeeded(
     AGENT_LOGIN_KEY: process.env.AGENT_LOGIN_KEY || "dev-agent-key",
     CONTROLLER_INTERNAL_TOKEN: internalToken,
     PROXY_SIGNING_SECRET: proxySigningSecret,
+    // Must match the proxy's PROXY_CREDENTIAL_LEASE_TOKEN (see the proxy env
+    // block) — the pair authenticates controller-to-proxy credential leases.
+    PROXY_CREDENTIAL_LEASE_TOKEN:
+      process.env.PROXY_CREDENTIAL_LEASE_TOKEN || "dev-proxy-credential-lease-token",
     PROXY_BASE_URL: proxyBaseUrl,
     PROXY_TOKEN_TTL_SECONDS: proxyTtl,
     RUST_LOG: process.env.RUST_LOG || "runtime_controller=info",

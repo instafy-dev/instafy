@@ -18,6 +18,7 @@ export type PendingConversationInvitePrompt = {
   imageFiles: File[];
   browserPageTarget: BrowserSessionPageTarget | null;
   browserLaunchMode: "new_page" | null;
+  expectedLaneIdle: boolean;
 };
 
 type ShowStatus = (message: string, intent?: StatusIntent, durationMs?: number) => void;
@@ -77,6 +78,7 @@ export function useChatInvitePromptHandlers({
       composerMessage: invitePrompt.message,
       editorState: transformed.editorState,
       imageFiles: invitePrompt.imageFiles,
+      expectedLaneIdle: invitePrompt.expectedLaneIdle,
     });
   }, [handleInvitePromptClose, invitePrompt, performSubmit, showStatus]);
 
@@ -112,6 +114,7 @@ export function useChatInvitePromptHandlers({
         composerMessage: invitePrompt.message,
         editorState: invitePrompt.editorState ?? null,
         imageFiles: invitePrompt.imageFiles ?? [],
+        expectedLaneIdle: invitePrompt.expectedLaneIdle,
       });
     } finally {
       setInvitePromptBusy(false);

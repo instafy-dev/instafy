@@ -93,6 +93,11 @@ test("one protected approval covers the whole exact-SHA service release", () => 
   );
   assert.doesNotMatch(authorizeSection, /packages: write/u);
   assert.doesNotMatch(authorizeSection, /environment:/u);
+  assert.match(authorizeSection, /actions: read/u);
+  assert.match(authorizeSection, /Refuse duplicate exact-SHA publication/u);
+  assert.match(authorizeSection, /GITHUB_RUN_ATTEMPT" != "1"/u);
+  assert.match(authorizeSection, /actions\/workflows\/\$\{RELEASE_WORKFLOW\}\/runs/u);
+  assert.match(authorizeSection, /\.conclusion == "success"/u);
 
   // Trivy pinning must be enforced in the services workflow too.
   assert.match(
@@ -108,6 +113,40 @@ test("one protected approval covers the whole exact-SHA service release", () => 
     "tar -xzf",
     'test "$(trivy --version',
   );
+});
+
+test("image publication bounds every BuildKit matrix cell", () => {
+  const serviceSource = readWorkflow();
+  const runtimeSource = readRuntimeWorkflow();
+  const serviceStart = serviceSource.indexOf("  publish:\n");
+  const runtimeStart = runtimeSource.indexOf("  build-scan-push:\n");
+  assert.notEqual(serviceStart, -1);
+  assert.notEqual(runtimeStart, -1);
+
+  const serviceSection = serviceSource.slice(
+    serviceStart,
+    serviceSource.indexOf("  manifest:\n", serviceStart),
+  );
+  const runtimeSection = runtimeSource.slice(
+    runtimeStart,
+    runtimeSource.indexOf("  assemble-release-manifest:\n", runtimeStart),
+  );
+
+  for (const [name, section, timeoutMinutes] of [
+    ["production service", serviceSection, 30],
+    ["runtime agent", runtimeSection, 75],
+  ]) {
+    assert.match(
+      section,
+      new RegExp(`timeout-minutes: ${timeoutMinutes}`, "u"),
+      `${name} build timeout`,
+    );
+    assert.equal(
+      [...section.matchAll(/timeout-minutes:/gu)].length,
+      1,
+      `${name} build matrix must have exactly one job-level timeout`,
+    );
+  }
 });
 
 test("every service is scanned before registry login and publication", () => {
@@ -126,6 +165,10 @@ test("every service is scanned before registry login and publication", () => {
   assert.match(source, /--severity HIGH,CRITICAL/u);
   assert.match(source, /--exit-code 1/u);
   assert.match(source, /production-service-release-manifest\.sha256/u);
+  assert.match(
+    source,
+    /name: Upload sealed release manifest[\s\S]*?retention-days: 90/u,
+  );
 });
 
 test("both image workflows parse the tagged digest line emitted by docker push", () => {
@@ -160,6 +203,59 @@ test("both image workflows parse the tagged digest line emitted by docker push",
     );
     assert.doesNotMatch(source, /s\/\^digest:/u);
   }
+});
+
+test("image publication retries only the same scanned bytes and waits for GHCR visibility", () => {
+  const services = readWorkflow();
+  const runtime = readRuntimeWorkflow();
+
+  for (const [name, source, tag] of [
+    ["production services", services, "RELEASE_TAG"],
+    ["runtime architectures", runtime, "ARCH_TAG"],
+  ]) {
+    assert.match(
+      source,
+      new RegExp(
+        `for attempt in 1 2 3 4; do[\\s\\S]*docker push "\\$${tag}" 2>&1 \\| tee "\\$attempt_log"[\\s\\S]*mv "\\$attempt_log" "\\$push_log"`,
+        "u",
+      ),
+      `${name} must retry the unchanged local image and parse only the successful push log`,
+    );
+    assert.match(
+      source,
+      /terminal_error="\$\([\s\S]*tr -d '\\r' < "\$attempt_log"[\s\S]*awk 'NF \{ terminal = \$0 \} END \{ print terminal \}'[\s\S]*\)"/u,
+      `${name} must normalize only the terminal provider response`,
+    );
+    assert.match(
+      source,
+      /if \[\[ "\$terminal_error" != "unknown blob" \]\]; then[\s\S]*GHCR push failed with a non-retryable response\.[\s\S]*exit 1/u,
+      `${name} must fail closed instead of retrying unrelated push errors`,
+    );
+    assert.match(source, /GHCR rejected all bounded attempts/u, name);
+    assert.match(
+      source,
+      /for attempt in 1 2 3 4 5 6; do[\s\S]*docker buildx imagetools inspect "\$immutable_(?:ref|image)"/u,
+      `${name} must tolerate bounded registry propagation delay`,
+    );
+  }
+
+  const assembleStart = runtime.indexOf(
+    "- name: Assemble commit-SHA multiarch manifests from immutable digests",
+  );
+  assert.notEqual(assembleStart, -1);
+  const assemble = runtime.slice(assembleStart);
+  assertOrdered(
+    assemble,
+    '--tag "$release_tag"',
+    'immutable_image="${image}@${digest}"',
+    'docker buildx imagetools inspect "$immutable_image" --raw > "$raw_manifest"',
+    'jq -c \'',
+    '"$raw_manifest"',
+  );
+  assert.match(
+    assemble,
+    /GHCR did not expose the assembled immutable manifest within the bounded visibility window/u,
+  );
 });
 
 test("the sealed manifest requires the complete hosted image set", () => {

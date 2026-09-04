@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use chrono::{DateTime, Utc};
 use serde_json::json;
+use std::time::{Duration, Instant};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -53,6 +54,33 @@ const RUNTIME_EVENT_CLEANUP_BATCH_SIZE: i64 = 5000;
 /// run; on a several-minute ticker a multi-million-row backlog clears within a
 /// few hours while steady state deletes only the day's trickle.
 const RUNTIME_EVENT_CLEANUP_MAX_BATCHES_PER_RUN: u32 = 20;
+const HOSTED_RUNTIME_BILLING_POOL_PRESSURE_REPORT_AFTER: Duration = Duration::from_secs(15 * 60);
+
+pub(crate) fn should_report_hosted_runtime_credit_sweep_error(
+    error: &anyhow::Error,
+    transient_failure_started_at: &mut Option<Instant>,
+    now: Instant,
+) -> bool {
+    let is_pool_timeout = error.chain().any(|cause| {
+        cause
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("timed out in bb8")
+    });
+    if !is_pool_timeout {
+        *transient_failure_started_at = None;
+        return true;
+    }
+
+    let started_at = transient_failure_started_at.get_or_insert(now);
+    now.saturating_duration_since(*started_at) >= HOSTED_RUNTIME_BILLING_POOL_PRESSURE_REPORT_AFTER
+}
+
+pub(crate) fn reset_hosted_runtime_credit_sweep_pool_pressure(
+    transient_failure_started_at: &mut Option<Instant>,
+) {
+    *transient_failure_started_at = None;
+}
 
 pub(crate) async fn sweep_idle_activity(state: &AppState) -> AnyResult<()> {
     resume_expired_runtime_drains(state).await?;
@@ -168,21 +196,28 @@ pub(crate) async fn prune_expired_runtime_events(state: &AppState) -> AnyResult<
 /// whenever a runtime next appears — even days later — duplicating side
 /// effects and burning fresh credits unprompted.
 async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()> {
-    let connection = state
+    let mut connection = state
         .pool
         .get()
         .await
         .context("failed to acquire connection for requeued job expiry")?;
+    let transaction = connection
+        .transaction()
+        .await
+        .context("failed to start requeued job expiry transaction")?;
 
     // Only expire jobs with no live runtime to run them: a stamped job merely
     // waiting behind a busy, healthy runtime will be leased normally.
-    let rows = connection
+    let rows = transaction
         .query(
             "update agent_jobs
              set status = 'failed',
                  outcome = 'expired',
                  error_message = 'This run was interrupted when its runtime stopped and was not resumed within 15 minutes. Send it again if you still need it.',
                  completed_at = now(),
+                 active_input_ready_runtime_id = null,
+                 active_input_ready_expires_at = null,
+                 active_input_ready_turn_id = null,
                  updated_at = now()
              where status = 'queued'
                and payload ? 'requeuedAt'
@@ -193,11 +228,72 @@ async fn expire_stale_requeued_jobs(state: &AppState) -> AnyResult<()> {
                  where r.project_id = agent_jobs.project_id
                    and r.status not in ('stopped', 'offline', 'removed')
                )
-             returning id, project_id",
+             returning id, project_id, run_id, conversation_id, payload, error_message",
             &[&(REQUEUED_JOB_EXPIRY_SECONDS as f64)],
         )
         .await
         .context("failed to expire stale requeued jobs")?;
+
+    let mut job_input_state_updates = Vec::new();
+    for row in &rows {
+        let job_id: Uuid = row.get("id");
+        let updates = crate::send_intents::reject_unacknowledged_inputs_for_job(
+            &transaction,
+            &job_id,
+            "requeued agent job expired before input acknowledgement",
+        )
+        .await
+        .map_err(|(status, Json(error))| {
+            anyhow::anyhow!(
+                "failed to reject inputs for expired requeued job ({status}): {}",
+                error.message
+            )
+        })?;
+        job_input_state_updates.extend(updates);
+
+        // The job is dead, so its run is too: without this the run stays
+        // "in_progress" forever and Home would list it as live work.
+        let run_id: Option<Uuid> = row.get("run_id");
+        if let Some(run_id) = run_id {
+            let project_id: Uuid = row.get("project_id");
+            let conversation_id: Option<Uuid> = row.get("conversation_id");
+            let error_message: Option<String> = row.get("error_message");
+            let payload = row
+                .get::<_, tokio_postgres::types::Json<serde_json::Value>>("payload")
+                .0;
+            transaction
+                .execute(
+                    "update runs
+                     set status = 'failed',
+                         progress_stage = null,
+                         last_message = coalesce($2, last_message),
+                         updated_at = now()
+                     where id = $1
+                       and status not in ('success', 'failed', 'canceled')",
+                    &[&run_id, &error_message],
+                )
+                .await
+                .context("failed to fail run for expired requeued job")?;
+            crate::activity::record_run_completed(
+                &transaction,
+                &project_id,
+                &run_id,
+                conversation_id,
+                None,
+                &payload,
+                false,
+                None,
+                error_message.as_deref(),
+            )
+            .await;
+        }
+    }
+
+    transaction
+        .commit()
+        .await
+        .context("failed to commit requeued job expiry")?;
+    crate::send_intents::publish_job_input_state_updates(state, &job_input_state_updates);
 
     for row in rows {
         let job_id: Uuid = row.get("id");

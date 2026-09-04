@@ -1,13 +1,18 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use reqwest::{StatusCode, Url};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use std::collections::HashMap;
 use tracing::{info, warn};
 use uuid::Uuid;
+
+use origin_http_server::config::{
+    CONTROLLER_TOKEN_REFRESH_TIMEOUT, ControllerTokenStore, SharedControllerToken,
+};
 
 use crate::agent_tokens::AgentTokenVerifier;
 use crate::config::Config;
@@ -31,7 +36,12 @@ const MAX_AGENT_METADATA_DEPTH: usize = 8;
 pub struct ControllerClient {
     http: reqwest::Client,
     base_url: Url,
-    runtime_access_token: Mutex<Option<String>>,
+    // Shared with the origin server's presence loop (#144): registration
+    // renewals write here and every reader sees the freshest token.
+    runtime_access_token: SharedControllerToken,
+    // Freshest controller-minted agent JWT; per-job tasks clone Registration
+    // at spawn, so requests resolve their bearer from here first (#144).
+    current_agent_token: Mutex<Option<String>>,
     poll_interval: Duration,
     lease_max_jobs: u32,
     lease_seconds: u32,
@@ -126,6 +136,39 @@ struct LeaseResponse {
     jobs: Vec<LeaseJob>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentJobInput {
+    pub command_id: Uuid,
+    pub job_id: Uuid,
+    pub run_id: Option<Uuid>,
+    pub message_id: Option<Uuid>,
+    pub sequence: i64,
+    pub target_turn_id: String,
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentJobInputPollResponse {
+    commands: Vec<AgentJobInput>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentJobInputPollRequest<'a> {
+    active_turn_id: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentJobInputAckRequest<'a> {
+    outcome: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    codex_turn_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_message: Option<&'a str>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AgentSecretInventoryItemResponse {
@@ -173,7 +216,10 @@ impl ControllerClient {
         Ok(Self {
             http,
             base_url: config.controller_base_url.clone(),
-            runtime_access_token: Mutex::new(config.runtime_access_token.clone()),
+            runtime_access_token: std::sync::Arc::new(ControllerTokenStore::new(
+                config.runtime_access_token.clone(),
+            )),
+            current_agent_token: Mutex::new(None),
             poll_interval: config.poll_interval,
             lease_max_jobs: config.lease_max_jobs,
             lease_seconds: config.lease_seconds,
@@ -181,6 +227,65 @@ impl ControllerClient {
             agent_tokens: AgentTokenVerifier::new(config.controller_jwks_url.clone()),
             resources: Mutex::new(ResourceSampler::new(config.workspace_root.clone())),
         })
+    }
+
+    async fn send_register_request(
+        &self,
+        url: &Url,
+        request_body: &JsonValue,
+        token: Option<&str>,
+    ) -> Result<(StatusCode, String)> {
+        let mut request = self
+            .http
+            .post(url.clone())
+            .header("content-type", "application/json")
+            .json(request_body);
+
+        if let Some(value) = token {
+            request = request.bearer_auth(value);
+        }
+
+        let response = request.send().await.context("agent login request failed")?;
+        let status = response.status();
+        let text = response.text().await.context("register runtime body")?;
+        Ok((status, text))
+    }
+
+    fn read_runtime_access_token(&self) -> Option<String> {
+        self.runtime_access_token.current()
+    }
+
+    fn store_runtime_access_token(&self, token: String) {
+        self.runtime_access_token.store(token);
+    }
+
+    /// Live handle to the runtime token for the origin server's presence
+    /// loop; registration renewals keep it fresh (#144).
+    pub fn runtime_token_handle(&self) -> SharedControllerToken {
+        self.runtime_access_token.clone()
+    }
+
+    /// Resolves once a re-registration has published fresh credentials, or the
+    /// wait times out. Callers use it to recover from a single 401 without
+    /// growing their own renewal logic: registration mints the runtime token
+    /// and the agent token together, so one bump covers both.
+    ///
+    /// Returns false when no renewal landed — the caller must surface the
+    /// original failure instead of retrying, so a genuinely dead credential
+    /// cannot turn into a retry loop.
+    async fn refresh_credentials_once(&self) -> bool {
+        self.runtime_access_token
+            .refresh_once(CONTROLLER_TOKEN_REFRESH_TIMEOUT)
+            .await
+    }
+
+    /// The freshest agent token when a renewal has landed, else the
+    /// spawn-time one captured in the registration snapshot.
+    fn bearer_for_agent(&self, registration: &Registration) -> String {
+        self.current_agent_token
+            .lock()
+            .clone()
+            .unwrap_or_else(|| registration.agent_token.clone())
     }
 
     pub async fn register_runtime(&self, config: &Config) -> Result<Registration> {
@@ -244,8 +349,7 @@ impl ControllerClient {
         };
 
         let url = self.base_url.join(path)?;
-        let mut token_candidates: Vec<Option<String>> =
-            vec![self.runtime_access_token.lock().clone()];
+        let mut token_candidates: Vec<Option<String>> = vec![self.read_runtime_access_token()];
         if let Ok(value) = std::env::var("SUPABASE_SERVICE_ROLE_KEY") {
             let trimmed = value.trim();
             if !trimmed.is_empty() {
@@ -264,20 +368,9 @@ impl ControllerClient {
         let mut last_error: Option<(StatusCode, String)> = None;
 
         for (index, token) in token_candidates.iter().enumerate() {
-            let mut request = self
-                .http
-                .post(url.clone())
-                .header("content-type", "application/json")
-                .json(&request_body);
-
-            if let Some(value) = token.as_ref() {
-                request = request.bearer_auth(value);
-            }
-
-            let response = request.send().await.context("agent login request failed")?;
-
-            let status = response.status();
-            let text = response.text().await.context("register runtime body")?;
+            let (status, text) = self
+                .send_register_request(&url, &request_body, token.as_deref())
+                .await?;
             if status.is_success() {
                 parsed = Some(
                     serde_json::from_str(&text)
@@ -287,21 +380,64 @@ impl ControllerClient {
             }
 
             last_error = Some((status, text.clone()));
-            if index + 1 < token_candidates.len()
-                && matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
-            {
+            if !matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+                return Err(anyhow::anyhow!(
+                    "runtime register failed: status={} body={}",
+                    status,
+                    text
+                ));
+            }
+            if index + 1 < token_candidates.len() {
                 warn!(
                     %status,
                     "runtime register unauthorized; retrying with fallback token"
                 );
-                continue;
             }
+        }
 
-            return Err(anyhow::anyhow!(
-                "runtime register failed: status={} body={}",
-                status,
-                text
-            ));
+        // Self-heal a stale spawn-time token: another local process may have
+        // refreshed and rotated the shared CLI session while this agent kept
+        // presenting the token it was launched with. Re-read the persisted
+        // session and retry once with its access token; if that token is also
+        // rejected (or the file is absent), fall through to the existing
+        // retry behavior.
+        if parsed.is_none()
+            && matches!(
+                last_error.as_ref().map(|(status, _)| *status),
+                Some(StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
+            )
+        {
+            if let Some(config_path) = crate::cli_session::config_path() {
+                let reloaded_token = crate::cli_session::access_token_if_untried(
+                    crate::cli_session::read_access_token(&config_path),
+                    token_candidates.iter().filter_map(|token| token.as_deref()),
+                );
+                if let Some(reloaded_token) = reloaded_token {
+                    warn!(
+                        config_path = %config_path.display(),
+                        "runtime register unauthorized; recovering with the access token re-read from the persisted CLI session"
+                    );
+                    let (status, text) = self
+                        .send_register_request(&url, &request_body, Some(&reloaded_token))
+                        .await?;
+                    if status.is_success() {
+                        // Later registrations (proactive renewal, tunnel
+                        // refresh) must present the recovered token instead of
+                        // the stale spawn-time one. A renewed runtime_token in
+                        // the response still overrides this below.
+                        self.store_runtime_access_token(reloaded_token);
+                        parsed = Some(serde_json::from_str(&text).with_context(|| {
+                            format!("failed to parse register response: {}", text)
+                        })?);
+                    } else {
+                        warn!(
+                            %status,
+                            "re-read CLI session token was also rejected; keeping existing register retry behavior"
+                        );
+                        last_error = Some((status, text));
+                    }
+                }
+            }
         }
 
         let parsed = parsed.ok_or_else(|| {
@@ -344,14 +480,34 @@ impl ControllerClient {
             .agent_token_scopes
             .clone()
             .unwrap_or_else(|| claims.scopes.clone());
+        // Proactive registration renewal is scheduled from this expiry. Fall
+        // back to the verified JWT `exp` claim so a controller that omits the
+        // informational field still gets renewed before the token lapses.
+        let agent_token_expires_at = parsed.agent_token_expires_at.clone().or_else(|| {
+            DateTime::<Utc>::from_timestamp(claims.exp, 0).map(|expires_at| expires_at.to_rfc3339())
+        });
 
-        if let Some(renewed_runtime_token) = parsed
+        // Per-job tasks clone `Registration` at spawn and would otherwise
+        // present the register-time agent token forever; requests resolve
+        // their bearer through `bearer_for_agent` so renewals land (#144).
+        // Published before the runtime token so a consumer woken by the
+        // generation bump below already sees both fresh credentials.
+        *self.current_agent_token.lock() = Some(parsed.agent_token.clone());
+
+        match parsed
             .runtime_token
             .as_ref()
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
         {
-            *self.runtime_access_token.lock() = Some(renewed_runtime_token.to_string());
+            Some(renewed_runtime_token) => {
+                self.store_runtime_access_token(renewed_runtime_token.to_string())
+            }
+            // No new runtime token this round, but a renewal did complete.
+            // Waiters are blocked on "a refresh happened", so releasing them
+            // here is what keeps a rejected consumer from waiting out its
+            // whole timeout for a value that is never going to change.
+            None => self.runtime_access_token.note_refreshed(),
         }
 
         Ok(Registration {
@@ -369,7 +525,7 @@ impl ControllerClient {
             parent_lease_id: config.parent_lease_id,
             agent_token_scopes,
             agent_token_issued_at: parsed.agent_token_issued_at,
-            agent_token_expires_at: parsed.agent_token_expires_at,
+            agent_token_expires_at,
             agent_token_ttl: parsed.agent_token_ttl,
         })
     }
@@ -379,7 +535,7 @@ impl ControllerClient {
             .http
             .post(reg.lease_url.clone())
             .header("content-type", "application/json")
-            .bearer_auth(&reg.agent_token);
+            .bearer_auth(self.bearer_for_agent(reg));
 
         let resources = self.resources.lock().sample();
         let payload = json!({
@@ -423,12 +579,6 @@ impl ControllerClient {
     }
 
     pub async fn heartbeat(&self, reg: &Registration, job_id: Uuid) -> Result<()> {
-        let request = self
-            .http
-            .post(reg.heartbeat_url.clone())
-            .header("content-type", "application/json")
-            .bearer_auth(&reg.agent_token);
-
         let resources = self.resources.lock().sample();
         let mut payload = json!({
             "job_id": job_id,
@@ -450,11 +600,39 @@ impl ControllerClient {
             }
         }
 
-        let response = request
-            .json(&payload)
-            .send()
+        let send = |bearer: String| {
+            self.http
+                .post(reg.heartbeat_url.clone())
+                .header("content-type", "application/json")
+                .bearer_auth(bearer)
+                .json(&payload)
+                .send()
+        };
+
+        let mut response = send(self.bearer_for_agent(reg))
             .await
             .context("heartbeat request failed")?;
+
+        // A job long enough to outlive its agent token would otherwise
+        // heartbeat itself to death. One renewal-and-retry, never a loop
+        // (#144); a lost lease (409) is a different failure and is not
+        // retried.
+        if response.status() == StatusCode::UNAUTHORIZED
+            || response.status() == StatusCode::FORBIDDEN
+        {
+            warn!(
+                status = %response.status(),
+                "heartbeat rejected; requesting a credential renewal"
+            );
+            if self.refresh_credentials_once().await {
+                response = send(self.bearer_for_agent(reg))
+                    .await
+                    .context("heartbeat retry request failed")?;
+                if response.status().is_success() {
+                    info!("heartbeat recovered with a renewed agent token");
+                }
+            }
+        }
 
         let status = response.status();
         if status == reqwest::StatusCode::CONFLICT {
@@ -470,6 +648,104 @@ impl ControllerClient {
             ));
         }
 
+        Ok(())
+    }
+
+    pub async fn poll_job_inputs(
+        &self,
+        registration: &Registration,
+        job_id: Uuid,
+        active_turn_id: &str,
+    ) -> Result<Vec<AgentJobInput>> {
+        let url = self
+            .base_url
+            .join(&format!("/agent/jobs/{job_id}/inputs"))?;
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(self.bearer_for_agent(registration))
+            .json(&AgentJobInputPollRequest { active_turn_id })
+            .send()
+            .await
+            .context("active-turn input poll failed")?;
+        let status = response.status();
+        let text = response
+            .text()
+            .await
+            .context("active-turn input poll response body")?;
+        if !status.is_success() {
+            return Err(anyhow!(
+                "active-turn input poll failed: status={} body={}",
+                status,
+                text
+            ));
+        }
+        serde_json::from_str::<AgentJobInputPollResponse>(&text)
+            .map(|response| response.commands)
+            .with_context(|| format!("failed to parse active-turn input poll response: {text}"))
+    }
+
+    pub async fn clear_job_input_readiness(
+        &self,
+        registration: &Registration,
+        job_id: Uuid,
+    ) -> Result<()> {
+        let url = self
+            .base_url
+            .join(&format!("/agent/jobs/{job_id}/inputs"))?;
+        let response = self
+            .http
+            .delete(url)
+            .bearer_auth(self.bearer_for_agent(registration))
+            .send()
+            .await
+            .context("active-turn input readiness clear failed")?;
+        let status = response.status();
+        if !status.is_success() && status != StatusCode::CONFLICT {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "active-turn input readiness clear failed: status={} body={}",
+                status,
+                text
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn acknowledge_job_input(
+        &self,
+        registration: &Registration,
+        job_id: Uuid,
+        command_id: Uuid,
+        outcome: &str,
+        codex_turn_id: Option<&str>,
+        error_message: Option<&str>,
+    ) -> Result<()> {
+        let url = self
+            .base_url
+            .join(&format!("/agent/jobs/{job_id}/inputs/{command_id}/ack"))?;
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(self.bearer_for_agent(registration))
+            .header("content-type", "application/json")
+            .json(&AgentJobInputAckRequest {
+                outcome,
+                codex_turn_id,
+                error_message,
+            })
+            .send()
+            .await
+            .context("active-turn input acknowledgement failed")?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "active-turn input acknowledgement failed: status={} body={}",
+                status,
+                text
+            ));
+        }
         Ok(())
     }
 
@@ -505,7 +781,7 @@ impl ControllerClient {
             .http
             .post(stop_url)
             .header("content-type", "application/json")
-            .bearer_auth(&registration.agent_token)
+            .bearer_auth(self.bearer_for_agent(registration))
             .json(&payload)
             .send()
             .await
@@ -549,7 +825,7 @@ impl ControllerClient {
             payload["proxy_metadata"] = compact_agent_payload_json(&metadata, 0);
         }
 
-        self.post_agent(url, &registration.agent_token, payload)
+        self.post_agent(url, &self.bearer_for_agent(registration), payload)
             .await
     }
 
@@ -588,7 +864,7 @@ impl ControllerClient {
             payload["proxy_metadata"] = compact_agent_payload_json(&metadata, 0);
         }
 
-        self.post_agent(url, &registration.agent_token, payload)
+        self.post_agent(url, &self.bearer_for_agent(registration), payload)
             .await
     }
 
@@ -624,7 +900,7 @@ impl ControllerClient {
             payload["metadata"] = compact_agent_payload_json(meta, 0);
         }
 
-        self.post_agent(url, &registration.agent_token, payload)
+        self.post_agent(url, &self.bearer_for_agent(registration), payload)
             .await
     }
 
@@ -640,21 +916,48 @@ impl ControllerClient {
             "touch": touch,
         });
 
-        let response = self
-            .http
-            .post(url)
-            .bearer_auth(&registration.agent_token)
-            .header("content-type", "application/json")
-            .json(&payload)
-            .send()
+        let send = |bearer: String| {
+            self.http
+                .post(url.clone())
+                .bearer_auth(bearer)
+                .header("content-type", "application/json")
+                .json(&payload)
+                .send()
+        };
+
+        let response = send(self.bearer_for_agent(registration))
             .await
             .context("agent secrets request failed")?;
 
-        let status = response.status();
-        let text = response
+        let mut status = response.status();
+        let mut text = response
             .text()
             .await
             .unwrap_or_else(|_| "<unable to read response body>".to_string());
+
+        // The refresh loop that runs alongside a long job outlives the agent
+        // token it started with. One renewal-and-retry, never a loop: if no
+        // fresh credential lands the original failure is surfaced and the
+        // caller's own cadence decides when to try again (#144).
+        if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+            warn!(
+                %status,
+                "agent secrets request rejected; requesting a credential renewal"
+            );
+            if self.refresh_credentials_once().await {
+                let retried = send(self.bearer_for_agent(registration))
+                    .await
+                    .context("agent secrets retry request failed")?;
+                status = retried.status();
+                text = retried
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "<unable to read response body>".to_string());
+                if status.is_success() {
+                    info!("agent secrets recovered with a renewed agent token");
+                }
+            }
+        }
 
         if !status.is_success() {
             return Err(anyhow!(
@@ -716,7 +1019,7 @@ impl ControllerClient {
         let response = self
             .http
             .get(url)
-            .bearer_auth(&registration.agent_token)
+            .bearer_auth(self.bearer_for_agent(registration))
             .send()
             .await
             .context("browser profile fetch request failed")?;
@@ -752,7 +1055,7 @@ impl ControllerClient {
         let response = self
             .http
             .put(url)
-            .bearer_auth(&registration.agent_token)
+            .bearer_auth(self.bearer_for_agent(registration))
             .header("content-type", "application/octet-stream")
             .body(body)
             .send()
@@ -779,7 +1082,7 @@ impl ControllerClient {
             .header("content-type", "application/json")
             .json(&payload);
 
-        if let Some(token) = self.runtime_access_token.lock().clone() {
+        if let Some(token) = self.read_runtime_access_token() {
             request = request.bearer_auth(token);
         }
 

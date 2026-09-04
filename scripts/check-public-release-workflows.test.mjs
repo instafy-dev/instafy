@@ -49,38 +49,169 @@ test("every external public workflow action is pinned to an exact commit", () =>
   }
 });
 
-test("npm publication is bound to exact protected main and a release environment", () => {
-  const source = readWorkflow("publish-provider-contract.yml");
-  const authorize = jobSection(source, "authorize", "validate");
-  const validate = jobSection(source, "validate", "publish-provider-contract");
-  const publish = jobSection(source, "publish-provider-contract");
+test("protected main publishes both exact image manifests only after CI", () => {
+  const source = readWorkflow("continuous-image-publication.yml");
 
-  assert.match(source, /\n      commit_sha:\n/u);
-  assert.match(source, /commit_sha:[\s\S]*required: true/u);
-  assert.doesNotMatch(source, /\n      ref:\n/u);
-  assert.match(authorize, /GITHUB_REF" != "refs\/heads\/main"/u);
-  assert.match(authorize, /\^\[0-9a-f\]\{40\}\$/u);
-  assert.match(authorize, /REQUESTED_COMMIT" != "\$GITHUB_SHA"/u);
-  assert.match(validate, /npm pack --dry-run --ignore-scripts/u);
-  assert.match(validate, /persist-credentials: false/u);
-  assert.doesNotMatch(validate, /\bsecrets\./u);
-  assert.match(publish, /environment: npm-release/u);
-  assert.match(publish, /persist-credentials: false/u);
-  assert.match(publish, /npm publish --ignore-scripts/u);
+  assert.match(source, /\n  push:\n    branches:\n      - main\n/u);
+  assert.match(source, /\n  schedule:\n    - cron: "17 \*\/6 \* \* \*"\n/u);
+  assert.match(source, /\n  workflow_dispatch:\n/u);
+  assert.match(source, /actions: write/u);
+  assert.match(source, /contents: read/u);
+  assert.match(source, /cancel-in-progress: false/u);
+  assert.match(source, /timeout-minutes: 180/u);
+  assert.match(source, /github\.repository == 'instafy-dev\/instafy'/u);
+  assert.match(source, /github\.ref == 'refs\/heads\/main'/u);
+  assert.match(source, /REQUESTED_COMMIT" != "\$GITHUB_SHA"/u);
+  assert.match(source, /actions\/workflows\/build\.yml\/runs\?event=push&head_sha=/u);
+  assert.match(source, /X-GitHub-Api-Version: 2026-03-10/u);
+  assert.match(source, /\.workflow_run_id/u);
+  assert.match(source, /\.event == "workflow_dispatch"/u);
+  assert.match(source, /\.head_branch == "main"/u);
+  assert.match(source, /\.head_sha == \$sha/u);
+  assert.match(source, /production-service-release-manifest/u);
+  assert.match(source, /runtime-agent-release-manifest/u);
+  assert.match(source, /Check exact manifest freshness/u);
+  assert.match(source, /14 \* 24 \* 60 \* 60/u);
+  assert.match(source, /services_publish=\$services_publish/u);
+  assert.match(source, /runtime_publish=\$runtime_publish/u);
+  assert.match(source, /steps\.freshness\.outputs\.publish == 'true'/u);
+  assert.match(source, /PUBLISH_SERVICES: \$\{\{ steps\.freshness\.outputs\.services_publish \}\}/u);
+  assert.match(source, /PUBLISH_RUNTIME: \$\{\{ steps\.freshness\.outputs\.runtime_publish \}\}/u);
+  const dispatchStart = source.indexOf(
+    "      - name: Dispatch stale immutable image publishers\n",
+  );
+  const dispatchEnd = source.indexOf(
+    "      - name: Require both exact image manifests\n",
+  );
+  assert.ok(dispatchStart >= 0 && dispatchEnd > dispatchStart);
+  const dispatch = source.slice(dispatchStart, dispatchEnd);
+  assert.equal([...dispatch.matchAll(/publish-production-services\.yml/gu)].length, 1);
+  assert.equal([...dispatch.matchAll(/publish-runtime-agent\.yml/gu)].length, 1);
   assert.match(
-    publish,
-    /ref: \$\{\{ needs\.authorize\.outputs\.commit_sha \}\}/u,
+    dispatch,
+    /if \[\[ "\$PUBLISH_SERVICES" == "true" \]\]; then\n\s+services="\$\([\s\S]*?publish-production-services\.yml/u,
+  );
+  assert.match(
+    dispatch,
+    /if \[\[ "\$PUBLISH_RUNTIME" == "true" \]\]; then\n\s+runtime="\$\([\s\S]*?publish-runtime-agent\.yml/u,
+  );
+  assert.match(source, /Report fresh immutable manifests/u);
+  assert.match(source, /\\"update_channel_tags\\":false/u);
+  assert.doesNotMatch(source, /\bsecrets\./u);
+  assert.doesNotMatch(source, /^\s+pull_request_target:|^\s+workflow_run:/mu);
+  assert.equal(
+    [...source.matchAll(/publish-production-services\.yml/gu)].length,
+    3,
   );
   assert.equal(
-    [...source.matchAll(/\bsecrets\.NPM_TOKEN\b/gu)].length,
-    1,
-    "NPM_TOKEN must appear only in the protected publish job",
+    [...source.matchAll(/publish-runtime-agent\.yml/gu)].length,
+    3,
   );
   assertOrdered(
+    source,
+    "Authorize the exact current protected-main commit",
+    "Wait for exact protected-main CI",
+    "Recheck protected main before publication",
+    "Check exact manifest freshness",
+    "Dispatch stale immutable image publishers",
+    "Require both exact image manifests",
+  );
+});
+
+test("Changesets separates pull-request, version, pack, and npm publish authority", () => {
+  const source = readWorkflow("npm-release.yml");
+  const pullRequest = jobSection(source, "pull-request-policy", "select");
+  const select = jobSection(source, "select", "version");
+  const version = jobSection(source, "version", "pack");
+  const pack = jobSection(source, "pack", "publish");
+  const publish = jobSection(source, "publish");
+
+  assert.doesNotMatch(source, /pull_request_target/u);
+  const pullRequestTrigger = source.slice(
+    source.indexOf("  pull_request:\n"),
+    source.indexOf("  push:\n"),
+  );
+  assert.doesNotMatch(pullRequestTrigger, /paths:/u);
+  const pushTrigger = source.slice(source.indexOf("  push:\n"), source.indexOf("  workflow_dispatch:\n"));
+  assert.doesNotMatch(pushTrigger, /paths:/u);
+  assert.match(source, /permissions: \{\}/u);
+  assert.match(source, /cancel-in-progress: false/u);
+  assert.match(source, /queue: max/u);
+  assert.match(pullRequest, /permissions:\n      contents: read/u);
+  assert.doesNotMatch(pullRequest, /\bsecrets\./u);
+  assert.match(pullRequest, /check-changeset-pr\.mjs/u);
+  assert.match(pullRequest, /changeset-release\/main/u);
+  assert.match(pullRequest, /PULL_REQUEST_AUTHOR" == "instafy-bot"/u);
+
+  assert.match(
+    select,
+    /changesets\/action\/select-mode@198f833dd7d863100ea6e28967bc9a9fdefadb0a/u,
+  );
+  assert.match(select, /current_sha[\s\S]*GITHUB_SHA/u);
+  assert.doesNotMatch(select, /\bsecrets\./u);
+  assert.doesNotMatch(select, /cache:/u);
+
+  assert.match(
+    version,
+    /changesets\/action\/version@198f833dd7d863100ea6e28967bc9a9fdefadb0a/u,
+  );
+  assert.match(version, /github-token: \$\{\{ secrets\.INSTAFY_BOT_TOKEN \}\}/u);
+  assert.match(version, /pr-draft: create/u);
+  assert.match(version, /push-with-git-cli: false/u);
+  assert.doesNotMatch(version, /id-token: write/u);
+  assert.doesNotMatch(version, /NPM_TOKEN|NODE_AUTH_TOKEN/u);
+  assert.doesNotMatch(version, /cache:/u);
+
+  assert.match(pack, /needs\.select\.outputs\.publish-plan-artifact-id/u);
+  assert.match(pack, /pnpm --filter @instafy\/cli test:package/u);
+  assert.match(pack, /npm pack --dry-run --ignore-scripts/u);
+  assert.match(pack, /pnpm changeset pack/u);
+  assert.match(pack, /verify-changeset-pack\.mjs/u);
+  assert.match(pack, /actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02/u);
+  assert.equal(
+    [
+      ...source.matchAll(
+        /actions\/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c/gu,
+      ),
+    ].length,
+    2,
+    "both release artifact downloads must use the raw-artifact-aware v8 action",
+  );
+  assert.doesNotMatch(pack, /\bsecrets\.|id-token: write|npm publish/u);
+  assert.doesNotMatch(pack, /cache:/u);
+
+  assert.match(publish, /environment: npm-release/u);
+  assert.match(publish, /id-token: write/u);
+  assert.match(publish, /contents: read/u);
+  assert.doesNotMatch(publish, /contents: write/u);
+  assert.match(publish, /needs\.pack\.outputs\.artifact-id/u);
+  assert.match(publish, /pnpm exec npm --version/u);
+  assert.match(publish, /Seal publication to the canonical npm registry/u);
+  assert.match(publish, /test ! -e packages\/instafy-cli\/\.npmrc/u);
+  assert.match(publish, /pnpm config get '@instafy:registry'/u);
+  assert.match(publish, /--registry before/u);
+  assert.match(publish, /pnpm changeset publish/u);
+  assert.match(publish, /--from-pack-dir/u);
+  assert.match(publish, /--no-git-tag/u);
+  assert.match(publish, /--registry after/u);
+  assert.match(publish, /test -z "\$\{NPM_TOKEN:-\}"/u);
+  assert.match(publish, /test -z "\$\{NODE_AUTH_TOKEN:-\}"/u);
+  assert.doesNotMatch(publish, /\bsecrets\.NPM_TOKEN\b|pnpm .*build|test:package|cache:/u);
+  assert.equal(
+    [...source.matchAll(/\bsecrets\.INSTAFY_BOT_TOKEN\b/gu)].length,
+    2,
+    "the bot credential is limited to the version job preflight and action",
+  );
+  assert.doesNotMatch(source, /\bsecrets\.NPM_TOKEN\b/u);
+  assertOrdered(
     publish,
-    "environment: npm-release",
-    "NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}",
-    "npm publish",
+    "Require the approved commit to remain current protected main",
+    "Seal publication to the canonical npm registry",
+    "Install the exact release toolchain without lifecycle scripts",
+    "Download the exact tested pack by immutable artifact id",
+    "Refuse registry collisions before publishing",
+    "Publish the unchanged tarballs with npm trusted publishing",
+    "Verify npm exposes the exact published bytes",
   );
 });
 
@@ -106,6 +237,11 @@ test("runtime images publish only exact protected main from a fixed namespace", 
   assert.match(authorize, /GITHUB_REF" != "refs\/heads\/main"/u);
   assert.match(authorize, /\^\[0-9a-f\]\{40\}\$/u);
   assert.match(authorize, /REQUESTED_COMMIT" != "\$GITHUB_SHA"/u);
+  assert.match(authorize, /actions: read/u);
+  assert.match(authorize, /Refuse duplicate exact-SHA publication/u);
+  assert.match(authorize, /GITHUB_RUN_ATTEMPT" != "1"/u);
+  assert.match(authorize, /actions\/workflows\/\$\{RELEASE_WORKFLOW\}\/runs/u);
+  assert.match(authorize, /\.conclusion == "success"/u);
   assert.doesNotMatch(authorize, /packages: write/u);
 
   // Exactly one protected-environment approval gates the whole release.

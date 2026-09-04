@@ -3,8 +3,11 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import kleur from "kleur";
-import { resolveConfiguredAccessToken, resolveControllerUrl } from "./config.js";
 import { buildInstafyGitCredentialHelperValue } from "./git-helper.js";
+import {
+  resolveRuntimeControllerCredential,
+  resolveRuntimeBoundControllerUrl,
+} from "./runtime-controller-binding.js";
 
 export type InstafyGitContext = {
   workTree: string;
@@ -435,8 +438,9 @@ function printGitSyncHelp() {
   console.log("");
   console.log("Env fallback:");
   console.log(
-    "  ORIGIN_ENDPOINT, ORIGIN_BIND_PORT, ORIGIN_ACCESS_TOKEN, ORIGIN_INTERNAL_TOKEN, RUNTIME_ACCESS_TOKEN",
+    "  ORIGIN_ENDPOINT, ORIGIN_BIND_PORT, ORIGIN_ACCESS_TOKEN, ORIGIN_INTERNAL_TOKEN",
   );
+  console.log("  An authorized runtime-machine context may mint a short-lived Origin token.");
 }
 
 function normalizeToken(raw: string | undefined | null): string | null {
@@ -457,14 +461,23 @@ function isInvalidOriginAudienceError(status: number, body: string): boolean {
   return normalized.includes("invalid origin token") || normalized.includes("invalidaudience");
 }
 
-function resolveControllerAccessToken(): string | null {
-  return (
-    normalizeToken(process.env["CONTROLLER_ACCESS_TOKEN"]) ??
-    normalizeToken(process.env["RUNTIME_ACCESS_TOKEN"]) ??
-    normalizeToken(process.env["INSTAFY_ACCESS_TOKEN"]) ??
-    resolveConfiguredAccessToken() ??
-    null
-  );
+type OriginMintCredential = {
+  token: string;
+  controllerUrl: string;
+};
+
+function resolveOriginMintCredential(): OriginMintCredential | null {
+  const runtimeCredential = resolveRuntimeControllerCredential();
+  if (!runtimeCredential || runtimeCredential.kind === "job") {
+    // Human sessions and model/job credentials are intentionally not Origin
+    // write-token minting capabilities. A caller outside a runtime-machine
+    // lease must supply an explicit or provisioned Origin token instead.
+    return null;
+  }
+  return {
+    token: runtimeCredential.token,
+    controllerUrl: resolveRuntimeBoundControllerUrl(runtimeCredential),
+  };
 }
 
 function resolveProjectId(): string | null {
@@ -487,26 +500,28 @@ function resolveOriginEndpoint(override: string | null): string {
   return `http://127.0.0.1:${resolvedPort}`;
 }
 
-function resolveOriginToken(override: string | null): string {
-  const token =
-    normalizeToken(override) ??
-    normalizeToken(process.env["ORIGIN_ACCESS_TOKEN"]) ??
-    normalizeToken(process.env["ORIGIN_INTERNAL_TOKEN"]) ??
-    normalizeToken(process.env["RUNTIME_ACCESS_TOKEN"]);
-  if (!token) {
+function httpOrigin(raw: string, label: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(`${label} must be a valid URL.`);
+  }
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.username || parsed.password) {
+    throw new Error(`${label} must use http or https and must not contain credentials.`);
+  }
+  return parsed.origin;
+}
+
+function assertOriginEndpointBinding(selected: string, provisioned: string): void {
+  if (
+    httpOrigin(selected, "The selected Origin endpoint") !==
+    httpOrigin(provisioned, "The provisioned Origin endpoint")
+  ) {
     throw new Error(
-      [
-        "Origin bearer token missing.",
-        "",
-        "Provide one of:",
-        "- --origin-token <token>",
-        "- ORIGIN_ACCESS_TOKEN=<token> (preferred inside hosted runtimes)",
-        "- ORIGIN_INTERNAL_TOKEN=<token> (recommended inside runtimes)",
-        "- RUNTIME_ACCESS_TOKEN=<token>",
-      ].join("\n"),
+      "Refusing to send an environment-provided Origin credential to an endpoint other than ORIGIN_ENDPOINT.",
     );
   }
-  return token;
 }
 
 type MintedOriginAccessToken = {
@@ -522,24 +537,20 @@ function resolveLeaseId(): string | null {
   );
 }
 
-async function mintOriginAccessTokenForCli(
-  originEndpointOverride: string | null,
-): Promise<MintedOriginAccessToken | null> {
+async function mintOriginAccessTokenForCli(): Promise<MintedOriginAccessToken | null> {
   const projectId = resolveProjectId();
-  const controllerAccessToken = resolveControllerAccessToken();
+  const controllerCredential = resolveOriginMintCredential();
   const leaseId = resolveLeaseId();
-  if (!projectId || !controllerAccessToken || !leaseId) {
+  if (!projectId || !controllerCredential || !leaseId) {
     return null;
   }
 
-  const controllerUrl = resolveControllerUrl({
-    controllerUrl: normalizeToken(process.env["CONTROLLER_BASE_URL"]) ?? null,
-  });
+  const controllerUrl = controllerCredential.controllerUrl;
 
   const response = await fetch(`${controllerUrl.replace(/\/+$/, "")}/access_token`, {
     method: "POST",
     headers: {
-      authorization: `Bearer ${controllerAccessToken}`,
+      authorization: `Bearer ${controllerCredential.token}`,
       "content-type": "application/json",
     },
     body: JSON.stringify({
@@ -548,6 +559,8 @@ async function mintOriginAccessTokenForCli(
       scopes: ["fs.write"],
       leaseId,
     }),
+    redirect: "error",
+    signal: AbortSignal.timeout(60_000),
   });
 
   if (!response.ok) {
@@ -568,7 +581,7 @@ async function mintOriginAccessTokenForCli(
   return {
     endpoint:
       normalizeToken(payload.endpoint)?.replace(/\/+$/, "") ??
-      resolveOriginEndpoint(originEndpointOverride),
+      resolveOriginEndpoint(null),
     token,
   };
 }
@@ -680,19 +693,26 @@ export async function runInstafyGitSync(args: string[], options?: { cwd?: string
     return 0;
   }
 
-  const explicitOriginToken =
-    normalizeToken(parsed.originTokenOverride) ??
+  const explicitOriginToken = normalizeToken(parsed.originTokenOverride);
+  const environmentOriginToken =
     normalizeToken(process.env["ORIGIN_ACCESS_TOKEN"]) ??
     normalizeToken(process.env["ORIGIN_INTERNAL_TOKEN"]);
-  const controllerAccessToken = resolveControllerAccessToken();
 
   let originEndpoint = resolveOriginEndpoint(parsed.originEndpointOverride);
-  let originToken: string | null = explicitOriginToken;
+  let originToken: string | null = explicitOriginToken ?? environmentOriginToken;
+
+  if (!explicitOriginToken && environmentOriginToken) {
+    const provisionedEndpoint = resolveOriginEndpoint(null);
+    assertOriginEndpointBinding(originEndpoint, provisionedEndpoint);
+  }
 
   if (!originToken) {
     try {
-      const minted = await mintOriginAccessTokenForCli(parsed.originEndpointOverride);
+      const minted = await mintOriginAccessTokenForCli();
       if (minted) {
+        if (parsed.originEndpointOverride) {
+          assertOriginEndpointBinding(parsed.originEndpointOverride, minted.endpoint);
+        }
         originEndpoint = minted.endpoint;
         originToken = minted.token;
       }
@@ -703,7 +723,13 @@ export async function runInstafyGitSync(args: string[], options?: { cwd?: string
   }
 
   if (!originToken) {
-    originToken = resolveOriginToken(parsed.originTokenOverride);
+    throw new Error(
+      [
+        "Origin bearer token missing.",
+        "",
+        "Provide an explicit --origin-token, a provisioned ORIGIN_ACCESS_TOKEN / ORIGIN_INTERNAL_TOKEN, or run from an authorized runtime-machine context.",
+      ].join("\n"),
+    );
   }
 
   const requestSync = async (endpoint: string, token: string) => {
@@ -719,6 +745,8 @@ export async function runInstafyGitSync(args: string[], options?: { cwd?: string
         message: parsed.message,
         paths: parsed.paths ?? undefined,
       }),
+      redirect: "error",
+      signal: AbortSignal.timeout(60_000),
     }).catch((error) => {
       throw new Error(`Origin git sync request failed: ${String(error)}`);
     });
@@ -730,13 +758,15 @@ export async function runInstafyGitSync(args: string[], options?: { cwd?: string
 
   if (
     !parsed.originTokenOverride &&
-    controllerAccessToken &&
-    explicitOriginToken &&
+    environmentOriginToken &&
     isInvalidOriginAudienceError(response.status, text)
   ) {
     try {
-      const minted = await mintOriginAccessTokenForCli(parsed.originEndpointOverride);
+      const minted = await mintOriginAccessTokenForCli();
       if (minted) {
+        if (parsed.originEndpointOverride) {
+          assertOriginEndpointBinding(parsed.originEndpointOverride, minted.endpoint);
+        }
         originEndpoint = minted.endpoint;
         originToken = minted.token;
         ({ response, text } = await requestSync(originEndpoint, originToken));

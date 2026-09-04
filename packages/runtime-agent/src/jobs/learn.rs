@@ -14,6 +14,7 @@ use super::JobExecution;
 
 pub const INSTAFY_FILENAME: &str = "INSTAFY.md";
 pub const AGENTS_DOC_FILENAME: &str = "AGENTS.md";
+pub const CLAUDE_DOC_FILENAME: &str = "CLAUDE.md";
 pub const AGENTS_SCRIPT_FILENAME: &str = "AGENTS.py";
 pub const SKILLS_ROOT_RELATIVE_PATH: &str = ".agents/skills";
 pub const LEARNING_POLICY_RELATIVE_PATH: &str = ".agents/skills/instafy-learning-policy/SKILL.md";
@@ -35,6 +36,9 @@ pub const GROUP_PARTICIPATION_RELATIVE_PATH: &str =
     ".agents/skills/instafy-group-participation/SKILL.md";
 pub const CONVERSATION_HISTORY_RELATIVE_PATH: &str =
     ".agents/skills/instafy-conversation-history/SKILL.md";
+pub const DIAGNOSTICS_RELATIVE_PATH: &str = ".agents/skills/instafy-diagnostics/SKILL.md";
+pub const DIAGNOSTICS_OPENAI_RELATIVE_PATH: &str =
+    ".agents/skills/instafy-diagnostics/agents/openai.yaml";
 pub const LOCATION_SHARING_RELATIVE_PATH: &str = ".agents/skills/instafy-location-sharing/SKILL.md";
 pub const AUTOMATIONS_RELATIVE_PATH: &str = ".agents/skills/instafy-automations/SKILL.md";
 pub const PERSISTENT_CONTEXTS_RELATIVE_PATH: &str =
@@ -72,6 +76,10 @@ const INSTAFY_TEMPLATE: &str = include_str!(concat!(
 const AGENTS_DOC_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/AGENTS.md"
+));
+const CLAUDE_DOC_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/instafy/CLAUDE.md"
 ));
 const AGENTS_SCRIPT_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -124,6 +132,14 @@ const GROUP_PARTICIPATION_TEMPLATE: &str = include_str!(concat!(
 const CONVERSATION_HISTORY_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/assets/instafy/.agents/skills/instafy-conversation-history/SKILL.md"
+));
+const DIAGNOSTICS_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/instafy/.agents/skills/instafy-diagnostics/SKILL.md"
+));
+const DIAGNOSTICS_OPENAI_TEMPLATE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/assets/instafy/.agents/skills/instafy-diagnostics/agents/openai.yaml"
 ));
 const LOCATION_SHARING_TEMPLATE: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -210,6 +226,7 @@ pub fn ensure_project_memory_scaffold(workspace_dir: &Path) {
     let mut wrote_any = false;
     let instafy_path = workspace_dir.join(INSTAFY_FILENAME);
     let agents_doc_path = workspace_dir.join(AGENTS_DOC_FILENAME);
+    let claude_doc_path = workspace_dir.join(CLAUDE_DOC_FILENAME);
     let agents_script_path = workspace_dir.join(AGENTS_SCRIPT_FILENAME);
     let skills_root_dir = workspace_dir.join(SKILLS_ROOT_RELATIVE_PATH);
     let policy_path = workspace_dir.join(LEARNING_POLICY_RELATIVE_PATH);
@@ -224,6 +241,8 @@ pub fn ensure_project_memory_scaffold(workspace_dir: &Path) {
     let agent_collaboration_path = workspace_dir.join(AGENT_COLLABORATION_RELATIVE_PATH);
     let group_participation_path = workspace_dir.join(GROUP_PARTICIPATION_RELATIVE_PATH);
     let conversation_history_path = workspace_dir.join(CONVERSATION_HISTORY_RELATIVE_PATH);
+    let diagnostics_path = workspace_dir.join(DIAGNOSTICS_RELATIVE_PATH);
+    let diagnostics_openai_path = workspace_dir.join(DIAGNOSTICS_OPENAI_RELATIVE_PATH);
     let location_sharing_path = workspace_dir.join(LOCATION_SHARING_RELATIVE_PATH);
     let automations_path = workspace_dir.join(AUTOMATIONS_RELATIVE_PATH);
     let persistent_contexts_path = workspace_dir.join(PERSISTENT_CONTEXTS_RELATIVE_PATH);
@@ -246,6 +265,12 @@ pub fn ensure_project_memory_scaffold(workspace_dir: &Path) {
 
     if !agents_doc_path.exists() {
         if fs::write(&agents_doc_path, AGENTS_DOC_TEMPLATE).is_ok() {
+            wrote_any = true;
+        }
+    }
+
+    if !claude_doc_path.exists() {
+        if fs::write(&claude_doc_path, CLAUDE_DOC_TEMPLATE).is_ok() {
             wrote_any = true;
         }
     }
@@ -383,6 +408,24 @@ pub fn ensure_project_memory_scaffold(workspace_dir: &Path) {
         }
     }
 
+    if !diagnostics_path.exists() {
+        if let Some(parent) = diagnostics_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if fs::write(&diagnostics_path, DIAGNOSTICS_TEMPLATE).is_ok() {
+            wrote_any = true;
+        }
+    }
+
+    if !diagnostics_openai_path.exists() {
+        if let Some(parent) = diagnostics_openai_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if fs::write(&diagnostics_openai_path, DIAGNOSTICS_OPENAI_TEMPLATE).is_ok() {
+            wrote_any = true;
+        }
+    }
+
     if let Some(parent) = location_sharing_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -501,6 +544,7 @@ fn maybe_commit_project_memory_scaffold(workspace_dir: &Path, _wrote_any: bool) 
     let scaffold_paths = [
         INSTAFY_FILENAME,
         AGENTS_DOC_FILENAME,
+        CLAUDE_DOC_FILENAME,
         AGENTS_SCRIPT_FILENAME,
         LEARNING_POLICY_RELATIVE_PATH,
         GIT_CANONICAL_RELATIVE_PATH,
@@ -514,6 +558,8 @@ fn maybe_commit_project_memory_scaffold(workspace_dir: &Path, _wrote_any: bool) 
         AGENT_COLLABORATION_RELATIVE_PATH,
         GROUP_PARTICIPATION_RELATIVE_PATH,
         CONVERSATION_HISTORY_RELATIVE_PATH,
+        DIAGNOSTICS_RELATIVE_PATH,
+        DIAGNOSTICS_OPENAI_RELATIVE_PATH,
         LOCATION_SHARING_RELATIVE_PATH,
         AUTOMATIONS_RELATIVE_PATH,
         PERSISTENT_CONTEXTS_RELATIVE_PATH,
@@ -1447,6 +1493,37 @@ mod tests {
         assert!(COLLABORATION_TEMPLATE.contains("CONTROLLER_ACCESS_TOKEN"));
         assert!(COLLABORATION_TEMPLATE.contains("viewer"));
         assert!(COLLABORATION_TEMPLATE.contains("builder"));
+    }
+
+    #[test]
+    fn diagnostics_guidance_and_claude_bridge_are_seeded() {
+        let tmp = tempdir().expect("temp dir");
+
+        ensure_project_memory_scaffold(tmp.path());
+
+        assert_eq!(
+            fs::read_to_string(tmp.path().join(CLAUDE_DOC_FILENAME)).expect("read Claude bridge"),
+            CLAUDE_DOC_TEMPLATE
+        );
+        assert_eq!(
+            fs::read_to_string(tmp.path().join(DIAGNOSTICS_RELATIVE_PATH))
+                .expect("read diagnostics skill"),
+            DIAGNOSTICS_TEMPLATE
+        );
+        assert_eq!(
+            fs::read_to_string(tmp.path().join(DIAGNOSTICS_OPENAI_RELATIVE_PATH))
+                .expect("read diagnostics OpenAI metadata"),
+            DIAGNOSTICS_OPENAI_TEMPLATE
+        );
+        assert!(DIAGNOSTICS_TEMPLATE.contains("instafy diagnostics run-result"));
+        assert!(DIAGNOSTICS_TEMPLATE.contains("returned `runId`"));
+        assert!(DIAGNOSTICS_TEMPLATE.contains("returned `spaceId`"));
+        assert!(DIAGNOSTICS_TEMPLATE.contains("every returned event's `runtimeId`"));
+        assert!(DIAGNOSTICS_TEMPLATE.contains("correlation, not proof of causation"));
+        assert!(DIAGNOSTICS_TEMPLATE.contains("--preview"));
+        assert!(DIAGNOSTICS_TEMPLATE.contains("obtain explicit confirmation"));
+        assert!(DIAGNOSTICS_TEMPLATE.contains("never bypass a traversal, symlink"));
+        assert_eq!(CLAUDE_DOC_TEMPLATE, "@AGENTS.md\n");
     }
 
     #[test]

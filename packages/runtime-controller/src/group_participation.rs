@@ -35,6 +35,9 @@ const CANCEL_COVERED_DEFAULT_OCTO_JOB_SQL: &str = "update agent_jobs
          summary = coalesce(summary, $5),
          completed_at = now(),
          lease_expires_at = null,
+         active_input_ready_runtime_id = null,
+         active_input_ready_expires_at = null,
+         active_input_ready_turn_id = null,
          heartbeat_at = now()
      where id = $1
        and project_id = $2
@@ -791,19 +794,24 @@ pub(crate) async fn cancel_covered_default_octo_job(
     Ok(true)
 }
 
-/// Marker decision stamped on ambient skill-mode turns: the dispatched agent
-/// (not the controller) decides whether to respond.
+/// Marker decision stamped on controller-authenticated evaluation turns: the
+/// dispatched agent (not the controller) decides whether to respond.
 pub(crate) const AGENT_EVALUATION_DECISION: &str = "agent_evaluation";
 pub(crate) const SKILL_MODE_AMBIENT_REASON: &str = "skill_mode_ambient";
+pub(crate) const AUTOMATION_NOTHING_TO_REPORT_REASON: &str = "automation_nothing_to_report";
 pub(crate) const AGENT_DECLINED_REASON: &str = "agent_declined";
 /// Exact bare token an agent emits as its first and only conversational output
-/// to decline an ambient skill-mode turn.
+/// to decline a marked evaluation turn.
 pub(crate) const DECLINE_SENTINEL: &str = "NO_RESPONSE";
 
 pub(crate) fn agent_evaluation_marker() -> JsonValue {
+    agent_evaluation_marker_with_reason(SKILL_MODE_AMBIENT_REASON)
+}
+
+fn agent_evaluation_marker_with_reason(reason: &str) -> JsonValue {
     serde_json::json!({
         "decision": AGENT_EVALUATION_DECISION,
-        "reason": SKILL_MODE_AMBIENT_REASON,
+        "reason": reason,
         "enforcedBy": "runtime-controller",
     })
 }
@@ -820,11 +828,25 @@ pub(crate) fn agent_declined_marker() -> JsonValue {
 /// `groupParticipation` claims were already stripped upstream, so this marker
 /// can only originate from the controller.
 pub(crate) fn inject_skill_mode_agent_evaluation_metadata(metadata: &mut JsonValue) {
+    inject_agent_evaluation_metadata(metadata, agent_evaluation_marker());
+}
+
+/// Server-stamped marker for an opted-in scheduled automation. Like ambient
+/// evaluations, this lets the agent explicitly decline with `NO_RESPONSE`,
+/// but it remains a normally billed automation dispatch.
+pub(crate) fn inject_automation_agent_evaluation_metadata(metadata: &mut JsonValue) {
+    inject_agent_evaluation_metadata(
+        metadata,
+        agent_evaluation_marker_with_reason(AUTOMATION_NOTHING_TO_REPORT_REASON),
+    );
+}
+
+fn inject_agent_evaluation_metadata(metadata: &mut JsonValue, marker: JsonValue) {
     if !metadata.is_object() {
         *metadata = JsonValue::Object(serde_json::Map::new());
     }
     if let Some(map) = metadata.as_object_mut() {
-        map.insert("groupParticipation".to_string(), agent_evaluation_marker());
+        map.insert("groupParticipation".to_string(), marker);
     }
 }
 
@@ -836,12 +858,44 @@ pub(crate) fn metadata_marks_agent_evaluation(metadata: &JsonValue) -> bool {
         && participation.get("enforcedBy").and_then(JsonValue::as_str) == Some("runtime-controller")
 }
 
-/// Whether an agent job was dispatched as an ambient skill-mode evaluation
-/// (marker lives under the job payload's `metadata` object).
+pub(crate) fn metadata_marks_skill_mode_ambient_evaluation(metadata: &JsonValue) -> bool {
+    metadata_marks_agent_evaluation(metadata)
+        && metadata
+            .get("groupParticipation")
+            .and_then(|participation| participation.get("reason"))
+            .and_then(JsonValue::as_str)
+            == Some(SKILL_MODE_AMBIENT_REASON)
+}
+
+/// Whether an agent job was dispatched as a controller-authenticated
+/// evaluation (marker lives under the job payload's `metadata` object).
 pub(crate) fn job_payload_marks_agent_evaluation(job_payload: &JsonValue) -> bool {
     job_payload
         .get("metadata")
         .map(metadata_marks_agent_evaluation)
+        .unwrap_or(false)
+}
+
+pub(crate) fn job_payload_marks_skill_mode_ambient_evaluation(job_payload: &JsonValue) -> bool {
+    job_payload
+        .get("metadata")
+        .map(metadata_marks_skill_mode_ambient_evaluation)
+        .unwrap_or(false)
+}
+
+pub(crate) fn metadata_marks_agent_declined(metadata: &JsonValue) -> bool {
+    let Some(participation) = metadata.get("groupParticipation") else {
+        return false;
+    };
+    participation.get("decision").and_then(JsonValue::as_str) == Some("silent")
+        && participation.get("reason").and_then(JsonValue::as_str) == Some(AGENT_DECLINED_REASON)
+        && participation.get("enforcedBy").and_then(JsonValue::as_str) == Some("runtime-controller")
+}
+
+pub(crate) fn job_payload_marks_agent_declined(job_payload: &JsonValue) -> bool {
+    job_payload
+        .get("metadata")
+        .map(metadata_marks_agent_declined)
         .unwrap_or(false)
 }
 
@@ -2050,6 +2104,46 @@ mod tests {
         assert!(!super::job_payload_marks_agent_evaluation(&forged));
         assert!(!super::job_payload_marks_agent_evaluation(
             &serde_json::json!({})
+        ));
+    }
+
+    #[test]
+    fn automation_evaluation_and_controller_decline_markers_are_authenticated() {
+        let mut metadata = serde_json::json!({});
+        super::inject_automation_agent_evaluation_metadata(&mut metadata);
+        assert_eq!(
+            metadata["groupParticipation"]["reason"],
+            serde_json::json!(super::AUTOMATION_NOTHING_TO_REPORT_REASON)
+        );
+        assert!(super::job_payload_marks_agent_evaluation(
+            &serde_json::json!({ "metadata": metadata })
+        ));
+        assert!(!super::job_payload_marks_skill_mode_ambient_evaluation(
+            &serde_json::json!({ "metadata": metadata })
+        ));
+
+        let ambient = serde_json::json!({
+            "metadata": {
+                "groupParticipation": super::agent_evaluation_marker()
+            }
+        });
+        assert!(super::job_payload_marks_skill_mode_ambient_evaluation(
+            &ambient
+        ));
+
+        let declined = serde_json::json!({
+            "metadata": { "groupParticipation": super::agent_declined_marker() }
+        });
+        assert!(super::job_payload_marks_agent_declined(&declined));
+        assert!(!super::job_payload_marks_agent_declined(
+            &serde_json::json!({
+                "metadata": {
+                    "groupParticipation": {
+                        "decision": "silent",
+                        "reason": "agent_declined"
+                    }
+                }
+            })
         ));
     }
 }

@@ -47,6 +47,7 @@ struct ReceivedRequests {
     lease: Vec<RecordedRequest>,
     heartbeat: Vec<RecordedRequest>,
     tunnel: Vec<RecordedRequest>,
+    secrets: Vec<RecordedRequest>,
 }
 
 type Shared = Arc<Mutex<ReceivedRequests>>;
@@ -58,6 +59,13 @@ struct ControllerState {
     jwks_body: Arc<Value>,
     key_id: String,
     project_id: Uuid,
+    /// When set, `/runtime/register` rejects any other bearer with the
+    /// production-observed 401 body, so tests can exercise the stale-token
+    /// recovery path.
+    register_requires_bearer: Option<String>,
+    /// The agent token `/agent/secrets` accepts. Anything else is answered with
+    /// the production 401, so tests can exercise the on-401 renewal path.
+    secrets_accepts: Option<Arc<Mutex<Option<String>>>>,
 }
 
 async fn agent_login_handler(
@@ -138,6 +146,19 @@ async fn runtime_register_handler(
         .unwrap()
         .register
         .push(RecordedRequest::new(&headers, payload));
+
+    if let Some(required) = state.register_requires_bearer.as_deref() {
+        let expected = format!("Bearer {required}");
+        let presented = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok());
+        if presented != Some(expected.as_str()) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"message": "access token expired"})),
+            );
+        }
+    }
 
     let runtime_id = Uuid::new_v4();
     let issued_at = Utc::now();
@@ -276,6 +297,42 @@ async fn tunnel_request_handler(
     )
 }
 
+async fn agent_secrets_handler(
+    State(state): State<ControllerState>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    state
+        .requests
+        .lock()
+        .unwrap()
+        .secrets
+        .push(RecordedRequest::new(&headers, payload));
+
+    if let Some(accepts) = state.secrets_accepts.as_ref() {
+        let expected = accepts.lock().unwrap().clone();
+        let presented = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let matches = expected
+            .as_deref()
+            .map(|token| presented.as_deref() == Some(format!("Bearer {token}").as_str()))
+            .unwrap_or(false);
+        if !matches {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"message": "agent token expired"})),
+            );
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "env": {}, "inventory": [] })),
+    )
+}
+
 async fn jwks_handler(State(state): State<ControllerState>) -> Json<Value> {
     Json((*state.jwks_body).clone())
 }
@@ -286,6 +343,7 @@ async fn spawn_controller(state: ControllerState) -> SocketAddr {
         .route("/agent/login", post(agent_login_handler))
         .route("/agent/lease", post(lease_handler))
         .route("/agent/heartbeat", post(heartbeat_handler))
+        .route("/agent/secrets", post(agent_secrets_handler))
         .route(
             "/projects/:project_id/tunnels/request",
             post(tunnel_request_handler),
@@ -357,6 +415,8 @@ async fn controller_client_registers_and_leases() {
         jwks_body: Arc::new(jwks),
         key_id,
         project_id,
+        register_requires_bearer: None,
+        secrets_accepts: None,
     };
     let addr = spawn_controller(state).await;
 
@@ -475,6 +535,165 @@ async fn controller_client_registers_and_leases() {
 }
 
 #[tokio::test]
+async fn renewal_register_presents_the_renewed_runtime_token() {
+    let shared = Arc::new(Mutex::new(ReceivedRequests::default()));
+    let project_id = Uuid::new_v4();
+    let key_id = "test-agent-key".to_string();
+    let jwks = build_jwks(test_origin_public_key(), &key_id);
+    let state = ControllerState {
+        requests: shared.clone(),
+        private_key_pem: Arc::new(test_origin_private_key().to_string()),
+        jwks_body: Arc::new(jwks),
+        key_id,
+        project_id,
+        register_requires_bearer: None,
+        secrets_accepts: None,
+    };
+    let addr = spawn_controller(state).await;
+    let workspace_root = tempfile::tempdir().expect("temp workspace root");
+    let config = test_config(addr, project_id, workspace_root.path());
+
+    let client = ControllerClient::new(&config).expect("client init");
+    let initial = client
+        .register_runtime(&config)
+        .await
+        .expect("initial register");
+    // The renewal scheduler needs to know when the agent token lapses.
+    let expires_at = initial
+        .agent_token_expires_at
+        .as_deref()
+        .expect("register surfaces agent token expiry");
+    let expires_at = chrono::DateTime::parse_from_rfc3339(expires_at).expect("rfc3339 expiry");
+    assert!(expires_at > Utc::now());
+
+    // A proactive renewal re-registers with the same client: it must carry the
+    // runtime token minted by the previous register, not the bootstrap token.
+    client
+        .register_runtime(&config)
+        .await
+        .expect("renewal register");
+
+    let captured = shared.lock().unwrap();
+    assert_eq!(captured.register.len(), 2);
+    let bearer = |request: &RecordedRequest| {
+        request
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .map(|(_, value)| value.clone())
+    };
+    assert_eq!(
+        bearer(&captured.register[0]).as_deref(),
+        Some("Bearer test-runtime-token")
+    );
+    assert_eq!(
+        bearer(&captured.register[1]).as_deref(),
+        Some("Bearer fresh-runtime-token")
+    );
+}
+
+/// Reproduces instafy-dev/instafy#104: the agent keeps presenting a stale
+/// spawn-time token after another process rotated the shared CLI session.
+/// Registration must self-heal by re-reading the persisted session, and keep
+/// the plain retry behavior when the file token is no better. The scenarios
+/// share one test because they contend on the INSTAFY_CLI_CONFIG env var.
+#[tokio::test]
+async fn register_recovers_by_rereading_the_persisted_cli_session() {
+    let shared = Arc::new(Mutex::new(ReceivedRequests::default()));
+    let project_id = Uuid::new_v4();
+    let key_id = "test-agent-key".to_string();
+    let jwks = build_jwks(test_origin_public_key(), &key_id);
+    let state = ControllerState {
+        requests: shared.clone(),
+        private_key_pem: Arc::new(test_origin_private_key().to_string()),
+        jwks_body: Arc::new(jwks),
+        key_id,
+        project_id,
+        register_requires_bearer: Some("rotated-session-token".to_string()),
+        secrets_accepts: None,
+    };
+    let addr = spawn_controller(state).await;
+
+    let session_dir = tempfile::tempdir().expect("session dir");
+    let session_path = session_dir.path().join("config.json");
+    std::fs::write(
+        &session_path,
+        r#"{"accessToken":"rotated-session-token","refreshToken":"rotated-refresh-token"}"#,
+    )
+    .expect("write session fixture");
+    unsafe { std::env::set_var("INSTAFY_CLI_CONFIG", &session_path) };
+
+    let workspace_root = tempfile::tempdir().expect("temp workspace root");
+
+    // Scenario 1: the spawn-time token is expired but the persisted session
+    // holds a rotated, valid token — registration recovers without a restart.
+    let mut config = test_config(addr, project_id, workspace_root.path());
+    config.runtime_access_token = Some("expired-user-token".into());
+    let client = ControllerClient::new(&config).expect("client init");
+    let registration = client
+        .register_runtime(&config)
+        .await
+        .expect("register recovers with the re-read session token");
+    assert_eq!(
+        registration.runtime_token.as_deref(),
+        Some("fresh-runtime-token")
+    );
+
+    // Scenario 2: the persisted token is also expired — the error surfaces so
+    // the existing registration retry loop keeps its cadence.
+    std::fs::write(&session_path, r#"{"accessToken":"still-stale-token"}"#)
+        .expect("rewrite session fixture");
+    let mut config = test_config(addr, project_id, workspace_root.path());
+    config.runtime_access_token = Some("expired-user-token-2".into());
+    let client = ControllerClient::new(&config).expect("client init");
+    let error = client
+        .register_runtime(&config)
+        .await
+        .expect_err("register still fails when the file token is stale too");
+    assert!(
+        format!("{error:#}").contains("access token expired"),
+        "unexpected error: {error:#}"
+    );
+
+    // Scenario 3: the persisted token matches the one already rejected — no
+    // pointless extra register call is made.
+    std::fs::write(&session_path, r#"{"accessToken":"expired-user-token-3"}"#)
+        .expect("rewrite session fixture");
+    let mut config = test_config(addr, project_id, workspace_root.path());
+    config.runtime_access_token = Some("expired-user-token-3".into());
+    let client = ControllerClient::new(&config).expect("client init");
+    client
+        .register_runtime(&config)
+        .await
+        .expect_err("register fails without retrying an already-rejected token");
+
+    unsafe { std::env::remove_var("INSTAFY_CLI_CONFIG") };
+
+    let captured = shared.lock().unwrap();
+    let bearer = |request: &RecordedRequest| {
+        request
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .map(|(_, value)| value.clone())
+    };
+    let bearers: Vec<Option<String>> = captured.register.iter().map(bearer).collect();
+    assert_eq!(
+        bearers,
+        vec![
+            // Scenario 1: stale spawn-time token, then the re-read session token.
+            Some("Bearer expired-user-token".to_string()),
+            Some("Bearer rotated-session-token".to_string()),
+            // Scenario 2: stale spawn-time token, then the (also stale) file token.
+            Some("Bearer expired-user-token-2".to_string()),
+            Some("Bearer still-stale-token".to_string()),
+            // Scenario 3: the file token was already tried, so no second call.
+            Some("Bearer expired-user-token-3".to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn tunnel_request_prefers_fresh_runtime_token() {
     let shared = Arc::new(Mutex::new(ReceivedRequests::default()));
     let project_id = Uuid::new_v4();
@@ -486,6 +705,8 @@ async fn tunnel_request_prefers_fresh_runtime_token() {
         jwks_body: Arc::new(jwks),
         key_id,
         project_id,
+        register_requires_bearer: None,
+        secrets_accepts: None,
     };
     let addr = spawn_controller(state).await;
     let workspace_root = tempfile::tempdir().expect("temp workspace root");
@@ -628,4 +849,207 @@ fn build_jwks(public_pem: &str, key_id: &str) -> Value {
             }
         ]
     })
+}
+
+/// Reproduces instafy-dev/instafy#144: per-job tasks clone `Registration` at
+/// spawn, so after a proactive renewal the secrets-refresh loop kept
+/// presenting the register-time agent token until it expired (401 loop).
+/// Requests must resolve their bearer from the client's freshest token.
+#[tokio::test]
+async fn job_secrets_present_the_renewed_agent_token() {
+    let shared = Arc::new(Mutex::new(ReceivedRequests::default()));
+    let project_id = Uuid::new_v4();
+    let key_id = "test-agent-key".to_string();
+    let jwks = build_jwks(test_origin_public_key(), &key_id);
+    let state = ControllerState {
+        requests: shared.clone(),
+        private_key_pem: Arc::new(test_origin_private_key().to_string()),
+        jwks_body: Arc::new(jwks),
+        key_id,
+        project_id,
+        register_requires_bearer: None,
+        secrets_accepts: None,
+    };
+    let addr = spawn_controller(state).await;
+    let workspace_root = tempfile::tempdir().expect("temp workspace root");
+    let config = test_config(addr, project_id, workspace_root.path());
+
+    let client = ControllerClient::new(&config).expect("client init");
+    let initial = client
+        .register_runtime(&config)
+        .await
+        .expect("initial register");
+    let renewed = client
+        .register_runtime(&config)
+        .await
+        .expect("renewal register");
+    assert_ne!(
+        initial.agent_token, renewed.agent_token,
+        "mock mints a distinct agent token per registration"
+    );
+
+    // The stale spawn-time snapshot: what a long-lived SecretsRefreshTask holds.
+    client
+        .fetch_job_secrets(&initial, Uuid::new_v4(), false)
+        .await
+        .expect("fetch job secrets");
+
+    let captured = shared.lock().unwrap();
+    assert_eq!(captured.secrets.len(), 1);
+    let bearer = captured.secrets[0]
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        .map(|(_, value)| value.clone());
+    assert_eq!(
+        bearer.as_deref(),
+        Some(format!("Bearer {}", renewed.agent_token).as_str()),
+        "secrets refresh must present the renewed agent token, not the spawn-time snapshot"
+    );
+}
+
+/// The other half of instafy-dev/instafy#144: routing the bearer through the
+/// live source is not enough on its own, because a consumer can still be
+/// holding a credential that lapsed between two renewals. A 401 must pull one
+/// re-registration through the shared source and retry with what it publishes —
+/// exactly once, so a credential the controller keeps rejecting cannot become
+/// the 401 loop that took the production runtime offline.
+#[tokio::test]
+async fn job_secrets_401_renews_and_retries_exactly_once() {
+    let shared = Arc::new(Mutex::new(ReceivedRequests::default()));
+    let project_id = Uuid::new_v4();
+    let key_id = "test-agent-key".to_string();
+    let jwks = build_jwks(test_origin_public_key(), &key_id);
+    // Nothing is accepted yet: the very first secrets call 401s, like a token
+    // that expired underneath a long-running refresh loop.
+    let secrets_accepts = Arc::new(Mutex::new(None));
+    let state = ControllerState {
+        requests: shared.clone(),
+        private_key_pem: Arc::new(test_origin_private_key().to_string()),
+        jwks_body: Arc::new(jwks),
+        key_id,
+        project_id,
+        register_requires_bearer: None,
+        secrets_accepts: Some(secrets_accepts.clone()),
+    };
+    let addr = spawn_controller(state).await;
+    let workspace_root = tempfile::tempdir().expect("temp workspace root");
+    let config = test_config(addr, project_id, workspace_root.path());
+
+    let client = Arc::new(ControllerClient::new(&config).expect("client init"));
+    let stale = client
+        .register_runtime(&config)
+        .await
+        .expect("initial register");
+
+    // Stands in for RegistrationRenewalTask: it waits for a consumer to report
+    // a rejected credential, re-registers, and the fresh agent token becomes
+    // the one the controller accepts.
+    let renewals = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let renewal_task = {
+        let client = client.clone();
+        let config = config.clone();
+        let store = client.runtime_token_handle();
+        let renewals = renewals.clone();
+        let secrets_accepts = secrets_accepts.clone();
+        tokio::spawn(async move {
+            loop {
+                store.refresh_requested().await;
+                renewals.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let renewed = client
+                    .register_runtime(&config)
+                    .await
+                    .expect("on-demand register");
+                *secrets_accepts.lock().unwrap() = Some(renewed.agent_token.clone());
+            }
+        })
+    };
+
+    // The caller still holds the stale spawn-time registration snapshot.
+    client
+        .fetch_job_secrets(&stale, Uuid::new_v4(), false)
+        .await
+        .expect("secrets recover after an on-demand renewal");
+
+    renewal_task.abort();
+
+    assert_eq!(
+        renewals.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "one 401 must pull exactly one re-registration"
+    );
+
+    let captured = shared.lock().unwrap();
+    assert_eq!(
+        captured.secrets.len(),
+        2,
+        "one rejected request plus exactly one retry"
+    );
+    let bearer = |request: &RecordedRequest| {
+        request
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+            .map(|(_, value)| value.clone())
+    };
+    assert_eq!(
+        bearer(&captured.secrets[0]).as_deref(),
+        Some(format!("Bearer {}", stale.agent_token).as_str()),
+        "the first attempt presents the credential the caller was holding"
+    );
+    let accepted = secrets_accepts.lock().unwrap().clone().expect("renewed");
+    assert_eq!(
+        bearer(&captured.secrets[1]).as_deref(),
+        Some(format!("Bearer {accepted}").as_str()),
+        "the retry presents the token the renewal published"
+    );
+    assert_ne!(stale.agent_token, accepted);
+}
+
+/// With nobody answering the refresh request the call must surface the original
+/// failure after a single attempt-plus-retry budget — never spin. The register
+/// count proves no renewal was invented locally.
+#[tokio::test]
+async fn job_secrets_401_without_a_renewer_fails_without_retrying() {
+    let shared = Arc::new(Mutex::new(ReceivedRequests::default()));
+    let project_id = Uuid::new_v4();
+    let key_id = "test-agent-key".to_string();
+    let jwks = build_jwks(test_origin_public_key(), &key_id);
+    let state = ControllerState {
+        requests: shared.clone(),
+        private_key_pem: Arc::new(test_origin_private_key().to_string()),
+        jwks_body: Arc::new(jwks),
+        key_id,
+        project_id,
+        register_requires_bearer: None,
+        // Never accepted, and no renewal task is running.
+        secrets_accepts: Some(Arc::new(Mutex::new(Some("never-issued".to_string())))),
+    };
+    let addr = spawn_controller(state).await;
+    let workspace_root = tempfile::tempdir().expect("temp workspace root");
+    let config = test_config(addr, project_id, workspace_root.path());
+
+    let client = ControllerClient::new(&config).expect("client init");
+    let registration = client.register_runtime(&config).await.expect("register");
+
+    let error = client
+        .fetch_job_secrets(&registration, Uuid::new_v4(), false)
+        .await
+        .expect_err("no renewal, so the request fails");
+    assert!(
+        format!("{error:#}").contains("status=401"),
+        "unexpected error: {error:#}"
+    );
+
+    let captured = shared.lock().unwrap();
+    assert_eq!(
+        captured.secrets.len(),
+        1,
+        "without a fresh credential the rejected request must not be retried"
+    );
+    assert_eq!(
+        captured.register.len(),
+        1,
+        "the consumer must not register on its own behalf"
+    );
 }

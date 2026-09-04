@@ -232,6 +232,21 @@ impl EmbeddedControllerFixture {
         path: &str,
         body: Option<&str>,
     ) -> StdCommand {
+        // Decision-driven runs get a generous window: 250ms flaked on loaded
+        // 2-core CI runners (approval file lands, poller misses the deadline).
+        // Timeout-behavior tests override with a short window explicitly.
+        self.command_for_with_timeout(mode, page_id, method, path, body, "5000")
+    }
+
+    fn command_for_with_timeout(
+        &self,
+        mode: &str,
+        page_id: &str,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+        approval_timeout_ms: &str,
+    ) -> StdCommand {
         let mut command = StdCommand::new("node");
         command
             .arg("-e")
@@ -245,7 +260,7 @@ impl EmbeddedControllerFixture {
             .env(PAGE_ID_ENV, page_id)
             .env(AGENT_CONTROL_FILE_ENV, &self.authority_path)
             .env(APPROVAL_DIR_ENV, &self.approval_dir)
-            .env(APPROVAL_TIMEOUT_MS_ENV, "250")
+            .env(APPROVAL_TIMEOUT_MS_ENV, approval_timeout_ms)
             .env(ACTIONS_FILE_ENV, &self.actions_path)
             .env("INSTAFY_SHARED_BROWSER_FAKE_MODE", mode)
             .env("HOSTILE_MARKER", &self.hostile_marker);
@@ -1350,7 +1365,17 @@ fn deny_timeout_replay_and_stale_target_fail_closed_without_action() {
     assert!(!denied.status.success());
     assert!(String::from_utf8_lossy(&denied.stderr).contains("approval_denied_non_retryable"));
 
-    let timed_out = fixture.run("safe", "POST", "/v1/click", Some(&body));
+    let timed_out = fixture
+        .command_for_with_timeout(
+            "safe",
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&body),
+            "250",
+        )
+        .output()
+        .expect("run embedded shared browser command");
     assert!(!timed_out.status.success());
     assert!(String::from_utf8_lossy(&timed_out.stderr).contains("approval_timeout_non_retryable"));
 

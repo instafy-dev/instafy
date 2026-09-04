@@ -12,6 +12,7 @@ use tracing::{error, info};
 use uuid::Uuid;
 
 mod active_job_auth;
+mod activity;
 mod agent;
 mod agent_contexts;
 mod agent_write_scopes;
@@ -30,6 +31,7 @@ mod credits;
 mod desktop_updates;
 mod dev;
 mod device_auth;
+mod diagnostics;
 mod dispatch;
 mod edge_downloads;
 mod errors;
@@ -40,6 +42,7 @@ mod group_participation;
 mod imports;
 mod integrations;
 mod jwks;
+mod message_stashes;
 mod model_defaults;
 mod multi_agent_plan;
 mod notifications;
@@ -57,6 +60,7 @@ mod redis_bus;
 mod runs;
 mod runtime;
 mod secrets;
+mod send_intents;
 mod send_queue;
 mod skills_discovery;
 mod speech_proxy;
@@ -283,6 +287,7 @@ async fn main() -> anyhow::Result<()> {
     workspace::spawn_local_workspace_housekeeping(&state);
     origins::spawn_origin_presence_housekeeping(&state);
     automations::spawn_automation_scheduler(state.clone());
+    send_queue::spawn_send_queue_recovery_sweep(state.clone());
 
     let idle_state = state.clone();
     tokio::spawn(async move {
@@ -316,46 +321,27 @@ async fn main() -> anyhow::Result<()> {
     let billing_state = state.clone();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(60));
+        let mut transient_failure_started_at = None;
         loop {
             ticker.tick().await;
-            if let Err(error) = runtime::sweep_hosted_runtime_credit_usage(&billing_state).await {
+            let error = runtime::sweep_hosted_runtime_credit_usage(&billing_state)
+                .await
+                .err();
+            if let Some(error) = error {
                 let error_message = error.to_string();
                 tracing::warn!(error = %error_message, "hosted runtime credit sweep failed");
-                if let Err(report_error) = bug_reports::record_system_bug_report(
-                    &billing_state,
-                    bug_reports::SystemBugReportInput {
-                        message: "Hosted runtime credit sweep failed".to_string(),
-                        details: Some(error_message.clone()),
-                        project_id: None,
-                        runtime_id: None,
-                        run_id: None,
-                        conversation_id: None,
-                        priority: "high".to_string(),
-                        labels: vec![
-                            "billing".to_string(),
-                            "runtime".to_string(),
-                            "monitoring".to_string(),
-                        ],
-                        metadata: json!({
-                            "source": "runtime.credit_sweep",
-                        }),
-                        logs: json!([
-                            {
-                                "kind": "runtime.credit_sweep.failed",
-                                "error": error_message,
-                            }
-                        ]),
-                        fingerprint: Some("runtime.credit_sweep.failed".to_string()),
-                        dedupe_window_seconds: Some(15 * 60),
-                    },
-                )
-                .await
-                {
-                    tracing::warn!(
-                        %report_error,
-                        "failed to record hosted runtime credit sweep issue"
-                    );
+                if !runtime::should_report_hosted_runtime_credit_sweep_error(
+                    &error,
+                    &mut transient_failure_started_at,
+                    std::time::Instant::now(),
+                ) {
+                    continue;
                 }
+                record_hosted_runtime_credit_sweep_failure(&billing_state, error_message).await;
+            } else {
+                runtime::reset_hosted_runtime_credit_sweep_pool_pressure(
+                    &mut transient_failure_started_at,
+                );
             }
         }
     });
@@ -436,6 +422,7 @@ async fn main() -> anyhow::Result<()> {
                 (StatusCode::OK, headers)
             }),
         )
+        .merge(diagnostics::router())
         .merge(runtime::router())
         .merge(billing::router())
         .merge(bug_reports::router())
@@ -459,8 +446,11 @@ async fn main() -> anyhow::Result<()> {
         .merge(skills_discovery::router())
         .merge(device_auth::router())
         .merge(conversations::router())
+        .merge(message_stashes::router())
+        .merge(send_intents::router())
         .merge(send_queue::router())
         .merge(notifications::router())
+        .merge(activity::router())
         .merge(runs::router())
         .merge(workspace::router())
         .merge(ota::router())
@@ -538,4 +528,42 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+async fn record_hosted_runtime_credit_sweep_failure(state: &AppState, error_message: String) {
+    if let Err(report_error) = bug_reports::record_system_bug_report(
+        state,
+        bug_reports::SystemBugReportInput {
+            message: "Hosted runtime credit sweep failed".to_string(),
+            details: Some(error_message.clone()),
+            project_id: None,
+            runtime_id: None,
+            run_id: None,
+            conversation_id: None,
+            priority: "high".to_string(),
+            labels: vec![
+                "billing".to_string(),
+                "runtime".to_string(),
+                "monitoring".to_string(),
+            ],
+            metadata: json!({
+                "source": "runtime.credit_sweep",
+            }),
+            logs: json!([
+                {
+                    "kind": "runtime.credit_sweep.failed",
+                    "error": error_message,
+                }
+            ]),
+            fingerprint: Some("runtime.credit_sweep.failed".to_string()),
+            dedupe_window_seconds: Some(15 * 60),
+        },
+    )
+    .await
+    {
+        tracing::warn!(
+            %report_error,
+            "failed to record hosted runtime credit sweep issue"
+        );
+    }
 }

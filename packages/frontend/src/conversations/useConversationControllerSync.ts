@@ -38,6 +38,14 @@ import { isUuid } from "./conversationMessageUtils";
 import { controllerConversationHasRemoteMessages } from "./conversationRemoteHistory";
 
 const CONTROLLER_CONVERSATION_BACKFILL_INTERVAL_MS = 30_000;
+// A hydration that fails outright (no session token yet, controller hiccup)
+// used to sit out the whole backfill interval, so a freshly opened space kept
+// showing its local placeholder for up to half a minute. Retry on our own
+// schedule instead, backing off so a genuinely unreachable controller is not
+// hammered.
+const CONTROLLER_CONVERSATION_RETRY_BASE_MS = 1_000;
+const CONTROLLER_CONVERSATION_RETRY_MAX_MS = 15_000;
+const CONTROLLER_CONVERSATION_RETRY_MAX_ATTEMPTS = 6;
 const runtimeControllerEnabled = controllerClient.core.enabled;
 
 type ControllerConversationFetcher = (args: {
@@ -92,6 +100,8 @@ export function useConversationControllerSync({
 }: ControllerSyncArgs) {
   const hydratedScopesRef = useRef<Set<string>>(new Set());
   const completedSyncEpochsRef = useRef<Map<string, number>>(new Map());
+  const hydrationFailuresRef = useRef<Map<string, number>>(new Map());
+  const hydrationRetryTimerRef = useRef<number | null>(null);
   const [resolvedProjectKeys, setResolvedProjectKeys] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
@@ -196,9 +206,30 @@ export function useConversationControllerSync({
           setTimeout(resolve, Math.min(500 * (attempt + 1), 2_000)),
         );
       }
-      if (cancelled || remoteConversations === null) {
+      if (cancelled) {
         return;
       }
+      if (remoteConversations === null) {
+        const failures = (hydrationFailuresRef.current.get(hydrationScope) ?? 0) + 1;
+        hydrationFailuresRef.current.set(hydrationScope, failures);
+        if (failures > CONTROLLER_CONVERSATION_RETRY_MAX_ATTEMPTS) {
+          // Give up on the fast lane; the periodic backfill keeps trying.
+          return;
+        }
+        const delay = Math.min(
+          CONTROLLER_CONVERSATION_RETRY_BASE_MS * 2 ** (failures - 1),
+          CONTROLLER_CONVERSATION_RETRY_MAX_MS,
+        );
+        if (hydrationRetryTimerRef.current !== null) {
+          window.clearTimeout(hydrationRetryTimerRef.current);
+        }
+        hydrationRetryTimerRef.current = window.setTimeout(() => {
+          hydrationRetryTimerRef.current = null;
+          bumpControllerConversationSyncEpoch();
+        }, delay);
+        return;
+      }
+      hydrationFailuresRef.current.delete(hydrationScope);
 
       const latestState = latestStateRef.current;
       if (latestState.projectKey !== projectId) {
@@ -259,10 +290,10 @@ export function useConversationControllerSync({
           typeof remote.parentConversationId === "string" && isUuid(remote.parentConversationId)
             ? remote.parentConversationId
             : null;
+        // A root conversation can carry a kind too: a scheduled thread is a
+        // root with thread kind "automation" — it must keep that origin.
         const threadKindFromRemote =
-          parentConversationIdFromRemote && typeof remote.threadKind === "string"
-            ? remote.threadKind.trim().toLowerCase() || null
-            : null;
+          typeof remote.threadKind === "string" ? remote.threadKind.trim().toLowerCase() || null : null;
         const visibility = resolveConversationVisibility(remote.visibility, metadata);
         const lifecycleStatus = extractConversationLifecycleFromMetadata(
           metadata,
@@ -515,8 +546,13 @@ export function useConversationControllerSync({
 
     return () => {
       cancelled = true;
+      if (hydrationRetryTimerRef.current !== null) {
+        window.clearTimeout(hydrationRetryTimerRef.current);
+        hydrationRetryTimerRef.current = null;
+      }
     };
   }, [
+    bumpControllerConversationSyncEpoch,
     controllerConversationSyncEpoch,
     controllerProjectMissing,
     currentUserId,
