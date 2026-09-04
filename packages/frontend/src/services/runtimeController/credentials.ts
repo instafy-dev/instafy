@@ -70,8 +70,7 @@ export interface RevokeCredentialResult {
   error?: string;
 }
 
-export type DeviceAuthProvider = "codex" | "github" | "gemini";
-export type GeminiOauthMode = "code_assist_cli" | "code_assist" | "api";
+export type DeviceAuthProvider = "codex" | "github";
 
 export interface StartDeviceAuthResult {
   success: boolean;
@@ -470,8 +469,6 @@ export async function startDeviceAuth(
   provider: DeviceAuthProvider,
   params?: {
     accessToken?: string | null;
-    geminiOauthMode?: GeminiOauthMode | null;
-    label?: string | null;
   },
 ): Promise<StartDeviceAuthResult> {
   if (!runtimeControllerEnabled) {
@@ -485,18 +482,7 @@ export async function startDeviceAuth(
   }
 
   try {
-    let startUrl = `${requestContext.baseUrl}/me/auth/device/${encodeURIComponent(provider)}/start`;
-    if (provider === "gemini" && (params?.geminiOauthMode || params?.label)) {
-      const search = new URLSearchParams();
-      if (params?.geminiOauthMode) {
-        search.set("oauthMode", params.geminiOauthMode);
-      }
-      const label = (params?.label ?? "").trim();
-      if (label.length > 0) {
-        search.set("label", label);
-      }
-      startUrl = `${startUrl}?${search.toString()}`;
-    }
+    const startUrl = `${requestContext.baseUrl}/me/auth/device/${encodeURIComponent(provider)}/start`;
 
     const response = await fetch(startUrl, {
       method: "POST",

@@ -3615,9 +3615,9 @@ fn should_persist_runtime_alert_conversation_message(
 }
 
 /// These sentences name the surface the reader can actually reach. They used to
-/// say "the Runtime button by the composer"; that button's only renderer
-/// (`RuntimeSelectorCompact`) lost its last importer, so the copy was pointing
-/// at a control that no longer exists. Machines is where runtimes live now.
+/// say "the Runtime button by the composer"; that button's only renderer lost
+/// its last importer and has since been deleted, so the copy was pointing at a
+/// control that no longer exists. Machines is where runtimes live now.
 /// The frontend mirrors these in `controllerConversationNotice.ts` and renders
 /// an "Open Machines" action beside them.
 fn runtime_alert_fallback_message(reason: &str, terminal_alert: bool) -> &'static str {
