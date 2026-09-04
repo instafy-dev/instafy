@@ -1142,6 +1142,26 @@ function StudioLayoutInner() {
     if (typeof window === "undefined") {
       return;
     }
+    const handler = () => {
+      // Runtime toasts are raised above WorkspaceTabsProvider and cannot open a
+      // tab themselves, so "Open Machines" arrives here as an event. Push before
+      // opening, or the ?panel= reconciliation snaps the workspace straight back.
+      requestHistoryPush();
+      openPanelTab("machines", { activate: true });
+      if (!isLargeScreen) {
+        setMobileSidebarOpen(false);
+      }
+    };
+    window.addEventListener("instafy:open-machines", handler as EventListener);
+    return () => {
+      window.removeEventListener("instafy:open-machines", handler as EventListener);
+    };
+  }, [isLargeScreen, openPanelTab, requestHistoryPush, setMobileSidebarOpen]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
     const handler = (event: Event) => {
       const custom = event as CustomEvent<GitReviewOpenDetail>;
       const review = custom.detail?.review ?? null;
@@ -1554,6 +1574,22 @@ function StudioLayoutInner() {
       icon: <Group className="text-[16px]" aria-hidden="true" />
     });
   }, [handleOpenSettingsTab, orgSettingsTitle]);
+
+  // ChatPanel's read-only notice cannot open a workspace tab itself —
+  // WorkspaceTabsProvider is mounted below the providers that panel runs in — so
+  // it asks here, the same way "instafy:open-source-control" does.
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+    const handler = () => {
+      handleOpenOrgSettings();
+    };
+    window.addEventListener("instafy:open-org-members", handler);
+    return () => {
+      window.removeEventListener("instafy:open-org-members", handler);
+    };
+  }, [handleOpenOrgSettings]);
 
   const handleOpenProjectSettings = useCallback(() => {
     handleOpenSettingsTab("project", {
