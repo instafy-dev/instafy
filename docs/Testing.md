@@ -128,7 +128,7 @@ under `packages/frontend/test-results/browser-ci/<lane>`.
 | Lane | What it proves | Local requirements |
 | --- | --- | --- |
 | `personal` | Real Electron profile/cookie persistence across restarts and projects, per-user isolation, clear, kill switch, and renderer ownership revocation (4 tests) | Installed workspace dependencies and compiled Desktop fixture; no Docker or database |
-| `browser-ui` | Real Chromium rendering of browser chrome, cursor overlay, approval layouts, and rendered-frame checks (11 tests) | Installed workspace dependencies and Playwright Chromium; no Docker, database, or controller |
+| `browser-ui` | Real Chromium rendering of browser chrome, cursor overlay, approval layouts, rendered-frame checks, and mobile drawer safe-area geometry (13 tests) | Installed workspace dependencies and Playwright Chromium; no Docker, database, or controller |
 | Shared profile fixture | Real Chromium HttpOnly/JS cookies, localStorage and server cookie echo; production runtime save/restore; controller authorization, encrypted database storage, stale-writer rejection, and clear/no-resurrection | Disposable Linux, Xvfb, Chromium, Go, Rust, and fully migrated loopback Postgres |
 
 After `pnpm install --frozen-lockfile`, run Personal locally with:
