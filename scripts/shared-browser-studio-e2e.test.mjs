@@ -102,6 +102,18 @@ test("fixture page is inert and tests HTTP login, localStorage and HttpOnly invi
   assert.doesNotMatch(html, /https?:\/\/|SUPABASE|Authorization|access_token|fixtureControlToken/);
 });
 
+test("Studio and trusted service accounts are provisioned separately and both cleaned up", async () => {
+  const source = await readFile(new URL("./shared-browser-studio-e2e.mjs", import.meta.url), "utf8");
+  assert.match(source, /serviceUser = JSON\.parse\(await run\(process\.execPath,\s*\["scripts\/mint-test-user\.mjs", "--no-seed-org", "--json"\]/);
+  assert.match(source, /SERVICE_RUNTIME_USER_ID: serviceUser\.userId/);
+  assert.match(source, /assert\.notEqual\(user\.userId, serviceUser\.userId/);
+  assert.match(source, /"--cleanup", user\.userId, "--json"/);
+  assert.match(source, /"--cleanup", serviceUser\.userId, "--json"/);
+  const rendererFixture = source.slice(source.indexOf("await writeFile(fixture, JSON.stringify("), source.indexOf("const publicConfig ="));
+  assert.match(rendererFixture, /userId: user\.userId/);
+  assert.doesNotMatch(rendererFixture, /serviceUser|SERVICE_ROLE|SERVICE_RUNTIME/);
+});
+
 async function ownedRoot(t) {
   const directory = await mkdtemp(path.join(tmpdir(), "studio-daemon-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
