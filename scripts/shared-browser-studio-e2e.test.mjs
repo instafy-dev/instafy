@@ -123,6 +123,14 @@ test("the fixture registers its provider through controller authority without re
   assert.doesNotMatch(source, /RUNTIME_PROVIDERS:|delete from runtime_providers where id='runtime'/);
 });
 
+test("the browser-only allocator does not receive background workspace auto-allocation", async () => {
+  const config = await readFile(new URL("../packages/frontend/vite.shared-studio-ci.config.ts", import.meta.url), "utf8");
+  assert.match(config, /"import\.meta\.env\.VITE_DISABLE_AUTO_RUNTIME_ENSURE": JSON\.stringify\("1"\)/);
+  const spec = await readFile(new URL("../packages/frontend/tests/playwright/smoke/shared-browser-studio-ci.spec.ts", import.meta.url), "utf8");
+  assert.match(spec, /getByTestId\("composer-action-menu-open-browser"\)\.click\(\)/);
+  assert.match(spec, /getByTestId\("browser-transport-shared"\)\.click\(\)/);
+});
+
 async function ownedRoot(t) {
   const directory = await mkdtemp(path.join(tmpdir(), "studio-daemon-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

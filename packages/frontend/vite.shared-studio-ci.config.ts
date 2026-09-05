@@ -45,6 +45,9 @@ export default defineConfig({
     "import.meta.env.VITE_CONTROLLER_URL": JSON.stringify(publicConfig.controllerURL),
     "import.meta.env.VITE_INSTAFY_SHARED_BROWSER_CDP_SCREENCAST": JSON.stringify("1"),
     "import.meta.env.VITE_INSTAFY_SHARED_BROWSER_WEBRTC": JSON.stringify("0"),
+    // This allocator implements explicit Shared Browser launches, not the
+    // independent background workspace-runtime allocation policy.
+    "import.meta.env.VITE_DISABLE_AUTO_RUNTIME_ENSURE": JSON.stringify("1"),
     "import.meta.env.INSTAFY_DEV_CODEX_SEED_ENABLED": "false",
     __INSTAFY_BUILD_INFO__: JSON.stringify({ app: "instafy-frontend", packageVersion: "0.0.0-fixture" }),
   },
