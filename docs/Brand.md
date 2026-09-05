@@ -80,12 +80,19 @@ stroke. Waiting for a runtime, requesting approval, compacting context,
 finalizing, and completed messages remain still.
 
 Motion is product state, not a second logo variant. Favicons, OAuth badges,
-native/store artwork, headers, login surfaces, and inactive or historical
+native/store artwork, headers, login forms, and inactive or historical
 transcript avatars remain static. The current live-run speaker avatar and the
 thinking row may animate. Custom agent avatars are never given Octo's motion.
 The motion must disappear under `prefers-reduced-motion: reduce`, and compact
 chat layouts use the same animated mark beside the thinking status because the
 avatar gutter is intentionally hidden on phones.
+
+Full-screen route and authentication loading may reuse the canonical swimming
+cycle while the requested route or session restoration is pending. Show a single
+decorative Octo above the polite status text “Getting things ready…” without a
+wordmark. Reduced motion keeps this mark still, and the loading screen disappears
+when the destination or login form is ready. This exception does not animate login
+form logos, header logos, or runtime-waiting states.
 
 A clearly labeled landing-page workspace example may use the same thinking
 state beside its simulated active work. Keep one example visible at a time,

@@ -70,6 +70,9 @@ describe("LoginPage entry handoff", () => {
   it("withholds the login form until session restoration finishes, then focuses email", async () => {
     await render();
     expect(container.querySelectorAll('[role="status"]')).toHaveLength(1);
+    expect(container.querySelector('[data-octo-motion="thinking"]')?.getAttribute("data-octo-animated"))
+      .toBe("true");
+    expect(container.textContent).not.toContain("Instafy");
     expect(container.querySelector('input[type="email"]')).toBeNull();
     expect(container.textContent).not.toContain("Log in or sign up");
 
@@ -77,6 +80,8 @@ describe("LoginPage entry handoff", () => {
     await render();
 
     expect(container.querySelector('[role="status"]')).toBeNull();
+    expect(container.querySelector('[data-octo-motion="idle"]')).not.toBeNull();
+    expect(container.querySelector("animate, animateTransform")).toBeNull();
     expect(container.textContent).toContain("Log in or sign up");
     expect(document.activeElement).toBe(container.querySelector('input[type="email"]'));
   });
