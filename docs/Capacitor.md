@@ -170,7 +170,29 @@ Notes:
 - Real APNs delivery requires a physical device + provisioning with Push Notifications enabled.
 - You can still test delivery on the iOS simulator via `xcrun simctl push`.
 
+## Shake-to-report diagnostics
+
+Shake to report is opt-in under Studio's **Diagnostics** menu. The iPhone shell uses
+its native motion bridge; web motion events are a fallback. **Simulate shake event**
+exercises the frontend event-to-dialog path, while **Test report dialog** bypasses
+gesture detection. Neither proves that the physical accelerometer is delivering events.
+
+An enabled shake attempts to attach the current screen before opening the report.
+Screenshot preparation has a three-second deadline: if it stalls or fails, the report
+still opens without a screenshot and shows an explanatory status. A late capture cannot
+replace screenshots in a newer report. The existing opt-in choice is unchanged.
+
+When investigating a device, distinguish no detected gesture, no dialog, and a submission
+error. Check the Diagnostics detection status and app logs first; physical shake detection
+still requires verification on a phone, even when the simulated-event test passes.
+
 ## iOS release boundary
+
+The mobile sidebar paints to every screen edge, with safe-area padding around its controls.
+While this drawer is open, iOS temporarily overlays its status bar on the WebView; closing the
+drawer restores its previous status-bar overlay mode (normally non-overlay). Android and the
+static startup policy are unchanged. Verify opening, closing, rotating, and returning from a
+native screen on an iPhone, including the top status area and bottom home-indicator area.
 
 Use `pnpm test:ios:config`, Capacitor sync, and an unsigned simulator build as the public validation
 path. A release pipeline may then build a signed IPA and upload it to TestFlight. Keep the
