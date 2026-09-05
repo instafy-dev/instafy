@@ -196,8 +196,10 @@ xvfb-run -a node scripts/shared-browser-studio-e2e.mjs
 This separate runner deliberately does not import the general developer
 Playwright harness or its environment/credential loaders. It refuses an
 occupied database or pre-existing browser resources, obtains only the local
-stack configuration, and creates a throwaway authenticated user with
-`mint-test-user.mjs`. It creates that user's project through the real
+stack configuration, and creates separate throwaway Studio and controller-service
+users with `mint-test-user.mjs`. The service identity is explicitly configured
+and never enters the renderer; automatic service-account bootstrap is not part
+of this lane. It creates the Studio user's project through the real
 authenticated controller API, then enables persistence for only that project
 on the disposable controller.
 
@@ -217,7 +219,7 @@ Finally, the visible clear action must retire the browser, start a fresh one,
 and show empty website data while Studio remains signed in. No model job is
 submitted. Only fixed-field result receipts are retained; traces, video,
 screenshots, raw service logs, profiles, and session values are not uploaded.
-Cleanup removes only this fixture's project, user, processes and temporary data.
+Cleanup removes only this fixture's project, both users, processes and temporary data.
 
 ## Stripe E2E
 - `PLAYWRIGHT_STRIPE_E2E=1 pnpm -C packages/frontend test:e2e:payments`

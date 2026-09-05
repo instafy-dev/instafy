@@ -204,7 +204,7 @@ async function lifecycle() {
   const temporary = await mkdtemp(path.join(tmpdir(), "instafy-shared-studio-"));
   const run = (command, args, options = {}) => runOwnedProcess(command, args,
     { env: buildEnv, signal, ...options });
-  let claimed = false, passed = false, stage = "preflight", user, projectId, controller, vite, provider, site, control;
+  let claimed = false, passed = false, stage = "preflight", user, serviceUser, projectId, controller, vite, provider, site, control;
   let stack;
   const started = Date.now();
   const connections = new Map();
@@ -244,11 +244,19 @@ async function lifecycle() {
     const baseURL = `http://127.0.0.1:${await freePort()}`;
     provider = await startStudioProvider({ root: temporary, bin, agentBinary, entrypoint, env,
       controllerURL, signal });
+    stage = "mint-service-user";
+    serviceUser = JSON.parse(await run(process.execPath,
+      ["scripts/mint-test-user.mjs", "--no-seed-org", "--json"], { timeoutMs: 90_000 }));
+    assert.match(serviceUser.userId, uuid);
     const encryptionKey = randomBytes(32);
     const keys = generateKeyPairSync("ed25519");
     const controllerEnv = { ...env, PORT: new URL(controllerURL).port, DATABASE_URL: stack.DB_URL,
       SUPABASE_PROJECT_URL: stack.API_URL, SUPABASE_JWT_SECRET: stack.JWT_SECRET,
       SUPABASE_SERVICE_ROLE_KEY: stack.SERVICE_ROLE_KEY,
+      // Provision the controller's trusted service identity explicitly. Never
+      // reuse the ordinary Studio user here: that would confer service authority
+      // on the renderer. Automatic service-account bootstrap is outside this lane.
+      SERVICE_RUNTIME_USER_ID: serviceUser.userId,
       CONTROLLER_INTERNAL_TOKEN: randomBytes(32).toString("hex"), USER_TOKEN_SECRET: randomBytes(32).toString("hex"),
       AGENT_LOGIN_KEY: randomBytes(32).toString("hex"), DEV_MODE: "true", STRICT_MODE: "true",
       MANAGED_AI_ENABLED: "false", MANAGED_AI_STARTUP_CHECK: "false", BROWSER_PROFILE_SNAPSHOT_SECS: "5",
@@ -271,6 +279,7 @@ async function lifecycle() {
     stage = "mint-user";
     user = JSON.parse(await run(process.execPath, ["scripts/mint-test-user.mjs", "--json"], { timeoutMs: 90_000 }));
     assert.match(user.userId, uuid); assert.match(user.org?.id, uuid);
+    assert.notEqual(user.userId, serviceUser.userId, "Studio and service identities must remain distinct");
     const userToken = JSON.parse(user.localStorageValue).access_token;
     stage = "create-project";
     ({ projectId } = await jsonRequest(`${controllerURL}/orgs/${user.org.id}/projects`,
@@ -410,13 +419,15 @@ async function lifecycle() {
     if (projectId && uuid.test(projectId)) await clean(() => executeSQL(`delete from projects where id='${projectId}'`));
     if (user?.userId && uuid.test(user.userId)) await clean(() => run(process.execPath,
       ["scripts/mint-test-user.mjs", "--cleanup", user.userId, "--json"], { timeoutMs: 60_000, signal: undefined }));
+    if (serviceUser?.userId && uuid.test(serviceUser.userId)) await clean(() => run(process.execPath,
+      ["scripts/mint-test-user.mjs", "--cleanup", serviceUser.userId, "--json"], { timeoutMs: 60_000, signal: undefined }));
     if (claimed) await clean(() => rm(fixedRoot, { recursive: true }));
     await clean(() => rm(temporary, { recursive: true }));
     await mkdir(path.dirname(receiptPath), { recursive: true });
     await writeFile(receiptPath, JSON.stringify({ schemaVersion: 1, lane: "shared-studio", status: passed && !cleanupErrors.length ? "passed" : "failed",
       stage, durationMs: Date.now() - started, cleanupErrors, serviceDiagnostics,
       proof: passed ? ["real-local-auth", "authenticated-project-creation", "studio-shared-launch", "real-origin-pixels-and-input", "periodic-encrypted-snapshot", "provider-acknowledged-stop", "replacement-cookie-restore", "ui-clear-no-resurrection"] : [],
-      excludes: ["cloud-provider-allocation", "network-egress-transport", "model-turns", "cross-user-collaboration", "OS-isolation"] }, null, 2) + "\n");
+      excludes: ["cloud-provider-allocation", "network-egress-transport", "model-turns", "cross-user-collaboration", "automatic-service-account-bootstrap", "OS-isolation"] }, null, 2) + "\n");
     removeSignals();
     assert.equal(cleanupErrors.length, 0, "fixture cleanup failed");
   }
