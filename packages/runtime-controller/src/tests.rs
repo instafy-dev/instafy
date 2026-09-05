@@ -9373,6 +9373,238 @@ async fn post_commit_receipt_emits_workspace_commit_event() -> anyhow::Result<()
 }
 
 #[tokio::test]
+async fn agent_lease_requires_signed_runtime_identity_before_claiming_private_jobs(
+) -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("agent lease identity regression").await?;
+    let owner_id = Uuid::new_v4();
+    let builder_id = Uuid::new_v4();
+    let project_id = Uuid::new_v4();
+    let conversation_id = Uuid::new_v4();
+    let job_id = Uuid::new_v4();
+    let runtime_id = Uuid::new_v4();
+    let generation = Uuid::new_v4();
+
+    let test_result: anyhow::Result<()> = async {
+        ensure_test_user(&pool, &owner_id).await?;
+        ensure_test_user(&pool, &builder_id).await?;
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into projects (id, owner_user_id, project_type, status)
+             values ($1, $2, 'customer', 'active')",
+                &[&project_id, &owner_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into project_memberships (project_id, user_id, role)
+             values ($1, $2, 'builder')",
+                &[&project_id, &builder_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into conversations (id, project_id, created_by, visibility)
+             values ($1, $2, $3, 'private')",
+                &[&conversation_id, &project_id, &owner_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into conversation_messages
+             (id, conversation_id, project_id, role, content, created_by, metadata)
+             values ($1, $2, $3, 'user', 'private-lease-history-marker', $4, '{}'::jsonb)",
+                &[&Uuid::new_v4(), &conversation_id, &project_id, &owner_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runtimes (id, project_id, provider, status, capabilities)
+             values ($1, $2, 'self-hosted', 'ready', $3)",
+                &[
+                    &runtime_id,
+                    &project_id,
+                    &PgJson(json!({
+                        "agent": true,
+                        "_instafySelfHostedAccess": { "mode": "private", "ownerUserId": owner_id },
+                        "_instafyRuntimeTokenGeneration": generation,
+                    })),
+                ],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into agent_jobs (id, project_id, conversation_id, status, payload)
+             values ($1, $2, $3, 'queued', $4)",
+                &[
+                    &job_id,
+                    &project_id,
+                    &conversation_id,
+                    &PgJson(json!({
+                        "user_id": owner_id,
+                        "prompt_text": "private-lease-prompt-marker",
+                    })),
+                ],
+            )
+            .await?;
+        drop(connection);
+
+        let mut config = build_app_config(
+            test_origin_private_key(),
+            test_origin_public_key(),
+            "agent-lease-identity",
+        );
+        config.strict_mode = false;
+        let state = build_test_state(pool.clone(), config.clone());
+        let builder_token = crate::auth::issue_controller_token(&config, &builder_id)
+            .map_err(|error| controller_error("issue builder token", error))?
+            .token;
+        let private_read = conversations::router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/conversations/{conversation_id}/messages"))
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {builder_token}"),
+                    )
+                    .body(Body::empty())?,
+            )
+            .await?;
+        anyhow::ensure!(private_read.status() == StatusCode::FORBIDDEN);
+        // Exercise the real public mint path: a valid partial scope still has no machine ID.
+        let minted = runtime::router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/projects/{project_id}/runtime/token"))
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {builder_token}"),
+                    )
+                    .body(Body::from(json!({ "scopes": ["agent.lease"] }).to_string()))?,
+            )
+            .await?;
+        anyhow::ensure!(minted.status() == StatusCode::OK);
+        let minted: runtime::RuntimeTokenResponse =
+            serde_json::from_slice(&to_bytes(minted.into_body(), usize::MAX).await?)?;
+        anyhow::ensure!(minted.runtime_id.is_none());
+
+        let issue = |id: Uuid, token_generation: Uuid| {
+            crate::auth::issue_agent_token(&config, &project_id, &id, None, Some(token_generation))
+                .map(|issued| issued.token)
+                .map_err(|error| controller_error("issue bound agent token", error))
+        };
+        let bound_token = issue(runtime_id, generation)?;
+        let request = |token: &str, body: serde_json::Value| {
+            Request::builder()
+                .method("POST")
+                .uri("/agent/lease")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(body.to_string()))
+        };
+        let app = agent::router().with_state(state);
+        for (case, token, body, expected) in [
+            (
+                "unbound",
+                minted.token.clone(),
+                json!({}),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                "unbound with body identity",
+                minted.token,
+                json!({ "runtime_id": runtime_id }),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                "different body identity",
+                bound_token.clone(),
+                json!({ "runtime_id": Uuid::new_v4() }),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                "unregistered runtime",
+                issue(Uuid::new_v4(), generation)?,
+                json!({}),
+                StatusCode::UNAUTHORIZED,
+            ),
+            (
+                "stale generation",
+                issue(runtime_id, Uuid::new_v4())?,
+                json!({}),
+                StatusCode::UNAUTHORIZED,
+            ),
+        ] {
+            let response = app.clone().oneshot(request(&token, body)?).await?;
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+            anyhow::ensure!(
+                status == expected,
+                "{case}: expected {expected}, got {status}"
+            );
+            let response_text = String::from_utf8_lossy(&bytes);
+            anyhow::ensure!(
+                !response_text.contains("private-lease-"),
+                "{case} exposed job contents"
+            );
+            let row = pool.get().await?.query_one(
+                "select status, leased_by_runtime_id, lease_attempts from agent_jobs where id = $1",
+                &[&job_id],
+            ).await?;
+            anyhow::ensure!(
+                row.get::<_, String>("status") == "queued",
+                "{case} claimed the job"
+            );
+            anyhow::ensure!(row.get::<_, Option<Uuid>>("leased_by_runtime_id").is_none());
+            anyhow::ensure!(row.get::<_, i32>("lease_attempts") == 0);
+        }
+
+        // Registered agents can omit the redundant body ID; the signed identity owns the lease.
+        let response = app
+            .clone()
+            .oneshot(request(&bound_token, json!({}))?)
+            .await?;
+        let status = response.status();
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        anyhow::ensure!(status == StatusCode::OK, "bound agent failed: {body}");
+        anyhow::ensure!(body["jobs"][0]["id"] == json!(job_id));
+        anyhow::ensure!(body["jobs"][0]["payload"]["prompt_text"] == "private-lease-prompt-marker");
+        anyhow::ensure!(body["jobs"][0]["payload"]["conversation_history"]
+            .to_string()
+            .contains("private-lease-history-marker"));
+        let row = pool
+            .get()
+            .await?
+            .query_one(
+                "select leased_by_runtime_id from agent_jobs where id = $1",
+                &[&job_id],
+            )
+            .await?;
+        anyhow::ensure!(row.get::<_, Option<Uuid>>("leased_by_runtime_id") == Some(runtime_id));
+        let response = app
+            .oneshot(request(&bound_token, json!({ "runtime_id": runtime_id }))?)
+            .await?;
+        anyhow::ensure!(response.status() == StatusCode::OK);
+        Ok(())
+    }
+    .await;
+
+    let project_cleanup = cleanup_origin_project(&pool, &project_id).await;
+    let owner_cleanup = cleanup_test_user(&pool, &owner_id).await;
+    let builder_cleanup = cleanup_test_user(&pool, &builder_id).await;
+    test_result?;
+    project_cleanup?;
+    owner_cleanup?;
+    builder_cleanup?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn targeted_conversation_message_is_leased_by_its_ready_runtime() -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {
         eprintln!("skipping targeted conversation lease regression: TEST_DATABASE_URL not set");
