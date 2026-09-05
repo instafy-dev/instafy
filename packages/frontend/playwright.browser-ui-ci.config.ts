@@ -31,6 +31,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "browser-chrome-mobile-layout.spec.ts",
   "browser-cursor-overlay.spec.ts",
   "browser-live-proof.spec.ts",
+  "mobile-sidebar-safe-area.spec.ts",
   "shared-browser-approval-responsive.spec.ts",
 ];
 

@@ -1,0 +1,125 @@
+import { Capacitor } from "@capacitor/core";
+import { useEffect, type ReactNode } from "react";
+
+interface SidebarStatusBarSession {
+  users: number;
+  revision: number;
+  bridge: Promise<{
+    StatusBar: typeof import("@capacitor/status-bar")["StatusBar"];
+    initialOverlay: boolean;
+  }>;
+  pending: Promise<void>;
+}
+
+let sidebarStatusBarSession: SidebarStatusBarSession | null = null;
+
+function acquireSidebarStatusBar() {
+  // Keep the original state until every queued restore finishes. A quick reopen
+  // (or StrictMode remount) must not snapshot our temporary overlay as the baseline.
+  const session = sidebarStatusBarSession ??= {
+    users: 0,
+    revision: 0,
+    bridge: import("@capacitor/status-bar").then(async ({ StatusBar }) => {
+      const initial = await StatusBar.getInfo().catch(() => null);
+      return { StatusBar, initialOverlay: initial?.overlays ?? false };
+    }),
+    pending: Promise.resolve(),
+  };
+  session.users += 1;
+
+  const applyOverlay = () => {
+    const revision = ++session.revision;
+    session.pending = session.pending
+      .then(async () => {
+        const { StatusBar, initialOverlay } = await session.bridge;
+        // Resolve the latest ownership after async work, not at request time.
+        await StatusBar.setOverlaysWebView({ overlay: session.users > 0 ? true : initialOverlay });
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (session.users === 0 && revision === session.revision && sidebarStatusBarSession === session) {
+          sidebarStatusBarSession = null;
+        }
+      });
+  };
+  applyOverlay();
+
+  return {
+    applyOverlay,
+    release: () => {
+      session.users -= 1;
+      applyOverlay();
+    },
+  };
+}
+
+/** The sidebar alone paints behind iOS system chrome; normal screens keep the native bar. */
+function useSidebarStatusBarOverlay() {
+  useEffect(() => {
+    if (Capacitor.getPlatform() !== "ios") {
+      return;
+    }
+
+    let active = true;
+    let appStateListener: { remove: () => Promise<void> } | undefined;
+    const { applyOverlay, release } = acquireSidebarStatusBar();
+    // Capacitor restores the static (non-overlay) bar when its view reappears.
+    window.addEventListener("focus", applyOverlay);
+    void import("@capacitor/app")
+      .then(({ App }) =>
+        App.addListener("appStateChange", ({ isActive }) => {
+          if (active && isActive) {
+            applyOverlay();
+          }
+        }),
+      )
+      .then((listener) => {
+        if (!active) {
+          void listener.remove();
+        } else {
+          appStateListener = listener;
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      active = false;
+      window.removeEventListener("focus", applyOverlay);
+      void appStateListener?.remove();
+      release();
+    };
+  }, []);
+}
+
+export function StudioMobileSidebarOverlay({
+  children,
+  onClose,
+}: {
+  children: ReactNode;
+  onClose: () => void;
+}) {
+  useSidebarStatusBarOverlay();
+
+  return (
+    <div className="fixed inset-0 z-50" data-testid="mobile-sidebar-overlay">
+      <button
+        type="button"
+        className="absolute inset-0 bg-slate-900/30 backdrop-blur-sm"
+        aria-label="Close sidebar"
+        onClick={onClose}
+      />
+      <div
+        className="absolute inset-y-0 left-0 border-r border-slate-200/70 bg-slate-50/80 dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-rail)]"
+        data-testid="mobile-sidebar-surface"
+        style={{
+          // Inset controls, never the painted surface (including the home-indicator area).
+          paddingTop: "var(--instafy-safe-area-inset-top)",
+          paddingBottom: "var(--instafy-safe-area-inset-bottom)",
+          paddingLeft: "var(--instafy-safe-area-inset-left)",
+        }}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
