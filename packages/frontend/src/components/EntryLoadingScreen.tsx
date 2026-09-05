@@ -8,9 +8,8 @@ export function EntryLoadingScreen() {
       data-testid="entry-loading-screen"
     >
       <div className="flex flex-col items-center gap-5">
-        <div className="flex items-center gap-3" aria-hidden="true">
-          <OctoMark className="h-10 w-10" />
-          <span className="text-lg font-bold tracking-tight">Instafy</span>
+        <div aria-hidden="true">
+          <OctoMark className="h-12 w-12" motion="thinking" />
         </div>
         <p role="status" aria-live="polite" aria-atomic="true" className="text-sm text-slate-500 dark:text-slate-400">
           Getting things ready…
