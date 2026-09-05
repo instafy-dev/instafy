@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { EventEmitter } from "node:events";
-import { readFile } from "node:fs/promises";
-import { cargoTestArtifact, fixtureChildEnvironment, installCancellationSignalHandlers, runOwnedProcess, validateBrowserFixtureEnvironment, validateFixtureEnvironment } from "./browser-profile-e2e.mjs";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { cargoTestArtifact, copyFixtureEntrypoint, fixtureChildEnvironment, installCancellationSignalHandlers, runOwnedProcess, validateBrowserFixtureEnvironment, validateFixtureEnvironment } from "./browser-profile-e2e.mjs";
 
 test("profile lifecycle requires explicit Linux loopback fixture and display", () => {
   const fixture = { DISPLAY: ":99", TEST_DATABASE_URL: "postgresql://fixture@127.0.0.1:54322/postgres" };
@@ -16,6 +18,23 @@ test("profile lifecycle requires explicit Linux loopback fixture and display", (
 
 test("fixture child environment never inherits credentials or policy overrides", () => {
   assert.deepEqual(fixtureChildEnvironment({ PATH: "/bin", HOME: "/tmp/inert", OPENAI_API_KEY: "must-not-copy", DATABASE_URL: "must-not-copy", INSTAFY_BROWSER_EGRESS_ALLOW_UNSAFE_DEV: "1", INSTAFY_ENV_DIR: "/private" }), { PATH: "/bin", HOME: "/tmp/inert" });
+});
+
+test("native fixture copies identical entrypoint bytes with executable mode without modifying the checkout", async () => {
+  const source = new URL("../docker/runtime/entrypoint.sh", import.meta.url);
+  const originalMode = (await stat(source)).mode;
+  const owned = await mkdtemp(path.join(tmpdir(), "profile-entrypoint-test-"));
+  try {
+    const destination = await copyFixtureEntrypoint(owned);
+    assert.equal(path.dirname(destination), owned);
+    assert.deepEqual(await readFile(destination), await readFile(source));
+    assert.equal((await stat(destination)).mode & 0o777, 0o700);
+    assert.equal((await stat(source)).mode, originalMode);
+    await assert.rejects(copyFixtureEntrypoint(owned), { code: "EEXIST" });
+  } finally {
+    await rm(owned, { recursive: true });
+  }
+  await assert.rejects(stat(owned), { code: "ENOENT" });
 });
 
 test("browser helper rejects missing marker, arbitrary ports and unowned profile paths before connecting", () => {

@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import { createRequire } from "node:module";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { tmpdir } from "node:os";
@@ -72,6 +72,16 @@ export function fixtureChildEnvironment(env) {
     "RUSTC", "RUSTFLAGS", "RUSTDOCFLAGS", "RUSTUP_TOOLCHAIN", "DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR",
     "SSL_CERT_FILE", "SSL_CERT_DIR", "PLAYWRIGHT_BROWSERS_PATH"];
   return Object.fromEntries(allowed.filter(key => env[key] !== undefined).map(key => [key, env[key]]));
+}
+
+export async function copyFixtureEntrypoint(binDirectory) {
+  const destination = path.join(binDirectory, "runtime-entrypoint");
+  // Docker makes the checked-in 0644 script executable while copying it into
+  // the image. Native CI must do the same only for its fresh owned copy, never
+  // chmod the checkout or silently replace an existing launcher.
+  await copyFile(path.join(root, "docker/runtime/entrypoint.sh"), destination, constants.COPYFILE_EXCL);
+  await chmod(destination, 0o700);
+  return destination;
 }
 
 function signalGroup(pid, signal) {
@@ -248,6 +258,7 @@ async function lifecycle() {
     await writeFile(ownerPath, JSON.stringify({ runId, root: temporary }), { mode: 0o600, flag: "wx" });
     const bin = path.join(temporary, "bin");
     await mkdir(bin);
+    const entrypoint = await copyFixtureEntrypoint(bin);
     stage = "build-egress-helper";
     await run("go", ["build", "-o", path.join(bin, "browser-egress-proxy"), "."], { cwd: path.join(root, "packages/browser-egress-proxy") });
     const supportedChromium = ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"];
@@ -272,7 +283,7 @@ async function lifecycle() {
       INSTAFY_ENABLE_BROWSER_SESSION: "1",
       INSTAFY_BROWSER_PROFILE_PERSIST: "1",
       INSTAFY_BROWSER_PROFILE_SNAPSHOT_SECS: "0",
-      INSTAFY_RUNTIME_ENTRYPOINT: path.join(root, "docker/runtime/entrypoint.sh"),
+      INSTAFY_RUNTIME_ENTRYPOINT: entrypoint,
       INSTAFY_PLAYWRIGHT_CDP_PORT: String(await freePort()),
       INSTAFY_BROWSER_EGRESS_PROXY_BIND: `127.0.0.1:${await freePort()}`,
       INSTAFY_BROWSER_EGRESS_ISOLATION: "1",
