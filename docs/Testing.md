@@ -210,6 +210,13 @@ executable path to Playwright. Sharing installed browser binaries does not share
 browser profiles, cookies, localStorage, or developer credentials. A missing
 installation fails the fixture preflight rather than skipping the journey.
 
+On failure the runner records only fixed provider-validation/launch stages,
+numeric response/exit codes, runtime/origin counts, and a closed vocabulary of
+runtime startup observations. The owned guardian drains process output with a
+bounded classifier; raw log text, grant bodies, URLs, and session material are
+never emitted or retained. These observations narrow the failing boundary but
+do not themselves establish a root cause or count as a passing journey.
+
 The fresh database must contain only its unchanged migration-seeded provider.
 The runner registers its additional disposable provider through the controller's
 service-role-only API; environment fallback does not override a populated registry.

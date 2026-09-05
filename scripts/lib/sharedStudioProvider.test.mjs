@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   clearOwnedBrowserBookkeeping,
   fixedBrowserDirectoryIsOwned,
+  runtimeDiagnosticCollector,
   startStudioProvider,
 } from "./sharedStudioProvider.mjs";
 
@@ -15,6 +16,19 @@ const projectId = "11111111-1111-4111-8111-111111111111";
 const runtimeId = "22222222-2222-4222-8222-222222222222";
 const leaseId = "33333333-3333-4333-8333-333333333333";
 const originId = "44444444-4444-4444-8444-444444444444";
+
+test("runtime startup diagnostics are bounded fixed categories, including split messages", () => {
+  const categories = [];
+  const collect = runtimeDiagnosticCollector(category => categories.push(category));
+  collect(Buffer.from("Bearer never-retain-this-token https://private.invalid runtime-agent boot"));
+  collect(Buffer.from("strap starting\n failed to register runtime secret=never-retain-this-token"));
+  collect(Buffer.from("failed to register runtime\n origin HTTP server listening"));
+  assert.deepEqual(categories, ["bootstrap-started", "runtime-registration-failed", "origin-listening"]);
+  collect(Buffer.alloc(8 * 1024 * 1024));
+  collect(Buffer.from("runtime agent terminated with error"));
+  assert.deepEqual(categories, ["bootstrap-started", "runtime-registration-failed", "origin-listening", "diagnostic-limit-reached"]);
+  assert.doesNotMatch(JSON.stringify(categories), /Bearer|never-retain|private\.invalid/);
+});
 
 async function fixture(t, options = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "shared-studio-provider-test-"));
@@ -30,6 +44,8 @@ import { writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
 import path from "node:path";
+console.error("runtime-agent bootstrap starting token=never-retain-this-token");
+console.log("runtime agent configuration loaded https://private.invalid");
 const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
 let listening = 0;
 for (const port of [9223, 9226]) createServer().listen(port, "127.0.0.1", () => {
@@ -171,6 +187,16 @@ test("attested ensure launches one actual owned process with a scrubbed producti
     await waitForFile(path.join(root, "runtimes", runtimeId, leaseId, "workspace", "observed-env.json")),
   );
   const observed = observation.env;
+  const diagnostics = provider.diagnostics();
+  assert.equal(diagnostics.ensureRequests, 1);
+  assert.equal(diagnostics.ensureFailures, 1); // Rejected authorization above.
+  assert.equal(diagnostics.validatedEnsures, 1);
+  assert.equal(diagnostics.launches, 1);
+  assert.equal(diagnostics.validationStage, "validated");
+  assert.equal(diagnostics.launchStage, "launched");
+  assert.equal(diagnostics.lastEnsureStatus, 200);
+  assert.deepEqual(diagnostics.categories, ["bootstrap-started", "configuration-loaded"]);
+  assert.doesNotMatch(JSON.stringify(diagnostics), /never-retain|private\.invalid|Bearer|token=/);
   assert.ok(processIsAlive(observation.descendantPid));
   assert.equal(observed.SPACE_ID, projectId);
   assert.equal(observed.RUNTIME_ID, runtimeId);

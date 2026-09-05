@@ -18,6 +18,38 @@ const EGRESS_PROXY_PORT = 9226;
 const GRACEFUL_STOP_MS = 15_000;
 const REPOSITORY_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
+const RUNTIME_DIAGNOSTIC_PATTERNS = [
+  ["bootstrap-started", "runtime-agent bootstrap starting"],
+  ["configuration-loaded", "runtime agent configuration loaded"],
+  ["configuration-failed", "failed to load configuration"],
+  ["runtime-registered", "registered runtime"],
+  ["runtime-registration-failed", "failed to register runtime"],
+  ["profile-restored", "restored browser profile baseline"],
+  ["profile-restore-failed", "browser profile restore failed"],
+  ["chromium-launch-failed", "failed to launch Chromium after profile restore"],
+  ["origin-listening", "origin HTTP server listening"],
+  ["origin-registration-failed", "origin registration failed; stopping origin server"],
+  ["registration-loop-failed", "registration loop failed; retrying after delay"],
+  ["agent-task-failed", "runtime agent terminated with error"],
+];
+
+// Also embedded in the trusted guardian. It drains output but exports only a
+// closed set of observations: never log text, tokens or paths.
+export function runtimeDiagnosticCollector(report, patterns = RUNTIME_DIAGNOSTIC_PATTERNS) {
+  const seen = new Set();
+  let tail = "", bytes = 0;
+  const emit = category => { if (!seen.has(category)) { seen.add(category); report(category); } };
+  return chunk => {
+    bytes += chunk.length;
+    if (bytes > 8 * 1024 * 1024) { tail = ""; emit("diagnostic-limit-reached"); return; }
+    for (let offset = 0; offset < chunk.length; offset += 4096) {
+      const text = tail + chunk.subarray(offset, offset + 4096).toString("utf8");
+      for (const [category, indicator] of patterns) if (text.includes(indicator)) emit(category);
+      tail = text.slice(-256);
+    }
+  };
+}
+
 // Keep a live, trusted process-group leader until every runtime helper is
 // killed. This avoids ever signaling a negative PID after the original group
 // leader exited and its numeric PID could have been recycled.
@@ -66,15 +98,18 @@ process.on("SIGTERM", stop);
 process.on("SIGINT", stop);
 process.on("disconnect", stop);
 process.on("message", message => { if (message?.stop === true) stop(); });
-agent = spawn(command, [], { stdio: "ignore" });
+agent = spawn(command, [], { stdio: ["ignore", "pipe", "pipe"] });
+const collect = (${runtimeDiagnosticCollector.toString()})(category => send({ diagnostic: category }), ${JSON.stringify(RUNTIME_DIAGNOSTIC_PATTERNS)});
+agent.stdout.on("data", collect);
+agent.stderr.on("data", collect);
 agent.once("spawn", () => {
   agentStartTicks = linuxStartTicks(agent.pid);
   send({ agentStarted: true, agentPid: agent.pid });
 });
 agent.once("error", () => { send({ agentLaunchFailed: true }); killOwnedGroup(); });
-agent.once("exit", () => {
+agent.once("exit", code => {
   agentExited = true;
-  send({ agentExited: true });
+  send({ agentExited: true, exitCode: Number.isInteger(code) && code >= 0 && code <= 255 ? code : null });
   killOwnedGroup();
 });
 setInterval(() => {}, 1000);
@@ -420,7 +455,8 @@ export async function clearOwnedBrowserBookkeeping(fixedRoot, providerRoot) {
   return true;
 }
 
-function validateEnsurePayload(payload, expectedProjectId) {
+function validateEnsurePayload(payload, expectedProjectId, stage = () => {}) {
+  stage("identity");
   requirePlainObject(payload, "provider request");
   const projectId = requireUuid(payload.project_id, "project_id");
   const runtimeId = requireUuid(payload.runtime_id, "runtime_id");
@@ -445,6 +481,7 @@ function validateEnsurePayload(payload, expectedProjectId) {
     requestError(400, "exact HTTP origin protocol is required");
   }
 
+  stage("metadata");
   const metadata = requirePlainObject(payload.metadata, "managed runtime metadata");
   const allowedTopLevel = new Set([
     "runtimeFlavor",
@@ -458,6 +495,7 @@ function validateEnsurePayload(payload, expectedProjectId) {
     if (!allowedTopLevel.has(key)) requestError(400, "unexpected managed runtime metadata");
   }
   if (metadata.runtimeFlavor !== "webdev") requestError(409, "managed webdev flavor is required");
+  stage("attestation");
   const attestation = requirePlainObject(
     metadata._instafyManagedRuntimeLaunch,
     "managed runtime launch attestation",
@@ -470,12 +508,14 @@ function validateEnsurePayload(payload, expectedProjectId) {
     requestError(409, "managed runtime generation is not attested");
   }
 
+  stage("managed-environment");
   const managedEnv = requirePlainObject(metadata.env, "managed runtime environment");
   for (const [key, value] of Object.entries(managedEnv)) {
     if (!MANAGED_ENV_KEYS.has(key) || typeof value !== "string") {
       requestError(400, "unexpected managed runtime environment");
     }
   }
+  stage("browser-policy");
   for (const [key, expected] of [
     ["INSTAFY_ENABLE_BROWSER_SESSION", "1"],
     ["INSTAFY_BROWSER_VIEWPORT_ONLY", "1"],
@@ -490,10 +530,12 @@ function validateEnsurePayload(payload, expectedProjectId) {
   if (managedEnv.INSTAFY_BROWSER_WEBRTC_ENABLED === "1") {
     requestError(409, "native fixture supports the CDP screencast transport only");
   }
+  stage("snapshot-policy");
   const snapshotSeconds = Number(managedEnv.INSTAFY_BROWSER_PROFILE_SNAPSHOT_SECS);
   if (!Number.isInteger(snapshotSeconds) || snapshotSeconds < 5 || snapshotSeconds > 3600) {
     requestError(409, "browser profile snapshot interval is invalid");
   }
+  stage("validated");
   return { projectId, runtimeId, leaseId, originId, metadata, managedEnv };
 }
 
@@ -689,6 +731,12 @@ export async function startStudioProvider({
   let closed = false;
   let closePromise = null;
   let operation = Promise.resolve();
+  const diagnosticCategories = new Set();
+  const allowedDiagnosticCategories = new Set([
+    ...RUNTIME_DIAGNOSTIC_PATTERNS.map(([category]) => category), "diagnostic-limit-reached",
+  ]);
+  const diagnostics = { ensureRequests: 0, validatedEnsures: 0, launches: 0,
+    ensureFailures: 0, lastEnsureStatus: null, validationStage: "not-requested", launchStage: "not-requested", agentExitCode: null };
 
   const serialize = task => {
     const result = operation.then(task, task);
@@ -697,6 +745,7 @@ export async function startStudioProvider({
   };
 
   async function launchRuntime(validated) {
+    diagnostics.launchStage = "generation-check";
     if (current && current.status !== "stopped" && current.status !== "exited") {
       if (current.id === validated.runtimeId && current.leaseId === validated.leaseId) {
         return current;
@@ -706,6 +755,7 @@ export async function startStudioProvider({
     if (current) await stopRuntime(current);
 
     const runtimeRoot = path.join(ownedRoot, "runtimes", validated.runtimeId, validated.leaseId);
+    diagnostics.launchStage = "owned-directories";
     const workspace = path.join(runtimeRoot, "workspace");
     const home = path.join(runtimeRoot, "home");
     const temporary = path.join(runtimeRoot, "tmp");
@@ -719,6 +769,7 @@ export async function startStudioProvider({
     ]);
     // These production helpers use fixed loopback ports. A fresh fixture root
     // does not prove that another local process has not already claimed them.
+    diagnostics.launchStage = "helper-port-check";
     await requireLoopbackPortAvailable(CDP_PORT, "Chromium CDP");
     await requireLoopbackPortAvailable(EGRESS_PROXY_PORT, "browser egress proxy");
     const originPort = await freeLoopbackPort();
@@ -796,6 +847,7 @@ export async function startStudioProvider({
       RUST_LOG: "runtime_agent=info,origin_http_server=info",
     });
 
+    diagnostics.launchStage = "guardian-spawn";
     const child = spawn(process.execPath, ["-e", RUNTIME_GUARDIAN, resolvedAgent], {
       cwd: workspace,
       env: childEnv,
@@ -810,6 +862,9 @@ export async function startStudioProvider({
       exitResult: null,
     };
     child.on("message", message => {
+      if (allowedDiagnosticCategories.has(message?.diagnostic)) diagnosticCategories.add(message.diagnostic);
+      if (message?.agentExited === true && Number.isInteger(message.exitCode) && message.exitCode >= 0 && message.exitCode <= 255)
+        diagnostics.agentExitCode = message.exitCode;
       if (message?.agentStarted === true && Number.isSafeInteger(message.agentPid) && message.agentPid > 1) {
         guardianState.agentPid = message.agentPid;
       }
@@ -901,6 +956,7 @@ export async function startStudioProvider({
       }
     });
     if (process.platform === "linux") {
+      diagnostics.launchStage = "process-identity";
       runtime.guardianIdentity = await linuxProcessIdentity(runtime.guardianPid, "runtime guardian");
       runtime.agentIdentity = await linuxProcessIdentity(runtime.pid, "runtime-agent");
       if (
@@ -912,6 +968,8 @@ export async function startStudioProvider({
       }
     }
     current = runtime;
+    diagnostics.launchStage = "launched";
+    diagnostics.launches += 1;
     if (typeof onRuntime === "function") {
       queueMicrotask(() => Promise.resolve(onRuntime(safeRuntimeView(runtime))).catch(() => {}));
     }
@@ -931,9 +989,12 @@ export async function startStudioProvider({
       }
       const payload = await readJson(request);
       if (request.url === "/runtime/ensure") {
-        const validated = validateEnsurePayload(payload, expectedProjectId);
+        diagnostics.ensureRequests += 1;
+        const validated = validateEnsurePayload(payload, expectedProjectId, stage => { diagnostics.validationStage = stage; });
+        diagnostics.validatedEnsures += 1;
         validated.runtimeToken = payload.runtime_token;
         await serialize(() => launchRuntime(validated));
+        diagnostics.lastEnsureStatus = 200;
         writeJson(response, 200, { message: "native Shared Browser CI runtime launched" });
         return;
       }
@@ -965,6 +1026,10 @@ export async function startStudioProvider({
       requestError(404, "provider route not found");
     } catch (error) {
       const status = error instanceof ProviderRequestError ? error.status : 500;
+      if (request.url === "/runtime/ensure") {
+        diagnostics.ensureFailures += 1;
+        diagnostics.lastEnsureStatus = status;
+      }
       const message = error instanceof ProviderRequestError ? error.message : "provider operation failed";
       if (!response.headersSent) writeJson(response, status, { error: message });
       else response.destroy();
@@ -1018,6 +1083,11 @@ export async function startStudioProvider({
     },
     currentRuntime() {
       return safeRuntimeView(current);
+    },
+    diagnostics() {
+      return { ...diagnostics, categories: [...diagnosticCategories].sort(),
+        hasRuntime: current !== null, agentExited: current?.agentExited === true,
+        guardianExited: current?.exitSettled === true };
     },
     assertOwnedRuntime(runtimeId) {
       const normalized = requireUuid(runtimeId, "runtimeId");
