@@ -755,6 +755,11 @@ pub(crate) async fn agent_lease(
         lease_id: token_lease_id,
         runtime_generation: token_runtime_generation,
     } = claims;
+    // Leasing exposes job payloads and conversation history. Always require a
+    // signed machine identity so runtime ownership and generation checks run,
+    // including when a caller minted only the public agent.lease scope.
+    let runtime_id =
+        token_runtime_id.ok_or_else(|| unauthorized("agent token missing runtime scope"))?;
     info!(project_id = %project_id, "agent lease request");
     let runtime_override = runtime_id_raw
         .as_deref()
@@ -770,88 +775,10 @@ pub(crate) async fn agent_lease(
         ));
     }
 
-    if state.config.strict_mode {
-        if token_runtime_id.is_none() {
-            warn!(
-                project_id = %project_id,
-                "strict mode requires runtime-scoped tokens; rejecting lease"
-            );
-            publish_controller_event(
-                &state.events,
-                "runtime.strict_mode",
-                Some(project_id),
-                None,
-                None,
-                None,
-                json!({
-                    "action": "missing_runtime_scope",
-                    "reason": "token missing runtime_id"
-                }),
-            );
-            return Err(unauthorized(
-                "agent token missing runtime scope while strict mode is enabled",
-            ));
-        }
-
-        if let Some(ref override_id) = runtime_override {
-            match token_runtime_id {
-                Some(claim_runtime_id) if claim_runtime_id == *override_id => {}
-                Some(claim_runtime_id) => {
-                    warn!(
-                        project_id = %project_id,
-                        requested_runtime = %override_id,
-                        token_runtime = %claim_runtime_id,
-                        "runtime override rejected in strict mode"
-                    );
-                    publish_controller_event(
-                        &state.events,
-                        "runtime.strict_mode",
-                        Some(project_id),
-                        None,
-                        None,
-                        None,
-                        json!({
-                            "action": "runtime_override_rejected",
-                            "requestedRuntimeId": override_id,
-                            "tokenRuntimeId": claim_runtime_id
-                        }),
-                    );
-                    return Err(forbidden(
-                        "runtime override is not allowed while strict mode is enabled",
-                    ));
-                }
-                None => {
-                    warn!(
-                        project_id = %project_id,
-                        requested_runtime = %override_id,
-                        "runtime override rejected because token missing runtime_id in strict mode"
-                    );
-                    publish_controller_event(
-                        &state.events,
-                        "runtime.strict_mode",
-                        Some(project_id),
-                        None,
-                        None,
-                        None,
-                        json!({
-                            "action": "runtime_override_rejected",
-                            "reason": "token missing runtime scope",
-                            "requestedRuntimeId": override_id
-                        }),
-                    );
-                    return Err(forbidden(
-                        "runtime override is not allowed while strict mode is enabled",
-                    ));
-                }
-            }
-        }
-    }
-
-    let runtime_id = runtime_override.or(token_runtime_id);
-    if let (Some(runtime_uuid), Some(resources)) = (runtime_id, resources) {
+    if let Some(resources) = resources {
         state
             .runtime_resource_usage
-            .set(runtime_uuid, resources)
+            .set(runtime_id, resources)
             .await;
     }
     let mut allow_untargeted_jobs = true;
@@ -867,10 +794,7 @@ pub(crate) async fn agent_lease(
                             &candidate.capabilities,
                         )
                     });
-            if preference_is_project_shareable && runtime_id != Some(preferred_runtime_id) {
-                let requested_label = runtime_id
-                    .map(|id| id.to_string())
-                    .unwrap_or_else(|| "none".to_string());
+            if preference_is_project_shareable && runtime_id != preferred_runtime_id {
                 publish_controller_event(
                     &state.events,
                     "runtime.dev_isolation",
@@ -888,7 +812,7 @@ pub(crate) async fn agent_lease(
                 info!(
                     project_id = %project_id,
                     preferred_runtime = %preferred_runtime_id,
-                    requested_runtime = %requested_label,
+                    requested_runtime = %runtime_id,
                     "restricting lease to targeted jobs (preferred runtime pinned)"
                 );
                 allow_untargeted_jobs = false;
@@ -935,18 +859,16 @@ pub(crate) async fn agent_lease(
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
-    if let Some(runtime_uuid) = runtime_id.as_ref() {
-        ensure_runtime_can_lease(
-            &state,
-            &transaction,
-            &project_id,
-            runtime_uuid,
-            token_lease_id,
-            token_runtime_generation,
-        )
-        .await?;
-        runtime::touch_runtime_last_seen(&transaction, runtime_uuid).await?;
-    }
+    ensure_runtime_can_lease(
+        &state,
+        &transaction,
+        &project_id,
+        &runtime_id,
+        token_lease_id,
+        token_runtime_generation,
+    )
+    .await?;
+    runtime::touch_runtime_last_seen(&transaction, &runtime_id).await?;
 
     let mut jobs = Vec::new();
     let mut batch_mode = AgentLeaseBatchMode::None;
@@ -956,7 +878,7 @@ pub(crate) async fn agent_lease(
         match lease_next_agent_job(
             &transaction,
             &project_id,
-            runtime_id.as_ref(),
+            Some(&runtime_id),
             lease_seconds,
             allow_untargeted_jobs,
             batch_mode == AgentLeaseBatchMode::ReadOnly,
@@ -973,20 +895,18 @@ pub(crate) async fn agent_lease(
                 let is_runtime_spread_job = job_requests_runtime_spread(&job);
                 let job_batch_group_id =
                     extract_multi_agent_group_id_from_job_payload(&job.payload);
-                if let Some(runtime_uuid) = runtime_id {
-                    let (agent_handle, agent_display_name, agent_description) =
-                        extract_agent_prompt_identity_from_job_payload(&job.payload);
-                    job.proxy = issue_proxy_envelope(
-                        &state.config,
-                        &project_id,
-                        &runtime_uuid,
-                        job.run_id.as_ref(),
-                        job.credential_id.as_ref(),
-                        agent_handle.as_deref(),
-                        agent_display_name.as_deref(),
-                        agent_description.as_deref(),
-                    );
-                }
+                let (agent_handle, agent_display_name, agent_description) =
+                    extract_agent_prompt_identity_from_job_payload(&job.payload);
+                job.proxy = issue_proxy_envelope(
+                    &state.config,
+                    &project_id,
+                    &runtime_id,
+                    job.run_id.as_ref(),
+                    job.credential_id.as_ref(),
+                    agent_handle.as_deref(),
+                    agent_display_name.as_deref(),
+                    agent_description.as_deref(),
+                );
                 jobs.push(job);
                 if jobs.len() == 1 {
                     if is_runtime_spread_job {
@@ -1018,7 +938,7 @@ pub(crate) async fn agent_lease(
     if !jobs.is_empty() {
         attach_controller_tokens(
             &state.config,
-            runtime_id.as_ref(),
+            Some(&runtime_id),
             token_lease_id.as_ref(),
             token_runtime_generation,
             supports_workspace_token,
