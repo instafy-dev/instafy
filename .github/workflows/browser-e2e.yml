@@ -133,26 +133,34 @@ jobs:
           # This path is confined to a fresh GitHub-hosted runner; it is never
           # installed or changed by the local test script on a user's machine.
           sudo ln -sf "$chromium_path" /usr/bin/chromium
+      - name: Install fixture display and database probes
+        run: sudo apt-get update && sudo apt-get install -y x11-utils sqlite3 postgresql-client
       - name: Restore Supabase Postgres image cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.instafy-image-cache
           key: supabase-postgres-image-${{ hashFiles('scripts/test-supabase-migrations-empty-db.mjs') }}
-      - name: Start disposable migrated Postgres
-        env:
-          SUPABASE_DATABASE_ONLY: "1"
+      - name: Start disposable migrated Supabase and local authentication
         run: |
           node scripts/ensure-supabase-postgres-image.mjs
           pnpm supabase:up
       - name: Test fixture safety guards
-        run: node --test scripts/browser-profile-e2e.test.mjs
+        run: node --test scripts/browser-profile-e2e.test.mjs scripts/shared-browser-studio-e2e.test.mjs scripts/lib/sharedStudioProvider.test.mjs
       - name: Exercise real Chromium and controller profile lifecycle
         run: xvfb-run -a node scripts/browser-profile-e2e.mjs
-      - name: Retain the credential-free profile result
+      - name: Exercise signed-in Studio launch, input, snapshot restore and clear
+        run: xvfb-run -a node scripts/shared-browser-studio-e2e.mjs
+      - name: Retain only credential-free browser results
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: shared-browser-profile-e2e
-          path: packages/frontend/test-results/browser-ci/shared-profile/result.json
+          path: |
+            packages/frontend/test-results/browser-ci/shared-profile/result.json
+            packages/frontend/test-results/browser-ci/shared-studio/result.json
+            packages/frontend/test-results/browser-ci/shared-studio/required-browser-result.json
           if-no-files-found: error
           retention-days: 7
+      - name: Stop the disposable authentication stack
+        if: always()
+        run: pnpm supabase:down
