@@ -114,6 +114,15 @@ test("Studio and trusted service accounts are provisioned separately and both cl
   assert.doesNotMatch(rendererFixture, /serviceUser|SERVICE_ROLE|SERVICE_RUNTIME/);
 });
 
+test("the fixture registers its provider through controller authority without replacing the migration seed", async () => {
+  const source = await readFile(new URL("./shared-browser-studio-e2e.mjs", import.meta.url), "utf8");
+  assert.match(source, /assert\.deepEqual\(providers, \{ count: 1, seeded: 1 \}/);
+  assert.match(source, /providerConfigurationClaimed = true;\s*const registered = await jsonRequest\(`\$\{controllerURL\}\/providers`, \{\s*token: stack\.SERVICE_ROLE_KEY, method: "POST"/);
+  assert.match(source, /endpoint: provider\.url, authToken: provider\.token, allowedOrgIds: \[\]/);
+  assert.match(source, /if \(providerConfigurationClaimed\) await clean\(\(\) => executeSQL\("delete from runtime_providers where id='instafy-cloud'"\)\)/);
+  assert.doesNotMatch(source, /RUNTIME_PROVIDERS:|delete from runtime_providers where id='runtime'/);
+});
+
 async function ownedRoot(t) {
   const directory = await mkdtemp(path.join(tmpdir(), "studio-daemon-test-"));
   t.after(() => rm(directory, { recursive: true, force: true }));

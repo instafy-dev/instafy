@@ -205,7 +205,7 @@ async function lifecycle() {
   const run = (command, args, options = {}) => runOwnedProcess(command, args,
     { env: buildEnv, signal, ...options });
   let claimed = false, passed = false, stage = "preflight", user, serviceUser, projectId, controller, vite, provider, site, control;
-  let stack;
+  let stack, providerConfigurationClaimed = false;
   const started = Date.now();
   const connections = new Map();
   const cleanupErrors = [];
@@ -225,6 +225,8 @@ async function lifecycle() {
     stage = "fresh-database-check";
     const [inventory] = await sql("select (select count(*) from projects)::integer as projects, (select count(*) from auth.users)::integer as users");
     assert.deepEqual(inventory, { projects: 0, users: 0 }, "refusing an occupied local database; use a fresh disposable stack");
+    const [providers] = await sql("select count(*)::integer as count, count(*) filter (where id='runtime' and kind='docker' and endpoint is null and auth_token is null)::integer as seeded from runtime_providers");
+    assert.deepEqual(providers, { count: 1, seeded: 1 }, "only the unchanged migration-seeded provider is permitted");
     stage = "sqlite-preflight";
     await run("sqlite3", [":memory:", "select 1"], { timeoutMs: 5_000 });
     const home = path.join(temporary, "home");
@@ -264,9 +266,7 @@ async function lifecycle() {
       RUNTIME_SIGNING_PRIVATE_KEY: keys.privateKey.export({ type: "pkcs8", format: "pem" }),
       RUNTIME_SIGNING_PUBLIC_KEY: keys.publicKey.export({ type: "spki", format: "pem" }),
       RUNTIME_SIGNING_KEY_ID: "shared-studio-fixture", WORKSPACE_ROOT: path.join(temporary, "workspaces"),
-      CONTROLLER_EXTERNAL_URL: controllerURL,
-      RUNTIME_PROVIDERS: JSON.stringify([{ id: "instafy-cloud", displayName: "Disposable managed browser", kind: "external_http",
-        endpoint: provider.url, authToken: provider.token, allowedOrgIds: [] }]), RUST_LOG: "error" };
+      CONTROLLER_EXTERNAL_URL: controllerURL, RUST_LOG: "error" };
     const bootController = async () => {
       controller = startDaemon(controllerBinary, [], { cwd: temporary, env: controllerEnv, signal });
       await poll(async () => {
@@ -276,6 +276,20 @@ async function lifecycle() {
     };
     stage = "controller-start";
     await bootController();
+    stage = "register-fixture-provider";
+    // The migrated provider registry is authoritative, so RUNTIME_PROVIDERS
+    // cannot override its seeded row. Register via the real administrative API;
+    // the generated token never enters SQL command arguments or the renderer.
+    // Claim cleanup before sending: the server may commit even if its reply fails.
+    providerConfigurationClaimed = true;
+    const registered = await jsonRequest(`${controllerURL}/providers`, {
+      token: stack.SERVICE_ROLE_KEY, method: "POST", body: {
+        id: "instafy-cloud", displayName: "Disposable managed browser", kind: "external_http",
+        endpoint: provider.url, authToken: provider.token, allowedOrgIds: [],
+      },
+    });
+    assert.equal(registered.id, "instafy-cloud");
+    assert.equal(registered.kind, "external_http");
     stage = "mint-user";
     user = JSON.parse(await run(process.execPath, ["scripts/mint-test-user.mjs", "--json"], { timeoutMs: 90_000 }));
     assert.match(user.userId, uuid); assert.match(user.org?.id, uuid);
@@ -421,6 +435,7 @@ async function lifecycle() {
       ["scripts/mint-test-user.mjs", "--cleanup", user.userId, "--json"], { timeoutMs: 60_000, signal: undefined }));
     if (serviceUser?.userId && uuid.test(serviceUser.userId)) await clean(() => run(process.execPath,
       ["scripts/mint-test-user.mjs", "--cleanup", serviceUser.userId, "--json"], { timeoutMs: 60_000, signal: undefined }));
+    if (providerConfigurationClaimed) await clean(() => executeSQL("delete from runtime_providers where id='instafy-cloud'"));
     if (claimed) await clean(() => rm(fixedRoot, { recursive: true }));
     await clean(() => rm(temporary, { recursive: true }));
     await mkdir(path.dirname(receiptPath), { recursive: true });

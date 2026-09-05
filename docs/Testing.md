@@ -203,6 +203,10 @@ of this lane. It creates the Studio user's project through the real
 authenticated controller API, then enables persistence for only that project
 on the disposable controller.
 
+The fresh database must contain only its unchanged migration-seeded provider.
+The runner registers its additional disposable provider through the controller's
+service-role-only API; environment fallback does not override a populated registry.
+
 Studio launches an actual native runtime-agent through a test-only loopback
 allocator implementing the controller's existing provider protocol. The
 production runtime restores and launches Chromium; Studio receives real
@@ -219,7 +223,8 @@ Finally, the visible clear action must retire the browser, start a fresh one,
 and show empty website data while Studio remains signed in. No model job is
 submitted. Only fixed-field result receipts are retained; traces, video,
 screenshots, raw service logs, profiles, and session values are not uploaded.
-Cleanup removes only this fixture's project, both users, processes and temporary data.
+Cleanup removes only this fixture's project, provider registration, both users,
+processes and temporary data, leaving the migration-seeded provider untouched.
 
 ## Stripe E2E
 - `PLAYWRIGHT_STRIPE_E2E=1 pnpm -C packages/frontend test:e2e:payments`
