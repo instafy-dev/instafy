@@ -144,7 +144,9 @@ async function providerFetch(provider, route, body, token = provider.token) {
 }
 
 async function waitForFile(file) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  // A cold fake Node worker can take just over a second to start on macOS.
+  // Bound infrastructure startup at five seconds without retrying any test.
+  for (let attempt = 0; attempt < 500; attempt += 1) {
     try {
       return await readFile(file, "utf8");
     } catch (error) {
