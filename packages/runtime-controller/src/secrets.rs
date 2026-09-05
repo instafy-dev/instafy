@@ -1256,7 +1256,9 @@ async fn agent_secrets(
     let token = extract_agent_token(&headers)?;
     let claims = verify_agent_token_with_scopes(&state.config, token, &["agent.secrets"])?;
     let project_id = claims.project_id;
-    let runtime_scope = claims.runtime_id;
+    let runtime_id = claims
+        .runtime_id
+        .ok_or_else(|| unauthorized("agent token missing runtime scope"))?;
 
     let job_id = Uuid::from_str(body.job_id.trim())
         .map_err(|_| bad_request("jobId must be a valid UUID"))?;
@@ -1284,16 +1286,14 @@ async fn agent_secrets(
         .await
         .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
 
-    if let Some(runtime_id) = runtime_scope.as_ref() {
-        ensure_agent_token_matches_runtime_lease(&state, &transaction, &claims, runtime_id).await?;
-    }
+    ensure_agent_token_matches_runtime_lease(&state, &transaction, &claims, &runtime_id).await?;
 
     let row = transaction
         .query_opt(
-            "select id, status, leased_by_runtime_id, payload, credential_id
+            "select id, status, leased_by_runtime_id, lease_expires_at, payload, credential_id
              from agent_jobs
              where id = $1 and project_id = $2
-             limit 1",
+             for share",
             &[&job_id, &project_id],
         )
         .await
@@ -1309,14 +1309,12 @@ async fn agent_secrets(
     }
 
     let leased_by_runtime_id: Option<Uuid> = row.get("leased_by_runtime_id");
-    if let Some(required_runtime) = runtime_scope {
-        if leased_by_runtime_id != Some(required_runtime) {
-            return Err(unauthorized("job must be leased by this runtime"));
-        }
-    } else if state.config.strict_mode {
-        return Err(unauthorized(
-            "agent token missing runtime scope while strict mode is enabled",
-        ));
+    if leased_by_runtime_id != Some(runtime_id) {
+        return Err(unauthorized("job must be leased by this runtime"));
+    }
+    let lease_expires_at: Option<DateTime<Utc>> = row.get("lease_expires_at");
+    if lease_expires_at.is_none_or(|expires_at| expires_at <= Utc::now()) {
+        return Err(unauthorized("job lease is no longer active"));
     }
 
     let payload: JsonValue = row.get::<_, PgJson<JsonValue>>("payload").0;
@@ -1507,6 +1505,10 @@ async fn agent_secrets(
         inventory,
     }))
 }
+
+#[cfg(test)]
+#[path = "secrets_security_tests.rs"]
+mod security_tests;
 
 #[cfg(test)]
 mod tests {

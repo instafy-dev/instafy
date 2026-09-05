@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { assessRegistryState, verifyPackDirectory } from "./verify-changeset-pack.mjs";
+import { assessRegistryState, verifyPackDirectory, verifyRegistry } from "./verify-changeset-pack.mjs";
 
 const temporaryDirectories = [];
 
@@ -174,4 +174,198 @@ test("requires both exact registry bytes and the planned latest dist-tag", () =>
       ),
     /different bytes/u,
   );
+});
+
+const registryEntry = { name: "@instafy/cli", version: "0.2.0" };
+const registryIntegrity = "sha512-reviewed";
+
+function registryClock(context, respond) {
+  const clock = { time: 0, requests: [], timeouts: [], sleeps: [] };
+  context.mock.method(AbortSignal, "timeout", (milliseconds) => {
+    clock.timeouts.push(milliseconds);
+    return new AbortController().signal;
+  });
+  clock.dependencies = {
+    now: () => clock.time,
+    sleep: async (milliseconds) => {
+      clock.sleeps.push(milliseconds);
+      clock.time += milliseconds;
+    },
+    fetchRegistry: async (url, options) => {
+      assert.equal(options.redirect, "error");
+      assert.ok(options.signal instanceof AbortSignal);
+      assert.equal(options.method, undefined, "registry convergence only issues reads");
+      assert.equal(options.body, undefined);
+      assert.equal(options.headers, undefined, "public readback receives no credentials");
+      clock.requests.push({ url, time: clock.time });
+      return respond(url, clock);
+    },
+  };
+  return clock;
+}
+
+function registryResponse(body, status = 200) {
+  return new Response(JSON.stringify(body), { status });
+}
+
+test("waits for delayed immutable bytes and latest visibility without republishing", async (context) => {
+  const clock = registryClock(context, (url, state) => {
+    if (url.endsWith("/dist-tags")) {
+      return registryResponse({ latest: state.time >= 102_000 ? "0.2.0" : "0.1.11" });
+    }
+    return state.time >= 96_000
+      ? registryResponse({ dist: { integrity: registryIntegrity } })
+      : registryResponse({ error: "Not found" }, 404);
+  });
+  assert.equal(await verifyRegistry(registryEntry, registryIntegrity, "after", clock.dependencies), true);
+  assert.equal(clock.time, 102_000);
+  assert.ok(clock.sleeps.length > 10, "covers propagation beyond the former ten-attempt limit");
+  assert.ok(clock.timeouts.every((milliseconds) => milliseconds === 15_000));
+  assert.ok(clock.requests.every(({ url }) =>
+    url === "https://registry.npmjs.org/%40instafy%2Fcli/0.2.0" ||
+    url === "https://registry.npmjs.org/-/package/%40instafy%2Fcli/dist-tags"));
+});
+
+test("stops exactly at the five-minute deadline and caps every request to the remaining budget", async (context) => {
+  const clock = registryClock(context, () => registryResponse({ error: "Not found" }, 404));
+  await assert.rejects(
+    () => verifyRegistry(registryEntry, registryIntegrity, "after", clock.dependencies),
+    /within the readback deadline/u,
+  );
+  assert.equal(clock.time, 300_000);
+  assert.equal(clock.requests.length, 100);
+  assert.equal(clock.requests.at(-1).time, 297_000);
+  assert.equal(clock.timeouts.at(-1), 3_000);
+  for (const [index, request] of clock.requests.entries()) {
+    assert.equal(clock.timeouts[index], Math.min(15_000, 300_000 - request.time));
+  }
+});
+
+test("response-body time is included and an exact match arriving at the deadline is refused", async (context) => {
+  const clock = registryClock(context, (url, state) => {
+    if (state.time < 297_000) return registryResponse({ error: "Not found" }, 404);
+    const tag = url.endsWith("/dist-tags");
+    return {
+      status: 200,
+      ok: true,
+      text: async () => {
+        state.time += tag ? 1_000 : 2_000;
+        return JSON.stringify(tag ? { latest: "0.2.0" } : { dist: { integrity: registryIntegrity } });
+      },
+    };
+  });
+  await assert.rejects(
+    () => verifyRegistry(registryEntry, registryIntegrity, "after", clock.dependencies),
+    /within the readback deadline/u,
+  );
+  assert.equal(clock.time, 300_000);
+  assert.deepEqual(clock.timeouts.slice(-2), [3_000, 1_000]);
+  assert.equal(clock.sleeps.length, 99);
+});
+
+test("an absent latest tag may converge after publication but never authorizes a prepublish collision", async (context) => {
+  const clock = registryClock(context, (url, state) => registryResponse(url.endsWith("/dist-tags")
+    ? (state.time >= 30_000 ? { latest: "0.2.0" } : {})
+    : { dist: { integrity: registryIntegrity } }));
+  assert.equal(await verifyRegistry(registryEntry, registryIntegrity, "after", clock.dependencies), true);
+  assert.equal(clock.time, 30_000);
+
+  const before = registryClock(context, (url) => registryResponse(url.endsWith("/dist-tags")
+    ? {} : { dist: { integrity: registryIntegrity } }));
+  await assert.rejects(
+    () => verifyRegistry(registryEntry, registryIntegrity, "before", before.dependencies),
+    /npm latest does not point/u,
+  );
+  assert.equal(before.requests.length, 2);
+  assert.deepEqual(before.sleeps, []);
+});
+
+test("does not read latest if the immutable response exhausts the budget", async (context) => {
+  const clock = registryClock(context, (_url, state) => {
+    if (state.time < 297_000) return registryResponse({ error: "Not found" }, 404);
+    state.time += 3_000;
+    return registryResponse({ dist: { integrity: registryIntegrity } });
+  });
+  await assert.rejects(
+    () => verifyRegistry(registryEntry, registryIntegrity, "after", clock.dependencies),
+    /within the readback deadline/u,
+  );
+  assert.equal(clock.time, 300_000);
+  assert.ok(clock.requests.every(({ url }) => !url.endsWith("/dist-tags")));
+});
+
+test("before mode keeps its single-read absence and exact collision checks", async (context) => {
+  const clock = registryClock(context, () => registryResponse({ error: "Not found" }, 404));
+  assert.equal(await verifyRegistry(registryEntry, registryIntegrity, "before", clock.dependencies), false);
+  assert.equal(clock.requests.length, 1);
+  assert.deepEqual(clock.sleeps, []);
+
+  const existing = registryClock(context, (url) => registryResponse(url.endsWith("/dist-tags")
+    ? { latest: "0.2.0" } : { dist: { integrity: registryIntegrity } }));
+  assert.equal(await verifyRegistry(registryEntry, registryIntegrity, "before", existing.dependencies), true);
+  assert.equal(existing.requests.length, 2);
+  assert.deepEqual(existing.sleeps, []);
+
+  const stale = registryClock(context, (url) => registryResponse(url.endsWith("/dist-tags")
+    ? { latest: "0.1.11" } : { dist: { integrity: registryIntegrity } }));
+  await assert.rejects(
+    () => verifyRegistry(registryEntry, registryIntegrity, "before", stale.dependencies),
+    /npm latest does not point/u,
+  );
+  assert.equal(stale.requests.length, 2);
+  assert.deepEqual(stale.sleeps, []);
+});
+
+for (const mode of ["before", "after"]) {
+  test(`${mode} refuses mismatched bytes immediately without a dist-tag read`, async (context) => {
+    const clock = registryClock(context, () => registryResponse({ dist: { integrity: "sha512-other" } }));
+    await assert.rejects(
+      () => verifyRegistry(registryEntry, registryIntegrity, mode, clock.dependencies),
+      /different bytes/u,
+    );
+    assert.equal(clock.requests.length, 1);
+    assert.deepEqual(clock.sleeps, []);
+  });
+
+  for (const status of [401, 403, 429, 500]) {
+    test(`${mode} does not retry registry HTTP ${status}`, async (context) => {
+      const clock = registryClock(context, () => registryResponse({ error: "Unavailable" }, status));
+      await assert.rejects(
+        () => verifyRegistry(registryEntry, registryIntegrity, mode, clock.dependencies),
+        new RegExp(`HTTP ${status}`, "u"),
+      );
+      assert.equal(clock.requests.length, 1);
+      assert.deepEqual(clock.sleeps, []);
+    });
+  }
+
+  for (const body of [{}, { dist: {} }, { dist: { integrity: "" } }, { dist: { integrity: 1 } }]) {
+    test(`${mode} refuses a malformed successful integrity response ${JSON.stringify(body)}`, async (context) => {
+      const clock = registryClock(context, () => registryResponse(body));
+      await assert.rejects(
+        () => verifyRegistry(registryEntry, registryIntegrity, mode, clock.dependencies),
+        /missing integrity/u,
+      );
+      assert.equal(clock.requests.length, 1);
+      assert.deepEqual(clock.sleeps, []);
+    });
+  }
+}
+
+test("does not retry malformed JSON, malformed dist-tags or transport failures", async (context) => {
+  for (const response of [
+    () => new Response("{", { status: 200 }),
+    () => registryResponse(null),
+    () => registryResponse([]),
+    () => registryResponse({ latest: null }),
+    () => registryResponse({ latest: "" }),
+    () => registryResponse({ latest: 1 }),
+    () => { throw new Error("read aborted"); },
+  ]) {
+    const clock = registryClock(context, (url) => url.endsWith("/dist-tags")
+      ? response() : registryResponse({ dist: { integrity: registryIntegrity } }));
+    await assert.rejects(() => verifyRegistry(registryEntry, registryIntegrity, "after", clock.dependencies));
+    assert.equal(clock.requests.length, 2);
+    assert.deepEqual(clock.sleeps, []);
+  }
 });
