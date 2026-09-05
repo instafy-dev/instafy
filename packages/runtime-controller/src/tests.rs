@@ -26,6 +26,7 @@ use crate::tunnels::{
     revoke_tunnels_for_scope, DynTunnelBroker, TunnelAssignment, TunnelBroker, TunnelProvider,
     TunnelRequestContext,
 };
+use anyhow::Context;
 use async_trait::async_trait;
 use axum::{
     body::{to_bytes, Body},
@@ -52,6 +53,9 @@ use tokio::time::timeout;
 use tokio_postgres::{types::Json as PgJson, NoTls};
 use tower::ServiceExt;
 use uuid::Uuid;
+
+#[path = "browser_profile_e2e_fixture.rs"]
+mod browser_profile_e2e_fixture;
 
 struct TestOriginKeyPair {
     private_pem: String,
@@ -832,6 +836,198 @@ async fn browser_profile_reset_retains_profile_when_provider_release_cannot_be_p
 }
 
 #[tokio::test]
+async fn browser_profile_reset_accepts_removed_runtime_with_ordered_provider_release_ack(
+) -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("acknowledged browser profile reset test").await?;
+    crate::browser_profile::ensure_browser_profiles_table(&pool).await?;
+
+    let project_id = Uuid::new_v4();
+    let runtime_id = Uuid::new_v4();
+    let lease_id = Uuid::new_v4();
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into projects (id, project_type, status)
+                 values ($1, 'customer', 'active')",
+                &[&project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into project_browser_profiles
+                   (id, project_id, scope, version, nonce_b64, ciphertext_b64, bytes)
+                 values ($1, $2, 'project', 1, 'nonce', 'ciphertext', 10)",
+                &[&Uuid::new_v4(), &project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runtimes
+                   (id, project_id, provider, status, idle_ttl_seconds, updated_at)
+                 values ($1, $2, 'instafy-cloud', 'removed', 600, now())",
+                &[&runtime_id, &project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runtime_leases
+                   (id, project_id, runtime_id, status, requested_at, launched_at, released_at)
+                 values ($1, $2, $3, 'released', now(), now(), now())",
+                &[&lease_id, &project_id, &runtime_id],
+            )
+            .await?;
+        // An acknowledgement older than the latest stop cannot prove the
+        // current terminal generation was released.
+        connection
+            .execute(
+                "insert into runtime_events (runtime_id, project_id, kind, data)
+                 values (
+                     $1, $2, 'provider_release_acknowledged',
+                     jsonb_build_object(
+                         'provider', 'instafy_cloud',
+                         'runtimeLeaseId', $3::text
+                     )
+                 )",
+                &[&runtime_id, &project_id, &lease_id.to_string()],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runtime_events (runtime_id, project_id, kind, data)
+                 values ($1, $2, 'stopped', '{}'::jsonb)",
+                &[&runtime_id, &project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runtime_events (runtime_id, project_id, kind, data)
+                 values ($1, $2, 'registered', '{}'::jsonb)",
+                &[&runtime_id, &project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "update runtime_events
+                 set created_at = now() - interval '15 days'
+                 where runtime_id = $1",
+                &[&runtime_id],
+            )
+            .await?;
+    }
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "browser-profile-reset-acknowledged-removal",
+    );
+    let state = build_test_state(pool.clone(), config);
+    let app = crate::browser_profile::router().with_state(state.clone());
+    let reset_request = || {
+        Request::builder()
+            .method("DELETE")
+            .uri(format!("/projects/{project_id}/browser-profile"))
+            .header("authorization", "Bearer service-role-token")
+            .body(Body::empty())
+    };
+
+    crate::runtime::prune_expired_runtime_events(&state).await?;
+    let retained_kinds: Vec<String> = pool
+        .get()
+        .await?
+        .query_one(
+            "select array_agg(kind order by id)
+             from runtime_events
+             where runtime_id = $1",
+            &[&runtime_id],
+        )
+        .await?
+        .get(0);
+    assert_eq!(
+        retained_kinds,
+        vec![
+            "provider_release_acknowledged".to_string(),
+            "stopped".to_string(),
+        ],
+        "retention must prune ordinary telemetry without deleting either side of lifecycle proof"
+    );
+
+    let stale_ack_reset = app.clone().oneshot(reset_request()?).await?;
+    assert_eq!(stale_ack_reset.status(), StatusCode::CONFLICT);
+    let profile_count: i64 = pool
+        .get()
+        .await?
+        .query_one(
+            "select count(*) from project_browser_profiles where project_id = $1",
+            &[&project_id],
+        )
+        .await?
+        .get(0);
+    assert_eq!(
+        profile_count, 1,
+        "stale provider acknowledgement must retain the encrypted profile"
+    );
+
+    // This is the state produced by a successful provider-backed removal: the
+    // lease is released, the runtime is removed with no active generation, and
+    // its matching provider acknowledgement follows the latest stop event.
+    let connection = pool.get().await?;
+    connection
+        .execute(
+            "insert into runtime_events (runtime_id, project_id, kind, data, created_at)
+             values (
+                 $1, $2, 'provider_release_acknowledged',
+                 jsonb_build_object(
+                     'provider', 'instafy_cloud',
+                     'runtimeLeaseId', $3::text
+                 ),
+                 now() - interval '15 days'
+             )",
+            &[&runtime_id, &project_id, &lease_id.to_string()],
+        )
+        .await?;
+    drop(connection);
+    crate::runtime::prune_expired_runtime_events(&state).await?;
+    let retained_proof_count: i64 = pool
+        .get()
+        .await?
+        .query_one(
+            "select count(*)
+             from runtime_events
+             where runtime_id = $1
+               and kind in ('stopped', 'provider_release_acknowledged')",
+            &[&runtime_id],
+        )
+        .await?
+        .get(0);
+    assert_eq!(
+        retained_proof_count, 3,
+        "retention must preserve an aged acknowledgement newer than the latest stop"
+    );
+
+    let acknowledged_reset = app.oneshot(reset_request()?).await?;
+    assert_eq!(acknowledged_reset.status(), StatusCode::OK);
+    let acknowledged_body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(acknowledged_reset.into_body(), usize::MAX).await?)?;
+    assert_eq!(acknowledged_body["cleared"], true);
+    assert_eq!(acknowledged_body["stoppedRuntimeIds"], json!([]));
+
+    let profile_count: i64 = pool
+        .get()
+        .await?
+        .query_one(
+            "select count(*) from project_browser_profiles where project_id = $1",
+            &[&project_id],
+        )
+        .await?
+        .get(0);
+    assert_eq!(profile_count, 0);
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn service_role_organization_delete_is_idempotent_for_recovery() -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {
         eprintln!("skipping organization delete recovery test: TEST_DATABASE_URL not set");
@@ -991,13 +1187,17 @@ async fn active_self_hosted_runtimes_cannot_access_browser_profiles() -> anyhow:
         let agent_token = token_result
             .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?
             .token;
-        for method in ["GET", "PUT"] {
+        for (method, uri) in [
+            ("GET", "/agent/browser-profile"),
+            ("PUT", "/agent/browser-profile"),
+            ("PUT", "/agent/browser-profile/v2?version=0"),
+        ] {
             let response = app
                 .clone()
                 .oneshot(
                     Request::builder()
                         .method(method)
-                        .uri("/agent/browser-profile")
+                        .uri(uri)
                         .header(
                             axum::http::header::AUTHORIZATION,
                             format!("Bearer {agent_token}"),
@@ -1051,6 +1251,8 @@ async fn active_managed_cloud_runtime_can_put_and_get_browser_profile() -> anyho
     let project_id = Uuid::new_v4();
     let runtime_id = Uuid::new_v4();
     let lease_id = Uuid::new_v4();
+    let competing_runtime_id = Uuid::new_v4();
+    let competing_lease_id = Uuid::new_v4();
     {
         let connection = pool.get().await?;
         connection
@@ -1060,36 +1262,41 @@ async fn active_managed_cloud_runtime_can_put_and_get_browser_profile() -> anyho
                 &[&project_id],
             )
             .await?;
-        connection
-            .execute(
-                "insert into runtimes (
+        for (runtime_id, lease_id) in [
+            (runtime_id, lease_id),
+            (competing_runtime_id, competing_lease_id),
+        ] {
+            connection
+                .execute(
+                    "insert into runtimes (
                      id, project_id, provider, status, endpoint_url, task_ref,
                      idle_ttl_seconds, last_seen_at, capabilities
                  ) values (
                      $1, $2, 'instafy-cloud', 'ready', 'http://runtime.invalid',
                      $3, 600, now(), '{\"agent\":true}'::jsonb
                  )",
-                &[
-                    &runtime_id,
-                    &project_id,
-                    &format!("browser-profile-cloud-{runtime_id}"),
-                ],
-            )
-            .await?;
-        connection
-            .execute(
-                "insert into runtime_leases (
+                    &[
+                        &runtime_id,
+                        &project_id,
+                        &format!("browser-profile-cloud-{runtime_id}"),
+                    ],
+                )
+                .await?;
+            connection
+                .execute(
+                    "insert into runtime_leases (
                      id, project_id, runtime_id, status, requested_at, launched_at
                  ) values ($1, $2, $3, 'active', now(), now())",
-                &[&lease_id, &project_id, &runtime_id],
-            )
-            .await?;
-        connection
-            .execute(
-                "update runtimes set active_lease_id = $2 where id = $1",
-                &[&runtime_id, &lease_id],
-            )
-            .await?;
+                    &[&lease_id, &project_id, &runtime_id],
+                )
+                .await?;
+            connection
+                .execute(
+                    "update runtimes set active_lease_id = $2 where id = $1",
+                    &[&runtime_id, &lease_id],
+                )
+                .await?;
+        }
     }
 
     let mut config = build_app_config(
@@ -1112,22 +1319,121 @@ async fn active_managed_cloud_runtime_can_put_and_get_browser_profile() -> anyho
     )
     .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?
     .token;
+    let competing_token = crate::auth::issue_agent_token_for_runtime(
+        &config,
+        &project_id,
+        &competing_runtime_id,
+        Some(&competing_lease_id),
+        None,
+        "instafy-cloud",
+        &json!({ "agent": true }),
+    )
+    .map_err(|(status, body)| anyhow::anyhow!("{status}: {}", body.0.message))?
+    .token;
     let app = crate::browser_profile::router().with_state(build_test_state(pool.clone(), config));
     let profile = b"managed-cloud-browser-profile";
+    let competing_profile = b"competing-runtime-profile";
+    let put_request = |token: &str, version: Option<i64>, body: &'static [u8]| {
+        let uri = match version {
+            Some(version) => format!("/agent/browser-profile/v2?version={version}"),
+            None => "/agent/browser-profile/v2".to_string(),
+        };
+        Request::builder()
+            .method("PUT")
+            .uri(uri)
+            .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::from(body))
+    };
 
-    let put_response = app
+    // Legacy uploads have no precondition and must not create or replace data.
+    let missing_version = app
+        .clone()
+        .oneshot(put_request(&agent_token, None, profile)?)
+        .await?;
+    assert_eq!(missing_version.status(), StatusCode::PRECONDITION_REQUIRED);
+    for uri in ["/agent/browser-profile", "/agent/browser-profile?version=0"] {
+        let legacy = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(uri)
+                    .header(
+                        axum::http::header::AUTHORIZATION,
+                        format!("Bearer {agent_token}"),
+                    )
+                    .body(Body::from(profile.as_slice()))?,
+            )
+            .await?;
+        assert_eq!(legacy.status(), StatusCode::PRECONDITION_REQUIRED);
+    }
+    let empty = app
         .clone()
         .oneshot(
             Request::builder()
-                .method("PUT")
                 .uri("/agent/browser-profile")
                 .header(
                     axum::http::header::AUTHORIZATION,
                     format!("Bearer {agent_token}"),
                 )
-                .body(Body::from(profile.as_slice()))?,
+                .body(Body::empty())?,
         )
         .await?;
+    assert_eq!(empty.status(), StatusCode::NOT_FOUND);
+    assert_eq!(
+        empty.headers()["x-instafy-profile-write-policy"],
+        "versioned-v2"
+    );
+
+    // Both runtimes observed an empty profile. Exactly one initial writer may
+    // win; this exercises the row-absence race that SELECT FOR UPDATE missed.
+    // A SHARE table lock allows the old SELECT FOR UPDATE to see no row, but
+    // holds both INSERTs until both requests reach the write. Without this
+    // barrier, scheduling could let the first commit before the second reads
+    // and accidentally make the old implementation pass this regression.
+    let mut barrier_connection = pool.get().await?;
+    let barrier = barrier_connection.transaction().await?;
+    barrier
+        .batch_execute("lock table project_browser_profiles in share mode")
+        .await?;
+    let first_app = app.clone();
+    let second_app = app.clone();
+    let first_request = put_request(&agent_token, Some(0), profile)?;
+    let second_request = put_request(&competing_token, Some(0), competing_profile)?;
+    let initial_writers = tokio::spawn(async move {
+        tokio::join!(
+            first_app.oneshot(first_request),
+            second_app.oneshot(second_request)
+        )
+    });
+    let both_waiting = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let connection = pool.get().await?;
+        loop {
+            let waiting: i64 = connection.query_one(
+                "select count(*) from pg_locks where relation = 'project_browser_profiles'::regclass
+                 and mode = 'RowExclusiveLock' and not granted",
+                &[],
+            ).await?.get(0);
+            if waiting >= 2 {
+                break Ok::<_, anyhow::Error>(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    barrier.commit().await?;
+    drop(barrier_connection);
+    let (first, second) = initial_writers.await?;
+    both_waiting.context("both initial profile writers must reach the write barrier")??;
+    let first = first?;
+    let second = second?;
+    let (put_response, rejected, winning_profile) = if first.status() == StatusCode::OK {
+        (first, second, profile.as_slice())
+    } else {
+        (second, first, competing_profile.as_slice())
+    };
+    assert_eq!(rejected.status(), StatusCode::CONFLICT);
+
     let put_status = put_response.status();
     let put_body = to_bytes(put_response.into_body(), usize::MAX).await?;
     assert_eq!(
@@ -1139,9 +1445,23 @@ async fn active_managed_cloud_runtime_can_put_and_get_browser_profile() -> anyho
     let manifest: serde_json::Value = serde_json::from_slice(&put_body)?;
     assert_eq!(manifest["scope"], json!("project"));
     assert_eq!(manifest["version"], json!(1));
-    assert_eq!(manifest["bytes"], json!(profile.len()));
+    assert_eq!(manifest["bytes"], json!(winning_profile.len()));
+
+    for (version, expected_status) in [
+        (None, StatusCode::PRECONDITION_REQUIRED),
+        (Some(0), StatusCode::CONFLICT),
+        (Some(99), StatusCode::CONFLICT),
+        (Some(-1), StatusCode::BAD_REQUEST),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(put_request(&agent_token, version, b"must-not-overwrite")?)
+            .await?;
+        assert_eq!(response.status(), expected_status);
+    }
 
     let get_response = app
+        .clone()
         .oneshot(
             Request::builder()
                 .method("GET")
@@ -1155,6 +1475,10 @@ async fn active_managed_cloud_runtime_can_put_and_get_browser_profile() -> anyho
         .await?;
     assert_eq!(get_response.status(), StatusCode::OK);
     assert_eq!(
+        get_response.headers()["x-instafy-profile-write-policy"],
+        "versioned-v2"
+    );
+    assert_eq!(
         get_response
             .headers()
             .get("x-instafy-profile-version")
@@ -1165,7 +1489,49 @@ async fn active_managed_cloud_runtime_can_put_and_get_browser_profile() -> anyho
         to_bytes(get_response.into_body(), usize::MAX)
             .await?
             .as_ref(),
-        profile
+        winning_profile
+    );
+
+    // The same rule applies after a row exists: two separate runtimes with the
+    // same restored version cannot both replace it, nor can the loser retry it.
+    let (first, second) = tokio::join!(
+        app.clone()
+            .oneshot(put_request(&agent_token, Some(1), b"next-first")?),
+        app.clone()
+            .oneshot(put_request(&competing_token, Some(1), b"next-second")?),
+    );
+    let first = first?;
+    let second = second?;
+    let (winner, loser, next_profile) = if first.status() == StatusCode::OK {
+        (first, second, b"next-first".as_slice())
+    } else {
+        (second, first, b"next-second".as_slice())
+    };
+    assert_eq!(winner.status(), StatusCode::OK);
+    assert_eq!(loser.status(), StatusCode::CONFLICT);
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&to_bytes(winner.into_body(), usize::MAX).await?)?;
+    assert_eq!(manifest["version"], json!(2));
+    let stale = app
+        .clone()
+        .oneshot(put_request(&competing_token, Some(1), b"stale-retry")?)
+        .await?;
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/agent/browser-profile")
+                .header(
+                    axum::http::header::AUTHORIZATION,
+                    format!("Bearer {agent_token}"),
+                )
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(response.headers()["x-instafy-profile-version"], "2");
+    assert_eq!(
+        to_bytes(response.into_body(), usize::MAX).await?.as_ref(),
+        next_profile
     );
 
     cleanup_origin_project(&pool, &project_id).await?;
@@ -21854,12 +22220,14 @@ async fn strict_runtime_stop_accepts_removed_runtime_only_with_newer_provider_ac
     let project_id = Uuid::new_v4();
     let acknowledged_runtime_id = Uuid::new_v4();
     let missing_ack_runtime_id = Uuid::new_v4();
+    let missing_stop_runtime_id = Uuid::new_v4();
     let stale_ack_runtime_id = Uuid::new_v4();
     let wrong_provider_ack_runtime_id = Uuid::new_v4();
     let wrong_lease_ack_runtime_id = Uuid::new_v4();
     let malformed_ack_runtime_id = Uuid::new_v4();
     let acknowledged_lease_id = Uuid::new_v4();
     let missing_ack_lease_id = Uuid::new_v4();
+    let missing_stop_lease_id = Uuid::new_v4();
     let stale_ack_lease_id = Uuid::new_v4();
     let wrong_provider_ack_lease_id = Uuid::new_v4();
     let wrong_lease_ack_lease_id = Uuid::new_v4();
@@ -21877,6 +22245,7 @@ async fn strict_runtime_stop_accepts_removed_runtime_only_with_newer_provider_ac
         for runtime_id in [
             acknowledged_runtime_id,
             missing_ack_runtime_id,
+            missing_stop_runtime_id,
             stale_ack_runtime_id,
             wrong_provider_ack_runtime_id,
             wrong_lease_ack_runtime_id,
@@ -21894,6 +22263,7 @@ async fn strict_runtime_stop_accepts_removed_runtime_only_with_newer_provider_ac
         for (lease_id, runtime_id) in [
             (acknowledged_lease_id, acknowledged_runtime_id),
             (missing_ack_lease_id, missing_ack_runtime_id),
+            (missing_stop_lease_id, missing_stop_runtime_id),
             (stale_ack_lease_id, stale_ack_runtime_id),
             (wrong_provider_ack_lease_id, wrong_provider_ack_runtime_id),
             (wrong_lease_ack_lease_id, wrong_lease_ack_runtime_id),
@@ -21940,6 +22310,22 @@ async fn strict_runtime_stop_accepts_removed_runtime_only_with_newer_provider_ac
                 "INSERT INTO runtime_events (runtime_id, project_id, kind, data)
                  VALUES ($1, $2, 'stopped', '{}'::jsonb)",
                 &[&missing_ack_runtime_id, &project_id],
+            )
+            .await?;
+
+        connection
+            .execute(
+                "INSERT INTO runtime_events (runtime_id, project_id, kind, data)
+                 VALUES (
+                     $1, $2, 'provider_release_acknowledged',
+                     jsonb_build_object('provider', $3::text, 'runtimeLeaseId', $4::text)
+                 )",
+                &[
+                    &missing_stop_runtime_id,
+                    &project_id,
+                    &provider_id,
+                    &missing_stop_lease_id.to_string(),
+                ],
             )
             .await?;
 
@@ -22118,6 +22504,7 @@ async fn strict_runtime_stop_accepts_removed_runtime_only_with_newer_provider_ac
 
     for runtime_id in [
         missing_ack_runtime_id,
+        missing_stop_runtime_id,
         stale_ack_runtime_id,
         wrong_provider_ack_runtime_id,
         wrong_lease_ack_runtime_id,
@@ -22183,7 +22570,7 @@ async fn strict_runtime_stop_accepts_removed_runtime_only_with_newer_provider_ac
         )
         .await?
         .get(0);
-    assert_eq!(remaining_removed, 6);
+    assert_eq!(remaining_removed, 7);
     drop(connection);
 
     provider_handle.abort();

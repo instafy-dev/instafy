@@ -4,7 +4,7 @@
 // "make the sharing obvious" half of the browser-identity work.
 
 const SHARED_BROWSER_TOOLTIP =
-  "This is the project's shared browser. Anyone on the project can see it and reuse whatever you sign into here. Choose Personal Browser in the desktop app when a login should stay on this device.";
+  "This project's members see the same remote browser and logged-in pages on their devices. Members with control can use those logins. Personal Browser has a separate profile for you on this device; its logins are not copied here.";
 
 export function BrowserIdentityBadge({ className }: { className?: string }) {
   return (
@@ -19,7 +19,7 @@ export function BrowserIdentityBadge({ className }: { className?: string }) {
         .join(" ")}
     >
       <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-sky-500 dark:bg-sky-400" aria-hidden="true" />
-      <span>Shared with your team</span>
+      <span>Shared · this project</span>
     </span>
   );
 }
