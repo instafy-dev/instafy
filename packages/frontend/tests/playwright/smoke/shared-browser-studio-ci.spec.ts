@@ -30,6 +30,7 @@ type FixtureState = {
 };
 
 type BrowserGrant = { runtimeId: string; originId: string; browserSessionId: string };
+type BrowserGeneration = { runtimeId: string; originId: string; leaseId: string };
 
 function isControllerURL(raw: string, fixture: StudioFixture, pathname: string): boolean {
   const actual = new URL(raw);
@@ -96,6 +97,18 @@ async function control<T>(fixture: StudioFixture, pathname: string, data?: unkno
     throw new Error(`Disposable Studio control ${pathname} failed (${response.status}).`);
   }
   return await response.json() as T;
+}
+
+async function readyGeneration(fixture: StudioFixture, grant: BrowserGrant): Promise<BrowserGeneration> {
+  expect(UUID.test(grant.runtimeId)).toBe(true);
+  expect(UUID.test(grant.originId)).toBe(true);
+  const generation = await control<BrowserGeneration>(fixture, "/ready", {
+    runtimeId: grant.runtimeId, originId: grant.originId,
+  });
+  expect(generation.runtimeId).toBe(grant.runtimeId);
+  expect(generation.originId).toBe(grant.originId);
+  expect(UUID.test(generation.leaseId)).toBe(true);
+  return generation;
 }
 
 async function state(fixture: StudioFixture): Promise<FixtureState> {
@@ -280,10 +293,10 @@ test.describe("Disposable signed-in Studio Shared Browser", () => {
       });
     };
     observeGrants(page);
-    const latestGrant = async (excludedRuntimeIds: string[] = []): Promise<BrowserGrant> => {
-      await expect.poll(() => grants.some(grant => !excludedRuntimeIds.includes(grant.runtimeId)),
+    const latestGrant = async (excludedOriginIds: string[] = []): Promise<BrowserGrant> => {
+      await expect.poll(() => grants.some(grant => !excludedOriginIds.includes(grant.originId)),
         { timeout: 180_000 }).toBe(true);
-      return grants.filter(grant => !excludedRuntimeIds.includes(grant.runtimeId)).at(-1)!;
+      return grants.filter(grant => !excludedOriginIds.includes(grant.originId)).at(-1)!;
     };
 
     await page.setViewportSize({ width: 1100, height: 900 });
@@ -299,8 +312,7 @@ test.describe("Disposable signed-in Studio Shared Browser", () => {
     await expectSignedIn(page, fixture);
     await openSharedBrowser(page);
     const initial = await latestGrant();
-    expect(UUID.test(initial.runtimeId)).toBe(true);
-    await control(fixture, "/ready", { runtimeId: initial.runtimeId });
+    const initialGeneration = await readyGeneration(fixture, initial);
     await navigateAndObserve(page, fixture, "empty");
 
     await control(fixture, "/checkpoint", {});
@@ -327,9 +339,12 @@ test.describe("Disposable signed-in Studio Shared Browser", () => {
     await page.goto(studioURL.toString());
     await expectSignedIn(page, fixture);
     await openSharedBrowser(page);
-    const replacement = await latestGrant([initial.runtimeId]);
+    // The controller may reuse a stopped runtime record. A genuinely fresh
+    // browser is identified by both its new origin and its owned lease.
+    const replacement = await latestGrant([initial.originId]);
     expect(replacement.originId).not.toBe(initial.originId);
-    await control(fixture, "/ready", { runtimeId: replacement.runtimeId });
+    const replacementGeneration = await readyGeneration(fixture, replacement);
+    expect(replacementGeneration.leaseId).not.toBe(initialGeneration.leaseId);
     const restored = await navigateAndObserve(page, fixture, "signed-in");
     expect(restored.submissions).toBe(beforeLogin.submissions + 1);
 
@@ -344,9 +359,12 @@ test.describe("Disposable signed-in Studio Shared Browser", () => {
     await page.getByTestId("shared-browser-clear-data").click();
     expect((await clearResponse).ok()).toBe(true);
     await expectBrowserReady(page);
-    const cleared = await latestGrant([initial.runtimeId, replacement.runtimeId]);
+    const cleared = await latestGrant([initial.originId, replacement.originId]);
+    expect(cleared.originId).not.toBe(initial.originId);
     expect(cleared.originId).not.toBe(replacement.originId);
-    await control(fixture, "/ready", { runtimeId: cleared.runtimeId });
+    const clearedGeneration = await readyGeneration(fixture, cleared);
+    expect(clearedGeneration.leaseId).not.toBe(initialGeneration.leaseId);
+    expect(clearedGeneration.leaseId).not.toBe(replacementGeneration.leaseId);
     const empty = await navigateAndObserve(page, fixture, "empty");
     expect(empty.submissions).toBe(restored.submissions);
     await expectSignedIn(page, fixture);

@@ -114,6 +114,40 @@ export function viteCliPath() {
   return path.join(path.dirname(require.resolve("vite/package.json")), "bin/vite.js");
 }
 
+export function createStudioGenerationBridge({ provider, attach }) {
+  const generations = new Map();
+  return async ({ runtimeId, originId }) => {
+    assert.match(runtimeId, uuid); assert.match(originId, uuid);
+    // Runtime records may be reused after an acknowledged stop. Re-prove the
+    // owned process on every request, including cache hits, and reject grants
+    // for an old origin before attaching to the current generation's CDP port.
+    const runtime = await provider.assertOwnedRuntime(runtimeId);
+    assert.equal(runtime.id, runtimeId);
+    assert.equal(runtime.originId, originId, "grant must match the current owned origin");
+    assert.match(runtime.leaseId, uuid);
+    const generation = { runtimeId, leaseId: runtime.leaseId, originId };
+    const key = JSON.stringify(generation);
+    if (!generations.has(key)) generations.set(key, Promise.resolve().then(() => attach(runtime)));
+    const pending = generations.get(key);
+    try { await pending; }
+    catch (error) { if (generations.get(key) === pending) generations.delete(key); throw error; }
+    return generation;
+  };
+}
+
+export async function closeStudioConnections(connections) {
+  const results = await Promise.allSettled([...connections].map(async browser => {
+    let timer;
+    try {
+      await Promise.race([browser.close(), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("owned CDP disconnect timed out")), 5_000);
+      })]);
+    } finally { clearTimeout(timer); }
+  }));
+  connections.clear();
+  assert.ok(results.every(result => result.status === "fulfilled"), "owned CDP connection cleanup failed");
+}
+
 async function listen(server) {
   await new Promise((resolve, reject) => {
     server.once("error", reject); server.listen(0, "127.0.0.1", resolve);
@@ -250,7 +284,7 @@ async function lifecycle() {
   let claimed = false, passed = false, stage = "preflight", user, serviceUser, projectId, controller, vite, provider, site, control;
   let stack, providerConfigurationClaimed = false;
   const started = Date.now();
-  const connections = new Map();
+  const connections = new Set();
   const cleanupErrors = [];
   const clean = async action => { try { await action(); } catch { cleanupErrors.push("owned-resource-cleanup-failed"); } };
   const sql = async query => JSON.parse((await run("psql", [stack.DB_URL, "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-c",
@@ -377,13 +411,14 @@ async function lifecycle() {
       } else response.writeHead(404).end();
     });
     const siteURL = await listen(site);
-    const attachBridge = async runtimeId => {
-      const runtime = await provider.assertOwnedRuntime(runtimeId);
-      if (connections.has(runtimeId)) return;
+    const attachBridge = createStudioGenerationBridge({ provider, attach: async runtime => {
       const { chromium } = require("@playwright/test");
       const browser = await poll(async () => {
         try { return await chromium.connectOverCDP(`http://127.0.0.1:${runtime.cdpPort}`, { timeout: 1_000 }); } catch { return false; }
       }, signal);
+      // Retain even a connection whose route setup fails, so final cleanup
+      // disconnects every fixture-owned client after provider shutdown.
+      connections.add(browser);
       const context = browser.contexts()[0];
       assert.ok(context, "real runtime persistent context required");
       await context.route(`${fixtureOrigin}/**`, async route => {
@@ -400,8 +435,7 @@ async function lifecycle() {
         await route.fulfill({ status: reply.status, headers: Object.fromEntries(reply.headers),
           body: Buffer.from(await reply.arrayBuffer()) });
       });
-      connections.set(runtimeId, browser);
-    };
+    } });
     const snapshotReady = async runtimeId => {
       assert.equal(provider.currentRuntime()?.id, runtimeId);
       const rows = await sql(`select version, nonce_b64, ciphertext_b64 from project_browser_profiles where project_id='${projectId}'`);
@@ -442,7 +476,7 @@ async function lifecycle() {
           assert.equal(observed.submissions, 0);
         } else if (request.method === "POST" && ["/ready", "/wait-snapshot", "/stop-runtime"].includes(request.url)) {
           assert.match(data.runtimeId, uuid); assert.equal(provider.currentRuntime()?.id, data.runtimeId);
-          if (request.url === "/ready") await attachBridge(data.runtimeId);
+          if (request.url === "/ready") result = await attachBridge(data);
           else if (request.url === "/wait-snapshot") result = await poll(() => snapshotReady(data.runtimeId), signal, 90_000);
           else {
             const stopped = await jsonRequest(`${controllerURL}/runtime/stop`, { token: userToken, method: "POST", timeout: 45_000,
@@ -487,6 +521,7 @@ async function lifecycle() {
     await clean(async () => { if (vite) await vite.close(); });
     await clean(async () => { if (control) await closeServer(control); });
     await clean(async () => { if (provider) await provider.close(); });
+    await clean(() => closeStudioConnections(connections));
     await clean(async () => { if (site) await closeServer(site); });
     await clean(async () => { if (controller) await controller.close(); });
     if (projectId && uuid.test(projectId)) await clean(() => executeSQL(`delete from projects where id='${projectId}'`));
