@@ -30,6 +30,7 @@ import {
   resolveNativeOtaChannel,
 } from "./shared";
 import { nativeBuildDisablesOta } from "./nativeRuntimeConfig";
+import { waitForNativeOtaAppMounted } from "./appReady";
 
 let installed = false;
 let refreshNativeOtaSession: (() => Promise<OtaCheckResponse | null>) | null = null;
@@ -119,6 +120,9 @@ async function prepareNativeOtaLifecycle(): Promise<{
   identity: NativeOtaIdentity | null;
   reconciliation: ReturnType<typeof reconcileNativeOtaState> | null;
 }> {
+  // Keep the native rollback timer armed until React commits the successful app shell.
+  // This deliberately does not wait for authentication, network data, or later lazy routes.
+  await waitForNativeOtaAppMounted();
   const channel = resolveNativeOtaChannel();
   await setNativeLiveUpdateChannel(channel).catch((error) => {
     const message = error instanceof Error ? error.message : String(error);
