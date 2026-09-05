@@ -1109,7 +1109,7 @@ export async function interruptControllerConversationRuns(params: {
 
 export async function fetchConversationMessagesFromController(
   params: FetchConversationMessagesParams,
-): Promise<ControllerConversationMessagesPage | "not_found" | null> {
+): Promise<ControllerConversationMessagesPage | "not_found" | "access_denied" | null> {
   if (!runtimeControllerEnabled) {
     return null;
   }
@@ -1146,6 +1146,13 @@ export async function fetchConversationMessagesFromController(
 
     if (response.status === 404) {
       return "not_found";
+    }
+
+    if (response.status === 403) {
+      // Revoked permission is terminal. A 401 still uses the auth-recovery
+      // path below, which can discard an expired override and retry the live session.
+      await readControllerError(response, "fetch messages denied", requestContext);
+      return "access_denied";
     }
 
     if (!response.ok) {
