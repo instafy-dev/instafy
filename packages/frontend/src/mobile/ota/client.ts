@@ -5,6 +5,7 @@ import type {
   OtaPlatform,
   OtaUpdateEvent,
 } from "@instafy/ota-contracts";
+import { isOtaNativeBuild } from "@instafy/ota-contracts";
 import { instafyBuildInfo } from "../../config/buildInfo";
 import { controllerBaseUrl, readControllerError } from "../../sdk/instafy";
 import { getNativeLiveUpdateDeviceId } from "./liveUpdate";
@@ -25,6 +26,7 @@ export interface NativeOtaIdentity {
   platform: OtaPlatform;
   channel: string;
   native_version: string;
+  native_build?: string | null;
   current_bundle_version: string | null;
   current_git_sha: string | null;
 }
@@ -80,6 +82,7 @@ export async function buildNativeOtaIdentity(
       platform,
       channel: overrides.channel ?? resolveNativeOtaChannel(),
       native_version: info.version?.trim() || "0.0.0",
+      native_build: isOtaNativeBuild(info.build) ? info.build : null,
       current_bundle_version:
         overrides.current_bundle_version !== undefined
           ? overrides.current_bundle_version
@@ -104,10 +107,19 @@ export async function checkForNativeOtaUpdate(
     platform: identity.platform,
     channel: identity.channel,
     native_version: identity.native_version,
+    native_build: isOtaNativeBuild(identity.native_build) ? identity.native_build : null,
     current_bundle_version: identity.current_bundle_version,
     current_git_sha: identity.current_git_sha,
   };
-  const result = await postJson<OtaCheckResponse>("/ota/check", payload);
+  const response = await postJson<OtaCheckResponse>("/ota/check", payload);
+  // Defense in depth: a guarded offer must never reach download/staging on the wrong shell,
+  // even if a stale or misconfigured controller returns update_available.
+  const result: OtaCheckResponse =
+    response.update_available && response.required_native_build != null &&
+    (!isOtaNativeBuild(response.required_native_build) ||
+      response.required_native_build !== payload.native_build)
+      ? { update_available: false, reason: "native_build_incompatible" }
+      : response;
   storeLastNativeOtaResult(result.reason);
   storeLastNativeOtaCheckSnapshot({
     checked_at: new Date().toISOString(),
@@ -139,6 +151,7 @@ export async function postNativeOtaEvent(input: {
     platform: input.identity.platform,
     channel: input.identity.channel,
     native_version: input.identity.native_version,
+    native_build: isOtaNativeBuild(input.identity.native_build) ? input.identity.native_build : null,
     bundle_version: input.bundle_version ?? input.identity.current_bundle_version,
     git_sha: input.git_sha ?? input.identity.current_git_sha,
     session_id: input.session_id ?? null,

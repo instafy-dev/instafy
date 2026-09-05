@@ -27,6 +27,11 @@
       "type": "string",
       "minLength": 1
     },
+    "native_build": {
+      "type": ["string", "null"],
+      "maxLength": 64,
+      "pattern": "^[0-9]+(?:\\.[0-9]+)*$(?![\\s\\S])"
+    },
     "current_bundle_version": {
       "type": ["string", "null"]
     },
