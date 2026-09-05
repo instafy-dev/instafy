@@ -9,6 +9,11 @@ Entry links go to Studio, which checks authentication before downloading the wor
 visitors see **Open Studio**; signed-out visitors see **Get started** and are sent through login
 with their destination preserved. Opening the public homepage itself does not require signing in.
 
+Pending route and authentication handoffs use a neutral full-screen loading surface: one Octo
+swimming above “Getting things ready…”, without a wordmark. The canonical animation stops for
+reduced-motion preferences, and the loading surface disappears once the destination or login
+form is ready. Login forms keep their static Octo mark.
+
 The landing workspace is an explicitly labeled interactive example. Visitors choose a scenario;
 it does not rotate automatically or create a real session. Octo's existing thinking animation
 appears only beside the example's active work. Motion can be paused and stops when the example
