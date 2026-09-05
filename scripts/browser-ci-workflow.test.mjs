@@ -43,5 +43,10 @@ test("standalone configs do not import the authenticated development harness", (
   }
   const vite = read("packages/frontend/vite.browser-ui-ci.config.ts");
   assert.match(vite, /envFile: false/);
+  assert.match(vite, /cacheDir: path\.join\(frontendRoot, "node_modules", "\.vite-browser-ui-ci"\)/);
+  assert.match(vite, /include: \["react", "react-dom\/client", "react-aria-components"\]/);
+  assert.match(vite, /noDiscovery: true/);
   assert.doesNotMatch(vite, /from ["']\.\/vite\.config|loadEnv\(/);
+  const resolver = read("packages/frontend/tests/playwright/component/viteComponentDependencies.ts");
+  assert.ok(resolver.includes("\\.vite(?:-browser-ui-ci)?"));
 });

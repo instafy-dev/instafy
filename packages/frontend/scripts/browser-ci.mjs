@@ -28,6 +28,24 @@ export function browserCiEnvironment(source = process.env) {
   return env;
 }
 
+/**
+ * The Electron fixture has a second, narrower environment boundary. Preserve
+ * X11's authorization file with its display address (xvfb-run needs both), but
+ * never inherit HOME, application configuration or service credentials.
+ * @param {Record<string, string | undefined>} source
+ * @returns {Record<string, string>}
+ */
+export function personalBrowserFixtureEnvironment(source = process.env) {
+  const env = { PATH: source.PATH ?? "" };
+  for (const key of [
+    "SystemRoot", "WINDIR", "DISPLAY", "XAUTHORITY", "WAYLAND_DISPLAY",
+    "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
+  ]) {
+    if (source[key] !== undefined) env[key] = source[key];
+  }
+  return env;
+}
+
 export async function runBrowserCi(args = process.argv.slice(2)) {
   if (args[0] === "--") args = args.slice(1);
   if (args.length !== 1 || !Object.hasOwn(configs, args[0])) {
