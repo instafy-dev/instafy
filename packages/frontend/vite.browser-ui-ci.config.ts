@@ -16,15 +16,21 @@ const workspaceDependencyRoot = path.resolve(frontendRoot, "..", "..", "node_mod
  * and styles they mount.
  */
 export default defineConfig({
+  // Keep this required lane's optimizer state separate from normal development
+  // and build caches. A fresh hosted checkout therefore proves the complete
+  // explicit dependency list instead of inheriting a developer Vite scan.
+  cacheDir: path.join(frontendRoot, "node_modules", ".vite-browser-ui-ci"),
   envFile: false,
   envPrefix: "INSTAFY_BROWSER_UI_CI_PUBLIC_",
   plugins: [react()],
   optimizeDeps: {
     // Avoid crawling the full application entrypoint and its auth/provider
     // graph. The component helper still receives stable optimized URLs for
-    // the two dependencies used by each synthetic fixture.
+    // the dependencies used by each synthetic fixture. Button-based browser
+    // chrome also reaches use-sync-external-store's CommonJS shim through
+    // react-aria-components, so optimize that package boundary as a unit.
     entries: [],
-    include: ["react", "react-dom/client"],
+    include: ["react", "react-dom/client", "react-aria-components"],
     noDiscovery: true,
   },
   server: {

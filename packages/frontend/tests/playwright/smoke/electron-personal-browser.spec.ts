@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { personalBrowserFixtureEnvironment } from "../../../scripts/browser-ci.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -230,15 +231,12 @@ test.describe("Electron Personal Browser", () => {
     // The fixture supplies its own inert identity and uses a disposable profile;
     // do not forward controller/model credentials or an operator's app settings.
     const env: Record<string, string> = {
-      PATH: process.env.PATH ?? "",
+      ...personalBrowserFixtureEnvironment(process.env),
       TMPDIR: os.tmpdir(),
       INSTAFY_APP_URL: `${fixtureOrigin}/studio`,
       INSTAFY_DESKTOP_ALLOW_MULTIPLE_INSTANCES: "1",
       INSTAFY_DESKTOP_USER_DATA_DIR: userDataDir,
     };
-    for (const name of ["SystemRoot", "WINDIR", "DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]) {
-      if (process.env[name]) env[name] = process.env[name]!;
-    }
     if (featureEnabled === undefined) {
       delete env.INSTAFY_DESKTOP_PERSONAL_BROWSER;
     } else {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { browserCiEnvironment, runBrowserCi } from "../packages/frontend/scripts/browser-ci.mjs";
+import { browserCiEnvironment, personalBrowserFixtureEnvironment, runBrowserCi } from "../packages/frontend/scripts/browser-ci.mjs";
 
 test("browser CI keeps OS/display settings but cannot inherit credentials or development endpoints", () => {
   const source = {
@@ -16,6 +16,31 @@ test("browser CI keeps OS/display settings but cannot inherit credentials or dev
     PLAYWRIGHT_BROWSERS_PATH: source.PLAYWRIGHT_BROWSERS_PATH, CI: "1",
   });
   assert.equal(source.CI, "0");
+});
+
+test("both browser CI environment boundaries preserve display authorization without credentials", () => {
+  const display = {
+    PATH: "/fixture/bin", SystemRoot: "/fixture/windows", WINDIR: "/fixture/windows",
+    DISPLAY: ":99", XAUTHORITY: "/fixture/xvfb/Xauthority",
+    WAYLAND_DISPLAY: "wayland-fixture", XDG_RUNTIME_DIR: "/fixture/runtime",
+  };
+  const source = {
+    ...display,
+    HOME: "/fixture/home", USERPROFILE: "/fixture/user", TMPDIR: "/fixture/tmp",
+    OPENAI_API_KEY: "must-not-copy", SUPABASE_SERVICE_ROLE_KEY: "must-not-copy",
+    DATABASE_URL: "must-not-copy", GH_TOKEN: "must-not-copy", NODE_OPTIONS: "must-not-copy",
+    INSTAFY_ENV_DIR: "/private/env", CODEX_HOME: "/private/auth",
+    INSTAFY_APP_URL: "https://remote.invalid", INSTAFY_DESKTOP_USER_DATA_DIR: "/private/profile",
+    INSTAFY_DESKTOP_PERSONAL_BROWSER: "0", CONTROLLER_URL: "https://remote.invalid",
+  };
+  const outer = browserCiEnvironment(source);
+  assert.deepEqual(outer, {
+    ...display, HOME: source.HOME, USERPROFILE: source.USERPROFILE, TMPDIR: source.TMPDIR, CI: "1",
+  });
+  assert.deepEqual(personalBrowserFixtureEnvironment(outer), display);
+  // Direct developer smoke runs must be equally isolated without the CI wrapper.
+  assert.deepEqual(personalBrowserFixtureEnvironment(source), display);
+  assert.equal(source.INSTAFY_DESKTOP_PERSONAL_BROWSER, "0");
 });
 
 test("browser CI rejects filters, reporter overrides, unknown lanes and missing lane", async () => {
