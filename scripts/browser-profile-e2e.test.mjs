@@ -192,19 +192,29 @@ test("SIGINT and SIGTERM cancel the fixture and their handlers are removed", () 
   }
 });
 
-async function assertOwnedProcessStopped(pid) {
+async function assertOwnedProcessStopped(pid, { kill = process.kill, read = readFile, platform = process.platform } = {}) {
   for (let retry = 0; retry < 50; retry++) {
-    try { process.kill(pid, 0); } catch (error) { assert.equal(error.code, "ESRCH"); return; }
-    if (process.platform === "linux") {
+    try { kill(pid, 0); } catch (error) { assert.equal(error.code, "ESRCH"); return; }
+    if (platform === "linux") {
       try {
-        const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+        const stat = await read(`/proc/${pid}/stat`, "utf8");
         if (stat.slice(stat.lastIndexOf(")") + 1).trimStart().startsWith("Z")) return;
-      } catch (error) { if (error.code === "ENOENT") return; throw error; }
+      } catch (error) { if (["ENOENT", "ESRCH"].includes(error.code)) return; throw error; }
     }
     await new Promise(resolve => setTimeout(resolve, 20));
   }
   assert.fail("owned disposable process survived cancellation/cleanup");
 }
+
+test("stopped-process proof accepts procfs exit races but rejects inaccessible live evidence", async () => {
+  // Linux can reap the process after kill(0) succeeds or after /proc/stat opens.
+  // The latter makes read(2) return ESRCH instead of open(2)'s ENOENT.
+  const probe = code => assertOwnedProcessStopped(123, { platform: "linux", kill() {},
+    read: async () => { throw Object.assign(new Error("fixture read"), { code }); } });
+  await probe("ENOENT");
+  await probe("ESRCH");
+  await assert.rejects(probe("EACCES"), { code: "EACCES" });
+});
 
 test("cancellation stops the owned build/test process group and descendants", async () => {
   const cancellation = new AbortController();

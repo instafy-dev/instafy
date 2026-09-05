@@ -116,20 +116,28 @@ async function waitForFile(filename) {
   assert.fail("owned daemon fixture did not start");
 }
 
-async function assertStopped(pid) {
+async function assertStopped(pid, { kill = process.kill, read = readFile, platform = process.platform } = {}) {
   assert.ok(Number.isSafeInteger(pid) && pid > 1);
   for (let retry = 0; retry < 100; retry++) {
-    try { process.kill(pid, 0); } catch (error) { assert.equal(error.code, "ESRCH"); return; }
-    if (process.platform === "linux") {
+    try { kill(pid, 0); } catch (error) { assert.equal(error.code, "ESRCH"); return; }
+    if (platform === "linux") {
       try {
-        const value = await readFile(`/proc/${pid}/stat`, "utf8");
+        const value = await read(`/proc/${pid}/stat`, "utf8");
         if (value.slice(value.lastIndexOf(")") + 1).trimStart().startsWith("Z")) return;
-      } catch (error) { if (error.code === "ENOENT") return; throw error; }
+      } catch (error) { if (["ENOENT", "ESRCH"].includes(error.code)) return; throw error; }
     }
     await new Promise(resolve => setTimeout(resolve, 20));
   }
   assert.fail("owned fixture process survived cleanup");
 }
+
+test("Studio stopped-process proof handles procfs exit races without swallowing permission errors", async () => {
+  const probe = code => assertStopped(123, { platform: "linux", kill() {},
+    read: async () => { throw Object.assign(new Error("fixture read"), { code }); } });
+  await probe("ENOENT");
+  await probe("ESRCH");
+  await assert.rejects(probe("EACCES"), { code: "EACCES" });
+});
 
 const daemonFixture = String.raw`
 const {spawn}=require('node:child_process');
