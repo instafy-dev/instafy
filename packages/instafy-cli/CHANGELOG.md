@@ -1,5 +1,11 @@
 # @instafy/cli
 
+## 0.2.2
+
+### Patch Changes
+
+- 67ff0e4: Allow ordinary `instafy chat` prompts to persist requested workspace files, matching Studio chat behavior.
+
 ## 0.2.1
 
 ### Patch Changes
