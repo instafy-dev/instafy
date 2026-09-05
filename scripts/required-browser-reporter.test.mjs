@@ -74,7 +74,7 @@ test("global failures, unknown lanes and missing discovery fail closed", async (
 
 test("missing component spec fails despite enough other tests", async (t) => {
   const run = setup(t, "browser-ui");
-  const tests = Array.from({ length: 11 }, (_, index) => ({ ...run.tests[0], id: String(index) }));
+  const tests = Array.from({ length: REQUIRED_BROWSER_LANES["browser-ui"].minimumTests }, (_, index) => ({ ...run.tests[0], id: String(index) }));
   run.begin(tests); run.pass(tests);
   assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" });
 });
