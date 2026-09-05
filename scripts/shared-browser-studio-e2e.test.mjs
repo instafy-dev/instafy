@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
-import { cargoBinaryArtifact, fixtureHTML, fixtureOrigin, startDaemon,
+import { cargoBinaryArtifact, closeStudioConnections, createStudioGenerationBridge, fixtureHTML, fixtureOrigin, startDaemon,
   resolvePlaywrightChromiumExecutable, studioProcessEnvironment, validateStudioStack,
   viteCliPath } from "./shared-browser-studio-e2e.mjs";
 import { fixtureChildEnvironment } from "./browser-profile-e2e.mjs";
@@ -139,6 +139,85 @@ test("fixture page is inert and tests HTTP login, localStorage and HttpOnly invi
   assert.match(html, /localStorage\.setItem\('fixture_login','studio-proof'\)/);
   assert.match(html, /document\.cookie\.includes\('fixture_http='\)/);
   assert.doesNotMatch(html, /https?:\/\/|SUPABASE|Authorization|access_token|fixtureControlToken/);
+});
+
+test("Studio bridges follow owned lease/origin generations when the controller reuses a runtime ID", async () => {
+  const id = suffix => `00000000-0000-4000-8000-${String(suffix).padStart(12, "0")}`;
+  let runtime = { id: id(1), leaseId: id(2), originId: id(3) };
+  let ownershipChecks = 0;
+  let owned = true;
+  const attachments = [];
+  const ready = createStudioGenerationBridge({
+    provider: { async assertOwnedRuntime(runtimeId) {
+      ownershipChecks++;
+      assert.equal(runtimeId, runtime.id);
+      assert.ok(owned, "owned process proof failed");
+      return { ...runtime };
+    } },
+    attach: async current => { attachments.push(current); await new Promise(resolve => setImmediate(resolve)); },
+  });
+  const initial = { runtimeId: runtime.id, originId: runtime.originId };
+  const first = { ...initial, leaseId: runtime.leaseId };
+  assert.deepEqual(await Promise.all([ready(initial), ready(initial)]), [first, first]);
+  assert.equal(ownershipChecks, 2, "cached generations must still re-prove ownership");
+  assert.equal(attachments.length, 1, "concurrent readiness shares one generation bridge");
+
+  runtime = { ...runtime, leaseId: id(4), originId: id(5) };
+  const replacement = { runtimeId: runtime.id, originId: runtime.originId };
+  assert.deepEqual(await ready(replacement), { ...replacement, leaseId: runtime.leaseId });
+  assert.equal(attachments.length, 2, "a reused runtime ID needs a new generation bridge");
+  assert.notEqual(attachments[0].leaseId, attachments[1].leaseId);
+  assert.notEqual(attachments[0].originId, attachments[1].originId);
+  await assert.rejects(ready(initial), /grant must match the current owned origin/);
+  owned = false;
+  await assert.rejects(ready(replacement), /owned process proof failed/);
+  assert.equal(ownershipChecks, 5);
+  assert.equal(attachments.length, 2, "stale grants and failed ownership must never attach");
+});
+
+test("Studio generation readiness rejects malformed identity and does not cache failed attachment", async () => {
+  const runtime = { id: "00000000-0000-4000-8000-000000000001",
+    leaseId: "00000000-0000-4000-8000-000000000002", originId: "00000000-0000-4000-8000-000000000003" };
+  let attempts = 0;
+  const ready = createStudioGenerationBridge({
+    provider: { async assertOwnedRuntime() { return { ...runtime }; } },
+    attach: async () => { if (++attempts === 1) throw new Error("fixture route setup failed"); },
+  });
+  const grant = { runtimeId: runtime.id, originId: runtime.originId };
+  await assert.rejects(ready({ ...grant, runtimeId: "invalid" }));
+  await assert.rejects(ready({ ...grant, originId: "invalid" }));
+  await assert.rejects(ready(grant), /fixture route setup failed/);
+  assert.deepEqual(await ready(grant), { ...grant, leaseId: runtime.leaseId });
+  runtime.leaseId = "invalid";
+  await assert.rejects(ready(grant));
+  assert.equal(attempts, 2);
+});
+
+test("Studio disconnect cleanup attempts every retained CDP connection even if one fails", async () => {
+  const closed = [];
+  const connections = new Set([1, 2, 3].map(id => ({ close: async () => {
+    closed.push(id);
+    if (id === 2) throw new Error("fixture disconnect failure");
+  } })));
+  await assert.rejects(closeStudioConnections(connections), /owned CDP connection cleanup failed/);
+  assert.deepEqual(closed, [1, 2, 3]);
+  assert.equal(connections.size, 0);
+  await closeStudioConnections(connections);
+});
+
+test("Studio journey requires fresh origins and owned leases without requiring a new runtime record", async () => {
+  const source = await readFile(new URL("./shared-browser-studio-e2e.mjs", import.meta.url), "utf8");
+  assert.match(source, /request.url === "\/ready"\) result = await attachBridge\(data\)/);
+  assert.ok(source.indexOf("connections.add(browser)") < source.indexOf("const context = browser.contexts()[0]"));
+  assert.ok(source.indexOf("if (provider) await provider.close()") < source.indexOf("closeStudioConnections(connections)", source.indexOf("async function lifecycle()")));
+  const spec = await readFile(new URL("../packages/frontend/tests/playwright/smoke/shared-browser-studio-ci.spec.ts", import.meta.url), "utf8");
+  assert.match(spec, /latestGrant\(\[initial\.originId\]\)/);
+  assert.match(spec, /latestGrant\(\[initial\.originId, replacement\.originId\]\)/);
+  assert.match(spec, /expect\(generation\.originId\)\.toBe\(grant\.originId\)/);
+  assert.match(spec, /expect\(replacementGeneration\.leaseId\)\.not\.toBe\(initialGeneration\.leaseId\)/);
+  assert.match(spec, /expect\(clearedGeneration\.leaseId\)\.not\.toBe\(initialGeneration\.leaseId\)/);
+  assert.match(spec, /expect\(clearedGeneration\.leaseId\)\.not\.toBe\(replacementGeneration\.leaseId\)/);
+  assert.doesNotMatch(spec, /excludedRuntimeIds/);
 });
 
 test("failed Studio launches retain only fixed API and provider diagnostics before cleanup", async () => {
