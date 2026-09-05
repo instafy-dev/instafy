@@ -453,12 +453,7 @@ pub(super) async fn mint_runtime_access_token(
         .as_ref()
         .map(|id| id.to_string())
         .unwrap_or_else(|| project_id.to_string());
-    let ttl_seconds = body.ttl_seconds.or(Some(
-        state
-            .config
-            .origin_token_ttl_seconds
-            .max(DEFAULT_RUNTIME_TOKEN_TTL_SECONDS),
-    ));
+    let ttl_seconds = resolve_runtime_token_ttl(body.ttl_seconds, None)?;
     let successor_generation = (lease_id.is_none() && mints_runtime_machine).then(Uuid::new_v4);
 
     let mut connection = state
@@ -553,7 +548,7 @@ pub(super) async fn mint_runtime_access_token(
             lease_id: lease_id.map(|id| id.to_string()),
             run_id: None,
             prefer_runtime: None,
-            ttl_seconds,
+            ttl_seconds: Some(ttl_seconds),
         },
         successor_generation,
     )?;
@@ -608,6 +603,10 @@ pub(super) async fn mint_runtime_access_token(
         git_remote_url,
     }))
 }
+
+#[cfg(test)]
+#[path = "token_ttl_tests.rs"]
+mod ttl_tests;
 
 #[cfg(test)]
 mod tests {

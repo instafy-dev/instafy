@@ -40,7 +40,7 @@ This document explains how the Instafy runtime controller is structured and how 
 ## HTTP Surface (selected)
 | Method | Route | Notes |
 | --- | --- | --- |
-| POST | `/dispatch-prompt` | Main entrypoint for conversations and module runs. Returns `{ runId, promptId, ... }`. |
+| POST | `/dispatch-prompt` | Main entrypoint for conversations and module runs on an authorized existing project. Only service-role callers may bootstrap a missing project. Returns `{ runId, promptId, ... }`. |
 | POST | `/progress-callback` | Receives build/job progress (ephemeral JWT). Broadcasts progress events and updates runs. |
 | GET | `/events` | SSE stream; filters by `projectId`, `sessionId`, `conversationId`, `runId`, or `kinds`. |
 | GET | `/runs` | List runs for a project/session. |
@@ -48,6 +48,7 @@ This document explains how the Instafy runtime controller is structured and how 
 | POST | `/runtime/ensure` | Guarantee a runtime record exists (creates idle agents when missing). |
 | POST | `/agent/login` | Exchange shared key for agent token, lease/heartbeat URLs, and proxy envelope. |
 | POST | `/agent/lease` | Claim work with a signed runtime ID bound to an eligible registered runtime and its current generation, including when `STRICT_MODE=false`. |
+| POST | `/agent/secrets` | Resolve granted secrets only for the signed runtime's exact active, unexpired job lease and current runtime generation, including when `STRICT_MODE=false`. |
 | POST | `/credits` | Apply authenticated credit-ledger operations through the controller. |
 | POST | `/projects/:id/git/access_token` | Mint project Git tokens. `git.delete` is a 60-second, service-auth-only, single-scope cleanup capability. |
 |  |  | Controller no longer serves `/fs/*`; clients should use project origin endpoints (`/entries`, `/files`, `/raw`). |
@@ -113,6 +114,13 @@ The runtime-token endpoint accepts only the controller's built-in runtime-machin
 `telemetry.write`, `git.token.mint`, `workspace.lease.read`, and `personal_browser.control`.
 Omitting `scopes` issues the standard bundle; empty or unknown scope sets are rejected, and
 `personal_browser.control` requires the explicit `personalBrowser: true` request flag.
+`ttlSeconds` must be between 60 and 3600 seconds inclusive; omitting it or sending `null`
+uses 3600 seconds, independently of the origin-token TTL configuration.
+
+Ordinary callers must create projects through authenticated `POST /orgs/:org_id/projects`
+before dispatch.
+Dispatch checks existing project permissions before initializing organization, subscription,
+or credit records. An already provisioned sandbox retains its session-based access policy.
 
 `pnpm controller:up` inherits the current shell environment. For a local TURN test, export the
 three `CONTROLLER_BROWSER_TURN_*` values before starting it; do not put the coturn shared secret
