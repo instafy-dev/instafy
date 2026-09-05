@@ -22,10 +22,10 @@ export async function resolveViteReactDependencies(
 
   const body = await response.text();
   const react = body.match(
-    /["'](\/node_modules\/\.vite\/deps\/react\.js\?v=[^"']+)["']/,
+    /["'](\/node_modules\/\.vite(?:-browser-ui-ci)?\/deps\/react\.js\?v=[^"']+)["']/,
   )?.[1];
   const reactDomClient = body.match(
-    /["'](\/node_modules\/\.vite\/deps\/react-dom_client\.js\?v=[^"']+)["']/,
+    /["'](\/node_modules\/\.vite(?:-browser-ui-ci)?\/deps\/react-dom_client\.js\?v=[^"']+)["']/,
   )?.[1];
   if (!react || !reactDomClient) {
     throw new Error("Could not resolve the frontend entrypoint's Vite dependencies");

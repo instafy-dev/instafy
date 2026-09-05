@@ -4,7 +4,7 @@
 //! LIVE_BROWSER_PROFILE_TOKEN (an agent.browser_profile-scoped token) to run it.
 //!
 //! This exercises the ACTUAL `ControllerClient::{put,get}_browser_profile`
-//! wire code — bearer auth, octet-stream body, 404->None, byte round-trip —
+//! wire code — bearer auth, version negotiation, conditional upload, byte round-trip —
 //! against the real endpoint + encrypted Postgres.
 
 use std::path::PathBuf;
@@ -71,13 +71,15 @@ fn registration_with(token: String, base: &str) -> Registration {
 }
 
 #[tokio::test]
+#[ignore = "requires an explicitly provisioned disposable controller/profile fixture"]
 async fn runtime_client_round_trips_browser_profile_against_live_controller() {
     let (Ok(base), Ok(token)) = (
         std::env::var("LIVE_BROWSER_PROFILE_URL"),
         std::env::var("LIVE_BROWSER_PROFILE_TOKEN"),
     ) else {
-        eprintln!("skipping: set LIVE_BROWSER_PROFILE_URL + LIVE_BROWSER_PROFILE_TOKEN to run");
-        return;
+        panic!(
+            "set LIVE_BROWSER_PROFILE_URL + LIVE_BROWSER_PROFILE_TOKEN for a disposable fixture"
+        );
     };
 
     let client = ControllerClient::new(&config_for(&base)).expect("build client");
@@ -86,8 +88,12 @@ async fn runtime_client_round_trips_browser_profile_against_live_controller() {
     // Distinctive payload; the client PUTs raw bytes and must GET them back.
     let payload: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
 
-    client
-        .put_browser_profile(&reg, payload.clone())
+    let baseline = client
+        .get_browser_profile(&reg)
+        .await
+        .expect("read fixture baseline");
+    let uploaded_version = client
+        .put_browser_profile(&reg, payload.clone(), baseline.version)
         .await
         .expect("put_browser_profile");
 
@@ -97,10 +103,11 @@ async fn runtime_client_round_trips_browser_profile_against_live_controller() {
         .expect("get_browser_profile");
 
     assert_eq!(
-        got.as_deref(),
+        got.archive.as_deref(),
         Some(payload.as_slice()),
         "client round-trip bytes must be identical"
     );
+    assert_eq!(got.version, uploaded_version);
     eprintln!(
         "LIVE OK: runtime client put {} bytes and read them back identically",
         payload.len()

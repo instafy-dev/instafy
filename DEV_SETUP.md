@@ -19,6 +19,16 @@ Install the tooling below before you start:
 
 > Tip: the project uses ES modules; ensure your Node install is recent enough to support them.
 
+### Browser checks without a local Docker stack
+
+Docker is not a prerequisite for the standalone Personal Browser and browser UI
+CI lanes. With Node 22 and the locked workspace dependencies installed, use
+`pnpm test:browser:ci personal` or `pnpm test:browser:ci browser-ui` after their
+fixture build/browser setup. These commands do not load local environment
+files or require production credentials. See [secret-free browser CI lanes](docs/Testing.md#secret-free-browser-ci-lanes)
+for exact setup, an installed-Chrome option when downloads are unavailable,
+and the separate Linux/Postgres requirements for Shared profile recovery.
+
 ### Protected local environment files
 
 Instafy can keep ignored local configuration outside the checkout. Set one absolute directory and

@@ -70,6 +70,22 @@ test.describe("live browser smoke proof", () => {
       if (!context) {
         throw new Error("2D canvas context unavailable");
       }
+      context.fillStyle = "#000";
+      context.fillRect(0, 0, 2048, 1080);
+      context.fillStyle = "#fff";
+      context.fillRect(768, 378, 512, 324);
+      context.fillStyle = "#111";
+      context.fillRect(845, 475, 333, 43);
+    });
+    // Exercise the progressive high-resolution sampling path without letting
+    // an isolated splash card count as a rendered page.
+    expect(await remoteSurfaceHasRenderedFrame(surface)).toBe(false);
+
+    await surface.evaluate((element) => {
+      const context = (element as HTMLCanvasElement).getContext("2d");
+      if (!context) {
+        throw new Error("2D canvas context unavailable");
+      }
       context.fillStyle = "#f0f0f0";
       context.fillRect(0, 0, 2048, 1080);
       context.fillStyle = "#222";

@@ -661,39 +661,13 @@ pub(crate) async fn runtime_stop(
         && provider_managed_runtime
         && should_skip_stop_for_terminal_runtime(&runtime)
     {
-        let provider_release_was_acknowledged: bool = transaction
-            .query_one(
-                "select coalesce(
-                    (select max(event.id)
-                     from runtime_events event
-                     where event.runtime_id = $1
-                       and event.kind = 'provider_release_acknowledged'
-                       and lower(replace(btrim(event.data ->> 'provider'), '_', '-')) =
-                           lower(replace(btrim($2::text), '_', '-'))
-                       and exists (
-                           select 1
-                           from runtime_leases lease
-                           where lease.runtime_id = $1
-                             and lease.id::text = btrim(event.data ->> 'runtimeLeaseId')
-                             and lease.status = 'released'
-                             and lease.released_at is not null
-                       )),
-                    0
-                 ) > coalesce(
-                    (select max(id) from runtime_events
-                     where runtime_id = $1
-                       and kind = 'stopped'),
-                    0
-                 )",
-                &[&runtime.id, &runtime.provider],
+        let provider_release_was_acknowledged =
+            provider_release_was_acknowledged_after_latest_stop(
+                &transaction,
+                &runtime.id,
+                &runtime.provider,
             )
-            .await
-            .map_err(|error| {
-                internal_error(format!(
-                    "failed to verify prior provider release acknowledgement: {error}"
-                ))
-            })?
-            .get(0);
+            .await?;
         if !provider_release_was_acknowledged {
             return Err((
                 StatusCode::CONFLICT,
@@ -2009,6 +1983,54 @@ fn runtime_matches_expected_identity(
 
 fn should_skip_stop_for_terminal_runtime(runtime: &RuntimeDetails) -> bool {
     matches!(runtime.status.as_str(), "stopped" | "removed") && runtime.active_lease_id.is_none()
+}
+
+/// Prove that a provider acknowledged release of one of this runtime's real
+/// lease generations after its latest stop event. Callers may use this to
+/// distinguish a successfully released terminal runtime from a local status
+/// label that has no provider-side cleanup proof.
+pub(crate) async fn provider_release_was_acknowledged_after_latest_stop(
+    transaction: &Transaction<'_>,
+    runtime_id: &Uuid,
+    provider: &str,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    transaction
+        .query_one(
+            "select coalesce(
+                (select max(event.id)
+                 from runtime_events event
+                 where event.runtime_id = $1
+                   and event.kind = 'provider_release_acknowledged'
+                   and lower(replace(btrim(event.data ->> 'provider'), '_', '-')) =
+                       lower(replace(btrim($2::text), '_', '-'))
+                   and exists (
+                       select 1
+                       from runtime_leases lease
+                       where lease.runtime_id = $1
+                         and lease.id::text = btrim(event.data ->> 'runtimeLeaseId')
+                         and lease.status = 'released'
+                         and lease.released_at is not null
+                   )),
+                0
+             ) > coalesce(
+                (select max(id) from runtime_events
+                 where runtime_id = $1
+                   and kind = 'stopped'),
+                0
+             ) and exists (
+                select 1 from runtime_events
+                where runtime_id = $1
+                  and kind = 'stopped'
+             )",
+            &[runtime_id, &provider],
+        )
+        .await
+        .map(|row| row.get(0))
+        .map_err(|error| {
+            internal_error(format!(
+                "failed to verify prior provider release acknowledgement: {error}"
+            ))
+        })
 }
 
 fn provider_runtime_missing_release_generation(state: &AppState, runtime: &RuntimeDetails) -> bool {

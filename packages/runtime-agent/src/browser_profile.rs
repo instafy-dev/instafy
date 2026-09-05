@@ -1,12 +1,14 @@
 //! Flag-gated durable browser-profile persistence — runtime side of spec step 2.
 //!
 //! ─────────────────────────────────────────────────────────────────────────────
-//! STATUS: verified end-to-end on 2026-07-09 against the real webdev image + the
+//! HISTORICAL PROOF (before versioned writes): verified on 2026-07-09 against the
+//! real webdev image + the
 //! local dev-stack controller (two separate runtime containers sharing one
 //! project): a login set in one runtime survives both a graceful restart AND an
 //! abrupt SIGKILL (via the periodic snapshot) into a fresh one. Still entirely
 //! behind `INSTAFY_BROWSER_PROFILE_PERSIST` (default off), so the shipped default
-//! boot path is byte-for-byte unchanged. See the notes at the bottom of this file.
+//! boot path is unchanged. That historical proof does not validate the newer
+//! version-checked writer lifecycle. See the notes at the bottom of this file.
 //! ─────────────────────────────────────────────────────────────────────────────
 //!
 //! ## The boot-ordering problem this solves
@@ -26,18 +28,21 @@
 //!      unpacks it into the profile dir, then launches Chromium by invoking the
 //!      exact same bash launcher via `runtime-entrypoint launch-chromium`.
 //!   3. During the session it snapshots the profile periodically (without
-//!      closing the browser) so an abrupt SIGKILL loses at most one interval of
-//!      state rather than the whole session.
+//!      closing the browser) as a best-effort recovery point for abrupt SIGKILL.
+//!      Live copies may lag or be inconsistent; no recovery interval is promised.
 //!   4. On graceful shutdown, runtime-agent asks Chromium to close *cleanly over
 //!      CDP* — a bare SIGTERM does NOT flush Chromium's batched cookie store, so
 //!      it would silently drop a login set during the session — then packs the
-//!      login surface and PUTs it back.
+//!      login surface and PUTs it back only after confirming Chromium stopped.
 //!
-//! Everything here is best-effort: any failure logs and falls back to a working
-//! blank browser rather than blocking the runtime from serving jobs.
+//! Persistence failures do not block browsing. A runtime saves only against the
+//! exact version it restored. Failed restore, conflicting/ambiguous uploads, or
+//! cancellation during an upload disable further saves for this process; they
+//! never rebase local cookies onto a newer remote version automatically.
 
 use std::collections::HashSet;
 use std::fs::File;
+use std::future::Future;
 use std::hash::{Hash, Hasher};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
@@ -49,7 +54,7 @@ use tracing::{info, warn};
 use zip::write::{FileOptions, ZipWriter};
 use zip::{CompressionMethod, ZipArchive};
 
-use crate::controller::{ControllerClient, Registration};
+use crate::controller::{BrowserProfileSnapshot, ControllerClient, Registration};
 use crate::model_environment::{BROWSER_HELPER_ENV_KEYS, apply_allowlisted_tokio_environment};
 
 /// Master gate. Off by default; the whole module is inert unless this is `1`.
@@ -82,9 +87,10 @@ const MAX_PROFILE_ENTRIES: usize = 4_096;
 const MAX_PROFILE_PATH_BYTES: usize = 4_096;
 const MAX_PROFILE_PATH_DEPTH: usize = 64;
 
-/// How long to wait for Chromium to finish flushing and exit after we ask it to
-/// close before we pack the profile anyway.
+/// Total budget to request Chromium's close and confirm it stopped. Exhausting
+/// this budget skips the final snapshot, never packs a potentially live profile.
 const CHROMIUM_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+const CHROMIUM_CDP_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 const CHROMIUM_CLOSE_POLL: Duration = Duration::from_millis(100);
 
 /// Profile paths (relative to the Chromium user-data-dir) that carry the login
@@ -118,6 +124,147 @@ const PROFILE_ARCHIVE_LIMITS: ProfileArchiveLimits = ProfileArchiveLimits {
     file_bytes: MAX_PROFILE_FILE_BYTES,
     entries: MAX_PROFILE_ENTRIES,
 };
+
+/// ControllerClient owns one instance for the runtime process, including across
+/// registration/token renewals. Its mutex serializes restore, periodic saves,
+/// and the final save. No version is persisted independently from its archive.
+#[derive(Default)]
+pub(crate) struct BrowserProfileSession {
+    restore_attempted: bool,
+    shutdown: bool,
+    writer: Option<BrowserProfileWriter>,
+}
+
+struct BrowserProfileWriter {
+    version: i64,
+    last_hash: Option<u64>,
+}
+
+impl BrowserProfileSession {
+    async fn restore(
+        &mut self,
+        load: impl Future<Output = Result<BrowserProfileSnapshot>>,
+        dir: PathBuf,
+    ) -> Result<()> {
+        anyhow::ensure!(!self.restore_attempted, "profile restore already attempted");
+        // Set before any await: cancellation must not leave a writable or
+        // retryable baseline for a partly restored local browser.
+        self.restore_attempted = true;
+        let snapshot = load.await?;
+        let version = snapshot.version;
+        let last_hash =
+            tokio::task::spawn_blocking(move || restore_profile_baseline(snapshot, &dir))
+                .await
+                .context("profile restore task failed")??;
+        self.writer = Some(BrowserProfileWriter {
+            version,
+            last_hash: Some(last_hash),
+        });
+        Ok(())
+    }
+}
+
+/// Install an exact baseline, not an overlay that can retain cookie databases
+/// absent from the stored snapshot. Validate/unpack entirely before replacing
+/// the old directory. On restore failure the old local profile is retained,
+/// but the caller never enables uploads from it.
+fn restore_profile_baseline(snapshot: BrowserProfileSnapshot, dir: &Path) -> Result<u64> {
+    anyhow::ensure!(
+        (snapshot.version == 0 && snapshot.archive.is_none())
+            || ((1..i64::MAX).contains(&snapshot.version) && snapshot.archive.is_some()),
+        "browser profile version does not match its archive"
+    );
+    let parent = dir
+        .parent()
+        .context("browser profile directory has no parent")?;
+    std::fs::create_dir_all(parent)?;
+    let staging = tempfile::tempdir_in(parent)?;
+    if let Some(archive) = snapshot.archive {
+        unpack_profile(&archive, staging.path())?;
+    }
+    // Normalize ZIP entry order/options before Chromium launches. An unchanged
+    // first snapshot must not bump the shared version and conflict another
+    // runtime that restored this same baseline.
+    let last_hash = hash_bytes(&pack_profile(staging.path())?);
+    let previous = tempfile::tempdir_in(parent)?;
+    let backup = previous.path().join("profile");
+    let had_previous = match std::fs::symlink_metadata(dir) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.is_dir() && !metadata.file_type().is_symlink(),
+                "browser profile directory must be a real directory"
+            );
+            std::fs::rename(dir, &backup)?;
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    if let Err(error) = std::fs::rename(staging.path(), dir) {
+        if had_previous {
+            // If rollback itself fails, retain the backup instead of deleting
+            // the user's old local profile when TempDir drops.
+            if std::fs::rename(&backup, dir).is_err() {
+                let _ = previous.keep();
+            }
+        }
+        return Err(error).context("failed to install restored browser profile");
+    }
+    Ok(last_hash)
+}
+
+async fn save_profile<Prepare, Upload, Uploaded>(
+    session: &tokio::sync::Mutex<BrowserProfileSession>,
+    shutdown: bool,
+    prepare: Prepare,
+    upload: Upload,
+) -> Result<bool>
+where
+    Prepare: Future<Output = Result<Option<Vec<u8>>>>,
+    Upload: FnOnce(Vec<u8>, i64) -> Uploaded,
+    Uploaded: Future<Output = Result<i64>>,
+{
+    let mut session = session.lock().await;
+    if session.shutdown {
+        return Ok(false);
+    }
+    session.shutdown = shutdown;
+    if !shutdown && session.writer.is_none() {
+        return Ok(false);
+    }
+    let Some(packed) = prepare.await? else {
+        return Ok(false);
+    };
+    let Some(writer) = session.writer.as_ref() else {
+        return Ok(false);
+    };
+    let previous_hash = writer.last_hash;
+    if packed.is_empty() {
+        return Ok(false);
+    }
+    anyhow::ensure!(
+        packed.len() <= MAX_PROFILE_BYTES,
+        "browser profile snapshot exceeds cap"
+    );
+    let hash = hash_bytes(&packed);
+    if previous_hash == Some(hash) {
+        return Ok(false);
+    }
+    // Remove authority before the request can reach the controller. A failed
+    // response or an aborted periodic task may follow a committed write; the
+    // final save must not retry or guess/adopt the server's new version.
+    let writer = session.writer.take().expect("writer checked above");
+    let version = upload(packed, writer.version).await?;
+    anyhow::ensure!(
+        writer.version.checked_add(1) == Some(version),
+        "browser profile upload returned an unexpected version"
+    );
+    session.writer = Some(BrowserProfileWriter {
+        version,
+        last_hash: Some(hash),
+    });
+    Ok(true)
+}
 
 fn env_flag(key: &str) -> bool {
     std::env::var(key)
@@ -171,73 +318,68 @@ fn snapshot_interval() -> Duration {
 /// registration, before the lease loop serves jobs. No-op unless persistence is
 /// enabled.
 ///
-/// IMPORTANT: `register_and_process` (the caller) re-runs on every non-shutdown
-/// re-registration — routinely on tunnel-lease refresh. Restoring again would
-/// unpack the *stale* stored snapshot over the profile dir while Chromium is
-/// still running, corrupting the live cookie DB/leveldb and reverting the user's
-/// mid-session login. So we skip entirely once a browser is already provisioned
-/// for this runtime (its pid file points at a live process). This also keeps the
-/// `launch-chromium` re-invoke — which truncates the live action log — from
-/// firing on a refresh. If a first launch failed there is no live process, so a
-/// later re-registration is free to retry (self-healing).
+/// Re-registration retains the same baseline, including a disabled writer after
+/// failure. Never GET a newer version and pair it with an already-running local
+/// profile. A dead Chromium process may relaunch using the existing local state
+/// but does not silently establish a new persistence baseline.
 pub async fn maybe_restore_and_launch(client: &ControllerClient, registration: &Registration) {
     if !persistence_enabled() {
         return;
     }
 
-    if chromium_is_running().await {
+    let mut session = client.browser_profile_session.lock().await;
+    if session.shutdown {
         return;
     }
-
-    match client.get_browser_profile(registration).await {
-        Ok(Some(bytes)) => {
-            let dir = profile_dir();
-            match tokio::task::spawn_blocking(move || unpack_profile(&bytes, &dir)).await {
-                Ok(Ok(count)) => info!(restored_entries = count, "restored browser profile"),
-                Ok(Err(error)) => {
-                    warn!(?error, "failed to unpack browser profile; starting blank")
-                }
-                Err(error) => warn!(?error, "profile unpack task panicked; starting blank"),
+    let running = chromium_is_running().await;
+    if !session.restore_attempted {
+        if running {
+            session.restore_attempted = true;
+            warn!("browser already running without a restored version; profile saves disabled");
+        } else {
+            match session
+                .restore(client.get_browser_profile(registration), profile_dir())
+                .await
+            {
+                Ok(()) => info!("restored browser profile baseline"),
+                Err(error) => warn!(
+                    ?error,
+                    "browser profile restore failed; profile saves disabled"
+                ),
             }
         }
-        Ok(None) => info!("no stored browser profile; starting blank"),
-        Err(error) => warn!(?error, "failed to fetch browser profile; starting blank"),
     }
-
-    if let Err(error) = launch_chromium().await {
-        warn!(?error, "failed to launch Chromium after profile restore");
+    if !running {
+        if let Err(error) = launch_chromium().await {
+            warn!(?error, "failed to launch Chromium after profile restore");
+        }
     }
 }
 
-/// Final snapshot on graceful shutdown. Closes Chromium first (which flushes its
-/// stores) so this captures the complete, consistent login state, then uploads
-/// unconditionally — it is the authoritative last write for the session.
+/// Final snapshot on graceful shutdown. Requests a clean Chromium close and
+/// requires confirmed exit before using the same version-checked writer as
+/// periodic snapshots. A SIGTERM fallback may lose unflushed browser writes.
+/// Failed/conflicted writers have no shutdown override.
 pub async fn maybe_snapshot(client: &ControllerClient, registration: &Registration) {
     if !persistence_enabled() {
         return;
     }
-    // Close Chromium so it flushes cookies/leveldb to disk before we pack.
-    close_chromium().await;
-    // prev_hash = None => always upload (final state wins).
-    let _ = pack_and_upload(client, registration, None, "shutdown").await;
+    pack_and_upload(client, registration, true).await;
 }
 
-/// Periodically snapshot the profile *during* the session so an abrupt SIGKILL
-/// (idle cull, crash, host loss) does not lose a login established mid-session —
-/// the graceful `maybe_snapshot` only runs on a clean shutdown. Runs until
+/// Best-effort periodic recovery points for abrupt SIGKILL (idle cull, crash,
+/// host loss); `maybe_snapshot` only runs on a clean shutdown. Runs until
 /// `shutdown` fires. No-op unless persistence is enabled and the interval is > 0.
 ///
 /// Unlike the shutdown path, this must NOT close the browser (it is still in
-/// use), so it packs whatever Chromium has already committed to disk. Chromium
-/// batches cookie writes on a ~30s timer, so a periodic snapshot can lag reality
-/// by up to about that; the trade is bounded loss (at most one interval) instead
-/// of losing the whole session. Reads of the live profile can occasionally be
-/// torn — that degrades to "this snapshot didn't take", never a broken runtime,
-/// and the next tick (or the clean shutdown) corrects it.
+/// use), so it copies files Chromium has already written. Batched writes can lag
+/// the browser session and live copies can be inconsistent, even if packing and
+/// uploading succeed. There is no guaranteed recovery interval or next-tick
+/// correction. Persistence failure does not prevent ordinary browsing.
 ///
-/// Concurrency note: like the shutdown snapshot this is last-write-wins on the
-/// project-scoped row, so multiple active runtimes on one project can clobber
-/// each other's uploads more often now. Acceptable for the shared tier v1.
+/// All uploads compare against the exact restored/acknowledged version. A
+/// conflict or uncertain response disables saves for the process, including
+/// shutdown, without fetching/adopting another runtime's newer version.
 pub async fn run_periodic_snapshots(
     client: Arc<ControllerClient>,
     registration: Registration,
@@ -251,83 +393,58 @@ pub async fn run_periodic_snapshots(
         return; // explicitly disabled (INSTAFY_BROWSER_PROFILE_SNAPSHOT_SECS=0)
     }
 
-    let mut prev_hash: Option<u64> = None;
     loop {
         tokio::select! {
             _ = shutdown.cancelled() => return,
             _ = tokio::time::sleep(interval) => {}
         }
-        // Only snapshot when a browser is actually up (skip during the restore/
-        // launch gap or if it died); avoids uploading a blank/partial profile.
-        if !chromium_is_running().await {
-            continue;
-        }
-        if let Some(hash) =
-            pack_and_upload(client.as_ref(), &registration, prev_hash, "periodic").await
-        {
-            prev_hash = Some(hash);
-        }
+        pack_and_upload(client.as_ref(), &registration, false).await;
     }
 }
 
-/// Pack the on-disk profile and upload it, unless it is empty, over the cap, or
-/// byte-identical to `prev_hash` (so a periodic caller skips redundant uploads
-/// while the browser is idle). Returns the content hash on a kept upload or an
-/// unchanged profile, or None when there was nothing to persist / it failed.
-async fn pack_and_upload(
-    client: &ControllerClient,
-    registration: &Registration,
-    prev_hash: Option<u64>,
-    context: &'static str,
-) -> Option<u64> {
-    let dir = profile_dir();
-    let packed = match tokio::task::spawn_blocking(move || pack_profile(&dir)).await {
-        Ok(Ok(bytes)) => bytes,
-        Ok(Err(error)) => {
-            warn!(
-                ?error,
-                context, "failed to pack browser profile; skipping snapshot"
-            );
-            return None;
-        }
-        Err(error) => {
-            warn!(
-                ?error,
-                context, "profile pack task panicked; skipping snapshot"
-            );
-            return None;
-        }
-    };
+/// Serialize Chromium close, packing and upload against periodic saves. The
+/// acknowledged version and content hash survive registration renewals.
+async fn pack_and_upload(client: &ControllerClient, registration: &Registration, shutdown: bool) {
+    let context = if shutdown { "shutdown" } else { "periodic" };
+    let result = save_profile(
+        &client.browser_profile_session,
+        shutdown,
+        prepare_profile_snapshot(
+            async {
+                if shutdown {
+                    close_chromium().await?;
+                } else if !chromium_is_running().await {
+                    return Ok(false);
+                }
+                Ok(true)
+            },
+            async {
+                let dir = profile_dir();
+                tokio::task::spawn_blocking(move || pack_profile(&dir))
+                    .await
+                    .context("profile pack task failed")?
+            },
+        ),
+        |packed, version| client.put_browser_profile(registration, packed, version),
+    )
+    .await;
+    match result {
+        Ok(true) => info!(context, "uploaded browser profile snapshot"),
+        Ok(false) => {}
+        Err(error) => warn!(?error, context, "browser profile snapshot failed"),
+    }
+}
 
-    if packed.is_empty() {
-        if context == "shutdown" {
-            info!("no browser profile contents to snapshot");
-        }
-        return None;
+/// Do not even start packing until browser preparation has succeeded. In the
+/// shutdown path, that means a confirmed stopped process, not a close attempt.
+async fn prepare_profile_snapshot(
+    ready: impl Future<Output = Result<bool>>,
+    pack: impl Future<Output = Result<Vec<u8>>>,
+) -> Result<Option<Vec<u8>>> {
+    if !ready.await? {
+        return Ok(None);
     }
-    if packed.len() > MAX_PROFILE_BYTES {
-        warn!(
-            bytes = packed.len(),
-            context, "browser profile snapshot exceeds cap; skipping (prune failed?)"
-        );
-        return None;
-    }
-
-    let hash = hash_bytes(&packed);
-    if Some(hash) == prev_hash {
-        return prev_hash; // unchanged since last upload — nothing to do
-    }
-
-    match client.put_browser_profile(registration, packed).await {
-        Ok(()) => {
-            info!(context, "uploaded browser profile snapshot");
-            Some(hash)
-        }
-        Err(error) => {
-            warn!(?error, context, "failed to upload browser profile snapshot");
-            None
-        }
-    }
+    pack.await.map(Some)
 }
 
 fn hash_bytes(bytes: &[u8]) -> u64 {
@@ -418,45 +535,161 @@ chromium.connectOverCDP(process.argv[1])\
 .catch(()=>process.exit(1));";
     let endpoint = format!("http://127.0.0.1:{}", cdp_port());
     let mut command = tokio::process::Command::new("node");
-    command.arg("-e").arg(JS).arg(&endpoint);
+    command.arg("-e").arg(JS).arg(&endpoint).kill_on_drop(true);
     apply_allowlisted_tokio_environment(&mut command, BROWSER_HELPER_ENV_KEYS);
-    matches!(command.status().await, Ok(status) if status.success())
+    let Ok(child) = command.spawn() else {
+        return false;
+    };
+    wait_for_close_helper(child, CHROMIUM_CDP_CLOSE_TIMEOUT).await
 }
 
-/// Best-effort close of the running Chromium so it flushes its stores before we
-/// snapshot. Prefers a graceful CDP `Browser.close` (which flushes cookies);
-/// falls back to SIGTERM (dependency-free `kill`, as entrypoint.sh uses) if the
-/// CDP path is unavailable.
-async fn close_chromium() {
-    let closed_gracefully = cdp_graceful_close().await;
+async fn wait_for_close_helper(mut child: tokio::process::Child, timeout: Duration) -> bool {
+    matches!(
+        tokio::time::timeout(timeout, child.wait()).await,
+        Ok(Ok(status)) if status.success()
+    )
+}
 
-    let Ok(pid_text) = tokio::fs::read_to_string(CHROMIUM_PID_FILE).await else {
-        return;
+/// Request a clean close, falling back to SIGTERM if CDP is unavailable. A
+/// successful signal/helper is not proof of exit. Missing/invalid PID, unknown
+/// liveness, or timeout fails closed so the remote snapshot is retained.
+async fn close_chromium() -> Result<()> {
+    tokio::time::timeout(CHROMIUM_CLOSE_TIMEOUT, async {
+        let pid_text = tokio::fs::read_to_string(CHROMIUM_PID_FILE)
+            .await
+            .context("cannot confirm Chromium stopped without its PID file")?;
+        let pid = parse_chromium_pid(&pid_text)?;
+        let Some(identity) = chromium_process_identity(pid).await? else {
+            return Ok(());
+        };
+        if identity.zombie {
+            return Ok(());
+        }
+        // A stale PID file must not authorize signaling an unrelated process.
+        let cmdline = tokio::fs::read(format!("/proc/{pid}/cmdline"))
+            .await
+            .context("cannot confirm Chromium process identity")?;
+        let profile_arg = format!("--user-data-dir={}", profile_dir().display());
+        let cdp_arg = format!("--remote-debugging-port={}", cdp_port());
+        anyhow::ensure!(
+            cmdline
+                .split(|byte| *byte == 0)
+                .any(|arg| arg == profile_arg.as_bytes())
+                && cmdline
+                    .split(|byte| *byte == 0)
+                    .any(|arg| arg == cdp_arg.as_bytes()),
+            "Chromium PID does not match the configured browser"
+        );
+
+        if !cdp_graceful_close().await {
+            if chromium_process_stopped(pid, identity).await? {
+                return Ok(());
+            }
+            let mut command = tokio::process::Command::new("kill");
+            command.arg("-TERM").arg(pid.to_string()).kill_on_drop(true);
+            apply_allowlisted_tokio_environment(&mut command, &[]);
+            // Exit may race the signal; the strict liveness probe below is the
+            // authority, not this command's success status.
+            command
+                .status()
+                .await
+                .context("failed to signal Chromium")?;
+        }
+        wait_for_chromium_exit(|| chromium_process_stopped(pid, identity)).await
+    })
+    .await
+    .context("Chromium close timed out; final profile snapshot skipped")?
+}
+
+fn parse_chromium_pid(text: &str) -> Result<i32> {
+    let pid = text.trim().parse::<i32>().context("invalid Chromium PID")?;
+    anyhow::ensure!(pid > 1, "invalid Chromium PID");
+    Ok(pid)
+}
+
+#[derive(Clone, Copy)]
+struct ChromiumProcessIdentity {
+    start_ticks: u64,
+    zombie: bool,
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_chromium_process_identity(stat: &str) -> Result<ChromiumProcessIdentity> {
+    let (_, fields) = stat
+        .rsplit_once(')')
+        .context("invalid Chromium process stat")?;
+    let mut fields = fields.split_whitespace();
+    let state = fields.next().context("missing Chromium process state")?;
+    // Fields start at state (field 3); starttime is field 22.
+    let start_ticks = fields
+        .nth(18)
+        .context("missing Chromium process start time")?
+        .parse()?;
+    Ok(ChromiumProcessIdentity {
+        start_ticks,
+        zombie: state == "Z",
+    })
+}
+
+/// Stronger than the ordinary browsing probe. Managed persistence runs on
+/// Linux; unavailable inspection elsewhere is unknown, never proof of exit.
+async fn chromium_process_identity(pid: i32) -> Result<Option<ChromiumProcessIdentity>> {
+    #[cfg(target_os = "linux")]
+    match tokio::fs::read_to_string(format!("/proc/{pid}/stat")).await {
+        Ok(stat) => return parse_chromium_process_identity(&stat).map(Some),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("cannot inspect Chromium process"),
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: signal 0 only probes the validated positive PID; it does not
+        // deliver a signal or access memory through pointers.
+        anyhow::ensure!(
+            unsafe { libc::kill(pid, 0) } != 0,
+            "Chromium process inspection unavailable"
+        );
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(None);
+        }
+        Err(error).context("cannot confirm Chromium process stopped")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        anyhow::bail!("Chromium stop confirmation requires Linux process inspection")
+    }
+}
+
+fn chromium_identity_stopped(
+    current: Option<ChromiumProcessIdentity>,
+    expected: ChromiumProcessIdentity,
+) -> Result<bool> {
+    let Some(current) = current else {
+        return Ok(true);
     };
-    let pid = pid_text.trim().to_string();
-    if pid.is_empty() {
-        return;
-    }
+    anyhow::ensure!(
+        current.start_ticks == expected.start_ticks,
+        "Chromium PID was reused; exit is unknown"
+    );
+    Ok(current.zombie)
+}
 
-    if !closed_gracefully {
-        let mut command = tokio::process::Command::new("kill");
-        command.arg("-TERM").arg(&pid);
-        apply_allowlisted_tokio_environment(&mut command, &[]);
-        let _ = command.status().await;
-    }
+async fn chromium_process_stopped(pid: i32, expected: ChromiumProcessIdentity) -> Result<bool> {
+    chromium_identity_stopped(chromium_process_identity(pid).await?, expected)
+}
 
-    let deadline_polls =
-        (CHROMIUM_CLOSE_TIMEOUT.as_millis() / CHROMIUM_CLOSE_POLL.as_millis()).max(1) as usize;
-    for _ in 0..deadline_polls {
-        if !process_alive(&pid).await {
-            return;
+async fn wait_for_chromium_exit<Probe, Checked>(mut stopped: Probe) -> Result<()>
+where
+    Probe: FnMut() -> Checked,
+    Checked: Future<Output = Result<bool>>,
+{
+    loop {
+        if stopped().await? {
+            return Ok(());
         }
         tokio::time::sleep(CHROMIUM_CLOSE_POLL).await;
     }
-    warn!(
-        pid,
-        "Chromium did not exit before snapshot; profile may be torn"
-    );
 }
 
 struct SizeLimitedCursor {
@@ -533,7 +766,6 @@ impl ProfilePackBudget {
     }
 
     fn reserve_file(&mut self, size: u64, limits: ProfileArchiveLimits) -> Result<()> {
-        self.visit_entry(limits)?;
         if size > limits.file_bytes {
             anyhow::bail!(
                 "browser profile file exceeds {} uncompressed bytes",
@@ -581,6 +813,7 @@ fn pack_profile_with_limits(profile_dir: &Path, limits: ProfileArchiveLimits) ->
                 warn!(path = %absolute.display(), "skipping non-file profile entry");
                 continue;
             }
+            budget.visit_entry(limits)?;
             add_file(
                 &mut zip,
                 profile_dir,
@@ -642,8 +875,25 @@ fn add_dir<W: Write + Seek>(
     let mut wrote = false;
     let entries = std::fs::read_dir(dir)
         .with_context(|| format!("failed to read profile dir {}", dir.display()))?;
+    let mut sorted_entries = Vec::new();
     for entry in entries {
         let entry = entry.with_context(|| format!("failed to read entry in {}", dir.display()))?;
+        // Reserve every encountered entry before buffering, including skipped
+        // symlinks/non-files. Across recursive calls the shared cap bounds both
+        // enumeration work and memory; never collect an unbounded directory.
+        budget.visit_entry(limits)?;
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(base)
+            .context("profile directory escaped base")?;
+        anyhow::ensure!(
+            relative_to_zip_name(relative).len() <= MAX_PROFILE_PATH_BYTES,
+            "browser profile path exceeds the supported bounds"
+        );
+        sorted_entries.push(entry);
+    }
+    sorted_entries.sort_unstable_by_key(|entry| entry.file_name());
+    for entry in sorted_entries {
         // `file_type()` here comes from readdir/lstat and does NOT follow the
         // entry's own symlink, so a symlinked file or dir is skipped rather than
         // dereferenced (host-file exfiltration guard, same as the top level).
@@ -656,7 +906,6 @@ fn add_dir<W: Write + Seek>(
         }
         let path = entry.path();
         if file_type.is_dir() {
-            budget.visit_entry(limits)?;
             wrote |= add_dir(zip, base, &path, options, budget, limits, depth + 1)?;
         } else if file_type.is_file() {
             add_file(zip, base, &path, options, budget, limits)?;
@@ -996,6 +1245,500 @@ fn safe_relative_path(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn writable_session(version: i64) -> tokio::sync::Mutex<BrowserProfileSession> {
+        tokio::sync::Mutex::new(BrowserProfileSession {
+            restore_attempted: true,
+            shutdown: false,
+            writer: Some(BrowserProfileWriter {
+                version,
+                last_hash: None,
+            }),
+        })
+    }
+
+    #[tokio::test]
+    async fn failed_shutdown_close_never_packs_uploads_or_advances_baseline() {
+        let session = writable_session(7);
+        assert!(
+            save_profile(
+                &session,
+                true,
+                prepare_profile_snapshot(
+                    async { anyhow::bail!("Chromium exit is unknown") },
+                    async { panic!("failed close must never start packing") },
+                ),
+                |_, _| async { panic!("failed close must never upload") },
+            )
+            .await
+            .is_err()
+        );
+        {
+            let state = session.lock().await;
+            assert!(state.shutdown);
+            let writer = state.writer.as_ref().unwrap();
+            assert_eq!(writer.version, 7);
+            assert_eq!(writer.last_hash, None);
+        }
+        assert!(
+            !save_profile(
+                &session,
+                true,
+                async { panic!("failed shutdown must not retry preparation") },
+                |_, _| async { panic!("failed shutdown must not retry upload") },
+            )
+            .await
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_profile_preparation_never_uploads_or_advances_baseline() {
+        let session = writable_session(3);
+        assert!(
+            save_profile(
+                &session,
+                true,
+                prepare_profile_snapshot(async { Ok(true) }, async {
+                    anyhow::bail!("packing failed")
+                },),
+                |_, _| async { panic!("failed preparation must never upload") },
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(session.lock().await.writer.as_ref().unwrap().version, 3);
+        assert!(
+            prepare_profile_snapshot(async { Ok(false) }, async {
+                panic!("unready browser must not pack")
+            },)
+            .await
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn chromium_stop_confirmation_rejects_unknown_or_reused_process_identity() {
+        for invalid in ["", " ", "abc", "-1", "0", "1", "2147483648"] {
+            assert!(parse_chromium_pid(invalid).is_err());
+        }
+        assert_eq!(parse_chromium_pid(" 123\n").unwrap(), 123);
+        let running = ChromiumProcessIdentity {
+            start_ticks: 42,
+            zombie: false,
+        };
+        let zombie = ChromiumProcessIdentity {
+            start_ticks: 42,
+            zombie: true,
+        };
+        assert!(!chromium_identity_stopped(Some(running), running).unwrap());
+        assert!(chromium_identity_stopped(Some(zombie), running).unwrap());
+        assert!(chromium_identity_stopped(None, running).unwrap());
+        let reused = ChromiumProcessIdentity {
+            start_ticks: 43,
+            zombie: true,
+        };
+        assert!(chromium_identity_stopped(Some(reused), running).is_err());
+        assert!(parse_chromium_process_identity("123 (chromium) Z").is_err());
+        let stat = format!("123 (chromium (main)) Z {} 42 999", "0 ".repeat(18));
+        let parsed = parse_chromium_process_identity(&stat).unwrap();
+        assert_eq!(parsed.start_ticks, 42);
+        assert!(parsed.zombie);
+    }
+
+    #[tokio::test]
+    async fn chromium_close_wait_requires_confirmed_exit_and_is_bounded() {
+        wait_for_chromium_exit(|| async { Ok(true) }).await.unwrap();
+        assert!(
+            wait_for_chromium_exit(|| async { anyhow::bail!("permission denied") })
+                .await
+                .is_err()
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                wait_for_chromium_exit(|| async { Ok(false) }),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                wait_for_chromium_exit(|| std::future::pending::<Result<bool>>()),
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timed_out_close_helper_is_killed_instead_of_hanging_shutdown() {
+        // Only a disposable sleep process, never a browser or real profile.
+        let child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap() as i32;
+        assert!(!wait_for_close_helper(child, Duration::from_millis(10)).await);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                // Probe only the disposable child's PID. libc is a Linux-only
+                // dependency; this helper test also runs on macOS.
+                if !tokio::process::Command::new("kill")
+                    .arg("-0")
+                    .arg(pid.to_string())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .kill_on_drop(true)
+                    .status()
+                    .await
+                    .unwrap()
+                    .success()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("timed-out helper must be killed and reaped");
+    }
+
+    #[test]
+    fn profile_pack_order_is_deterministic_and_directory_buffering_is_bounded() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let names = ["z.log", "a/last", "a/first", "m.log"];
+        for (dir, order) in [
+            (first.path(), names.to_vec()),
+            (second.path(), names.iter().rev().copied().collect()),
+        ] {
+            for name in order {
+                let path = dir.join("Default/Local Storage").join(name);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, name.as_bytes()).unwrap();
+            }
+        }
+        assert_eq!(
+            pack_profile(first.path()).unwrap(),
+            pack_profile(second.path()).unwrap()
+        );
+        assert!(pack_profile_with_limits(first.path(), limits(4096, 4096, 1024, 3)).is_err());
+    }
+
+    #[tokio::test]
+    async fn restored_unchanged_profiles_do_not_consume_versions_but_real_changes_do() {
+        // Intentionally non-normalized input order: both restored sessions must
+        // compare normalized local packs, not the original archive's bytes.
+        let archive = profile_zip(&[
+            ("Default/Local Storage/z", 3, b'z'),
+            ("Local State", 3, b'k'),
+            ("Default/Local Storage/a", 3, b'a'),
+        ]);
+        for _ in 0..2 {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("profile");
+            let mut state = BrowserProfileSession::default();
+            state
+                .restore(
+                    async {
+                        Ok(BrowserProfileSnapshot {
+                            version: 5,
+                            archive: Some(archive.clone()),
+                        })
+                    },
+                    dir.clone(),
+                )
+                .await
+                .unwrap();
+            let session = tokio::sync::Mutex::new(state);
+            assert!(
+                !save_profile(
+                    &session,
+                    false,
+                    async { pack_profile(&dir).map(Some) },
+                    |_, _| async {
+                        panic!("unchanged restored baseline must not consume a version")
+                    },
+                )
+                .await
+                .unwrap()
+            );
+            assert_eq!(session.lock().await.writer.as_ref().unwrap().version, 5);
+            std::fs::write(dir.join("Local State"), b"changed").unwrap();
+            assert!(
+                save_profile(
+                    &session,
+                    false,
+                    async { pack_profile(&dir).map(Some) },
+                    |_, version| async move {
+                        assert_eq!(version, 5);
+                        Ok(6)
+                    },
+                )
+                .await
+                .unwrap()
+            );
+            assert_eq!(session.lock().await.writer.as_ref().unwrap().version, 6);
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_restore_establishes_exact_baseline_without_stale_cookie_files() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("profile");
+        std::fs::create_dir_all(dir.join("Default")).unwrap();
+        std::fs::write(dir.join("Default/Cookies"), b"old-local-cookie").unwrap();
+        let mut session = BrowserProfileSession::default();
+        session
+            .restore(
+                async {
+                    Ok(BrowserProfileSnapshot {
+                        version: 4,
+                        archive: Some(profile_zip(&[("Local State", 5, b'x')])),
+                    })
+                },
+                dir.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(session.writer.as_ref().unwrap().version, 4);
+        assert_eq!(std::fs::read(dir.join("Local State")).unwrap(), b"xxxxx");
+        assert!(!dir.join("Default/Cookies").exists());
+
+        // A genuine 404 also replaces old local state with the empty baseline.
+        let mut empty = BrowserProfileSession::default();
+        empty
+            .restore(
+                async {
+                    Ok(BrowserProfileSnapshot {
+                        version: 0,
+                        archive: None,
+                    })
+                },
+                dir.clone(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty.writer.unwrap().version, 0);
+        assert_eq!(std::fs::read_dir(dir).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_profile_fetch_or_restore_never_enables_saves_or_retries_baseline() {
+        for archive in [None, Some(b"not-a-zip".to_vec())] {
+            let root = tempfile::tempdir().unwrap();
+            let dir = root.path().join("profile");
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("Local State"), b"retained-local-data").unwrap();
+            let mut session = BrowserProfileSession::default();
+            let result = session
+                .restore(
+                    async {
+                        let archive = archive.context("fetch failed")?;
+                        Ok(BrowserProfileSnapshot {
+                            version: 9,
+                            archive: Some(archive),
+                        })
+                    },
+                    dir.clone(),
+                )
+                .await;
+            assert!(result.is_err());
+            assert!(session.restore_attempted);
+            assert!(session.writer.is_none());
+            assert_eq!(
+                std::fs::read(dir.join("Local State")).unwrap(),
+                b"retained-local-data"
+            );
+            assert!(
+                session
+                    .restore(async { panic!("must not refetch a new baseline") }, dir)
+                    .await
+                    .is_err()
+            );
+            let session = tokio::sync::Mutex::new(session);
+            assert!(
+                !save_profile(
+                    &session,
+                    true,
+                    async { Ok(Some(b"unsaved-local-data".to_vec())) },
+                    |_, _| async { panic!("failed restore must not overwrite stored profile") },
+                )
+                .await
+                .unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn profile_conflict_latches_without_retry_or_adopting_another_version() {
+        let session = writable_session(3);
+        assert!(
+            save_profile(
+                &session,
+                false,
+                async { Ok(Some(b"local".to_vec())) },
+                |_, version| async move {
+                    assert_eq!(version, 3);
+                    anyhow::bail!("409: another runtime wrote version 4")
+                },
+            )
+            .await
+            .is_err()
+        );
+        assert!(session.lock().await.writer.is_none());
+        for shutdown in [false, true] {
+            assert!(
+                !save_profile(
+                    &session,
+                    shutdown,
+                    async { Ok(Some(b"newer-local".to_vec())) },
+                    |_, _| async {
+                        panic!("conflicted writer must never retry, including shutdown")
+                    },
+                )
+                .await
+                .unwrap()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_profile_upload_cannot_be_retried_by_shutdown() {
+        let session = Arc::new(writable_session(8));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let periodic_session = session.clone();
+        let periodic = tokio::spawn(async move {
+            save_profile(
+                &periodic_session,
+                false,
+                async { Ok(Some(b"possibly-committed".to_vec())) },
+                |_, version| async move {
+                    assert_eq!(version, 8);
+                    started_tx.send(()).unwrap();
+                    std::future::pending::<Result<i64>>().await
+                },
+            )
+            .await
+        });
+        started_rx.await.unwrap();
+        periodic.abort();
+        assert!(periodic.await.unwrap_err().is_cancelled());
+        assert!(session.lock().await.writer.is_none());
+        assert!(
+            !save_profile(
+                &session,
+                true,
+                async { Ok(Some(b"final-local".to_vec())) },
+                |_, _| async { panic!("uncertain upload must not be retried") },
+            )
+            .await
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn periodic_and_shutdown_profile_saves_serialize_and_advance_one_baseline() {
+        let session = Arc::new(writable_session(0));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finish_tx, finish_rx) = tokio::sync::oneshot::channel();
+        let periodic_session = session.clone();
+        let periodic = tokio::spawn(async move {
+            save_profile(
+                &periodic_session,
+                false,
+                async { Ok(Some(b"periodic".to_vec())) },
+                |_, version| async move {
+                    assert_eq!(version, 0);
+                    started_tx.send(()).unwrap();
+                    finish_rx.await.unwrap();
+                    Ok(1)
+                },
+            )
+            .await
+        });
+        started_rx.await.unwrap();
+        let final_session = session.clone();
+        let (prepare_tx, mut prepare_rx) = tokio::sync::oneshot::channel();
+        let final_save = tokio::spawn(async move {
+            save_profile(
+                &final_session,
+                true,
+                async move {
+                    prepare_tx.send(()).unwrap();
+                    Ok(Some(b"final-flushed".to_vec()))
+                },
+                |_, version| async move {
+                    assert_eq!(version, 1);
+                    Ok(2)
+                },
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        assert!(matches!(
+            prepare_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
+        finish_tx.send(()).unwrap();
+        assert!(periodic.await.unwrap().unwrap());
+        assert!(final_save.await.unwrap().unwrap());
+        assert_eq!(session.lock().await.writer.as_ref().unwrap().version, 2);
+        assert!(
+            !save_profile(
+                &session,
+                false,
+                async { panic!("shutdown must gate later preparation") },
+                |_, _| async { panic!("shutdown must gate later uploads") },
+            )
+            .await
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn profile_saves_require_matching_ack_and_skip_unchanged_archives() {
+        let session = writable_session(5);
+        assert!(
+            save_profile(
+                &session,
+                false,
+                async { Ok(Some(vec![1])) },
+                |_, version| async move {
+                    assert_eq!(version, 5);
+                    Ok(6)
+                }
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            !save_profile(&session, false, async { Ok(Some(vec![1])) }, |_, _| async {
+                panic!("unchanged snapshot must not upload")
+            })
+            .await
+            .unwrap()
+        );
+        assert!(
+            save_profile(
+                &session,
+                false,
+                async { Ok(Some(vec![2])) },
+                |_, version| async move {
+                    assert_eq!(version, 6);
+                    Ok(99)
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert!(session.lock().await.writer.is_none());
+    }
 
     fn limits(
         archive_bytes: u64,
