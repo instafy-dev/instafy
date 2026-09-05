@@ -15,11 +15,8 @@ export function resolveNativeOtaPlatform(): OtaPlatform | null {
 }
 
 export function resolveNativeOtaChannel(): string {
-  const envValue =
-    typeof import.meta.env.VITE_OTA_CHANNEL === "string"
-      ? import.meta.env.VITE_OTA_CHANNEL.trim().toLowerCase()
-      : "";
-  return envValue || "stable";
+  // Derive the actual channel from the archived literal, not separate attestation metadata.
+  return __INSTAFY_NATIVE_OTA_CHANNEL__.slice("instafy-native-ota-channel:".length);
 }
 
 export function otaIsSupportedOnThisClient(): boolean {

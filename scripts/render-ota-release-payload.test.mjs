@@ -85,3 +85,28 @@ test("render-ota-release-payload allows explicit signature override", () => {
   const payload = JSON.parse(fs.readFileSync(outPath, "utf8"));
   assert.equal(payload.signature, "override-signature");
 });
+
+test("render-ota-release-payload carries an exact optional native build without changing channel", (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "instafy-ota-render-build-"));
+  t.after(() => fs.rmSync(tempDir, { recursive: true, force: true }));
+  const manifestPath = writeManifest(tempDir);
+  const outPath = path.join(tempDir, "release.json");
+  const baseArgs = [
+    "--manifest", manifestPath, "--artifact-url", "https://artifacts.example.test/bundle.zip",
+    "--platform", "ios", "--channel", "internal", "--native-version", "1.0", "--out", outPath,
+  ];
+  for (const build of ["80", "001.02.3"]) {
+    const result = runRender([...baseArgs, "--required-native-build", build]);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    const payload = JSON.parse(fs.readFileSync(outPath, "utf8"));
+    assert.equal(payload.required_native_build, build);
+    assert.equal(payload.channel, "internal");
+    assert.equal(payload.status, "draft");
+  }
+  for (const build of ["", "80 ", "80\n", "1..2", "9".repeat(65)]) {
+    const result = runRender([...baseArgs, `--required-native-build=${build}`]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /requiredNativeBuild/);
+  }
+  assert.notEqual(runRender([...baseArgs, "--required-native-build"]).status, 0);
+});
