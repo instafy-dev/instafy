@@ -159,6 +159,9 @@ describe("chat command", () => {
     expect(JSON.parse(captured[0]?.body ?? "{}")).toMatchObject({
       promptText: "Read the title",
       intent: "feature",
+      metadata: {
+        writeIntent: true,
+      },
     });
     expect(runsPolls).toBeGreaterThan(0);
     expect(messagesPolls).toBeGreaterThan(0);
@@ -220,7 +223,63 @@ describe("chat command", () => {
     expect(JSON.parse(captured[0]?.body ?? "{}")).toMatchObject({
       promptText: "follow up",
       intent: "feature",
+      metadata: {
+        writeIntent: true,
+      },
     });
+  });
+
+  it("keeps terminal command dispatches read-only", async () => {
+    const conversationId = randomUUID();
+    const runId = randomUUID();
+    const promptId = randomUUID();
+    const captured: CapturedRequest[] = [];
+
+    const server = startMockController((req) => {
+      captured.push(req);
+      if (req.method === "POST" && req.url === `/conversations/${conversationId}/messages`) {
+        return {
+          status: 200,
+          body: {
+            conversationId,
+            runId,
+            promptId,
+            status: "queued",
+          },
+        };
+      }
+      return { status: 404, body: { error: "not found" } };
+    });
+
+    await once(server, "listening");
+    const address = server.address();
+    const port = typeof address === "object" && address ? address.port : 0;
+
+    const result = await execCli([
+      "chat",
+      "pwd",
+      "--conversation",
+      conversationId,
+      "--intent",
+      "TERMINAL_COMMAND",
+      "--server-url",
+      `http://127.0.0.1:${port}`,
+      "--access-token",
+      "chat-token",
+      "--no-wait",
+      "--json",
+    ]);
+
+    server.close();
+
+    expect(result.code).toBe(0);
+    expect(captured).toHaveLength(1);
+    expect(JSON.parse(captured[0]?.body ?? "{}")).toMatchObject({
+      promptText: "pwd",
+      intent: "TERMINAL_COMMAND",
+      metadata: {},
+    });
+    expect(JSON.parse(captured[0]?.body ?? "{}").metadata).toEqual({});
   });
 
   it("sends explicit @agent mention metadata for controller routing", async () => {
@@ -275,6 +334,7 @@ describe("chat command", () => {
       promptText: "@ben what is 3+4? @octo double-check",
       intent: "feature",
       metadata: {
+        writeIntent: true,
         agentSelection: {
           active: ["ben", "octo"],
           mentions: ["ben", "octo"],

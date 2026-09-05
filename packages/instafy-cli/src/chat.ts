@@ -95,17 +95,22 @@ function extractMentionedAgentHandles(prompt: string): string[] {
   return handles;
 }
 
-function buildPromptMetadata(prompt: string): Record<string, unknown> {
+function buildPromptMetadata(prompt: string, intent: string): Record<string, unknown> {
   const mentionedHandles = extractMentionedAgentHandles(prompt);
+  // Match Studio's interactive-chat contract: a normal chat may update the
+  // workspace, but it does not have to. File-changing prompts still use
+  // runtimeExpectations.workspaceFileChanges when a mutation is required.
+  // Terminal-command dispatches intentionally retain their read-only policy.
+  const metadata: Record<string, unknown> =
+    intent.toLowerCase() === "terminal_command" ? {} : { writeIntent: true };
   if (mentionedHandles.length === 0) {
-    return {};
+    return metadata;
   }
-  return {
-    agentSelection: {
-      active: mentionedHandles,
-      mentions: mentionedHandles,
-    },
+  metadata.agentSelection = {
+    active: mentionedHandles,
+    mentions: mentionedHandles,
   };
+  return metadata;
 }
 
 function normalizeBooleanEnv(value: string | undefined): boolean | null {
@@ -232,10 +237,11 @@ async function dispatchPrompt(options: ChatPromptOptions): Promise<{
   status: string | null;
 }> {
   const prompt = normalizePrompt(options.prompt);
+  const intent = options.intent?.trim() || "feature";
   const payload = {
     promptText: prompt,
-    intent: options.intent?.trim() || "feature",
-    metadata: buildPromptMetadata(prompt),
+    intent,
+    metadata: buildPromptMetadata(prompt, intent),
   };
 
   if (options.conversation?.trim()) {
