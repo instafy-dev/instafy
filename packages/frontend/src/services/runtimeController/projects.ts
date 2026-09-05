@@ -57,6 +57,11 @@ export interface ControllerProjectSummary {
   canManage?: boolean;
 }
 
+export type ControllerProjectListResult =
+  | { status: "success"; projects: ControllerProjectSummary[] }
+  | { status: "unsupported" }
+  | { status: "error" };
+
 export interface ControllerOrgMember {
   userId: string;
   email?: string | null;
@@ -410,24 +415,36 @@ export async function bootstrapControllerProjectMemory(params: {
 export async function listControllerProjects(params?: {
   orgId?: string | null;
 }): Promise<ControllerProjectSummary[]> {
+  const result = await listControllerProjectsResult(params);
+  return result.status === "success" ? result.projects : [];
+}
+
+// Cache-aware discovery must distinguish a successful empty access list from
+// a failed refresh. Only an unsupported route permits legacy discovery.
+export async function listControllerProjectsResult(params?: {
+  orgId?: string | null;
+}): Promise<ControllerProjectListResult> {
   if (!runtimeControllerEnabled) {
-    return [];
+    return { status: "error" };
   }
-  const requestContext = await resolveControllerRequestContext(null);
-  const accessToken = requestContext.accessToken;
-  if (!accessToken) {
-    return [];
-  }
-  const normalizedOrgId = normalizeUuidParam(params?.orgId ?? null);
-  const url = normalizedOrgId
-    ? `${requestContext.baseUrl}/orgs/${encodeURIComponent(normalizedOrgId)}/projects`
-    : `${requestContext.baseUrl}/projects`;
   try {
+    const requestContext = await resolveControllerRequestContext(null);
+    const accessToken = requestContext.accessToken;
+    if (!accessToken) {
+      return { status: "error" };
+    }
+    const normalizedOrgId = normalizeUuidParam(params?.orgId ?? null);
+    const url = normalizedOrgId
+      ? `${requestContext.baseUrl}/orgs/${encodeURIComponent(normalizedOrgId)}/projects`
+      : `${requestContext.baseUrl}/projects`;
     const response = await fetch(url, {
       headers: {
         authorization: `Bearer ${accessToken}`,
       },
     });
+    if (response.status === 404 || response.status === 405) {
+      return { status: "unsupported" };
+    }
     if (!response.ok) {
       const message = await readControllerError(
         response,
@@ -440,16 +457,20 @@ export async function listControllerProjects(params?: {
       projects?: ControllerProjectSummary[];
     } | null;
     if (payload?.projects && Array.isArray(payload.projects)) {
-      return payload.projects.filter(
-        (project) => typeof project.projectId === "string" && project.projectId.length > 0,
-      );
+      return {
+        status: "success",
+        projects: payload.projects.filter(
+          (project) => typeof project.projectId === "string" && project.projectId.length > 0,
+        ),
+      };
     }
+    throw new Error("list projects returned an invalid response");
   } catch (error) {
     logControllerRequestError("[runtime-controller] listControllerProjects error:", error, {
       suppressLikelyConnectionNoise: true,
     });
   }
-  return [];
+  return { status: "error" };
 }
 
 export async function importGithubProject(

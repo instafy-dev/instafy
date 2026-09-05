@@ -8,6 +8,7 @@ import type {
   ControllerProjectConversation,
 } from "../../services/runtimeController/conversations";
 import {
+  conversationsReducer,
   createInitialConversation,
   type ConversationsAction,
   type ConversationsState,
@@ -84,12 +85,14 @@ function ControllerSyncHarness({
   fetchProjectConversations,
   currentUserId = USER_ID,
   syncEpoch = 0,
+  updateMetadata = vi.fn(),
 }: {
   state: ConversationsState;
   dispatch: (action: ConversationsAction) => void;
   fetchProjectConversations: () => Promise<ControllerProjectConversation[] | null>;
   currentUserId?: string | null;
   syncEpoch?: number;
+  updateMetadata?: (args: { conversationId: string; metadata: Record<string, unknown> }) => Promise<unknown>;
 }) {
   const latestStateRef = useRef(state);
   latestStateRef.current = state;
@@ -104,7 +107,7 @@ function ControllerSyncHarness({
     controllerConversationSyncEpoch: syncEpoch,
     bumpControllerConversationSyncEpoch: vi.fn(),
     fetchProjectConversationsFromController: fetchProjectConversations,
-    updateControllerConversationMetadata: vi.fn(),
+    updateControllerConversationMetadata: updateMetadata,
   });
   return null;
 }
@@ -180,6 +183,60 @@ describe("conversation routing during controller attachment", () => {
     expect(dispatch.mock.calls.map(([action]) => action.type)).not.toContain(
       "SET_ROUTING_PREFERENCES",
     );
+  });
+
+  it.each([
+    { name: "active placeholder", firstMetadata: {}, secondMetadata: {} },
+    { name: "single placeholder", firstMetadata: { title: "Chat 1" }, secondMetadata: { title: "Chat 2" } },
+    { name: "duplicate remote local IDs", firstMetadata: { localId: LOCAL_ID }, secondMetadata: { localId: LOCAL_ID } },
+  ])("hydrates both remote chats immediately with a $name", async ({ firstMetadata, secondMetadata }) => {
+    const secondControllerId = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+    const initialState = buildState();
+    let hydratedState = initialState;
+    const dispatch = vi.fn<(action: ConversationsAction) => void>((action) => {
+      hydratedState = conversationsReducer(hydratedState, action);
+    });
+    const updateMetadata = vi.fn().mockResolvedValue(undefined);
+    const fetchProjectConversations = vi.fn().mockResolvedValue([
+      buildRemoteConversation(firstMetadata),
+      {
+        ...buildRemoteConversation(secondMetadata),
+        id: secondControllerId,
+        // Selecting the newest row must not close the placeholder after it
+        // has become the first row's real conversation in this same batch.
+        createdAt: "2026-07-14T20:00:00.000Z",
+      },
+    ]);
+
+    await act(async () => {
+      root.render(
+        <ControllerSyncHarness
+          state={initialState}
+          dispatch={dispatch}
+          fetchProjectConversations={fetchProjectConversations}
+          updateMetadata={updateMetadata}
+        />,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(hydratedState.conversations.map((conversation) => conversation.controllerId)).toEqual([
+      CONTROLLER_ID,
+      secondControllerId,
+    ]);
+    expect(new Set(hydratedState.conversations.map((conversation) => conversation.localId)).size).toBe(2);
+    expect(hydratedState.activeId).toBe(secondControllerId);
+    expect(dispatch.mock.calls.filter(([action]) => action.type === "SET_CONTROLLER")).toHaveLength(1);
+    expect(dispatch.mock.calls.map(([action]) => action.type)).not.toContain("CLOSE");
+    if ("localId" in firstMetadata) {
+      expect(updateMetadata).not.toHaveBeenCalled();
+    } else {
+      expect(updateMetadata).toHaveBeenCalledTimes(1);
+      expect(updateMetadata).toHaveBeenCalledWith({
+        conversationId: CONTROLLER_ID,
+        metadata: expect.objectContaining({ localId: LOCAL_ID }),
+      });
+    }
   });
 
   it("preserves local routing when an SSE creation attaches without routing metadata", async () => {

@@ -16,9 +16,62 @@ vi.mock("../core", () => ({
 }));
 
 import {
+  fetchConversationMessagesFromController,
   recordControllerConversationMessage,
   resolveControllerConversationParticipation,
 } from "../conversations";
+import { readControllerError } from "../core";
+
+describe("fetchConversationMessagesFromController", () => {
+  beforeEach(() => {
+    resolveControllerAccessTokenMock.mockReset();
+    resolveControllerAccessTokenMock.mockResolvedValue("token-123");
+    vi.mocked(readControllerError).mockClear();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("distinguishes explicit HTTP 403 denial from transient failure", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 403 })));
+
+    await expect(fetchConversationMessagesFromController({ conversationId: "conversation-1" }))
+      .resolves.toBe("access_denied");
+  });
+
+  it("keeps HTTP 401 retryable after the existing auth-recovery handler runs", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const response = new Response(null, { status: 401 });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+    await expect(fetchConversationMessagesFromController({ conversationId: "conversation-1" }))
+      .resolves.toBeNull();
+    expect(readControllerError).toHaveBeenCalledWith(
+      response,
+      "fetch messages failed",
+      expect.objectContaining({ accessToken: "token-123" }),
+    );
+  });
+
+  it("keeps unavailable, missing, and genuinely empty history distinct", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn()
+      .mockRejectedValueOnce(new TypeError("Network unavailable"))
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ messages: [], hasMore: false }))));
+
+    const request = { conversationId: "conversation-1" };
+    await expect(fetchConversationMessagesFromController(request)).resolves.toBeNull();
+    await expect(fetchConversationMessagesFromController(request)).resolves.toBeNull();
+    await expect(fetchConversationMessagesFromController(request)).resolves.toBe("not_found");
+    await expect(fetchConversationMessagesFromController(request)).resolves.toEqual({
+      messages: [], nextCursor: null, hasMore: false,
+    });
+  });
+});
 
 describe("recordControllerConversationMessage", () => {
   beforeEach(() => {
