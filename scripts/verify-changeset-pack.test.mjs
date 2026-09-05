@@ -263,6 +263,23 @@ test("response-body time is included and an exact match arriving at the deadline
   assert.equal(clock.sleeps.length, 99);
 });
 
+test("an absent latest tag may converge after publication but never authorizes a prepublish collision", async (context) => {
+  const clock = registryClock(context, (url, state) => registryResponse(url.endsWith("/dist-tags")
+    ? (state.time >= 30_000 ? { latest: "0.2.0" } : {})
+    : { dist: { integrity: registryIntegrity } }));
+  assert.equal(await verifyRegistry(registryEntry, registryIntegrity, "after", clock.dependencies), true);
+  assert.equal(clock.time, 30_000);
+
+  const before = registryClock(context, (url) => registryResponse(url.endsWith("/dist-tags")
+    ? {} : { dist: { integrity: registryIntegrity } }));
+  await assert.rejects(
+    () => verifyRegistry(registryEntry, registryIntegrity, "before", before.dependencies),
+    /npm latest does not point/u,
+  );
+  assert.equal(before.requests.length, 2);
+  assert.deepEqual(before.sleeps, []);
+});
+
 test("does not read latest if the immutable response exhausts the budget", async (context) => {
   const clock = registryClock(context, (_url, state) => {
     if (state.time < 297_000) return registryResponse({ error: "Not found" }, 404);
@@ -338,6 +355,10 @@ for (const mode of ["before", "after"]) {
 test("does not retry malformed JSON, malformed dist-tags or transport failures", async (context) => {
   for (const response of [
     () => new Response("{", { status: 200 }),
+    () => registryResponse(null),
+    () => registryResponse([]),
+    () => registryResponse({ latest: null }),
+    () => registryResponse({ latest: "" }),
     () => registryResponse({ latest: 1 }),
     () => { throw new Error("read aborted"); },
   ]) {

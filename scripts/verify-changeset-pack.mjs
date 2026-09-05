@@ -255,8 +255,14 @@ async function registryLatestVersion(name, read) {
   const text = await response.text();
   if (Buffer.byteLength(text) > MAX_PLAN_BYTES) fail(`npm dist-tags response for ${name} is too large`);
   const body = JSON.parse(text);
-  if (typeof body?.latest !== "string" || body.latest.length === 0) {
-    fail(`npm dist-tags response for ${name} is missing latest`);
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    fail(`npm dist-tags response for ${name} is malformed`);
+  }
+  // A valid tag map can temporarily lack latest while publication converges.
+  // Before-mode still rejects that state for an already registered version.
+  if (!Object.hasOwn(body, "latest")) return null;
+  if (typeof body.latest !== "string" || body.latest.length === 0) {
+    fail(`npm dist-tags response for ${name} has an invalid latest`);
   }
   return body.latest;
 }
