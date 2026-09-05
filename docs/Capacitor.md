@@ -309,6 +309,28 @@ bundle, upload it to an immutable artifact URL, register the release, and update
 rollout attached to an authoritative native release event; an infrastructure or frontend deploy is
 not a mobile release event.
 
+Guard automated OTA registrations with `--required-native-build <exact-build>` from the verified
+native publication receipt. The client reports the installed `App.getInfo().build`, separately
+from its marketing version and current web bundle. The controller and updated client require
+an exact match for guarded offers. An older client that omits this field needs a native update
+containing build reporting before it can receive guarded OTA; do not weaken the guard to enroll it.
+The guard does not replace native bridge/config/dependency compatibility evidence or embedded
+public-key verification. Channel configuration and stable-promotion policy are unchanged.
+
+Vite compiles the normalized channel into `instafy-native-ota-channel:<channel>`; the runtime
+resolver derives its channel from that literal. Archive inspection can therefore check the
+reachable entry JavaScript against the packaged native `LiveUpdate.defaultChannel`, rather than
+trusting environment variables or a separate metadata-only claim. Unconfigured builds still use
+`stable`; internal native lanes must explicitly build with `VITE_OTA_CHANNEL=internal` and the
+matching native default channel.
+
+The native rollback timer remains armed until React successfully commits the app shell. The
+router's initial error fallback and a shell that immediately unmounts do not acknowledge readiness.
+This is shell readiness only: authentication/loading UI can count as a successful commit, and
+the acknowledgment does not certify network health, later lazy-route chunks, or the complete
+Studio workflow. Verify signed download rejection and timeout rollback on real native builds;
+JavaScript tests cannot prove the packaged key or native timer behavior.
+
 ## Shared release artifact infra
 
 Mobile OTA and desktop binaries may share one public artifact layer, but keep their metadata and

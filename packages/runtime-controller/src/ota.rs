@@ -221,6 +221,10 @@ impl OtaRegistry {
         match &self.backend {
             OtaRegistryBackend::InMemory(store) => {
                 let mut guard = store.write().await;
+                if let Some(existing) = guard.releases.get(&release.release_id) {
+                    ensure_same_release_identity(existing, &release)?;
+                    return Ok(existing.clone());
+                }
                 guard
                     .releases
                     .insert(release.release_id.clone(), release.clone());
@@ -304,7 +308,7 @@ impl PostgresOtaRegistry {
                 "select release_id, platform, channel, bundle_version, git_sha, native_version,
                         min_supported_native_version, artifact_url, artifact_sha256,
                         artifact_size_bytes, artifact_type, signature, rollout_percentage,
-                        status, published_at, published_by, notes
+                        status, published_at, published_by, notes, required_native_build
                    from ota_releases
                order by published_at desc",
                 &[],
@@ -389,7 +393,7 @@ impl PostgresOtaRegistry {
         }
 
         let mut sql = String::from(
-            "select device_id, platform, channel, native_version, current_bundle_version,
+            "select device_id, platform, channel, native_version, native_build, current_bundle_version,
                     current_git_sha, last_seen_at, last_check_at, last_event_type,
                     last_event_at, last_release_id, last_session_id, last_user_id,
                     last_space_id
@@ -450,7 +454,7 @@ impl PostgresOtaRegistry {
 
         let mut sql = String::from(
             "select event_id, event_type, occurred_at, device_id, platform, channel,
-                    native_version, bundle_version, git_sha, space_id, user_id,
+                    native_version, native_build, bundle_version, git_sha, space_id, user_id,
                     session_id, country_code, properties
                from ota_events",
         );
@@ -646,42 +650,26 @@ impl PostgresOtaRegistry {
         release: OtaReleaseRecord,
     ) -> Result<OtaReleaseRecord, OtaRegistryError> {
         self.ensure_tables().await?;
-        let connection = self.pool.get().await.map_err(ota_internal)?;
-        let row = connection
-            .query_one(
+        let mut connection = self.pool.get().await.map_err(ota_internal)?;
+        let transaction = connection.transaction().await.map_err(ota_internal)?;
+        let inserted = transaction
+            .query_opt(
                 "insert into ota_releases (
                     release_id, platform, channel, bundle_version, git_sha, native_version,
                     min_supported_native_version, artifact_url, artifact_sha256,
                     artifact_size_bytes, artifact_type, signature, rollout_percentage,
-                    status, published_at, published_by, notes
+                    status, published_at, published_by, notes, required_native_build
                  ) values (
                     $1, $2, $3, $4, $5, $6,
                     $7, $8, $9,
                     $10, $11, $12, $13,
-                    $14, $15, $16, $17
+                    $14, $15, $16, $17, $18
                  )
-                 on conflict (release_id) do update set
-                    platform = excluded.platform,
-                    channel = excluded.channel,
-                    bundle_version = excluded.bundle_version,
-                    git_sha = excluded.git_sha,
-                    native_version = excluded.native_version,
-                    min_supported_native_version = excluded.min_supported_native_version,
-                    artifact_url = excluded.artifact_url,
-                    artifact_sha256 = excluded.artifact_sha256,
-                    artifact_size_bytes = excluded.artifact_size_bytes,
-                    artifact_type = excluded.artifact_type,
-                    signature = excluded.signature,
-                    rollout_percentage = excluded.rollout_percentage,
-                    status = excluded.status,
-                    published_at = excluded.published_at,
-                    published_by = excluded.published_by,
-                    notes = excluded.notes,
-                    updated_at = now()
+                 on conflict (release_id) do nothing
                  returning release_id, platform, channel, bundle_version, git_sha, native_version,
                            min_supported_native_version, artifact_url, artifact_sha256,
                            artifact_size_bytes, artifact_type, signature, rollout_percentage,
-                           status, published_at, published_by, notes",
+                           status, published_at, published_by, notes, required_native_build",
                 &[
                     &release.release_id,
                     &release.platform.to_string(),
@@ -700,11 +688,21 @@ impl PostgresOtaRegistry {
                     &release.published_at,
                     &release.published_by,
                     &release.notes,
+                    &release.required_native_build,
                 ],
             )
             .await
             .map_err(ota_internal)?;
-        map_release_row(row)
+        let stored = if let Some(row) = inserted {
+            map_release_row(row)?
+        } else {
+            // A separate READ COMMITTED statement sees the winning concurrent insert.
+            let existing = load_release_for_update(&transaction, &release.release_id).await?;
+            ensure_same_release_identity(&existing, &release)?;
+            existing
+        };
+        transaction.commit().await.map_err(ota_internal)?;
+        Ok(stored)
     }
 
     async fn activate_channel(
@@ -719,6 +717,13 @@ impl PostgresOtaRegistry {
         let mut connection = self.pool.get().await.map_err(ota_internal)?;
         let transaction = connection.transaction().await.map_err(ota_internal)?;
 
+        lock_channel(&transaction, platform, &channel).await?;
+        let existing_assignment =
+            load_channel_assignment_for_update(&transaction, platform, &channel).await?;
+        check_expected_active_release(
+            &request.expected_active_release_id,
+            existing_assignment.as_ref(),
+        )?;
         let release = load_release_for_update(&transaction, &release_id).await?;
         if release.platform != platform {
             return Err(OtaRegistryError::Invalid(format!(
@@ -733,8 +738,6 @@ impl PostgresOtaRegistry {
             )));
         }
 
-        let existing_assignment =
-            load_channel_assignment_for_update(&transaction, platform, &channel).await?;
         let previous_release_id = if let Some(existing) = existing_assignment.as_ref() {
             if existing.active_release_id != release_id {
                 if let Err(error) = transaction
@@ -844,12 +847,16 @@ impl PostgresOtaRegistry {
         let mut connection = self.pool.get().await.map_err(ota_internal)?;
         let transaction = connection.transaction().await.map_err(ota_internal)?;
 
+        lock_channel(&transaction, platform, &channel).await?;
         let existing_assignment =
-            load_channel_assignment_for_update(&transaction, platform, &channel)
-                .await?
-                .ok_or_else(|| {
-                    OtaRegistryError::NotFound("no active release for channel".to_string())
-                })?;
+            load_channel_assignment_for_update(&transaction, platform, &channel).await?;
+        check_expected_active_release(
+            &request.expected_active_release_id,
+            existing_assignment.as_ref(),
+        )?;
+        let existing_assignment = existing_assignment.ok_or_else(|| {
+            OtaRegistryError::NotFound("no active release for channel".to_string())
+        })?;
 
         let target_release_id = if let Some(explicit) = request.release_id.as_ref() {
             normalize_non_empty(explicit, "release_id")?
@@ -966,7 +973,8 @@ impl PostgresOtaRegistry {
                         r.native_version, r.min_supported_native_version, r.artifact_url,
                         r.artifact_sha256, r.artifact_size_bytes, r.artifact_type,
                         r.signature, r.rollout_percentage, r.status, r.published_at,
-                        r.published_by, r.notes, a.rollout_percentage as assignment_rollout
+                        r.published_by, r.notes, r.required_native_build,
+                        a.rollout_percentage as assignment_rollout
                    from ota_channel_assignments a
                    join ota_releases r on r.release_id = a.active_release_id
                   where a.platform = $1 and a.channel = $2",
@@ -979,7 +987,9 @@ impl PostgresOtaRegistry {
         let response = if let Some(row) = joined {
             let release = map_release_row(row.clone())?;
             let rollout_percentage = row.get::<_, i32>("assignment_rollout").clamp(0, 100) as u8;
-            if !version_is_compatible(
+            if !native_build_is_compatible(&request, &release) {
+                OtaCheckResponse::not_available("native_build_incompatible")
+            } else if !version_is_compatible(
                 &request.native_version,
                 &release.min_supported_native_version,
             ) {
@@ -1004,6 +1014,7 @@ impl PostgresOtaRegistry {
                 OtaCheckResponse {
                     update_available: true,
                     reason: "update_available".to_string(),
+                    required_native_build: release.required_native_build.clone(),
                     release_id: Some(release.release_id.clone()),
                     bundle_version: Some(release.bundle_version.clone()),
                     git_sha: Some(release.git_sha.clone()),
@@ -1025,15 +1036,16 @@ impl PostgresOtaRegistry {
                     platform, channel, device_id, native_version, current_bundle_version,
                     current_git_sha, last_seen_at, last_check_at, last_event_type,
                     last_event_at, last_release_id, last_session_id, last_user_id,
-                    last_space_id
+                    last_space_id, native_build
                  ) values (
                     $1, $2, $3, $4, $5,
                     $6, $7, $8, $9,
                     $10, $11, $12, $13,
-                    $14
+                    $14, $15
                  )
                  on conflict (platform, channel, device_id) do update set
                     native_version = excluded.native_version,
+                    native_build = excluded.native_build,
                     current_bundle_version = excluded.current_bundle_version,
                     current_git_sha = excluded.current_git_sha,
                     last_seen_at = excluded.last_seen_at,
@@ -1064,6 +1076,7 @@ impl PostgresOtaRegistry {
                     &Option::<String>::None,
                     &Option::<String>::None,
                     &Option::<String>::None,
+                    &request.native_build,
                 ],
             )
             .await
@@ -1100,11 +1113,11 @@ impl PostgresOtaRegistry {
                 "insert into ota_events (
                     event_id, event_type, occurred_at, device_id, platform, channel,
                     native_version, bundle_version, git_sha, space_id, user_id,
-                    session_id, country_code, properties
+                    session_id, country_code, properties, native_build
                  ) values (
                     $1, $2, $3, $4, $5, $6,
                     $7, $8, $9, $10, $11,
-                    $12, $13, $14
+                    $12, $13, $14, $15
                  )
                  on conflict (event_id) do update set
                     event_type = excluded.event_type,
@@ -1113,6 +1126,7 @@ impl PostgresOtaRegistry {
                     platform = excluded.platform,
                     channel = excluded.channel,
                     native_version = excluded.native_version,
+                    native_build = excluded.native_build,
                     bundle_version = excluded.bundle_version,
                     git_sha = excluded.git_sha,
                     space_id = excluded.space_id,
@@ -1135,6 +1149,7 @@ impl PostgresOtaRegistry {
                     &event.session_id,
                     &event.country_code,
                     &PgJson(properties_to_json(&event.properties)),
+                    &event.native_build,
                 ],
             )
             .await
@@ -1147,15 +1162,16 @@ impl PostgresOtaRegistry {
                     platform, channel, device_id, native_version, current_bundle_version,
                     current_git_sha, last_seen_at, last_check_at, last_event_type,
                     last_event_at, last_release_id, last_session_id, last_user_id,
-                    last_space_id
+                    last_space_id, native_build
                  ) values (
                     $1, $2, $3, $4, $5,
                     $6, $7, $8, $9,
                     $10, $11, $12, $13,
-                    $14
+                    $14, $15
                  )
                  on conflict (platform, channel, device_id) do update set
                     native_version = excluded.native_version,
+                    native_build = excluded.native_build,
                     current_bundle_version = coalesce(excluded.current_bundle_version, ota_device_states.current_bundle_version),
                     current_git_sha = coalesce(excluded.current_git_sha, ota_device_states.current_git_sha),
                     last_seen_at = excluded.last_seen_at,
@@ -1181,6 +1197,7 @@ impl PostgresOtaRegistry {
                     &event.session_id,
                     &event.user_id,
                     &event.space_id,
+                    &event.native_build,
                 ],
             )
             .await
@@ -1391,6 +1408,8 @@ pub(crate) struct OtaReleaseRecord {
     pub(crate) git_sha: String,
     pub(crate) native_version: String,
     pub(crate) min_supported_native_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) required_native_build: Option<String>,
     pub(crate) artifact_url: String,
     pub(crate) artifact_sha256: String,
     pub(crate) artifact_size_bytes: u64,
@@ -1423,6 +1442,8 @@ pub(crate) struct OtaDeviceState {
     pub(crate) platform: OtaPlatform,
     pub(crate) channel: String,
     pub(crate) native_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) native_build: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) current_bundle_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1453,6 +1474,8 @@ pub(crate) struct OtaUpdateEvent {
     pub(crate) platform: OtaPlatform,
     pub(crate) channel: String,
     pub(crate) native_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) native_build: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) bundle_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1514,6 +1537,8 @@ pub(crate) struct OtaCheckRequest {
     pub(crate) platform: OtaPlatform,
     pub(crate) channel: String,
     pub(crate) native_version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) native_build: Option<String>,
     #[serde(default)]
     pub(crate) current_bundle_version: Option<String>,
     #[serde(default)]
@@ -1524,6 +1549,8 @@ pub(crate) struct OtaCheckRequest {
 pub(crate) struct OtaCheckResponse {
     pub(crate) update_available: bool,
     pub(crate) reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) required_native_build: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) release_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1549,6 +1576,7 @@ impl OtaCheckResponse {
         Self {
             update_available: false,
             reason: reason.to_string(),
+            required_native_build: None,
             release_id: None,
             bundle_version: None,
             git_sha: None,
@@ -1568,6 +1596,8 @@ struct ActivateChannelRequest {
     #[serde(default)]
     rollout_percentage: Option<u8>,
     activated_by: String,
+    #[serde(default, deserialize_with = "deserialize_expected_active_release_id")]
+    expected_active_release_id: Option<Option<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1575,11 +1605,24 @@ struct RollbackChannelRequest {
     #[serde(default)]
     release_id: Option<String>,
     activated_by: String,
+    #[serde(default, deserialize_with = "deserialize_expected_active_release_id")]
+    expected_active_release_id: Option<Option<String>>,
+}
+
+// Missing is the legacy unconditional operation; explicit null expects an empty channel.
+fn deserialize_expected_active_release_id<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug)]
 pub(crate) enum OtaRegistryError {
     Invalid(String),
+    Conflict(String),
     NotFound(String),
     Internal(anyhow::Error),
 }
@@ -1588,6 +1631,7 @@ impl OtaRegistryError {
     fn into_response(self) -> (StatusCode, Json<ApiError>) {
         match self {
             Self::Invalid(message) => bad_request(message),
+            Self::Conflict(message) => (StatusCode::CONFLICT, Json(ApiError::new(message))),
             Self::NotFound(message) => not_found(message),
             Self::Internal(error) => internal_error(format!("ota registry error: {error}")),
         }
@@ -2300,6 +2344,9 @@ async fn activate_channel_in_memory(
     let activated_by = normalize_non_empty(&request.activated_by, "activated_by")?;
     let release_id = normalize_non_empty(&request.release_id, "release_id")?;
     let mut guard = store.write().await;
+    let assignment_key = channel_key(platform, &channel);
+    let existing = guard.channels.get(&assignment_key).cloned();
+    check_expected_active_release(&request.expected_active_release_id, existing.as_ref())?;
     let release = guard.releases.get(&release_id).cloned().ok_or_else(|| {
         OtaRegistryError::NotFound(format!("unknown release_id '{}'", release_id))
     })?;
@@ -2316,8 +2363,6 @@ async fn activate_channel_in_memory(
         )));
     }
 
-    let assignment_key = channel_key(platform, &channel);
-    let existing = guard.channels.get(&assignment_key).cloned();
     let previous_release_id = if let Some(existing_assignment) = existing.as_ref() {
         if existing_assignment.active_release_id != release_id {
             if let Some(previous_release) = guard
@@ -2381,10 +2426,12 @@ async fn rollback_channel_in_memory(
     let activated_by = normalize_non_empty(&request.activated_by, "activated_by")?;
     let assignment_key = channel_key(platform, &channel);
     let mut guard = store.write().await;
-    let existing_assignment = guard
-        .channels
-        .get(&assignment_key)
-        .cloned()
+    let existing_assignment = guard.channels.get(&assignment_key).cloned();
+    check_expected_active_release(
+        &request.expected_active_release_id,
+        existing_assignment.as_ref(),
+    )?;
+    let existing_assignment = existing_assignment
         .ok_or_else(|| OtaRegistryError::NotFound("no active release for channel".to_string()))?;
 
     let target_release_id = if let Some(explicit) = request.release_id.as_ref() {
@@ -2466,7 +2513,9 @@ async fn check_for_update_in_memory(
     let response = match guard.channels.get(&assignment_key).cloned() {
         Some(assignment) => match guard.releases.get(&assignment.active_release_id).cloned() {
             Some(release) => {
-                if !version_is_compatible(
+                if !native_build_is_compatible(&request, &release) {
+                    OtaCheckResponse::not_available("native_build_incompatible")
+                } else if !version_is_compatible(
                     &request.native_version,
                     &release.min_supported_native_version,
                 ) {
@@ -2491,6 +2540,7 @@ async fn check_for_update_in_memory(
                     OtaCheckResponse {
                         update_available: true,
                         reason: "update_available".to_string(),
+                        required_native_build: release.required_native_build.clone(),
                         release_id: Some(release.release_id.clone()),
                         bundle_version: Some(release.bundle_version.clone()),
                         git_sha: Some(release.git_sha.clone()),
@@ -2515,6 +2565,7 @@ async fn check_for_update_in_memory(
             platform: request.platform,
             channel: request.channel,
             native_version: request.native_version,
+            native_build: request.native_build,
             current_bundle_version: request.current_bundle_version,
             current_git_sha: request.current_git_sha,
             last_seen_at: now,
@@ -2562,6 +2613,7 @@ async fn record_event_in_memory(
             platform: event.platform,
             channel: event.channel.clone(),
             native_version: event.native_version.clone(),
+            native_build: event.native_build.clone(),
             current_bundle_version: event.bundle_version.clone().or_else(|| {
                 existing
                     .as_ref()
@@ -2610,6 +2662,7 @@ fn map_release_row(row: Row) -> Result<OtaReleaseRecord, OtaRegistryError> {
         git_sha: row.get("git_sha"),
         native_version: row.get("native_version"),
         min_supported_native_version: row.get("min_supported_native_version"),
+        required_native_build: row.get("required_native_build"),
         artifact_url: row.get("artifact_url"),
         artifact_sha256: row.get("artifact_sha256"),
         artifact_size_bytes: to_u64(
@@ -2667,6 +2720,7 @@ fn map_device_state_row(row: Row) -> Result<OtaDeviceState, OtaRegistryError> {
         platform: OtaPlatform::from_str(row.get::<_, String>("platform").as_str())?,
         channel: row.get("channel"),
         native_version: row.get("native_version"),
+        native_build: row.get("native_build"),
         current_bundle_version: row.get("current_bundle_version"),
         current_git_sha: row.get("current_git_sha"),
         last_seen_at: row.get("last_seen_at"),
@@ -2693,6 +2747,7 @@ fn map_event_row(row: Row) -> Result<OtaUpdateEvent, OtaRegistryError> {
         platform: OtaPlatform::from_str(row.get::<_, String>("platform").as_str())?,
         channel: row.get("channel"),
         native_version: row.get("native_version"),
+        native_build: row.get("native_build"),
         bundle_version: row.get("bundle_version"),
         git_sha: row.get("git_sha"),
         space_id: row.get("space_id"),
@@ -2712,7 +2767,7 @@ async fn load_release_for_update(
             "select release_id, platform, channel, bundle_version, git_sha, native_version,
                     min_supported_native_version, artifact_url, artifact_sha256,
                     artifact_size_bytes, artifact_type, signature, rollout_percentage,
-                    status, published_at, published_by, notes
+                    status, published_at, published_by, notes, required_native_build
                from ota_releases
               where release_id = $1
               for update",
@@ -2724,6 +2779,51 @@ async fn load_release_for_update(
             OtaRegistryError::NotFound(format!("unknown release_id '{}'", release_id))
         })?;
     map_release_row(row)
+}
+
+fn check_expected_active_release(
+    expected: &Option<Option<String>>,
+    assignment: Option<&OtaChannelAssignment>,
+) -> Result<(), OtaRegistryError> {
+    if let Some(expected) = expected {
+        if expected
+            .as_deref()
+            .is_some_and(|value| value.trim().is_empty())
+        {
+            return Err(OtaRegistryError::Invalid(
+                "expected_active_release_id must be a non-empty string or null".to_string(),
+            ));
+        }
+        let active = assignment.map(|value| value.active_release_id.as_str());
+        if active != expected.as_deref() {
+            return Err(OtaRegistryError::Conflict(
+                "active release changed; read the channel again before retrying".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn channel_lock_id(platform: OtaPlatform, channel: &str) -> i64 {
+    let digest = Sha256::digest(format!("instafy:ota-channel:{platform}:{channel}"));
+    i64::from_be_bytes(digest[..8].try_into().expect("SHA-256 has eight bytes"))
+}
+
+async fn lock_channel(
+    transaction: &tokio_postgres::Transaction<'_>,
+    platform: OtaPlatform,
+    channel: &str,
+) -> Result<(), OtaRegistryError> {
+    // Lock before any row reads: SELECT FOR UPDATE cannot lock an absent assignment.
+    // Every channel writer, including legacy unconditional requests, uses this lock.
+    transaction
+        .query_one(
+            "select pg_advisory_xact_lock($1)",
+            &[&channel_lock_id(platform, channel)],
+        )
+        .await
+        .map_err(ota_internal)?;
+    Ok(())
 }
 
 async fn load_channel_assignment_for_update(
@@ -2839,6 +2939,13 @@ async fn ensure_ota_tables(pool: &PgPool) -> anyhow::Result<()> {
             alter table ota_events
               add column if not exists country_code text;
 
+            alter table ota_releases
+              add column if not exists required_native_build text;
+            alter table ota_device_states
+              add column if not exists native_build text;
+            alter table ota_events
+              add column if not exists native_build text;
+
             create index if not exists ota_releases_platform_channel_published_idx
               on ota_releases (platform, channel, published_at desc);
             create unique index if not exists ota_releases_platform_channel_bundle_version_idx
@@ -2916,6 +3023,49 @@ fn json_to_properties(value: JsonValue) -> BTreeMap<String, JsonValue> {
     }
 }
 
+fn ensure_same_release_identity(
+    existing: &OtaReleaseRecord,
+    incoming: &OtaReleaseRecord,
+) -> Result<(), OtaRegistryError> {
+    if existing.release_id != incoming.release_id
+        || existing.platform != incoming.platform
+        || existing.channel != incoming.channel
+        || existing.bundle_version != incoming.bundle_version
+        || existing.git_sha != incoming.git_sha
+        || existing.native_version != incoming.native_version
+        || existing.min_supported_native_version != incoming.min_supported_native_version
+        || existing.required_native_build != incoming.required_native_build
+        || existing.artifact_url != incoming.artifact_url
+        || existing.artifact_sha256 != incoming.artifact_sha256
+        || existing.artifact_size_bytes != incoming.artifact_size_bytes
+        || existing.artifact_type != incoming.artifact_type
+        || existing.signature != incoming.signature
+    {
+        return Err(OtaRegistryError::Conflict(
+            "release_id already exists with different immutable release metadata".to_string(),
+        ));
+    }
+    // Registration retries must not reset activation/rollback state or publication metadata.
+    Ok(())
+}
+
+fn valid_native_build(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn native_build_is_compatible(request: &OtaCheckRequest, release: &OtaReleaseRecord) -> bool {
+    release
+        .required_native_build
+        .as_deref()
+        .is_none_or(|required| {
+            valid_native_build(required) && request.native_build.as_deref() == Some(required)
+        })
+}
+
 fn normalize_release(release: &mut OtaReleaseRecord) -> Result<(), OtaRegistryError> {
     release.release_id = normalize_non_empty(&release.release_id, "release_id")?;
     release.channel = normalize_channel(&release.channel)?;
@@ -2931,6 +3081,15 @@ fn normalize_release(release: &mut OtaReleaseRecord) -> Result<(), OtaRegistryEr
         &release.min_supported_native_version,
         "min_supported_native_version",
     )?;
+    if release
+        .required_native_build
+        .as_deref()
+        .is_some_and(|value| !valid_native_build(value))
+    {
+        return Err(OtaRegistryError::Invalid(
+            "required_native_build must contain at most 64 ASCII digits with optional dot-separated numeric components".to_string(),
+        ));
+    }
     release.artifact_url = normalize_non_empty(&release.artifact_url, "artifact_url")?;
     release.artifact_sha256 =
         normalize_non_empty(&release.artifact_sha256, "artifact_sha256")?.to_ascii_lowercase();
@@ -2973,6 +3132,10 @@ fn normalize_check_request(request: &mut OtaCheckRequest) -> Result<(), OtaRegis
     request.device_id = normalize_non_empty(&request.device_id, "device_id")?;
     request.channel = normalize_channel(&request.channel)?;
     request.native_version = normalize_non_empty(&request.native_version, "native_version")?;
+    request.native_build = request
+        .native_build
+        .take()
+        .filter(|value| valid_native_build(value));
     request.current_bundle_version = request
         .current_bundle_version
         .take()
@@ -2991,6 +3154,10 @@ fn normalize_event(event: &mut OtaUpdateEvent) -> Result<(), OtaRegistryError> {
     event.device_id = normalize_non_empty(&event.device_id, "device_id")?;
     event.channel = normalize_channel(&event.channel)?;
     event.native_version = normalize_non_empty(&event.native_version, "native_version")?;
+    event.native_build = event
+        .native_build
+        .take()
+        .filter(|value| valid_native_build(value));
     event.bundle_version = event
         .bundle_version
         .take()
@@ -3109,6 +3276,10 @@ fn to_u8(value: i32, field: &str) -> Result<u8, OtaRegistryError> {
 }
 
 #[cfg(test)]
+#[path = "ota_safety_tests.rs"]
+mod safety_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::tests::{
@@ -3123,7 +3294,7 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
-    fn sample_release() -> OtaReleaseRecord {
+    pub(super) fn sample_release() -> OtaReleaseRecord {
         OtaReleaseRecord {
             release_id: "ios-stable-20260318".to_string(),
             platform: OtaPlatform::Ios,
@@ -3132,6 +3303,7 @@ mod tests {
             git_sha: "abcdef123456".to_string(),
             native_version: "1.2.0".to_string(),
             min_supported_native_version: "1.2.0".to_string(),
+            required_native_build: None,
             artifact_url: "https://downloads.instafy.dev/ota/ios-stable-20260318.zip".to_string(),
             artifact_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .to_string(),
@@ -3154,7 +3326,7 @@ mod tests {
         Ok(Pool::builder().max_size(1).build_unchecked(manager))
     }
 
-    async fn test_state() -> anyhow::Result<(AppState, TempDir)> {
+    pub(super) async fn test_state() -> anyhow::Result<(AppState, TempDir)> {
         let temp_dir = tempfile::tempdir()?;
         let config = build_app_config(
             test_origin_private_key(),

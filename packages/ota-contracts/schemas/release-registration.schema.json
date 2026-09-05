@@ -50,6 +50,12 @@
       "type": "string",
       "minLength": 1
     },
+    "required_native_build": {
+      "type": ["string", "null"],
+      "maxLength": 64,
+      "pattern": "^[0-9]+(?:\\.[0-9]+)*$(?![\\s\\S])",
+      "description": "Exact native build required; missing or null preserves legacy version-only routing."
+    },
     "artifact_url": {
       "type": "string",
       "format": "uri"
