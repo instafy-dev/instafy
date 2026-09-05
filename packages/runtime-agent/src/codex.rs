@@ -99,6 +99,11 @@ const PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS: &str = r#"Personal Browser transp
 - Get interactive element indices from `snapshot`, then use one fresh index for exactly one click/type/press action. Snapshot again before every subsequent indexed action and after navigation, scrolling, or DOM changes. Arbitrary CSS selectors are not accepted.
 - The Personal Browser capability is deliberately unavailable to shell tools and subprocesses. Never try to discover, print, persist, or reconstruct it.
 - Stop on a 423 response because the user paused control. Stop on 401 because the session capability was rotated or revoked; do not inspect or retry the token."#;
+const LOCAL_BROWSER_DEVELOPER_INSTRUCTIONS: &str = r#"Owner-local browser observation (self-hosted runtime policy):
+- The `instafy_local_browser.observe` tool can open one public HTTP(S) URL in a fresh headless browser, count matching elements, read bounded text and computed CSS, and optionally save a PNG under `artifacts/browser/`.
+- Use that tool for read-only public-page verification. Collect related observations and the screenshot in one call when practical.
+- This capability has no saved login state and cannot click, type, run arbitrary JavaScript, or access non-HTTP(S) URLs. Do not work around those boundaries with ad-hoc Playwright, Chromium, or CDP shell commands.
+- Report the returned final URL and exact observation values. Treat an error as final unless the user changes the request."#;
 const MCP_MODE_DEVELOPER_INSTRUCTIONS: &str = "MCP-focused run: complete the task via real MCP function calls, not shell emulation. Your first executable action should be an MCP tool call from the discovered MCP tool inventory in this run. Never execute MCP tool names through shell commands.";
 const STRUCTURED_RUNTIME_DEVELOPER_INSTRUCTIONS: &str = r#"Instafy Studio structured execution run:
 - Treat this as a background automation job, not an interactive chat turn.
@@ -849,6 +854,18 @@ impl CodexClient {
         let personal_browser_mode =
             options.personal_browser && personal_browser_capability_is_present();
         let shared_browser_mode = options.shared_browser && shared_browser_capability_is_present();
+        let local_browser_config = if options.personal_browser || options.shared_browser {
+            None
+        } else {
+            match crate::local_browser::process_config() {
+                Ok(config) => config,
+                Err(error) => {
+                    tracing::warn!(error = %error, "owner-local browser capability is unavailable for this turn");
+                    None
+                }
+            }
+        };
+        let local_browser_mode = local_browser_config.is_some();
         let generic_mcp_mode = options.expect_mcp_tools;
         let mcp_mode = generic_mcp_mode || personal_browser_mode || shared_browser_mode;
         let cancel_signal = options.cancel_signal.clone();
@@ -862,6 +879,7 @@ impl CodexClient {
             browser_mode,
             personal_browser_mode,
             shared_browser_mode,
+            local_browser_mode,
             mcp_mode,
             generic_mcp_mode,
             expect_mcp_tools = options.expect_mcp_tools,
@@ -979,6 +997,9 @@ impl CodexClient {
             })
             .map(|instructions| {
                 append_personal_browser_developer_instructions(instructions, personal_browser_mode)
+            })
+            .map(|instructions| {
+                append_local_browser_developer_instructions(instructions, local_browser_mode)
             });
         let base_instructions = if mcp_mode || browser_mode {
             None
@@ -1113,6 +1134,8 @@ impl CodexClient {
             options.personal_browser,
             options.shared_browser,
             options.shared_browser_page_id.as_deref(),
+            local_browser_config.as_ref(),
+            self.workspace_dir(),
         )?;
         scope_browser_capabilities_from_shell_environment(
             &mut config.permissions.shell_environment_policy,
@@ -2459,6 +2482,12 @@ fn scope_browser_capabilities_from_shell_environment(policy: &mut ShellEnvironme
         SHARED_BROWSER_PAGE_ID_ENV,
         SHARED_BROWSER_PLAYWRIGHT_MODULE_PATH_ENV,
         SHARED_BROWSER_TRUSTED_NODE_MODULES_ROOT_ENV,
+        crate::local_browser::ENABLED_ENV,
+        crate::local_browser::PLAYWRIGHT_PATH_ENV,
+        crate::local_browser::CHROMIUM_PATH_ENV,
+        crate::local_browser::EGRESS_PROXY_PATH_ENV,
+        crate::local_browser::NODE_PATH_ENV,
+        crate::local_browser::WORKSPACE_PATH_ENV,
     ] {
         policy.r#set.remove(key);
         policy
@@ -2472,17 +2501,25 @@ fn install_browser_mcp_servers(
     personal_enabled: bool,
     shared_enabled: bool,
     shared_page_id: Option<&str>,
+    local_browser: Option<&crate::local_browser::LocalBrowserConfig>,
+    workspace: &Path,
 ) -> Result<()> {
     if personal_enabled && shared_enabled {
         return Err(anyhow!(
             "Personal Browser and Shared Browser cannot be enabled in the same Codex turn"
         ));
     }
+    if local_browser.is_some() && (personal_enabled || shared_enabled) {
+        return Err(anyhow!(
+            "owner-local browser observation cannot be combined with Personal or Shared Browser"
+        ));
+    }
 
-    // A browser capability must never coexist with project-configured MCP servers. A hostile
-    // server can request selected parent environment variables or attach headers sourced from
-    // them. Replacing the map keeps the Personal bearer and Shared CDP capability reachable only
-    // through the single trusted broker for this turn.
+    // Personal and Shared Browser must never coexist with project-configured MCP servers. A
+    // hostile server can request selected parent environment variables or attach headers sourced
+    // from them. Replacing the map keeps their bearer/CDP capabilities reachable only through the
+    // single trusted broker for the turn. Owner-local observation carries no reusable browser
+    // authority and is intentionally additive with project MCP servers.
     let mut servers = if personal_enabled || shared_enabled {
         HashMap::new()
     } else {
@@ -2490,6 +2527,7 @@ fn install_browser_mcp_servers(
     };
     servers.remove(PERSONAL_BROWSER_MCP_SERVER_NAME);
     servers.remove(SHARED_BROWSER_MCP_SERVER_NAME);
+    servers.remove(crate::local_browser::MCP_SERVER_NAME);
 
     if personal_enabled {
         let (url, project_id, token) = crate::personal_browser::mcp_registration_from_process()
@@ -2561,6 +2599,25 @@ fn install_browser_mcp_servers(
         );
     }
 
+    if let Some(local_browser) = local_browser {
+        let executable = crate::local_browser::mcp_executable().context(
+            "failed to locate the running runtime-agent image for owner-local browser MCP",
+        )?;
+        servers.insert(
+            crate::local_browser::MCP_SERVER_NAME.to_string(),
+            local_browser_mcp_server_config(McpServerTransportConfig::Stdio {
+                command: executable.to_string_lossy().into_owned(),
+                args: vec![crate::local_browser::MCP_COMMAND.to_string()],
+                env: Some(crate::local_browser::mcp_environment(
+                    local_browser,
+                    workspace,
+                )),
+                env_vars: Vec::new(),
+                cwd: Some(LegacyAppPathString::from_path(workspace)),
+            }),
+        );
+    }
+
     if personal_enabled || shared_enabled {
         let expected_server_name = if personal_enabled {
             PERSONAL_BROWSER_MCP_SERVER_NAME
@@ -2575,6 +2632,27 @@ fn install_browser_mcp_servers(
         .set(servers)
         .context("failed to install the bounded browser MCP server set")?;
     Ok(())
+}
+
+fn local_browser_mcp_server_config(transport: McpServerTransportConfig) -> McpServerConfig {
+    McpServerConfig {
+        transport,
+        auth: Default::default(),
+        environment_id: DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
+        enabled: true,
+        required: true,
+        supports_parallel_tool_calls: false,
+        disabled_reason: None,
+        startup_timeout_sec: Some(Duration::from_secs(10)),
+        tool_timeout_sec: Some(Duration::from_secs(90)),
+        default_tools_approval_mode: None,
+        enabled_tools: Some(vec!["observe".to_string()]),
+        disabled_tools: None,
+        scopes: None,
+        oauth: None,
+        oauth_resource: None,
+        tools: HashMap::new(),
+    }
 }
 
 fn browser_mcp_server_config(transport: McpServerTransportConfig) -> McpServerConfig {
@@ -2699,6 +2777,13 @@ fn append_personal_browser_developer_instructions(base: String, enabled: bool) -
         return base;
     }
     format!("{base}\n\n{PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS}")
+}
+
+fn append_local_browser_developer_instructions(base: String, enabled: bool) -> String {
+    if !enabled {
+        return base;
+    }
+    format!("{base}\n\n{LOCAL_BROWSER_DEVELOPER_INSTRUCTIONS}")
 }
 
 fn apply_runtime_security_feature_overrides(features: &mut ManagedFeatures) {
@@ -3951,6 +4036,48 @@ mod tests {
     }
 
     #[test]
+    fn owner_local_browser_policy_is_appended_only_when_capable() {
+        let base = "ordinary runtime turn".to_string();
+        assert_eq!(
+            append_local_browser_developer_instructions(base.clone(), false),
+            base
+        );
+        let enabled = append_local_browser_developer_instructions(base, true);
+        assert!(enabled.contains("instafy_local_browser.observe"));
+        assert!(enabled.contains("computed CSS"));
+        assert!(enabled.contains("artifacts/browser/"));
+        assert!(enabled.contains("no saved login state"));
+        assert!(enabled.contains("Do not work around those boundaries"));
+    }
+
+    #[test]
+    fn owner_local_browser_mcp_is_required_serial_and_observe_only() {
+        let server = local_browser_mcp_server_config(McpServerTransportConfig::Stdio {
+            command: "/trusted/runtime-agent".to_string(),
+            args: vec![crate::local_browser::MCP_COMMAND.to_string()],
+            env: Some(HashMap::from([(
+                crate::local_browser::EGRESS_PROXY_PATH_ENV.to_string(),
+                "/trusted/browser-egress-proxy".to_string(),
+            )])),
+            env_vars: Vec::new(),
+            cwd: None,
+        });
+        assert!(server.enabled);
+        assert!(server.required);
+        assert!(!server.supports_parallel_tool_calls);
+        assert_eq!(server.enabled_tools, Some(vec!["observe".to_string()]));
+        let McpServerTransportConfig::Stdio { env, .. } = server.transport else {
+            panic!("owner-local browser MCP must use stdio");
+        };
+        assert_eq!(
+            env.and_then(|values| values
+                .get(crate::local_browser::EGRESS_PROXY_PATH_ENV)
+                .cloned()),
+            Some("/trusted/browser-egress-proxy".to_string())
+        );
+    }
+
+    #[test]
     fn every_job_strips_all_browser_capabilities_from_shell_children() {
         let mut policy = ShellEnvironmentPolicy::default();
         for key in [
@@ -3961,6 +4088,12 @@ mod tests {
             SHARED_BROWSER_AGENT_CONTROL_FILE_ENV,
             SHARED_BROWSER_APPROVAL_DIR_ENV,
             SHARED_BROWSER_APPROVAL_TIMEOUT_MS_ENV,
+            crate::local_browser::ENABLED_ENV,
+            crate::local_browser::PLAYWRIGHT_PATH_ENV,
+            crate::local_browser::CHROMIUM_PATH_ENV,
+            crate::local_browser::EGRESS_PROXY_PATH_ENV,
+            crate::local_browser::NODE_PATH_ENV,
+            crate::local_browser::WORKSPACE_PATH_ENV,
         ] {
             policy
                 .r#set
@@ -3977,14 +4110,20 @@ mod tests {
             SHARED_BROWSER_AGENT_CONTROL_FILE_ENV,
             SHARED_BROWSER_APPROVAL_DIR_ENV,
             SHARED_BROWSER_APPROVAL_TIMEOUT_MS_ENV,
+            crate::local_browser::ENABLED_ENV,
+            crate::local_browser::PLAYWRIGHT_PATH_ENV,
+            crate::local_browser::CHROMIUM_PATH_ENV,
+            crate::local_browser::EGRESS_PROXY_PATH_ENV,
+            crate::local_browser::NODE_PATH_ENV,
+            crate::local_browser::WORKSPACE_PATH_ENV,
         ] {
             assert!(!policy.r#set.contains_key(key));
         }
-        assert_eq!(policy.exclude.len(), 14);
+        assert_eq!(policy.exclude.len(), 20);
 
         let mut fresh_policy = ShellEnvironmentPolicy::default();
         scope_browser_capabilities_from_shell_environment(&mut fresh_policy);
-        assert_eq!(fresh_policy.exclude.len(), 14);
+        assert_eq!(fresh_policy.exclude.len(), 20);
     }
 
     #[test]
