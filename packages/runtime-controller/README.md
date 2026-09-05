@@ -47,7 +47,7 @@ This document explains how the Instafy runtime controller is structured and how 
 | GET | `/runs/:run_id/result` | Fetch stored result JSON (fallback if SSE missed). |
 | POST | `/runtime/ensure` | Guarantee a runtime record exists (creates idle agents when missing). |
 | POST | `/agent/login` | Exchange shared key for agent token, lease/heartbeat URLs, and proxy envelope. |
-| POST | `/agent/lease` | Claim work (job queue). |
+| POST | `/agent/lease` | Claim work with a signed runtime ID bound to an eligible registered runtime and its current generation, including when `STRICT_MODE=false`. |
 | POST | `/credits` | Apply authenticated credit-ledger operations through the controller. |
 | POST | `/projects/:id/git/access_token` | Mint project Git tokens. `git.delete` is a 60-second, service-auth-only, single-scope cleanup capability. |
 |  |  | Controller no longer serves `/fs/*`; clients should use project origin endpoints (`/entries`, `/files`, `/raw`). |
