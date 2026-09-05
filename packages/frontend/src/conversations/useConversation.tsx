@@ -82,6 +82,7 @@ export function useConversation(): UseConversationResult {
     addConversationAgentHandle,
     removeConversationAgentHandle,
     appendMessages,
+    replaceMessages,
     updateMessage,
     markConversationRead,
     setConversationControllerId,
@@ -110,8 +111,10 @@ export function useConversation(): UseConversationResult {
     loadOlderMessages,
   } = useConversationHistoryState({
     activeConversation,
+    currentUserId,
     runs,
     setConversationControllerId,
+    replaceMessages,
   });
 
   const {

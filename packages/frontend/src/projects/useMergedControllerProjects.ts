@@ -6,6 +6,7 @@ import {
   type ControllerProjectSummary,
 } from "../sdk/instafy";
 import type { ProjectListItem } from "./useProjects";
+import { PROJECT_ACCESS_REFRESH_EVENT } from "./projectAccessEvents";
 
 const runtimeControllerEnabled = controllerClient.core.enabled;
 
@@ -85,20 +86,18 @@ export function filterAccessibleProjectsByOrg(
   return projects.filter((project) => project.orgId === orgId);
 }
 
-async function listLegacyControllerProjects(
-  orgId: string | null,
-): Promise<ControllerProjectSummary[]> {
-  if (orgId) {
-    return controllerClient.projects.list({ orgId });
-  }
-
-  const orgs = await controllerClient.organizations.list();
-  const results = await Promise.allSettled(
-    orgs.map(async (org) => controllerClient.projects.list({ orgId: org.id })),
+async function listLegacyControllerProjects(): Promise<ControllerProjectSummary[]> {
+  const orgs = await controllerClient.organizations.list({ throwOnError: true });
+  const results = await Promise.all(
+    orgs.map(async (org) => {
+      const result = await controllerClient.projects.listResult({ orgId: org.id });
+      if (result.status !== "success") {
+        throw new Error("Unable to discover all organization spaces.");
+      }
+      return result.projects;
+    }),
   );
-  return results.flatMap((result) =>
-    result.status === "fulfilled" ? result.value : [],
-  );
+  return results.flat();
 }
 
 export function useMergedControllerProjects({
@@ -108,112 +107,211 @@ export function useMergedControllerProjects({
   requestedProjectId = null,
 }: UseMergedControllerProjectsOptions) {
   const { loading: authLoading, session, user } = useAuth();
-  const [remoteProjects, setRemoteProjects] = useState<ControllerProjectSummary[]>([]);
-  const [requestedProject, setRequestedProject] = useState<ControllerProjectSummary | null>(null);
-  const [remoteLoading, setRemoteLoading] = useState(false);
-  // Which scope the CURRENT remoteProjects were fetched for. Consumers that
-  // act on "this org has no projects" must check this: right after an org
-  // switch, remoteProjects still holds the previous scope's results for a
-  // render, and remoteLoading may not have flipped yet in their closure.
-  const [remoteLoadedScope, setRemoteLoadedScope] = useState<string | null>(null);
+  const userId = user?.id ?? null;
+  const [discovery, setDiscovery] = useState<{
+    userId: string;
+    projects: ControllerProjectSummary[];
+  } | null>(null);
+  const [settledDiscoveryUserId, setSettledDiscoveryUserId] = useState<string | null>(null);
+  const [requestedSnapshot, setRequestedSnapshot] = useState<{
+    userId: string;
+    projectId: string;
+    summary: ControllerProjectSummary | null;
+  } | null>(null);
   const [requestedProjectLoading, setRequestedProjectLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-
-    if (!runtimeControllerEnabled) {
-      setRemoteProjects([]);
-      setRemoteLoading(false);
-      return () => {
-        cancelled = true;
-      };
+    if (!runtimeControllerEnabled || !userId) {
+      setDiscovery(null);
+      setSettledDiscoveryUserId(null);
+      return;
     }
     if (authLoading) {
-      setRemoteProjects([]);
-      setRemoteLoading(true);
-      return () => {
-        cancelled = true;
-      };
+      return;
     }
-    if (!user) {
-      setRemoteProjects([]);
-      setRemoteLoading(false);
-      return () => {
-        cancelled = true;
-      };
-    }
-    setRemoteLoading(true);
-    (async () => {
-      let accessibleProjects = await controllerClient.projects.list();
-      // Keep ordinary org-backed discovery working while controller nodes are
-      // rolling out the unscoped endpoint. Direct project memberships still
-      // appear as soon as GET /projects is available.
-      if (accessibleProjects.length === 0) {
-        accessibleProjects = await listLegacyControllerProjects(orgId);
+
+    // GET /projects already covers every accessible organization. Keep that
+    // snapshot when the selected org changes, so switching never waits for
+    // another identical request. Refresh authentication/access changes and
+    // foreground visits in the background while retaining the current list.
+    let inFlight = false;
+    let accessRefreshRequested = false;
+    const refresh = async () => {
+      if (inFlight || cancelled) {
+        return;
       }
-      return filterAccessibleProjectsByOrg(accessibleProjects, orgId);
-    })()
-      .then((projects) => {
-        if (!cancelled) {
-          setRemoteProjects(projects);
-          setRemoteLoadedScope(orgId ?? (includeAllOrgs ? "__all__" : null));
+      inFlight = true;
+      try {
+        const result = await controllerClient.projects.listResult();
+        if (cancelled) {
+          return;
         }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setRemoteLoading(false);
+        if (result.status === "error") {
+          return;
         }
-      });
+        // Older controllers expose only org-scoped discovery. Gather all
+        // memberships once there too, so switching can use the same snapshot.
+        // A successful empty list is authoritative; an unavailable controller
+        // must not replace a warm snapshot with an apparent loss of access.
+        const projects = result.status === "unsupported"
+          ? await listLegacyControllerProjects()
+          : result.projects;
+        if (!cancelled) {
+          setDiscovery({ userId, projects });
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.warn("[projects] failed to refresh accessible spaces:", error);
+        }
+      } finally {
+        inFlight = false;
+        if (!cancelled) {
+          setSettledDiscoveryUserId(userId);
+        }
+        if (accessRefreshRequested && !cancelled) {
+          accessRefreshRequested = false;
+          void refresh();
+        }
+      }
+    };
+    const handleRefresh = () => {
+      void refresh();
+    };
+    const handleAccessChanged = () => {
+      if (inFlight) {
+        accessRefreshRequested = true;
+        return;
+      }
+      handleRefresh();
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        handleRefresh();
+      }
+    };
+    handleRefresh();
+    window.addEventListener("focus", handleRefresh);
+    window.addEventListener(PROJECT_ACCESS_REFRESH_EVENT, handleAccessChanged);
+    document.addEventListener("visibilitychange", handleVisibility);
 
     return () => {
       cancelled = true;
+      window.removeEventListener("focus", handleRefresh);
+      window.removeEventListener(PROJECT_ACCESS_REFRESH_EVENT, handleAccessChanged);
+      document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [authLoading, includeAllOrgs, orgId, session?.access_token, user]);
+  }, [authLoading, session?.access_token, userId]);
 
   useEffect(() => {
     let cancelled = false;
 
     if (!runtimeControllerEnabled) {
-      setRequestedProject(null);
+      setRequestedSnapshot(null);
       setRequestedProjectLoading(false);
       return () => {
         cancelled = true;
       };
     }
     if (authLoading) {
-      setRequestedProject(null);
       setRequestedProjectLoading(true);
       return () => {
         cancelled = true;
       };
     }
-    if (!user || !requestedProjectId) {
-      setRequestedProject(null);
+    if (!userId || !requestedProjectId) {
+      setRequestedSnapshot(null);
       setRequestedProjectLoading(false);
       return () => {
         cancelled = true;
       };
     }
 
-    setRequestedProjectLoading(true);
-    controllerClient.projects
-      .getSummaryResult(requestedProjectId)
-      .then((result) => {
-        if (cancelled) {
+    let inFlight = false;
+    let accessRefreshRequested = false;
+    let accessVersion = 0;
+    const refresh = async () => {
+      if (inFlight || cancelled) {
+        return;
+      }
+      inFlight = true;
+      const requestedAccessVersion = accessVersion;
+      setRequestedProjectLoading(true);
+      try {
+        const result = await controllerClient.projects.getSummaryResult(requestedProjectId);
+        if (cancelled || requestedAccessVersion !== accessVersion) {
           return;
         }
-        setRequestedProject(result.summary ?? null);
-      })
-      .finally(() => {
+        // Keep a directly shared space during transient failures, but remove
+        // its fallback summary when the controller reports lost access.
+        if (result.summary || result.notFound || result.forbidden || result.unauthorized) {
+          setRequestedSnapshot({ userId, projectId: requestedProjectId, summary: result.summary ?? null });
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.warn("[projects] failed to refresh requested space:", error);
+        }
+      } finally {
+        inFlight = false;
         if (!cancelled) {
           setRequestedProjectLoading(false);
         }
-      });
+        if (accessRefreshRequested && !cancelled) {
+          accessRefreshRequested = false;
+          void refresh();
+        }
+      }
+    };
+    const handleRefresh = () => {
+      void refresh();
+    };
+    const handleAccessChanged = (event: Event) => {
+      const projectId = (event as CustomEvent<{ projectId?: string }>).detail?.projectId;
+      if (projectId && projectId !== requestedProjectId) {
+        return;
+      }
+      accessVersion += 1;
+      if (inFlight) {
+        accessRefreshRequested = true;
+        return;
+      }
+      handleRefresh();
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        handleRefresh();
+      }
+    };
+    handleRefresh();
+    window.addEventListener("focus", handleRefresh);
+    window.addEventListener(PROJECT_ACCESS_REFRESH_EVENT, handleAccessChanged);
+    document.addEventListener("visibilitychange", handleVisibility);
 
     return () => {
       cancelled = true;
+      window.removeEventListener("focus", handleRefresh);
+      window.removeEventListener(PROJECT_ACCESS_REFRESH_EVENT, handleAccessChanged);
+      document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [authLoading, requestedProjectId, session?.access_token, user]);
+  }, [authLoading, requestedProjectId, session?.access_token, userId]);
+
+  // Scope the data during render, rather than clearing it in a later effect:
+  // neither an account change nor an org click may expose the old scope.
+  const accessibleProjects = userId && discovery?.userId === userId ? discovery.projects : null;
+  const remoteProjects = useMemo(
+    () => filterAccessibleProjectsByOrg(accessibleProjects ?? [], orgId),
+    [accessibleProjects, orgId],
+  );
+  const remoteLoadedScope = accessibleProjects
+    ? orgId ?? (includeAllOrgs ? "__all__" : null)
+    : null;
+  const remoteLoading = !accessibleProjects && (
+    authLoading || (runtimeControllerEnabled && Boolean(userId) && settledDiscoveryUserId !== userId)
+  );
+  const requestedProjectResolved = Boolean(
+    userId && requestedSnapshot?.userId === userId && requestedSnapshot.projectId === requestedProjectId,
+  );
+  const requestedProject = requestedProjectResolved ? requestedSnapshot?.summary ?? null : null;
 
   const effectiveRemoteProjects = useMemo(
     () => mergeRemoteProjectSources(remoteProjects, requestedProject),
@@ -227,7 +325,7 @@ export function useMergedControllerProjects({
 
   return {
     mergedProjects,
-    remoteLoading: remoteLoading || requestedProjectLoading,
+    remoteLoading: remoteLoading || (Boolean(requestedProjectId) && requestedProjectLoading && !requestedProjectResolved),
     remoteLoadedScope,
     remoteProjects: effectiveRemoteProjects,
   };

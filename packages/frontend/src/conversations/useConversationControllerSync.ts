@@ -411,8 +411,7 @@ export function useConversationControllerSync({
           }
           if (
             activeLocalConversation &&
-            isAttachableConversation(activeLocalConversation) &&
-            !activeLocalConversation.controllerId
+            attachableByLocalId.has(activeLocalConversation.localId)
           ) {
             if (!titleFromMetadata || activeLocalConversation.title === titleFromMetadata) {
               return activeLocalConversation;
@@ -433,6 +432,9 @@ export function useConversationControllerSync({
 
         const existingAttachable = createdByIsSelf ? findAttachableMatch() : null;
         if (existingAttachable && !existingAttachable.controllerId) {
+          // Dispatch updates React after this batch. Consume the snapshot's
+          // placeholder now so another remote row cannot bind to it as well.
+          attachableByLocalId.delete(existingAttachable.localId);
           dispatch({ type: "SET_CONTROLLER", id: existingAttachable.localId, controllerId });
           syncExistingConversationFromRemote(existingAttachable);
 
@@ -528,7 +530,9 @@ export function useConversationControllerSync({
           candidateLocalId !== activeLocalConversation.localId
         ) {
           dispatch({ type: "SELECT", id: candidateLocalId });
-          dispatch({ type: "CLOSE", id: activeLocalConversation.localId });
+          if (attachableByLocalId.has(activeLocalConversation.localId)) {
+            dispatch({ type: "CLOSE", id: activeLocalConversation.localId });
+          }
         }
       }
 

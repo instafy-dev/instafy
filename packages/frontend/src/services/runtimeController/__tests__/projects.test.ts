@@ -38,6 +38,7 @@ import {
   getControllerProjectSummaryResult,
   importGithubProject,
   listControllerProjects,
+  listControllerProjectsResult,
   listControllerOrganizations,
   listControllerOrgMembers,
   listControllerProjectMembers,
@@ -213,6 +214,76 @@ describe("strict controller membership discovery", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("reports a successfully empty project list without requesting legacy discovery", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ projects: [] }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(listControllerProjectsResult()).resolves.toEqual({
+      status: "success",
+      projects: [],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([404, 405])("marks HTTP %s project discovery as unsupported", async (status) => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(async () => new Response(null, { status })));
+
+    await expect(listControllerProjectsResult()).resolves.toEqual({ status: "unsupported" });
+    await expect(listControllerProjects()).resolves.toEqual([]);
+  });
+
+  it.each([401, 403, 429, 500, 503])("retains HTTP %s as a failed project refresh", async (status) => {
+    const response = new Response(JSON.stringify({ message: "discovery unavailable" }), { status });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+    await expect(listControllerProjectsResult()).resolves.toEqual({ status: "error" });
+    expect(readControllerErrorMock).toHaveBeenCalledWith(
+      response,
+      "list projects failed",
+      defaultRequestContext,
+    );
+  });
+
+  it("distinguishes network failure from successfully empty project discovery", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network unavailable")));
+
+    await expect(listControllerProjectsResult()).resolves.toEqual({ status: "error" });
+    await expect(listControllerProjects()).resolves.toEqual([]);
+  });
+
+  it.each([null, {}, { projects: "invalid" }])("rejects malformed project discovery %j", async (body) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(body), { status: 200 })));
+
+    await expect(listControllerProjectsResult()).resolves.toEqual({ status: "error" });
+  });
+
+  it("does not treat unavailable authentication as an empty project list", async () => {
+    resolveControllerRequestContextMock.mockResolvedValue({ ...defaultRequestContext, accessToken: null });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(listControllerProjectsResult()).resolves.toEqual({ status: "error" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("reports org-scoped project results through the originating request context", async () => {
+    const project = { projectId: "project-1", orgId: "org-1" };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ projects: [project] }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(listControllerProjectsResult({ orgId: "org-1" })).resolves.toEqual({
+      status: "success",
+      projects: [project],
+    });
+    expect(fetchMock).toHaveBeenCalledWith("http://controller.test/orgs/org-1/projects", {
+      headers: { authorization: "Bearer token-123" },
+    });
   });
 
   it("distinguishes an organization request failure from a successful empty list", async () => {
