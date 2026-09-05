@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { cargoBinaryArtifact, fixtureHTML, fixtureOrigin, startDaemon,
-  studioProcessEnvironment, validateStudioStack, viteCliPath } from "./shared-browser-studio-e2e.mjs";
+  resolvePlaywrightChromiumExecutable, studioProcessEnvironment, validateStudioStack,
+  viteCliPath } from "./shared-browser-studio-e2e.mjs";
 import { fixtureChildEnvironment } from "./browser-profile-e2e.mjs";
 
 const jwt = claims => `fixture.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.fixture`;
@@ -41,7 +42,8 @@ test("Studio process environment replaces user homes and excludes credentials an
     RUSTC: "/untrusted/rustc", RUSTFLAGS: "--fixture", RUSTDOCFLAGS: "--fixture", NODE_OPTIONS: "--require=/untrusted.js",
     CODEX_HOME: "/operator/codex", INSTAFY_ENV_DIR: "/operator/private", GH_TOKEN: "must-not-copy",
     OPENAI_API_KEY: "must-not-copy", SUPABASE_SERVICE_ROLE_KEY: "must-not-copy", DATABASE_URL: "must-not-copy",
-    CONTROLLER_URL: "https://remote.invalid", HTTP_PROXY: "http://remote.invalid", VITE_SUPABASE_URL: "https://remote.invalid" };
+    CONTROLLER_URL: "https://remote.invalid", HTTP_PROXY: "http://remote.invalid", VITE_SUPABASE_URL: "https://remote.invalid",
+    PLAYWRIGHT_BROWSERS_PATH: "/operator/browser-cache" };
   assert.deepEqual(studioProcessEnvironment(source, "/fixture/home"), {
     PATH: source.PATH, HOME: "/fixture/home", DISPLAY: source.DISPLAY, XAUTHORITY: source.XAUTHORITY,
     CODEX_HOME: "/fixture/home/.codex", INSTAFY_ENV_DIR: "/fixture/home/empty-env", CODEX_DISABLED: "1",
@@ -90,6 +92,42 @@ test("locked Vite CLI resolves through the exported package manifest", async () 
   assert.equal(path.basename(cli), "vite.js");
   assert.equal(path.basename(path.dirname(cli)), "bin");
   assert.ok((await stat(cli)).isFile());
+});
+
+test("pinned Chromium crosses the empty-HOME boundary only as an executable", async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), "studio-browser-binary-test-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const executable = path.join(directory, "chromium");
+  await writeFile(executable, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
+  const environment = { HOME: "/operator/home", PLAYWRIGHT_BROWSERS_PATH: "/untrusted/cache",
+    NODE_OPTIONS: "--require=/untrusted.js", PLAYWRIGHT_EXECUTABLE_PATH: "/untrusted/chromium" };
+  const execute = async (command, args, options) => {
+    assert.equal(command, process.execPath);
+    assert.deepEqual(options.env, { HOME: environment.HOME });
+    assert.equal(options.timeout, 5_000);
+    assert.equal(options.maxBuffer, 4_096);
+    assert.equal(path.isAbsolute(args[2]), true);
+    return { stdout: JSON.stringify(executable), stderr: "" };
+  };
+  assert.equal(await resolvePlaywrightChromiumExecutable({ environment, execute }), await realpath(executable));
+  await assert.rejects(
+    resolvePlaywrightChromiumExecutable({ environment, execute: async () => ({
+      stdout: JSON.stringify(path.join(directory, "missing")), stderr: "",
+    }) }),
+    /Pinned Playwright Chromium is missing or not executable/,
+  );
+
+  const runner = await readFile(new URL("./shared-browser-studio-e2e.mjs", import.meta.url), "utf8");
+  assert.ok(runner.indexOf("await resolvePlaywrightChromiumExecutable()") <
+    runner.indexOf("studioProcessEnvironment(buildEnv, home)"));
+  assert.match(runner, /fixtureControlToken: controlToken, browserExecutablePath/);
+
+  const config = await readFile(
+    new URL("../packages/frontend/playwright.shared-studio-ci.config.ts", import.meta.url), "utf8",
+  );
+  assert.match(config, /launchOptions: \{ executablePath: browserExecutablePath \}/);
+  assert.match(config, /fixtureStat\.size > 64 \* 1024/);
+  assert.doesNotMatch(config, /userDataDir|storageState|PLAYWRIGHT_BROWSERS_PATH|process\.env\.HOME/);
 });
 
 test("fixture page is inert and tests HTTP login, localStorage and HttpOnly invisibility", () => {

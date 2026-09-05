@@ -203,6 +203,13 @@ of this lane. It creates the Studio user's project through the real
 authenticated controller API, then enables persistence for only that project
 on the disposable controller.
 
+The Studio-driving Playwright process uses an empty fixture home and a fresh
+browser context. The runner resolves and checks the installed, lockfile-pinned
+Chromium executable before that environment isolation, then passes only the
+executable path to Playwright. Sharing installed browser binaries does not share
+browser profiles, cookies, localStorage, or developer credentials. A missing
+installation fails the fixture preflight rather than skipping the journey.
+
 The fresh database must contain only its unchanged migration-seeded provider.
 The runner registers its additional disposable provider through the controller's
 service-role-only API; environment fallback does not override a populated registry.
