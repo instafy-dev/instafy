@@ -185,15 +185,40 @@ fn runtime_may_hold_browser_profile_with_classification(
         && (runtime.status != "stopped" || runtime.active_lease_id.is_some())
 }
 
-fn runtime_may_hold_browser_profile(state: &AppState, runtime: &BrowserProfileRuntime) -> bool {
-    runtime_may_hold_browser_profile_with_classification(
+async fn runtime_may_hold_browser_profile(
+    state: &AppState,
+    transaction: &tokio_postgres::Transaction<'_>,
+    runtime: &BrowserProfileRuntime,
+) -> Result<bool, (StatusCode, Json<ApiError>)> {
+    let may_hold = runtime_may_hold_browser_profile_with_classification(
         runtime,
         crate::runtime::runtime_is_private_self_hosted(
             state,
             &runtime.provider,
             &runtime.capabilities,
         ),
-    )
+    );
+    if !may_hold {
+        return Ok(false);
+    }
+
+    // `removed` alone is only a local lifecycle label and is not proof that a
+    // provider allocation released its decrypted profile. A normal successful
+    // provider removal does, however, retain an ordered acknowledgement tied to
+    // its released lease. Admit only that exact terminal state; ambiguous rows
+    // and every row with an active generation remain fenced through stop.
+    if runtime.status == "removed" && runtime.active_lease_id.is_none() {
+        let release_was_proven =
+            crate::runtime::provider_release_was_acknowledged_after_latest_stop(
+                transaction,
+                &runtime.id,
+                &runtime.provider,
+            )
+            .await?;
+        return Ok(!release_was_proven);
+    }
+
+    Ok(true)
 }
 
 fn map_browser_profile_runtime(row: &tokio_postgres::Row) -> BrowserProfileRuntime {
@@ -210,12 +235,16 @@ async fn load_browser_profile_runtime_candidates(
     state: &AppState,
     project_id: &Uuid,
 ) -> Result<Vec<Uuid>, (StatusCode, Json<ApiError>)> {
-    let connection = state
+    let mut connection = state
         .pool
         .get()
         .await
         .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
-    let rows = connection
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+    let rows = transaction
         .query(
             "select id, provider, capabilities, status, active_lease_id
              from runtimes
@@ -230,12 +259,19 @@ async fn load_browser_profile_runtime_candidates(
             ))
         })?;
 
-    Ok(rows
-        .iter()
-        .map(map_browser_profile_runtime)
-        .filter(|runtime| runtime_may_hold_browser_profile(state, runtime))
-        .map(|runtime| runtime.id)
-        .collect())
+    let mut runtime_ids = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let runtime = map_browser_profile_runtime(row);
+        if runtime_may_hold_browser_profile(state, &transaction, &runtime).await? {
+            runtime_ids.push(runtime.id);
+        }
+    }
+    transaction.commit().await.map_err(|error| {
+        internal_error(format!(
+            "failed to finalize browser profile runtime scan: {error}"
+        ))
+    })?;
+    Ok(runtime_ids)
 }
 
 /// Clear project-shared browser identity without leaving a live Chromium able
@@ -345,11 +381,15 @@ async fn reset_browser_profile(
                 "failed to recheck runtimes during browser profile reset: {error}"
             ))
         })?;
-    if current_runtimes
-        .iter()
-        .map(map_browser_profile_runtime)
-        .any(|runtime| runtime_may_hold_browser_profile(&state, &runtime))
-    {
+    let mut runtime_may_hold_profile = false;
+    for row in &current_runtimes {
+        let runtime = map_browser_profile_runtime(row);
+        if runtime_may_hold_browser_profile(&state, &transaction, &runtime).await? {
+            runtime_may_hold_profile = true;
+            break;
+        }
+    }
+    if runtime_may_hold_profile {
         return Err(conflict(
             "a managed Shared Browser runtime became active during reset; retry",
         ));

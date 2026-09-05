@@ -836,6 +836,198 @@ async fn browser_profile_reset_retains_profile_when_provider_release_cannot_be_p
 }
 
 #[tokio::test]
+async fn browser_profile_reset_accepts_removed_runtime_with_ordered_provider_release_ack(
+) -> anyhow::Result<()> {
+    let pool = require_origin_test_pool("acknowledged browser profile reset test").await?;
+    crate::browser_profile::ensure_browser_profiles_table(&pool).await?;
+
+    let project_id = Uuid::new_v4();
+    let runtime_id = Uuid::new_v4();
+    let lease_id = Uuid::new_v4();
+    {
+        let connection = pool.get().await?;
+        connection
+            .execute(
+                "insert into projects (id, project_type, status)
+                 values ($1, 'customer', 'active')",
+                &[&project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into project_browser_profiles
+                   (id, project_id, scope, version, nonce_b64, ciphertext_b64, bytes)
+                 values ($1, $2, 'project', 1, 'nonce', 'ciphertext', 10)",
+                &[&Uuid::new_v4(), &project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runtimes
+                   (id, project_id, provider, status, idle_ttl_seconds, updated_at)
+                 values ($1, $2, 'instafy-cloud', 'removed', 600, now())",
+                &[&runtime_id, &project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runtime_leases
+                   (id, project_id, runtime_id, status, requested_at, launched_at, released_at)
+                 values ($1, $2, $3, 'released', now(), now(), now())",
+                &[&lease_id, &project_id, &runtime_id],
+            )
+            .await?;
+        // An acknowledgement older than the latest stop cannot prove the
+        // current terminal generation was released.
+        connection
+            .execute(
+                "insert into runtime_events (runtime_id, project_id, kind, data)
+                 values (
+                     $1, $2, 'provider_release_acknowledged',
+                     jsonb_build_object(
+                         'provider', 'instafy_cloud',
+                         'runtimeLeaseId', $3::text
+                     )
+                 )",
+                &[&runtime_id, &project_id, &lease_id.to_string()],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runtime_events (runtime_id, project_id, kind, data)
+                 values ($1, $2, 'stopped', '{}'::jsonb)",
+                &[&runtime_id, &project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "insert into runtime_events (runtime_id, project_id, kind, data)
+                 values ($1, $2, 'registered', '{}'::jsonb)",
+                &[&runtime_id, &project_id],
+            )
+            .await?;
+        connection
+            .execute(
+                "update runtime_events
+                 set created_at = now() - interval '15 days'
+                 where runtime_id = $1",
+                &[&runtime_id],
+            )
+            .await?;
+    }
+
+    let config = build_app_config(
+        test_origin_private_key(),
+        test_origin_public_key(),
+        "browser-profile-reset-acknowledged-removal",
+    );
+    let state = build_test_state(pool.clone(), config);
+    let app = crate::browser_profile::router().with_state(state.clone());
+    let reset_request = || {
+        Request::builder()
+            .method("DELETE")
+            .uri(format!("/projects/{project_id}/browser-profile"))
+            .header("authorization", "Bearer service-role-token")
+            .body(Body::empty())
+    };
+
+    crate::runtime::prune_expired_runtime_events(&state).await?;
+    let retained_kinds: Vec<String> = pool
+        .get()
+        .await?
+        .query_one(
+            "select array_agg(kind order by id)
+             from runtime_events
+             where runtime_id = $1",
+            &[&runtime_id],
+        )
+        .await?
+        .get(0);
+    assert_eq!(
+        retained_kinds,
+        vec![
+            "provider_release_acknowledged".to_string(),
+            "stopped".to_string(),
+        ],
+        "retention must prune ordinary telemetry without deleting either side of lifecycle proof"
+    );
+
+    let stale_ack_reset = app.clone().oneshot(reset_request()?).await?;
+    assert_eq!(stale_ack_reset.status(), StatusCode::CONFLICT);
+    let profile_count: i64 = pool
+        .get()
+        .await?
+        .query_one(
+            "select count(*) from project_browser_profiles where project_id = $1",
+            &[&project_id],
+        )
+        .await?
+        .get(0);
+    assert_eq!(
+        profile_count, 1,
+        "stale provider acknowledgement must retain the encrypted profile"
+    );
+
+    // This is the state produced by a successful provider-backed removal: the
+    // lease is released, the runtime is removed with no active generation, and
+    // its matching provider acknowledgement follows the latest stop event.
+    let connection = pool.get().await?;
+    connection
+        .execute(
+            "insert into runtime_events (runtime_id, project_id, kind, data, created_at)
+             values (
+                 $1, $2, 'provider_release_acknowledged',
+                 jsonb_build_object(
+                     'provider', 'instafy_cloud',
+                     'runtimeLeaseId', $3::text
+                 ),
+                 now() - interval '15 days'
+             )",
+            &[&runtime_id, &project_id, &lease_id.to_string()],
+        )
+        .await?;
+    drop(connection);
+    crate::runtime::prune_expired_runtime_events(&state).await?;
+    let retained_proof_count: i64 = pool
+        .get()
+        .await?
+        .query_one(
+            "select count(*)
+             from runtime_events
+             where runtime_id = $1
+               and kind in ('stopped', 'provider_release_acknowledged')",
+            &[&runtime_id],
+        )
+        .await?
+        .get(0);
+    assert_eq!(
+        retained_proof_count, 3,
+        "retention must preserve an aged acknowledgement newer than the latest stop"
+    );
+
+    let acknowledged_reset = app.oneshot(reset_request()?).await?;
+    assert_eq!(acknowledged_reset.status(), StatusCode::OK);
+    let acknowledged_body: serde_json::Value =
+        serde_json::from_slice(&to_bytes(acknowledged_reset.into_body(), usize::MAX).await?)?;
+    assert_eq!(acknowledged_body["cleared"], true);
+    assert_eq!(acknowledged_body["stoppedRuntimeIds"], json!([]));
+
+    let profile_count: i64 = pool
+        .get()
+        .await?
+        .query_one(
+            "select count(*) from project_browser_profiles where project_id = $1",
+            &[&project_id],
+        )
+        .await?
+        .get(0);
+    assert_eq!(profile_count, 0);
+
+    cleanup_origin_project(&pool, &project_id).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn service_role_organization_delete_is_idempotent_for_recovery() -> anyhow::Result<()> {
     let Some(pool) = setup_origin_test_pool().await? else {
         eprintln!("skipping organization delete recovery test: TEST_DATABASE_URL not set");
@@ -22028,12 +22220,14 @@ async fn strict_runtime_stop_accepts_removed_runtime_only_with_newer_provider_ac
     let project_id = Uuid::new_v4();
     let acknowledged_runtime_id = Uuid::new_v4();
     let missing_ack_runtime_id = Uuid::new_v4();
+    let missing_stop_runtime_id = Uuid::new_v4();
     let stale_ack_runtime_id = Uuid::new_v4();
     let wrong_provider_ack_runtime_id = Uuid::new_v4();
     let wrong_lease_ack_runtime_id = Uuid::new_v4();
     let malformed_ack_runtime_id = Uuid::new_v4();
     let acknowledged_lease_id = Uuid::new_v4();
     let missing_ack_lease_id = Uuid::new_v4();
+    let missing_stop_lease_id = Uuid::new_v4();
     let stale_ack_lease_id = Uuid::new_v4();
     let wrong_provider_ack_lease_id = Uuid::new_v4();
     let wrong_lease_ack_lease_id = Uuid::new_v4();
@@ -22051,6 +22245,7 @@ async fn strict_runtime_stop_accepts_removed_runtime_only_with_newer_provider_ac
         for runtime_id in [
             acknowledged_runtime_id,
             missing_ack_runtime_id,
+            missing_stop_runtime_id,
             stale_ack_runtime_id,
             wrong_provider_ack_runtime_id,
             wrong_lease_ack_runtime_id,
@@ -22068,6 +22263,7 @@ async fn strict_runtime_stop_accepts_removed_runtime_only_with_newer_provider_ac
         for (lease_id, runtime_id) in [
             (acknowledged_lease_id, acknowledged_runtime_id),
             (missing_ack_lease_id, missing_ack_runtime_id),
+            (missing_stop_lease_id, missing_stop_runtime_id),
             (stale_ack_lease_id, stale_ack_runtime_id),
             (wrong_provider_ack_lease_id, wrong_provider_ack_runtime_id),
             (wrong_lease_ack_lease_id, wrong_lease_ack_runtime_id),
@@ -22114,6 +22310,22 @@ async fn strict_runtime_stop_accepts_removed_runtime_only_with_newer_provider_ac
                 "INSERT INTO runtime_events (runtime_id, project_id, kind, data)
                  VALUES ($1, $2, 'stopped', '{}'::jsonb)",
                 &[&missing_ack_runtime_id, &project_id],
+            )
+            .await?;
+
+        connection
+            .execute(
+                "INSERT INTO runtime_events (runtime_id, project_id, kind, data)
+                 VALUES (
+                     $1, $2, 'provider_release_acknowledged',
+                     jsonb_build_object('provider', $3::text, 'runtimeLeaseId', $4::text)
+                 )",
+                &[
+                    &missing_stop_runtime_id,
+                    &project_id,
+                    &provider_id,
+                    &missing_stop_lease_id.to_string(),
+                ],
             )
             .await?;
 
@@ -22292,6 +22504,7 @@ async fn strict_runtime_stop_accepts_removed_runtime_only_with_newer_provider_ac
 
     for runtime_id in [
         missing_ack_runtime_id,
+        missing_stop_runtime_id,
         stale_ack_runtime_id,
         wrong_provider_ack_runtime_id,
         wrong_lease_ack_runtime_id,
@@ -22357,7 +22570,7 @@ async fn strict_runtime_stop_accepts_removed_runtime_only_with_newer_provider_ac
         )
         .await?
         .get(0);
-    assert_eq!(remaining_removed, 6);
+    assert_eq!(remaining_removed, 7);
     drop(connection);
 
     provider_handle.abort();

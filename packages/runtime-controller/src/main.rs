@@ -302,8 +302,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Telemetry/ephemeral-table retention, on its own slow ticker (separate from
     // the 10s idle sweep) so the periodic prunes are cheap and never compete with
-    // the hot lifecycle path. Both tables are append-only logs nothing reads
-    // beyond a short window; left unbounded they blow the database size quota.
+    // the hot lifecycle path. High-volume telemetry and expired grants need only
+    // short retention; lifecycle fencing evidence is retained by its pruner.
     let retention_state = state.clone();
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(300));
