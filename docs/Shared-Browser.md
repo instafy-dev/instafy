@@ -4,7 +4,7 @@
 > optional WebRTC transport. WebRTC and durable profile persistence are default-off and must be
 > enabled deliberately by each deployment after connectivity and privacy validation.
 
-Shared Browser is the isolated, web/mobile-compatible browser identity. Cookies, tabs, storage, and network location stay in the project runtime. The Electron app renders the same remote session and never imports it into the device-local Personal Browser profile.
+Shared Browser is the project-scoped, web/mobile-compatible browser identity. Cookies, tabs, storage, and network location stay in the project runtime. The Electron app renders the same remote session and never imports it into the device-local Personal Browser profile. Profile separation is not an OS sandbox from other processes in that runtime; see [browser profiles and login continuity](Browser-Profiles.md).
 
 ## Runtime eligibility
 
@@ -497,6 +497,74 @@ Storage, IndexedDB, and required Chromium identity files are included; caches
 and browsing history are not. The row is overwritten rather than accumulated
 and is retained until a writer clears it or the project/organization is
 deleted. There is no separate inactivity TTL.
+
+Saves use compare-and-swap, not last-writer-wins. An authorized `GET
+/agent/browser-profile` supplies the exact stored version and the
+`x-instafy-profile-write-policy: versioned-v2` header. An authorized empty `404`
+with that policy establishes version `0`. The runtime installs a validated
+snapshot as an exact baseline, not an overlay on an older cookie database, and
+uploads only to `PUT /agent/browser-profile/v2?version=N`. The controller
+atomically creates version `1` only while the row is absent, or updates a row
+only while its version still equals `N`. A stale writer receives `409` and
+cannot overwrite the winning profile. Snapshots do not synchronize two live
+Chromium sessions.
+
+Archives are packed in deterministic file order, and the runtime hashes the
+exact restored baseline before launching Chromium. An unchanged snapshot does
+not consume a version or needlessly invalidate another writer. This compares
+archive bytes, not semantic equivalence of website logins.
+
+Periodic and shutdown saves share one serialized writer state. A failed
+restore, conflicting or uncertain upload, cancelled upload, or invalid
+acknowledgment disables further saves for that process. A runtime must restart
+or be replaced and successfully establish a baseline before it can save again;
+it never automatically adopts another writer's version. The browser may remain
+usable locally while saving is disabled, so unsaved changes can be lost when
+that runtime ends.
+
+Final packing requires confirmed Chromium exit. Close has a bounded deadline;
+a missing/ambiguous process identity, PID reuse, or timeout skips that final
+upload and retains the last acknowledged stored snapshot. A successful close
+signal alone is not treated as proof that the browser stopped.
+
+A shutdown save also requires the runtime lease to remain active. Ordinary
+controller/provider-initiated stops currently fence the lease before signaling
+the runtime, so their final upload is rejected and recovery uses the last
+successful periodic snapshot. Do not promise zero-loss graceful recovery for
+those stops. A future reason-scoped pre-stop snapshot/acknowledgment protocol
+must finish before fencing; profile reset must continue to fence old writers
+without accepting a late upload. Periodic live-profile copies are best-effort,
+not a transactional Chromium database backup.
+
+Legacy `PUT /agent/browser-profile` requests on an upgraded controller are
+authorized normally but then fail with `428`, even if they carry a version.
+New runtimes require the `versioned-v2` policy and never fall back to the
+legacy write route. Older controllers do not implement the v2 route, so
+rollback or a mixed-controller deployment cannot silently turn a **new
+client's** conditional save into a blind overwrite. An **old runtime talking
+to an old controller can still perform a blind write**; protocol negotiation
+does not protect that pair.
+
+Roll out with an all-controller barrier, not just controllers-first ordering:
+
+1. Disable durable persistence on every serving controller and drain/stop all
+   profile-capable runtimes before introducing new writers. Confirm no old
+   in-flight save remains. If preserving a final snapshot, finish it before
+   closing this maintenance window's write gate.
+2. Upgrade and verify **every** serving controller target, including standby
+   targets that can receive failover traffic. Keep persistence disabled until
+   the legacy route is rejected everywhere; one upgraded GET response does
+   not prove the fleet is upgraded.
+3. Roll out the new runtime image, enable the controller-owned allowlist, and
+   start new runtime generations that establish a versioned baseline.
+
+Before controller rollback, disable persistence on every controller, stop/drain
+every profile-capable runtime, and wait for in-flight writes to finish. Keep
+persistence disabled throughout rollback; do not roll back one target into a
+live mixed-writer fleet. Deployment tooling must enforce these barriers.
+This change does not itself implement a deployment coordinator. The persistence
+compatibility change is intentional; ordinary browser use does not require
+durable profile saving. Persistence remains default-off.
 
 Builders and higher roles get one **Clear shared browser data** action in the
 existing browser bar. After confirmation, `DELETE

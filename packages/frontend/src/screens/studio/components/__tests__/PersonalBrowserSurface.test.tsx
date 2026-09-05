@@ -101,6 +101,7 @@ describe("PersonalBrowserSurface", () => {
 
   afterEach(async () => {
     await act(async () => root.unmount());
+    vi.restoreAllMocks();
     container.remove();
     delete window.instafyDesktop;
     if (originalResizeObserver) {
@@ -155,7 +156,7 @@ describe("PersonalBrowserSurface", () => {
     expect(container.textContent).not.toContain("Personal on this device");
     expect(
       container.querySelector('[data-testid="browser-transport-personal"]')?.textContent,
-    ).toBe("Personal");
+    ).toBe("Personal · you");
     expect(container.textContent).toContain("Ready");
     expect(
       container
@@ -197,16 +198,61 @@ describe("PersonalBrowserSurface", () => {
       '[data-testid="browser-transport-shared"]',
     );
     expect(personal?.disabled).toBe(true);
-    expect(personal?.getAttribute("aria-label")).toBe("Personal on this device");
-    expect(shared?.getAttribute("aria-label")).toBe("Shared with your team");
+    expect(personal?.getAttribute("aria-label")).toBe("Personal — you, this device");
+    expect(shared?.getAttribute("aria-label")).toBe("Shared — this project");
     expect(
       document.getElementById(personal?.getAttribute("aria-describedby") ?? "")?.textContent,
     ).toContain("stay on this device");
     expect(
       document.getElementById(shared?.getAttribute("aria-describedby") ?? "")?.textContent,
-    ).toContain("Project members can see and reuse logins");
+    ).toContain("Project members see the same remote browser");
     await act(async () => shared?.click());
     expect(onModeChange).toHaveBeenCalledWith("shared");
+  });
+
+  it("keeps profile ownership accessible when compact controls hide their text", async () => {
+    await act(async () => {
+      root.render(
+        <BrowserTransportSelector
+          checked
+          compact
+          mode="personal"
+          onModeChange={vi.fn()}
+          personalAvailable
+        />,
+      );
+    });
+    expect(container.querySelector('[role="group"]')?.getAttribute("aria-label"))
+      .toBe("Browser profile");
+    const personal = container.querySelector<HTMLButtonElement>('[data-testid="browser-transport-personal"]')!;
+    const shared = container.querySelector<HTMLButtonElement>('[data-testid="browser-transport-shared"]')!;
+    expect(personal.textContent).toBe("");
+    expect(shared.textContent).toBe("");
+    expect(personal.getAttribute("aria-label")).toBe("Personal — you, this device");
+    expect(personal.getAttribute("aria-pressed")).toBe("true");
+    expect(shared.getAttribute("aria-label")).toBe("Shared — this project");
+    expect(shared.getAttribute("aria-pressed")).toBe("false");
+    const personalDescription = document.getElementById(personal.getAttribute("aria-describedby")!)?.textContent;
+    expect(personalDescription).toContain("follow you across projects");
+    expect(personalDescription).toContain("not copied to Shared Browser or your other devices");
+  });
+
+  it("explains that clearing Personal data affects all projects on this device and respects cancellation", async () => {
+    const model = createModel();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await act(async () => {
+      root.render(
+        <PersonalBrowserSurface active model={model} transportSelector={<span>Personal</span>} />,
+      );
+    });
+    const clear = container.querySelector<HTMLButtonElement>('[aria-label="Clear personal browser data"]')!;
+    await act(async () => clear.click());
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("across all your projects on this device"));
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("does not clear Shared Browser, your Instafy sign-in, or your other browsers"));
+    expect(model.clearData).not.toHaveBeenCalled();
+    confirm.mockReturnValue(true);
+    await act(async () => clear.click());
+    expect(model.clearData).toHaveBeenCalledTimes(1);
   });
 
   it("associates invalid-address feedback with the address field", async () => {

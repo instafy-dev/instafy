@@ -28,6 +28,7 @@ These docs reflect the current product scope: a chat-first filesystem workspace 
 - OTA control plane: `docs/OTA-Control-Plane.md`
 - Desktop updater: `docs/Desktop-Updater.md`
 - Shared Browser native shell and streaming boundary: `docs/Shared-Browser.md`
+- Browser profiles, cookie sharing, and clearing scope: `docs/Browser-Profiles.md`
 - Shared Browser origin scopes and transport boundary: `docs/Shared-Browser-Authorization.md`
 - Personal Browser desktop architecture and security boundary: `docs/Personal-Browser.md`
 - Private self-hosted ownership and future Team runtime boundary: `docs/Self-Hosted-Runtime-Security.md`

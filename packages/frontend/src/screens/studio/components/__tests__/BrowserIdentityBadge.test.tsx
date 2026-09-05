@@ -31,9 +31,11 @@ describe("BrowserIdentityBadge", () => {
     });
     const badge = container.querySelector<HTMLElement>('[data-testid="browser-identity-badge"]');
     expect(badge).not.toBeNull();
-    expect(badge?.textContent).toContain("Shared with your team");
+    expect(badge?.textContent).toContain("Shared · this project");
     // The tooltip spells out the sharing so it is never a surprise.
-    expect(badge?.title).toMatch(/anyone on the project/i);
+    expect(badge?.title).toMatch(/this project's members see the same remote browser/i);
+    expect(badge?.title).toMatch(/members with control can use those logins/i);
+    expect(badge?.title).toMatch(/logins are not copied here/i);
   });
 
   it("passes through extra classes for placement", async () => {

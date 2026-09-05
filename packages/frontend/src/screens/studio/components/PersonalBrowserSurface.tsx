@@ -59,7 +59,7 @@ export function BrowserTransportSelector({
 
   return (
     <div
-      aria-label="Browser location"
+      aria-label="Browser profile"
       className="inline-flex shrink-0 rounded-lg bg-slate-100/80 p-0.5 dark:bg-slate-800/60"
       data-browser-session-safe-zone="true"
       data-compact={compact ? "true" : "false"}
@@ -68,7 +68,7 @@ export function BrowserTransportSelector({
     >
       <button
         aria-describedby={personalDescriptionId}
-        aria-label="Personal on this device"
+        aria-label="Personal — you, this device"
         aria-pressed={mode === "personal"}
         className={optionClassName("personal")}
         data-testid="browser-transport-personal"
@@ -79,31 +79,33 @@ export function BrowserTransportSelector({
             ? "Checking this device…"
             : !personalAvailable
               ? "Personal Browser is available in the Instafy desktop app."
-              : "Personal — logins stay on this device"
+              : "Personal — your logins across projects on this device; never shared with project members"
         }
         type="button"
       >
         <Computer className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-        {compact ? null : <span>Personal</span>}
+        {compact ? null : <span>Personal · you</span>}
       </button>
       <button
         aria-describedby={sharedDescriptionId}
-        aria-label="Shared with your team"
+        aria-label="Shared — this project"
         aria-pressed={mode === "shared"}
         className={optionClassName("shared")}
         data-testid="browser-transport-shared"
         onClick={() => onModeChange("shared")}
-        title="Shared with your team — project members can see and reuse logins"
+        title="Shared — this project's remote browser and logins, visible to project members on their devices"
         type="button"
       >
         <Globe className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-        {compact ? null : <span>Shared with team</span>}
+        {compact ? null : <span>Shared · project</span>}
       </button>
       <span className="sr-only" id={personalDescriptionId}>
-        Logins and site data stay on this device.
+        Your logins and site data stay on this device and follow you across projects.
+        They are not copied to Shared Browser or your other devices.
       </span>
       <span className="sr-only" id={sharedDescriptionId}>
-        Project members can see and reuse logins saved in this browser.
+        Project members see the same remote browser and logged-in pages. Members
+        with control can use those logins. Your Personal Browser logins are not copied here.
       </span>
     </div>
   );
@@ -265,7 +267,9 @@ export function PersonalBrowserSurface({
   );
 
   const handleClearData = useCallback(() => {
-    if (!window.confirm("Clear cookies, site data, and browsing history from your Personal Browser?")) {
+    if (!window.confirm(
+      "Clear your Personal Browser cookies and site data on this device? This signs you out of websites across all your projects on this device. It does not clear Shared Browser, your Instafy sign-in, or your other browsers. This cannot be undone.",
+    )) {
       return;
     }
     void model.clearData();

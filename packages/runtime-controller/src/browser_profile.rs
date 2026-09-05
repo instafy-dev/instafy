@@ -14,7 +14,7 @@
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{Json, Response};
+use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use axum::Router;
 use serde::{Deserialize, Serialize};
@@ -43,9 +43,14 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/agent/browser-profile",
             get(get_browser_profile)
-                .put(put_browser_profile)
+                .put(reject_legacy_browser_profile_upload)
                 // Profiles are up to a few MB, above axum's 2MB default extractor
                 // cap; align the limit with the handler's own size check.
+                .layer(DefaultBodyLimit::max(BROWSER_PROFILE_MAX_BYTES)),
+        )
+        .route(
+            "/agent/browser-profile/v2",
+            axum::routing::put(put_browser_profile)
                 .layer(DefaultBodyLimit::max(BROWSER_PROFILE_MAX_BYTES)),
         )
         .route(
@@ -115,23 +120,28 @@ async fn ensure_browser_profile_runtime_is_managed_cloud(
     Ok(())
 }
 
-/// Decide the next version, enforcing the optimistic single-writer contract.
-/// A caller that passes the version it last saw is rejected if another runtime
-/// has since written. `None` means "write unconditionally".
-fn next_browser_profile_version(current: Option<i64>, expected: Option<i64>) -> Result<i64, i64> {
-    let current = current.unwrap_or(0);
-    if let Some(expected) = expected {
-        if expected != current {
-            return Err(current);
-        }
+fn required_browser_profile_version(
+    expected: Option<i64>,
+) -> Result<i64, (StatusCode, Json<ApiError>)> {
+    let expected = expected.ok_or_else(|| {
+        (
+            StatusCode::PRECONDITION_REQUIRED,
+            Json(ApiError::new(
+                "browser profile uploads require the version restored by this runtime; upgrade the runtime before saving",
+            )),
+        )
+    })?;
+    if !(0..i64::MAX).contains(&expected) {
+        return Err(bad_request("browser profile version is out of range"));
     }
-    Ok(current + 1)
+    Ok(expected)
 }
 
 #[derive(Debug, Deserialize)]
 struct BrowserProfileQuery {
     scope: Option<String>,
-    /// Version the caller last saw, for optimistic concurrency (409 if stale).
+    /// Required for PUT: version of the restored profile (0 for an empty store).
+    /// Missing preconditions fail with 428; stale writers fail with 409.
     version: Option<i64>,
 }
 
@@ -424,6 +434,19 @@ pub(crate) async fn ensure_browser_profiles_table(pool: &PgPool) -> anyhow::Resu
     Ok(())
 }
 
+/// Old runtimes used this path for unconditional writes. Preserve its auth and
+/// policy checks, but reject even callers that attach a version: new writers
+/// must use a distinct route that old controllers cannot silently accept.
+async fn reject_legacy_browser_profile_upload(
+    state: State<AppState>,
+    headers: HeaderMap,
+    Query(mut query): Query<BrowserProfileQuery>,
+    body: Bytes,
+) -> Result<Json<BrowserProfileManifest>, (StatusCode, Json<ApiError>)> {
+    query.version = None;
+    put_browser_profile(state, headers, Query(query), body).await
+}
+
 async fn put_browser_profile(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -475,6 +498,10 @@ async fn put_browser_profile(
     ensure_browser_profile_runtime_is_managed_cloud(&state, &transaction, &project_id, &runtime_id)
         .await?;
 
+    // Keep the existing query shape, but reject legacy unconditional writers.
+    // Otherwise an older runtime can still overwrite a version-aware writer.
+    let expected_version = required_browser_profile_version(query.version)?;
+
     let key = state
         .config
         .credential_encryption_key
@@ -484,71 +511,40 @@ async fn put_browser_profile(
         .map_err(|error| internal_error(format!("failed to encrypt browser profile: {error}")))?;
     let plaintext_bytes = body.len() as i64;
 
-    let current: Option<i64> = transaction
-        .query_opt(
-            // FOR UPDATE locks an existing row so concurrent snapshots serialize
-            // on the optimistic version check rather than racing a lost update.
-            "select version from project_browser_profiles
-             where project_id = $1 and scope = $2 for update",
-            &[&project_id, &scope],
-        )
-        .await
-        .map_err(|error| {
-            internal_error(format!("failed to read browser profile version: {error}"))
-        })?
-        .map(|row| row.get::<_, i64>("version"));
-
-    let next_version = match next_browser_profile_version(current, query.version) {
-        Ok(version) => version,
-        Err(current) => {
-            return Err(conflict(format!(
-                "browser profile changed since version {}; current is {current}",
-                query.version.unwrap_or(0)
-            )));
-        }
+    // Atomic compare-and-swap, including the absent-row case: SELECT FOR UPDATE
+    // cannot lock a row that does not exist. Two version=0 writers must never
+    // both succeed through an unconditional ON CONFLICT update.
+    let stored = if expected_version == 0 {
+        transaction
+            .query_opt(
+                "insert into project_browser_profiles
+                   (id, project_id, scope, version, nonce_b64, ciphertext_b64, bytes, updated_by_runtime, updated_at)
+                 values ($1, $2, $3, 1, $4, $5, $6, $7, now())
+                 on conflict (project_id, scope) do nothing
+                 returning version, updated_at",
+                &[&Uuid::new_v4(), &project_id, &scope, &nonce_b64, &ciphertext_b64,
+                  &plaintext_bytes, &runtime_id],
+            )
+            .await
+    } else {
+        transaction
+            .query_opt(
+                "update project_browser_profiles
+                 set version = version + 1, nonce_b64 = $4, ciphertext_b64 = $5,
+                     bytes = $6, updated_by_runtime = $7, updated_at = now()
+                 where project_id = $1 and scope = $2 and version = $3
+                 returning version, updated_at",
+                &[&project_id, &scope, &expected_version, &nonce_b64, &ciphertext_b64,
+                  &plaintext_bytes, &runtime_id],
+            )
+            .await
+    }
+    .map_err(|error| internal_error(format!("failed to store browser profile: {error}")))?;
+    let Some(stored) = stored else {
+        return Err(conflict(
+            "browser profile changed; this runtime must not save again without restoring the replacement profile",
+        ));
     };
-
-    transaction
-        .execute(
-            "insert into project_browser_profiles
-               (id, project_id, scope, version, nonce_b64, ciphertext_b64, bytes, updated_by_runtime, updated_at)
-             values ($1, $2, $3, $4, $5, $6, $7, $8, now())
-             on conflict (project_id, scope) do update set
-               -- Increment from the stored value (not excluded.version) so two
-               -- concurrent first-writers — whose FOR UPDATE locked nothing
-               -- because the row did not exist yet — still advance the counter
-               -- monotonically instead of both landing on version 1.
-               version = project_browser_profiles.version + 1,
-               nonce_b64 = excluded.nonce_b64,
-               ciphertext_b64 = excluded.ciphertext_b64,
-               bytes = excluded.bytes,
-               updated_by_runtime = excluded.updated_by_runtime,
-               updated_at = now()",
-            &[
-                &Uuid::new_v4(),
-                &project_id,
-                &scope,
-                &next_version,
-                &nonce_b64,
-                &ciphertext_b64,
-                &plaintext_bytes,
-                &runtime_id,
-            ],
-        )
-        .await
-        .map_err(|error| internal_error(format!("failed to store browser profile: {error}")))?;
-
-    // Read the persisted version back rather than trusting `next_version`: under
-    // the first-write race the ON CONFLICT branch may have advanced it further,
-    // so the DB row is the source of truth for what the client should report.
-    let stored = transaction
-        .query_one(
-            "select version, updated_at from project_browser_profiles
-             where project_id = $1 and scope = $2",
-            &[&project_id, &scope],
-        )
-        .await
-        .map_err(|error| internal_error(format!("failed to read browser profile: {error}")))?;
     let stored_version: i64 = stored.get("version");
     let updated_at: chrono::DateTime<chrono::Utc> = stored.get("updated_at");
 
@@ -611,8 +607,17 @@ async fn get_browser_profile(
     })?;
 
     let Some(row) = row else {
-        // Nothing stored — the runtime treats this as "start fresh".
-        return Err(not_found("no browser profile stored"));
+        // A policy marker on the authorized empty result lets new runtimes
+        // distinguish this CAS implementation from an older unconditional one.
+        let mut response = not_found("no browser profile stored").into_response();
+        response.headers_mut().insert(
+            "x-instafy-profile-write-policy",
+            "versioned-v2".parse().unwrap(),
+        );
+        response
+            .headers_mut()
+            .insert("cache-control", "no-store".parse().unwrap());
+        return Ok(response);
     };
 
     let key = state
@@ -630,6 +635,8 @@ async fn get_browser_profile(
     Response::builder()
         .header("content-type", "application/octet-stream")
         .header("x-instafy-profile-version", version.to_string())
+        .header("x-instafy-profile-write-policy", "versioned-v2")
+        .header("cache-control", "no-store")
         .body(Body::from(plaintext))
         .map_err(|error| internal_error(error.to_string()))
 }
@@ -638,7 +645,7 @@ async fn get_browser_profile(
 mod tests {
     use super::{
         ensure_browser_profile_persistence_enabled, is_supported_scope,
-        next_browser_profile_version, runtime_may_hold_browser_profile_with_classification,
+        required_browser_profile_version, runtime_may_hold_browser_profile_with_classification,
         BrowserProfileRuntime,
     };
     use axum::http::StatusCode;
@@ -653,20 +660,21 @@ mod tests {
     }
 
     #[test]
-    fn version_advances_and_rejects_stale_writes() {
-        // First write (no row yet): unconditional or expected 0 -> version 1.
-        assert_eq!(next_browser_profile_version(None, None), Ok(1));
-        assert_eq!(next_browser_profile_version(None, Some(0)), Ok(1));
-
-        // Correct expected version advances.
-        assert_eq!(next_browser_profile_version(Some(3), Some(3)), Ok(4));
-
-        // Unconditional write over an existing row advances from current.
-        assert_eq!(next_browser_profile_version(Some(3), None), Ok(4));
-
-        // Stale expected version is rejected with the current version.
-        assert_eq!(next_browser_profile_version(Some(3), Some(2)), Err(3));
-        assert_eq!(next_browser_profile_version(Some(1), Some(0)), Err(1));
+    fn browser_profile_version_precondition_is_required_and_bounded() {
+        assert_eq!(required_browser_profile_version(Some(0)).unwrap(), 0);
+        assert_eq!(required_browser_profile_version(Some(3)).unwrap(), 3);
+        assert_eq!(
+            required_browser_profile_version(None).unwrap_err().0,
+            StatusCode::PRECONDITION_REQUIRED
+        );
+        for invalid in [-1, i64::MAX] {
+            assert_eq!(
+                required_browser_profile_version(Some(invalid))
+                    .unwrap_err()
+                    .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
     }
 
     #[test]

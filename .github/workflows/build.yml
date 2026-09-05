@@ -15,6 +15,12 @@ permissions:
   contents: read
 
 jobs:
+  browser-verification:
+    name: Browser verification
+    uses: ./.github/workflows/browser-e2e.yml
+    permissions:
+      contents: read
+
   secret-scan:
     # Pull requests are leak-gated by the base-owned Trusted Public Boundary workflow.
     name: Secret scan
