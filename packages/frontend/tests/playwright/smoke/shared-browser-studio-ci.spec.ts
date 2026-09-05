@@ -205,21 +205,37 @@ test.describe("Disposable signed-in Studio Shared Browser", () => {
     const context = page.context();
     const fixture = readFixture();
     const grants: BrowserGrant[] = [];
-    const observeGrants = (target: Page) => target.on("response", async response => {
-      if (!response.ok() || response.request().method() !== "POST" ||
-          response.url() !== new URL("/access_token", fixture.controllerURL).toString()) return;
-      const request = response.request().postDataJSON() as Record<string, unknown> | null;
-      if (request?.projectId !== fixture.projectId || request.protocol !== "http" ||
-          !Array.isArray(request.scopes) || !request.scopes.includes("browser.control") ||
-          !request.scopes.includes("browser.view") || typeof request.preferRuntime !== "string" ||
-          typeof request.browserSessionId !== "string") return;
-      const payload = await response.json() as { originId?: unknown };
-      if (typeof payload.originId === "string") grants.push({
-        runtimeId: request.preferRuntime,
-        originId: payload.originId,
-        browserSessionId: request.browserSessionId,
+    const reported = new Set<string>();
+    const reportAPI = (url: string, status: number | "request-failed") => {
+      const operation = url === new URL("/runtime/ensure", fixture.controllerURL).toString() ? "ensure"
+        : url === new URL("/access_token", fixture.controllerURL).toString() ? "access-token" : null;
+      if (!operation || (status !== "request-failed" && (!Number.isInteger(status) || status < 100 || status > 599))) return;
+      const category = `${operation}:${status}`;
+      if (reported.has(category) || reported.size >= 32) return;
+      reported.add(category);
+      // A fixed operation and HTTP status only: never request/response bodies,
+      // URLs, error strings, grants, or browser session material.
+      console.log(`[shared-studio-api] ${category}`);
+    };
+    const observeGrants = (target: Page) => {
+      target.on("requestfailed", request => reportAPI(request.url(), "request-failed"));
+      target.on("response", async response => {
+        reportAPI(response.url(), response.status());
+        if (!response.ok() || response.request().method() !== "POST" ||
+            response.url() !== new URL("/access_token", fixture.controllerURL).toString()) return;
+        const request = response.request().postDataJSON() as Record<string, unknown> | null;
+        if (request?.projectId !== fixture.projectId || request.protocol !== "http" ||
+            !Array.isArray(request.scopes) || !request.scopes.includes("browser.control") ||
+            !request.scopes.includes("browser.view") || typeof request.preferRuntime !== "string" ||
+            typeof request.browserSessionId !== "string") return;
+        const payload = await response.json() as { originId?: unknown };
+        if (typeof payload.originId === "string") grants.push({
+          runtimeId: request.preferRuntime,
+          originId: payload.originId,
+          browserSessionId: request.browserSessionId,
+        });
       });
-    });
+    };
     observeGrants(page);
     const latestGrant = async (excludedRuntimeIds: string[] = []): Promise<BrowserGrant> => {
       await expect.poll(() => grants.some(grant => !excludedRuntimeIds.includes(grant.runtimeId)),

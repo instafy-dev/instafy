@@ -472,6 +472,17 @@ async function lifecycle() {
     passed = true;
   } finally {
     const serviceDiagnostics = { controller: controller?.diagnostics() ?? null, vite: vite?.diagnostics() ?? null };
+    // Capture fixed counters and closed-vocabulary observations before stopping
+    // the owned runtime. Never retain database rows, endpoints or raw logs.
+    const providerDiagnostics = provider?.diagnostics() ?? null;
+    let databaseDiagnostics = null;
+    if (projectId && uuid.test(projectId)) {
+      try {
+        const [counts] = await sql(`select (select count(*) from runtimes where project_id='${projectId}')::integer as runtimes, (select count(*) from workspace_origins where project_id='${projectId}')::integer as origins`);
+        if (Number.isSafeInteger(counts.runtimes) && Number.isSafeInteger(counts.origins))
+          databaseDiagnostics = { runtimes: counts.runtimes, origins: counts.origins };
+      } catch { /* Diagnostic absence cannot replace the original failure. */ }
+    }
     stage = passed ? "cleanup" : stage;
     await clean(async () => { if (vite) await vite.close(); });
     await clean(async () => { if (control) await closeServer(control); });
@@ -488,7 +499,7 @@ async function lifecycle() {
     await clean(() => rm(temporary, { recursive: true }));
     await mkdir(path.dirname(receiptPath), { recursive: true });
     await writeFile(receiptPath, JSON.stringify({ schemaVersion: 1, lane: "shared-studio", status: passed && !cleanupErrors.length ? "passed" : "failed",
-      stage, durationMs: Date.now() - started, cleanupErrors, serviceDiagnostics,
+      stage, durationMs: Date.now() - started, cleanupErrors, serviceDiagnostics, providerDiagnostics, databaseDiagnostics,
       proof: passed ? ["real-local-auth", "authenticated-project-creation", "studio-shared-launch", "real-origin-pixels-and-input", "periodic-encrypted-snapshot", "provider-acknowledged-stop", "replacement-cookie-restore", "ui-clear-no-resurrection"] : [],
       excludes: ["cloud-provider-allocation", "network-egress-transport", "model-turns", "cross-user-collaboration", "automatic-service-account-bootstrap", "OS-isolation"] }, null, 2) + "\n");
     removeSignals();

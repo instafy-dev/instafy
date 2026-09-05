@@ -140,6 +140,17 @@ test("fixture page is inert and tests HTTP login, localStorage and HttpOnly invi
   assert.doesNotMatch(html, /https?:\/\/|SUPABASE|Authorization|access_token|fixtureControlToken/);
 });
 
+test("failed Studio launches retain only fixed API and provider diagnostics before cleanup", async () => {
+  const runner = await readFile(new URL("./shared-browser-studio-e2e.mjs", import.meta.url), "utf8");
+  assert.ok(runner.indexOf("provider?.diagnostics()") < runner.indexOf("if (provider) await provider.close()"));
+  assert.match(runner, /serviceDiagnostics, providerDiagnostics, databaseDiagnostics/);
+  const spec = await readFile(new URL("../packages/frontend/tests/playwright/smoke/shared-browser-studio-ci.spec.ts", import.meta.url), "utf8");
+  assert.match(spec, /reported\.size >= 32/);
+  assert.match(spec, /status < 100 \|\| status > 599/);
+  assert.match(spec, /\[shared-studio-api\]/);
+  assert.doesNotMatch(spec, /console\.log\([^\n]*(?:response|request\.url|payload|fixture)/);
+});
+
 test("Studio and trusted service accounts are provisioned separately and both cleaned up", async () => {
   const source = await readFile(new URL("./shared-browser-studio-e2e.mjs", import.meta.url), "utf8");
   assert.match(source, /serviceUser = JSON\.parse\(await run\(process\.execPath,\s*\["scripts\/mint-test-user\.mjs", "--no-seed-org", "--json"\]/);
