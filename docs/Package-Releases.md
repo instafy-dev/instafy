@@ -40,6 +40,13 @@ The release workflow uses four isolated stages:
    the downloaded pack, and publishes the same tarballs without rebuilding them. The final receipt
    proves both exact registry bytes and that `latest` points at the planned version.
 
+Registry readback can lag a successful upload. Post-publication verification waits up to five
+minutes per package for the exact integrity and `latest` dist-tag to become visible, using only
+read-only registry requests bounded by the remaining deadline. It never retries publication.
+Conflicting immutable bytes, malformed responses and registry errors fail immediately; a timeout
+does not prove that the upload failed. Inspect the exact published version before recovery and
+never republish an immutable version just because its receipt is missing.
+
 Pull-request checks run on hosted runners with read-only repository access and no secrets.
 Publishing never runs from `pull_request` or `pull_request_target`. Every external Action is pinned
 to an immutable commit.
