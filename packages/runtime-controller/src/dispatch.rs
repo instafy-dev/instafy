@@ -4382,10 +4382,21 @@ async fn ensure_project_record_for_dispatch(
 
     if let Some(row) = existing {
         let project = map_project_row(&row);
+        // Authorize before initializing organizations, billing, or credits.
+        ensure_project_prompt_access(transaction, &project, context, request.session_id).await?;
         let project = ensure_project_org(transaction, &project).await?;
         credits::ensure_sandbox_credit_seed(transaction, config, &project, request, context)
             .await?;
         return Ok(project);
+    }
+
+    // A caller-selected project/session pair is not an onboarding grant.
+    // Interactive clients must create projects through the authenticated
+    // project API; only trusted controller operations retain lazy bootstrap.
+    if !context.is_service_role {
+        return Err(forbidden(
+            "Only service-role requests can create projects during dispatch",
+        ));
     }
 
     let inferred_type = request.project_type_hint.clone().unwrap_or_else(|| {
@@ -4427,6 +4438,7 @@ async fn ensure_project_record_for_dispatch(
     };
 
     let project = map_project_row(&project_row);
+    ensure_project_prompt_access(transaction, &project, context, request.session_id).await?;
     let project = ensure_project_org(transaction, &project).await?;
     credits::ensure_sandbox_credit_seed(transaction, config, &project, request, context).await?;
     Ok(project)
@@ -4618,6 +4630,10 @@ async fn progress_callback(
 
     Ok(Json(ProgressCallbackResponse { ok: true }))
 }
+
+#[cfg(test)]
+#[path = "dispatch_security_tests.rs"]
+mod security_tests;
 
 #[cfg(test)]
 mod tests {
