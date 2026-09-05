@@ -141,6 +141,48 @@ test("fixture page is inert and tests HTTP login, localStorage and HttpOnly invi
   assert.doesNotMatch(html, /https?:\/\/|SUPABASE|Authorization|access_token|fixtureControlToken/);
 });
 
+test("Studio login barrier waits for the browser's complete cookie/storage report before navigation", async () => {
+  const spec = await readFile(new URL("../packages/frontend/tests/playwright/smoke/shared-browser-studio-ci.spec.ts", import.meta.url), "utf8");
+  const helpers = [spec.match(/^function cookies\([\s\S]*?^}/m)?.[0],
+    spec.match(/^async function expectLoginObserved\([\s\S]*?^}/m)?.[0]];
+  assert.ok(helpers.every(Boolean));
+  const beforeLogin = { cookie: "", storage: null, httpOnlyVisible: false, submissions: 0, observations: 1, modelJobs: 0 };
+  const completed = { ...beforeLogin, cookie: "fixture_http=studio-proof; fixture_js=studio-proof",
+    storage: "studio-proof", submissions: 1, observations: 2 };
+  const incomplete = [
+    { ...beforeLogin, submissions: 1 }, // Server received POST; response has not reached Chromium.
+    { ...completed, observations: beforeLogin.observations },
+    { ...completed, cookie: "fixture_js=studio-proof" }, // HttpOnly response cookie has not arrived.
+    { ...completed, cookie: "fixture_http=studio-proof" },
+    { ...completed, cookie: `${completed.cookie}; unexpected=extra` },
+    { ...completed, storage: null },
+    { ...completed, httpOnlyVisible: true },
+    { ...completed, modelJobs: 1 },
+    { ...completed, submissions: 2 },
+  ];
+  const states = [...incomplete, completed];
+  let reads = 0;
+  const polling = { poll(check, options) {
+    assert.deepEqual(options, { timeout: 30_000 });
+    return { async toEqual(expected) {
+      for (let index = 0; index < incomplete.length; index++)
+        assert.notDeepEqual(await check(), expected, `incomplete login state ${index} must not complete the barrier`);
+      assert.deepEqual(await check(), expected);
+    } };
+  } };
+  const requireFrontend = createRequire(new URL("../packages/frontend/package.json", import.meta.url));
+  const { transpileModule } = requireFrontend("typescript");
+  const wait = new Function("expect", "state", "PROOF_VALUE",
+    `${transpileModule(helpers.join("\n"), {}).outputText}; return expectLoginObserved;`)(
+    polling, async () => states[reads++], "studio-proof");
+  await wait({}, beforeLogin);
+  assert.equal(reads, states.length);
+  const submissionAssertion = spec.indexOf(".toBe(beforeLogin.submissions + 1)");
+  const barrier = spec.indexOf("await expectLoginObserved(fixture, beforeLogin)");
+  const navigation = spec.indexOf('await navigateAndObserve(page, fixture, "signed-in")');
+  assert.ok(submissionAssertion >= 0 && submissionAssertion < barrier && barrier < navigation);
+});
+
 test("Studio bridges follow owned lease/origin generations when the controller reuses a runtime ID", async () => {
   const id = suffix => `00000000-0000-4000-8000-${String(suffix).padStart(12, "0")}`;
   let runtime = { id: id(1), leaseId: id(2), originId: id(3) };

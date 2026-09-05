@@ -130,6 +130,30 @@ function cookies(value: string): Record<string, string> {
   }));
 }
 
+async function expectLoginObserved(fixture: StudioFixture, beforeLogin: FixtureState) {
+  // A server-side submission count precedes Chromium receiving Set-Cookie.
+  // The form reports only after that response; consume its complete report
+  // before navigation can cancel the login or count the old page's report.
+  await expect.poll(async () => {
+    const observed = await state(fixture);
+    return {
+      submissions: observed.submissions,
+      newObservation: observed.observations > beforeLogin.observations,
+      cookies: cookies(observed.cookie),
+      storage: observed.storage,
+      httpOnlyVisible: observed.httpOnlyVisible,
+      modelJobs: observed.modelJobs,
+    };
+  }, { timeout: 30_000 }).toEqual({
+    submissions: beforeLogin.submissions + 1,
+    newObservation: true,
+    cookies: { fixture_js: PROOF_VALUE, fixture_http: PROOF_VALUE },
+    storage: PROOF_VALUE,
+    httpOnlyVisible: false,
+    modelJobs: 0,
+  });
+}
+
 async function expectSignedIn(page: Page, fixture: StudioFixture) {
   await expect.poll(async () => page.evaluate(async () => {
     const client = (window as typeof window & {
@@ -322,6 +346,7 @@ test.describe("Disposable signed-in Studio Shared Browser", () => {
     await page.keyboard.press("Enter");
     await expect.poll(async () => (await state(fixture)).submissions, { timeout: 30_000 })
       .toBe(beforeLogin.submissions + 1);
+    await expectLoginObserved(fixture, beforeLogin);
     await navigateAndObserve(page, fixture, "signed-in");
     await control(fixture, "/wait-snapshot", { runtimeId: initial.runtimeId });
 
