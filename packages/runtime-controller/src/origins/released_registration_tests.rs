@@ -88,7 +88,7 @@ impl PrivateOriginFixture {
     }
 
     async fn register_and_release(&self) -> anyhow::Result<()> {
-        post_origin_register(
+        let _ = post_origin_register(
             axum::extract::State(self.state.clone()),
             self.headers(self.owner_id, self.generation),
             AxumJson(self.request("http://127.0.0.1:54332")),
