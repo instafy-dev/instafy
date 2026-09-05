@@ -74,7 +74,7 @@ test("global failures, unknown lanes and missing discovery fail closed", async (
 
 test("missing component spec fails despite enough other tests", async (t) => {
   const run = setup(t, "browser-ui");
-  const tests = Array.from({ length: 11 }, (_, index) => ({ ...run.tests[0], id: String(index) }));
+  const tests = Array.from({ length: REQUIRED_BROWSER_LANES["browser-ui"].minimumTests }, (_, index) => ({ ...run.tests[0], id: String(index) }));
   run.begin(tests); run.pass(tests);
   assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" });
 });
@@ -93,6 +93,23 @@ test("Shared Studio requires the complete named journey without skipping or retr
     assert.deepEqual(await run.reporter.onEnd({ status: "passed" }),
       { status: scenario === "pass" ? "passed" : "failed" }, scenario);
   }
+});
+
+test("browser UI lane requires the mobile sidebar geometry regression", async (t) => {
+  const run = setup(t, "browser-ui");
+  const contract = REQUIRED_BROWSER_LANES["browser-ui"];
+  assert.ok(contract.files.includes("mobile-sidebar-safe-area.spec.ts"));
+  const tests = Array.from({ length: contract.minimumTests }, (_, index) => ({
+    ...run.tests[0],
+    id: String(index),
+    location: { file: `/fixture/${contract.files[index % contract.files.length]}` },
+  }));
+  run.begin(tests); run.pass(tests);
+  assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "passed" });
+  const missing = tests.map((item) => item.location.file.endsWith("mobile-sidebar-safe-area.spec.ts")
+    ? { ...item, location: { file: "/fixture/browser-live-proof.spec.ts" } } : item);
+  run.begin(missing);
+  assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" });
 });
 
 test("receipt write errors cannot be swallowed into a green Playwright result", async (t) => {

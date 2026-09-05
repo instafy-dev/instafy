@@ -23,8 +23,15 @@ describe("studio sidebar clears the macOS window buttons", () => {
   const nav = source.slice(source.indexOf("<nav"), source.indexOf("</nav>"));
 
   it("pads by the safe-area inset on shells that still own the title bar", () => {
-    // Also the path every non-macOS target takes: the variable is 0 there.
+    // Non-overlay rails own their safe-area padding, including older macOS shells.
     expect(nav).toContain("pt-[var(--instafy-safe-area-inset-top)]");
+  });
+
+  it("leaves the mobile overlay in charge of its surface and safe-area padding", () => {
+    expect(nav).toMatch(/mobileOverlay\s*\? "overflow-hidden"\s*: titleBarFree/);
+    expect(source).toContain("const titleBarFree = !mobileOverlay && desktopTitleBarFree()");
+    const layout = fs.readFileSync(path.join(__dirname, "..", "..", "..", "StudioLayout.tsx"), "utf8");
+    expect(layout).toMatch(/<StudioMobileSidebarOverlay[^>]*>[\s\S]*?<StudioSidebar\s+mobileOverlay/);
   });
 
   it("starts the rail surface on the tab baseline when the title bar is free", () => {

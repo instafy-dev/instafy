@@ -31,6 +31,7 @@ import {
   useParticipantsDrawerOpen,
 } from "./studio/components/chatParticipantsStore";
 import { StudioSidebar } from "./studio/components/StudioSidebar";
+import { StudioMobileSidebarOverlay } from "./studio/components/StudioMobileSidebarOverlay";
 import { StudioTopBar } from "./studio/components/StudioTopBar";
 import { MobileBottomDock } from "./studio/components/MobileBottomDock";
 import { ProjectLauncher } from "./studio/components/ProjectLauncher";
@@ -2139,40 +2140,26 @@ function StudioLayoutInner() {
           </div>
 
           {!isLargeScreen && mobileSidebarOpen ? (
-            <div className="fixed inset-0 z-50" data-testid="mobile-sidebar-overlay">
-              <button
-                type="button"
-                className="absolute inset-0 bg-slate-900/30 backdrop-blur-sm"
-                aria-label="Close sidebar"
-                onClick={() => setMobileSidebarOpen(false)}
-              />
-              <div
-                className="absolute"
-                style={{
-                  bottom: "var(--instafy-safe-area-inset-bottom)",
-                  left: "var(--instafy-safe-area-inset-left)",
-                  top: "var(--instafy-safe-area-inset-top)",
+            <StudioMobileSidebarOverlay onClose={() => setMobileSidebarOpen(false)}>
+              <StudioSidebar
+                mobileOverlay
+                items={sidebarItems}
+                moreItems={sidebarMoreItems}
+                activePanel={sidebarActivePanel}
+                pinnedPanel={null}
+                onRequestClose={() => setMobileSidebarOpen(false)}
+                onSelect={(panel) => {
+                  handlePanelSelect(panel);
+                  setMobileSidebarOpen(false);
                 }}
-              >
-                <StudioSidebar
-                  items={sidebarItems}
-                  moreItems={sidebarMoreItems}
-                  activePanel={sidebarActivePanel}
-                  pinnedPanel={null}
-                  onRequestClose={() => setMobileSidebarOpen(false)}
-                  onSelect={(panel) => {
-                    handlePanelSelect(panel);
-                    setMobileSidebarOpen(false);
-                  }}
-                  onOpenConversationHistory={() => {
-                    handleOpenConversationHistory();
-                    setMobileSidebarOpen(false);
-                  }}
-                  isConversationHistoryActive={isConversationHistoryActive}
-                  collapsed={false}
-                />
-              </div>
-            </div>
+                onOpenConversationHistory={() => {
+                  handleOpenConversationHistory();
+                  setMobileSidebarOpen(false);
+                }}
+                isConversationHistoryActive={isConversationHistoryActive}
+                collapsed={false}
+              />
+            </StudioMobileSidebarOverlay>
           ) : null}
 
           {showMobileLeftDrawerOverlay ? (
