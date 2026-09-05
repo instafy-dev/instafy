@@ -41,7 +41,10 @@ pub(crate) use status::{
 };
 pub(crate) use status::{runtime_logs, RuntimeLogEntry, RuntimeLogsQuery};
 pub(crate) use stop::runtime_mark_offline;
-pub(crate) use stop::{stop_runtime_for_project, RuntimeStopResponse};
+pub(crate) use stop::{
+    provider_release_was_acknowledged_after_latest_stop, stop_runtime_for_project,
+    RuntimeStopResponse,
+};
 pub(crate) use sweeps::{
     prune_expired_runtime_events, reset_hosted_runtime_credit_sweep_pool_pressure,
     should_report_hosted_runtime_credit_sweep_error, sweep_hosted_runtime_credit_usage,

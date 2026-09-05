@@ -49,6 +49,23 @@ pub struct ControllerClient {
     heartbeat_seconds: u32,
     agent_tokens: AgentTokenVerifier,
     resources: Mutex<ResourceSampler>,
+    // One profile baseline/writer survives registration and token renewals.
+    pub(crate) browser_profile_session:
+        tokio::sync::Mutex<crate::browser_profile::BrowserProfileSession>,
+}
+
+/// A version belongs to these exact bytes, not merely to a GET request. Version
+/// zero represents the controller's empty store; positive versions require a
+/// successful restore before the runtime may upload changes.
+pub struct BrowserProfileSnapshot {
+    pub version: i64,
+    pub archive: Option<Vec<u8>>,
+}
+
+#[derive(Deserialize)]
+struct BrowserProfileManifest {
+    scope: String,
+    version: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -226,6 +243,7 @@ impl ControllerClient {
             heartbeat_seconds: config.heartbeat_seconds,
             agent_tokens: AgentTokenVerifier::new(config.controller_jwks_url.clone()),
             resources: Mutex::new(ResourceSampler::new(config.workspace_root.clone())),
+            browser_profile_session: tokio::sync::Mutex::new(Default::default()),
         })
     }
 
@@ -1008,13 +1026,12 @@ impl ControllerClient {
     }
 
     /// Fetch the durable browser profile for this project (shared scope).
-    /// Returns `Ok(None)` when nothing is stored yet (404), which the caller
-    /// treats as "start from a blank profile". The body is the decrypted,
-    /// packed profile archive (the controller holds it encrypted at rest).
+    /// A 404 establishes an empty version-zero baseline. A successful response
+    /// must include its version; never treat an unversioned archive as writable.
     pub async fn get_browser_profile(
         &self,
         registration: &Registration,
-    ) -> Result<Option<Vec<u8>>> {
+    ) -> Result<BrowserProfileSnapshot> {
         let url = self.base_url.join("/agent/browser-profile")?;
         let response = self
             .http
@@ -1025,23 +1042,39 @@ impl ControllerClient {
             .context("browser profile fetch request failed")?;
 
         let status = response.status();
+        if status != StatusCode::NOT_FOUND && !status.is_success() {
+            return Err(anyhow!("browser profile fetch failed: status={status}"));
+        }
+        anyhow::ensure!(
+            response
+                .headers()
+                .get("x-instafy-profile-write-policy")
+                .and_then(|value| value.to_str().ok())
+                == Some("versioned-v2"),
+            "controller does not advertise versioned browser profile writes; profile saves disabled"
+        );
         if status == StatusCode::NOT_FOUND {
-            return Ok(None);
+            return Ok(BrowserProfileSnapshot {
+                version: 0,
+                archive: None,
+            });
         }
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "browser profile fetch failed: status={} body={}",
-                status,
-                body
-            ));
-        }
+        let version = response
+            .headers()
+            .get("x-instafy-profile-version")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<i64>().ok())
+            .filter(|version| (1..i64::MAX).contains(version))
+            .context("browser profile response is missing a valid version")?;
 
         let bytes = response
             .bytes()
             .await
             .context("failed to read browser profile body")?;
-        Ok(Some(bytes.to_vec()))
+        Ok(BrowserProfileSnapshot {
+            version,
+            archive: Some(bytes.to_vec()),
+        })
     }
 
     /// Upload a fresh snapshot of the browser profile for this project. The
@@ -1050,8 +1083,17 @@ impl ControllerClient {
         &self,
         registration: &Registration,
         body: Vec<u8>,
-    ) -> Result<()> {
-        let url = self.base_url.join("/agent/browser-profile")?;
+        expected_version: i64,
+    ) -> Result<i64> {
+        anyhow::ensure!(
+            (0..i64::MAX).contains(&expected_version),
+            "browser profile upload requires a valid restored version"
+        );
+        // Old controllers must reject this route, including a rollback after
+        // GET negotiated the new protocol. Never fall back to the legacy PUT.
+        let mut url = self.base_url.join("/agent/browser-profile/v2")?;
+        url.query_pairs_mut()
+            .append_pair("version", &expected_version.to_string());
         let response = self
             .http
             .put(url)
@@ -1064,14 +1106,17 @@ impl ControllerClient {
 
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "browser profile upload failed: status={} body={}",
-                status,
-                body
-            ));
+            return Err(anyhow!("browser profile upload failed: status={status}"));
         }
-        Ok(())
+        let manifest: BrowserProfileManifest = response
+            .json()
+            .await
+            .context("invalid browser profile upload response")?;
+        anyhow::ensure!(
+            manifest.scope == "project" && manifest.version == expected_version + 1,
+            "browser profile upload returned an unexpected version or scope"
+        );
+        Ok(manifest.version)
     }
 
     pub async fn post_telemetry(&self, payload: JsonValue) -> Result<()> {

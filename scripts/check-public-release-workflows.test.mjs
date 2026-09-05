@@ -40,6 +40,14 @@ test("every external public workflow action is pinned to an exact commit", () =>
     const source = readWorkflow(name);
     for (const match of source.matchAll(/^\s+uses:\s+([^\s#]+)(?:\s+#.*)?$/gmu)) {
       const action = match[1];
+      if (action.startsWith("./")) {
+        // A relative reusable workflow is loaded from this exact tested
+        // checkout; it cannot carry an external ref. Keep the exemption
+        // narrow and reject traversal, local action loading, or missing files.
+        assert.match(action, /^\.\/\.github\/workflows\/[a-z0-9-]+\.ya?ml$/u);
+        assert.ok(fs.statSync(path.join(repositoryRoot, action)).isFile());
+        continue;
+      }
       assert.match(
         action,
         /@[0-9a-f]{40}$/u,

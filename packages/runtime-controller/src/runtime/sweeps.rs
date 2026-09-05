@@ -42,10 +42,11 @@ const AUTO_STOP_STALE_RUNTIMES_QUERY: &str = "select id from runtimes
 /// instead of silently re-running whenever a runtime next appears.
 const REQUEUED_JOB_EXPIRY_SECONDS: i64 = 15 * 60;
 /// runtime_events is an append-only telemetry/audit log with no natural bound.
-/// Nothing reads rows older than a few days (the widest reader lookback is the
-/// 7-day OOM window), so retain two weeks and prune the rest. Without this the
-/// table grew to millions of rows / ~1.8 GB in production and blew the database
-/// size quota.
+/// Most rows are not read after a few days (the widest telemetry lookback is the
+/// 7-day OOM window), so retain two weeks and prune them. The low-volume stop and
+/// provider-release acknowledgement events are durable lifecycle fencing proof
+/// and are excluded below. Without pruning the high-volume kinds, this table
+/// grew to millions of rows / ~1.8 GB in production and blew the database quota.
 const RUNTIME_EVENT_RETENTION_SECONDS: i64 = 14 * 24 * 60 * 60;
 /// Rows deleted per statement. Bounded so each statement is cheap and holds no
 /// long lock.
@@ -139,10 +140,11 @@ pub(super) async fn resume_expired_runtime_drains(state: &AppState) -> AnyResult
     Ok(())
 }
 
-/// Deletes runtime_events older than the retention window in bounded batches.
-/// runtime_events is an append-only log (heartbeats, lifecycle transitions,
-/// agent completions) that nothing reads beyond a few days; left unbounded it
-/// reached millions of rows / ~1.8 GB in production.
+/// Deletes non-fencing runtime_events older than the retention window in bounded
+/// batches. `stopped` and `provider_release_acknowledged` together prove that a
+/// terminal managed runtime released its exact provider generation; pruning
+/// either side can invalidate a valid proof or make an older acknowledgement
+/// appear newer than a now-missing stop event.
 ///
 /// Runs on its own slow ticker (not the 10s idle sweep) and deliberately does
 /// NOT `order by` — any row past the cutoff is equally deletable, so skipping
@@ -169,6 +171,7 @@ pub(crate) async fn prune_expired_runtime_events(state: &AppState) -> AnyResult<
                    select ctid
                    from runtime_events
                    where created_at < now() - ($1::bigint * interval '1 second')
+                     and kind not in ('stopped', 'provider_release_acknowledged')
                    limit $2
                  )",
                 &[

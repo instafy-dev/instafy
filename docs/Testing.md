@@ -18,12 +18,20 @@ The default `pnpm test:e2e` loop is intentionally product-focused:
 - it does not load the opt-in benchmark specs under `tests/playwright/bench`
 - benchmark coverage stays available through `pnpm test:e2e:bench`, which sets `PLAYWRIGHT_RUN_BENCH=1`
 
-Public Build keeps four stable job names:
+Public Build keeps its existing job names:
 
 - Secret scan
 - JavaScript packages
 - Go packages
 - Rust packages
+
+It also calls the secret-free `Browser verification` workflow on every pull
+request, `main` push, and manual Public Build run. That workflow has three
+non-optional jobs: `Personal Browser E2E`, `Browser UI rendering`, and
+`Shared Browser profile E2E`. A failure in any of them fails Public Build,
+including its downstream release-workflow result. Repository administrators
+must also require the emitted browser job checks in branch protection; adding
+workflow YAML does not change repository protection settings.
 
 Pull requests are leak-gated by the separate
 `Public boundary (trusted base)` check. Its `pull_request_target` workflow owns
@@ -35,7 +43,7 @@ candidate code. It has read-only repository permission and no
 repository or deployment secrets. Its candidate checkout is the one deliberate
 `allow-unsafe-pr-checkout` exception required by current `actions/checkout`;
 the trusted checkout does not opt out. Before public visibility, require this
-check in addition to the four Public Build names.
+check in addition to the Public Build checks above.
 
 The same workflow emits that exact check name for every push to protected
 `main`. The push lane binds its checkout to `github.sha`, treats that protected
@@ -82,15 +90,17 @@ builds/tests the Desktop app and its runtime helper. The empty-database test
 prefetches its digest-pinned Postgres image with bounded retry/backoff and then
 disables implicit pulls; image acquisition may retry, while container, SQL, and
 schema-verification failures remain fatal. The Go and Rust jobs test
-the public service packages directly. Full-stack Playwright suites remain
-available to contributors and downstream distributions, but are not required
-public-branch checks because they depend on a larger local/deployment fixture.
+the public service packages directly. The browser lanes below run real browser
+processes separately from frontend unit tests. Full-stack Studio, provider
+allocation, model-driven browsing, and cross-user collaboration suites remain
+available to contributors and downstream distributions, but are not included
+in these secret-free public browser checks.
 
 Environment-gated suites remain non-required:
 - payments
 - voice / speech / desktop voice
 - private GitHub / secrets-dependent flows
-- desktop or hardware-specific smokes
+- other packaged-release Desktop and hardware-specific smokes
 
 Stripe-backed payment tests are opt-in and require test-mode Stripe credentials. They are not part
 of the default public CI gate.
@@ -100,9 +110,73 @@ Automation browser cleanup:
 - the Playwright wrapper and smoke scripts clean up those owned browser trees on normal exit, failures, and handled interrupts
 - if a prior run was killed hard and left owned automation browsers behind, run `pnpm test:automation:cleanup`
 
-Run the local stack first:
+For the full-stack suites, run the local stack first:
 - `pnpm stack:up`
 - `pnpm stack:down` when finished.
+
+## Secret-free browser CI lanes
+
+These lanes use disposable data, do not load local `.env` files, and do not
+need a real account, model API key, or production controller. Personal and UI
+lanes run through `pnpm test:browser:ci <lane>`, which removes ambient
+credentials and development endpoint overrides before starting Playwright.
+Their strict reporter requires the known test inventory and a single passing
+attempt per test: skips, expected failures, retries, filtered subsets, and zero
+tests fail the lane. Failure traces and a machine-readable result are retained
+under `packages/frontend/test-results/browser-ci/<lane>`.
+
+| Lane | What it proves | Local requirements |
+| --- | --- | --- |
+| `personal` | Real Electron profile/cookie persistence across restarts and projects, per-user isolation, clear, kill switch, and renderer ownership revocation (4 tests) | Installed workspace dependencies and compiled Desktop fixture; no Docker or database |
+| `browser-ui` | Real Chromium rendering of browser chrome, cursor overlay, approval layouts, and rendered-frame checks (11 tests) | Installed workspace dependencies and Playwright Chromium; no Docker, database, or controller |
+| Shared profile fixture | Real Chromium HttpOnly/JS cookies, localStorage and server cookie echo; production runtime save/restore; controller authorization, encrypted database storage, stale-writer rejection, and clear/no-resurrection | Disposable Linux, Xvfb, Chromium, Go, Rust, and fully migrated loopback Postgres |
+
+After `pnpm install --frozen-lockfile`, run Personal locally with:
+
+```bash
+pnpm --filter @instafy/desktop-runtime-agent build
+pnpm --filter @instafy/desktop-app exec tsup
+pnpm test:browser:ci personal
+```
+
+Linux also needs the browser/display system dependencies and `xvfb-run -a`
+before the last command, as shown in `.github/workflows/browser-e2e.yml`.
+Run the component lane with:
+
+```bash
+pnpm --filter @instafy/frontend exec playwright install chromium
+pnpm test:browser:ci browser-ui
+```
+
+If a browser download is unavailable, an already installed Google Chrome can
+be used explicitly with
+`PLAYWRIGHT_BROWSER_UI_CHANNEL=chrome pnpm test:browser:ci browser-ui`.
+That verifies the installed channel, not the lockfile's Chromium revision;
+CI always installs and uses the locked Playwright browser.
+
+The Shared fixture command on a disposable Linux machine is:
+
+```bash
+TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:54322/postgres \
+  xvfb-run -a node scripts/browser-profile-e2e.mjs
+```
+
+It invokes explicitly selected Rust browser/controller tests, requires both
+completion receipts, and fails when dependencies or migrations are missing.
+The Shared job retains only a fixed-field `shared-profile/result.json` receipt
+under the browser CI results directory, never the profile archive or tokens.
+It refuses pre-existing `/tmp/instafy` resources. The standard hosted workflow
+uses Docker **only to provision disposable migrated Postgres**; Chromium and the
+runtime/controller test processes run natively on Linux. A separately
+provisioned compatible, migrated loopback database also works. No local Docker
+installation is needed to run these checks on GitHub-hosted runners.
+
+The Shared fixture uses a test-only HTTP bridge so the browser receives real
+cookies without weakening the production public-only egress policy. It does
+not prove network egress enforcement, container isolation, provider stop
+ordering, full Studio streaming/control, or model-driven browsing. Those need
+their own larger integration fixtures; a green profile lane is not evidence
+that those paths ran.
 
 ## Stripe E2E
 - `PLAYWRIGHT_STRIPE_E2E=1 pnpm -C packages/frontend test:e2e:payments`
