@@ -43,7 +43,11 @@ Use these mappings unless a project-specific skill overrides them.
 
 - **Interactive browsing / guided clicks / consent / login / MFA / checkout**
   - Use `instafy-browser-automation`.
-  - This is the “headed browser (VNC) that the user can see” path.
+  - This requires an exposed Personal or Shared Browser tool; do not assume a headed browser exists.
+
+- **Public page text / element counts / computed CSS / screenshot verification**
+  - Use `instafy-browser-automation`.
+  - Prefer `instafy_local_browser.observe` when it is exposed; it is headless and read-only, not an interactive or authenticated session.
 
 - **Nearby / around me / current location / walking distance**
   - Use `instafy-location-sharing`.
