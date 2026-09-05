@@ -399,6 +399,171 @@ fn test_config(addr: SocketAddr, project_id: Uuid, workspace_root: &Path) -> Con
     }
 }
 
+fn profile_registration(addr: SocketAddr) -> runtime_agent::controller::Registration {
+    let url = format!("http://{addr}").parse::<reqwest::Url>().unwrap();
+    runtime_agent::controller::Registration {
+        runtime_id: Uuid::new_v4(),
+        agent_token: "disposable-profile-test-token".into(),
+        runtime_token: None,
+        lease_url: url.clone(),
+        heartbeat_url: url,
+        stop_url: None,
+        lease_id: None,
+        proxy: None,
+        lease_scope: None,
+        tenant_projects: vec![],
+        workspace_manifest: None,
+        parent_lease_id: None,
+        agent_token_scopes: vec!["agent.browser_profile".into()],
+        agent_token_issued_at: None,
+        agent_token_expires_at: None,
+        agent_token_ttl: None,
+    }
+}
+
+#[tokio::test]
+async fn browser_profile_client_uses_versioned_route_and_never_falls_back_after_rollback() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = requests.clone();
+    let legacy_recorded = requests.clone();
+    let router = Router::new()
+        .route(
+            "/agent/browser-profile",
+            get(|| async {
+                (
+                    StatusCode::NOT_FOUND,
+                    [("x-instafy-profile-write-policy", "versioned-v2")],
+                )
+            })
+            .put(move || {
+                let legacy_recorded = legacy_recorded.clone();
+                async move {
+                    legacy_recorded
+                        .lock()
+                        .unwrap()
+                        .push("unsafe-legacy-put".into());
+                    StatusCode::OK
+                }
+            }),
+        )
+        .route(
+            "/agent/browser-profile/v2",
+            axum::routing::put(move |uri: axum::http::Uri| {
+                let recorded = recorded.clone();
+                async move {
+                    recorded.lock().unwrap().push(uri.to_string());
+                    StatusCode::NOT_FOUND // controller rollback after the GET handshake
+                }
+            }),
+        );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let client = ControllerClient::new(&test_config(addr, Uuid::new_v4(), dir.path())).unwrap();
+    let reg = profile_registration(addr);
+    let baseline = client.get_browser_profile(&reg).await.unwrap();
+    assert_eq!(baseline.version, 0);
+    assert!(baseline.archive.is_none());
+    assert!(
+        client
+            .put_browser_profile(&reg, vec![1], baseline.version)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        *requests.lock().unwrap(),
+        ["/agent/browser-profile/v2?version=0"]
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn browser_profile_client_pairs_archive_version_and_validates_upload_ack() {
+    let acknowledgment = Arc::new(Mutex::new(8_i64));
+    let response_version = acknowledgment.clone();
+    let router = Router::new()
+        .route("/agent/browser-profile", get(|| async {
+            ([("x-instafy-profile-write-policy", "versioned-v2"), ("x-instafy-profile-version", "7")], b"stored-archive".as_slice())
+        }))
+        .route("/agent/browser-profile/v2", axum::routing::put(move |uri: axum::http::Uri, headers: HeaderMap, body: axum::body::Bytes| {
+            let response_version = response_version.clone();
+            async move {
+                assert_eq!(uri.query(), Some("version=7"));
+                assert_eq!(headers["authorization"], "Bearer disposable-profile-test-token");
+                assert_eq!(body.as_ref(), b"changed-archive");
+                Json(serde_json::json!({ "scope": "project", "version": *response_version.lock().unwrap() }))
+            }
+        }));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let dir = tempfile::tempdir().unwrap();
+    let client = ControllerClient::new(&test_config(addr, Uuid::new_v4(), dir.path())).unwrap();
+    let reg = profile_registration(addr);
+    let baseline = client.get_browser_profile(&reg).await.unwrap();
+    assert_eq!(baseline.version, 7);
+    assert_eq!(
+        baseline.archive.as_deref(),
+        Some(b"stored-archive".as_slice())
+    );
+    assert_eq!(
+        client
+            .put_browser_profile(&reg, b"changed-archive".to_vec(), 7)
+            .await
+            .unwrap(),
+        8
+    );
+    *acknowledgment.lock().unwrap() = 99;
+    assert!(
+        client
+            .put_browser_profile(&reg, b"changed-archive".to_vec(), 7)
+            .await
+            .is_err()
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn browser_profile_client_rejects_missing_policy_and_invalid_archive_versions() {
+    for (status, policy, version) in [
+        (StatusCode::NOT_FOUND, None, None),
+        (StatusCode::OK, None, Some("1")),
+        (StatusCode::OK, Some("versioned-v2"), None),
+        (StatusCode::OK, Some("versioned-v2"), Some("0")),
+        (StatusCode::OK, Some("versioned-v2"), Some("-1")),
+        (StatusCode::OK, Some("versioned-v2"), Some("invalid")),
+    ] {
+        let router = Router::new().route(
+            "/agent/browser-profile",
+            get(move || async move {
+                let mut response = axum::http::Response::builder().status(status);
+                if let Some(policy) = policy {
+                    response = response.header("x-instafy-profile-write-policy", policy);
+                }
+                if let Some(version) = version {
+                    response = response.header("x-instafy-profile-version", version);
+                }
+                response
+                    .body(axum::body::Body::from("untrusted-archive"))
+                    .unwrap()
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let dir = tempfile::tempdir().unwrap();
+        let client = ControllerClient::new(&test_config(addr, Uuid::new_v4(), dir.path())).unwrap();
+        assert!(
+            client
+                .get_browser_profile(&profile_registration(addr))
+                .await
+                .is_err()
+        );
+        server.abort();
+    }
+}
+
 #[tokio::test]
 async fn controller_client_registers_and_leases() {
     let _ = tracing_subscriber::fmt()

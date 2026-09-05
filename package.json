@@ -95,6 +95,7 @@
     "test:e2e": "node scripts/test-e2e.mjs run",
     "test:e2e:bench": "node scripts/test-e2e.mjs run bench",
     "test:e2e:component": "pnpm --filter @instafy/frontend test:e2e:component",
+    "test:browser:ci": "node packages/frontend/scripts/browser-ci.mjs",
     "test:e2e:smoke": "node scripts/test-e2e.mjs run smoke",
     "test:e2e:smoke:core": "node scripts/test-e2e.mjs run smoke-core",
     "test:e2e:controller": "node scripts/test-e2e.mjs run controller",

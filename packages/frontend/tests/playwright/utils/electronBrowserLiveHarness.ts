@@ -840,13 +840,35 @@ export async function remoteSurfaceHasRenderedFrame(surface: Locator): Promise<b
       return false;
     }
     try {
-      // Electron/Chromium may otherwise use a nearest-neighbour path for this
-      // extreme downscale. Sparse pages (for example, Example Domain) then
-      // retain only a handful of dark pixels and look falsely uniform to the
-      // proof heuristic even though the full canvas is correct.
+      // A single extreme GPU downscale is not stable across Chromium
+      // versions. Some versions retain only a handful of pixels from sparse
+      // page detail even with high-quality smoothing. First reduce large
+      // frames to a small, bounded intermediate canvas, then produce the
+      // canonical sample. This preserves spatial evidence without changing
+      // the uniform-frame or mostly-black safeguards below.
+      let sampleSource: CanvasImageSource = element;
+      if (sourceWidth > sample.width * 4 || sourceHeight > sample.height * 4) {
+        const intermediate = document.createElement("canvas");
+        intermediate.width = Math.min(sourceWidth, sample.width * 4);
+        intermediate.height = Math.min(sourceHeight, sample.height * 4);
+        const intermediateContext = intermediate.getContext("2d", { alpha: false });
+        if (!intermediateContext) {
+          return false;
+        }
+        intermediateContext.imageSmoothingEnabled = true;
+        intermediateContext.imageSmoothingQuality = "high";
+        intermediateContext.drawImage(
+          element,
+          0,
+          0,
+          intermediate.width,
+          intermediate.height,
+        );
+        sampleSource = intermediate;
+      }
       context.imageSmoothingEnabled = true;
       context.imageSmoothingQuality = "high";
-      context.drawImage(element, 0, 0, sample.width, sample.height);
+      context.drawImage(sampleSource, 0, 0, sample.width, sample.height);
       const pixels = context.getImageData(0, 0, sample.width, sample.height).data;
       let minimum = 255;
       let maximum = 0;
