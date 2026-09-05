@@ -213,7 +213,9 @@ production runtime restores and launches Chromium; Studio receives real
 controller grants and drives the real origin pixel/input paths. Only website
 traffic for the inert test origin is bridged into the owned HTTP fixture;
 production egress policy remains enabled. The fixture is not a cloud allocator,
-container-isolation or network-egress proof.
+container-isolation or network-egress proof. The existing
+`VITE_DISABLE_AUTO_RUNTIME_ENSURE` switch disables background workspace
+allocation in this lane; the explicit Shared Browser UI launch remains real.
 
 Before restart, the runner inspects the actual encrypted stored snapshot for
 the test cookie records and localStorage marker. It then stops the runtime
