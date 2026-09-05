@@ -90,6 +90,16 @@ This does **not** require a dedicated public file server. Private storage stays 
 
 ## Conversation delivery intents
 
+Prompt dispatch uses an existing, authorized project. Interactive clients create
+projects through authenticated `POST /orgs/:org_id/projects` before calling
+`/dispatch-prompt`.
+Only controller/service-role requests can bootstrap a missing project during
+dispatch; an anonymous caller's fresh project/session UUIDs cannot create a
+project, organization, subscription, credit grant, or agent job. Existing
+provisioned sandbox sessions retain their session-bound write access. The
+controller checks project write access before initializing organization, billing,
+or credit state.
+
 The controller is authoritative for explicit composer delivery intent:
 
 - A **queue** intent resolves the target agent lane on the server, persists an idempotent entry,

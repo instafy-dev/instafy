@@ -1764,7 +1764,7 @@ async fn cleanup_org(pool: &PgPool, org_id: &Uuid) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn ensure_test_user(pool: &PgPool, user_id: &Uuid) -> anyhow::Result<()> {
+pub(crate) async fn ensure_test_user(pool: &PgPool, user_id: &Uuid) -> anyhow::Result<()> {
     let instance_id = Uuid::nil();
     let email = format!("controller-test+{}@example.com", user_id);
     let connection = pool.get().await?;
@@ -9382,6 +9382,7 @@ async fn agent_lease_requires_signed_runtime_identity_before_claiming_private_jo
     let conversation_id = Uuid::new_v4();
     let job_id = Uuid::new_v4();
     let runtime_id = Uuid::new_v4();
+    let builder_runtime_id = Uuid::new_v4();
     let generation = Uuid::new_v4();
 
     let test_result: anyhow::Result<()> = async {
@@ -9498,6 +9499,22 @@ async fn agent_lease_requires_signed_runtime_identity_before_claiming_private_jo
                 .map_err(|error| controller_error("issue bound agent token", error))
         };
         let bound_token = issue(runtime_id, generation)?;
+        pool.get()
+            .await?
+            .execute(
+                "insert into runtimes (id, project_id, provider, status, capabilities)
+                 values ($1, $2, 'self-hosted', 'ready', $3)",
+                &[
+                    &builder_runtime_id,
+                    &project_id,
+                    &PgJson(json!({
+                        "agent": true,
+                        "_instafySelfHostedAccess": { "mode": "private", "ownerUserId": builder_id },
+                        "_instafyRuntimeTokenGeneration": generation,
+                    })),
+                ],
+            )
+            .await?;
         let request = |token: &str, body: serde_json::Value| {
             Request::builder()
                 .method("POST")
@@ -9538,6 +9555,12 @@ async fn agent_lease_requires_signed_runtime_identity_before_claiming_private_jo
                 json!({}),
                 StatusCode::UNAUTHORIZED,
             ),
+            (
+                "builder's registered runtime cannot claim owner's private job",
+                issue(builder_runtime_id, generation)?,
+                json!({}),
+                StatusCode::OK,
+            ),
         ] {
             let response = app.clone().oneshot(request(&token, body)?).await?;
             let status = response.status();
@@ -9562,6 +9585,25 @@ async fn agent_lease_requires_signed_runtime_identity_before_claiming_private_jo
             anyhow::ensure!(row.get::<_, Option<Uuid>>("leased_by_runtime_id").is_none());
             anyhow::ensure!(row.get::<_, i32>("lease_attempts") == 0);
         }
+
+        // A valid signed generation cannot reactivate a stopped runtime.
+        pool.get()
+            .await?
+            .execute("update runtimes set status = 'stopped' where id = $1", &[&runtime_id])
+            .await?;
+        let response = app.clone().oneshot(request(&bound_token, json!({}))?).await?;
+        anyhow::ensure!(response.status() == StatusCode::FORBIDDEN);
+        let row = pool.get().await?.query_one(
+            "select status, leased_by_runtime_id, lease_attempts from agent_jobs where id = $1",
+            &[&job_id],
+        ).await?;
+        anyhow::ensure!(row.get::<_, String>("status") == "queued");
+        anyhow::ensure!(row.get::<_, Option<Uuid>>("leased_by_runtime_id").is_none());
+        anyhow::ensure!(row.get::<_, i32>("lease_attempts") == 0);
+        pool.get()
+            .await?
+            .execute("update runtimes set status = 'ready' where id = $1", &[&runtime_id])
+            .await?;
 
         // Registered agents can omit the redundant body ID; the signed identity owns the lease.
         let response = app

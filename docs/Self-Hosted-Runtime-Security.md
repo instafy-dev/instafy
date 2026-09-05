@@ -40,6 +40,17 @@ The owner check is repeated at every authority boundary, rather than treated as 
 
 Private preferences and local-workspace registrations are keyed by user as well as project. A project teammate cannot make the owner's machine the project's shared preference. Controller-mediated operations revalidate scoped credentials against the current runtime owner and generation, so a stopped or rotated runtime fails those requests immediately. Direct origin credentials remain stateless until their short expiry (normally about five minutes), and an already-upgraded origin WebSocket is not continuously introspected; it ends on expiry or explicit connection closure. That limitation is one reason Team runtime is not enabled.
 
+`POST /agent/lease` always requires a signed runtime ID and validates the registered runtime
+and its current generation, even with `STRICT_MODE=false`. A project-scoped `agent.lease`
+token without that identity cannot claim jobs or obtain their prompts and conversation history;
+supplying a runtime ID in the request body does not grant that identity. Private runtimes can
+lease only work belonging to their attested owner.
+
+`POST /agent/secrets` independently requires the same signed runtime identity and current
+generation. The requested job must belong to that exact runtime, remain leased, and have a
+future expiry before granted secrets can be decrypted. Missing runtime ownership or expiry
+fails closed regardless of `STRICT_MODE`.
+
 Raw runtime routing state is controller-only. Authenticated project members have
 no direct database privileges on runtimes, runtime leases/events, tunnel grants,
 origins, presence, origin instances, or workspace commit receipts; otherwise a
