@@ -103,6 +103,7 @@ export interface StudioSidebarProps {
   onOpenConversationHistory?: () => void;
   isConversationHistoryActive?: boolean;
   onRequestClose?: () => void;
+  mobileOverlay?: boolean;
 }
 
 export function StudioSidebar({
@@ -115,6 +116,7 @@ export function StudioSidebar({
   onOpenConversationHistory,
   isConversationHistoryActive = false,
   onRequestClose,
+  mobileOverlay = false,
 }: StudioSidebarProps) {
   const {
     onShowLogs,
@@ -286,7 +288,7 @@ export function StudioSidebar({
     : "w-[clamp(16rem,60vw,22rem)]";
   // Only true in the macOS shell that vacated its title bar; everywhere
   // else the rail keeps its stock full-height surface.
-  const titleBarFree = desktopTitleBarFree();
+  const titleBarFree = !mobileOverlay && desktopTitleBarFree();
   const widthClass = isExpanded
     ? isLargeScreen
       ? "w-56"
@@ -1252,18 +1254,20 @@ export function StudioSidebar({
         // the same line and the buttons sit on the title bar above it; the
         // surface moves to an inner layer because padding alone would keep
         // painting the background up to y=0. Otherwise the rail keeps its own
-        // background and merely pads by the safe-area inset -- which is also
-        // what every non-macOS target does, since the variable is 0 there.
+        // background and pads by the safe-area inset. The mobile overlay owns
+        // both the surface and safe-area padding, so the nav must not add them twice.
         className={[
           widthClass,
           "group relative flex h-full min-h-0 shrink-0 flex-col pb-4 text-slate-600",
           "transition-[width] duration-200 ease-in-out dark:text-slate-300",
-          titleBarFree
-            // Lift every child above the surface layer as a rule, rather than
-            // tagging each one: a control added to the rail later would
-            // otherwise render behind the background and simply vanish.
-            ? "overflow-visible [&>*:not([data-rail-surface])]:relative [&>*:not([data-rail-surface])]:z-[1]"
-            : "overflow-hidden border-r border-slate-200/70 bg-slate-50/80 pt-[var(--instafy-safe-area-inset-top)] dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-rail)]",
+          mobileOverlay
+            ? "overflow-hidden"
+            : titleBarFree
+              // Lift every child above the surface layer as a rule, rather than
+              // tagging each one: a control added to the rail later would
+              // otherwise render behind the background and simply vanish.
+              ? "overflow-visible [&>*:not([data-rail-surface])]:relative [&>*:not([data-rail-surface])]:z-[1]"
+              : "overflow-hidden border-r border-slate-200/70 bg-slate-50/80 pt-[var(--instafy-safe-area-inset-top)] dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-rail)]",
         ]
           .filter(Boolean)
           .join(" ")}

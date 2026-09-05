@@ -188,6 +188,12 @@ still requires verification on a phone, even when the simulated-event test passe
 
 ## iOS release boundary
 
+The mobile sidebar paints to every screen edge, with safe-area padding around its controls.
+While this drawer is open, iOS temporarily overlays its status bar on the WebView; closing the
+drawer restores its previous status-bar overlay mode (normally non-overlay). Android and the
+static startup policy are unchanged. Verify opening, closing, rotating, and returning from a
+native screen on an iPhone, including the top status area and bottom home-indicator area.
+
 Use `pnpm test:ios:config`, Capacitor sync, and an unsigned simulator build as the public validation
 path. A release pipeline may then build a signed IPA and upload it to TestFlight. Keep the
 distribution certificate, App Store Connect credential, and provisioning material in the
