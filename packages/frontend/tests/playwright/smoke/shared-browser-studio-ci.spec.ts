@@ -31,6 +31,16 @@ type FixtureState = {
 
 type BrowserGrant = { runtimeId: string; originId: string; browserSessionId: string };
 
+function isControllerURL(raw: string, fixture: StudioFixture, pathname: string): boolean {
+  const actual = new URL(raw);
+  const expected = new URL(pathname, fixture.controllerURL);
+  // The real frontend intentionally normalizes its 127.0.0.1 controller to
+  // localhost. Accept only these loopback aliases at this fixture's exact port.
+  return actual.protocol === "http:" && ["127.0.0.1", "localhost"].includes(actual.hostname) &&
+    actual.port === expected.port && actual.pathname === expected.pathname &&
+    !actual.username && !actual.password && !actual.search && !actual.hash;
+}
+
 function readFixture(): StudioFixture {
   const fixturePath = process.env.INSTAFY_STUDIO_E2E_FIXTURE;
   if (!fixturePath || !path.isAbsolute(fixturePath)) {
@@ -129,7 +139,22 @@ async function openSharedBrowser(page: Page) {
 async function expectBrowserReady(page: Page) {
   const modal = page.getByTestId("browser-session-modal");
   await expect(modal).toBeVisible({ timeout: 60_000 });
-  await expect(modal.getByTestId("browser-session-status")).toContainText("Ready", { timeout: 180_000 });
+  const reported = new Set<string>();
+  await expect.poll(async () => {
+    const status = await modal.getByTestId("browser-session-status").innerText();
+    if (status.includes("Unavailable")) {
+      const detail = (await modal.getByTestId("browser-session-error-notice").textContent({ timeout: 1_000 }).catch(() => ""))?.toLowerCase();
+      const indicators = ["origin not ready", "newer version", "view-only", "failed to fetch", "websocket",
+        "runtime id missing", "token request failed", "endpoint missing", "provider", "capabilities", "screencast",
+        "cdp", "connect", "timeout", "401", "403", "409", "500", "502", "503"];
+      const category = JSON.stringify(indicators.filter(value => detail?.includes(value)));
+      if (!reported.has(category) && reported.size < 16) {
+        reported.add(category);
+        console.log(`[shared-studio-ui] ${category}`);
+      }
+    }
+    return status;
+  }, { timeout: 180_000 }).toContain("Ready");
   await expect(modal.getByTestId("browser-session-stage"))
     .toHaveAttribute("data-shared-browser-viewer", "cdp-screencast");
   await expect(modal.getByTestId("shared-browser-collaboration-control-state"))
@@ -207,8 +232,11 @@ test.describe("Disposable signed-in Studio Shared Browser", () => {
     const grants: BrowserGrant[] = [];
     const reported = new Set<string>();
     const reportAPI = (url: string, status: number | "request-failed") => {
-      const operation = url === new URL("/runtime/ensure", fixture.controllerURL).toString() ? "ensure"
-        : url === new URL("/access_token", fixture.controllerURL).toString() ? "access-token" : null;
+      const parsed = new URL(url);
+      const browserOperation = parsed.protocol === "http:" && ["127.0.0.1", "localhost"].includes(parsed.hostname)
+        ? /\/browser\/(capabilities|pages)$/.exec(parsed.pathname)?.[1] : null;
+      const operation = isControllerURL(url, fixture, "/runtime/ensure") ? "ensure"
+        : isControllerURL(url, fixture, "/access_token") ? "access-token" : browserOperation;
       if (!operation || (status !== "request-failed" && (!Number.isInteger(status) || status < 100 || status > 599))) return;
       const category = `${operation}:${status}`;
       if (reported.has(category) || reported.size >= 32) return;
@@ -218,11 +246,26 @@ test.describe("Disposable signed-in Studio Shared Browser", () => {
       console.log(`[shared-studio-api] ${category}`);
     };
     const observeGrants = (target: Page) => {
+      target.on("websocket", socket => {
+        const url = new URL(socket.url());
+        if (url.protocol !== "ws:" || !["127.0.0.1", "localhost"].includes(url.hostname)) return;
+        const kind = /\/browser\/(screencast|input|collaboration)$/.exec(url.pathname)?.[1];
+        if (!kind) return;
+        const report = (event: "socketerror" | "close" | "framereceived") => {
+          const category = `${kind}:${event}`;
+          if (reported.has(category) || reported.size >= 32) return;
+          reported.add(category);
+          console.log(`[shared-studio-ws] ${category}`);
+        };
+        socket.once("socketerror", () => report("socketerror"));
+        socket.once("close", () => report("close"));
+        socket.once("framereceived", () => report("framereceived"));
+      });
       target.on("requestfailed", request => reportAPI(request.url(), "request-failed"));
       target.on("response", async response => {
         reportAPI(response.url(), response.status());
         if (!response.ok() || response.request().method() !== "POST" ||
-            response.url() !== new URL("/access_token", fixture.controllerURL).toString()) return;
+            !isControllerURL(response.url(), fixture, "/access_token")) return;
         const request = response.request().postDataJSON() as Record<string, unknown> | null;
         if (request?.projectId !== fixture.projectId || request.protocol !== "http" ||
             !Array.isArray(request.scopes) || !request.scopes.includes("browser.control") ||
@@ -292,7 +335,7 @@ test.describe("Disposable signed-in Studio Shared Browser", () => {
 
     const clearResponse = page.waitForResponse(response =>
       response.request().method() === "DELETE" &&
-      response.url() === new URL(`/projects/${fixture.projectId}/browser-profile`, fixture.controllerURL).toString());
+      isControllerURL(response.url(), fixture, `/projects/${fixture.projectId}/browser-profile`));
     page.once("dialog", async dialog => {
       expect(dialog.type()).toBe("confirm");
       expect(dialog.message()).toContain("Clear Shared Browser data for everyone in this space?");

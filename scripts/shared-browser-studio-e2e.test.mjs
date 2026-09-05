@@ -4,6 +4,7 @@ import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { cargoBinaryArtifact, fixtureHTML, fixtureOrigin, startDaemon,
   resolvePlaywrightChromiumExecutable, studioProcessEnvironment, validateStudioStack,
   viteCliPath } from "./shared-browser-studio-e2e.mjs";
@@ -149,6 +150,30 @@ test("failed Studio launches retain only fixed API and provider diagnostics befo
   assert.match(spec, /status < 100 \|\| status > 599/);
   assert.match(spec, /\[shared-studio-api\]/);
   assert.doesNotMatch(spec, /console\.log\([^\n]*(?:response|request\.url|payload|fixture)/);
+});
+
+test("Studio response observers accept the app's localhost normalization only at the fixture port", async () => {
+  const spec = await readFile(new URL("../packages/frontend/tests/playwright/smoke/shared-browser-studio-ci.spec.ts", import.meta.url), "utf8");
+  // Compile and exercise the actual pure helper without registering/running the
+  // environment-gated Playwright suite or creating an authenticated browser.
+  const source = spec.match(/^function isControllerURL\([\s\S]*?^}/m)?.[0];
+  assert.ok(source);
+  const requireFrontend = createRequire(new URL("../packages/frontend/package.json", import.meta.url));
+  const { transpileModule } = requireFrontend("typescript");
+  const match = new Function(`${transpileModule(source, {}).outputText}; return isControllerURL;`)();
+  const fixture = { controllerURL: "http://127.0.0.1:43210" };
+  for (const endpoint of ["/access_token", "/runtime/ensure", "/projects/fixture/browser-profile"]) {
+    for (const host of ["127.0.0.1", "localhost"]) {
+      assert.equal(match(`http://${host}:43210${endpoint}`, fixture, endpoint), true);
+    }
+    for (const rejected of [`http://localhost:43211${endpoint}`, `https://localhost:43210${endpoint}`,
+      `http://remote.invalid:43210${endpoint}`, `http://user@localhost:43210${endpoint}`,
+      `http://localhost:43210${endpoint}?token=never-retain`, `http://localhost:43210${endpoint}#fragment`]) {
+      assert.equal(match(rejected, fixture, endpoint), false);
+    }
+  }
+  assert.match(spec, /isControllerURL\(response\.url\(\), fixture, "\/access_token"\)/);
+  assert.match(spec, /isControllerURL\(response\.url\(\), fixture, `\/projects/);
 });
 
 test("Studio and trusted service accounts are provisioned separately and both cleaned up", async () => {

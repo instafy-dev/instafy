@@ -216,6 +216,10 @@ runtime startup observations. The owned guardian drains process output with a
 bounded classifier; raw log text, grant bodies, URLs, and session material are
 never emitted or retained. These observations narrow the failing boundary but
 do not themselves establish a root cause or count as a passing journey.
+Response observers accept the application's `127.0.0.1` → `localhost`
+controller normalization only at the exact fixture port, including grant and
+clear responses. Browser capability/status and WebSocket diagnostics retain
+only fixed operation/event names, never payloads or connection URLs.
 
 The fresh database must contain only its unchanged migration-seeded provider.
 The runner registers its additional disposable provider through the controller's
