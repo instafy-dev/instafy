@@ -35,6 +35,14 @@ const MAX_SUPPORT_LOGS_BYTES: usize = 1024 * 1024;
 const MAX_LOG_ENTRIES: usize = 500;
 const DEFAULT_LIST_LIMIT: i64 = 25;
 const MAX_LIST_LIMIT: i64 = 100;
+const BUG_REPORT_COOLDOWN: Duration = Duration::from_secs(10);
+
+fn retry_after_seconds(duration: Duration) -> u64 {
+    duration
+        .as_secs()
+        .saturating_add(u64::from(duration.subsec_nanos() > 0))
+        .max(1)
+}
 
 pub(crate) struct SystemBugReportInput {
     pub(crate) message: String,
@@ -285,13 +293,13 @@ async fn post_support_report(
             .enforce(
                 format!("bug-reports:user:{user_id}"),
                 5,
-                Duration::from_secs(10 * 60),
+                BUG_REPORT_COOLDOWN,
             )
             .await
             .map_err(|limit| {
                 too_many_requests(format!(
                     "Too many support report attempts. Try again in {}s.",
-                    limit.retry_after.as_secs().max(1)
+                    retry_after_seconds(limit.retry_after)
                 ))
             })?;
     }
@@ -306,7 +314,7 @@ async fn post_support_report(
         })?;
     let body = serde_json::from_slice::<CreateBugReportRequest>(&body_bytes)
         .map_err(|_| bad_request("support report request must be valid JSON"))?;
-    post_bug_report_with_context(&state, context, true, true, body).await
+    post_bug_report_with_context(&state, context, true, body).await
 }
 
 async fn list_support_reports(
@@ -451,24 +459,23 @@ async fn post_bug_report(
             .enforce(
                 format!("bug-reports:legacy-attempts:user:{user_id}"),
                 30,
-                Duration::from_secs(10 * 60),
+                BUG_REPORT_COOLDOWN,
             )
             .await
             .map_err(|limit| {
                 too_many_requests(format!(
                     "Too many bug report attempts. Try again in {}s.",
-                    limit.retry_after.as_secs().max(1)
+                    retry_after_seconds(limit.retry_after)
                 ))
             })?;
     }
-    post_bug_report_with_context(&state, context, mine_only, false, body).await
+    post_bug_report_with_context(&state, context, mine_only, body).await
 }
 
 async fn post_bug_report_with_context(
     state: &AppState,
     context: RequestContext,
     mine_only: bool,
-    attempt_pre_limited: bool,
     body: CreateBugReportRequest,
 ) -> Result<(StatusCode, Json<CreateBugReportResponse>), (StatusCode, Json<ApiError>)> {
     let customer_submission = !context.is_service_role;
@@ -524,25 +531,6 @@ async fn post_bug_report_with_context(
         )
         .await?;
     }
-    if customer_submission && !attempt_pre_limited && !state.config.dev_mode {
-        let user_id = context
-            .user_id
-            .ok_or_else(|| unauthorized("bug reports require an authenticated user"))?;
-        state
-            .rate_limiter
-            .enforce(
-                format!("bug-reports:user:{user_id}"),
-                5,
-                Duration::from_secs(10 * 60),
-            )
-            .await
-            .map_err(|limit| {
-                too_many_requests(format!(
-                    "Too many bug reports. Try again in {}s.",
-                    limit.retry_after.as_secs().max(1)
-                ))
-            })?;
-    }
     if customer_submission {
         let user_id = context
             .user_id
@@ -559,37 +547,41 @@ async fn post_bug_report_with_context(
                     "failed to reserve support report submission: {error}"
                 ))
             })?;
-        let recent_count = transaction
+        // Serialize accepted reports across endpoints and controller instances.
+        // Use the database clock after taking the lock, not transaction-start
+        // time or a controller's wall clock, for the ten-second spacing.
+        let retry_after = transaction
             .query_one(
-                "select count(*)::bigint
+                "select greatest(0, ceil(extract(epoch from (
+                            max(created_at) + $2::bigint * interval '1 second'
+                            - clock_timestamp()
+                        ))))::bigint
                    from bug_reports
-                  where user_id = $1
-                    and created_at >= now() - interval '24 hours'",
-                &[&user_id],
+                  where user_id = $1",
+                &[&user_id, &(BUG_REPORT_COOLDOWN.as_secs() as i64)],
             )
             .await
             .map_err(|error| {
-                internal_error(format!("failed to check support report quota: {error}"))
+                internal_error(format!("failed to check support report cooldown: {error}"))
             })?
             .get::<_, i64>(0);
-        if recent_count >= 20 {
-            return Err(too_many_requests(
-                "Daily support report limit reached. Try again later.",
-            ));
+        if retry_after > 0 {
+            return Err(too_many_requests(format!(
+                "Too many bug reports. Try again in {retry_after}s.",
+            )));
         }
     }
 
     let report_id = Uuid::new_v4();
-    let created_at = Utc::now();
-    transaction
-        .execute(
+    let created_at = transaction
+        .query_one(
             "insert into bug_reports (
                 id, user_id, reporter_email, message, details, project_id, runtime_id, run_id,
                 conversation_id, status, metadata, logs, created_at
              ) values (
                 $1, $2, $3, $4, $5, $6, $7, $8,
-                $9, 'open', $10, $11, $12
-             )",
+                $9, 'open', $10, $11, clock_timestamp()
+             ) returning created_at",
             &[
                 &report_id,
                 &context.user_id,
@@ -602,11 +594,11 @@ async fn post_bug_report_with_context(
                 &conversation_id,
                 &PgJson(&metadata),
                 &PgJson(&logs),
-                &created_at,
             ],
         )
         .await
-        .map_err(|error| internal_error(format!("failed to insert bug report: {error}")))?;
+        .map_err(|error| internal_error(format!("failed to insert bug report: {error}")))?
+        .get::<_, chrono::DateTime<Utc>>(0);
 
     for screenshot in screenshots.iter() {
         let attachment_id = Uuid::new_v4();
@@ -1687,6 +1679,10 @@ fn parse_uuid_optional(
         .map_err(|_| bad_request(format!("{field} must be a valid UUID")))?;
     Ok(Some(parsed))
 }
+
+#[cfg(test)]
+#[path = "bug_reports_rate_limit_tests.rs"]
+mod rate_limit_tests;
 
 #[cfg(test)]
 mod tests {
