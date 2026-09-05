@@ -11,6 +11,9 @@ const MAX_TARBALL_BYTES = 20 * 1024 * 1024;
 const MAX_PACK_BYTES = 32 * 1024 * 1024;
 const MAX_UNPACKED_BYTES = 64 * 1024 * 1024;
 const MAX_TAR_ENTRIES = 500;
+const REGISTRY_READBACK_TIMEOUT_MS = 5 * 60_000;
+const REGISTRY_REQUEST_TIMEOUT_MS = 15_000;
+const REGISTRY_POLL_INTERVAL_MS = 3_000;
 const REPOSITORY_URL = "git+https://github.com/instafy-dev/instafy.git";
 
 const PACKAGE_POLICIES = new Map([
@@ -229,29 +232,33 @@ function validatePackageManifest(entry, manifest) {
   }
 }
 
-async function registryPackageIntegrity(name, version) {
-  const response = await fetch(
+async function registryPackageIntegrity(name, version, read) {
+  const response = await read(
     `https://registry.npmjs.org/${encodeURIComponent(name)}/${encodeURIComponent(version)}`,
-    { redirect: "error", signal: AbortSignal.timeout(15_000) },
   );
   if (response.status === 404) return null;
   if (!response.ok) fail(`npm registry returned HTTP ${response.status} for ${name}@${version}`);
   const text = await response.text();
   if (Buffer.byteLength(text) > MAX_PLAN_BYTES) fail(`npm registry response for ${name}@${version} is too large`);
   const body = JSON.parse(text);
-  return typeof body?.dist?.integrity === "string" ? body.dist.integrity : null;
+  if (typeof body?.dist?.integrity !== "string" || body.dist.integrity.length === 0) {
+    fail(`npm registry response for ${name}@${version} is missing integrity`);
+  }
+  return body.dist.integrity;
 }
 
-async function registryLatestVersion(name) {
-  const response = await fetch(
+async function registryLatestVersion(name, read) {
+  const response = await read(
     `https://registry.npmjs.org/-/package/${encodeURIComponent(name)}/dist-tags`,
-    { redirect: "error", signal: AbortSignal.timeout(15_000) },
   );
   if (!response.ok) fail(`npm registry returned HTTP ${response.status} for ${name} dist-tags`);
   const text = await response.text();
   if (Buffer.byteLength(text) > MAX_PLAN_BYTES) fail(`npm dist-tags response for ${name} is too large`);
   const body = JSON.parse(text);
-  return typeof body?.latest === "string" ? body.latest : null;
+  if (typeof body?.latest !== "string" || body.latest.length === 0) {
+    fail(`npm dist-tags response for ${name} is missing latest`);
+  }
+  return body.latest;
 }
 
 export function assessRegistryState(entry, sha512, state, mode) {
@@ -271,16 +278,37 @@ export function assessRegistryState(entry, sha512, state, mode) {
   };
 }
 
-async function verifyRegistry(entry, sha512, mode) {
-  const attempts = mode === "after" ? 10 : 1;
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    const integrity = await registryPackageIntegrity(entry.name, entry.version);
-    const latest = integrity ? await registryLatestVersion(entry.name) : null;
+export async function verifyRegistry(entry, sha512, mode, {
+  fetchRegistry = fetch,
+  now = () => performance.now(),
+  sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+} = {}) {
+  if (mode !== "before" && mode !== "after") fail("registry mode must be before or after");
+  // Only readback convergence is retried. Each request (including its response body)
+  // shares this absolute budget; errors and conflicting bytes remain terminal.
+  const deadline = mode === "after" ? now() + REGISTRY_READBACK_TIMEOUT_MS : Infinity;
+  const remaining = () => {
+    const milliseconds = Math.floor(deadline - now());
+    if (milliseconds < 1) {
+      fail(`npm did not expose ${entry.name}@${entry.version} as latest with the expected integrity within the readback deadline`);
+    }
+    return milliseconds;
+  };
+  const read = (url) => fetchRegistry(url, {
+    redirect: "error",
+    signal: AbortSignal.timeout(Math.min(REGISTRY_REQUEST_TIMEOUT_MS, remaining())),
+  });
+  while (true) {
+    const integrity = await registryPackageIntegrity(entry.name, entry.version, read);
+    remaining();
+    // Refuse immutable-byte collisions before reading the mutable dist-tag.
+    assessRegistryState(entry, sha512, { integrity, latest: null }, "after");
+    const latest = integrity ? await registryLatestVersion(entry.name, read) : null;
+    remaining();
     const assessment = assessRegistryState(entry, sha512, { integrity, latest }, mode);
     if (assessment.done) return assessment.alreadyPublished;
-    if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 3_000));
+    await sleep(Math.min(REGISTRY_POLL_INTERVAL_MS, remaining()));
   }
-  fail(`npm did not expose ${entry.name}@${entry.version} as latest with the expected integrity`);
 }
 
 export async function verifyPackDirectory(packDirectory, options = {}) {
