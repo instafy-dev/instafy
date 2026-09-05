@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { lstat, mkdir, open, readFile, readdir, realpath, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { createServer as createTcpServer } from "node:net";
@@ -27,6 +27,9 @@ const RUNTIME_DIAGNOSTIC_PATTERNS = [
   ["profile-restored", "restored browser profile baseline"],
   ["profile-restore-failed", "browser profile restore failed"],
   ["chromium-launch-failed", "failed to launch Chromium after profile restore"],
+  ["chromium-cdp-ready", "Headed Chromium ready (CDP)"],
+  ["chromium-cdp-not-ready", "Headed Chromium did not become ready"],
+  ["chromium-executable-missing", "no Chromium executable found"],
   ["origin-listening", "origin HTTP server listening"],
   ["origin-registration-failed", "origin registration failed; stopping origin server"],
   ["registration-loop-failed", "registration loop failed; retrying after delay"],
@@ -754,17 +757,25 @@ export async function startStudioProvider({
     }
     if (current) await stopRuntime(current);
 
+    // Chromium creates a ProcessSingleton Unix socket below TMPDIR. Nesting
+    // this below both generation UUIDs exceeds Linux's socket-path limit and
+    // aborts Chromium. Keep each fresh mode-0700 directory in the same owned
+    // fixture root, with ample room for Chromium's generated socket suffix.
+    diagnostics.launchStage = "temporary-path-check";
+    const temporaryPrefix = path.join(ownedRoot, "t-");
+    if (Buffer.byteLength(`${temporaryPrefix}XXXXXX`) > 50) {
+      throw new Error("provider root is too long for a Chromium temporary socket directory");
+    }
+    const temporary = await mkdtemp(temporaryPrefix);
     const runtimeRoot = path.join(ownedRoot, "runtimes", validated.runtimeId, validated.leaseId);
     diagnostics.launchStage = "owned-directories";
     const workspace = path.join(runtimeRoot, "workspace");
     const home = path.join(runtimeRoot, "home");
-    const temporary = path.join(runtimeRoot, "tmp");
     const browserControl = path.join(runtimeRoot, "browser-control");
     const profileDir = path.join(runtimeRoot, "profile");
     await Promise.all([
       mkdir(workspace, { recursive: true, mode: 0o700 }),
       mkdir(home, { recursive: true, mode: 0o700 }),
-      mkdir(temporary, { recursive: true, mode: 0o700 }),
       mkdir(browserControl, { recursive: true, mode: 0o700 }),
     ]);
     // These production helpers use fixed loopback ports. A fresh fixture root

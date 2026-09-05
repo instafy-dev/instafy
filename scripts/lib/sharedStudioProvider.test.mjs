@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createServer as createTcpServer } from "node:net";
 import path from "node:path";
@@ -30,8 +30,21 @@ test("runtime startup diagnostics are bounded fixed categories, including split 
   assert.doesNotMatch(JSON.stringify(categories), /Bearer|never-retain|private\.invalid/);
 });
 
-async function fixture(t, options = {}) {
-  const root = await mkdtemp(path.join(tmpdir(), "shared-studio-provider-test-"));
+test("Chromium readiness warnings are classified even when its launcher exits successfully", () => {
+  const categories = [];
+  const collect = runtimeDiagnosticCollector(category => categories.push(category));
+  collect(Buffer.from("[instafy] Headed Chromium ready (CDP) on private-address\n"));
+  collect(Buffer.from("[instafy] Headed Chromium did not become ready; Check /private/profile\n"));
+  collect(Buffer.from("no Chromium executable found token=never-retain\n"));
+  assert.deepEqual(categories, ["chromium-cdp-ready", "chromium-cdp-not-ready", "chromium-executable-missing"]);
+  assert.doesNotMatch(JSON.stringify(categories), /private|never-retain/);
+});
+
+async function fixture(t, { rootSuffix = "", ...options } = {}) {
+  // macOS's ambient TMPDIR is much longer than disposable Linux's /tmp.
+  const temporaryRoot = await mkdtemp("/tmp/iss-provider-");
+  const root = path.join(temporaryRoot, rootSuffix);
+  await mkdir(root, { recursive: true });
   const bin = path.join(root, "bin");
   const entrypoint = path.join(bin, "runtime-entrypoint");
   const agent = path.join(root, "fake-agent.mjs");
@@ -80,7 +93,7 @@ setInterval(() => {}, 1000);
   });
   t.after(async () => {
     await provider.close();
-    await rm(root, { recursive: true, force: true });
+    await rm(temporaryRoot, { recursive: true, force: true });
   });
   return { root, provider, callbacks };
 }
@@ -187,6 +200,22 @@ test("attested ensure launches one actual owned process with a scrubbed producti
     await waitForFile(path.join(root, "runtimes", runtimeId, leaseId, "workspace", "observed-env.json")),
   );
   const observed = observation.env;
+  assert.equal(path.dirname(observed.TMPDIR), await realpath(root));
+  assert.match(path.basename(observed.TMPDIR), /^t-[a-zA-Z0-9]{6}$/);
+  assert.ok(Buffer.byteLength(observed.TMPDIR) <= 50);
+  assert.equal((await lstat(observed.TMPDIR)).mode & 0o777, 0o700);
+  // Exercise a real Unix socket with Chromium's generated suffix, not only
+  // a string-length assertion. The old UUID-nested TMPDIR cannot bind this.
+  const socketDirectory = await mkdtemp(path.join(observed.TMPDIR, ".org.chromium.Chromium."));
+  const socket = createTcpServer();
+  try {
+    await new Promise((resolve, reject) => {
+      socket.once("error", reject);
+      socket.listen(path.join(socketDirectory, "SingletonSocket"), resolve);
+    });
+  } finally {
+    if (socket.listening) await new Promise(resolve => socket.close(resolve));
+  }
   const diagnostics = provider.diagnostics();
   assert.equal(diagnostics.ensureRequests, 1);
   assert.equal(diagnostics.ensureFailures, 1); // Rejected authorization above.
@@ -255,6 +284,25 @@ test("attested ensure launches one actual owned process with a scrubbed producti
   assert.equal(provider.currentRuntime(), null);
   assert.equal(processIsAlive(runtime.pid), false);
   assert.equal(processIsAlive(observation.descendantPid), false);
+
+  const nextLeaseId = "55555555-5555-4555-8555-555555555555";
+  const next = ensureBody({ lease_id: nextLeaseId });
+  next.metadata._instafyManagedRuntimeLaunch.generation = nextLeaseId;
+  assert.equal((await providerFetch(provider, "/runtime/ensure", next)).status, 200);
+  const replacement = JSON.parse(await waitForFile(
+    path.join(root, "runtimes", runtimeId, nextLeaseId, "workspace", "observed-env.json"),
+  ));
+  assert.notEqual(replacement.env.TMPDIR, observed.TMPDIR);
+  assert.equal(path.dirname(replacement.env.TMPDIR), await realpath(root));
+});
+
+test("provider rejects a too-deep temporary root before launching any runtime", async t => {
+  const { provider } = await fixture(t, { rootSuffix: "too-long-for-chromium-sockets-".repeat(3) });
+  provider.setProject(projectId);
+  assert.equal((await providerFetch(provider, "/runtime/ensure", ensureBody())).status, 500);
+  assert.equal(provider.currentRuntime(), null);
+  assert.equal(provider.diagnostics().launchStage, "temporary-path-check");
+  assert.equal(provider.diagnostics().launches, 0);
 });
 
 test("provider rejects unconfigured projects, spoofed generations and environment launch authority", async t => {

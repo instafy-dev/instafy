@@ -209,6 +209,11 @@ Chromium executable before that environment isolation, then passes only the
 executable path to Playwright. Sharing installed browser binaries does not share
 browser profiles, cookies, localStorage, or developer credentials. A missing
 installation fails the fixture preflight rather than skipping the journey.
+Runtime generations also receive distinct mode-0700 temporary directories
+directly below the owned fixture root. These paths are bounded to leave room
+for Chromium's ProcessSingleton Unix socket; nesting them below runtime and
+lease UUIDs exceeds Linux's socket-path limit and prevents Chromium startup.
+The temporary data stays fixture-owned and is removed during final cleanup.
 
 On failure the runner records only fixed provider-validation/launch stages,
 numeric response/exit codes, runtime/origin counts, and a closed vocabulary of
