@@ -16,6 +16,7 @@ import { TermsPage } from "./screens/TermsPage";
 import { PrivacyPage } from "./screens/PrivacyPage";
 import { RouteErrorPage } from "./screens/RouteErrorPage";
 import { RequireAuth } from "./components/RequireAuth";
+import { EntryLoadingScreen } from "./components/EntryLoadingScreen";
 import {
   subscribeToControllerReloadRequired,
 } from "./services/runtimeController/core";
@@ -43,18 +44,8 @@ const StatusProviderLazy = lazy(() =>
   import("./status/StatusProvider").then((module) => ({ default: module.StatusProvider })),
 );
 
-function RouteFallback() {
-  return (
-    <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-slate-100 via-white to-[#efefef] dark:bg-none dark:bg-slate-950">
-      <div className="rounded-3xl border border-white/60 bg-white/90 px-8 py-6 text-sm font-medium text-slate-600 shadow-xl dark:border-slate-800 dark:bg-slate-950/70 dark:text-slate-300">
-        Loading Instafy…
-      </div>
-    </div>
-  );
-}
-
 function LazyRoute({ children }: { children: ReactNode }) {
-  return <Suspense fallback={<RouteFallback />}>{children}</Suspense>;
+  return <Suspense fallback={<EntryLoadingScreen />}>{children}</Suspense>;
 }
 
 function ScrollToHash() {
@@ -214,9 +205,11 @@ export function createInstafyRouter(
         {
           path: "studio",
           element: (
-            <LazyRoute>
-              <StudioRoute />
-            </LazyRoute>
+            <RequireAuth>
+              <LazyRoute>
+                <StudioRoute />
+              </LazyRoute>
+            </RequireAuth>
           ),
         },
       ],
