@@ -10,6 +10,20 @@ Instafy Studio is a browser-based AI workspace for chatting with a runtime contr
 ## Header
 The Studio header is owner-first: `Team/Personal > Space`, followed by runtime status and the user menu.
 
+## Switching teams and chats
+
+The team switcher opens the most recently visited space in the selected team, falling back to
+alphabetical order. Accessible spaces are cached for the signed-in user during the app session,
+so changing teams can use the existing list immediately. Authentication, access changes and
+returning to the app refresh discovery in the background. First-time discovery still needs the
+controller.
+
+Open conversation tabs are remembered per space in the current browser. Previously loaded chat
+history stays visible while refreshing, including when a refresh fails; transient failures retry
+without replacing saved messages with an empty conversation. This does not restore an entire
+editor session: file and panel tabs currently carry across space switches, while file selection
+and explorer state reset for the destination space.
+
 ## Composer delivery actions
 
 The composer exposes three one-shot actions instead of a persistent delivery mode:
