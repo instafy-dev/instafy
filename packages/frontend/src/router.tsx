@@ -17,6 +17,7 @@ import { PrivacyPage } from "./screens/PrivacyPage";
 import { RouteErrorPage } from "./screens/RouteErrorPage";
 import { RequireAuth } from "./components/RequireAuth";
 import { EntryLoadingScreen } from "./components/EntryLoadingScreen";
+import { NativeOtaAppReady } from "./mobile/ota/NativeOtaAppReady";
 import {
   subscribeToControllerReloadRequired,
 } from "./services/runtimeController/core";
@@ -100,6 +101,7 @@ function AppShell() {
       <ScrollRestoration />
       <ScrollToHash />
       <Outlet />
+      <NativeOtaAppReady />
     </>
   );
 }
