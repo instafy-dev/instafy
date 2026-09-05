@@ -2,15 +2,17 @@
 // Real signed-in Studio + controller + native runtime. The only allocator is
 // an owned local fixture; no model/provider credentials or .env files are read.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createDecipheriv, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { access, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { copyFixtureEntrypoint, fixtureChildEnvironment, installCancellationSignalHandlers,
   preflightFixtureDisplay, runOwnedProcess } from "./browser-profile-e2e.mjs";
 import { parseShellEnv } from "./lib/localSupabaseEnv.mjs";
@@ -21,6 +23,7 @@ const script = fileURLToPath(import.meta.url);
 const root = path.resolve(path.dirname(script), "..");
 const frontend = path.join(root, "packages/frontend");
 const require = createRequire(path.join(frontend, "package.json"));
+const execFileAsync = promisify(execFile);
 const fixedRoot = "/tmp/instafy";
 const receiptPath = path.join(frontend, "test-results/browser-ci/shared-studio/result.json");
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -51,10 +54,50 @@ export function validateStudioStack(status, platform = process.platform) {
 
 export function studioProcessEnvironment(env, home) {
   const build = fixtureChildEnvironment(env);
-  for (const key of ["CARGO_HOME", "RUSTUP_HOME", "CARGO_TARGET_DIR", "RUSTFLAGS", "RUSTDOCFLAGS", "RUSTC"])
+  for (const key of ["CARGO_HOME", "RUSTUP_HOME", "CARGO_TARGET_DIR", "RUSTFLAGS", "RUSTDOCFLAGS", "RUSTC",
+    "PLAYWRIGHT_BROWSERS_PATH"])
     delete build[key];
   return { ...build, HOME: home, CODEX_HOME: path.join(home, ".codex"),
     INSTAFY_ENV_DIR: path.join(home, "empty-env"), CODEX_DISABLED: "1" };
+}
+
+const playwrightChromiumResolver = String.raw`
+const { chromium } = require(process.argv[1]);
+process.stdout.write(JSON.stringify(chromium.executablePath()));
+`;
+
+export async function resolvePlaywrightChromiumExecutable({
+  environment = process.env,
+  execute = execFileAsync,
+  playwrightModule = require.resolve("@playwright/test"),
+} = {}) {
+  try {
+    assert.ok(typeof environment.HOME === "string" && path.isAbsolute(environment.HOME));
+    const { stdout } = await execute(
+      process.execPath,
+      ["-e", playwrightChromiumResolver, playwrightModule],
+      {
+        // HOME locates the browser installed by Playwright before the fixture
+        // switches homes. Do not honor ambient cache/executable overrides or
+        // restore any other user environment in this resolver process.
+        env: { HOME: environment.HOME },
+        encoding: "utf8",
+        timeout: 5_000,
+        maxBuffer: 4_096,
+        windowsHide: true,
+      },
+    );
+    const candidate = JSON.parse(stdout);
+    assert.ok(typeof candidate === "string" && path.isAbsolute(candidate));
+    const canonical = await realpath(candidate);
+    assert.ok((await stat(canonical)).isFile());
+    await access(canonical, fsConstants.X_OK);
+    return canonical;
+  } catch {
+    throw new Error(
+      "Pinned Playwright Chromium is missing or not executable; install this checkout's Chromium before running Shared Studio CI.",
+    );
+  }
 }
 
 export function cargoBinaryArtifact(output, target) {
@@ -215,6 +258,11 @@ async function lifecycle() {
   // Cleanup gets its own bounded command budget even after the run is aborted.
   const executeSQL = query => run("psql", [stack.DB_URL, "-X", "-qAt", "-v", "ON_ERROR_STOP=1", "-c", query], { timeoutMs: 20_000, signal: undefined });
   try {
+    stage = "browser-executable-preflight";
+    // Resolve the exact browser revision selected by this checkout's Playwright
+    // package while the install-time cache location is still available. Only
+    // the canonical executable crosses into the later empty-HOME process.
+    const browserExecutablePath = await resolvePlaywrightChromiumExecutable();
     await mkdir(fixedRoot); claimed = true;
     await mkdir(path.join(fixedRoot, "playwright"));
     await writeFile(path.join(fixedRoot, "studio-e2e-owner.json"), JSON.stringify({ runId: randomUUID(), root: temporary }), { flag: "wx", mode: 0o600 });
@@ -410,7 +458,7 @@ async function lifecycle() {
     const fixture = path.join(temporary, "studio-fixture.json");
     await writeFile(fixture, JSON.stringify({ baseURL, controllerURL, projectId, userId: user.userId,
       storageKey: user.storageKey, localStorageValue: user.localStorageValue, fixturePageURL: `${fixtureOrigin}/`,
-      fixtureControlURL, fixtureControlToken: controlToken }), { mode: 0o600, flag: "wx" });
+      fixtureControlURL, fixtureControlToken: controlToken, browserExecutablePath }), { mode: 0o600, flag: "wx" });
     const publicConfig = JSON.stringify({ supabaseURL: stack.API_URL, anonKey: stack.ANON_KEY, controllerURL });
     stage = "studio-server";
     vite = startDaemon(process.execPath, [viteCliPath(), "--config", "vite.shared-studio-ci.config.ts", "--port", new URL(baseURL).port],
