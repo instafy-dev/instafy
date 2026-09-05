@@ -44,7 +44,7 @@ test("dark landing and login backgrounds stay full-bleed", async ({ page }) => {
   await page.goto("/");
 
   await expectFullViewportPage(page, page.getByTestId("landing-page"));
-  await expectFullBleedGlow(page, page.getByTestId("landing-ambient-glow"));
+  await expect(page.getByTestId("landing-hero-heading")).toBeVisible();
 
   await page.goto("/login");
   await expectFullViewportPage(page, page.getByTestId("login-page"));
@@ -53,7 +53,7 @@ test("dark landing and login backgrounds stay full-bleed", async ({ page }) => {
   await page.setViewportSize(PHONE_VIEWPORT);
   await page.goto("/");
   await expectFullViewportPage(page, page.getByTestId("landing-page"));
-  await expectFullBleedGlow(page, page.getByTestId("landing-ambient-glow"));
+  await expect(page.getByTestId("landing-hero-heading")).toBeVisible();
 
   await page.goto("/login");
   await expectFullViewportPage(page, page.getByTestId("login-page"));

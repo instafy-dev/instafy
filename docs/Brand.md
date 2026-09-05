@@ -87,6 +87,11 @@ The motion must disappear under `prefers-reduced-motion: reduce`, and compact
 chat layouts use the same animated mark beside the thinking status because the
 avatar gutter is intentionally hidden on phones.
 
+A clearly labeled landing-page workspace example may use the same thinking
+state beside its simulated active work. Keep one example visible at a time,
+provide a motion pause control, and suspend motion offscreen and in hidden
+browser tabs. The example does not animate the header logo or completed output.
+
 ## Scale, clear space, and wordmark
 
 Distribution exports place the canonical 64-unit drawing at `0.85` scale,
