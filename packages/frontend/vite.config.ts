@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vitest/config";
 import { loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
+import { buildNativeOtaChannelMarker } from "./nativeOtaChannel.js";
 import { sanitizeCodexSubscriptionAuthJson } from "./tests/playwright/utils/codexSubscriptionAuthJson.js";
 import {
   FRONTEND_FEATURE_MANIFEST_ENV,
@@ -371,6 +372,9 @@ export default defineConfig(({ mode, command }) => {
   },
   define: {
     __INSTAFY_BUILD_INFO__: JSON.stringify(instafyBuildInfo),
+    __INSTAFY_NATIVE_OTA_CHANNEL__: JSON.stringify(buildNativeOtaChannelMarker(
+      loadEnv(mode, frontendPackageRoot, "VITE_").VITE_OTA_CHANNEL,
+    )),
     "import.meta.env.INSTAFY_DEV_CODEX_SEED_ENABLED": JSON.stringify(DEV_CODEX_SEED_ENABLED),
   },
   build: {

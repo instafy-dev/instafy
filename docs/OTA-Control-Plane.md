@@ -108,6 +108,7 @@ Suggested canonical fields:
 | `git_sha` | string | Source revision |
 | `native_version` | string | Intended native app version |
 | `min_supported_native_version` | string | Compatibility gate |
+| `required_native_build` | string or null | Optional exact installed-native-build gate |
 | `artifact_url` | string | Immutable ZIP URL |
 | `artifact_sha256` | string | Integrity check |
 | `artifact_size_bytes` | integer | Useful for telemetry and UI |
@@ -129,6 +130,7 @@ Useful fields for rollout and diagnostics:
 | `platform` | string | `ios` or `android` |
 | `channel` | string | Assigned update channel |
 | `native_version` | string | Current installed native version |
+| `native_build` | string or null | Installed native build, independent of the OTA bundle |
 | `current_bundle_version` | string or null | Current OTA bundle identity, independent from the binary version |
 | `current_git_sha` | string or null | Current bundle source |
 | `last_seen_at` | timestamp | Last OTA check / app heartbeat |
@@ -154,10 +156,38 @@ The current controller implementation persists OTA operational data in Postgres 
 
 Treat the native binary version and the OTA bundle identity as separate values.
 
-- The native binary version is the App Store / TestFlight / Play build version shipped inside the app shell.
+- `native_version` is the native marketing version (`App.getInfo().version`). Different native
+  builds can share that version, so it cannot prove bridge compatibility.
+- `native_build` is the installed native build (`App.getInfo().build`), not a value compiled into
+  the downloaded web bundle. It is a raw string of 1–64 ASCII digits with optional dot-separated
+  numeric components. Whitespace, empty components, and longer values are invalid. No trimming,
+  numeric coercion, or semantic-version normalization is performed.
 - The OTA bundle identity is the currently applied web bundle. It does not need to be semantic versioning; a timestamped hash-like identifier is fine and is simpler operationally.
 
-Diagnostics, bug reports, and operator tooling should always capture both values. A publish or rollback decision without both pieces of metadata is incomplete.
+A release with `required_native_build` is offered only when the installed build matches exactly,
+in addition to the existing platform, channel, minimum marketing-version, and rollout checks.
+Missing builds and mismatches return `native_build_incompatible`. Available responses repeat
+`required_native_build`; updated clients also reject invalid or mismatched guarded offers before
+download/staging. Omitted/null guards preserve legacy version-only behavior, not proof of native
+compatibility.
+
+Automated publication must populate this guard from a verified native publication receipt for
+the same source/platform and prove the candidate's native bridge/config/dependency inputs match
+that shell. A build identifier is a routing constraint, not a bridge fingerprint or signature.
+Do not infer compatibility merely because marketing versions match. The public payload renderer
+accepts optional `--required-native-build <exact-build>` and rejects malformed supplied values.
+
+Apply the additive schema migration and upgrade every serving controller before enabling guarded
+publication or relying on conditional channel movement. Older controllers ignore the new fields
+and do not participate in the channel advisory lock; a mixed backend deployment is not safe for
+these guarantees. Legacy clients that
+do not report `native_build` intentionally receive no guarded release: install a native build
+containing the updated client first. Never remove the guard merely to bootstrap those clients.
+This contract does not move channels, enroll clients in `internal`, or authorize automatic
+promotion to `stable`.
+
+Diagnostics, bug reports, and operator tooling should capture native version/build and OTA
+bundle identity. A publish or rollback decision without these values is incomplete.
 
 This is intentionally not the same thing as full product analytics.
 
@@ -179,6 +209,12 @@ These routes are for release registration and admin operations.
 
 Create or register a release.
 
+A release ID has immutable artifact and native compatibility identity. Re-registering the same
+identity is an idempotent retry and returns the existing record unchanged, including its lifecycle
+and publication metadata. Changing that identity returns HTTP 409. Registration is no longer a
+way to edit an existing release's notes, status, or rollout; activation/rollback own lifecycle
+changes, and a different artifact or native guard requires a new release ID.
+
 Payload:
 
 ```json
@@ -190,6 +226,7 @@ Payload:
   "git_sha": "e7c0e985b8b4d4f6c0f8b6b3c9f6a6b0f5d5e8a1",
   "native_version": "1.0.0",
   "min_supported_native_version": "1.0.0",
+  "required_native_build": "42",
   "artifact_url": "https://artifacts.example.com/mobile/2026.03.18-e7c0e985.zip",
   "artifact_sha256": "6c0d0d1f4ddf0e9f7f6c6ef9a246f73468d08e9d0d131e5b7b5d62a2d8d4a0e2",
   "artifact_size_bytes": 10485760,
@@ -274,6 +311,13 @@ Payload:
 
 `release_id` is optional. If omitted, the controller rolls back to the previously active release for that platform/channel.
 
+Both activation and rollback accept optional `expected_active_release_id` for compare-and-set
+channel movement. Omit it only for legacy unconditional behavior; explicit `null` requires an
+unassigned channel, and a string requires that exact active release. A stale expectation returns
+HTTP 409 without moving the channel. Automation must capture and pass the expected assignment
+to reject a delayed run when the current release ID differs. This is not a revision counter:
+an A→B→A transition or same-ID rollout change needs external serialization and fresh revalidation.
+
 ### Administrative authorization
 
 Release-registration and channel-mutation routes require a protected server-side identity plus an
@@ -297,6 +341,7 @@ Payload:
   "platform": "ios",
   "channel": "stable",
   "native_version": "1.0.0",
+  "native_build": "42",
   "current_bundle_version": "2026.03.10-cd0ad5ab",
   "current_git_sha": "cd0ad5ab2d4a6f905e3a06d5f302b8f7dd1e0f52"
 }
@@ -308,6 +353,7 @@ Response when update is available:
 {
   "update_available": true,
   "reason": "update_available",
+  "required_native_build": "42",
   "release_id": "ios-stable-2026-03-18T120000Z-e7c0e985",
   "bundle_version": "2026.03.18-e7c0e985",
   "git_sha": "e7c0e985b8b4d4f6c0f8b6b3c9f6a6b0f5d5e8a1",
@@ -344,6 +390,7 @@ Payload:
   "platform": "ios",
   "channel": "stable",
   "native_version": "1.0.0",
+  "native_build": "42",
   "bundle_version": "2026.03.18-e7c0e985",
   "git_sha": "e7c0e985b8b4d4f6c0f8b6b3c9f6a6b0f5d5e8a1",
   "space_id": null,
