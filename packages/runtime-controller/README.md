@@ -56,6 +56,20 @@ This document explains how the Instafy runtime controller is structured and how 
 
 Refer to `src/main.rs` for the complete list, including agent callbacks and admin endpoints (`/runtime/stop`, `/runtime/idle-reaper`).
 
+### Bug report submission limits
+
+Customer submissions to `/support/reports` and `/bug-reports` share a per-user
+ten-second cooldown. Reports spaced at least ten seconds apart are accepted without
+a daily count limit. A database advisory lock and the database clock enforce this
+spacing across controller instances; an early retry receives HTTP 429 with the
+remaining wait rounded up to whole seconds.
+
+Invalid or repeated attempts remain bounded separately: `/support/reports` accepts
+at most five attempts per ten seconds, authenticated before buffering its larger
+body, and `/bug-reports` accepts at most thirty attempts per ten seconds. Existing
+authentication, project access, payload and screenshot limits still apply. These
+limits do not expand service-role or operator access.
+
 ## Configuration
 Key environment variables (see `AppConfig::from_env` for defaults):
 - `DATABASE_URL` — Postgres connection for controller state (required).
