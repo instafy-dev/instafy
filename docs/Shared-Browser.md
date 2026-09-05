@@ -573,8 +573,13 @@ managed runtime through the provider-fenced release path, takes the project
 launch fence, rechecks that no replacement runtime can hold the decrypted
 profile, and only then deletes the encrypted row. Provider ambiguity, failed
 release, or a concurrent replacement fails closed and retains the row for a
-safe retry. The action remains available after a project is removed from the
-persistence allowlist so policy rollback cannot strand stored login material.
+safe retry. A historical `removed` runtime is considered released only when its
+matching lease is released and its provider acknowledgement follows its latest
+stop event; an unproved terminal label still blocks the clear. Both low-volume
+proof events survive the ordinary 14-day telemetry pruning window and cascade
+with runtime or project deletion. The action remains
+available after a project is removed from the persistence allowlist so policy
+rollback cannot strand stored login material.
 Viewers cannot invoke it. A successful clear ends the current shared session
 and Studio starts one fresh browser; the client suppresses automatic reconnect
 while deletion is in flight.
