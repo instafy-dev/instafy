@@ -2,6 +2,18 @@
 
 Instafy Studio is a browser-based AI workspace for chatting with a runtime controller and editing space files. The Studio prioritizes three surfaces: Assistant, Files, and Credits.
 
+## Public entry
+
+The landing page renders immediately, including while a saved sign-in session is being restored.
+Entry links go to Studio, which checks authentication before downloading the workspace. Signed-in
+visitors see **Open Studio**; signed-out visitors see **Get started** and are sent through login
+with their destination preserved. Opening the public homepage itself does not require signing in.
+
+The landing workspace is an explicitly labeled interactive example. Visitors choose a scenario;
+it does not rotate automatically or create a real session. Octo's existing thinking animation
+appears only beside the example's active work. Motion can be paused and stops when the example
+is offscreen, the browser tab is hidden, or reduced motion is enabled. Header marks remain static.
+
 ## Studio Surface
 - **Assistant**: conversational control of the workspace, runs, and file changes.
 - **Files**: Monaco editor + file explorer backed by the controller workspace.
