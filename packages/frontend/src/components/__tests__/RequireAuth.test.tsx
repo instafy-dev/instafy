@@ -52,21 +52,63 @@ describe("RequireAuth entry handoff", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    vi.unstubAllGlobals();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it("shows one polite, static handoff while withholding private content and premature redirects", async () => {
+  it("shows one polite handoff with a swimming Octo while withholding private content and premature redirects", async () => {
     await render();
 
     expect(container.querySelectorAll('[role="status"]')).toHaveLength(1);
     expect(container.querySelector('[role="status"]')?.getAttribute("aria-live")).toBe("polite");
     expect(container.textContent).toContain("Getting things ready…");
+    expect(container.textContent).not.toContain("Instafy");
     expect(container.textContent).not.toContain("Private workspace");
     expect(container.querySelector('[data-testid="login-destination"]')).toBeNull();
     expect(loadProtectedPage).not.toHaveBeenCalled();
-    // The waiting mark is deliberately still, including reduced-motion environments.
-    expect(container.querySelector('[data-octo-motion="idle"]')).not.toBeNull();
+    expect(container.querySelector('[data-octo-motion="thinking"]')?.getAttribute("data-octo-animated"))
+      .toBe("true");
+    expect(container.querySelector('animate[data-octo-animation="tentacle"]')).not.toBeNull();
+  });
+
+  it("respects reduced-motion changes during loading and releases its listener when the session is ready", async () => {
+    let reducedMotion = true;
+    const listeners = new Set<() => void>();
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query === "(prefers-reduced-motion: reduce)" && reducedMotion,
+      addEventListener: (_type: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_type: string, listener: () => void) => listeners.delete(listener),
+    }));
+    await render();
+
+    expect(container.querySelector('[data-octo-motion="thinking"]')?.getAttribute("data-octo-animated"))
+      .toBe("false");
     expect(container.querySelector("animate, animateTransform")).toBeNull();
+    expect(container.querySelectorAll('[role="status"]')).toHaveLength(1);
+    expect(loadProtectedPage).not.toHaveBeenCalled();
+    expect(listeners.size).toBe(1);
+
+    await act(async () => {
+      reducedMotion = false;
+      listeners.forEach((listener) => listener());
+    });
+    expect(container.querySelector('[data-octo-animated="true"]')).not.toBeNull();
+    expect(container.querySelector("animate, animateTransform")).not.toBeNull();
+
+    await act(async () => {
+      reducedMotion = true;
+      listeners.forEach((listener) => listener());
+    });
+    expect(container.querySelector('[data-octo-animated="true"]')).toBeNull();
+    expect(container.querySelector("animate, animateTransform")).toBeNull();
+    expect(loadProtectedPage).not.toHaveBeenCalled();
+
+    auth.loading = false;
+    auth.user = { id: "user-1" };
+    await render();
+    expect(container.textContent).toBe("Private workspace");
+    expect(container.querySelector('[data-testid="entry-loading-screen"]')).toBeNull();
+    expect(listeners.size).toBe(0);
   });
 
   it("opens protected content when the restored session is ready", async () => {
@@ -91,6 +133,7 @@ describe("RequireAuth entry handoff", () => {
     expect(new URLSearchParams(destination.split("?")[1]).get("redirect"))
       .toBe("/studio?projectId=project-1&from=landing");
     expect(container.textContent).not.toContain("Private workspace");
+    expect(container.querySelector('[data-testid="entry-loading-screen"]')).toBeNull();
     expect(loadProtectedPage).not.toHaveBeenCalled();
   });
 });
