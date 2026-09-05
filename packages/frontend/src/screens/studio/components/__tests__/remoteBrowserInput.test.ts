@@ -147,6 +147,43 @@ describe("attachRemoteBrowserInput", () => {
     binding.dispose();
   });
 
+  it.each<{ label: string; init: KeyboardEventInit; text: string; modifiers: number }>([
+    { label: "Enter", init: { key: "Enter", code: "Enter" }, text: "\r", modifiers: 0 },
+    { label: "Shift+Enter", init: { key: "Enter", code: "Enter", shiftKey: true }, text: "\r", modifiers: 8 },
+    { label: "NumpadEnter", init: { key: "Enter", code: "NumpadEnter" }, text: "\r", modifiers: 0 },
+    { label: "Shift+NumpadEnter", init: { key: "Enter", code: "NumpadEnter", shiftKey: true }, text: "\r", modifiers: 8 },
+    { label: "Control+Enter", init: { key: "Enter", code: "Enter", ctrlKey: true }, text: "", modifiers: 2 },
+    { label: "Alt+Enter", init: { key: "Enter", code: "Enter", altKey: true }, text: "", modifiers: 1 },
+    { label: "Meta+Enter", init: { key: "Enter", code: "Enter", metaKey: true }, text: "", modifiers: 4 },
+    { label: "Control+x", init: { key: "x", code: "KeyX", ctrlKey: true }, text: "", modifiers: 2 },
+    { label: "Alt+x", init: { key: "x", code: "KeyX", altKey: true }, text: "", modifiers: 1 },
+    { label: "Meta+x", init: { key: "x", code: "KeyX", metaKey: true }, text: "", modifiers: 4 },
+  ])("preserves $label key text and keeps key-up nonprinting", ({ init, text, modifiers }) => {
+    const element = document.createElement("canvas");
+    const send = vi.fn();
+    const binding = attachRemoteBrowserInput(element, { getViewport: () => null, send });
+    const keyCode = init.key === "Enter" ? 13 : 88;
+    const down = new KeyboardEvent("keydown", { ...init, keyCode, cancelable: true });
+    const up = new KeyboardEvent("keyup", { ...init, keyCode, cancelable: true });
+
+    element.dispatchEvent(down);
+    element.dispatchEvent(up);
+
+    expect(send.mock.calls.map(([message]) => message)).toEqual([
+      {
+        type: "key", kind: text ? "keyDown" : "rawKeyDown", key: init.key, code: init.code,
+        text, modifiers, autoRepeat: false, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode,
+      },
+      {
+        type: "key", kind: "keyUp", key: init.key, code: init.code,
+        text: "", modifiers, autoRepeat: false, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode,
+      },
+    ]);
+    expect(down.defaultPrevented).toBe(true);
+    expect(up.defaultPrevented).toBe(true);
+    binding.dispose();
+  });
+
   it("keeps a mounted but inactive Shared surface from receiving input", () => {
     const element = document.createElement("canvas");
     element.tabIndex = 0;

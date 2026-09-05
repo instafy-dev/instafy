@@ -8,7 +8,8 @@ import {
 import { flushSync } from "react-dom";
 import { InputField, Xmark } from "iconoir-react";
 
-import type { RemoteBrowserVirtualInputMessage } from "./remoteBrowserInput";
+import { cdpScreencastModifiers } from "./cdpScreencastProtocol";
+import { remoteBrowserKeyDownText, type RemoteBrowserVirtualInputMessage } from "./remoteBrowserInput";
 
 const MOBILE_CONTROL_KEYS: Readonly<Record<string, string>> = {
   ArrowDown: "ArrowDown",
@@ -43,7 +44,9 @@ const MOBILE_CONTROL_KEY_CODES: Readonly<Record<string, number>> = {
 function virtualKeyMessages(
   key: string,
   code: string,
+  modifiers = 0,
 ): [RemoteBrowserVirtualInputMessage, RemoteBrowserVirtualInputMessage] {
+  const text = remoteBrowserKeyDownText(key, modifiers);
   const virtualKeyCode = MOBILE_CONTROL_KEY_CODES[key];
   const virtualKeyFields =
     virtualKeyCode === undefined
@@ -55,11 +58,11 @@ function virtualKeyMessages(
   return [
     {
       type: "key",
-      kind: "rawKeyDown",
+      kind: text ? "keyDown" : "rawKeyDown",
       key,
       code,
-      text: "",
-      modifiers: 0,
+      text,
+      modifiers,
       autoRepeat: false,
       ...virtualKeyFields,
     },
@@ -69,7 +72,7 @@ function virtualKeyMessages(
       key,
       code,
       text: "",
-      modifiers: 0,
+      modifiers,
       autoRepeat: false,
       ...virtualKeyFields,
     },
@@ -239,7 +242,11 @@ export function RemoteBrowserMobileKeyboard({
         suppressedBeforeInputTimerRef.current = null;
       }, 0);
     }
-    const [down, up] = virtualKeyMessages(event.key, code);
+    const [down, up] = virtualKeyMessages(
+      event.key,
+      event.code === "NumpadEnter" ? event.code : code,
+      cdpScreencastModifiers(event),
+    );
     onMessage(down);
     onMessage(up);
     if (event.key === "Escape") {
