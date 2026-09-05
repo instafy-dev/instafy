@@ -7,6 +7,7 @@ import { Heading } from "../components/Heading";
 import { GitHubIcon } from "../components/IntegrationIcons";
 import { Input } from "../components/Input";
 import { OctoMark } from "../components/OctoMark";
+import { EntryLoadingScreen } from "../components/EntryLoadingScreen";
 import { Text } from "../components/Text";
 import { TextLink } from "../components/TextLink";
 import { ToggleIconButton } from "../components/ToggleIconButton";
@@ -301,6 +302,9 @@ export function LoginPage() {
   }, [recoveryMode, rememberedAccounts.length, accountChooserDismissed, step, normalizedEmail]);
 
   useEffect(() => {
+    if (loading || (user && !recoveryMode)) {
+      return;
+    }
     if (step === "email") {
       if (!shouldSkipInitialEmailAutofocus || stepAutofocusReadyRef.current) {
         emailRef.current?.focus();
@@ -313,7 +317,7 @@ export function LoginPage() {
       otpRef.current?.focus();
     }
     stepAutofocusReadyRef.current = true;
-  }, [step, shouldSkipInitialEmailAutofocus]);
+  }, [loading, user, recoveryMode, step, shouldSkipInitialEmailAutofocus]);
 
   const clearTransientState = () => {
     resetNativeAuthState();
@@ -1003,6 +1007,12 @@ export function LoginPage() {
       {renderForm()}
     </div>
   );
+
+  // Keep the sign-in form out of the handoff for an existing session. Password
+  // recovery remains available to signed-in users who opened a recovery link.
+  if (loading || (user && !recoveryMode)) {
+    return <EntryLoadingScreen />;
+  }
 
   return (
     <div
