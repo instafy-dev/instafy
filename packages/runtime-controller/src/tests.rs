@@ -4424,7 +4424,7 @@ async fn bug_report_operator_allowlist_grants_only_bug_report_routes() -> anyhow
 }
 
 #[tokio::test]
-async fn support_report_routes_enforce_request_and_daily_limits() -> anyhow::Result<()> {
+async fn support_report_routes_enforce_request_and_cooldown_limits() -> anyhow::Result<()> {
     let pool = require_origin_test_pool("support report request limit test").await?;
     let config = build_app_config(
         test_origin_private_key(),
@@ -4457,30 +4457,13 @@ async fn support_report_routes_enforce_request_and_daily_limits() -> anyhow::Res
                     format!("Bearer {quota_user_token}"),
                 )
                 .body(Body::from(
-                    json!({ "message": "Daily quota seed" }).to_string(),
+                    json!({ "message": "Cooldown seed" }).to_string(),
                 ))?,
         )
         .await?;
     assert_eq!(initial_quota_report.status(), StatusCode::CREATED);
 
-    {
-        let connection = pool.get().await?;
-        for ordinal in 1..20 {
-            connection
-                .execute(
-                    "insert into bug_reports (id, user_id, message, created_at)
-                     values ($1, $2, $3, now())",
-                    &[
-                        &Uuid::new_v4(),
-                        &quota_user_id,
-                        &format!("Daily quota seed {ordinal}"),
-                    ],
-                )
-                .await?;
-        }
-    }
-
-    let daily_quota_response = app
+    let cooldown_response = app
         .clone()
         .oneshot(
             Request::builder()
@@ -4492,11 +4475,20 @@ async fn support_report_routes_enforce_request_and_daily_limits() -> anyhow::Res
                     format!("Bearer {quota_user_token}"),
                 )
                 .body(Body::from(
-                    json!({ "message": "Must exceed daily quota" }).to_string(),
+                    json!({ "message": "Must wait for cooldown" }).to_string(),
                 ))?,
         )
         .await?;
-    assert_eq!(daily_quota_response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(cooldown_response.status(), StatusCode::TOO_MANY_REQUESTS);
+    let cooldown_payload: serde_json::Value =
+        serde_json::from_slice(&to_bytes(cooldown_response.into_body(), usize::MAX).await?)?;
+    let cooldown_message = cooldown_payload["message"].as_str().unwrap();
+    let retry_seconds = cooldown_message
+        .strip_prefix("Too many bug reports. Try again in ")
+        .and_then(|message| message.strip_suffix("s."))
+        .unwrap()
+        .parse::<u64>()?;
+    assert!((1..=10).contains(&retry_seconds));
 
     for attempt in 1..=6 {
         let malformed_response = app
