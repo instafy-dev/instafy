@@ -64,6 +64,14 @@ curl -s http://127.0.0.1:8080/v1/responses \
 
 Any of the following fields can supply user input: `prompt`, `text`, `input` (Codex array format), or a Chat Completions-style `messages` array. The proxy forwards the request using credentials from your `auth.json` and returns the upstream JSON verbatim.
 
+Pass `reasoning.effort` to `/v1/responses`, or `reasoning_effort` to
+`/v1/chat/completions`, to choose `minimal`, `low`, `medium`, `high`, `xhigh`, or
+`max`. Valid requests override `CODEX_REASONING_EFFORT` and retain their effort
+when forwarded to ChatGPT, API-key Responses, or Chat Completions upstreams.
+Values are trimmed and case-normalized; invalid values are ignored. Model support
+still applies: [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra)
+supports `low` through `max`, while older models may support fewer values.
+
 The proxy also exposes OpenAI-style speech synthesis at `/v1/audio/speech`. That is intended for
 local speech-host tooling that wants an HTTP TTS backend instead of the macOS `say` fallback:
 
@@ -91,6 +99,7 @@ returns a surfaced upstream error instead of silently pretending the backend is 
 | `CODEX_HOME` | Directory containing `auth.json` | `$HOME/.codex` |
 | `OPENAI_API_KEY` | API key credential | `None` |
 | `CODEX_OPENAI_ENDPOINT` | Upstream Responses endpoint for API-key credentials | `https://api.openai.com/v1/responses` |
+| `CODEX_REASONING_EFFORT` | Fallback effort (`minimal`, `low`, `medium`, `high`, `xhigh`, `max`), read once at startup/first use | Unset; ChatGPT defaults to `medium` |
 | `PROXY_CONTROLLER_BASE_URL` | Enables controller-integrated hosted mode | `None` |
 | `CONTROLLER_INTERNAL_TOKEN` | Service bearer used for controller credit events | `None` |
 | `PROXY_CREDENTIAL_LEASE_TOKEN` | Dedicated bearer used only for controller credential leases | `None` |
