@@ -1688,6 +1688,7 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
       projectMembers={projectMembers}
       sortedProjectMembers={sortedProjectMembers}
       projectMembersError={projectMembersError}
+      onRetryProjectMembers={() => void refreshProjectMembers({ force: true })}
       projectMemberUpdatePendingId={projectMemberUpdatePendingId}
       projectMemberRemovePendingId={projectMemberRemovePendingId}
       onProjectRoleChange={(userId, nextRole) => void handleProjectRoleChange(userId, nextRole)}

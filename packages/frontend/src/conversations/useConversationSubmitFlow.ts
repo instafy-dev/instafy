@@ -70,6 +70,7 @@ import type {
 } from "./conversationSubmitTypes";
 import { useConversationAutoTitle } from "./useConversationAutoTitle";
 import { useConversationControllerDispatch } from "./useConversationControllerDispatch";
+import { withUserMentionMetadata } from "./userMentions";
 
 export type {
   SubmitConversationOptions,
@@ -342,6 +343,13 @@ export function useConversationSubmitFlow({
       if (!trimmed) {
         return;
       }
+      let submittedMetadata: Record<string, unknown>;
+      try {
+        submittedMetadata = withUserMentionMetadata(options?.metadata, options?.editorState);
+      } catch (error) {
+        showStatus(error instanceof Error ? error.message : String(error), "error", 4500);
+        return;
+      }
       const terminalRequest = parseTerminalCommandRequest(trimmed);
       if (terminalRequest && terminalRequest.command.length === 0) {
         showStatus("Add a command after /terminal.", "error", 4000);
@@ -379,6 +387,7 @@ export function useConversationSubmitFlow({
         });
         const goalCommandDispatchInput = goalCommandDispatch?.input ?? null;
         const goalUserMetadata = {
+          ...submittedMetadata,
           client: buildConversationClientMetadata(chatClientSessionId, currentUserId),
           clientMessageId: generateUUID(),
           command: { type: "goal" },
@@ -510,7 +519,7 @@ export function useConversationSubmitFlow({
       }
       const autoSyncAfterApply = getGitAutoSyncAfterApplyPreference();
       let promptMetadata: Record<string, unknown> | null = {
-        ...(options?.metadata ?? {}),
+        ...submittedMetadata,
         client: buildConversationClientMetadata(chatClientSessionId, currentUserId),
         clientMessageId: generateUUID(),
         git: {

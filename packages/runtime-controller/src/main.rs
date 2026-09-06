@@ -45,6 +45,7 @@ mod jwks;
 mod message_stashes;
 mod model_defaults;
 mod multi_agent_plan;
+mod notification_platform;
 mod notifications;
 mod operator_admin;
 mod org_limits;
@@ -122,7 +123,11 @@ async fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
 
-    let mut config = AppConfig::from_env()?;
+    // Configuration performs blocking HTTP work, including service-user bootstrap.
+    // Keep its blocking clients outside Tokio's async execution context.
+    let mut config = tokio::task::spawn_blocking(AppConfig::from_env)
+        .await
+        .map_err(|_| anyhow::anyhow!("controller configuration task failed"))??;
     let pool = config.build_pool().await?;
     browser_profile::ensure_browser_profiles_table(&pool)
         .await
@@ -287,6 +292,7 @@ async fn main() -> anyhow::Result<()> {
     workspace::spawn_local_workspace_housekeeping(&state);
     origins::spawn_origin_presence_housekeeping(&state);
     automations::spawn_automation_scheduler(state.clone());
+    notification_platform::spawn_worker(state.clone());
     send_queue::spawn_send_queue_recovery_sweep(state.clone());
 
     let idle_state = state.clone();
@@ -450,6 +456,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(send_intents::router())
         .merge(send_queue::router())
         .merge(notifications::router())
+        .merge(notification_platform::router())
         .merge(activity::router())
         .merge(runs::router())
         .merge(workspace::router())

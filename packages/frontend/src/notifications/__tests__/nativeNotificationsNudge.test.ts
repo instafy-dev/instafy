@@ -7,6 +7,7 @@ import { recordGenuineAssistantResponseAndMaybeOfferNativeNotifications } from "
 vi.mock("@capacitor/core", () => ({
   Capacitor: {
     isNativePlatform: vi.fn(),
+    getPlatform: () => "ios",
   },
 }));
 
@@ -24,12 +25,12 @@ describe("native notifications nudge", () => {
   });
 
   it("does not count responses when a notification preference already exists", () => {
-    window.localStorage.setItem("instafy.notifications.enabled", "0");
+    window.localStorage.setItem("instafy.notifications.enabled:signed-out", "0");
     expect(recordGenuineAssistantResponseAndMaybeOfferNativeNotifications()).toBe(false);
     expect(recordGenuineAssistantResponseAndMaybeOfferNativeNotifications()).toBe(false);
     expect(recordGenuineAssistantResponseAndMaybeOfferNativeNotifications()).toBe(false);
 
-    window.localStorage.removeItem("instafy.notifications.enabled");
+    window.localStorage.removeItem("instafy.notifications.enabled:signed-out");
     expect(recordGenuineAssistantResponseAndMaybeOfferNativeNotifications()).toBe(false);
     expect(recordGenuineAssistantResponseAndMaybeOfferNativeNotifications()).toBe(false);
     expect(recordGenuineAssistantResponseAndMaybeOfferNativeNotifications()).toBe(true);

@@ -1,6 +1,7 @@
 import { ChatLines, NavArrowRight, Plus, Puzzle, Refresh } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { Card } from "../../../components/Card";
+import { LoadingStatus } from "../../../components/LoadingStatus";
 import { SearchInput } from "../../../components/SearchInput";
 import { Select } from "../../../components/Select";
 import { Spinner } from "../../../components/Spinner";
@@ -197,6 +198,8 @@ export function SkillsDiscoverySection({
           </label>
         </div>
       </div>
+
+      {discoveryLoading ? <LoadingStatus>Searching skills…</LoadingStatus> : null}
 
       {!discoveryError && !discoveryLoading ? (
         <Text variant="caption" tone="muted">

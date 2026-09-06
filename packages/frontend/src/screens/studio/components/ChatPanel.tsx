@@ -18,6 +18,7 @@ import { Button } from "../../../components/Button";
 import { OctoScrollMotionScope } from "../../../components/OctoMark";
 import { Spinner } from "../../../components/Spinner";
 import { useBreakpoint } from "../../../hooks/useBreakpoint";
+import { useConversationNotificationRead } from "../../../notifications/useConversationNotificationRead";
 import {
   addFloatingSurfaceViewportChangeListener,
   clampFloatingSurfacePositionToStudioViewport,
@@ -485,6 +486,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     hasMoreHistory,
     isHistoryLoading,
     isInitialHistoryLoading,
+    initialHistoryError,
+    retryInitialHistory,
     loadOlderMessages,
     onInputChange,
     onRecordMessage,
@@ -1854,6 +1857,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     isHistoryLoading,
     loadOlderMessages,
     messages,
+  });
+
+  useConversationNotificationRead({
+    currentUserId,
+    conversationId: activeConversationControllerId,
+    rootRef: scrollContainerRef,
+    enabled: browserSubtab === "chat" && !jobThread,
   });
 
   const activeConversation = useMemo(
@@ -3687,7 +3697,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     inputValue,
     isHistoryLoading,
     remoteHistoryPresenceResolved:
-      remoteConversationHistoryResolved && !isInitialHistoryLoading,
+      remoteConversationHistoryResolved && !isInitialHistoryLoading && !initialHistoryError,
     onInputChange,
     runtimeControllerEnabled,
   });
@@ -4757,7 +4767,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     const result = observeNotificationNudgeAssistantResponses({
       observation,
       messages,
-      historyReady: remoteConversationHistoryResolved && !isInitialHistoryLoading,
+      historyReady: remoteConversationHistoryResolved && !isInitialHistoryLoading && !initialHistoryError,
       assistantRoutingEnabled: anyAgentsEnabled,
     });
     notificationNudgeObservationsRef.current.set(conversationObservationKey, result.observation);
@@ -4792,6 +4802,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     anyAgentsEnabled,
     conversationsProjectKey,
     credentialGateState,
+    initialHistoryError,
     isInitialHistoryLoading,
     messages,
     notificationsNudgeOpen,
@@ -5438,6 +5449,22 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 <div className="inline-flex items-center gap-3 rounded-2xl border border-slate-200/70 bg-white/85 px-4 py-3 text-sm font-medium text-slate-600 shadow-sm dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)] dark:text-slate-300">
                   <Spinner aria-hidden="true" tone="slate" size="sm" />
                   <span>Loading messages…</span>
+                </div>
+              </div>
+            ) : null}
+            {initialHistoryError ? (
+              <div className="flex justify-center px-2 py-1" data-testid="chat-history-error">
+                <div className="flex flex-wrap items-center justify-center gap-3 text-sm text-slate-600 dark:text-slate-300">
+                  <span>{initialHistoryError}</span>
+                  <Button
+                    onPress={() => void retryInitialHistory()}
+                    variant="outline"
+                    size="xs"
+                    radius="full"
+                    data-testid="chat-history-retry"
+                  >
+                    Retry
+                  </Button>
                 </div>
               </div>
             ) : null}

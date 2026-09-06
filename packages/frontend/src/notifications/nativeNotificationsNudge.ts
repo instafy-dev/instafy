@@ -1,3 +1,4 @@
+import { notificationStorageKey } from "./notificationSession";
 import { Capacitor } from "@capacitor/core";
 
 const NATIVE_ASSISTANT_RESPONSE_COUNT_KEY = "instafy.notifications.native_assistant_response_count";
@@ -24,30 +25,30 @@ function canUseLocalStorage(): boolean {
  * user messages, timeline/status rows, or hydrated conversation history.
  */
 export function recordGenuineAssistantResponseAndMaybeOfferNativeNotifications(): boolean {
-  if (!Capacitor.isNativePlatform()) {
+  if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() === "android") {
     return false;
   }
   if (!canUseLocalStorage()) {
     return false;
   }
 
-  const storedPreference = window.localStorage.getItem(ENABLED_KEY);
+  const storedPreference = window.localStorage.getItem(notificationStorageKey(ENABLED_KEY));
   if (storedPreference === "1" || storedPreference === "0") {
     return false;
   }
-  if (window.localStorage.getItem(NATIVE_NUDGE_SEEN_KEY) === "1") {
+  if (window.localStorage.getItem(notificationStorageKey(NATIVE_NUDGE_SEEN_KEY)) === "1") {
     return false;
   }
 
-  const currentRaw = window.localStorage.getItem(NATIVE_ASSISTANT_RESPONSE_COUNT_KEY) ?? "0";
+  const currentRaw = window.localStorage.getItem(notificationStorageKey(NATIVE_ASSISTANT_RESPONSE_COUNT_KEY)) ?? "0";
   const current = Number.parseInt(currentRaw, 10);
   const next = Number.isFinite(current) ? current + 1 : 1;
-  window.localStorage.setItem(NATIVE_ASSISTANT_RESPONSE_COUNT_KEY, String(Math.min(next, 50)));
+  window.localStorage.setItem(notificationStorageKey(NATIVE_ASSISTANT_RESPONSE_COUNT_KEY), String(Math.min(next, 50)));
 
   if (next < 3) {
     return false;
   }
 
-  window.localStorage.setItem(NATIVE_NUDGE_SEEN_KEY, "1");
+  window.localStorage.setItem(notificationStorageKey(NATIVE_NUDGE_SEEN_KEY), "1");
   return true;
 }

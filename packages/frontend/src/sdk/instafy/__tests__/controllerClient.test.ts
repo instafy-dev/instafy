@@ -33,5 +33,13 @@ describe("instafy sdk controller client", () => {
     expect(typeof controllerClient.browserSessions.fetchPages).toBe("function");
     expect(typeof controllerClient.browserSessions.fetchPendingApproval).toBe("function");
     expect(typeof controllerClient.browserSessions.decideApproval).toBe("function");
+    expect(typeof controllerClient.bugReports.listPage).toBe("function");
+    expect(typeof controllerClient.bugReports.acknowledgeActivity).toBe("function");
+    expect(typeof controllerClient.bugReports.claimResolutionAlerts).toBe("function");
+    expect(typeof controllerClient.bugReports.listMessages).toBe("function");
+    expect(typeof controllerClient.bugReports.listMessagePage).toBe("function");
+    expect(typeof controllerClient.bugReports.postMessage).toBe("function");
+    expect(typeof controllerClient.bugReports.createRequestId).toBe("function");
+    expect(typeof controllerClient.bugReports.createMessageRequestId).toBe("function");
   });
 });

@@ -90,4 +90,55 @@ describe("Status toast presentations", () => {
     expect(document.querySelector('[aria-label="Dismiss notification"]')).not.toBeNull();
     expect(document.body.textContent).toContain("Open");
   });
+
+  it("queues a non-preemptive background alert behind a visible warning", async () => {
+    await act(async () => {
+      statusContext?.showStatus("Publishing failed.", "error", 0);
+      statusContext?.showStatus("Your support report was resolved.", "success", 12_000, {
+        id: "support-resolution:report-1",
+        actionLabel: "View report",
+        nonPreemptive: true,
+        onAction: vi.fn(),
+      });
+    });
+
+    expect(document.body.textContent).toContain("Publishing failed.");
+    expect(document.body.textContent).not.toContain("Your support report was resolved.");
+    expect(statusContext?.queue?.visibleToasts).toHaveLength(1);
+
+    await act(async () => {
+      const current = statusContext?.queue?.visibleToasts[0];
+      if (current) statusContext?.queue?.close(current.key);
+    });
+
+    expect(document.body.textContent).not.toContain("Publishing failed.");
+    expect(document.body.textContent).toContain("Your support report was resolved.");
+    expect(document.body.textContent).toContain("View report");
+  });
+  it("calls onShow only after a queued notification becomes visible", async () => {
+    const shown = vi.fn();
+    await act(async () => {
+      statusContext?.showStatus("An active error.", "error", 0, { id: "error" });
+      statusContext?.showStatus("A new notification.", "info", 10000, {
+        id: "notification", forceVisible: true, nonPreemptive: true, onShow: shown,
+      });
+    });
+    expect(shown).not.toHaveBeenCalled();
+    await act(async () => statusContext?.hideStatus("error"));
+    expect(shown).toHaveBeenCalledOnce();
+  });
+
+  it("does not acknowledge a queued toast removed during signout", async () => {
+    const shown = vi.fn();
+    await act(async () => {
+      statusContext?.showStatus("An active error.", "error", 0, { id: "error" });
+      statusContext?.showStatus("Old account notification.", "info", 10000, {
+        id: "notification", forceVisible: true, nonPreemptive: true, onShow: shown,
+      });
+      statusContext?.hideStatus("notification");
+      statusContext?.hideStatus("error");
+    });
+    expect(shown).not.toHaveBeenCalled();
+  });
+
 });

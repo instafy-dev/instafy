@@ -160,7 +160,7 @@ after a few chat messages (toast nudge).
 
 To send native push notifications from the runtime controller, configure APNs on the controller:
 
-- `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID` (defaults to `dev.instafy.studio`)
+- `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID` (required; match the provisioned app)
 - `APNS_PRIVATE_KEY_B64` (or `APNS_PRIVATE_KEY`)
 - `APNS_USE_SANDBOX=1` for local/dev builds
 
@@ -169,6 +169,10 @@ See `.env.apns.example` (or `.env.supabase.example`) for the full list.
 Notes:
 - Real APNs delivery requires a physical device + provisioning with Push Notifications enabled.
 - You can still test delivery on the iOS simulator via `xcrun simctl push`.
+- Android push token registration is disabled until an FCM transport is available;
+  the Android in-app notification center still works.
+- See [Notifications](Notifications.md) for the durable outbox, account-scoped
+  preferences, native notification actions, and provider verification checklist.
 
 ## Shake-to-report diagnostics
 

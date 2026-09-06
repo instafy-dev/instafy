@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Clock, EditPencil, MoreHoriz, Pause, Play, Trash } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
 import { Button, IconButton } from "../../../components/Button";
@@ -10,6 +11,7 @@ import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { StudioMenu, StudioMenuItem, StudioMenuSeparator } from "../../../components/aria/StudioMenu";
 import { MenuItemContent } from "../../../components/MenuItemContent";
 import { Text } from "../../../components/Text";
+import { LoadingStatus } from "../../../components/LoadingStatus";
 import { Textarea } from "../../../components/Textarea";
 import { Toggle } from "../../../components/Toggle";
 import { SettingsShell } from "./SettingsShell";
@@ -22,6 +24,8 @@ import {
 } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
 import { useProjects } from "../../../projects/useProjects";
+import { useAuth } from "../../../providers/AuthProvider";
+import { ControllerApiError } from "../../../services/runtimeController/core";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import {
   LIST_ROW_FOCUS_WITHIN_RING,
@@ -182,37 +186,62 @@ function emptyDraft(): AutomationDraft {
 
 export function AutomationsPanel() {
   const { activeProjectId } = useProjects();
+  const { user } = useAuth();
+  return <ProjectAutomationsPanel key={`${user?.id}:${activeProjectId}`} activeProjectId={activeProjectId} userId={user?.id ?? null} />;
+}
+
+function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId: string | null; userId: string | null }) {
   const { openConversationTab } = useWorkspaceTabs();
   const { showStatus } = useStatus();
-  const [automations, setAutomations] = useState<ControllerAutomation[]>([]);
-  const [loading, setLoading] = useState(false);
+  const queryClient = useQueryClient();
+  const queryKey = useMemo(() => ["project-automations", userId, activeProjectId] as const, [userId, activeProjectId]);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+  const automationsQuery = useQuery({
+    queryKey,
+    enabled: Boolean(userId && activeProjectId),
+    staleTime: 0,
+    queryFn: async ({ signal }) => {
+      try {
+        const data = await controllerClient.automations.listForProject({ projectId: activeProjectId!, signal });
+        if (!data) throw new Error("Unable to load automations. Check your connection and try again.");
+        return data;
+      } catch (error) {
+        if (!signal.aborted && error instanceof ControllerApiError && [401, 403, 404].includes(error.status)) {
+          // Remove revoked records from the cache too: a later network failure
+          // must never make the previously authorized list visible again.
+          queryClient.setQueryData(queryKey, []);
+        }
+        throw error;
+      }
+    },
+  });
+  const loading = automationsQuery.isFetching;
+  const errorStatus = automationsQuery.error instanceof ControllerApiError ? automationsQuery.error.status : null;
+  const loadError = !automationsQuery.error ? null
+    : errorStatus === 401 ? "Your session needs to be refreshed. Try again."
+    : errorStatus === 403 ? "You no longer have access to these automations."
+    : errorStatus === 404 ? "These automations are no longer available."
+    : automationsQuery.data === undefined ? "Couldn't load automations. Try again."
+    : automationsQuery.data.length > 0 ? "Couldn't refresh automations. Your saved list is still shown."
+    : "Couldn't refresh automations. Try again.";
+  const automations = useMemo(
+    () => automationsQuery.data ?? [],
+    [automationsQuery.data],
+  );
   const [editorOpen, setEditorOpen] = useState(false);
   const [draft, setDraft] = useState<AutomationDraft>(() => emptyDraft());
   const [saving, setSaving] = useState(false);
 
+  const { refetch } = automationsQuery;
   const refresh = useCallback(async () => {
-    if (!activeProjectId) {
-      setAutomations([]);
-      return;
+    if (activeProjectId && mountedRef.current) {
+      await refetch();
     }
-    setLoading(true);
-    try {
-      const data = await controllerClient.automations.listForProject({
-        projectId: activeProjectId,
-      });
-      setAutomations(data ?? []);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      showStatus(message || "Unable to load automations.", "error", 5000);
-      setAutomations([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [activeProjectId, showStatus]);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
+  }, [activeProjectId, refetch]);
 
   const sortedAutomations = useMemo(() => {
     return [...automations].sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""));
@@ -284,10 +313,12 @@ export function AutomationsPanel() {
         });
       }
 
+      await queryClient.invalidateQueries({ queryKey, exact: true });
+      if (!mountedRef.current) return;
       setEditorOpen(false);
-      await refresh();
       showStatus("Automation saved.", "success", 2500);
     } catch (error) {
+      if (!mountedRef.current) return;
       const message = error instanceof Error ? error.message : String(error);
       showStatus(message || "Unable to save automation.", "error", 6000);
     } finally {
@@ -298,9 +329,11 @@ export function AutomationsPanel() {
   const handleRunNow = async (automation: ControllerAutomation) => {
     try {
       await controllerClient.automations.runNow({ automationId: automation.id });
+      await queryClient.invalidateQueries({ queryKey, exact: true });
+      if (!mountedRef.current) return;
       showStatus("Automation queued.", "success", 2500);
-      await refresh();
     } catch (error) {
+      if (!mountedRef.current) return;
       const message = error instanceof Error ? error.message : String(error);
       showStatus(message || "Unable to run automation.", "error", 6000);
     }
@@ -313,9 +346,11 @@ export function AutomationsPanel() {
         automationId: automation.id,
         status: nextStatus,
       });
-      await refresh();
+      await queryClient.invalidateQueries({ queryKey, exact: true });
+      if (!mountedRef.current) return;
       showStatus(nextStatus === "paused" ? "Automation paused." : "Automation resumed.", "success", 2500);
     } catch (error) {
+      if (!mountedRef.current) return;
       const message = error instanceof Error ? error.message : String(error);
       showStatus(message || "Unable to update automation.", "error", 6000);
     }
@@ -330,9 +365,11 @@ export function AutomationsPanel() {
     }
     try {
       await controllerClient.automations.delete({ automationId: automation.id });
-      await refresh();
+      await queryClient.invalidateQueries({ queryKey, exact: true });
+      if (!mountedRef.current) return;
       showStatus("Automation deleted.", "success", 2500);
     } catch (error) {
+      if (!mountedRef.current) return;
       const message = error instanceof Error ? error.message : String(error);
       showStatus(message || "Unable to delete automation.", "error", 6000);
     }
@@ -349,6 +386,7 @@ export function AutomationsPanel() {
           size="sm"
           radius="xl"
           onPress={openCreate}
+          isDisabled={!activeProjectId}
           data-testid="automations-create-button"
         >
           New
@@ -357,8 +395,19 @@ export function AutomationsPanel() {
     >
       <div className="space-y-3">
         {loading ? (
-          <Text tone="muted">Loading…</Text>
-        ) : sortedAutomations.length === 0 ? (
+          <LoadingStatus>{automationsQuery.data === undefined ? "Loading automations…" : "Refreshing automations…"}</LoadingStatus>
+        ) : null}
+        {loadError ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <Text role="alert" tone="danger">{loadError}</Text>
+            <Button variant="outline" size="sm" onPress={() => void refresh()} isDisabled={loading}>
+              Retry
+            </Button>
+          </div>
+        ) : null}
+        {!activeProjectId ? (
+          <Text tone="muted">Select a space to manage automations.</Text>
+        ) : !loading && !loadError && sortedAutomations.length === 0 ? (
           <div className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-950">
             <Text tone="muted">No automations yet.</Text>
           </div>

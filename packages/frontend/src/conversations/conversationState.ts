@@ -57,6 +57,9 @@ export interface ConversationsState {
 }
 
 export interface CreateConversationOptions {
+  /** Identity of a controller conversation created before opening its composer. */
+  localId?: string;
+  controllerId?: string;
   title?: string;
   messages?: ChatMessage[];
   visibility?: ConversationVisibility;

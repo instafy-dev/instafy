@@ -7,6 +7,24 @@ export interface BugReportScreenshotDraft extends BugReportScreenshotPayload {
 
 export const BUG_REPORT_MAX_SCREENSHOTS = 6;
 export const BUG_REPORT_MAX_SCREENSHOT_BYTES = 4 * 1024 * 1024;
+export const BUG_REPORT_MAX_SCREENSHOT_TOTAL_BYTES = 12 * 1024 * 1024;
+export const BUG_REPORT_SCREENSHOT_ACCEPT = "image/png,image/jpeg,image/webp";
+
+const SUPPORTED_SCREENSHOT_MEDIA_TYPES = new Set(
+  BUG_REPORT_SCREENSHOT_ACCEPT.split(","),
+);
+
+export function isSupportedBugReportScreenshotMediaType(mediaType: string): boolean {
+  return SUPPORTED_SCREENSHOT_MEDIA_TYPES.has(mediaType.trim().toLowerCase());
+}
+
+function requireSupportedScreenshotMediaType(mediaType: string): string {
+  const normalized = mediaType.trim().toLowerCase();
+  if (!SUPPORTED_SCREENSHOT_MEDIA_TYPES.has(normalized)) {
+    throw new Error("Screenshots must be PNG, JPEG, or WebP images.");
+  }
+  return normalized;
+}
 
 function createDraftId() {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -21,7 +39,7 @@ function parseDataUrl(dataUrl: string): { mediaType: string; dataBase64: string 
     throw new Error("Unable to encode screenshot.");
   }
   return {
-    mediaType: match[1] || "image/png",
+    mediaType: requireSupportedScreenshotMediaType(match[1] || "image/png"),
     dataBase64: match[2],
   };
 }
@@ -56,21 +74,27 @@ export function formatBugReportFileSize(bytes: number): string {
   return `${Math.round((bytes / (1024 * 1024)) * 10) / 10} MB`;
 }
 
+export function assertBugReportScreenshotTotalBytes(totalBytes: number): void {
+  if (totalBytes > BUG_REPORT_MAX_SCREENSHOT_TOTAL_BYTES) {
+    throw new Error("Screenshots must total 12 MB or less.");
+  }
+}
+
 export async function buildBugReportScreenshotDrafts(
   files: File[],
-  existingCount = 0,
+  existing: readonly Pick<BugReportScreenshotDraft, "byteLength">[] = [],
 ): Promise<BugReportScreenshotDraft[]> {
-  const remainingSlots = Math.max(0, BUG_REPORT_MAX_SCREENSHOTS - existingCount);
+  const remainingSlots = Math.max(0, BUG_REPORT_MAX_SCREENSHOTS - existing.length);
   if (remainingSlots === 0) {
     throw new Error(`You can attach up to ${BUG_REPORT_MAX_SCREENSHOTS} screenshots.`);
   }
 
   const selected = files
-    .filter((file) => file.type.startsWith("image/"))
+    .filter((file) => isSupportedBugReportScreenshotMediaType(file.type))
     .slice(0, remainingSlots);
 
   if (selected.length === 0) {
-    throw new Error("Choose an image screenshot to attach.");
+    throw new Error("Choose a PNG, JPEG, or WebP screenshot to attach.");
   }
 
   for (const file of selected) {
@@ -78,6 +102,10 @@ export async function buildBugReportScreenshotDrafts(
       throw new Error(`${file.name} is larger than 4 MB.`);
     }
   }
+  assertBugReportScreenshotTotalBytes(
+    existing.reduce((total, screenshot) => total + screenshot.byteLength, 0) +
+      selected.reduce((total, file) => total + file.size, 0),
+  );
 
   const drafts = await Promise.all(
     selected.map(async (file) => {
@@ -89,7 +117,7 @@ export async function buildBugReportScreenshotDrafts(
       return {
         id: createDraftId(),
         fileName: file.name || "screenshot.png",
-        mediaType: file.type || "image/png",
+        mediaType: requireSupportedScreenshotMediaType(file.type),
         byteLength: file.size,
         dataBase64: previewUrl.slice(commaIndex + 1),
         previewUrl,

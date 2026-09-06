@@ -22,6 +22,7 @@ use uuid::Uuid;
 use crate::auth::{Credentials, response_indicates_chatgpt_token_expired};
 use crate::client::{
     CodexClient, CodexCompletion, DEFAULT_INSTRUCTIONS, DEFAULT_MODEL, conversation_id_enabled,
+    normalize_reasoning_effort,
 };
 use crate::controller_client::ControllerCreditsError;
 use crate::controller_integration::{ControllerIntegration, CreditBurn as ControllerCreditBurn};
@@ -227,14 +228,8 @@ fn requested_reasoning_effort(payload: &Value) -> Option<String> {
         .get("reasoning")
         .and_then(Value::as_object)
         .and_then(|reasoning| reasoning.get("effort"))
-        .and_then(Value::as_str)?
-        .trim()
-        .to_ascii_lowercase();
-
-    match effort.as_str() {
-        "minimal" | "low" | "medium" | "high" => Some(effort),
-        _ => None,
-    }
+        .and_then(Value::as_str)?;
+    normalize_reasoning_effort(effort)
 }
 
 fn plain_text_completion_requested(payload: &Value) -> bool {
@@ -1158,6 +1153,10 @@ async fn create_chat_completion(
     };
     let plain_text_completion = plain_text_completion_requested(&payload);
     let proxy_base_instructions = proxy_base_instructions_for_payload(&payload);
+    let reasoning_effort = payload
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .and_then(normalize_reasoning_effort);
     let completion_options = RemoteCompletionOptions {
         requested_model: &requested_model,
         payload: &payload,
@@ -1165,7 +1164,13 @@ async fn create_chat_completion(
         claims: claims.as_ref(),
         auth_mode,
         plain_text_completion,
-        response_controls: None,
+        response_controls: Some(RemoteResponseControls {
+            reasoning_effort: reasoning_effort.as_deref(),
+            requested_tools: None,
+            requested_tool_choice: None,
+            requested_parallel_tool_calls: None,
+            requested_text_controls: None,
+        }),
     };
 
     match &state.backend {
@@ -2653,26 +2658,36 @@ mod tests {
 
     #[test]
     fn requested_reasoning_effort_preserves_runtime_turn_setting() {
-        let payload = json!({
-            "model": "gpt-5.5",
-            "reasoning": {
-                "effort": "low",
-                "summary": "auto"
-            }
-        });
-
-        assert_eq!(requested_reasoning_effort(&payload).as_deref(), Some("low"));
+        for effort in ["minimal", "low", "medium", "high", "xhigh", "max"] {
+            let payload = json!({
+                "model": "gpt-6-astra",
+                "reasoning": {
+                    "effort": format!(" {} ", effort.to_ascii_uppercase()),
+                    "summary": "auto"
+                }
+            });
+            assert_eq!(
+                requested_reasoning_effort(&payload).as_deref(),
+                Some(effort)
+            );
+        }
     }
 
     #[test]
     fn requested_reasoning_effort_ignores_invalid_values() {
-        let payload = json!({
-            "reasoning": {
-                "effort": "lots"
-            }
-        });
-
-        assert_eq!(requested_reasoning_effort(&payload), None);
+        for effort in [
+            json!("lots"),
+            json!(""),
+            json!("ultra"),
+            json!(4),
+            json!(null),
+        ] {
+            assert_eq!(
+                requested_reasoning_effort(&json!({"reasoning": {"effort": effort}})),
+                None
+            );
+        }
+        assert_eq!(requested_reasoning_effort(&json!({})), None);
     }
 
     #[test]
