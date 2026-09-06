@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge } from "../../../components/Badge";
 import { Button } from "../../../components/Button";
 import { Checkbox } from "../../../components/Checkbox";
 import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
 import { Text } from "../../../components/Text";
+import { LoadingStatus } from "../../../components/LoadingStatus";
 import { StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
 import { Textarea } from "../../../components/Textarea";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
@@ -14,6 +16,7 @@ import {
   type ControllerProjectSecret,
 } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
+import { useAuth } from "../../../providers/AuthProvider";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import {
   clearPendingProjectSecretPrefill,
@@ -48,6 +51,9 @@ function SecretModal({
   valueVisible,
   onToggleValueVisible,
   agents,
+  agentsLoading,
+  agentsError,
+  onRetryAgents,
   selectedAgentHandles,
   onToggleAgentHandle,
   autoFocusValue,
@@ -68,6 +74,9 @@ function SecretModal({
   valueVisible: boolean;
   onToggleValueVisible: () => void;
   agents: ControllerAgentProfile[];
+  agentsLoading: boolean;
+  agentsError: string | null;
+  onRetryAgents: () => void;
   selectedAgentHandles: Set<string>;
   onToggleAgentHandle: (agentHandle: string) => void;
   autoFocusValue?: boolean;
@@ -237,7 +246,13 @@ function SecretModal({
             Allowed agents
           </Text>
           <div className="max-h-44 space-y-1 overflow-auto rounded-xl border border-slate-200 bg-slate-50 p-2 dark:border-slate-800 dark:bg-slate-900/40">
-            {agents.length === 0 ? (
+            {agentsLoading ? <LoadingStatus>Loading agents…</LoadingStatus> : null}
+            {agentsError ? (
+              <div className="space-y-2">
+                <Text role="alert" tone="danger">{agentsError}</Text>
+                <Button variant="outline" size="sm" onPress={onRetryAgents} isDisabled={agentsLoading}>Retry</Button>
+              </div>
+            ) : !agentsLoading && agents.length === 0 ? (
               <Text variant="caption" tone="muted" className="text-xs">
                 No agents found yet.
               </Text>
@@ -281,7 +296,7 @@ function SecretModal({
           variant="primary"
           size="sm"
           radius="full"
-          isDisabled={pending}
+          isDisabled={pending || agentsLoading || Boolean(agentsError)}
           data-testid="project-secret-save"
         >
           {pending ? "Working…" : saveLabel}
@@ -292,11 +307,42 @@ function SecretModal({
 }
 
 export function ProjectSecretsCard({ projectId }: { projectId: string | null }) {
+  const { user } = useAuth();
+  return <ScopedProjectSecretsCard key={`${user?.id}:${projectId}`} projectId={projectId} userId={user?.id ?? null} />;
+}
+
+function ScopedProjectSecretsCard({ projectId, userId }: { projectId: string | null; userId: string | null }) {
   const { showStatus } = useStatus();
   const { openPanelTab, requestUrlPush } = useWorkspaceTabs();
-  const [secrets, setSecrets] = useState<ControllerProjectSecret[]>([]);
-  const [agents, setAgents] = useState<ControllerAgentProfile[]>([]);
-  const [loading, setLoading] = useState(false);
+  const queryClient = useQueryClient();
+  const queryKey = useMemo(() => ["project-secrets", userId, projectId] as const, [userId, projectId]);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+  const secretsQuery = useQuery({
+    queryKey,
+    enabled: Boolean(userId && projectId),
+    staleTime: 0,
+    queryFn: async () => {
+      const [secretsResult, agentsResult] = await Promise.all([
+        controllerClient.secrets.listForProject(projectId!),
+        controllerClient.agents.list({ projectId: projectId! }),
+      ]);
+      if (!secretsResult.success) throw new Error(secretsResult.error || "Unable to load secrets.");
+      if (!agentsResult.success) throw new Error(agentsResult.error || "Unable to load agents.");
+      return { secrets: secretsResult.secrets, agents: agentsResult.agents };
+    },
+  });
+  const loading = secretsQuery.isFetching;
+  const loadError = secretsQuery.error
+    ? secretsQuery.data === undefined ? "Couldn't load secrets. Try again." : "Couldn't refresh secrets. Try again."
+    : null;
+  // A failed protected read can indicate revoked access. Never retain secret
+  // metadata or agent names after that failure, or across project boundaries.
+  const secrets = useMemo(() => loadError ? [] : secretsQuery.data?.secrets ?? [], [loadError, secretsQuery.data]);
+  const agents = useMemo(() => loadError ? [] : secretsQuery.data?.agents ?? [], [loadError, secretsQuery.data]);
   const [actionPendingId, setActionPendingId] = useState<string | null>(null);
 
   const [modalMode, setModalMode] = useState<SecretModalMode>("create");
@@ -322,46 +368,10 @@ export function ProjectSecretsCard({ projectId }: { projectId: string | null }) 
     return map;
   }, [agents]);
 
-  const loadData = useCallback(
-    async (options?: { silent?: boolean }) => {
-      if (!projectId) {
-        setSecrets([]);
-        setAgents([]);
-        return;
-      }
-      if (!options?.silent) {
-        setLoading(true);
-      }
-
-      const [secretsResult, agentsResult] = await Promise.all([
-        controllerClient.secrets.listForProject(projectId).catch((error: unknown) => {
-          const message = error instanceof Error ? error.message : String(error);
-          return { success: false as const, secrets: [], error: message };
-        }),
-        controllerClient.agents.list({ projectId }).catch((error: unknown) => {
-          const message = error instanceof Error ? error.message : String(error);
-          return { success: false as const, agents: [], error: message };
-        }),
-      ]);
-
-      if (secretsResult.success) {
-        setSecrets(secretsResult.secrets);
-      } else if (!options?.silent) {
-        showStatus(secretsResult.error ?? "Unable to load secrets.", "error", 4500);
-      }
-
-      if (agentsResult.success) {
-        setAgents(agentsResult.agents);
-      } else if (!options?.silent) {
-        showStatus(agentsResult.error ?? "Unable to load agents.", "error", 4500);
-      }
-
-      if (!options?.silent) {
-        setLoading(false);
-      }
-    },
-    [projectId, showStatus],
-  );
+  const { refetch } = secretsQuery;
+  const loadData = useCallback(async () => {
+    if (projectId && mountedRef.current) await refetch();
+  }, [projectId, refetch]);
 
   useEffect(() => {
     if (!projectId) {
@@ -380,10 +390,6 @@ export function ProjectSecretsCard({ projectId }: { projectId: string | null }) 
     pendingPrefillRef.current = pending;
     clearPendingProjectSecretPrefill();
   }, [projectId]);
-
-  useEffect(() => {
-    void loadData({ silent: true });
-  }, [loadData]);
 
   const openCreateModal = useCallback(
     (prefill?: PendingProjectSecretPrefill | null) => {
@@ -495,6 +501,8 @@ export function ProjectSecretsCard({ projectId }: { projectId: string | null }) 
           description: descriptionDraft.trim() ? descriptionDraft.trim() : null,
           agentHandles: Array.from(selectedAgentHandles),
         });
+        if (result.success) await queryClient.invalidateQueries({ queryKey, exact: true });
+        if (!mountedRef.current) return;
         if (!result.success) {
           showStatus(result.error ?? "Unable to create secret.", "error", 4500);
           return;
@@ -526,6 +534,8 @@ export function ProjectSecretsCard({ projectId }: { projectId: string | null }) 
           value: valueDraft.trim() ? valueDraft : undefined,
           agentHandles: Array.from(selectedAgentHandles),
         });
+        if (result.success) await queryClient.invalidateQueries({ queryKey, exact: true });
+        if (!mountedRef.current) return;
         if (!result.success) {
           showStatus(result.error ?? "Unable to update secret.", "error", 4500);
           return;
@@ -535,18 +545,22 @@ export function ProjectSecretsCard({ projectId }: { projectId: string | null }) 
 
       activeCreatePrefillRef.current = null;
       setModalOpen(false);
-      await loadData({ silent: true });
+    } catch (error) {
+      if (mountedRef.current) {
+        showStatus(error instanceof Error ? error.message : "Unable to save secret.", "error", 4500);
+      }
     } finally {
       setSaving(false);
     }
   }, [
     descriptionDraft,
     editingSecretId,
-    loadData,
     modalMode,
     nameDraft,
     openPanelTab,
     projectId,
+    queryClient,
+    queryKey,
     requestUrlPush,
     selectedAgentHandles,
     showStatus,
@@ -567,17 +581,22 @@ export function ProjectSecretsCard({ projectId }: { projectId: string | null }) 
       setActionPendingId(secret.id);
       try {
         const result = await controllerClient.secrets.revokeForProject(projectId, secret.id);
+        if (result.success) await queryClient.invalidateQueries({ queryKey, exact: true });
+        if (!mountedRef.current) return;
         if (!result.success) {
           showStatus(result.error ?? "Unable to revoke secret.", "error", 4500);
           return;
         }
         showStatus("Secret revoked.", "success", 2500);
-        await loadData({ silent: true });
+      } catch (error) {
+        if (mountedRef.current) {
+          showStatus(error instanceof Error ? error.message : "Unable to revoke secret.", "error", 4500);
+        }
       } finally {
         setActionPendingId(null);
       }
     },
-    [loadData, projectId, showStatus],
+    [projectId, queryClient, queryKey, showStatus],
   );
 
   const assignedAgentsLabel = useCallback(
@@ -611,25 +630,30 @@ export function ProjectSecretsCard({ projectId }: { projectId: string | null }) 
         ) : null}
 
         {loading ? (
-          <SettingsSurface>
-            <Text variant="caption" tone="muted">
-              Loading…
-            </Text>
-          </SettingsSurface>
+          <LoadingStatus>{secretsQuery.data === undefined ? "Loading secrets…" : "Refreshing secrets…"}</LoadingStatus>
         ) : null}
 
-        {projectId && !loading ? (
+        {loadError ? (
+          <div className="flex flex-wrap items-center gap-3">
+            <Text role="alert" tone="danger">{loadError}</Text>
+            <Button variant="outline" size="sm" onPress={() => void loadData()} isDisabled={loading}>
+              Retry
+            </Button>
+          </div>
+        ) : null}
+
+        {projectId ? (
           <div className="space-y-3">
             <div className="flex items-center justify-end">
               <SettingsAddButton
                 onPress={() => openCreateModal(null)}
-                isDisabled={!projectId || loading}
+                isDisabled={loading || Boolean(loadError)}
                 data-testid="project-secret-create"
                 ariaLabel="Create secret"
                 title="Create secret"
               />
             </div>
-            {activeSecrets.length === 0 ? (
+            {!loading && !loadError && activeSecrets.length === 0 ? (
               <div className="space-y-1 px-1 py-1">
                 <Text variant="bodyStrong" tone="primary" className="text-sm">
                   No secrets yet.
@@ -707,6 +731,9 @@ export function ProjectSecretsCard({ projectId }: { projectId: string | null }) 
         valueVisible={valueVisible}
         onToggleValueVisible={() => setValueVisible((value) => !value)}
         agents={agents}
+        agentsLoading={loading}
+        agentsError={loadError}
+        onRetryAgents={() => void loadData()}
         selectedAgentHandles={selectedAgentHandles}
         onToggleAgentHandle={toggleAgentHandle}
         autoFocusValue={autoFocusValue}

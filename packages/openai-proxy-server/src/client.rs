@@ -86,6 +86,14 @@ fn detect_upstream_wire_api(endpoint: &str) -> UpstreamWireApi {
     }
 }
 
+pub(crate) fn normalize_reasoning_effort(raw: &str) -> Option<String> {
+    let effort = raw.trim().to_ascii_lowercase();
+    match effort.as_str() {
+        "minimal" | "low" | "medium" | "high" | "xhigh" | "max" => Some(effort),
+        _ => None,
+    }
+}
+
 fn global_reasoning_effort() -> Option<&'static str> {
     static CACHE: OnceLock<Option<String>> = OnceLock::new();
     CACHE
@@ -95,17 +103,14 @@ fn global_reasoning_effort() -> Option<&'static str> {
                 if trimmed.is_empty() {
                     return None;
                 }
-                let lowered = trimmed.to_ascii_lowercase();
-                match lowered.as_str() {
-                    "minimal" | "low" | "medium" | "high" => Some(lowered),
-                    _ => {
-                        eprintln!(
-                            "[proxy] Ignoring invalid CODEX_REASONING_EFFORT value `{}`; expected minimal|low|medium|high.",
-                            trimmed
-                        );
-                        None
-                    }
+                let effort = normalize_reasoning_effort(trimmed);
+                if effort.is_none() {
+                    eprintln!(
+                        "[proxy] Ignoring invalid CODEX_REASONING_EFFORT value `{}`; expected minimal|low|medium|high|xhigh|max.",
+                        trimmed
+                    );
                 }
+                effort
             }
             Err(_) => None,
         })
@@ -293,6 +298,7 @@ impl CodexClient {
                     &self.model,
                     &self.instructions,
                     input_items,
+                    self.reasoning_effort.as_deref(),
                 )?,
                 UpstreamWireApi::GeminiCodeAssist => {
                     let (payload, request_id) = build_gemini_code_assist_payload(
@@ -519,6 +525,7 @@ fn build_openai_chat_completions_payload(
     model: &str,
     instructions: &str,
     input_items: &[Value],
+    requested_reasoning_effort: Option<&str>,
 ) -> Result<Value> {
     let mut messages = Vec::new();
     let instructions_text = instructions.trim();
@@ -576,13 +583,17 @@ fn build_openai_chat_completions_payload(
         bail!("chat completions payload is missing messages");
     }
 
-    Ok(json!({
+    let mut payload = json!({
         "model": model,
         "messages": messages,
         "stream": false,
         // Keep this high enough that providers with separate reasoning fields still return visible output.
         "max_tokens": 1024,
-    }))
+    });
+    if let Some(effort) = requested_reasoning_effort.or_else(|| global_reasoning_effort()) {
+        payload["reasoning_effort"] = json!(effort);
+    }
+    Ok(payload)
 }
 
 fn build_gemini_code_assist_payload(
