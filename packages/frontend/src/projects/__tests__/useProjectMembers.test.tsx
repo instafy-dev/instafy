@@ -7,8 +7,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useProjectMembers } from "../useProjectMembers";
 
 const mocks = vi.hoisted(() => ({
+  userId: "user-1" as string | null,
   listMembers: vi.fn(),
 }));
+
+vi.mock("../../providers/AuthProvider", () => ({ useAuth: () => ({ user: mocks.userId ? { id: mocks.userId } : null }) }));
 
 vi.mock("../../sdk/instafy", () => ({
   controllerClient: {
@@ -41,6 +44,7 @@ describe("useProjectMembers", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     mocks.listMembers.mockReset();
+    mocks.userId = "user-1";
     queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
@@ -85,7 +89,7 @@ describe("useProjectMembers", () => {
     mocks.listMembers.mockRejectedValueOnce(new Error("authorization expired"));
     await act(async () => {
       await queryClient.refetchQueries({
-        queryKey: ["project-members", "project-1"],
+        queryKey: ["project-members", "user-1", "project-1"],
         exact: true,
       });
       await vi.waitFor(() => {
@@ -98,5 +102,30 @@ describe("useProjectMembers", () => {
     const probe = container.querySelector<HTMLElement>('[data-testid="probe"]');
     expect(probe?.dataset.error).toBe("authorization expired");
     expect(container.textContent).not.toContain("private@example.com");
+  });
+
+  it("withholds the previous account's directory when accounts switch in the same project", async () => {
+    mocks.listMembers.mockResolvedValueOnce([{ createdAt: "2026-09-06", email: "private@example.com", role: "viewer", userId: "guest-1" }]);
+    await act(async () => root.render(<Providers><Probe /></Providers>));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+    expect(container.textContent).toContain("private@example.com");
+
+    mocks.userId = "user-2";
+    let resolveNext!: (members: unknown[]) => void;
+    mocks.listMembers.mockReturnValueOnce(new Promise((resolve) => { resolveNext = resolve; }));
+    await act(async () => root.render(<Providers><Probe /></Providers>));
+    expect(container.textContent).not.toContain("private@example.com");
+    expect(mocks.listMembers).toHaveBeenCalledTimes(2);
+
+    await act(async () => resolveNext([]));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+    expect(container.textContent).not.toContain("private@example.com");
+  });
+
+  it("does not fetch a protected directory without a signed-in user", async () => {
+    mocks.userId = null;
+    await act(async () => root.render(<Providers><Probe /></Providers>));
+    expect(mocks.listMembers).not.toHaveBeenCalled();
+    expect(container.textContent).toBe("");
   });
 });

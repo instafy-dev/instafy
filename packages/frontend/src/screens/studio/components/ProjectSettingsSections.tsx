@@ -2,6 +2,7 @@ import { Button } from "../../../components/Button";
 import { Input } from "../../../components/Input";
 import { Select } from "../../../components/Select";
 import { Text } from "../../../components/Text";
+import { LoadingStatus } from "../../../components/LoadingStatus";
 import { type ControllerOrgInvitation, type ControllerProjectMember } from "../../../sdk/instafy";
 import type { OrgInvitationRoleConflict } from "../../../org/useInviteActions";
 import type { PreparedEmailInvite } from "../../../sharing/preparedEmailInvite";
@@ -78,6 +79,7 @@ type ProjectSettingsSectionsProps = {
   projectMembers: ControllerProjectMember[];
   sortedProjectMembers: ControllerProjectMember[];
   projectMembersError: string | null;
+  onRetryProjectMembers: () => void;
   projectMemberUpdatePendingId: string | null;
   projectMemberRemovePendingId: string | null;
   onProjectRoleChange: (userId: string, nextRole: string) => void;
@@ -137,6 +139,7 @@ export function ProjectSettingsSections({
   projectMembers,
   sortedProjectMembers,
   projectMembersError,
+  onRetryProjectMembers,
   projectMemberUpdatePendingId,
   projectMemberRemovePendingId,
   onProjectRoleChange,
@@ -570,18 +573,15 @@ export function ProjectSettingsSections({
             data-testid="project-guests-section"
           >
         {projectMembersLoading ? (
-          <SettingsSurface>
-            <Text variant="body" tone="secondary">
-              Loading guests…
-            </Text>
-          </SettingsSurface>
-        ) : projectMembers.length === 0 ? (
+          <LoadingStatus>{projectMembers.length > 0 ? "Refreshing guests…" : "Loading guests…"}</LoadingStatus>
+        ) : null}
+        {!projectMembersLoading && !projectMembersError && projectMembers.length === 0 ? (
           <SettingsSurface>
             <Text variant="body" tone="secondary">
               No guests have accepted access yet.
             </Text>
           </SettingsSurface>
-        ) : (
+        ) : projectMembers.length > 0 ? (
           <SettingsSurface className="overflow-hidden p-0">
             <div className="divide-y divide-slate-200/70 dark:divide-slate-800">
               {sortedProjectMembers.map((member) => {
@@ -653,11 +653,14 @@ export function ProjectSettingsSections({
               })}
             </div>
           </SettingsSurface>
-        )}
+        ) : null}
         {projectMembersError ? (
-          <Text variant="caption" tone="danger">
-            {projectMembersError}
-          </Text>
+          <div className="flex flex-wrap items-center gap-3">
+            <Text role="alert" variant="caption" tone="danger">{projectMembersError}</Text>
+            <Button onPress={onRetryProjectMembers} isDisabled={projectMembersLoading} variant="outline" size="sm">
+              Retry
+            </Button>
+          </div>
         ) : null}
           </SettingsSection>
 
