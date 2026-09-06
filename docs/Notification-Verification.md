@@ -99,6 +99,13 @@ wrong-account redirects before protected resources render. Delayed click
 acknowledgements cannot navigate back after Studio unmounts. Native request-order
 reproduction retains the new account's token; this is a simulated provider boundary.
 
+A GitHub run exposed a cold-import race in a foreground-toast test. That test now
+waits for the actual lazy module imports before asserting presentation; five
+fresh-process focused runs passed. Production presentation timing was unchanged.
+Diagnostic-redaction tests generate inert JWT/PEM-shaped fixtures at runtime rather
+than storing credential-shaped literals; production redaction and scanner policy
+remain unchanged.
+
 Desktop's separate TypeScript check still reports **28 existing diagnostics**
 around module resolution, workspace exports, speech, and updater code. An isolated
 copy of `HEAD` produced the same diagnostic messages; they were not introduced by

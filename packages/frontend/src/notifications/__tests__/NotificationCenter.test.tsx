@@ -77,14 +77,22 @@ describe("notification center", () => {
   });
   it("leaves foreground presentation to Web Push while that channel is active", async () => {
     mocks.foreground = true; mocks.subscription = true;
-    await act(async () => window.dispatchEvent(new Event("focus")));
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      // The transport modules are loaded lazily; React act alone does not wait
+      // for a cold dynamic import to finish on the CI runner.
+      await vi.dynamicImportSettled();
+    });
     expect(mocks.show).not.toHaveBeenCalled();
     expect(mocks.state).not.toHaveBeenCalledWith(expect.objectContaining({ action: "seen" }));
   });
 
   it("acknowledges a queued foreground toast only on actual presentation", async () => {
     mocks.foreground = true;
-    await act(async () => window.dispatchEvent(new Event("focus")));
+    await act(async () => {
+      window.dispatchEvent(new Event("focus"));
+      await vi.dynamicImportSettled();
+    });
     expect(mocks.show).toHaveBeenCalled();
     const options = mocks.show.mock.calls.at(-1)?.[3];
     expect(mocks.state).not.toHaveBeenCalledWith(expect.objectContaining({ action: "seen" }));
