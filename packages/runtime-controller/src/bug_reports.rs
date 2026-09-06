@@ -4322,6 +4322,24 @@ mod rate_limit_tests;
 mod tests {
     use super::*;
 
+    fn synthetic_diagnostic_jwt() -> String {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        // Exercise the JWT-shaped redaction path without storing a token or
+        // signing material in the repository. This signature is deliberately inert.
+        format!(
+            "{}.{}.{}",
+            URL_SAFE_NO_PAD.encode(br#"{"alg":"none","typ":"JWT"}"#),
+            URL_SAFE_NO_PAD.encode(br#"{"sub":"synthetic-diagnostic-fixture"}"#),
+            URL_SAFE_NO_PAD.encode(b"invalid-test-signature"),
+        )
+    }
+
+    fn synthetic_diagnostic_pem() -> String {
+        let label = "PRIVATE KEY";
+        format!("-----BEGIN {label}-----\nprivate-material\n-----END {label}-----")
+    }
+
     #[test]
     fn normalize_logs_caps_entries_and_keeps_latest_order() {
         let logs = JsonValue::Array((0..510).map(|index| json!({ "index": index })).collect());
@@ -4362,8 +4380,8 @@ mod tests {
                     ["x-api-key", "short-secret"]
                 ]
             },
-            "message": "password: colon-secret bearer inline-secret eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature12345",
-            "pem": "-----BEGIN PRIVATE KEY-----\nprivate-material\n-----END PRIVATE KEY-----\nkept"
+            "message": format!("password: colon-secret bearer inline-secret {}", synthetic_diagnostic_jwt()),
+            "pem": format!("{}\nkept", synthetic_diagnostic_pem())
         }));
 
         assert_eq!(redacted["pageUrl"], "https://instafy.dev/studio");
@@ -4410,6 +4428,8 @@ mod tests {
 
     #[test]
     fn diagnostic_secret_detection_fails_closed_for_public_support_replies() {
+        let unsafe_jwt = synthetic_diagnostic_jwt();
+        let unsafe_pem = synthetic_diagnostic_pem();
         for unsafe_body in [
             "Authorization: Bearer operator-secret",
             "password: hunter2",
@@ -4418,8 +4438,8 @@ mod tests {
             "mqtt://device:secret@broker.invalid/topic",
             "https://example.invalid/callback?code=oauth-secret",
             "https://example.invalid/blob?sig=signed-secret",
-            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature12345",
-            "-----BEGIN PRIVATE KEY-----\nprivate-material\n-----END PRIVATE KEY-----",
+            unsafe_jwt.as_str(),
+            unsafe_pem.as_str(),
             concat!("github", "_pat_", "abcdefghijklmnopqrstuvwxyz"),
             r#"[["Cookie","session=opaque"]]"#,
             r#"[["x-api-key","short-secret"]]"#,
