@@ -1,3 +1,4 @@
+import { getNotificationSession, isNotificationSessionCurrent } from "./notificationSession";
 import {
   type WebPushSubscriptionPayload,
   controllerClient,
@@ -96,7 +97,7 @@ export async function hasActiveWebPushSubscription(): Promise<boolean> {
   return active;
 }
 
-export async function unregisterWebPushSubscription(): Promise<boolean> {
+export async function unregisterWebPushSubscription(session = getNotificationSession()): Promise<boolean> {
   if (!canUseWebPush()) {
     return true;
   }
@@ -115,8 +116,9 @@ export async function unregisterWebPushSubscription(): Promise<boolean> {
     return false;
   }
 
+  if (!session) return false;
   const removed = await controllerClient.notifications.removeWebPushSubscription({
-    endpoint,
+    endpoint, accessToken: session.accessToken,
   });
   return removed.success;
 }
@@ -140,6 +142,8 @@ function extractSubscriptionPayload(subscription: PushSubscription): WebPushSubs
 }
 
 export async function ensureWebPushSubscriptionRegistered(): Promise<boolean> {
+  const session = getNotificationSession();
+  if (!session) return false;
   if (!canUseWebPush()) {
     logNotificationDebug("web push registration skipped: API unavailable");
     return false;
@@ -184,10 +188,16 @@ export async function ensureWebPushSubscriptionRegistered(): Promise<boolean> {
     return false;
   }
 
+  if (!isNotificationSessionCurrent(session)) return false;
   const stored = await controllerClient.notifications.upsertWebPushSubscription({
+    accessToken: session.accessToken,
     subscription: payload,
     userAgent: typeof navigator !== "undefined" ? navigator.userAgent : undefined,
   });
+  if (getNotificationSession()?.userId !== session.userId) {
+    await controllerClient.notifications.removeWebPushSubscription({ endpoint: payload.endpoint, accessToken: session.accessToken });
+    return false;
+  }
   logNotificationDebug("web push registration upsert result", {
     success: stored.success,
     error: stored.error ?? null,

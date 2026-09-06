@@ -132,6 +132,7 @@ export function StudioSidebar({
     onOpenOrgSettings,
     onOpenBugReport,
     onOpenBugReportInbox,
+    supportUnreadCount = 0,
     shakeToReportEnabled = false,
     onToggleShakeToReport,
     onSimulateShakeToReport,
@@ -1619,6 +1620,8 @@ export function StudioSidebar({
         onUpdateEntryPointerDown={handleUpdateEntryPointerDown}
         clearUpdateLongPress={clearUpdateLongPress}
         onOpenProfileSettings={onOpenProfileSettings}
+        onOpenSupport={onOpenBugReportInbox}
+        supportUnreadCount={supportUnreadCount}
         notificationsPending={notificationsPending}
         notificationsEnabled={notificationsEnabled}
         onToggleNotifications={handleToggleNotifications}

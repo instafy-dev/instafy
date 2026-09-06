@@ -1,3 +1,6 @@
+import { processNotificationClickDestination } from "../notifications/notificationClickDestination";
+import { useNotificationCenter } from "../notifications/useNotificationCenter";
+import { UUID_PATTERN, parseNotificationClickUrl } from "../notifications/notificationContract";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { ChatLines, Clock, Coins, Cpu, Cube, GitBranch, Globe, Group, Lock, Page, Puzzle, User, Xmark } from "iconoir-react";
@@ -420,15 +423,74 @@ function StudioLayoutInner() {
     handleShowBuildLogs,
     handleHideBuildLogs
   } = useBuildLogs();
+  const notificationCenter = useNotificationCenter({ userId: currentUserId, accessToken: auth.session?.access_token ?? null, navigate });
   const bugReportController = useStudioBugReportController({
+    legacyResolutionToasts: false,
+    currentUserId,
     activeProjectId,
     activeConversationId: activeConversation?.controllerId ?? null,
     activeConversationLocalId: activeConversation?.localId ?? null,
     activeRuntimeId: effectiveRuntimeId,
-    userEmail: user?.email ?? null,
     controllerProjectMissing,
     buildLogs,
   });
+  const openSupportReport = bugReportController.onOpenBugReportInbox;
+  const notificationDestinationIdentity = useRef({ userId: currentUserId, accessToken: auth.session?.access_token ?? null });
+  if (notificationDestinationIdentity.current.userId !== currentUserId ||
+    notificationDestinationIdentity.current.accessToken !== (auth.session?.access_token ?? null)) {
+    notificationDestinationIdentity.current = { userId: currentUserId, accessToken: auth.session?.access_token ?? null };
+  }
+  const notificationDestinationUrl = `${location.pathname}${location.search}`;
+  const notificationDestinationUrlRef = useRef(notificationDestinationUrl);
+  notificationDestinationUrlRef.current = notificationDestinationUrl;
+  const notificationDestinationRequest = useRef<{ key: string; active: boolean } | null>(null);
+  useEffect(() => {
+    const click = parseNotificationClickUrl(notificationDestinationUrl);
+    const identity = notificationDestinationIdentity.current;
+    if (!click || !identity.userId || !identity.accessToken) return;
+    const key = `${identity.userId}:${notificationDestinationUrl}`;
+    if (notificationDestinationRequest.current?.key === key && notificationDestinationRequest.current.active) return;
+    const request = { key, active: true };
+    notificationDestinationRequest.current = request;
+    const isCurrent = () => request.active && notificationDestinationIdentity.current === identity;
+    void processNotificationClickDestination({
+      url: notificationDestinationUrl,
+      userId: identity.userId,
+      accessToken: identity.accessToken,
+      isCurrent,
+      openResource: (resourceUrl) => {
+        const reportId = new URL(resourceUrl, "https://instafy.invalid").searchParams.get("supportReportId");
+        if (reportId) openSupportReport(reportId);
+        // Conversation/project routing already consumes this URL in Studio.
+        // Retain click metadata until acknowledgement succeeds, so reload retries.
+      },
+    }).then((result) => {
+      if (result.status === "pending" || !result.resourceUrl || !isCurrent() ||
+        notificationDestinationUrlRef.current !== notificationDestinationUrl) return;
+      const target = new URL(result.status === "ignored" ? "/studio" : result.resourceUrl, "https://instafy.invalid");
+      target.searchParams.delete("supportReportId");
+      navigate(`${target.pathname}${target.search}`, { replace: true });
+    }).catch(() => {
+      // Keep IDs-only metadata in the URL for an authenticated reload retry.
+    }).finally(() => {
+      if (notificationDestinationRequest.current === request) notificationDestinationRequest.current = null;
+    });
+    return () => {
+      request.active = false;
+      if (notificationDestinationRequest.current === request) notificationDestinationRequest.current = null;
+    };
+  }, [auth.session?.access_token, currentUserId, navigate, notificationDestinationUrl, openSupportReport]);
+  useEffect(() => {
+    if (!currentUserId || parseNotificationClickUrl(`${location.pathname}${location.search}`)) return;
+    const params = new URLSearchParams(location.search);
+    const reportId = params.get("supportReportId");
+    if (!reportId || !UUID_PATTERN.test(reportId)) return;
+    openSupportReport(reportId);
+    params.delete("supportReportId");
+    params.delete("notificationEventId");
+    params.delete("notificationAccountId");
+    navigate({ pathname: location.pathname, search: params.toString() }, { replace: true });
+  }, [currentUserId, location.pathname, location.search, navigate, openSupportReport]);
   const [projectPickerSearchTerm, setProjectPickerSearchTerm] = useState("");
   const [preferredFilesMobileView, setPreferredFilesMobileView] =
     useState<FilesPanelMobileView>("tree");
@@ -2023,6 +2085,7 @@ function StudioLayoutInner() {
             onOpenProfileSettings: handleOpenProfileSettings,
             onOpenBugReport: bugReportController.onOpenBugReport,
             onOpenBugReportInbox: bugReportController.onOpenBugReportInbox,
+            supportUnreadCount: bugReportController.supportUnreadCount,
             topbarLocationOverride,
             shakeToReportEnabled: bugReportController.shakeToReportEnabled,
             onToggleShakeToReport: bugReportController.onToggleShakeToReport,
@@ -2098,7 +2161,7 @@ function StudioLayoutInner() {
             aria-hidden={showMobileLeftDrawerOverlay || undefined}
             inert={showMobileLeftDrawerOverlay || undefined}
           >
-            <StudioTopBar />
+            <StudioTopBar notificationBell={notificationCenter.bell} />
             {/* relative: the participants drawer overlays the right edge of the
                 workspace content rather than pushing it, so it never competes
                 with the code/preview panel for width. */}
@@ -2185,7 +2248,7 @@ function StudioLayoutInner() {
                 paddingRight: "var(--instafy-safe-area-inset-right)",
               }}
             >
-              <StudioTopBar />
+              <StudioTopBar notificationBell={notificationCenter.bell} />
               <div className="flex-1 min-h-0 overflow-hidden">
                   {leftDrawer === "history" ? (
                     <ConversationHistoryTab
@@ -2245,6 +2308,7 @@ function StudioLayoutInner() {
               </div>
             </div>
           ) : null}
+          {notificationCenter.dialog}
           {bugReportController.dialogs}
         </WorkspaceControlsProvider>
       </div>

@@ -21,10 +21,10 @@ describe("RequireAuth entry handoff", () => {
   let root: Root;
   let ProtectedPage: ComponentType;
 
-  const render = async () => {
+  const render = async (initialUrl = "/studio?projectId=project-1&from=landing") => {
     await act(async () => {
       root.render(
-        <MemoryRouter initialEntries={["/studio?projectId=project-1&from=landing"]}>
+        <MemoryRouter initialEntries={[initialUrl]}>
           <Routes>
             <Route path="/studio" element={
               <RequireAuth>
@@ -136,4 +136,30 @@ describe("RequireAuth entry handoff", () => {
     expect(container.querySelector('[data-testid="entry-loading-screen"]')).toBeNull();
     expect(loadProtectedPage).not.toHaveBeenCalled();
   });
+  it("preserves notification event and account IDs through cold-start login", async () => {
+    const id = "11111111-1111-4111-8111-111111111111";
+    const destination = `/studio?supportReportId=${id}&notificationEventId=${id}&notificationAccountId=${id}`;
+    auth.loading = false;
+    await render(destination);
+    const login = container.querySelector('[data-testid="login-destination"]')?.textContent ?? "";
+    expect(new URLSearchParams(login.split("?")[1]).get("redirect")).toBe(destination);
+    expect(loadProtectedPage).not.toHaveBeenCalled();
+  });
+
+  it("strips a different account's notification before any protected resource renders", async () => {
+    const account = "11111111-1111-4111-8111-111111111111";
+    const other = "22222222-2222-4222-8222-222222222222";
+    const opened: string[] = [];
+    loadProtectedPage.mockResolvedValueOnce({ default: function ProtectedDestination() {
+      const location = useLocation();
+      opened.push(`${location.pathname}${location.search}`);
+      return <p>Private workspace</p>;
+    } });
+    auth.loading = false;
+    auth.user = { id: other };
+    await render(`/studio?projectId=${account}&conversationControllerId=${account}&notificationEventId=${account}&notificationAccountId=${account}`);
+    expect(opened.length).toBeGreaterThan(0);
+    expect(opened.every((location) => location === "/studio")).toBe(true);
+  });
+
 });
