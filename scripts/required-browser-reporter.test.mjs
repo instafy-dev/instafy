@@ -79,6 +79,22 @@ test("missing component spec fails despite enough other tests", async (t) => {
   assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" });
 });
 
+test("Shared Studio requires the complete named journey without skipping or retries", async (t) => {
+  for (const scenario of ["pass", "missing", "renamed", "skipped", "retry"]) {
+    const run = setup(t, "shared-studio");
+    const contract = REQUIRED_BROWSER_LANES["shared-studio"];
+    const item = { ...run.tests[0], title: contract.titles[0],
+      location: { file: `/fixture/${contract.files[0]}` } };
+    if (scenario === "renamed") item.title = "an unrelated smoke test";
+    if (scenario === "skipped") item.expectedStatus = "skipped";
+    run.begin(scenario === "missing" ? [] : [item]);
+    if (scenario !== "missing") run.reporter.onTestEnd(item,
+      { status: scenario === "skipped" ? "skipped" : "passed", retry: scenario === "retry" ? 1 : 0 });
+    assert.deepEqual(await run.reporter.onEnd({ status: "passed" }),
+      { status: scenario === "pass" ? "passed" : "failed" }, scenario);
+  }
+});
+
 test("browser UI lane requires the mobile sidebar geometry regression", async (t) => {
   const run = setup(t, "browser-ui");
   const contract = REQUIRED_BROWSER_LANES["browser-ui"];
