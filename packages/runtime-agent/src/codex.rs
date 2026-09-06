@@ -1175,32 +1175,18 @@ impl CodexClient {
             config.include_apps_instructions = false;
             tracing::info!("suppressed broad contextual instructions for focused Codex run");
         }
-        clamp_runtime_reasoning_effort(&mut config);
-        if let Some(target) = options.reasoning_effort.clone()
-            && config.model_reasoning_effort != Some(target.clone())
-        {
-            tracing::info!(
-                from = ?config.model_reasoning_effort,
-                to = ?target,
-                "raised Codex reasoning effort for this runtime-agent run"
-            );
-            config.model_reasoning_effort = Some(target);
-        }
-        // A per-agent reasoning effort (the controller emits it as
-        // CODEX_AGENT_REASONING_EFFORT from the agent's `reasoning_effort` column)
-        // wins over the runtime clamp and the per-job heuristic above. Applied last
-        // so it is authoritative; when the env is absent/empty/unparseable this is a
-        // no-op and the existing per-job / global behavior is preserved untouched.
-        if let Some(agent_effort) = agent_reasoning_effort_override()
-            && config.model_reasoning_effort.as_ref() != Some(&agent_effort)
-        {
-            tracing::info!(
-                from = ?config.model_reasoning_effort,
-                to = ?agent_effort,
-                "applied per-agent Codex reasoning effort override"
-            );
-            config.model_reasoning_effort = Some(agent_effort);
-        }
+        let runtime_effort = optional_env("CODEX_RUNTIME_REASONING_EFFORT");
+        let effort = resolve_runtime_reasoning_effort(
+            runtime_effort.as_deref(),
+            options.reasoning_effort.clone(),
+            agent_reasoning_effort_override(),
+        );
+        tracing::info!(
+            from = ?config.model_reasoning_effort,
+            to = ?effort,
+            "applied effective Codex reasoning effort for runtime-agent run"
+        );
+        config.model_reasoning_effort = Some(effort);
         if options.disable_shell_tool {
             // For browser-session jobs we want MCP-first behavior and to avoid shell-script fallbacks.
             // Disable both shell modes (legacy shell + unified exec) and freeform patching.
@@ -2906,19 +2892,23 @@ fn turn_environment_selections(
     TurnEnvironmentSelections::new(default_cwd, environments)
 }
 
-fn clamp_runtime_reasoning_effort(config: &mut Config) {
-    let target = optional_env("CODEX_RUNTIME_REASONING_EFFORT")
+fn resolve_runtime_reasoning_effort(
+    runtime_effort: Option<&str>,
+    job_effort: Option<ReasoningEffort>,
+    agent_effort: Option<ReasoningEffort>,
+) -> ReasoningEffort {
+    // An explicit runtime setting must not be lowered by a job heuristic (for
+    // example, a feature job's High when the operator selected Max). Preserve
+    // the controller's per-agent override as the most specific selection.
+    let runtime_effort = runtime_effort
         .and_then(|value| value.parse::<ReasoningEffort>().ok())
-        .unwrap_or(ReasoningEffort::Low);
-
-    if config.model_reasoning_effort.as_ref() != Some(&target) {
-        tracing::info!(
-            from = ?config.model_reasoning_effort,
-            to = ?target,
-            "clamped Codex reasoning effort for runtime-agent background run"
-        );
-        config.model_reasoning_effort = Some(target);
-    }
+        // FromStr accepts unknown strings as Custom. A misspelled environment
+        // setting must retain the ordinary job/default policy instead.
+        .filter(|effort| !matches!(effort, ReasoningEffort::Custom(_)));
+    agent_effort
+        .or(runtime_effort)
+        .or(job_effort)
+        .unwrap_or(ReasoningEffort::Low)
 }
 
 /// Parse the per-agent reasoning effort the controller emits as
@@ -4388,6 +4378,63 @@ mod tests {
         match previous_codex_home {
             Some(value) => unsafe { std::env::set_var("CODEX_HOME", value) },
             None => unsafe { std::env::remove_var("CODEX_HOME") },
+        }
+    }
+
+    #[test]
+    fn runtime_reasoning_effort_preserves_explicit_max_over_feature_job_high() {
+        assert_eq!(
+            resolve_runtime_reasoning_effort(Some("max"), Some(ReasoningEffort::High), None),
+            ReasoningEffort::Max
+        );
+        assert_eq!(
+            resolve_runtime_reasoning_effort(Some("max"), Some(ReasoningEffort::Low), None),
+            ReasoningEffort::Max
+        );
+    }
+
+    #[test]
+    fn runtime_reasoning_effort_preserves_job_policy_without_a_valid_override() {
+        for runtime_effort in [None, Some(""), Some("maax"), Some("future-effort")] {
+            assert_eq!(
+                resolve_runtime_reasoning_effort(runtime_effort, Some(ReasoningEffort::High), None),
+                ReasoningEffort::High
+            );
+            assert_eq!(
+                resolve_runtime_reasoning_effort(runtime_effort, None, None),
+                ReasoningEffort::Low
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_reasoning_effort_keeps_agent_override_most_specific() {
+        assert_eq!(
+            resolve_runtime_reasoning_effort(
+                Some("max"),
+                Some(ReasoningEffort::Medium),
+                Some(ReasoningEffort::High),
+            ),
+            ReasoningEffort::High
+        );
+    }
+
+    #[test]
+    fn runtime_reasoning_effort_honors_known_explicit_values() {
+        for (raw, expected) in [
+            ("none", ReasoningEffort::None),
+            ("minimal", ReasoningEffort::Minimal),
+            ("low", ReasoningEffort::Low),
+            ("medium", ReasoningEffort::Medium),
+            ("high", ReasoningEffort::High),
+            ("xhigh", ReasoningEffort::XHigh),
+            ("max", ReasoningEffort::Max),
+            ("ultra", ReasoningEffort::Ultra),
+        ] {
+            assert_eq!(
+                resolve_runtime_reasoning_effort(Some(raw), Some(ReasoningEffort::High), None),
+                expected
+            );
         }
     }
 
