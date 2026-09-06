@@ -122,7 +122,11 @@ async fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
 
-    let mut config = AppConfig::from_env()?;
+    // Configuration performs blocking HTTP work, including service-user bootstrap.
+    // Keep its blocking clients outside Tokio's async execution context.
+    let mut config = tokio::task::spawn_blocking(AppConfig::from_env)
+        .await
+        .map_err(|_| anyhow::anyhow!("controller configuration task failed"))??;
     let pool = config.build_pool().await?;
     browser_profile::ensure_browser_profiles_table(&pool)
         .await
