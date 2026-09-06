@@ -19,7 +19,12 @@ reply/read/resolve/reopen lifecycle, exact resolution transitions, all initial
 event producers, quiet automation completions, payload privacy, category/channel
 preferences, monotonic read/archive state, browser privilege isolation, project
 and private-conversation revocation, endpoint account reassignment, and retained
-APNs delivery audit after endpoint deletion. The Python harness also runs
+APNs delivery audit after endpoint deletion. Conversation coverage includes
+canonical human mentions, duplicate mention/participant recipients, sender
+exclusion, malformed and oversized mention metadata, private and wrong-project
+mention denial, muted delivery with durable inbox retention, and team automation
+replies to existing participants without duplicating the owner's terminal alert.
+The Python harness also runs
 concurrent producers, concurrent support resolutions, concurrent `SKIP LOCKED`
 claims, lease recovery, stale-token fencing, bounded retry exhaustion, and replay
 of the notification migration without changing existing state.

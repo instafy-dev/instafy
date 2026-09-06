@@ -18,6 +18,7 @@ import { Button } from "../../../components/Button";
 import { OctoScrollMotionScope } from "../../../components/OctoMark";
 import { Spinner } from "../../../components/Spinner";
 import { useBreakpoint } from "../../../hooks/useBreakpoint";
+import { useConversationNotificationRead } from "../../../notifications/useConversationNotificationRead";
 import {
   addFloatingSurfaceViewportChangeListener,
   clampFloatingSurfacePositionToStudioViewport,
@@ -1854,6 +1855,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     isHistoryLoading,
     loadOlderMessages,
     messages,
+  });
+
+  useConversationNotificationRead({
+    currentUserId,
+    conversationId: activeConversationControllerId,
+    rootRef: scrollContainerRef,
+    enabled: browserSubtab === "chat" && !jobThread,
   });
 
   const activeConversation = useMemo(

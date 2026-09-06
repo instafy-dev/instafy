@@ -62,6 +62,8 @@ pub(crate) struct ConversationPromptBody {
 pub(crate) struct ConversationCreateBody {
     pub(crate) session_id: Option<String>,
     pub(crate) metadata: Option<JsonValue>,
+    #[serde(default)]
+    pub(crate) initial_participant_user_ids: Vec<String>,
     #[serde(rename = "parentConversationId", alias = "parent_conversation_id")]
     pub(crate) parent_conversation_id: Option<String>,
     #[serde(rename = "threadKind", alias = "thread_kind")]
@@ -72,6 +74,7 @@ pub(crate) struct ConversationCreateBody {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConversationCreateResponse {
     pub(crate) conversation_id: Uuid,
+    pub(crate) initial_participant_user_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -716,6 +719,15 @@ pub(crate) async fn create_blank_project_conversation(
         _ => None,
     };
     let thread_kind = body.thread_kind.as_deref().and_then(normalize_thread_kind);
+    let initial_participants = normalize_conversation_user_ids(
+        &body.initial_participant_user_ids,
+        "initialParticipantUserIds",
+    )?;
+    if !initial_participants.is_empty() && context.scoped_claims.is_some() {
+        return Err(crate::forbidden(
+            "Scoped job tokens cannot invite conversation participants",
+        ));
+    }
 
     let mut connection = state
         .pool
@@ -764,6 +776,14 @@ pub(crate) async fn create_blank_project_conversation(
     }
 
     let visibility_value = resolve_conversation_visibility(&metadata_value).to_string();
+    if !initial_participants.is_empty() && visibility_value != CONVERSATION_VISIBILITY_PRIVATE {
+        return Err(bad_request(
+            "initialParticipantUserIds requires a private conversation",
+        ));
+    }
+    for user_id in &initial_participants {
+        ensure_conversation_participant_project_access(&transaction, &project, *user_id).await?;
+    }
     let metadata_param = PgJson(&metadata_value);
     if visibility_value == CONVERSATION_VISIBILITY_PRIVATE
         && !access_context.is_service_role
@@ -841,6 +861,22 @@ pub(crate) async fn create_blank_project_conversation(
             })?;
     }
 
+    // A direct chat becomes visible only after its intended recipients can read
+    // it. The first message must never race a separate invitation request.
+    for user_id in &initial_participants {
+        transaction
+            .execute(
+                "insert into conversation_participants (conversation_id, user_id, role, added_by)
+                 values ($1, $2, 'member', $3)
+                 on conflict (conversation_id, user_id) do nothing",
+                &[&conversation.id, user_id, &access_context.user_id],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!("failed to add initial participant: {error}"))
+            })?;
+    }
+
     // Home's feed: a new root conversation is activity in its space.
     crate::activity::record_conversation_created(&transaction, &conversation).await;
 
@@ -875,7 +911,10 @@ pub(crate) async fn create_blank_project_conversation(
         payload,
     );
 
-    Ok(Json(ConversationCreateResponse { conversation_id }))
+    Ok(Json(ConversationCreateResponse {
+        conversation_id,
+        initial_participant_user_ids: initial_participants,
+    }))
 }
 
 pub(crate) async fn update_conversation_metadata(
@@ -1108,6 +1147,86 @@ pub(crate) fn sanitize_client_recorded_message_metadata(
     metadata
 }
 
+const MAX_CONVERSATION_USER_IDS: usize = 32;
+
+fn normalize_conversation_user_ids(
+    values: &[String],
+    field: &str,
+) -> Result<Vec<Uuid>, (StatusCode, Json<ApiError>)> {
+    if values.len() > MAX_CONVERSATION_USER_IDS {
+        return Err(bad_request(format!("{field} permits at most 32 user IDs")));
+    }
+    let mut ids = Vec::with_capacity(values.len());
+    for value in values {
+        let value = value.trim();
+        if value.len() != 36 {
+            return Err(bad_request(format!("{field} must contain UUID user IDs")));
+        }
+        let id = Uuid::parse_str(value)
+            .map_err(|_| bad_request(format!("{field} must contain UUID user IDs")))?;
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    Ok(ids)
+}
+
+/// A selected human mention carries a bounded identity list, never an inferred
+/// display handle. Delivery separately checks current conversation access.
+pub(crate) fn normalize_human_mention_metadata(
+    metadata: &mut JsonValue,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let Some(map) = metadata.as_object_mut() else {
+        return Ok(());
+    };
+    let Some(value) = map.get("mentionedUserIds") else {
+        return Ok(());
+    };
+    let values = value
+        .as_array()
+        .ok_or_else(|| bad_request("mentionedUserIds must be an array"))?;
+    if values.len() > MAX_CONVERSATION_USER_IDS {
+        return Err(bad_request("mentionedUserIds permits at most 32 user IDs"));
+    }
+    let values = values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| bad_request("mentionedUserIds must contain UUID user IDs"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let ids = normalize_conversation_user_ids(&values, "mentionedUserIds")?;
+    map.insert("mentionedUserIds".to_string(), json!(ids));
+    Ok(())
+}
+
+async fn ensure_conversation_participant_project_access(
+    transaction: &tokio_postgres::Transaction<'_>,
+    project: &crate::projects::ProjectRecord,
+    user_id: Uuid,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    // Invitation is not a project grant, including for personal projects or
+    // service-role callers. Evaluate the target's real membership without a
+    // sandbox session or the inviter's administrative capability.
+    let target = RequestContext {
+        user_id: Some(user_id),
+        is_service_role: false,
+        scoped_claims: None,
+    };
+    crate::projects::ensure_project_read_access(transaction, project, &target, None)
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            if error.0.is_server_error() {
+                error
+            } else {
+                crate::forbidden("Conversation participants must have access to this project")
+            }
+        })
+}
+
 pub(crate) async fn record_conversation_message_only(
     axum::extract::State(state): axum::extract::State<AppState>,
     headers: HeaderMap,
@@ -1139,8 +1258,9 @@ pub(crate) async fn record_conversation_message_only(
         Some(JsonValue::Object(map)) => JsonValue::Object(map),
         _ => json!({}),
     };
-    let metadata_value =
+    let mut metadata_value =
         sanitize_client_recorded_message_metadata(metadata_value, context.is_service_role);
+    normalize_human_mention_metadata(&mut metadata_value)?;
     let client_message_id = body
         .client_message_id
         .as_deref()
@@ -3440,35 +3560,8 @@ async fn add_conversation_participant(
                 ));
             }
         }
-
-        if project.org_id.is_some() && project.owner_user_id != Some(target_user_id) {
-            let project_member = transaction
-                .query_opt(
-                    "select user_id from project_memberships where project_id = $1 and user_id = $2 limit 1",
-                    &[&project.id, &target_user_id],
-                )
-                .await
-                .map_err(|error| {
-                    internal_error(format!("failed to verify project membership: {error}"))
-                })?;
-            if project_member.is_none() {
-                let org_member = transaction
-                    .query_opt(
-                        "select user_id from org_memberships where org_id = $1 and user_id = $2 limit 1",
-                        &[&project.org_id, &target_user_id],
-                    )
-                    .await
-                    .map_err(|error| {
-                        internal_error(format!("failed to verify org membership: {error}"))
-                    })?;
-                if org_member.is_none() {
-                    return Err(bad_request(
-                        "user must be a member of this project or organization",
-                    ));
-                }
-            }
-        }
     }
+    ensure_conversation_participant_project_access(&transaction, &project, target_user_id).await?;
 
     transaction
         .execute(
@@ -3736,6 +3829,11 @@ fn build_conversation_message_metadata(request: &DispatchPromptNormalized) -> Js
         map.insert("conversation_metadata".to_string(), metadata.clone());
     }
     map.insert("prompt_metadata".to_string(), request.metadata.clone());
+    // Prompt metadata is otherwise nested for the runtime. Persist the validated
+    // human identities at the same canonical message key as record-only sends.
+    if let Some(mentions) = request.metadata.get("mentionedUserIds") {
+        map.insert("mentionedUserIds".to_string(), mentions.clone());
+    }
     if let Some(group_participation) =
         controller_enforced_group_participation_marker(&request.metadata)
     {
@@ -3874,6 +3972,49 @@ fn build_conversation_message_metadata(request: &DispatchPromptNormalized) -> Js
     }
 
     JsonValue::Object(map)
+}
+
+#[cfg(test)]
+mod conversation_notification_metadata_tests {
+    use super::*;
+
+    #[test]
+    fn selected_human_mentions_are_bounded_canonical_identities() {
+        let user_id = Uuid::new_v4();
+        let mut metadata =
+            json!({"mentionedUserIds": [user_id.to_string().to_uppercase(), user_id.to_string()]});
+        normalize_human_mention_metadata(&mut metadata).unwrap();
+        assert_eq!(metadata["mentionedUserIds"], json!([user_id]));
+        for value in [
+            json!("@marcus"),
+            json!(["@marcus"]),
+            json!([null]),
+            json!(vec![user_id; 33]),
+        ] {
+            let error = normalize_human_mention_metadata(&mut json!({"mentionedUserIds": value}))
+                .unwrap_err();
+            assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn dispatch_message_exposes_selected_human_mentions_at_the_canonical_source_key() {
+        let user_id = Uuid::new_v4();
+        let payload: DispatchPromptRequest = serde_json::from_value(json!({
+            "projectId": Uuid::new_v4(), "promptText": "Hello teammate",
+            "metadata": {"mentionedUserIds": [user_id]}
+        }))
+        .unwrap();
+        let mut request = crate::dispatch::normalize_dispatch_request(payload).unwrap();
+        normalize_human_mention_metadata(&mut request.metadata).unwrap();
+        let source = build_conversation_message_metadata(&request);
+        assert_eq!(source["mentionedUserIds"], json!([user_id]));
+        assert_eq!(
+            source["prompt_metadata"]["mentionedUserIds"],
+            json!([user_id])
+        );
+        assert_eq!(source.get("editorState"), None);
+    }
 }
 
 fn metadata_object_mut(value: &mut JsonValue) -> &mut JsonMap<String, JsonValue> {

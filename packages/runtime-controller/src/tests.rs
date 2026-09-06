@@ -63,6 +63,12 @@ mod support_workflow_tests;
 #[path = "notification_platform_http_tests.rs"]
 mod notification_platform_http_tests;
 
+#[path = "conversation_notification_http_tests.rs"]
+mod conversation_notification_http_tests;
+
+#[path = "notification_conversation_read_tests.rs"]
+mod notification_conversation_read_tests;
+
 struct TestOriginKeyPair {
     private_pem: String,
     public_pem: String,

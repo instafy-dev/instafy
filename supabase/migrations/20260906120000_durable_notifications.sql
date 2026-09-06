@@ -210,6 +210,32 @@ returns uuid[] language sql stable set search_path = public, pg_temp as $$
     and public.notification_conversation_authorized(conversation,candidate.id);
 $$;
 
+-- Mentions are canonical user identities, never display-name/content matching.
+-- Direct service writes receive the same bounded shape checks as controller
+-- callers. A mention cannot grant project access or private-chat membership.
+create or replace function public.notification_message_recipients(
+  conversation uuid, sender uuid, message_metadata jsonb)
+returns uuid[] language plpgsql stable set search_path = public, pg_temp as $$
+declare recipients uuid[]; mentions jsonb; mention jsonb; mentioned_user uuid;
+begin
+  recipients := public.notification_conversation_recipients(conversation,sender);
+  mentions := message_metadata->'mentionedUserIds';
+  if jsonb_typeof(mentions) is distinct from 'array' then return recipients; end if;
+  if jsonb_array_length(mentions)>32 then return recipients; end if;
+  for mention in select value from jsonb_array_elements(mentions) loop
+    if jsonb_typeof(mention)='string'
+      and (mention#>>'{}') ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
+      mentioned_user := (mention#>>'{}')::uuid;
+      if mentioned_user is distinct from sender
+        and public.notification_conversation_authorized(conversation,mentioned_user) then
+        recipients := array_append(recipients,mentioned_user);
+      end if;
+    end if;
+  end loop;
+  return array(select distinct id from unnest(recipients) candidate(id));
+end;
+$$;
+
 -- A counter survives reopen/re-resolve even when both mutations share now().
 -- Existing resolution history is intentionally not emitted on migration/replay.
 alter table public.bug_reports add column if not exists notification_resolution_sequence bigint not null default 0;
@@ -272,7 +298,7 @@ create trigger notification_support_reply after insert on public.bug_report_mess
 
 create or replace function public.notification_conversation_reply()
 returns trigger language plpgsql set search_path = public, pg_temp as $$
-declare message_type text; message_kind text;
+declare message_type text; message_kind text; recipients uuid[]; automation_owner uuid;
 begin
   if lower(btrim(new.role)) not in ('assistant','user') or btrim(new.content)='' then return new; end if;
   message_type := lower(btrim(coalesce(new.metadata->>'messageType',new.metadata->>'message_type','')));
@@ -282,17 +308,24 @@ begin
   if message_type in ('command_execution','mcp_tool_call','todo_list','web_search','file_change','token_usage','reasoning',
     'runtime_alert','run_cancellation','runtime_switch','agent_job_thread') then return new; end if;
   if message_type='status' and lower(btrim(coalesce(new.metadata#>>'{details,kind}','')))<>'agent_message' then return new; end if;
-  -- Automated assistant result threads produce one terminal run event, avoiding
-  -- completion plus reply duplicates. Human replies still notify participants.
-  if lower(btrim(new.role))='assistant' and exists(select 1 from public.automations a
-    where a.conversation_id=new.conversation_id) then return new; end if;
-  -- Failed completion also writes an assistant result. Its run.failed event
-  -- already carries the same destination; do not alert twice for one failure.
-  if lower(btrim(new.role))='assistant' and exists(select 1 from public.runs r
-    where r.id=new.run_id and r.status='failed') then return new; end if;
+  if lower(btrim(new.role))='user' then
+    recipients := public.notification_message_recipients(new.conversation_id,new.created_by,new.metadata);
+  else
+    recipients := public.notification_conversation_recipients(new.conversation_id,new.created_by);
+    select a.user_id into automation_owner from public.automations a
+      where a.conversation_id=new.conversation_id and a.project_id=new.project_id order by a.created_at limit 1;
+    if found then
+      -- The owner gets the terminal automation event. Other actual participants
+      -- still get visible replies; automation control failures remain owner-only.
+      recipients := array_remove(recipients,automation_owner);
+      if cardinality(recipients)=0 then return new; end if;
+    elsif exists(select 1 from public.runs r where r.id=new.run_id and r.status='failed') then
+      -- A normal failed run already notifies every participant at this destination.
+      return new;
+    end if;
+  end if;
   perform public.notification_emit('conversation.reply',new.conversation_id,new.project_id,new.conversation_id,
-    'conversation.reply:'||new.id,new.created_at,
-    public.notification_conversation_recipients(new.conversation_id,new.created_by));
+    'conversation.reply:'||new.id,new.created_at,recipients);
   return new;
 end;
 $$;

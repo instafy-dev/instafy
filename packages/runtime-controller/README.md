@@ -41,6 +41,8 @@ This document explains how the Instafy runtime controller is structured and how 
 | Method | Route | Notes |
 | --- | --- | --- |
 | POST | `/dispatch-prompt` | Main entrypoint for conversations and module runs on an authorized existing project. Only service-role callers may bootstrap a missing project. Returns `{ runId, promptId, ... }`. |
+| POST | `/projects/:id/conversations/blank` | Creates a conversation. Private chats accept `initialParticipantUserIds` and return the IDs committed atomically with the conversation. |
+| POST | `/conversations/:id/messages/record` | Records a user or assistant message; human metadata may include canonical `mentionedUserIds`. |
 | POST | `/progress-callback` | Receives build/job progress (ephemeral JWT). Broadcasts progress events and updates runs. |
 | GET | `/events` | SSE stream; filters by `projectId`, `sessionId`, `conversationId`, `runId`, or `kinds`. |
 | GET | `/runs` | List runs for a project/session. |
@@ -55,6 +57,23 @@ This document explains how the Instafy runtime controller is structured and how 
 | POST | `/projects/:id/origin/presence/beat` | Project-scoped presence updates from an origin. |
 
 Refer to `src/main.rs` for the complete list, including agent callbacks and admin endpoints (`/runtime/stop`, `/runtime/idle-reaper`).
+
+### Conversation recipients
+
+Private creation accepts at most 32 UUID `initialParticipantUserIds`. Each target must already
+have project access; the request fails atomically with HTTP 403 otherwise. Initial participants
+require a private conversation and cannot be added with a scoped job credential. The successful
+response includes the normalized committed IDs, allowing clients to fail closed against older
+controllers that ignore this additive request field. Adding a participant later applies the same
+project-access requirement and never grants project membership.
+
+User-message metadata accepts at most 32 UUID `mentionedUserIds`, derived from selected human
+mention identities rather than display text. Record-only and prompt-dispatch paths validate and
+deduplicate the list; malformed metadata returns HTTP 400. The transactional notification producer
+unions these IDs with the creator and participants, excludes the sender, and filters by current
+conversation access. A private nonparticipant or a user without project access receives nothing.
+See [Notifications](../../docs/Notifications.md) for preferences, visible automation replies,
+recipient read state, and rollout requirements.
 
 ### Bug report submission limits
 

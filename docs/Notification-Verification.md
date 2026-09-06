@@ -1,15 +1,16 @@
 # Notification implementation verification
 
-Verification performed on 2026-09-06 in the working tree, without committing,
-publishing, deploying, or changing a shared database. Existing support changes
-were preserved. Package-manager hooks were avoided; Node checks used installed
+Verification performed on 2026-09-06 on the integrated support/notification branch,
+without publishing, deploying, or changing a shared database. Existing support
+changes were preserved. Package-manager hooks were avoided; Node checks used installed
 package entry points directly.
 
 ## Database and controller
 
-`python3 scripts/test-durable-notifications.py --controller-test notification --controller-test support`
-passed with all 76 public migrations, 18 notification-filtered Rust tests, and
-12 support-filtered Rust tests after the combined integration review.
+`python3 scripts/test-durable-notifications.py --controller-test notification --controller-test support --controller-test conversation_participants_include_scoped_display_names_without_email`
+passed with all 77 public migrations, 27 notification-filtered Rust tests,
+12 support-filtered Rust tests, and the existing participant-display/privacy test
+after the recipient-semantics and exact-message read follow-ups.
 The script created and removed its own PostgreSQL cluster and used a separate
 clean database for the HTTP and worker tests.
 
@@ -28,6 +29,16 @@ Verified behavior includes:
 - Six initial producer types work, including human conversation replies,
   failed-run deduplication, and quiet-automation suppression. A quiet sentinel
   after earlier visible automation output still produces completion.
+- Selected human mentions reach authorized shared-conversation nonparticipants;
+  participant/mention overlap deduplicates and the sender is excluded. Wrong-project
+  and private nonparticipants are filtered, revoked access hides existing entries
+  and prevents queued delivery, and muting external delivery retains center entries.
+- Private creation commits intended participants atomically before its first
+  message. Router tests cover initial-message delivery, participant follow-up,
+  malformed/oversized IDs, unauthorized creation rollback, and idempotent sends.
+- Visible team-automation replies notify actual non-owner participants while the
+  owner keeps its terminal event. Quiet evaluations and control-plane failures
+  do not expand delivery to other project members.
 - Sixteen concurrent producer attempts share one event/recipient/job, and
   sixteen concurrent resolutions produce one transition event.
 - Concurrent workers never share a lease. Crashes recover with new lease
@@ -38,6 +49,10 @@ Verified behavior includes:
   delivery while the notification remains unread.
 - HTTP pagination, old mark-all watermarks, account isolation, preview defaults,
   invalid requests, archive, and the separate support cursor behave correctly.
+- Viewing a conversation acknowledges exact message IDs, leaving concurrent,
+  newer, and backdated unseen messages unread. Account pins, revoked private or
+  project access, batch/body limits, duplicate IDs, support-cursor independence,
+  and cancellation of pending push delivery are exercised through the real router.
 - A mocked transient delivery retries with the same event ID, succeeds, and
   preserves its attempt history. Expired endpoints are removed with terminal
   audit retained.
@@ -54,16 +69,26 @@ catalog check and `git diff --check` passed.
 
 ## Frontend and desktop
 
-The final complete frontend unit run passed **426 files / 2,811 tests**. Frontend
+The final complete frontend unit run passed **436 files / 2,951 tests**. Frontend
 TypeScript, ESLint, and the Vite production build passed. The build reported
 existing bundle-size and browser-data warnings.
 
 Notification regressions cover canonical links, account switches, native
 registration intent, late callbacks, queued toast acknowledgement, center
 filters/read/archive/preferences, service-worker presentation, and notification
-click routing. The final focused run passed **17 files / 94 tests** after the
+click routing. An earlier focused run passed **17 files / 94 tests** after the
 integration fixes. Frontend TypeScript and ESLint were rerun successfully.
 Desktop bundling and ten focused deep-link tests passed.
+
+The mention/private-chat follow-up covers immediate messages, initial queues and
+edited queues, including rich-mention identity after server queue hydration,
+removal of stale mention IDs, preserved browser context, 32-person limits, and
+private-chat creation/proof/account/project/unmount guards. The new composer
+remains unavailable when an older controller fails to confirm atomic participant
+creation. The final broad run includes those checks and normal conversation-view
+read acknowledgement. Its focused hook/service run passed **15 tests**, including
+hidden or covered messages, scrolling without a new intersection threshold,
+bounded batches/retries, and delayed account/session changes.
 
 Independent review reproduced and fixed a service-worker account switch during
 window lookup, a delayed old-account iOS registration overwriting the new account,
@@ -83,7 +108,7 @@ The older environment-gated assistant-notification smoke was updated to expect
 durable events, account-scoped opt-in, stable tags, and generic private previews.
 That live-app smoke was not run; the isolated browser suite below was run instead.
 
-The new `playwright.notifications-ci.config.ts` browser suite passed **2/2** in
+The new `playwright.notifications-ci.config.ts` browser suite passed **3/3** in
 installed Chrome at **1280×900** and **360×800**. It uses the production center,
 status queue, IndexedDB, and HTTP client with synthetic controller/authentication
 and OS-delivery boundaries. It checks a background reply envelope and exact
@@ -93,6 +118,15 @@ a manual **Mark read** action), resolution
 followed by reopen and a second resolution, pagination/filter transitions,
 archive/read-all, and persisted preferences. Four All/Preferences screenshots
 were visually checked for readable controls and overflow.
+
+The third browser case uses the production conversation-read hook and HTTP service
+with an explicit synthetic transcript and backend. Actual Chromium layout,
+IntersectionObserver, and hit testing prove that a covering dialog causes no
+read writes; revealing and scrolling mark only the exact exposed messages;
+hydrating an offscreen new message and hiding the chat do not mark it read.
+The support lifecycle browser suite separately passed **2/2** at desktop and
+narrow-phone sizes. The customer CLI build, **16 support tests**, and clean
+npm-artifact install/run test also passed.
 
 The browser suite caught and now guards a real regression: switching to Unread
 after loading extra All pages must discard previously loaded read items.
