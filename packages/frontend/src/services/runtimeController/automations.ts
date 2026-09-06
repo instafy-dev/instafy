@@ -1,5 +1,7 @@
 import {
+  ControllerApiError,
   normalizeUuidParam,
+  readControllerApiError,
   readControllerError,
   resolveControllerRequestContext,
   runtimeControllerEnabled,
@@ -155,6 +157,7 @@ function normalizeAutomationPayload(payload: unknown): ControllerAutomation | nu
 export async function fetchProjectAutomationsFromController(params: {
   projectId: string;
   accessToken?: string | null;
+  signal?: AbortSignal;
 }): Promise<ControllerAutomation[] | null> {
   if (!runtimeControllerEnabled) {
     return null;
@@ -168,27 +171,28 @@ export async function fetchProjectAutomationsFromController(params: {
   const requestContext = await resolveControllerRequestContext(params.accessToken ?? null);
   const sessionToken = requestContext.accessToken;
   if (!sessionToken) {
-    return null;
+    throw new ControllerApiError({ status: 401, message: "Missing controller session token.", code: null, details: null });
   }
 
   const response = await fetch(`${requestContext.baseUrl}/projects/${projectId}/automations`, {
+    signal: params.signal,
     headers: {
       authorization: `Bearer ${sessionToken}`,
     },
   });
 
   if (!response.ok) {
-    const message = await readControllerError(
+    const error = await readControllerApiError(
       response,
       "fetch automations failed",
       requestContext,
     );
-    throw new Error(message);
+    throw new ControllerApiError(error);
   }
 
   const data = (await response.json().catch(() => null)) as unknown;
   if (!Array.isArray(data)) {
-    return [];
+    throw new Error("Controller response missing automations list.");
   }
   return data
     .map(normalizeAutomationPayload)
