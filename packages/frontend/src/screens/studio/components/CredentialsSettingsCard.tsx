@@ -46,6 +46,7 @@ import {
 } from "./agentProfileDeepLink";
 import { emitAiConfigChanged } from "./aiConfigEvents";
 import { SettingsAddButton } from "./SettingsAddButton";
+import { SettingsShell, type SettingsCategory } from "./SettingsShell";
 import {
   StudioListRow,
   StudioListSection,
@@ -312,9 +313,17 @@ function AgentAvatar({
   );
 }
 
+const AI_SETTINGS_CATEGORIES: SettingsCategory[] = [
+  { id: "providers", label: "Providers", icon: Cpu },
+  { id: "agents", label: "Agents", icon: Brain },
+];
+
 export function CredentialsSettingsCard() {
   const { user } = useAuth();
   const { showStatus } = useStatus();
+  const [section, setSection] = useState(() =>
+    readPendingAgentProfileTarget() ? "agents" : "providers",
+  );
 
   const [credentials, setCredentials] = useState<ControllerCredentialListItem[]>([]);
   const [agents, setAgents] = useState<ControllerAgentProfile[]>([]);
@@ -1177,7 +1186,16 @@ export function CredentialsSettingsCard() {
         saveLabel={agentProfileModalMode === "create" ? "Create bot" : "Save"}
       />
 
-      <div className="space-y-8" data-testid="credentials-settings-card">
+      <SettingsShell
+        title="AI & Providers"
+        hideTitle
+        navLabel="Sections"
+        categories={AI_SETTINGS_CATEGORIES}
+        activeCategoryId={section}
+        onCategoryChange={setSection}
+        testId="credentials-settings-card"
+      >
+        {section === "providers" ? (
         <StudioListSection
           title="AI connections"
           description="Connect providers and choose what new prompts use."
@@ -1641,7 +1659,8 @@ export function CredentialsSettingsCard() {
           ) : null}
           </div>
         </StudioListSection>
-
+        ) : null}
+        {section === "agents" ? (
         <StudioListSection
           title="Agents"
           description="Customize @octo and create bots for quick styles."
@@ -1822,7 +1841,8 @@ export function CredentialsSettingsCard() {
             </StudioListSurface>
           ) : null}
         </StudioListSection>
-      </div>
+        ) : null}
+      </SettingsShell>
 
       <input
         ref={reconnectFileInputRef}

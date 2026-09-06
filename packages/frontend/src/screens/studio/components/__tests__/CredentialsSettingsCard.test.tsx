@@ -4,8 +4,15 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CredentialsSettingsCard } from "../CredentialsSettingsCard";
+import { clearPendingAgentProfileTarget, setPendingAgentProfileTarget } from "../agentProfileDeepLink";
+
+vi.mock("../../useStudioDesktopLayout", () => ({
+  useStudioDesktopLayout: () => mocks.isDesktop,
+}));
 
 const mocks = vi.hoisted(() => ({
+  isDesktop: true,
+  user: { id: "user-1", email: "playwright@instafy.dev" },
   clearDefaultCredential: vi.fn(),
   createCodexCredential: vi.fn(),
   deleteAgent: vi.fn(),
@@ -21,7 +28,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../../../../providers/AuthProvider", () => ({
   useAuth: () => ({
-    user: { id: "user-1", email: "playwright@instafy.dev" },
+    user: mocks.user,
   }),
 }));
 
@@ -100,6 +107,9 @@ describe("CredentialsSettingsCard", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div");
+    clearPendingAgentProfileTarget();
+    mocks.isDesktop = true;
+    vi.stubGlobal("CSS", { escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, "\\$&") });
     document.body.appendChild(container);
     root = createRoot(container);
 
@@ -137,7 +147,60 @@ describe("CredentialsSettingsCard", () => {
       root.unmount();
     });
     container.remove();
+    vi.unstubAllGlobals();
+    clearPendingAgentProfileTarget();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("separates providers and agents with the shared settings navigation", async () => {
+    await act(async () => {
+      root.render(<CredentialsSettingsCard />);
+      await flush();
+    });
+
+    expect(container.querySelector('[data-testid="credentials-add-connection"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="bots-create"]')).toBeNull();
+    const agents = container.querySelector<HTMLButtonElement>('[data-testid="settings-category-agents"]');
+    expect(agents).not.toBeNull();
+    await act(async () => { agents!.click(); await flush(); });
+    expect(container.querySelector('[data-testid="bots-create"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="credentials-add-connection"]')).toBeNull();
+
+    const providers = container.querySelector<HTMLButtonElement>('[data-testid="settings-category-providers"]');
+    await act(async () => { providers!.click(); await flush(); });
+    expect(container.querySelector('[data-testid="credentials-add-connection"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="bots-create"]')).toBeNull();
+    expect(mocks.listCredentials).toHaveBeenCalledTimes(1);
+    expect(mocks.listAgents).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts on agents for a pending profile target, even when the agent is unavailable", async () => {
+    setPendingAgentProfileTarget("missing-bot");
+    await act(async () => {
+      root.render(<CredentialsSettingsCard />);
+      await flush();
+    });
+    expect(container.textContent).toContain("No bots yet");
+    expect(container.querySelector('[data-testid="credentials-add-connection"]')).toBeNull();
+    expect(container.querySelector('[data-testid="settings-category-providers"]')).not.toBeNull();
+  });
+
+  it("offers the shared category picker on mobile instead of stacking both sections", async () => {
+    mocks.isDesktop = false;
+    await act(async () => {
+      root.render(<CredentialsSettingsCard />);
+      await flush();
+    });
+    const picker = container.querySelector<HTMLButtonElement>('[data-testid="settings-category-nav-picker"]');
+    expect(picker?.textContent).toContain("Providers");
+    await act(async () => { picker!.click(); await flush(); });
+    const agents = Array.from(document.querySelectorAll<HTMLElement>('[role^="menuitem"]'))
+      .find((item) => item.textContent?.includes("Agents"));
+    expect(agents).toBeDefined();
+    await act(async () => { agents!.click(); await flush(); });
+    expect(picker?.textContent).toContain("Agents");
+    expect(container.querySelector('[data-testid="bots-create"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="credentials-add-connection"]')).toBeNull();
   });
 
   it("shows failed auth.json test feedback and an explicit reconnect action", async () => {
