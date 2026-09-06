@@ -2,10 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const resolveControllerRequestContextMock = vi.hoisted(() => vi.fn());
 const readControllerErrorMock = vi.hoisted(() => vi.fn());
+const readControllerApiErrorMock = vi.hoisted(() => vi.fn());
 
-vi.mock("../core", () => ({
+vi.mock("../core", async (importOriginal) => ({
+  ControllerApiError: (await importOriginal<typeof import("../core")>()).ControllerApiError,
   normalizeUuidParam: (value: string | null | undefined) => value?.trim() || null,
   readControllerError: readControllerErrorMock,
+  readControllerApiError: readControllerApiErrorMock,
   resolveControllerRequestContext: resolveControllerRequestContextMock,
   runtimeControllerEnabled: true,
 }));
@@ -74,6 +77,29 @@ describe("automation controller client", () => {
     resolveControllerRequestContextMock.mockReset();
     resolveControllerRequestContextMock.mockResolvedValue(defaultRequestContext);
     readControllerErrorMock.mockReset();
+    readControllerApiErrorMock.mockReset();
+  });
+
+  it.each([401, 403, 404, 503])("preserves HTTP %s so protected lists can distinguish denial from temporary failure", async (status) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status })));
+    readControllerApiErrorMock.mockResolvedValue({ status, message: "List unavailable", code: null, details: null });
+
+    await expect(fetchProjectAutomationsFromController({ projectId: PROJECT_ID })).rejects.toMatchObject({
+      name: "ControllerApiError", status, message: "List unavailable",
+    });
+  });
+
+  it("treats a missing session as an authorization failure", async () => {
+    resolveControllerRequestContextMock.mockResolvedValue({ ...defaultRequestContext, accessToken: null });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(fetchProjectAutomationsFromController({ projectId: PROJECT_ID })).rejects.toMatchObject({ status: 401 });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not mistake a malformed response for an empty list", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", { status: 200 })));
+    await expect(fetchProjectAutomationsFromController({ projectId: PROJECT_ID })).rejects.toThrow("missing automations list");
   });
 
   afterEach(() => {
@@ -98,9 +124,12 @@ describe("automation controller client", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
+    const request = new AbortController();
     const automations = await fetchProjectAutomationsFromController({
       projectId: PROJECT_ID,
+      signal: request.signal,
     });
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ signal: request.signal });
 
     expect(automations?.map((automation) => automation.silentWhenNothingToReport)).toEqual([
       false,

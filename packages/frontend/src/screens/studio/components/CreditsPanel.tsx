@@ -4,7 +4,7 @@ import { Badge } from "../../../components/Badge";
 import { Button } from "../../../components/Button";
 import { Card } from "../../../components/Card";
 import { Heading } from "../../../components/Heading";
-import { Spinner } from "../../../components/Spinner";
+import { LoadingStatus } from "../../../components/LoadingStatus";
 import { Text } from "../../../components/Text";
 import { BILLING_PLANS, type BillingPlanDefinition } from "../../../credits/plans";
 import { fetchCreditPolicy, type CreditPolicy } from "../../../credits/creditService";
@@ -893,15 +893,12 @@ export function CreditsPanel() {
                 Shared team balance
               </Text>
               {!creditsLoaded && !creditsError ? (
-                <div
-                  className="mt-2 flex items-center gap-2"
+                <LoadingStatus
+                  className="mt-2"
                   data-testid="credits-balance-loading"
                 >
-                  <Spinner size="sm" />
-                  <Text as="span" variant="body" tone="muted">
-                    Loading balance…
-                  </Text>
-                </div>
+                  Loading balance…
+                </LoadingStatus>
               ) : !creditsLoaded && creditsError ? (
                 <div className="mt-2 space-y-2" data-testid="credits-balance-error">
                   <Text as="p" variant="body" tone="danger" className="font-medium">
@@ -1028,10 +1025,9 @@ export function CreditsPanel() {
           className="flex items-center gap-3"
           data-testid="billing-activation-pending"
         >
-          <Spinner size="sm" />
-          <Text as="p" variant="body" tone="secondary">
+          <LoadingStatus>
             Payment received — activating your new plan…
-          </Text>
+          </LoadingStatus>
         </Card>
       ) : null}
 
@@ -1046,10 +1042,7 @@ export function CreditsPanel() {
             </Text>
           </div>
           {policyLoading ? (
-            <div className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
-              <Spinner size="sm" />
-              <span>Loading usage rates…</span>
-            </div>
+            <LoadingStatus>Loading usage rates…</LoadingStatus>
           ) : policyError ? (
             <Text variant="body" tone="danger" className="font-medium">
               {policyError}

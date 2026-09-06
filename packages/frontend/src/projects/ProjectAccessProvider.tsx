@@ -46,6 +46,7 @@ export interface ProjectAccessContextValue {
   projectInitialized: boolean;
   projectAccessPending: boolean;
   projectAccessBlocked: boolean;
+  projectAccessUnavailable: boolean;
   projectCapabilitiesResolved: boolean;
   effectiveProjectRole: EffectiveProjectRole | null;
   canWriteProject: boolean;
@@ -143,6 +144,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
   const [projectInitialized, setProjectInitialized] = useState(false);
   const [projectAccessPending, setProjectAccessPending] = useState(false);
   const [projectAccessBlocked, setProjectAccessBlocked] = useState(false);
+  const [projectAccessUnavailable, setProjectAccessUnavailable] = useState(false);
   const [projectCapabilities, setProjectCapabilities] = useState<{
     projectId: string;
     value: ProjectCapabilities;
@@ -196,6 +198,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
       writeStoredProjectId(null);
       clearProjectAutoCreateSuppression();
       setProjectAccessBlocked(false);
+      setProjectAccessUnavailable(false);
       setProjectAccessPending(false);
       setProjectCapabilities(null);
       setProjectInitialized(false);
@@ -209,6 +212,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
       }
       setProjectAccessPending(false);
       setProjectAccessBlocked(false);
+      setProjectAccessUnavailable(false);
       if (activeProjectId) {
         setProjectCapabilities((current) =>
           current?.projectId === activeProjectId
@@ -294,10 +298,25 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     const requestId = Symbol("project-bootstrap");
     activeRequestRef.current = requestId;
 
+    const selectRecoveryProject = (projectId: string) => {
+      // A remembered UUID can outlive the user-scoped workspace snapshot. Keep
+      // its local identity available for Retry without granting access or
+      // creating a replacement project on the controller.
+      if (!projectsRef.current[projectId]) {
+        createProject({ projectId });
+      } else if (activeProjectId !== projectId) {
+        switchProject(projectId);
+      }
+      if (typeof window !== "undefined") {
+        (window as Window & { __INSTAFY_ACTIVE_PROJECT_ID__?: string }).__INSTAFY_ACTIVE_PROJECT_ID__ = projectId;
+      }
+    };
+
     const resolveProject = async () => {
       let targetProjectIdForBackoff: string | null = urlProjectId;
       setProjectAccessPending(true);
       setProjectAccessBlocked(false);
+      setProjectAccessUnavailable(false);
       try {
         let mintedProject: Awaited<ReturnType<typeof createControllerProject>> | null = null;
         let targetProjectId: string | null =
@@ -411,6 +430,8 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
           return;
         }
         if (projectSummaryUnavailable) {
+          selectRecoveryProject(targetProjectId);
+          setProjectAccessUnavailable(true);
           projectSummaryRetryBackoffRef.current = {
             projectId: targetProjectId,
             until: Date.now() + PROJECT_SUMMARY_RETRY_BACKOFF_MS,
@@ -496,6 +517,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
         }
         if (!cancelled && activeRequestRef.current === requestId) {
           if (targetProjectIdForBackoff && isUUID(targetProjectIdForBackoff)) {
+            selectRecoveryProject(targetProjectIdForBackoff);
             projectSummaryRetryBackoffRef.current = {
               projectId: targetProjectIdForBackoff,
               until: Date.now() + PROJECT_SUMMARY_RETRY_BACKOFF_MS,
@@ -503,6 +525,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
           }
           setProjectAccessPending(false);
           setProjectAccessBlocked(false);
+          setProjectAccessUnavailable(Boolean(targetProjectIdForBackoff));
           if (typeof window !== "undefined") {
             const runtimeWindow = window as typeof window & {
               __INSTAFY_PROJECT_INITIALIZED__?: boolean;
@@ -666,6 +689,19 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     let refreshInFlight = false;
     let refreshRequested = false;
     let accessInvalidationVersion = 0;
+    let retryTimer: number | null = null;
+
+    const scheduleRetry = (delayMs = PROJECT_SUMMARY_RETRY_BACKOFF_MS) => {
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer);
+      }
+      retryTimer = window.setTimeout(() => {
+        retryTimer = null;
+        if (document.visibilityState !== "hidden") {
+          void refreshCapabilities();
+        }
+      }, delayMs);
+    };
 
     const refreshCapabilities = async () => {
       if (cancelled) {
@@ -674,6 +710,10 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
       if (refreshInFlight) {
         refreshRequested = true;
         return;
+      }
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer);
+        retryTimer = null;
       }
       refreshInFlight = true;
       const refreshVersion = accessInvalidationVersion;
@@ -685,6 +725,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
         if (result.notFound || result.forbidden || result.unauthorized) {
           blockedProjectIdRef.current = targetProjectId;
           projectSummaryRetryBackoffRef.current = null;
+          setProjectAccessUnavailable(false);
           setProjectCapabilities((current) =>
             current?.projectId === targetProjectId ? null : current,
           );
@@ -694,6 +735,8 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
         }
 
         if (!result.summary) {
+          setProjectAccessUnavailable(true);
+          scheduleRetry();
           return;
         }
 
@@ -703,12 +746,29 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
             ? { projectId: targetProjectId, value: refreshedCapabilities }
             : null,
         );
+        if (projectSummaryRetryBackoffRef.current?.projectId === targetProjectId) {
+          const projectName = result.summary.projectName?.trim();
+          if (projectName) {
+            setProjectName(targetProjectId, projectName);
+          }
+          if (result.summary.orgId) {
+            setProjectOrg(targetProjectId, {
+              id: result.summary.orgId,
+              name: getOrgDisplayName(result.summary.orgName),
+            });
+          }
+        }
         blockedProjectIdRef.current = null;
         projectSummaryRetryBackoffRef.current = null;
         setProjectAccessBlocked(false);
+        setProjectAccessUnavailable(false);
       } catch (error) {
         if (import.meta.env.DEV) {
           console.warn("Failed to refresh project access", error);
+        }
+        if (!cancelled) {
+          setProjectAccessUnavailable(true);
+          scheduleRetry();
         }
       } finally {
         refreshInFlight = false;
@@ -747,6 +807,13 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
       }
     }, PROJECT_CAPABILITY_REFRESH_INTERVAL_MS);
 
+    // An unavailable initial lookup releases the full-screen loader without
+    // granting capabilities. Recover promptly through this same access check.
+    const initialRetry = projectSummaryRetryBackoffRef.current;
+    if (initialRetry?.projectId === targetProjectId) {
+      scheduleRetry(Math.max(0, initialRetry.until - Date.now()));
+    }
+
     window.addEventListener("focus", handleFocus);
     window.addEventListener(PROJECT_ACCESS_REFRESH_EVENT, handleAccessChanged);
     window.addEventListener("instafy:controller-stream-reconnected", handleStreamReconnected);
@@ -754,6 +821,9 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer);
+      }
       window.removeEventListener("focus", handleFocus);
       window.removeEventListener(PROJECT_ACCESS_REFRESH_EVENT, handleAccessChanged);
       window.removeEventListener("instafy:controller-stream-reconnected", handleStreamReconnected);
@@ -764,6 +834,8 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     getControllerProjectSummaryResult,
     projectInitialized,
     removeProject,
+    setProjectName,
+    setProjectOrg,
     user?.id,
   ]);
 
@@ -778,13 +850,14 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
       projectInitialized,
       projectAccessPending,
       projectAccessBlocked,
+      projectAccessUnavailable,
       projectCapabilitiesResolved: capabilitiesResolved,
       effectiveProjectRole: activeCapabilities?.effectiveRole ?? null,
       canWriteProject: activeCapabilities?.canWrite ?? !hasSupabaseConfig,
       canShareProject: activeCapabilities?.canShare ?? !hasSupabaseConfig,
       canManageProject: activeCapabilities?.canManage ?? !hasSupabaseConfig,
     }),
-    [activeCapabilities, capabilitiesResolved, projectAccessBlocked, projectAccessPending, projectInitialized]
+    [activeCapabilities, capabilitiesResolved, projectAccessBlocked, projectAccessUnavailable, projectAccessPending, projectInitialized]
   );
 
   return <ProjectAccessContext.Provider value={value}>{children}</ProjectAccessContext.Provider>;
