@@ -204,18 +204,27 @@ export function useConversationHistoryState({
 
   const hasMoreHistory = Boolean(controllerMessagesQuery.hasNextPage);
   const isHistoryLoading = controllerMessagesQuery.isFetchingNextPage;
-  const isInitialHistoryLoading =
+  const needsInitialHistory =
     runtimeControllerEnabled &&
     Boolean(currentUserId) &&
     Boolean(controllerConversationId) &&
     !controllerHistoryNotFound &&
     !controllerHistoryAccessDenied &&
     messages.length === 0 &&
-    (
-      controllerMessagesQuery.isPending ||
-      (controllerMessagesQuery.isFetching &&
-        !(controllerMessagesQuery.data?.pages?.length ?? 0))
-    );
+    !(controllerMessagesQuery.data?.pages?.length ?? 0);
+  const isInitialHistoryLoading =
+    needsInitialHistory && (controllerMessagesQuery.isPending || controllerMessagesQuery.isFetching);
+  const initialHistoryError =
+    needsInitialHistory && controllerMessagesQuery.isError && !controllerMessagesQuery.isFetching
+      ? "Couldn't load messages."
+      : null;
+
+  const retryInitialHistory = useCallback(async () => {
+    if (!needsInitialHistory || controllerMessagesQuery.isFetching) {
+      return;
+    }
+    await controllerMessagesQuery.refetch();
+  }, [controllerMessagesQuery, needsInitialHistory]);
 
   const loadOlderMessages = useCallback(async () => {
     if (!controllerConversationId) {
@@ -232,6 +241,8 @@ export function useConversationHistoryState({
     hasMoreHistory,
     isHistoryLoading,
     isInitialHistoryLoading,
+    initialHistoryError,
+    retryInitialHistory,
     loadOlderMessages,
   };
 }

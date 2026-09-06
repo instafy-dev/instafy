@@ -50,6 +50,8 @@ interface UseConversationResult {
   hasMoreHistory: boolean;
   isHistoryLoading: boolean;
   isInitialHistoryLoading: boolean;
+  initialHistoryError: string | null;
+  retryInitialHistory: () => Promise<void>;
   loadOlderMessages: () => Promise<void>;
   onSelectConversation: (conversationId: string) => void;
   onCreateConversation: () => void;
@@ -108,6 +110,8 @@ export function useConversation(): UseConversationResult {
     hasMoreHistory,
     isHistoryLoading,
     isInitialHistoryLoading,
+    initialHistoryError,
+    retryInitialHistory,
     loadOlderMessages,
   } = useConversationHistoryState({
     activeConversation,
@@ -413,6 +417,8 @@ export function useConversation(): UseConversationResult {
     hasMoreHistory,
     isHistoryLoading,
     isInitialHistoryLoading,
+    initialHistoryError,
+    retryInitialHistory,
     loadOlderMessages,
     onSelectConversation: handleSelectConversation,
     onCreateConversation: handleCreateConversation,
