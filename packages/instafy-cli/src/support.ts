@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import {
   customerControllerJsonRequest,
@@ -14,6 +15,11 @@ const MAX_LOG_ENTRIES = 500;
 const MAX_SCREENSHOTS = 6;
 const MAX_SCREENSHOT_BYTES = 4 * 1024 * 1024;
 const MAX_SCREENSHOT_TOTAL_BYTES = 12 * 1024 * 1024;
+const MAX_MESSAGE_CHARS = 4_000;
+const MAX_MESSAGE_BYTES = 16 * 1024;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+const RFC3339 =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|([+-])(\d{2}):(\d{2}))$/u;
 
 type SupportAuthOptions = CustomerControllerAuthOptions;
 
@@ -29,6 +35,7 @@ export type SupportReportOptions = SupportAuthOptions & {
   metadataFile?: string;
   logsFile?: string;
   screenshots?: string[];
+  clientRequestId?: string;
   preview?: boolean;
   json?: boolean;
 };
@@ -38,11 +45,30 @@ export type SupportListOptions = SupportAuthOptions & {
   status?: string;
   space?: string;
   before?: string;
+  beforeCreatedAt?: string;
+  beforeCreatedId?: string;
+  beforeActivityAt?: string;
+  beforeActivityId?: string;
   json?: boolean;
 };
 
 export type SupportShowOptions = SupportAuthOptions & {
   reportId: string;
+  json?: boolean;
+};
+
+export type SupportMessagesOptions = SupportAuthOptions & {
+  reportId: string;
+  limit?: number;
+  beforeCreatedAt?: string;
+  beforeMessageId?: string;
+  json?: boolean;
+};
+
+export type SupportReplyOptions = SupportAuthOptions & {
+  reportId: string;
+  message: string;
+  clientRequestId?: string;
   json?: boolean;
 };
 
@@ -55,8 +81,72 @@ type ScreenshotPayload = {
 
 type JsonRecord = Record<string, unknown>;
 
+type SafeSupportMessage = {
+  id: string;
+  authorType: "customer" | "support" | "system";
+  body: string;
+  createdAt: string;
+};
+
+type SafeSupportReportCursor =
+  | { activityAt: string; id: string }
+  | { createdAt: string; id: string };
+
+type SafeSupportMessageCursor = {
+  createdAt: string;
+  id: string;
+};
+
 function cleanText(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function isRfc3339(value: string): boolean {
+  const match = RFC3339.exec(value);
+  if (!match) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = Number(match[6]);
+  const offsetHour = match[8] === undefined ? 0 : Number(match[8]);
+  const offsetMinute = match[9] === undefined ? 0 : Number(match[9]);
+  if (
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    hour > 23 ||
+    minute > 59 ||
+    second > 59 ||
+    offsetHour > 23 ||
+    offsetMinute > 59
+  ) {
+    return false;
+  }
+  const calendar = new Date(Date.UTC(year, month - 1, day));
+  return (
+    calendar.getUTCFullYear() === year &&
+    calendar.getUTCMonth() === month - 1 &&
+    calendar.getUTCDate() === day &&
+    !Number.isNaN(Date.parse(value))
+  );
+}
+
+function requiredCursorTimestamp(value: unknown, flag: string): string {
+  const timestamp = cleanText(value);
+  if (!timestamp || !isRfc3339(timestamp)) {
+    throw new Error(`${flag} must be an RFC3339 timestamp.`);
+  }
+  return timestamp;
+}
+
+function requiredCursorUuid(value: unknown, flag: string): string {
+  const id = cleanText(value);
+  if (!id || !UUID.test(id)) {
+    throw new Error(`${flag} must be a UUID.`);
+  }
+  return id;
 }
 
 function readRegularFile(filePath: string, maxBytes: number, label: string): Buffer {
@@ -203,16 +293,44 @@ function resolveLinkedSpace(options: SupportReportOptions): string | null {
 }
 
 function safeSummary(value: JsonRecord): JsonRecord {
+  const createdAt = cleanText(value["createdAt"]);
+  const updatedAt = cleanText(value["updatedAt"]);
   return {
     id: cleanText(value["id"]),
-    createdAt: cleanText(value["createdAt"]),
-    updatedAt: cleanText(value["updatedAt"]),
+    createdAt,
+    activityAt: cleanText(value["activityAt"]) ?? updatedAt ?? createdAt,
+    updatedAt,
     summary: cleanText(value["message"]) ?? "",
     status: cleanText(value["status"]) ?? "open",
     projectId: cleanText(value["projectId"]),
     screenshotCount:
       typeof value["screenshotCount"] === "number" ? value["screenshotCount"] : 0,
   };
+}
+
+function safeSupportReportCursor(value: unknown): SafeSupportReportCursor | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as JsonRecord;
+  const activityAt = cleanText(record["activityAt"]);
+  const createdAt = cleanText(record["createdAt"]);
+  const id = cleanText(record["id"]);
+  if (!id || !UUID.test(id) || Boolean(activityAt) === Boolean(createdAt)) {
+    return null;
+  }
+  if (activityAt && isRfc3339(activityAt)) return { activityAt, id };
+  if (createdAt && isRfc3339(createdAt)) return { createdAt, id };
+  return null;
+}
+
+function safeSupportMessageCursor(value: unknown): SafeSupportMessageCursor | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as JsonRecord;
+  const createdAt = cleanText(record["createdAt"]);
+  const id = cleanText(record["id"]);
+  if (!createdAt || !isRfc3339(createdAt) || !id || !UUID.test(id)) {
+    return null;
+  }
+  return { createdAt, id };
 }
 
 function safeDetail(value: JsonRecord): JsonRecord {
@@ -230,13 +348,42 @@ function safeDetail(value: JsonRecord): JsonRecord {
   const detail: JsonRecord = {
     ...safeSummary(value),
     details: cleanText(value["details"]),
-    runtimeId: cleanText(value["runtimeId"]),
-    runId: cleanText(value["runId"]),
-    conversationId: cleanText(value["conversationId"]),
     screenshotCount: screenshots.length,
     screenshots,
   };
   return detail;
+}
+
+function safeSupportMessage(value: unknown): SafeSupportMessage | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as JsonRecord;
+  const id = cleanText(record["id"]);
+  const authorType = cleanText(record["authorType"]);
+  const body = cleanText(record["body"]);
+  const createdAt = cleanText(record["createdAt"]);
+  if (
+    !id ||
+    !body ||
+    !createdAt ||
+    (authorType !== "customer" && authorType !== "support" && authorType !== "system")
+  ) {
+    return null;
+  }
+  return { id, authorType, body, createdAt };
+}
+
+function requireSupportMessage(value: unknown): SafeSupportMessage {
+  const message = safeSupportMessage(value);
+  if (!message) {
+    throw new Error("Support response contained an invalid message.");
+  }
+  return message;
+}
+
+function supportAuthorLabel(authorType: SafeSupportMessage["authorType"]): string {
+  if (authorType === "customer") return "You";
+  if (authorType === "support") return "Support";
+  return "Status";
 }
 
 function printJson(value: unknown) {
@@ -246,7 +393,7 @@ function printJson(value: unknown) {
 export async function supportReport(options: SupportReportOptions): Promise<void> {
   const summary = options.summary.replace(/\s+/g, " ").trim();
   if (!summary) throw new Error("A support report summary is required.");
-  if (summary.length > MAX_SUMMARY_CHARS) {
+  if (Array.from(summary).length > MAX_SUMMARY_CHARS) {
     throw new Error(`Support report summary must be ${MAX_SUMMARY_CHARS} characters or shorter.`);
   }
 
@@ -275,6 +422,7 @@ export async function supportReport(options: SupportReportOptions): Promise<void
   if (options.preview) {
     const preview = {
       upload: false,
+      supportAccountIdentityIncluded: true,
       summary,
       detailsIncluded: Boolean(details),
       projectId,
@@ -292,6 +440,15 @@ export async function supportReport(options: SupportReportOptions): Promise<void
     printJson(preview);
     return;
   }
+
+  const clientRequestId = cleanText(options.clientRequestId) ?? randomUUID();
+  if (!UUID.test(clientRequestId)) {
+    throw new Error("--client-request-id must be a UUID.");
+  }
+  payload["clientRequestId"] = clientRequestId;
+  console.error(
+    `Support report request id: ${clientRequestId} (reuse it only to retry this exact report).`,
+  );
 
   const response = await customerControllerJsonRequest<JsonRecord>({
     method: "POST",
@@ -330,9 +487,55 @@ export async function supportList(options: SupportListOptions): Promise<void> {
   const projectId = cleanText(options.space);
   if (projectId) query.set("project_id", projectId);
   const before = cleanText(options.before);
-  if (before) query.set("before_created_at", before);
+  const beforeCreatedAt = cleanText(options.beforeCreatedAt);
+  const beforeCreatedId = cleanText(options.beforeCreatedId);
+  const beforeActivityAt = cleanText(options.beforeActivityAt);
+  const beforeActivityId = cleanText(options.beforeActivityId);
+  if (Boolean(beforeCreatedAt) !== Boolean(beforeCreatedId)) {
+    throw new Error(
+      "--before-created-at and --before-created-id must be used together.",
+    );
+  }
+  if (Boolean(beforeActivityAt) !== Boolean(beforeActivityId)) {
+    throw new Error(
+      "--before-activity-at and --before-activity-id must be used together.",
+    );
+  }
+  if (before && (beforeCreatedAt || beforeActivityAt)) {
+    throw new Error("--before cannot be combined with the paired cursor flags.");
+  }
+  if (beforeCreatedAt && beforeActivityAt) {
+    throw new Error("Created-at and activity cursor flags cannot be combined.");
+  }
+  if (before) {
+    query.set("before_created_at", requiredCursorTimestamp(before, "--before"));
+  }
+  if (beforeCreatedAt && beforeCreatedId) {
+    query.set(
+      "before_created_at",
+      requiredCursorTimestamp(beforeCreatedAt, "--before-created-at"),
+    );
+    query.set(
+      "before_created_id",
+      requiredCursorUuid(beforeCreatedId, "--before-created-id"),
+    );
+  }
+  if (beforeActivityAt && beforeActivityId) {
+    query.set(
+      "before_activity_at",
+      requiredCursorTimestamp(beforeActivityAt, "--before-activity-at"),
+    );
+    query.set(
+      "before_activity_id",
+      requiredCursorUuid(beforeActivityId, "--before-activity-id"),
+    );
+  }
 
-  const response = await customerControllerJsonRequest<{ reports?: JsonRecord[] }>({
+  const response = await customerControllerJsonRequest<{
+    reports?: JsonRecord[];
+    hasMore?: unknown;
+    nextCursor?: unknown;
+  }>({
     method: "GET",
     apiPath: `/support/reports?${query.toString()}`,
     operation: "Support",
@@ -340,8 +543,10 @@ export async function supportList(options: SupportListOptions): Promise<void> {
     accessToken: options.accessToken,
   });
   const reports = Array.isArray(response.reports) ? response.reports.map(safeSummary) : [];
+  const nextCursor = safeSupportReportCursor(response.nextCursor);
+  const hasMore = response.hasMore === true && nextCursor !== null;
   if (options.json) {
-    printJson({ reports });
+    printJson({ reports, hasMore, nextCursor: hasMore ? nextCursor : null });
     return;
   }
   if (!reports.length) {
@@ -352,12 +557,24 @@ export async function supportList(options: SupportListOptions): Promise<void> {
     reports.map((report) => ({
       id: report["id"],
       createdAt: report["createdAt"],
+      activityAt: report["activityAt"],
       status: report["status"],
       summary: report["summary"],
       space: report["projectId"] ?? "",
       screenshots: report["screenshotCount"],
     })),
   );
+  if (hasMore && nextCursor) {
+    if ("activityAt" in nextCursor) {
+      console.log(
+        `More reports: rerun with --before-activity-at ${nextCursor.activityAt} --before-activity-id ${nextCursor.id}`,
+      );
+    } else {
+      console.log(
+        `More reports: rerun with --before-created-at ${nextCursor.createdAt} --before-created-id ${nextCursor.id}`,
+      );
+    }
+  }
 }
 
 export async function supportShow(options: SupportShowOptions): Promise<void> {
@@ -382,4 +599,102 @@ export async function supportShow(options: SupportShowOptions): Promise<void> {
   if (report["details"]) console.log(`\n${report["details"]}`);
   const screenshots = Array.isArray(report["screenshots"]) ? report["screenshots"] : [];
   if (screenshots.length) console.log(`\nScreenshots: ${screenshots.length} (content not printed)`);
+}
+
+export async function supportMessages(options: SupportMessagesOptions): Promise<void> {
+  const reportId = cleanText(options.reportId);
+  if (!reportId) throw new Error("A support report id is required.");
+  const limit = options.limit ?? 100;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new Error("--limit must be an integer between 1 and 100.");
+  }
+  const beforeCreatedAt = cleanText(options.beforeCreatedAt);
+  const beforeMessageId = cleanText(options.beforeMessageId);
+  if (Boolean(beforeCreatedAt) !== Boolean(beforeMessageId)) {
+    throw new Error(
+      "--before-created-at and --before-message-id must be used together.",
+    );
+  }
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (beforeCreatedAt && beforeMessageId) {
+    query.set(
+      "before_created_at",
+      requiredCursorTimestamp(beforeCreatedAt, "--before-created-at"),
+    );
+    query.set(
+      "before_message_id",
+      requiredCursorUuid(beforeMessageId, "--before-message-id"),
+    );
+  }
+  const response = await customerControllerJsonRequest<{
+    messages?: unknown[];
+    hasMore?: unknown;
+    nextCursor?: unknown;
+  }>({
+    method: "GET",
+    apiPath: `/support/reports/${encodeURIComponent(reportId)}/messages?${query.toString()}`,
+    operation: "Support",
+    controllerUrl: options.controllerUrl,
+    accessToken: options.accessToken,
+  });
+  const messages = Array.isArray(response.messages)
+    ? response.messages.map(safeSupportMessage).filter((message): message is SafeSupportMessage => message !== null)
+    : [];
+  const nextCursor = safeSupportMessageCursor(response.nextCursor);
+  const hasMore = response.hasMore === true && nextCursor !== null;
+  if (options.json) {
+    printJson({ messages, hasMore, nextCursor: hasMore ? nextCursor : null });
+    return;
+  }
+  if (!messages.length) {
+    console.log("No support follow-ups yet.");
+    return;
+  }
+  for (const message of messages) {
+    console.log(`[${message.createdAt}] ${supportAuthorLabel(message.authorType)}: ${message.body}`);
+  }
+  if (hasMore && nextCursor) {
+    console.log(
+      `Older messages: rerun with --before-created-at ${nextCursor.createdAt} --before-message-id ${nextCursor.id}`,
+    );
+  }
+}
+
+export async function supportReply(options: SupportReplyOptions): Promise<void> {
+  const reportId = cleanText(options.reportId);
+  if (!reportId) throw new Error("A support report id is required.");
+  const message = cleanText(options.message);
+  if (!message) throw new Error("A follow-up message is required.");
+  if (
+    Array.from(message).length > MAX_MESSAGE_CHARS ||
+    Buffer.byteLength(message, "utf8") > MAX_MESSAGE_BYTES
+  ) {
+    throw new Error(
+      `A follow-up must be at most ${MAX_MESSAGE_CHARS} characters and ${MAX_MESSAGE_BYTES} bytes.`,
+    );
+  }
+  const clientRequestId = cleanText(options.clientRequestId) ?? randomUUID();
+  if (!UUID.test(clientRequestId)) {
+    throw new Error("--client-request-id must be a UUID.");
+  }
+  console.error(
+    `Support follow-up request id: ${clientRequestId} (reuse it only to retry this exact message).`,
+  );
+  const response = await customerControllerJsonRequest<{ message?: unknown }>({
+    method: "POST",
+    apiPath: `/support/reports/${encodeURIComponent(reportId)}/messages`,
+    operation: "Support",
+    controllerUrl: options.controllerUrl,
+    accessToken: options.accessToken,
+    body: {
+      body: message,
+      clientRequestId,
+    },
+  });
+  const posted = requireSupportMessage(response.message);
+  if (options.json) {
+    printJson({ message: posted });
+    return;
+  }
+  console.log(`Follow-up added to support report ${reportId}.`);
 }

@@ -198,60 +198,126 @@ self.addEventListener("fetch", (event) => {
   );
 });
 
+// The page and worker share one atomic presentation ledger. It contains only
+// account/event IDs and timestamps, never notification bodies or credentials.
+function notificationDatabase() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("instafy-notifications", 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("presentation");
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+async function notificationAccountAndClaim(accountId, eventId, claim) {
+  const db = await notificationDatabase();
+  return new Promise((resolve) => {
+    const tx = db.transaction("presentation", "readwrite");
+    const store = tx.objectStore("presentation");
+    let accepted = false;
+    const account = store.get("active-account");
+    account.onsuccess = () => {
+      if (account.result !== accountId) return;
+      // Acceptance means this account may present, not that the event was new.
+      // userVisibleOnly still requires displaying valid same-account retries.
+      accepted = true;
+      if (!claim) return;
+      const old = store.openCursor();
+      old.onsuccess = () => {
+        const cursor = old.result;
+        if (!cursor) return;
+        if (typeof cursor.value === "number" && cursor.value < Date.now() - 30 * 24 * 60 * 60 * 1000) cursor.delete();
+        cursor.continue();
+      };
+      store.add(Date.now(), `${accountId}:${eventId}`);
+    };
+    tx.oncomplete = () => { db.close(); resolve(accepted); };
+    // A duplicate claim aborts the write transaction but does not revoke the
+    // account match read within it. Account mismatches remain false.
+    tx.onabort = () => { db.close(); resolve(accepted); };
+    tx.onerror = () => {};
+  });
+}
+const NOTIFICATION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function canonicalPushUrl(value) {
+  if (typeof value !== "string" || value.length > 512 || !value.startsWith("/") || value.startsWith("//")) return null;
+  try {
+    const url = new URL(value, self.location.origin);
+    if (url.origin !== self.location.origin || url.pathname !== "/studio" || url.hash) return null;
+    const keys = [...url.searchParams.keys()];
+    const support = url.searchParams.get("supportReportId");
+    const project = url.searchParams.get("projectId");
+    const conversation = url.searchParams.get("conversationControllerId");
+    if (keys.length === 0) return "/studio";
+    if (keys.length === 1 && support && NOTIFICATION_UUID.test(support)) return `/studio?supportReportId=${support.toLowerCase()}`;
+    if (keys.length === 1 && project && NOTIFICATION_UUID.test(project)) return `/studio?projectId=${project.toLowerCase()}`;
+    if (keys.length === 2 && project && conversation && NOTIFICATION_UUID.test(project) && NOTIFICATION_UUID.test(conversation)) return `/studio?projectId=${project.toLowerCase()}&conversationControllerId=${conversation.toLowerCase()}`;
+    if (keys.length === 2 && project && NOTIFICATION_UUID.test(project) && url.searchParams.get("panel") === "automations") return `/studio?projectId=${project.toLowerCase()}&panel=automations`;
+  } catch { /* Invalid or untrusted URL. */ }
+  return null;
+}
+const SAFE_NOTIFICATION_BODIES = new Set(["There is a new reply to your support report.", "Your support report has been resolved.", "There is a new reply in your conversation.", "A run could not finish.", "Your automation has finished.", "Your automation could not finish."]);
 self.addEventListener("push", (event) => {
-  event.waitUntil(
-    (async () => {
-      await broadcastPushDebug({
-        phase: "received",
-        hasData: Boolean(event.data),
+  event.waitUntil((async () => {
+    let payload;
+    try { payload = event.data?.json(); } catch { return; }
+    if (!payload || !NOTIFICATION_UUID.test(payload.eventId) || !NOTIFICATION_UUID.test(payload.accountId)) return;
+    const url = canonicalPushUrl(payload.url);
+    if (!url) return;
+    try {
+      if (!(await notificationAccountAndClaim(payload.accountId, payload.eventId, false))) return;
+      const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      for (const client of windows) client.postMessage({ type: "instafy:notification-received", accountId: payload.accountId, eventId: payload.eventId });
+      // userVisibleOnly requires displaying every valid push, including retries
+      // and focused windows (WebKit can revoke permission for silent pushes).
+      // The stable tag replaces an earlier OS notification where supported.
+      // matchAll awaited above; a sign-out or account switch may have happened
+      // meanwhile. The atomic second account check must gate presentation too.
+      if (!(await notificationAccountAndClaim(payload.accountId, payload.eventId, true))) return;
+      await self.registration.showNotification("Instafy", {
+        body: SAFE_NOTIFICATION_BODIES.has(payload.body) ? payload.body : "You have a new notification.",
+        tag: payload.eventId,
+        renotify: false,
+        data: { url, eventId: payload.eventId, accountId: payload.accountId },
       });
-
-      let payload = {};
-      try {
-        payload = event.data ? event.data.json() : {};
-      } catch (_error) {
-        payload = {};
-      }
-
-      const title = typeof payload.title === "string" && payload.title.trim().length > 0 ? payload.title : "Instafy";
-      const body =
-        typeof payload.body === "string" && payload.body.trim().length > 0 ? payload.body : "New assistant message";
-      const url = typeof payload.url === "string" && payload.url.trim().length > 0 ? payload.url : "/studio";
-
-      await self.registration.showNotification(title, {
-        body,
-        data: { url },
-      });
-
-      await broadcastPushDebug({
-        phase: "shown",
-        title,
-        hasBody: body.length > 0,
-        hasUrl: Boolean(url),
-      });
-    })(),
-  );
+      await broadcastPushDebug({ phase: "shown", eventId: payload.eventId });
+    } catch { /* Fail closed; durable notification remains in the center. */ }
+  })());
 });
-
+async function notificationClickAccountAllowed(accountId) {
+  try {
+    const db = await notificationDatabase();
+    const account = await new Promise((resolve, reject) => {
+      const request = db.transaction("presentation").objectStore("presentation").get("active-account");
+      request.onsuccess = () => { db.close(); resolve(request.result); };
+      request.onerror = () => { db.close(); reject(request.error); };
+    });
+    return !account || account === accountId;
+  } catch { return false; }
+}
 self.addEventListener("notificationclick", (event) => {
   event.notification?.close?.();
-  const url = event.notification?.data?.url || "/studio";
-
-  event.waitUntil(
-    (async () => {
-      const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
-      for (const client of windows) {
-        if ("focus" in client) {
-          await client.focus();
-          if ("navigate" in client) {
-            await client.navigate(url);
-          }
-          return;
-        }
+  const payload = event.notification?.data;
+  const url = canonicalPushUrl(payload?.url);
+  if (!url || !NOTIFICATION_UUID.test(payload?.accountId) || !NOTIFICATION_UUID.test(payload?.eventId)) return;
+  event.waitUntil((async () => {
+    // The IDs-only receipt survives RequireAuth; Studio validates the account
+    // again before marking the authorized event read after opening its target.
+    const target = new URL(url, self.location.origin);
+    target.searchParams.set("notificationEventId", payload.eventId.toLowerCase());
+    target.searchParams.set("notificationAccountId", payload.accountId.toLowerCase());
+    const destination = `${target.pathname}${target.search}`;
+    if (!(await notificationClickAccountAllowed(payload.accountId))) return;
+    const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+    // Revalidate after the asynchronous window lookup, including signed-out
+    // clicks that changed to a different signed-in account during the lookup.
+    if (!(await notificationClickAccountAllowed(payload.accountId))) return;
+    for (const client of windows) {
+      if ("focus" in client && "navigate" in client) {
+        await client.navigate(destination);
+        await client.focus();
+        return;
       }
-      if (self.clients.openWindow) {
-        await self.clients.openWindow(url);
-      }
-    })(),
-  );
+    }
+    if (self.clients.openWindow) await self.clients.openWindow(destination);
+  })());
 });

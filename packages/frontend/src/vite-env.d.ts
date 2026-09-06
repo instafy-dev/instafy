@@ -41,6 +41,9 @@ declare const __INSTAFY_BUILD_INFO__: InstafyBuildInfo;
 type InstafyDesktopNotificationPayload = {
   title: string;
   body?: string;
+  url?: string;
+  eventId?: string;
+  accountId?: string;
 };
 
 type InstafyDesktopExtensionInvokeOptions = {
@@ -349,7 +352,7 @@ type InstafyDesktopPersonalBrowserBounds = {
 interface Window {
   instafyDesktop?: {
     windowChrome?: "hiddenInset" | "system";
-    notify: (payload: InstafyDesktopNotificationPayload) => Promise<void>;
+    notify: (payload: InstafyDesktopNotificationPayload) => Promise<boolean | void>;
     invokeDesktopExtension?: (
       options: InstafyDesktopExtensionInvokeOptions,
     ) => Promise<unknown>;
