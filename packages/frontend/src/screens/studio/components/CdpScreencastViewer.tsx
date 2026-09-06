@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   normalizeCdpScreencastViewport,
   parseCdpScreencastServerMessage,
@@ -123,6 +123,11 @@ export function CdpScreencastViewer({
   const inputSocketStartedWithAuthorityRef = useRef(false);
   const lastObservedInputAuthorityKeyRef = useRef<string | null>(null);
   const callbacksRef = useRef({ onConnected, onDisconnected, onTransportError });
+  const inputConnectionKey = inputAvailable && inputWsUrl
+    ? `${connectionGeneration}\n${inputWsUrl}`
+    : null;
+  const [readyInputConnectionKey, setReadyInputConnectionKey] = useState<string | null>(null);
+  const inputReady = inputConnectionKey !== null && readyInputConnectionKey === inputConnectionKey;
   activeRef.current = active;
   inputEnabledRef.current = inputEnabled;
   callbacksRef.current = { onConnected, onDisconnected, onTransportError };
@@ -364,6 +369,7 @@ export function CdpScreencastViewer({
         currentViewport = message;
         if (message.type === "ready") {
           ready = true;
+          setReadyInputConnectionKey(inputConnectionKey);
           window.clearTimeout(readyTimer);
           if (authorityResizePending) {
             sendResize(true);
@@ -381,11 +387,13 @@ export function CdpScreencastViewer({
     });
     socket.addEventListener("error", () => {
       if (!disposed) {
+        setReadyInputConnectionKey((current) => current === inputConnectionKey ? null : current);
         callbacksRef.current.onTransportError("Shared Browser input connection failed.", true);
       }
     });
     socket.addEventListener("close", (event) => {
       if (!disposed) {
+        setReadyInputConnectionKey((current) => current === inputConnectionKey ? null : current);
         callbacksRef.current.onTransportError(
           event.reason || `Shared Browser input closed (${event.code}).`,
           true,
@@ -395,6 +403,7 @@ export function CdpScreencastViewer({
 
     return () => {
       disposed = true;
+      setReadyInputConnectionKey((current) => current === inputConnectionKey ? null : current);
       requestInputResizeRef.current = null;
       window.clearTimeout(readyTimer);
       if (resizeTimer !== null) {
@@ -405,7 +414,7 @@ export function CdpScreencastViewer({
       input.dispose();
       socket.close(1000, "input target changed");
     };
-  }, [connectionGeneration, inputAvailable, inputWsUrl]);
+  }, [connectionGeneration, inputAvailable, inputConnectionKey, inputWsUrl]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -438,6 +447,7 @@ export function CdpScreencastViewer({
       data-active={active ? "true" : "false"}
       data-input-available={inputAvailable ? "true" : "false"}
       data-input-enabled={inputEnabled ? "true" : "false"}
+      data-input-ready={inputReady ? "true" : "false"}
       data-testid="shared-browser-cdp-screencast"
       ref={canvasRef}
       tabIndex={active && inputEnabled ? 0 : -1}
