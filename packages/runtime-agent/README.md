@@ -43,6 +43,7 @@ updated when the human running the workflow explicitly requests it.
 - `CONTROLLER_JWKS_URL` — controller JWKS endpoint used to verify controller-issued agent tokens. Defaults to `<CONTROLLER_BASE_URL>/.well-known/jwks.json`.
 - `CODEX_DISABLED` — set to `1`/`true` to disable Codex automation (useful for smoke tests that stub job execution).
 - `CODEX_MODEL`, `CODEX_MODEL_PROVIDER` — optional overrides for the model slug or provider id used by Codex.
+- `CODEX_RUNTIME_REASONING_EFFORT` — explicit reasoning effort for runtime runs (`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`; choose a value supported by the selected model and proxy). A valid setting takes precedence over job heuristics, including feature jobs and retries. When unset or invalid, the runtime retains the job's effort selection or defaults to `low`. A controller-supplied `CODEX_AGENT_REASONING_EFFORT` override remains authoritative.
 - `CODEX_PROFILE` — optional profile from `~/.codex/config.toml` used when loading configuration.
 - `CODEX_SANDBOX_MODE` — choose `read-only`, `workspace-write` (default), or `danger-full-access` when overriding the sandbox.
 - `CODEX_LINUX_SANDBOX_EXE` — optional path to the hardened sandbox binary (mirrors the CLI flag).
