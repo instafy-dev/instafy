@@ -85,6 +85,26 @@ function emitFrame(socket: FakeWebSocket, frameId: number) {
   );
 }
 
+function emitInputReady(socket: FakeWebSocket | undefined) {
+  if (!socket) {
+    throw new Error("Expected a Shared Browser input socket.");
+  }
+  socket.emit(
+    "message",
+    Object.assign(new Event("message"), {
+      data: JSON.stringify({
+        type: "ready",
+        pageId: "PAGE",
+        width: 640,
+        height: 360,
+        dpr: 1,
+        deviceWidth: 640,
+        deviceHeight: 360,
+      }),
+    }),
+  );
+}
+
 function socketsMatching(path: string): FakeWebSocket[] {
   return FakeWebSocket.instances.filter((socket) => socket.url.includes(path));
 }
@@ -385,6 +405,14 @@ describe("CdpScreencastViewer", () => {
     expect(FakeWebSocket.instances).toHaveLength(2);
     const [firstRenderer] = socketsMatching("/browser/screencast");
     const [firstInput] = socketsMatching("/browser/input");
+    const canvas = host.querySelector<HTMLCanvasElement>(
+      '[data-testid="shared-browser-cdp-screencast"]',
+    )!;
+    expect(canvas.dataset.inputReady).toBe("false");
+    await act(async () => {
+      emitInputReady(firstInput);
+    });
+    expect(canvas.dataset.inputReady).toBe("true");
 
     await act(async () => root.render(renderViewer(0)));
     expect(FakeWebSocket.instances).toHaveLength(2);
@@ -393,10 +421,52 @@ describe("CdpScreencastViewer", () => {
     expect(FakeWebSocket.instances).toHaveLength(4);
     const [, secondRenderer] = socketsMatching("/browser/screencast");
     const [, secondInput] = socketsMatching("/browser/input");
+    expect(canvas.dataset.inputReady).toBe("false");
     expect(firstRenderer?.readyState).toBe(3);
     expect(firstInput?.readyState).toBe(3);
     expect(secondRenderer?.url).toBe(firstRenderer?.url);
     expect(secondInput?.url).toBe(firstInput?.url);
+    await act(async () => {
+      emitInputReady(secondInput);
+    });
+    expect(canvas.dataset.inputReady).toBe("true");
+  });
+
+  it("does not reuse readiness when the same input target returns", async () => {
+    const renderViewer = (inputAvailable: boolean) => (
+      <CdpScreencastViewer
+        wsUrl="wss://runtime.test/browser/screencast"
+        inputWsUrl="wss://runtime.test/browser/input?token=same-grant"
+        inputAvailable={inputAvailable}
+        connectionGeneration={0}
+        active
+        inputEnabled
+        onConnected={vi.fn()}
+        onDisconnected={vi.fn()}
+        onTransportError={vi.fn()}
+      />
+    );
+
+    await act(async () => root.render(renderViewer(true)));
+    const canvas = host.querySelector<HTMLCanvasElement>(
+      '[data-testid="shared-browser-cdp-screencast"]',
+    )!;
+    const [firstInput] = socketsMatching("/browser/input");
+    await act(async () => {
+      emitInputReady(firstInput);
+    });
+    expect(canvas.dataset.inputReady).toBe("true");
+
+    await act(async () => root.render(renderViewer(false)));
+    expect(canvas.dataset.inputReady).toBe("false");
+    await act(async () => root.render(renderViewer(true)));
+    expect(canvas.dataset.inputReady).toBe("false");
+
+    const [, secondInput] = socketsMatching("/browser/input");
+    await act(async () => {
+      emitInputReady(secondInput);
+    });
+    expect(canvas.dataset.inputReady).toBe("true");
   });
 
   it("fails closed when the socket never produces a ready message or frame", async () => {
@@ -446,20 +516,9 @@ describe("CdpScreencastViewer", () => {
       );
     });
     const [inputSocket] = socketsMatching("/browser/input");
-    inputSocket.emit(
-      "message",
-      Object.assign(new Event("message"), {
-        data: JSON.stringify({
-          type: "ready",
-          pageId: "PAGE",
-          width: 640,
-          height: 360,
-          dpr: 1,
-          deviceWidth: 640,
-          deviceHeight: 360,
-        }),
-      }),
-    );
+    await act(async () => {
+      emitInputReady(inputSocket);
+    });
 
     canvasRect = { ...canvasRect, width: 800 } as DOMRect;
     FakeResizeObserver.instances[0]?.trigger();
