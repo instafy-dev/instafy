@@ -15,14 +15,20 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
     ],
   },
   "browser-ui": {
-    minimumTests: 11,
+    minimumTests: 13,
     files: [
       "browser-chrome-mobile-layout.spec.ts",
       "browser-cursor-overlay.spec.ts",
       "shared-browser-approval-responsive.spec.ts",
       "browser-live-proof.spec.ts",
+      "mobile-sidebar-safe-area.spec.ts",
     ],
     titles: [],
+  },
+  "shared-studio": {
+    minimumTests: 1,
+    files: ["shared-browser-studio-ci.spec.ts"],
+    titles: ["signed-in Studio controls Shared Browser, restores its login, and clears project data"],
   },
 });
 

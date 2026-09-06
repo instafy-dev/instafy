@@ -22,10 +22,13 @@ test("required browser lanes execute without secret or production authority", ()
   assert.match(workflow, /xvfb-run -a pnpm test:browser:ci personal/);
   assert.match(workflow, /run: pnpm test:browser:ci browser-ui/);
   assert.match(workflow, /xvfb-run -a node scripts\/browser-profile-e2e\.mjs/);
-  assert.match(workflow, /SUPABASE_DATABASE_ONLY: "1"/);
+  assert.match(workflow, /xvfb-run -a node scripts\/shared-browser-studio-e2e\.mjs/);
+  assert.match(workflow, /apt-get install -y x11-utils sqlite3 postgresql-client/);
+  assert.doesNotMatch(workflow, /SUPABASE_DATABASE_ONLY:/);
   assert.match(workflow, /TEST_DATABASE_URL: postgresql:\/\/postgres:postgres@127\.0\.0\.1:54322\/postgres/);
   assert.equal((workflow.match(/if-no-files-found: error/g) ?? []).length, 3);
   assert.match(workflow, /browser-ci\/shared-profile\/result\.json/);
+  assert.match(workflow, /browser-ci\/shared-studio\/required-browser-result\.json/);
   assert.doesNotMatch(workflow, /--pass-with-no-tests|--retries=[1-9]|--grep/);
   for (const match of workflow.matchAll(/^\s+uses:\s+([^\s#]+)/gm)) {
     assert.match(match[1], /@[a-f0-9]{40}$/);
@@ -33,7 +36,7 @@ test("required browser lanes execute without secret or production authority", ()
 });
 
 test("standalone configs do not import the authenticated development harness", () => {
-  for (const file of ["playwright.personal-ci.config.ts", "playwright.browser-ui-ci.config.ts"]) {
+  for (const file of ["playwright.personal-ci.config.ts", "playwright.browser-ui-ci.config.ts", "playwright.shared-studio-ci.config.ts"]) {
     const config = read(`packages/frontend/${file}`);
     assert.match(config, /forbidOnly: true/);
     assert.match(config, /workers: 1/);

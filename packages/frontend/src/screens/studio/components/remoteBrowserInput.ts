@@ -49,6 +49,20 @@ export type RemoteBrowserVirtualInputMessage = Extract<
 const REMOTE_BROWSER_VIRTUAL_INPUT_EVENT = "instafy:remote-browser-virtual-input";
 const TOUCH_SCROLL_THRESHOLD_PX = 8;
 
+export function remoteBrowserKeyDownText(key: string, modifiers = 0, altGraph = false): string {
+  // CDP modifiers: Alt=1, Control=2, Meta=4, Shift=8. Shift changes the
+  // character supplied by the keyboard; ordinary shortcuts must not type.
+  const shortcutModifiers = modifiers & 7;
+  if (key === "Enter") {
+    // A raw Enter has no keypress/default action in Chromium. Both physical
+    // and software keyboards need the carriage return for submit/newline.
+    return shortcutModifiers === 0 ? "\r" : "";
+  }
+  return key.length === 1 && !(modifiers & 4) && (altGraph || shortcutModifiers === 0)
+    ? key
+    : "";
+}
+
 /**
  * Send text or an allowlisted virtual key through the same bounded input lane
  * used by physical keyboards. This lets a coarse-pointer client keep the
@@ -346,16 +360,15 @@ export function attachRemoteBrowserInput(
     if (!enabled() || event.isComposing || event.key === "Process") {
       return;
     }
-    const altGraph = event.getModifierState("AltGraph");
-    const printable =
-      event.key.length === 1 && !event.metaKey && (altGraph || (!event.altKey && !event.ctrlKey));
+    const modifiers = cdpScreencastModifiers(event);
+    const text = remoteBrowserKeyDownText(event.key, modifiers, event.getModifierState("AltGraph"));
     options.send({
       type: "key",
-      kind: printable ? "keyDown" : "rawKeyDown",
+      kind: text ? "keyDown" : "rawKeyDown",
       key: event.key.slice(0, 128),
       code: event.code.slice(0, 128),
-      text: printable ? event.key : "",
-      modifiers: cdpScreencastModifiers(event),
+      text,
+      modifiers,
       autoRepeat: event.repeat,
       ...(keyCode(event) === undefined
         ? {}

@@ -62,6 +62,7 @@ export function buildReleaseRegistration({
   channel,
   nativeVersion,
   minSupportedNativeVersion = nativeVersion,
+  requiredNativeBuild = null,
   rolloutPercentage = 100,
   status = "draft",
   notes = null,
@@ -78,6 +79,12 @@ export function buildReleaseRegistration({
   if (!Number.isInteger(rolloutPercentage) || rolloutPercentage < 0 || rolloutPercentage > 100) {
     throw new Error(`rolloutPercentage must be an integer between 0 and 100; received ${rolloutPercentage}`);
   }
+  if (requiredNativeBuild !== null && (
+    typeof requiredNativeBuild !== "string" || requiredNativeBuild.length > 64 ||
+    !/^[0-9]+(?:\.[0-9]+)*$(?![\s\S])/.test(requiredNativeBuild)
+  )) {
+    throw new Error("requiredNativeBuild must contain 1–64 ASCII digits with optional dot-separated numeric components");
+  }
 
   const bundleVersion = manifest.bundle_version;
   return {
@@ -88,6 +95,7 @@ export function buildReleaseRegistration({
     git_sha: manifest.git_sha,
     native_version: nativeVersion,
     min_supported_native_version: minSupportedNativeVersion,
+    ...(requiredNativeBuild === null ? {} : { required_native_build: requiredNativeBuild }),
     artifact_url: artifactUrl,
     artifact_sha256: manifest.archive_sha256,
     artifact_size_bytes: manifest.archive_size_bytes,

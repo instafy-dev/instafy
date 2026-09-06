@@ -19,6 +19,8 @@ import { controllerClient } from "../../../sdk/instafy";
 import { getStoredShakeReportEnabled, setStoredShakeReportEnabled } from "./shakeReportPreference";
 import { NATIVE_SHAKE_REPORT_EVENT, useShakeToReport } from "./useShakeToReport";
 
+const SHAKE_SCREENSHOT_TIMEOUT_MS = 3_000;
+
 interface UseStudioBugReportControllerOptions {
   currentUserId: string | null;
   activeProjectId: string | null;
@@ -71,6 +73,13 @@ export function useStudioBugReportController({
   const [lastShakeSampleMagnitude, setLastShakeSampleMagnitude] = useState<number | null>(null);
   const [lastShakePeakCount, setLastShakePeakCount] = useState(0);
   const [lastShakeSampleSource, setLastShakeSampleSource] = useState<string | null>(null);
+  const reportRequestRef = useRef(0);
+
+  useEffect(() => {
+    return () => {
+      reportRequestRef.current += 1;
+    };
+  }, [currentUserId]);
 
   currentUserIdRef.current = currentUserId;
   const bugReportOpen = currentUserId !== null && bugReportOpenForUserId === currentUserId;
@@ -206,15 +215,37 @@ export function useStudioBugReportController({
     const requestUserId = currentUserIdRef.current;
     if (!requestUserId) return;
     logAppInfo("Opening issue report from shake gesture.");
+    const requestId = ++reportRequestRef.current;
     setBugReportSeed(null);
     setBugReportInitialScreenshots([]);
     setBugReportSessionKey((current) => current + 1);
+    let captureExpired = false;
+    let captureTimeout: ReturnType<typeof setTimeout> | undefined;
     try {
-      await waitForAnimationFrames(2);
-      const screenshot = await captureCurrentScreenBugReportDraft();
+      // Screenshots are best-effort: a stalled animation frame, image/font
+      // request, or WebView image decode must not disable reporting itself.
+      const screenshot = await Promise.race([
+        (async () => {
+          await waitForAnimationFrames(2);
+          if (captureExpired || requestId !== reportRequestRef.current ||
+            currentUserIdRef.current !== requestUserId) return null;
+          return captureCurrentScreenBugReportDraft();
+        })(),
+        new Promise<never>((_resolve, reject) => {
+          captureTimeout = setTimeout(() => {
+            captureExpired = true;
+            reject(new Error(
+              "Screenshot capture timed out. You can still send the issue report without a screenshot.",
+            ));
+          }, SHAKE_SCREENSHOT_TIMEOUT_MS);
+        }),
+      ]);
+      if (!screenshot || requestId !== reportRequestRef.current ||
+        currentUserIdRef.current !== requestUserId) return;
       setBugReportInitialScreenshots([screenshot]);
       logAppInfo("Captured current screen for shake issue report.");
     } catch (error) {
+      if (requestId !== reportRequestRef.current || currentUserIdRef.current !== requestUserId) return;
       setBugReportInitialScreenshots([]);
       const nextMessage =
         error instanceof Error
@@ -222,8 +253,10 @@ export function useStudioBugReportController({
           : "Opened the issue report, but could not capture the current screen.";
       logAppWarn(`Shake issue report could not capture the current screen. ${nextMessage}`);
       showStatus(nextMessage, "info", 4000);
+    } finally {
+      clearTimeout(captureTimeout);
     }
-    if (currentUserIdRef.current !== requestUserId) return;
+    if (requestId !== reportRequestRef.current || currentUserIdRef.current !== requestUserId) return;
     setBugReportOpenForUserId(requestUserId);
     logAppInfo("Issue report dialog opened from shake gesture.");
   }, [bugReportOpen, showStatus, waitForAnimationFrames]);
@@ -231,6 +264,7 @@ export function useStudioBugReportController({
   const handleOpenManualBugReport = useCallback(async (detail?: OpenBugReportDetail | null) => {
     const requestUserId = currentUserIdRef.current;
     if (!requestUserId) return;
+    reportRequestRef.current += 1;
     setBugReportSeed(detail ?? null);
     setBugReportInitialScreenshots([]);
     setBugReportSessionKey((current) => current + 1);
@@ -415,6 +449,7 @@ export function useStudioBugReportController({
         onOpenChange={(open) => {
           setBugReportOpenForUserId(open ? currentUserId : null);
           if (!open) {
+            reportRequestRef.current += 1;
             setBugReportSeed(null);
             setBugReportInitialScreenshots([]);
           }

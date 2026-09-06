@@ -31,6 +31,8 @@ export interface OtaReleaseRecord {
   git_sha: string;
   native_version: string;
   min_supported_native_version: string;
+  /** Exact native App.getInfo().build required; absent means legacy version-only routing. */
+  required_native_build?: string | null;
   artifact_url: string;
   artifact_sha256: string;
   artifact_size_bytes: number;
@@ -72,6 +74,7 @@ export interface OtaDeviceState {
   platform: OtaPlatform;
   channel: string;
   native_version: string;
+  native_build?: string | null;
   current_bundle_version?: string | null;
   current_git_sha?: string | null;
   last_seen_at: string;
@@ -92,6 +95,7 @@ export interface OtaUpdateEvent {
   platform: OtaPlatform;
   channel: string;
   native_version: string;
+  native_build?: string | null;
   bundle_version?: string | null;
   git_sha?: string | null;
   space_id?: string | null;
@@ -106,6 +110,7 @@ export interface OtaCheckRequest {
   platform: OtaPlatform;
   channel: string;
   native_version: string;
+  native_build?: string | null;
   current_bundle_version?: string | null;
   current_git_sha?: string | null;
 }
@@ -113,6 +118,7 @@ export interface OtaCheckRequest {
 export interface OtaCheckResponse {
   update_available: boolean;
   reason: string;
+  required_native_build?: string | null;
   release_id?: string | null;
   bundle_version?: string | null;
   git_sha?: string | null;
@@ -128,11 +134,14 @@ export interface ActivateOtaChannelRequest {
   release_id: string;
   rollout_percentage?: number | null;
   activated_by: string;
+  /** Omit for legacy behavior; null expects an unassigned channel; otherwise compare exactly. */
+  expected_active_release_id?: string | null;
 }
 
 export interface RollbackOtaChannelRequest {
   release_id?: string | null;
   activated_by: string;
+  expected_active_release_id?: string | null;
 }
 
 export interface OtaReleaseRegistrationInput extends Omit<OtaReleaseRecord, "published_at"> {
@@ -141,6 +150,12 @@ export interface OtaReleaseRegistrationInput extends Omit<OtaReleaseRecord, "pub
 
 export function isOtaPlatform(value: unknown): value is OtaPlatform {
   return value === "ios" || value === "android";
+}
+
+/** Native build identifiers are opaque: never normalize dotted or zero-prefixed builds. */
+export function isOtaNativeBuild(value: unknown): value is string {
+  return typeof value === "string" && value.length <= 64 &&
+    /^[0-9]+(?:\.[0-9]+)*$(?![\s\S])/.test(value);
 }
 
 export type DesktopReleaseChannel = "internal" | "stable";
