@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import { createRequire } from "node:module";
-import { access, chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, lstat, mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,6 +20,99 @@ const fixedBrowserDirectory = "/tmp/instafy/playwright";
 const controllerTest = "tests::browser_profile_e2e_fixture::shared_profile_browser_runtime_lifecycle_e2e";
 const ownerPath = path.join(fixedRuntimeDirectory, "profile-e2e-owner.json");
 const receiptPath = path.join(root, "packages/frontend/test-results/browser-ci/shared-profile/result.json");
+const CHROMIUM_DIAGNOSTIC_BYTES = 64 * 1024;
+
+// These are observations, not a claimed root cause. Never retain matched text:
+// Chromium messages can contain URLs, profile paths, or page-controlled values.
+const CHROMIUM_STARTUP_CATEGORIES = [
+  ["display-unavailable", /Missing X server or \$DISPLAY|cannot open display|Unable to open X display|Failed to connect to X server/i],
+  ["display-authorization", /Authorization required, but no authorization protocol specified|Invalid MIT-MAGIC-COOKIE-1 key|No protocol specified|X11 connection rejected because of wrong authentication/i],
+  ["platform-initialization-failed", /The platform failed to initialize/i],
+  ["missing-system-library", /error while loading shared libraries|cannot open shared object file/i],
+  ["profile-in-use", /Failed to create[^\n]*SingletonLock|Failed to create a ProcessSingleton|profile appears to be in use/i],
+  ["address-in-use", /Address already in use|EADDRINUSE/i],
+  ["devtools-listener-failed", /Cannot start http server for devtools/i],
+  ["resource-exhausted", /No space left on device|Cannot allocate memory|Out of memory|Resource temporarily unavailable|Too many open files/i],
+  ["sandbox-failed", /No usable sandbox|SUID sandbox helper binary[^\n]*not configured correctly|Failed to move to new namespace|Running as root without --no-sandbox/i],
+  ["crash-handler-failed", /chrome_crashpad_handler: --database is required/i],
+  ["fatal-or-signal", /FATAL:|Received signal [0-9]+|Trace\/breakpoint trap|Segmentation fault/i],
+  ["devtools-ready-observed", /^DevTools listening on ws:\/\/127\.0\.0\.1:[0-9]+\//m],
+];
+
+async function boundedDiagnosticFile(filename, limit) {
+  let file;
+  try {
+    // NONBLOCK prevents an unexpected FIFO/device from wedging diagnostics;
+    // NOFOLLOW and fstat reject links and non-regular files before any read.
+    if (!constants.O_NOFOLLOW) return { state: "unsafe" };
+    file = await open(filename, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const info = await file.stat();
+    if (!info.isFile() || info.nlink !== 1 || info.uid !== process.getuid()) return { state: "unsafe" };
+    const bytes = Buffer.alloc(Math.min(info.size, limit));
+    const { bytesRead } = await file.read(bytes, 0, bytes.length, Math.max(0, info.size - limit));
+    return { state: "read", text: bytes.subarray(0, bytesRead).toString("utf8"), bytesRead, truncated: info.size > limit };
+  } catch (error) {
+    return { state: error.code === "ENOENT" ? "missing" : error.code === "ELOOP" ? "unsafe" : "unreadable" };
+  } finally {
+    await file?.close().catch(() => {});
+  }
+}
+
+export async function chromiumStartupDiagnostics({ directory = fixedRuntimeDirectory, runId, fixtureRoot }) {
+  const unverified = { state: "ownership-unverified", bytesRead: 0, truncated: false, categories: [] };
+  try {
+    for (const candidate of [directory, path.join(directory, "playwright")]) {
+      const info = await lstat(candidate);
+      if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid()) return unverified;
+    }
+    const marker = await boundedDiagnosticFile(path.join(directory, "profile-e2e-owner.json"), 4096);
+    if (marker.state !== "read" || marker.truncated || !runId || !fixtureRoot) return unverified;
+    const owner = JSON.parse(marker.text);
+    if (owner.runId !== runId || owner.root !== fixtureRoot) return unverified;
+  } catch {
+    return unverified;
+  }
+  const log = await boundedDiagnosticFile(path.join(directory, "playwright/chromium.log"), CHROMIUM_DIAGNOSTIC_BYTES);
+  if (log.state !== "read") return { state: log.state, bytesRead: 0, truncated: false, categories: [] };
+  const categories = CHROMIUM_STARTUP_CATEGORIES.filter(([, pattern]) => pattern.test(log.text)).map(([category]) => category);
+  return { state: "read", bytesRead: log.bytesRead, truncated: log.truncated,
+    categories: categories.length ? categories : ["unclassified"] };
+}
+
+// Probe the same X connection used by the native browser, after the long builds
+// and immediately before the lifecycle. No stdout/stderr or error text escapes.
+export async function preflightFixtureDisplay(env, { signal, spawnProcess = spawn, timeoutMs = 5_000 } = {}) {
+  if (signal?.aborted) return "cancelled";
+  if (!env.DISPLAY) return "display-not-configured";
+  let child;
+  let timer;
+  let abort;
+  try {
+    child = spawnProcess("xdpyinfo", ["-display", env.DISPLAY], {
+      env: fixtureChildEnvironment(env), detached: true, stdio: "ignore",
+    });
+    return await new Promise(resolve => {
+      const stop = (status) => {
+        // xdpyinfo is one non-spawning probe. Use its ChildProcess handle,
+        // avoiding a second signal to a possibly already-reaped process group.
+        if (child.pid && !child.killed) child.kill("SIGKILL");
+        resolve(status);
+      };
+      child.once("error", error => resolve(error.code === "ENOENT" ? "probe-unavailable" : "probe-failed"));
+      child.once("exit", code => resolve(code === 0 ? "ready" : "display-unavailable"));
+      abort = () => stop("cancelled");
+      timer = setTimeout(() => stop("timed-out"), timeoutMs);
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
+    });
+  } catch {
+    return "probe-failed";
+  } finally {
+    clearTimeout(timer);
+    if (abort) signal?.removeEventListener("abort", abort);
+    if (child?.pid && !child.killed && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  }
+}
 
 export function validateBrowserFixtureEnvironment(env, platform = process.platform) {
   assert.equal(env.INSTAFY_PROFILE_E2E, "1", "browser helper requires the explicit lifecycle fixture marker");
@@ -241,6 +334,8 @@ async function lifecycle() {
   let claimedFixedDirectory = false;
   let passed = false;
   let stage = "setup";
+  let displayPreflight = "not-run";
+  let runId;
   const started = Date.now();
   const cancellation = new AbortController();
   const removeSignalHandlers = installCancellationSignalHandlers(cancellation);
@@ -254,7 +349,7 @@ async function lifecycle() {
     await mkdir(fixedRuntimeDirectory);
     claimedFixedDirectory = true;
     await mkdir(fixedBrowserDirectory);
-    const runId = randomUUID();
+    runId = randomUUID();
     await writeFile(ownerPath, JSON.stringify({ runId, root: temporary }), { mode: 0o600, flag: "wx" });
     const bin = path.join(temporary, "bin");
     await mkdir(bin);
@@ -291,6 +386,9 @@ async function lifecycle() {
       INSTAFY_BROWSER_ADBLOCK: "0",
       WORKSPACE_DIR: path.join(temporary, "workspace"),
     };
+    stage = "display-preflight";
+    displayPreflight = await preflightFixtureDisplay(runEnv, { signal: cancellation.signal });
+    assert.equal(displayPreflight, "ready", "Shared fixture X-display preflight failed");
     stage = "real-browser-lifecycle";
     const output = await run(controller, [controllerTest, "--exact", "--ignored", "--nocapture", "--test-threads=1"], {
       env: runEnv, timeoutMs: 240_000, onOutput: data => process.stdout.write(data),
@@ -301,6 +399,10 @@ async function lifecycle() {
     console.log("Shared profile/runtime lifecycle passed; full Studio/collaboration and browser egress transport are outside this lane.");
   } finally {
     try {
+      const chromiumLog = !passed && claimedFixedDirectory
+        ? await chromiumStartupDiagnostics({ runId, fixtureRoot: temporary })
+        : { state: "not-inspected", bytesRead: 0, truncated: false, categories: [] };
+      if (!passed) console.error(`[profile-startup] display=${displayPreflight}; log=${chromiumLog.state}; categories=${chromiumLog.categories.join(",") || "none"}`);
       if (claimedFixedDirectory) await rm(fixedRuntimeDirectory, { recursive: true });
       await rm(temporary, { recursive: true });
       await mkdir(path.dirname(receiptPath), { recursive: true });
@@ -309,6 +411,7 @@ async function lifecycle() {
       await writeFile(receiptPath, `${JSON.stringify({
         schemaVersion: 1, lane: "shared-profile-runtime-lifecycle", status: passed ? "passed" : "failed",
         stage, durationMs: Date.now() - started,
+        startupDiagnostics: { displayPreflight, chromiumLog },
         proof: passed ? ["real-chromium-http-only-and-js-cookies", "server-cookie-echo", "local-storage", "runtime-profile-replacement", "encrypted-controller-storage", "stale-writer-409", "authorized-reset", "released-lease-no-resurrection"] : [],
         excludes: ["full-studio", "collaboration", "model-turns", "active-provider-stop", "browser-egress-transport", "OS-isolation"],
       }, null, 2)}\n`);
