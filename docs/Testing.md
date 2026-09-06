@@ -114,6 +114,37 @@ For the full-stack suites, run the local stack first:
 - `pnpm stack:up`
 - `pnpm stack:down` when finished.
 
+## Support workflow simulation
+
+The support component browser suite exercises the production profile menu, report composer,
+inbox, follow-up form, notification hook, and status toast in desktop and narrow phone viewports.
+It uses synthetic authentication and controller responses with the real frontend HTTP client;
+it needs no account, database, model, or provider credentials. From `packages/frontend`, run:
+
+```bash
+node ./node_modules/@playwright/test/cli.js test --config playwright.support-ci.config.ts
+```
+
+Use `PLAYWRIGHT_BROWSER_UI_CHANNEL=chrome` to select an installed Chrome when the pinned
+Playwright Chromium is unavailable. The dedicated configuration launches the existing minimal
+Vite component server directly and does not load local environment files. This is browser UI
+simulation; it does not prove a deployed controller or external push delivery.
+
+The corresponding controller checks require an isolated Postgres database with the public
+migrations applied, selected explicitly by `TEST_DATABASE_URL`. Run from the repository root:
+
+```bash
+cargo test --manifest-path packages/runtime-controller/Cargo.toml tests::support_workflow_tests
+cargo test --manifest-path packages/runtime-controller/Cargo.toml tests::support_report_messages_are_owner_scoped_safe_and_idempotent -- --exact
+cargo test --manifest-path packages/runtime-controller/Cargo.toml tests::support_report_routes_enforce_customer_privacy_boundary -- --exact
+```
+
+These exercise the real report routes and database. The first group checks required and stale
+triage versions, customer activity checks during resolution, simultaneous resolution-alert
+claims, and viewing a resolution before the polling loop claims it. The lifecycle check covers
+operator replies, review, resolution, acknowledgement, customer follow-up, and re-resolution.
+The privacy check verifies owner isolation, operator boundaries, and account mismatch rejection.
+
 ## Secret-free browser CI lanes
 
 These lanes use disposable data, do not load local `.env` files, and do not

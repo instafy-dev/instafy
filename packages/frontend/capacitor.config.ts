@@ -70,6 +70,8 @@ const config: CapacitorConfig = {
         }
       : undefined,
   plugins: {
+    // Foreground alerts are presented once by the durable notification center.
+    PushNotifications: { presentationOptions: [] },
     StatusBar: {
       backgroundColor: "#ffffff",
       overlaysWebView: false,
