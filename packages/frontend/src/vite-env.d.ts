@@ -37,6 +37,7 @@ type InstafyBuildInfo = {
 };
 
 declare const __INSTAFY_BUILD_INFO__: InstafyBuildInfo;
+declare const __INSTAFY_NATIVE_OTA_CHANNEL__: string;
 
 type InstafyDesktopNotificationPayload = {
   title: string;

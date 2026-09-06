@@ -117,6 +117,11 @@ from it is rejected because its signed session no longer owns control.
 The frontend adapter in `remoteBrowserInput.ts` is transport-independent and is
 shared with the WebRTC viewer. Neither viewer accepts arbitrary CDP method names,
 JavaScript expressions, URLs, or payload objects from the browser client.
+Physical and mobile Enter keys send `keyDown` with carriage-return text (`\r`),
+followed by a text-free `keyUp`, so Chromium performs form submission and textarea
+line breaks. Ctrl/Alt/Meta shortcuts remain nonprinting; Shift+Enter retains its
+normal line-break behavior. A raw key-down alone does not generate the character
+event needed for these default browser actions.
 
 ## Verification
 

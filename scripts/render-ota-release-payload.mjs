@@ -68,6 +68,7 @@ const payload = buildReleaseRegistration({
   channel,
   nativeVersion,
   minSupportedNativeVersion: args.get("--min-supported-native-version") || nativeVersion,
+  requiredNativeBuild: args.get("--required-native-build") ?? null,
   rolloutPercentage: Number.parseInt(args.get("--rollout-percentage") || "100", 10),
   status: args.get("--status") || "draft",
   notes: args.get("--notes") || null,
