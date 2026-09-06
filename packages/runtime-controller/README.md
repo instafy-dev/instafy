@@ -112,6 +112,32 @@ Key environment variables (see `AppConfig::from_env` for defaults):
 Additional fields include Redis settings for cross-controller `/events` fanout (`REDIS_URL`, optional `REDIS_NAMESPACE`, optional `REDIS_EVENTS_CHANNEL`), agent token TTLs, and GitHub workflow metadata. Keep environment-specific values in your orchestration layer (e.g., AWS ECS task definitions).
 
 ## Local Development
+
+### Startup service identity
+
+`SERVICE_RUNTIME_USER_ID` optionally supplies the controller's service-runtime
+user UUID (plain or base64-encoded). When it is absent and a server-side
+`SUPABASE_SERVICE_ROLE_KEY` is available, startup looks up or creates the service
+user through the Supabase admin API. `SERVICE_RUNTIME_USER_EMAIL` selects that
+identity (default `service-runtime@instafy.dev`); `SERVICE_RUNTIME_USER_PASSWORD`
+optionally supplies the password used only when creating it.
+
+Configuration loading performs blocking HTTP calls, so async startup runs it on
+a blocking worker before initializing the database pool. An explicit service
+UUID skips admin bootstrap. Without an admin key, or if bootstrap fails, the
+existing database lookup fallback remains available. Service-role keys and the
+service user's password stay controller-side; they are not browser settings.
+
+The startup regression suite launches the real controller with a cleared
+environment and an inert loopback Auth server. It needs neither Docker nor a
+database and never uses an existing Supabase account:
+
+```bash
+cargo test --locked --manifest-path packages/runtime-controller/Cargo.toml --test startup
+```
+
+### Running the controller
+
 1. Ensure Postgres + Supabase stack are running locally with the expected schema (see `packages/runtime-controller/migrations/`).
 2. Set the required env vars (at minimum `DATABASE_URL`, `SUPABASE_PROJECT_URL`, `CONTROLLER_INTERNAL_TOKEN`, `WORKSPACE_ROOT`, and an Ed25519 keypair via `RUNTIME_SIGNING_PRIVATE_KEY` / `RUNTIME_SIGNING_PUBLIC_KEY`).
 3. Use the provided scripts: `pnpm controller:up` to boot Supabase + the controller, and the matching `*:down` command when finished. Avoid backgrounding the controller manually; orphaned listeners block Playwright.

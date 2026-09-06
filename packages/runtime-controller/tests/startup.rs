@@ -1,0 +1,314 @@
+//! Exercise the actual Tokio entrypoint without a database, Docker or user credentials.
+//! Each child has an empty environment and private home. Its deliberately invalid
+//! database URL stops startup immediately after configuration, before any database IO.
+
+use std::io::Read;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
+use httpmock::prelude::*;
+use httpmock::Mock;
+use serde_json::json;
+
+const SERVICE_ID: &str = "00000000-0000-4000-8000-000000000001";
+const SERVICE_EMAIL: &str = "controller-startup@example.test";
+const SERVICE_KEY: &str = "inert-startup-service-role";
+const SERVICE_PASSWORD: &str = "inert-startup-password-override";
+const ADMIN_PATH: &str = "/auth/v1/admin/users";
+const JWKS_PATH: &str = "/auth/v1/.well-known/jwks.json";
+const OUTPUT_LIMIT: u64 = 32 * 1024;
+const CHILD_TIMEOUT: Duration = Duration::from_secs(15);
+
+struct OwnedChild {
+    child: Child,
+    reaped: bool,
+}
+
+impl Drop for OwnedChild {
+    fn drop(&mut self) {
+        if !self.reaped {
+            // This exact unreaped child cannot have its PID reused. Never signal
+            // a process found by name, a shared group, or a previously reaped PID.
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+struct StartupExit {
+    status: ExitStatus,
+    output: String,
+}
+
+fn capture_output(
+    stream: impl Read + Send + 'static,
+    oversized: Arc<AtomicBool>,
+) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stream
+            .take(OUTPUT_LIMIT + 1)
+            .read_to_end(&mut bytes)
+            .expect("read bounded owned-child output");
+        if bytes.len() as u64 > OUTPUT_LIMIT {
+            oversized.store(true, Ordering::SeqCst);
+        }
+        bytes
+    })
+}
+
+fn run_controller(server: &MockServer, configure: impl FnOnce(&mut Command)) -> StartupExit {
+    let directory = tempfile::tempdir().expect("private startup fixture directory");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_runtime-controller"));
+    command
+        .env_clear()
+        .current_dir(directory.path())
+        .env("HOME", directory.path())
+        .env("WORKSPACE_ROOT", directory.path().join("workspaces"))
+        .env("DATABASE_URL", "not-a-database-connection")
+        .env("SUPABASE_PROJECT_URL", server.base_url())
+        .env("SUPABASE_JWT_SECRET", "inert-startup-hmac-fallback")
+        .env("SUPABASE_SERVICE_ROLE_KEY", SERVICE_KEY)
+        .env("SERVICE_RUNTIME_USER_EMAIL", SERVICE_EMAIL)
+        .env("MANAGED_AI_ENABLED", "false")
+        .env("MANAGED_AI_STARTUP_CHECK", "false")
+        .env("RUST_LOG", "info")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure(&mut command);
+    let mut owned = OwnedChild {
+        child: command.spawn().expect("spawn the owned controller binary"),
+        reaped: false,
+    };
+    let oversized = Arc::new(AtomicBool::new(false));
+    let stdout = capture_output(owned.child.stdout.take().unwrap(), oversized.clone());
+    let stderr = capture_output(owned.child.stderr.take().unwrap(), oversized.clone());
+    let deadline = Instant::now() + CHILD_TIMEOUT;
+    let status = loop {
+        assert!(
+            !oversized.load(Ordering::SeqCst),
+            "owned controller output exceeded its limit"
+        );
+        if let Some(status) = owned.child.try_wait().expect("poll owned controller") {
+            owned.reaped = true;
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "owned controller startup timed out"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    let mut bytes = stdout.join().expect("join owned stdout reader");
+    bytes.extend(stderr.join().expect("join owned stderr reader"));
+    assert!(
+        !oversized.load(Ordering::SeqCst),
+        "owned controller output exceeded its limit"
+    );
+    let output = String::from_utf8_lossy(&bytes).into_owned();
+    // Diagnostics should identify the failure, never print even these inert
+    // credentials. Do not include raw child output in assertion messages.
+    assert!(!output.contains(SERVICE_KEY));
+    assert!(!output.contains(SERVICE_PASSWORD));
+    StartupExit { status, output }
+}
+
+fn assert_normal_error(result: &StartupExit, diagnostic: &str) {
+    assert_eq!(
+        result.status.code(),
+        Some(1),
+        "startup must return a normal configuration error, not panic or signal"
+    );
+    assert!(
+        result.output.contains(diagnostic),
+        "expected startup diagnostic"
+    );
+    assert!(!result.output.contains("panicked at"));
+    assert!(!result.output.contains("Cannot drop a runtime"));
+}
+
+fn jwks_fixture(server: &MockServer) -> Mock<'_> {
+    server.mock(|when, then| {
+        when.method(GET).path(JWKS_PATH);
+        // Exercise the normal bounded JWKS fetch and documented HMAC fallback.
+        then.status(200).json_body(json!({ "keys": [] }));
+    })
+}
+
+#[test]
+fn startup_bootstraps_an_existing_service_user_inside_tokio() {
+    let server = MockServer::start();
+    let jwks = jwks_fixture(&server);
+    let lookup = server.mock(|when, then| {
+        when.method(GET)
+            .path(ADMIN_PATH)
+            .query_param("email", SERVICE_EMAIL)
+            .header("apikey", SERVICE_KEY)
+            .header("authorization", format!("Bearer {SERVICE_KEY}"));
+        then.status(200)
+            .json_body(json!({ "users": [{ "id": SERVICE_ID }] }));
+    });
+    let create = server.mock(|when, then| {
+        when.method(POST).path(ADMIN_PATH);
+        then.status(500);
+    });
+    let result = run_controller(&server, |command| {
+        command.env(
+            "SERVICE_RUNTIME_USER_EMAIL",
+            "  CONTROLLER-STARTUP@EXAMPLE.TEST  ",
+        );
+    });
+    assert_normal_error(&result, "failed to parse DATABASE_URL");
+    assert!(result
+        .output
+        .contains("bootstrapped SERVICE_RUNTIME_USER_ID via Supabase admin API"));
+    assert!(result.output.contains(SERVICE_ID));
+    jwks.assert_hits(1);
+    lookup.assert_hits(1);
+    create.assert_hits(0);
+}
+
+#[test]
+fn startup_creates_a_missing_service_user_inside_tokio() {
+    let server = MockServer::start();
+    let jwks = jwks_fixture(&server);
+    let lookup = server.mock(|when, then| {
+        when.method(GET)
+            .path(ADMIN_PATH)
+            .query_param("email", SERVICE_EMAIL);
+        then.status(200).json_body(json!({ "users": [] }));
+    });
+    let create = server.mock(|when, then| {
+        when.method(POST)
+            .path(ADMIN_PATH)
+            .header("apikey", SERVICE_KEY)
+            .header("authorization", format!("Bearer {SERVICE_KEY}"))
+            .json_body(json!({ "email": SERVICE_EMAIL, "password": SERVICE_PASSWORD, "email_confirm": true }));
+        then.status(201).json_body(json!({ "id": SERVICE_ID }));
+    });
+    let result = run_controller(&server, |command| {
+        command.env(
+            "SERVICE_RUNTIME_USER_PASSWORD",
+            format!("  {SERVICE_PASSWORD}  "),
+        );
+    });
+    assert_normal_error(&result, "failed to parse DATABASE_URL");
+    assert!(result
+        .output
+        .contains("bootstrapped SERVICE_RUNTIME_USER_ID via Supabase admin API"));
+    assert!(result.output.contains(SERVICE_ID));
+    jwks.assert_hits(1);
+    lookup.assert_hits(1);
+    create.assert_hits(1);
+}
+
+#[test]
+fn startup_explicit_uuid_and_base64_id_never_call_the_admin_api() {
+    let server = MockServer::start();
+    let jwks = jwks_fixture(&server);
+    let admin = server.mock(|when, then| {
+        when.path(ADMIN_PATH);
+        then.status(500);
+    });
+    for configured in [SERVICE_ID.to_string(), BASE64.encode(SERVICE_ID)] {
+        let result = run_controller(&server, |command| {
+            command.env("SERVICE_RUNTIME_USER_ID", format!("  {configured}  "));
+        });
+        assert_normal_error(&result, "failed to parse DATABASE_URL");
+        assert!(!result
+            .output
+            .contains("bootstrapped SERVICE_RUNTIME_USER_ID"));
+        assert!(!result
+            .output
+            .contains("failed to bootstrap SERVICE_RUNTIME_USER_ID"));
+    }
+    jwks.assert_hits(2);
+    admin.assert_hits(0);
+}
+
+#[test]
+fn startup_without_a_service_key_preserves_the_no_admin_fallback() {
+    let server = MockServer::start();
+    let jwks = jwks_fixture(&server);
+    let admin = server.mock(|when, then| {
+        when.path(ADMIN_PATH);
+        then.status(500);
+    });
+    let result = run_controller(&server, |command| {
+        command.env_remove("SUPABASE_SERVICE_ROLE_KEY");
+    });
+    assert_normal_error(&result, "failed to parse DATABASE_URL");
+    assert!(result
+        .output
+        .contains("SUPABASE_SERVICE_ROLE_KEY is unavailable"));
+    jwks.assert_hits(1);
+    admin.assert_hits(0);
+}
+
+#[test]
+fn startup_admin_failure_remains_a_warning_not_a_panic() {
+    let server = MockServer::start();
+    let jwks = jwks_fixture(&server);
+    let lookup = server.mock(|when, then| {
+        when.method(GET).path(ADMIN_PATH);
+        then.status(503)
+            .json_body(json!({ "error": "inert fixture failure" }));
+    });
+    let create = server.mock(|when, then| {
+        when.method(POST).path(ADMIN_PATH);
+        then.status(503)
+            .json_body(json!({ "error": "inert fixture failure" }));
+    });
+    let result = run_controller(&server, |_| {});
+    assert_normal_error(&result, "failed to parse DATABASE_URL");
+    assert!(result
+        .output
+        .contains("failed to bootstrap SERVICE_RUNTIME_USER_ID via Supabase admin API"));
+    jwks.assert_hits(1);
+    lookup.assert_hits(1);
+    create.assert_hits(1);
+}
+
+#[test]
+fn startup_retries_lookup_after_a_duplicate_create_response() {
+    let server = MockServer::start();
+    let jwks = jwks_fixture(&server);
+    let lookup = server.mock(|when, then| {
+        when.method(GET)
+            .path(ADMIN_PATH)
+            .query_param("email", SERVICE_EMAIL);
+        then.status(200).json_body(json!({ "users": [] }));
+    });
+    let create = server.mock(|when, then| {
+        when.method(POST).path(ADMIN_PATH);
+        then.status(422)
+            .json_body(json!({ "code": "email_exists" }));
+    });
+    let result = run_controller(&server, |_| {});
+    assert_normal_error(&result, "failed to parse DATABASE_URL");
+    assert!(result
+        .output
+        .contains("failed to bootstrap SERVICE_RUNTIME_USER_ID via Supabase admin API"));
+    jwks.assert_hits(1);
+    lookup.assert_hits(2);
+    create.assert_hits(1);
+}
+
+#[test]
+fn startup_propagates_configuration_errors_before_network_io() {
+    let server = MockServer::start();
+    let requests = server.mock(|_when, then| {
+        then.status(500);
+    });
+    let result = run_controller(&server, |command| {
+        command.env_remove("DATABASE_URL");
+    });
+    assert_normal_error(&result, "DATABASE_URL must be set");
+    requests.assert_hits(0);
+}
