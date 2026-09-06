@@ -1,4 +1,4 @@
-import { BellNotification, BellOff, Download, HalfMoon, LogOut, Refresh, Settings, SunLight, User } from "iconoir-react";
+import { BellNotification, BellOff, ChatBubble, Download, HalfMoon, LogOut, Refresh, Settings, SunLight, User } from "iconoir-react";
 import { DialogTrigger } from "react-aria-components";
 import { useId, type MouseEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import { Button, IconButton } from "../../../components/Button";
@@ -34,6 +34,8 @@ type StudioSidebarAccountSectionProps = {
   onUpdateEntryPointerDown: (event: ReactPointerEvent<HTMLButtonElement>) => void;
   clearUpdateLongPress: () => void;
   onOpenProfileSettings?: () => void;
+  onOpenSupport?: () => void;
+  supportUnreadCount?: number;
   notificationsPending: boolean;
   notificationsEnabled: boolean;
   onToggleNotifications: () => void;
@@ -81,6 +83,17 @@ function ProfileUpdateIndicator({
   );
 }
 
+function ProfileSupportIndicator({ unreadCount }: { unreadCount: number }) {
+  if (unreadCount <= 0) return null;
+  return (
+    <span
+      className="absolute bottom-0.5 right-0.5 z-10 inline-flex h-2.5 w-2.5 rounded-full bg-sky-500 ring-2 ring-white dark:ring-[var(--color-studio-dark-rail)]"
+      data-testid="profile-support-indicator"
+      aria-hidden="true"
+    />
+  );
+}
+
 export function StudioSidebarAccountSection({
   footerRef,
   showLabels,
@@ -101,6 +114,8 @@ export function StudioSidebarAccountSection({
   onUpdateEntryPointerDown,
   clearUpdateLongPress,
   onOpenProfileSettings,
+  onOpenSupport,
+  supportUnreadCount = 0,
   notificationsPending,
   notificationsEnabled,
   onToggleNotifications,
@@ -116,11 +131,25 @@ export function StudioSidebarAccountSection({
   updateActionPending,
 }: StudioSidebarAccountSectionProps) {
   const updateStatusDescriptionId = useId();
+  const supportStatusDescriptionId = useId();
   const accessibleUpdateStatus =
     shouldRenderUpdateEntry &&
     (updatePresentation?.emphasis === "attention" || updatePresentation?.emphasis === "danger")
       ? `${updatePresentation.title}. ${updatePresentation.detail}.`
       : null;
+  const normalizedSupportUnreadCount = Math.max(0, Math.floor(supportUnreadCount));
+  const accessibleSupportStatus =
+    normalizedSupportUnreadCount > 0
+      ? `${normalizedSupportUnreadCount} unread support ${
+          normalizedSupportUnreadCount === 1 ? "update" : "updates"
+        }.`
+      : null;
+  const profileStatusDescriptionIds = [
+    accessibleUpdateStatus ? updateStatusDescriptionId : null,
+    accessibleSupportStatus ? supportStatusDescriptionId : null,
+  ]
+    .filter(Boolean)
+    .join(" ") || undefined;
 
   return (
     <div
@@ -145,6 +174,14 @@ export function StudioSidebarAccountSection({
       >
         {accessibleUpdateStatus}
       </span>
+      <span
+        id={supportStatusDescriptionId}
+        className="sr-only"
+        role="status"
+        aria-live="polite"
+      >
+        {accessibleSupportStatus}
+      </span>
       <DialogTrigger
         isOpen={profileMenuOpen}
         onOpenChange={(open) => onProfileMenuOpenChange(open)}
@@ -157,7 +194,7 @@ export function StudioSidebarAccountSection({
             className="w-full justify-start gap-3 text-left"
             data-testid="sidebar-profile-menu"
             aria-haspopup="dialog"
-            aria-describedby={accessibleUpdateStatus ? updateStatusDescriptionId : undefined}
+            aria-describedby={profileStatusDescriptionIds}
           >
             <span className={avatarShellClassName("h-9 w-9")}>
               {avatarUrl ? (
@@ -168,6 +205,7 @@ export function StudioSidebarAccountSection({
               {shouldRenderUpdateEntry ? (
                 <ProfileUpdateIndicator presentation={updatePresentation} />
               ) : null}
+              <ProfileSupportIndicator unreadCount={normalizedSupportUnreadCount} />
             </span>
             <span className="min-w-0 flex-1">
               <Text as="span" variant="bodyStrong" tone="primary" className="block truncate">
@@ -189,7 +227,7 @@ export function StudioSidebarAccountSection({
             data-testid="sidebar-profile-menu"
             aria-haspopup="dialog"
             aria-label="Open profile menu"
-            aria-describedby={accessibleUpdateStatus ? updateStatusDescriptionId : undefined}
+            aria-describedby={profileStatusDescriptionIds}
           >
             {avatarUrl ? (
               <img src={avatarUrl} alt="" className="h-full w-full object-cover" />
@@ -199,6 +237,7 @@ export function StudioSidebarAccountSection({
             {shouldRenderUpdateEntry ? (
               <ProfileUpdateIndicator presentation={updatePresentation} />
             ) : null}
+            <ProfileSupportIndicator unreadCount={normalizedSupportUnreadCount} />
           </IconButton>
         )}
         <StudioDialogPopover placement="top start" offset={10} className="w-64 p-3 text-sm">
@@ -299,6 +338,11 @@ export function StudioSidebarAccountSection({
                   void onToggleNotifications();
                   return;
                 }
+                if (action === "profile:support") {
+                  onProfileMenuOpenChange(false);
+                  onOpenSupport?.();
+                  return;
+                }
                 if (action === "profile:diagnostics") {
                   onProfileMenuOpenChange(false);
                   onOpenDiagnostics();
@@ -328,6 +372,31 @@ export function StudioSidebarAccountSection({
                 >
                   <MenuItemContent start={<Download aria-hidden="true" />}>
                     Install Instafy
+                  </MenuItemContent>
+                </StudioMenuItem>
+              ) : null}
+              {onOpenSupport ? (
+                <StudioMenuItem id="profile:support" data-testid="profile-support-button">
+                  <MenuItemContent
+                    start={<ChatBubble aria-hidden="true" />}
+                    end={
+                      normalizedSupportUnreadCount > 0 ? (
+                        <span
+                          className="inline-flex min-w-5 items-center justify-center rounded-full bg-sky-100 px-1.5 py-0.5 text-[11px] font-semibold text-sky-700 dark:bg-sky-950 dark:text-sky-200"
+                          data-testid="profile-support-unread-count"
+                          aria-label={`${normalizedSupportUnreadCount} unread support ${
+                            normalizedSupportUnreadCount === 1 ? "update" : "updates"
+                          }`}
+                        >
+                          {normalizedSupportUnreadCount > 99
+                            ? "99+"
+                            : normalizedSupportUnreadCount}
+                        </span>
+                      ) : null
+                    }
+                    endClassName="shrink-0"
+                  >
+                    Support
                   </MenuItemContent>
                 </StudioMenuItem>
               ) : null}

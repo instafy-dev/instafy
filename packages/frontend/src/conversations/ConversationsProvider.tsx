@@ -291,11 +291,11 @@ export const ConversationsProvider = ({ children }: PropsWithChildren) => {
     (options?: CreateConversationOptions): ConversationState => {
       const initialMessages = options?.messages ?? [];
       const conversation: ConversationState = {
-        localId: makeConversationId(),
+        localId: options?.localId ?? makeConversationId(),
         title: options?.title ?? `Conversation ${state.sequence}`,
         visibility: options?.visibility ?? "public",
         lifecycleStatus: "active",
-        controllerId: null,
+        controllerId: options?.controllerId ?? null,
         parentConversationId: options?.parentConversationId ?? null,
         threadKind: options?.threadKind ?? null,
         ownerAgent: options?.ownerAgent ? { ...options.ownerAgent } : null,

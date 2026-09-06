@@ -5,6 +5,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ResolvedPromptAgentSelection } from "../../../../conversations/assistantMentions";
 import { useChatSubmitFlow } from "../useChatSubmitFlow";
+import { queuedMentionComposer, QUEUED_MENTION_USER_ID } from "./fixtures/queuedMentionComposer";
+import { readQueuedComposerMetadata } from "../chatSendQueueComposer";
 
 type HookOptions = Parameters<typeof useChatSubmitFlow>[0];
 type HookResult = ReturnType<typeof useChatSubmitFlow>;
@@ -205,6 +207,42 @@ describe("useChatSubmitFlow queued composer draft", () => {
     );
     expect(composer.draft).toBe("");
     expect(clearComposerAfterQueue).toHaveBeenCalledWith("conversation-local", TYPED_DRAFT);
+  });
+
+  it("forwards selected people into the durable queue before a busy assistant finishes", async () => {
+    const composer = queuedMentionComposer();
+    const options = createOptions({ inputValue: composer.message, inputEditorState: composer.editorState });
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => root.render(<Harness options={options} resultRef={resultRef} />));
+    await act(async () => { await resultRef.current?.submitMessage(); });
+    expect(options.enqueueServerSendQueueItem).toHaveBeenCalledWith(expect.objectContaining({
+      composerMessage: composer.message, editorState: composer.editorState,
+      metadata: expect.objectContaining({ mentionedUserIds: [QUEUED_MENTION_USER_ID] }),
+    }));
+    expect(options.performSubmit).not.toHaveBeenCalled();
+  });
+
+  it.each(["queue", "steer"] as const)("preserves editor identity in explicit %s requests", async (intent) => {
+    const composer = queuedMentionComposer();
+    const options = createOptions({ inputValue: composer.message, inputEditorState: composer.editorState });
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => root.render(<Harness options={options} resultRef={resultRef} />));
+    await act(async () => { await resultRef.current?.submitMessage(undefined, { intent }); });
+    const request = vi.mocked(options.submitSendIntent).mock.calls[0][0].request;
+    const restored = readQueuedComposerMetadata(request.metadata as Record<string, unknown>, request.promptText as string);
+    expect(restored.composer?.editorState).toBe(composer.editorState);
+    expect(restored.metadata?.mentionedUserIds).toEqual([QUEUED_MENTION_USER_ID]);
+  });
+
+  it("keeps the composer intact when more than 32 people are selected", async () => {
+    const options = createOptions({ inputEditorState: JSON.stringify({ root: { children: Array.from({ length: 33 }, (_, i) => ({ type: "user-mention", userId: `${i.toString(16).padStart(8, "0")}-bbbb-4ccc-8ddd-eeeeeeeeeeee`, handle: `person${i}` })) } }) });
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => root.render(<Harness options={options} resultRef={resultRef} />));
+    await act(async () => { await resultRef.current?.submitMessage(); });
+    expect(options.showStatus).toHaveBeenCalledWith("Mention up to 32 people in one message.", "error", 4500);
+    expect(options.enqueueServerSendQueueItem).not.toHaveBeenCalled();
+    expect(options.clearComposerAfterQueue).not.toHaveBeenCalled();
+    expect(options.clearComposerIfUnchanged).not.toHaveBeenCalled();
   });
 
   it("keeps the typed draft when a programmatic send falls back to the local queue", async () => {

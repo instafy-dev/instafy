@@ -135,6 +135,8 @@ describe("customer support commands", () => {
         "space-1",
         "--runtime-id",
         "runtime-1",
+        "--client-request-id",
+        "55555555-5555-4555-8555-555555555555",
         "--server-url",
         controller.controllerUrl,
         "--access-token",
@@ -149,6 +151,7 @@ describe("customer support commands", () => {
         status: "open",
       });
       expect(result.stdout).not.toContain("must-not-be-printed@example.com");
+      expect(result.stderr).toContain("55555555-5555-4555-8555-555555555555");
       expect(controller.requests).toHaveLength(1);
       expect(controller.requests[0]).toMatchObject({
         method: "POST",
@@ -158,6 +161,7 @@ describe("customer support commands", () => {
           details: "The connection closed during sync.",
           projectId: "space-1",
           runtimeId: "runtime-1",
+          clientRequestId: "55555555-5555-4555-8555-555555555555",
         },
       });
       const requestUrl = new URL(controller.requests[0]?.url ?? "", controller.controllerUrl);
@@ -170,6 +174,23 @@ describe("customer support commands", () => {
     }
   });
 
+  it("discloses account identity in preview without sending the report", async () => {
+    const result = await execCli([
+      "support",
+      "report",
+      "Preview disclosure",
+      "--no-linked-space",
+      "--preview",
+    ]);
+
+    expect(result.code, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      upload: false,
+      supportAccountIdentityIncluded: true,
+      summary: "Preview disclosure",
+    });
+  });
+
   it("lists only the public support summary fields", async () => {
     const controller = await startMockController(() => ({
       body: {
@@ -177,6 +198,7 @@ describe("customer support commands", () => {
           {
             id: "report-2",
             createdAt: "2026-08-15T12:01:00.000Z",
+            activityAt: "2026-08-15T12:05:00.000Z",
             updatedAt: "2026-08-15T12:02:00.000Z",
             message: "Build hangs",
             details: "private diagnostic details",
@@ -194,6 +216,11 @@ describe("customer support commands", () => {
             screenshotCount: 2,
           },
         ],
+        hasMore: true,
+        nextCursor: {
+          activityAt: "2026-08-15T12:05:00.000Z",
+          id: "22222222-2222-4222-8222-222222222222",
+        },
       },
     }));
 
@@ -203,6 +230,10 @@ describe("customer support commands", () => {
         "list",
         "--limit",
         "10",
+        "--before-activity-at",
+        "2026-08-16T00:00:00Z",
+        "--before-activity-id",
+        "11111111-1111-4111-8111-111111111111",
         "--server-url",
         controller.controllerUrl,
         "--access-token",
@@ -216,6 +247,7 @@ describe("customer support commands", () => {
           {
             id: "report-2",
             createdAt: "2026-08-15T12:01:00.000Z",
+            activityAt: "2026-08-15T12:05:00.000Z",
             updatedAt: "2026-08-15T12:02:00.000Z",
             summary: "Build hangs",
             status: "in_progress",
@@ -223,6 +255,11 @@ describe("customer support commands", () => {
             screenshotCount: 2,
           },
         ],
+        hasMore: true,
+        nextCursor: {
+          activityAt: "2026-08-15T12:05:00.000Z",
+          id: "22222222-2222-4222-8222-222222222222",
+        },
       });
       expect(result.stdout).not.toContain("private diagnostic details");
       expect(result.stdout).not.toContain("customer@example.com");
@@ -232,6 +269,113 @@ describe("customer support commands", () => {
       const requestUrl = new URL(controller.requests[0]?.url ?? "", controller.controllerUrl);
       expect(requestUrl.pathname).toBe("/support/reports");
       expect(requestUrl.searchParams.get("limit")).toBe("10");
+      expect(requestUrl.searchParams.get("before_activity_at")).toBe(
+        "2026-08-16T00:00:00Z",
+      );
+      expect(requestUrl.searchParams.get("before_activity_id")).toBe(
+        "11111111-1111-4111-8111-111111111111",
+      );
+    } finally {
+      await controller.close();
+    }
+  });
+
+  it("rejects incomplete support pagination cursors before making a request", async () => {
+    const controller = await startMockController(() => ({ body: { reports: [] } }));
+
+    try {
+      const listResult = await execCli([
+        "support",
+        "list",
+        "--before-activity-at",
+        "2026-08-16T00:00:00Z",
+        "--server-url",
+        controller.controllerUrl,
+        "--access-token",
+        "customer-token",
+      ]);
+      expect(listResult.code).not.toBe(0);
+      expect(`${listResult.stdout}\n${listResult.stderr}`).toMatch(/must be used together/i);
+
+      const createdListResult = await execCli([
+        "support",
+        "list",
+        "--before-created-at",
+        "2026-08-16T00:00:00Z",
+        "--server-url",
+        controller.controllerUrl,
+        "--access-token",
+        "customer-token",
+      ]);
+      expect(createdListResult.code).not.toBe(0);
+      expect(`${createdListResult.stdout}\n${createdListResult.stderr}`).toMatch(
+        /must be used together/i,
+      );
+
+      const messagesResult = await execCli([
+        "support",
+        "messages",
+        "report-3",
+        "--before-created-at",
+        "2026-02-30T00:00:00Z",
+        "--before-message-id",
+        "44444444-4444-4444-8444-444444444444",
+        "--server-url",
+        controller.controllerUrl,
+        "--access-token",
+        "customer-token",
+      ]);
+      expect(messagesResult.code).not.toBe(0);
+      expect(`${messagesResult.stdout}\n${messagesResult.stderr}`).toMatch(/RFC3339/i);
+      expect(controller.requests).toHaveLength(0);
+    } finally {
+      await controller.close();
+    }
+  });
+
+  it("continues legacy creation-time report pages with a stable paired cursor", async () => {
+    const controller = await startMockController(() => ({
+      body: {
+        reports: [],
+        hasMore: true,
+        nextCursor: {
+          createdAt: "2026-08-15T12:01:00.000Z",
+          id: "22222222-2222-4222-8222-222222222222",
+        },
+      },
+    }));
+
+    try {
+      const result = await execCli([
+        "support",
+        "list",
+        "--before-created-at",
+        "2026-08-16T00:00:00Z",
+        "--before-created-id",
+        "11111111-1111-4111-8111-111111111111",
+        "--server-url",
+        controller.controllerUrl,
+        "--access-token",
+        "customer-token",
+        "--json",
+      ]);
+
+      expect(result.code, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({
+        reports: [],
+        hasMore: true,
+        nextCursor: {
+          createdAt: "2026-08-15T12:01:00.000Z",
+          id: "22222222-2222-4222-8222-222222222222",
+        },
+      });
+      const requestUrl = new URL(controller.requests[0]?.url ?? "", controller.controllerUrl);
+      expect(requestUrl.searchParams.get("before_created_at")).toBe(
+        "2026-08-16T00:00:00Z",
+      );
+      expect(requestUrl.searchParams.get("before_created_id")).toBe(
+        "11111111-1111-4111-8111-111111111111",
+      );
     } finally {
       await controller.close();
     }
@@ -242,6 +386,7 @@ describe("customer support commands", () => {
       body: {
         id: "report-3",
         createdAt: "2026-08-15T12:03:00.000Z",
+        activityAt: "2026-08-15T12:04:00.000Z",
         updatedAt: "2026-08-15T12:04:00.000Z",
         message: "Preview is blank",
         details: "The preview remains white after reload.",
@@ -282,13 +427,11 @@ describe("customer support commands", () => {
       expect(JSON.parse(result.stdout)).toEqual({
         id: "report-3",
         createdAt: "2026-08-15T12:03:00.000Z",
+        activityAt: "2026-08-15T12:04:00.000Z",
         updatedAt: "2026-08-15T12:04:00.000Z",
         summary: "Preview is blank",
         status: "open",
         projectId: "space-3",
-        runtimeId: null,
-        runId: null,
-        conversationId: null,
         screenshotCount: 1,
         details: "The preview remains white after reload.",
         screenshots: [
@@ -307,6 +450,220 @@ describe("customer support commands", () => {
       expect(controller.requests).toHaveLength(1);
       const requestUrl = new URL(controller.requests[0]?.url ?? "", controller.controllerUrl);
       expect(requestUrl.pathname).toBe("/support/reports/report-3");
+    } finally {
+      await controller.close();
+    }
+  });
+
+  it("lists only customer-visible support messages", async () => {
+    const controller = await startMockController(() => ({
+      body: {
+        messages: [
+          {
+            id: "message-1",
+            authorType: "support",
+            body: "We reproduced this and are preparing a fix.",
+            createdAt: "2026-08-15T12:05:00.000Z",
+            authorUserId: "private-operator-id",
+            metadata: { internalConversationId: "private-conversation" },
+          },
+          {
+            id: "message-2",
+            authorType: "customer",
+            body: "Thank you.",
+            createdAt: "2026-08-15T12:06:00.000Z",
+          },
+        ],
+        hasMore: true,
+        nextCursor: {
+          createdAt: "2026-08-15T12:05:00.000Z",
+          id: "33333333-3333-4333-8333-333333333333",
+        },
+      },
+    }));
+
+    try {
+      const result = await execCli([
+        "support",
+        "messages",
+        "report-3",
+        "--limit",
+        "20",
+        "--before-created-at",
+        "2026-08-16T00:00:00Z",
+        "--before-message-id",
+        "44444444-4444-4444-8444-444444444444",
+        "--server-url",
+        controller.controllerUrl,
+        "--access-token",
+        "customer-token",
+        "--json",
+      ]);
+
+      expect(result.code, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({
+        messages: [
+          {
+            id: "message-1",
+            authorType: "support",
+            body: "We reproduced this and are preparing a fix.",
+            createdAt: "2026-08-15T12:05:00.000Z",
+          },
+          {
+            id: "message-2",
+            authorType: "customer",
+            body: "Thank you.",
+            createdAt: "2026-08-15T12:06:00.000Z",
+          },
+        ],
+        hasMore: true,
+        nextCursor: {
+          createdAt: "2026-08-15T12:05:00.000Z",
+          id: "33333333-3333-4333-8333-333333333333",
+        },
+      });
+      expect(result.stdout).not.toContain("private-operator-id");
+      expect(result.stdout).not.toContain("private-conversation");
+      expect(controller.requests).toHaveLength(1);
+      const requestUrl = new URL(controller.requests[0]?.url ?? "", controller.controllerUrl);
+      expect(requestUrl.pathname).toBe("/support/reports/report-3/messages");
+      expect(requestUrl.searchParams.get("limit")).toBe("20");
+      expect(requestUrl.searchParams.get("before_created_at")).toBe(
+        "2026-08-16T00:00:00Z",
+      );
+      expect(requestUrl.searchParams.get("before_message_id")).toBe(
+        "44444444-4444-4444-8444-444444444444",
+      );
+      expect(controller.requests[0]).toMatchObject({
+        method: "GET",
+        authorization: "Bearer customer-token",
+      });
+    } finally {
+      await controller.close();
+    }
+  });
+
+  it("posts an idempotent customer follow-up without printing internal response fields", async () => {
+    const controller = await startMockController(() => ({
+      body: {
+        message: {
+          id: "message-3",
+          authorType: "customer",
+          body: "The issue also happens in a new space.",
+          createdAt: "2026-08-15T12:07:00.000Z",
+          authorUserId: "private-customer-id",
+        },
+      },
+    }));
+
+    try {
+      const result = await execCli([
+        "support",
+        "reply",
+        "report-3",
+        "The",
+        "issue",
+        "also",
+        "happens",
+        "in",
+        "a",
+        "new",
+        "space.",
+        "--server-url",
+        controller.controllerUrl,
+        "--access-token",
+        "customer-token",
+        "--json",
+      ]);
+
+      expect(result.code, result.stderr).toBe(0);
+      expect(JSON.parse(result.stdout)).toEqual({
+        message: {
+          id: "message-3",
+          authorType: "customer",
+          body: "The issue also happens in a new space.",
+          createdAt: "2026-08-15T12:07:00.000Z",
+        },
+      });
+      expect(result.stdout).not.toContain("private-customer-id");
+      const requestId = result.stderr.match(/Support follow-up request id: ([0-9a-f-]{36})/iu)?.[1];
+      expect(requestId).toMatch(/^[0-9a-f-]{36}$/u);
+      expect(controller.requests).toHaveLength(1);
+      expect(controller.requests[0]).toMatchObject({
+        method: "POST",
+        authorization: "Bearer customer-token",
+        body: {
+          body: "The issue also happens in a new space.",
+        },
+      });
+      expect((controller.requests[0]?.body as Record<string, unknown>)?.clientRequestId).toBe(
+        requestId,
+      );
+      const requestUrl = new URL(controller.requests[0]?.url ?? "", controller.controllerUrl);
+      expect(requestUrl.pathname).toBe("/support/reports/report-3/messages");
+    } finally {
+      await controller.close();
+    }
+  });
+
+  it("counts Unicode scalar values consistently with the controller", async () => {
+    const body = "😀".repeat(4_000);
+    const requestId = "11111111-1111-4111-8111-111111111111";
+    const controller = await startMockController(() => ({
+      body: {
+        message: {
+          id: "message-unicode",
+          authorType: "customer",
+          body,
+          createdAt: "2026-08-15T12:08:00.000Z",
+        },
+      },
+    }));
+
+    try {
+      const result = await execCli([
+        "support",
+        "reply",
+        "report-3",
+        body,
+        "--client-request-id",
+        requestId,
+        "--server-url",
+        controller.controllerUrl,
+        "--access-token",
+        "customer-token",
+        "--json",
+      ]);
+
+      expect(result.code, result.stderr).toBe(0);
+      expect(result.stderr).toContain(requestId);
+      expect(controller.requests[0]?.body).toMatchObject({
+        body,
+        clientRequestId: requestId,
+      });
+    } finally {
+      await controller.close();
+    }
+  });
+
+  it("rejects an oversized follow-up before contacting support", async () => {
+    const controller = await startMockController(() => ({ body: { message: {} } }));
+
+    try {
+      const result = await execCli([
+        "support",
+        "reply",
+        "report-3",
+        "x".repeat(4_001),
+        "--server-url",
+        controller.controllerUrl,
+        "--access-token",
+        "customer-token",
+      ]);
+
+      expect(result.code).not.toBe(0);
+      expect(`${result.stdout}\n${result.stderr}`).toMatch(/at most 4000 characters/i);
+      expect(controller.requests).toHaveLength(0);
     } finally {
       await controller.close();
     }

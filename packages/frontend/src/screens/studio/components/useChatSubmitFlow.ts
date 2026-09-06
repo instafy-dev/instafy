@@ -34,6 +34,7 @@ import type { EnqueueServerSendQueuePayload } from "./useChatServerSendQueue";
 import { buildServerSendQueuePromptBody } from "./useChatServerSendQueue";
 import type { PersonalBrowserAgentPhase } from "./usePersonalBrowserBridge";
 import type { PreparedEmailInvite } from "../../../sharing/preparedEmailInvite";
+import { withUserMentionMetadata } from "../../../conversations/userMentions";
 
 export type SubmitMessageFn = (
   override?: ChatSubmitOverride,
@@ -304,7 +305,6 @@ export function useChatSubmitFlow({
 
     const allowWhileBusy = options?.allowWhileBusy ?? false;
     const requestedIntent = options?.intent ?? "send";
-    const baseSubmitMetadata = override?.metadata ?? options?.metadata ?? null;
     const {
       agentSelection,
       browserLaunchMode,
@@ -336,6 +336,18 @@ export function useChatSubmitFlow({
         showStatus("Add a message to send with your image attachments.", "error", 4000);
       }
       focusInput();
+      return false;
+    }
+
+    const submittedEditorState = override ? override.editorState : trimmed ? inputEditorState : null;
+    let baseSubmitMetadata: Record<string, unknown>;
+    try {
+      baseSubmitMetadata = withUserMentionMetadata(
+        override?.metadata ?? options?.metadata,
+        submittedEditorState,
+      );
+    } catch (error) {
+      showStatus(error instanceof Error ? error.message : String(error), "error", 4500);
       return false;
     }
 
@@ -488,15 +500,26 @@ export function useChatSubmitFlow({
         focusInput();
         return false;
       }
-      const accepted = await submitSendIntent({
-        mode: effectiveIntent,
-        request: buildServerSendQueuePromptBody({
+      let request: Record<string, unknown>;
+      try {
+        request = buildServerSendQueuePromptBody({
           message: dispatchedMessage,
+          composerMessage: messageToSend,
+          editorState: submittedEditorState,
+          browserPageTarget: shouldApplyBrowserPageTarget ? browserPageTarget : null,
+          browserLaunchMode: shouldApplyNewBrowserLaunch ? browserLaunchMode : null,
           targetAgentHandles: effectiveTargetAgentHandles,
           metadata: queuedSubmitMetadata,
           runtimeOverride: submitRuntimeOverride,
           intent: terminalRequest ? "terminal_command" : null,
-        }),
+        });
+      } catch (error) {
+        showStatus(error instanceof Error ? error.message : String(error), "error", 4500);
+        return false;
+      }
+      const accepted = await submitSendIntent({
+        mode: effectiveIntent,
+        request,
         targetAgentHandles: effectiveTargetAgentHandles,
         expectedActiveJobId: options?.expectedActiveJobId ?? null,
       });
@@ -585,6 +608,10 @@ export function useChatSubmitFlow({
     const queueMessageToServer = async (): Promise<boolean> => {
       return await enqueueServerSendQueueItem({
         message: dispatchedMessage,
+        composerMessage: messageToSend,
+        editorState: submittedEditorState,
+        browserPageTarget: shouldApplyBrowserPageTarget ? browserPageTarget : null,
+        browserLaunchMode: shouldApplyNewBrowserLaunch ? browserLaunchMode : null,
         targetAgentHandles: effectiveTargetAgentHandles,
         metadata: queuedSubmitMetadata,
         runtimeOverride: submitRuntimeOverride,

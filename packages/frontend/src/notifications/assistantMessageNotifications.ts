@@ -1,3 +1,6 @@
+import { routeNotificationClick } from "./notificationPresentation";
+import { notificationStorageKey, getNotificationSession, isNotificationSessionCurrent } from "./notificationSession";
+import { canonicalNotificationUrl, safeNotificationBody } from "./notificationContract";
 import { Capacitor } from "@capacitor/core";
 import { ensureWebPushSubscriptionRegistered, hasActiveWebPushSubscription, unregisterWebPushSubscription } from "./webPushRegistration";
 import { requestNativePushTokenRegistered, unregisterNativePushToken } from "./nativePushRegistration";
@@ -6,6 +9,8 @@ type DesktopNotificationPayload = {
   title: string;
   body?: string;
   url?: string;
+  eventId?: string;
+  accountId?: string;
 };
 
 const ENABLED_KEY = "instafy.notifications.enabled";
@@ -46,7 +51,7 @@ function logNotificationDebug(message: string, details?: Record<string, unknown>
   console.info(`[notifications] ${message}`);
 }
 
-function getDesktopBridge(): { notify: (payload: DesktopNotificationPayload) => Promise<void> } | null {
+function getDesktopBridge(): { notify: (payload: DesktopNotificationPayload) => Promise<unknown> } | null {
   if (typeof window === "undefined") {
     return null;
   }
@@ -79,7 +84,7 @@ function readStoredEnabled(): boolean | null {
   if (!canUseLocalStorage()) {
     return null;
   }
-  const raw = window.localStorage.getItem(ENABLED_KEY);
+  const raw = window.localStorage.getItem(notificationStorageKey(ENABLED_KEY));
   if (raw === "1") {
     return true;
   }
@@ -101,7 +106,7 @@ export function setMessageNotificationsEnabled(enabled: boolean) {
   if (!canUseLocalStorage()) {
     return;
   }
-  window.localStorage.setItem(ENABLED_KEY, enabled ? "1" : "0");
+  window.localStorage.setItem(notificationStorageKey(ENABLED_KEY), enabled ? "1" : "0");
 }
 
 export function isAppInForeground(): boolean {
@@ -135,17 +140,19 @@ export function shouldOfferBrowserNotificationsNudge(): boolean {
   if (!canUseLocalStorage()) {
     return false;
   }
-  return window.localStorage.getItem(NUDGE_SEEN_KEY) !== "1";
+  return window.localStorage.getItem(notificationStorageKey(NUDGE_SEEN_KEY)) !== "1";
 }
 
 export function markBrowserNotificationsNudgeSeen() {
   if (!canUseLocalStorage()) {
     return;
   }
-  window.localStorage.setItem(NUDGE_SEEN_KEY, "1");
+  window.localStorage.setItem(notificationStorageKey(NUDGE_SEEN_KEY), "1");
 }
 
 export async function enableBrowserMessageNotifications(): Promise<boolean> {
+  const session = getNotificationSession();
+  if (!session) return false;
   if (typeof window === "undefined") {
     logNotificationDebug("enable browser notifications skipped: no window");
     return false;
@@ -155,6 +162,7 @@ export async function enableBrowserMessageNotifications(): Promise<boolean> {
     return false;
   }
   const permission = await Notification.requestPermission();
+  if (!isNotificationSessionCurrent(session)) return false;
   const enabled = permission === "granted";
   logNotificationDebug("browser notification permission result", { permission, enabled });
   setMessageNotificationsEnabled(enabled);
@@ -166,6 +174,8 @@ export async function enableBrowserMessageNotifications(): Promise<boolean> {
 }
 
 export async function enableMessageNotifications(): Promise<boolean> {
+  const session = getNotificationSession();
+  if (!session) return false;
   const desktop = getDesktopBridge();
   if (desktop) {
     setMessageNotificationsEnabled(true);
@@ -173,6 +183,7 @@ export async function enableMessageNotifications(): Promise<boolean> {
   }
   if (Capacitor.isNativePlatform()) {
     const ok = await requestNativePushTokenRegistered();
+    if (!isNotificationSessionCurrent(session)) return false;
     setMessageNotificationsEnabled(ok);
     return ok;
   }
@@ -199,60 +210,42 @@ export async function disableMessageNotifications(): Promise<boolean> {
   return nativeOk && webOk;
 }
 
-export async function notifyAssistantMessage(payload: DesktopNotificationPayload) {
+export async function notifyAssistantMessage(payload: DesktopNotificationPayload): Promise<boolean> {
   if (typeof window === "undefined") {
     logNotificationDebug("notify skipped: no window");
-    return;
+    return false;
   }
   if (!areMessageNotificationsEnabled()) {
     logNotificationDebug("notify skipped: notifications disabled");
-    return;
+    return false;
   }
 
+  const session = getNotificationSession();
+  if (!session || payload.accountId !== session.userId || !payload.eventId) return false;
+  const url = canonicalNotificationUrl(payload.url);
+  if (!url) return false;
+  payload = { ...payload, title: "Instafy", body: safeNotificationBody(payload.body), url };
   const desktop = getDesktopBridge();
   if (desktop) {
     logNotificationDebug("notify via desktop bridge", {
       hasBody: Boolean(payload.body),
       hasUrl: Boolean(payload.url),
     });
-    await desktop.notify(payload);
-    return;
+    return await desktop.notify(payload) === true;
   }
 
   if (Capacitor.isNativePlatform()) {
-    try {
-      const { LocalNotifications } = await import("@capacitor/local-notifications");
-      const permissions = await LocalNotifications.checkPermissions();
-      if (permissions.display !== "granted") {
-        logNotificationDebug("native notify skipped: local notification permission not granted", {
-          display: permissions.display,
-        });
-        return;
-      }
-      await LocalNotifications.schedule({
-        notifications: [
-          {
-            id: Math.floor(Date.now() % 2_000_000_000),
-            title: payload.title,
-            body: payload.body ?? "",
-            schedule: { at: new Date(Date.now() + 250) }
-          }
-        ]
-      });
-      logNotificationDebug("native local notification scheduled");
-      return;
-    } catch (_error) {
-      logNotificationDebug("native notify failed while scheduling");
-      return;
-    }
+    // APNs owns native background presentation; local scheduling would duplicate it.
+    return false;
   }
 
   if ("Notification" in window && Notification.permission === "granted") {
     const hasWebPushSubscription = await hasActiveWebPushSubscription();
+    if (!isNotificationSessionCurrent(session)) return false;
     const forceLocal = notificationsForceLocalEnabled();
     if (hasWebPushSubscription && !forceLocal) {
       logNotificationDebug("browser notify skipped: active web push subscription is present");
-      return;
+      return false;
     }
     if (hasWebPushSubscription && forceLocal) {
       logNotificationDebug("browser notify proceeding with force-local override");
@@ -260,7 +253,8 @@ export async function notifyAssistantMessage(payload: DesktopNotificationPayload
     try {
       const notification = new Notification(payload.title, {
         body: payload.body ?? "",
-        data: payload.url ? { url: payload.url } : undefined,
+        data: { url, eventId: payload.eventId, accountId: payload.accountId },
+        tag: payload.eventId,
       });
       logNotificationDebug("browser notification displayed", {
         title: payload.title,
@@ -275,19 +269,21 @@ export async function notifyAssistantMessage(payload: DesktopNotificationPayload
             // ignore focus errors
           }
           try {
-            window.location.assign(payload.url ?? "/studio");
+            routeNotificationClick(payload);
           } catch {
             // ignore navigation errors
           }
         };
       }
+      return true;
     } catch (_error) {
       logNotificationDebug("browser notification failed to display");
     }
-    return;
+    return false;
   }
   logNotificationDebug("browser notify skipped: permission not granted", {
     hasNotificationApi: "Notification" in window,
     permission: "Notification" in window ? Notification.permission : "unsupported",
   });
+  return false;
 }

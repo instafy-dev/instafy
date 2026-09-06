@@ -10,6 +10,9 @@ import type {
 type DesktopNotificationPayload = {
   title: string;
   body?: string;
+  url?: string;
+  eventId?: string;
+  accountId?: string;
 };
 
 export type DesktopExtensionInvokeOptions = {
@@ -251,7 +254,7 @@ contextBridge.exposeInMainWorld("instafyDesktop", {
   // full-width drag strip and turn every tab click into a window drag.
   titleBarFree: process.platform === "darwin",
   notify: async (payload: DesktopNotificationPayload) => {
-    await ipcRenderer.invoke("instafy:notify", payload);
+    return (await ipcRenderer.invoke("instafy:notify", payload)) as boolean;
   },
   invokeDesktopExtension: async (
     options: DesktopExtensionInvokeOptions,

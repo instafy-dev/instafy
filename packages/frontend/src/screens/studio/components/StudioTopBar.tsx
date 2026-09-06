@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { desktopTitleBarFree } from "../../../lib/desktopShell";
 import { DialogTrigger } from "react-aria-components";
 import {
@@ -89,7 +89,7 @@ function resolvePrivateChatSubtitle(member: ControllerProjectMember): string | n
   return null;
 }
 
-export function StudioTopBar() {
+export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNode } = {}) {
   const {
     activeProjectName,
     onStartNewConversation,
@@ -643,7 +643,7 @@ export function StudioTopBar() {
           actions={
             hasDesktopTabs ? (
               <div className="flex items-center">
-                <DesktopInstallTopBarAction enabled={isLargeScreen} />
+                <>{notificationBell}<DesktopInstallTopBarAction enabled={isLargeScreen} /></>
                 <DialogTrigger
                   isOpen={tabMenuOpen}
                   onOpenChange={(open) => setTabMenuOpen((current) => (open && current ? false : open))}
@@ -662,7 +662,7 @@ export function StudioTopBar() {
                 </DialogTrigger>
               </div>
             ) : (
-              <DesktopInstallTopBarAction enabled={isLargeScreen} />
+              <>{notificationBell}<DesktopInstallTopBarAction enabled={isLargeScreen} /></>
             )
           }
         />
@@ -772,6 +772,7 @@ export function StudioTopBar() {
                 {newChatMenu}
               </DialogTrigger>
             ) : null}
+            {notificationBell}
             <DesktopInstallTopBarAction enabled={isLargeScreen} variant="compact" />
           </div>
         </div>
@@ -860,6 +861,7 @@ export function StudioTopBar() {
           </div>
 
           <div className="flex items-center justify-end">
+            {notificationBell}
             {shouldShowNewChat ? (
               <DialogTrigger isOpen={newChatMenuOpen} onOpenChange={handleNewChatMenuOpenChange}>
                 <IconButton

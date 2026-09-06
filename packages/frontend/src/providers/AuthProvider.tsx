@@ -25,9 +25,8 @@ import {
 } from "../auth/nativeAuthBridge";
 import { useWorkspaceStore } from "../store";
 import { clearProjectState } from "../workspace/projectClear";
-import { ensureNativePushTokenRegistered } from "../notifications/nativePushRegistration";
-import { areMessageNotificationsEnabled } from "../notifications/assistantMessageNotifications";
-import { ensureWebPushSubscriptionRegistered } from "../notifications/webPushRegistration";
+import { changeNotificationSession, releaseNotificationSession } from "../notifications/notificationLifecycle";
+import { installNotificationActionListeners } from "../notifications/notificationActions";
 import { postAuthTelemetryEvent } from "../services/runtimeController/authTelemetry";
 import {
   isInvalidRefreshTokenError,
@@ -576,15 +575,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [shouldUseFallback]);
 
   useEffect(() => {
-    if (!user) {
-      return;
-    }
-    if (!areMessageNotificationsEnabled()) {
-      return;
-    }
-    void ensureNativePushTokenRegistered();
-    void ensureWebPushSubscriptionRegistered();
-  }, [user]);
+    if (loading) return;
+    void changeNotificationSession(user?.id && session?.access_token
+      ? { userId: user.id, accessToken: session.access_token }
+      : null);
+  }, [loading, user?.id, session?.access_token]);
+
+  useEffect(() => installNotificationActionListeners(), []);
 
   useEffect(() => {
     if (loading) {
@@ -875,6 +872,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setUser(data?.user ?? null);
       },
       async signOut() {
+        await releaseNotificationSession();
         if (baseFallback || devGuestFallbackEnabled) {
           clearDevGuestFallbackState();
           setDevGuestFallbackEnabled(false);
