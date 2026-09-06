@@ -382,3 +382,21 @@ body.dark {
   filter: saturate(1.14) brightness(1.12);
 }
 
+/* Keep loading and live-status cues readable without continuous movement. This
+   also covers raw refresh icons that use the shared Tailwind animation classes. */
+@media (prefers-reduced-motion: reduce) {
+  .animate-spin,
+  .animate-pulse,
+  .animate-ping,
+  .instafy-compact-event-pill,
+  .instafy-compact-overflow-pill,
+  .instafy-compact-event-pill-live {
+    animation: none;
+    will-change: auto;
+  }
+
+  .instafy-status-sweep::after {
+    animation: none;
+    content: none;
+  }
+}

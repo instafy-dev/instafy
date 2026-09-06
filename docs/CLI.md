@@ -386,6 +386,8 @@ Use `instafy support` to send a report and review the reports created by your si
 instafy support report "Runtime stops after launch"
 instafy support list --json
 instafy support show <reportId> --json
+instafy support messages <reportId>
+instafy support reply <reportId> "It happened again after upgrading."
 ```
 
 The controller enforces customer mode for these requests: `list` and `show` can access only the
@@ -393,8 +395,9 @@ current user's reports, even though the underlying support system is also used b
 report can default to the space linked by `.instafy/space.json`; use `--space <spaceId>` to select
 one explicitly or `--no-linked-space` to omit space context.
 
-Only the summary and selected context are submitted by default. Extra diagnostics require explicit
-flags:
+The signed-in account identity, including its email snapshot, is attached for report ownership and
+support contact. Only the summary and selected context are submitted as report content by default;
+extra diagnostics require explicit flags:
 
 ```bash
 instafy support report "Build fails on startup" \
@@ -423,6 +426,21 @@ show which images were attached. The controller applies the same minimized proje
 bug-report reads made by ordinary users; only operator/service authorization (or a user listed in
 the controller's `BUG_REPORTS_OPERATOR_USER_IDS`, which grants bug-report triage and nothing else)
 can retrieve the full triage record and attachment bytes.
+
+`support messages` prints only the customer-visible case timeline. `support reply` appends a
+follow-up as the signed-in reporter; replying to a resolved report reopens it for support. Internal
+operator notes, automation transcripts, runtime details, and devbox access are never exposed by
+these commands. Both report creation and reply print a request UUID before sending; after an
+uncertain network result, inspect the report list or timeline and reuse that value with
+`--client-request-id` only for the exact same payload. Reusing it for different content is rejected.
+
+Support reports are ordered by their latest customer-visible activity. JSON list responses include
+`hasMore` and `nextCursor`; continue with both `--before-activity-at <activityAt>` and
+`--before-activity-id <id>`. Message JSON uses the same shape with `createdAt`/`id`; pass both
+`--before-created-at <createdAt>` and `--before-message-id <id>` to load an older page. The paired
+IDs make pagination stable when events share a timestamp. The legacy list `--before <timestamp>`
+continues to page by report creation time; when another page exists, its response returns a
+`createdAt`/`id` cursor to continue safely with `--before-created-at` and `--before-created-id`.
 
 ## Teams and invitations
 

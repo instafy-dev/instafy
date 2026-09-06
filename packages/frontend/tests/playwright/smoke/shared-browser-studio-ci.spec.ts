@@ -239,7 +239,15 @@ async function navigateAndObserve(page: Page, fixture: StudioFixture, expected: 
 }
 
 async function clickRemoteInput(page: Page) {
-  const point = await page.getByTestId("shared-browser-cdp-screencast").evaluate(element => {
+  const surface = page.getByTestId("shared-browser-cdp-screencast");
+  // Navigating the remote page can reconnect collaboration and its input
+  // socket. Local canvas focus and control authority do not prove that the
+  // replacement driver has sent its ready message, so wait for all three.
+  await expect(page.getByTestId("shared-browser-collaboration-control-state"))
+    .toHaveText("You control", { timeout: 30_000 });
+  await expect(surface).toHaveAttribute("data-input-enabled", "true", { timeout: 30_000 });
+  await expect(surface).toHaveAttribute("data-input-ready", "true", { timeout: 30_000 });
+  const point = await surface.evaluate(element => {
     const canvas = element as HTMLCanvasElement;
     const bounds = canvas.getBoundingClientRect();
     const width = Number(canvas.getAttribute("data-remote-content-width")) || canvas.width;
@@ -255,7 +263,7 @@ async function clickRemoteInput(page: Page) {
   await page.mouse.click(point.x, point.y);
   // A missed remote click must fail before typing/Enter could reach Studio's
   // chat composer and accidentally enqueue an agent job.
-  await expect(page.getByTestId("shared-browser-cdp-screencast")).toBeFocused();
+  await expect(surface).toBeFocused();
 }
 
 test.describe("Disposable signed-in Studio Shared Browser", () => {

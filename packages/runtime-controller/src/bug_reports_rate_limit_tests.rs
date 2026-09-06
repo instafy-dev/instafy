@@ -58,6 +58,162 @@ fn assert_short_retry(message: &JsonValue) {
     assert!((1..=10).contains(&seconds));
 }
 
+#[tokio::test]
+async fn report_creation_idempotency_is_user_scoped_and_compares_normalized_payloads(
+) -> anyhow::Result<()> {
+    let state = test_state("support-report-create-idempotency").await?;
+    let user_id = Uuid::new_v4();
+    let other_user_id = Uuid::new_v4();
+    let user_token = token(&state, user_id);
+    let other_user_token = token(&state, other_user_id);
+    let client_request_id = Uuid::new_v4();
+    let png = BASE64.decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    )?;
+    let request = json!({
+        "message": "  An idempotent customer report  ",
+        "details": "  normalized details  ",
+        "clientRequestId": client_request_id,
+        "metadata": {
+            "authorization": "Bearer first-secret",
+            "stable": true
+        },
+        "logs": [{ "password": "first-secret", "event": "failed" }],
+        "screenshots": [{
+            "fileName": " evidence.png ",
+            "mediaType": " image/png ",
+            "dataBase64": base64::engine::general_purpose::STANDARD.encode(&png),
+            "byteLength": png.len()
+        }]
+    });
+    let created = submit(
+        state.clone(),
+        &user_token,
+        "/support/reports",
+        &request.to_string(),
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created_payload = response_json(created).await;
+
+    // Whitespace and values removed by the authoritative redactor normalize to
+    // the same persisted request, so a retry returns the original report.
+    let mut replay_request = request.clone();
+    replay_request["message"] = json!("An idempotent customer report");
+    replay_request["details"] = json!("normalized details");
+    replay_request["metadata"]["authorization"] = json!("Bearer second-secret");
+    replay_request["logs"][0]["password"] = json!("second-secret");
+    let replay = submit(
+        state.clone(),
+        &user_token,
+        "/bug-reports",
+        &replay_request.to_string(),
+    )
+    .await;
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(response_json(replay).await, created_payload);
+
+    let mut conflicting_request = request.clone();
+    conflicting_request["message"] = json!("Different report content");
+    let conflict = submit(
+        state.clone(),
+        &user_token,
+        "/support/reports",
+        &conflicting_request.to_string(),
+    )
+    .await;
+    assert_eq!(conflict.status(), StatusCode::CONFLICT);
+
+    let other_user = submit(
+        state.clone(),
+        &other_user_token,
+        "/support/reports",
+        &request.to_string(),
+    )
+    .await;
+    assert_eq!(other_user.status(), StatusCode::CREATED);
+    assert_ne!(response_json(other_user).await["id"], created_payload["id"]);
+
+    let stored_count: i64 = state
+        .pool
+        .get()
+        .await?
+        .query_one(
+            "select count(*)::bigint from bug_reports where user_id = $1",
+            &[&user_id],
+        )
+        .await?
+        .get(0);
+    assert_eq!(stored_count, 1);
+
+    let created_report_id = Uuid::parse_str(created_payload["id"].as_str().unwrap())?;
+    state
+        .pool
+        .get()
+        .await?
+        .execute(
+            "insert into bug_report_attachments (
+                id, bug_report_id, file_name, media_type, byte_size, content, created_at
+             ) values ($1, $2, 'seeded-quota.png', 'image/png', $3, ''::bytea, clock_timestamp())",
+            &[
+                &Uuid::new_v4(),
+                &created_report_id,
+                &MAX_CUSTOMER_ATTACHMENT_BYTES_PER_24_HOURS,
+            ],
+        )
+        .await?;
+
+    // A lost successful response can be retried even after another request has
+    // consumed the attachment allowance, because replay is checked first.
+    let replay_after_quota = submit(
+        state.clone(),
+        &user_token,
+        "/support/reports",
+        &replay_request.to_string(),
+    )
+    .await;
+    assert_eq!(replay_after_quota.status(), StatusCode::OK);
+    assert_eq!(response_json(replay_after_quota).await, created_payload);
+
+    let mut quota_request = request.clone();
+    quota_request["clientRequestId"] = json!(Uuid::new_v4());
+    quota_request["message"] = json!("Another report with an attachment");
+    let quota_limited = submit(
+        state.clone(),
+        &user_token,
+        "/support/reports",
+        &quota_request.to_string(),
+    )
+    .await;
+    assert_eq!(quota_limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response_json(quota_limited).await["message"],
+        format!(
+            "Support report attachments are limited to {MAX_CUSTOMER_ATTACHMENT_BYTES_PER_24_HOURS} bytes per 24 hours."
+        )
+    );
+
+    let invalid_id = submit(
+        state.clone(),
+        &other_user_token,
+        "/support/reports",
+        r#"{"message":"invalid id","clientRequestId":"not-a-uuid"}"#,
+    )
+    .await;
+    assert_eq!(invalid_id.status(), StatusCode::BAD_REQUEST);
+
+    state
+        .pool
+        .get()
+        .await?
+        .execute(
+            "delete from bug_reports where user_id = $1 or user_id = $2",
+            &[&user_id, &other_user_id],
+        )
+        .await?;
+    Ok(())
+}
+
 #[test]
 fn retry_seconds_round_up_instead_of_inviting_an_early_retry() {
     assert_eq!(retry_after_seconds(Duration::ZERO), 1);
@@ -67,7 +223,7 @@ fn retry_seconds_round_up_instead_of_inviting_an_early_retry() {
 }
 
 #[tokio::test]
-async fn paced_reports_have_no_five_report_or_daily_twenty_report_ceiling() -> anyhow::Result<()> {
+async fn reports_hit_the_durable_twenty_five_per_day_ceiling() -> anyhow::Result<()> {
     let state = test_state("paced-report-cooldown").await?;
     let user_id = Uuid::new_v4();
     let user_token = token(&state, user_id);
@@ -91,6 +247,23 @@ async fn paced_reports_have_no_five_report_or_daily_twenty_report_ceiling() -> a
         );
     }
 
+    state.pool.get().await?.execute(
+        "update bug_reports set created_at = created_at - interval '10 seconds' where user_id = $1",
+        &[&user_id],
+    ).await?;
+    let limited = submit(
+        crate::tests::build_test_state(state.pool.clone(), state.config.clone()),
+        &user_token,
+        "/support/reports",
+        REPORT,
+    )
+    .await;
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response_json(limited).await["message"],
+        "Support reports are limited to 25 per 24 hours."
+    );
+
     let count: i64 = state
         .pool
         .get()
@@ -107,6 +280,167 @@ async fn paced_reports_have_no_five_report_or_daily_twenty_report_ceiling() -> a
         .get()
         .await?
         .execute("delete from bug_reports where user_id = $1", &[&user_id])
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn customer_messages_hit_the_durable_daily_ceiling_but_replays_remain_idempotent(
+) -> anyhow::Result<()> {
+    let state = test_state("customer-message-daily-limit").await?;
+    let user_id = Uuid::new_v4();
+    let report_id = Uuid::new_v4();
+    let user_token = token(&state, user_id);
+    state
+        .pool
+        .get()
+        .await?
+        .execute(
+            "insert into bug_reports (
+                id, user_id, message, status, metadata, logs, customer_last_message_at
+             ) values ($1, $2, 'Daily message cap', 'open', '{}'::jsonb, '[]'::jsonb, clock_timestamp())",
+            &[&report_id, &user_id],
+        )
+        .await?;
+    state
+        .pool
+        .get()
+        .await?
+        .execute(
+            "insert into bug_report_messages (
+                id, bug_report_id, author_type, author_user_id, body, created_at
+             )
+             select gen_random_uuid(), $1, 'customer', $2,
+                    'seeded customer follow-up ' || ordinal,
+                    clock_timestamp() - interval '1 hour'
+               from generate_series(1, $3::integer) ordinal",
+            &[
+                &report_id,
+                &user_id,
+                &((MAX_CUSTOMER_MESSAGES_PER_24_HOURS - 1) as i32),
+            ],
+        )
+        .await?;
+
+    let client_request_id = Uuid::new_v4();
+    let final_allowed = json!({
+        "body": "the final message inside the daily allowance",
+        "clientRequestId": client_request_id,
+    })
+    .to_string();
+    assert_eq!(
+        submit(
+            state.clone(),
+            &user_token,
+            &format!("/support/reports/{report_id}/messages"),
+            &final_allowed,
+        )
+        .await
+        .status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        submit(
+            state.clone(),
+            &user_token,
+            &format!("/support/reports/{report_id}/messages"),
+            &final_allowed,
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+
+    let first_page = router()
+        .with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!("/support/reports/{report_id}/messages"))
+                .header("authorization", format!("Bearer {user_token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(first_page.status(), StatusCode::OK);
+    let first_page = response_json(first_page).await;
+    assert_eq!(first_page["messages"].as_array().map(Vec::len), Some(100));
+    assert_eq!(first_page["hasMore"], true);
+    let first_cursor = &first_page["nextCursor"];
+    let second_page = router()
+        .with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/support/reports/{report_id}/messages?before_created_at={}&before_message_id={}",
+                    urlencoding::encode(
+                        first_cursor["createdAt"]
+                            .as_str()
+                            .expect("message cursor createdAt")
+                    ),
+                    first_cursor["id"].as_str().expect("message cursor id")
+                ))
+                .header("authorization", format!("Bearer {user_token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(second_page.status(), StatusCode::OK);
+    let second_page = response_json(second_page).await;
+    assert_eq!(second_page["messages"].as_array().map(Vec::len), Some(100));
+    assert_eq!(second_page["hasMore"], true);
+    let second_cursor = &second_page["nextCursor"];
+    let oldest_page = router()
+        .with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/support/reports/{report_id}/messages?before_created_at={}&before_message_id={}",
+                    urlencoding::encode(
+                        second_cursor["createdAt"]
+                            .as_str()
+                            .expect("message cursor createdAt")
+                    ),
+                    second_cursor["id"].as_str().expect("message cursor id")
+                ))
+                .header("authorization", format!("Bearer {user_token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(oldest_page.status(), StatusCode::OK);
+    let oldest_page = response_json(oldest_page).await;
+    assert_eq!(oldest_page["messages"].as_array().map(Vec::len), Some(50));
+    assert_eq!(oldest_page["hasMore"], false);
+    assert!(oldest_page["nextCursor"].is_null());
+
+    let incomplete_cursor = router()
+        .with_state(state.clone())
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/support/reports/{report_id}/messages?before_message_id={client_request_id}"
+                ))
+                .header("authorization", format!("Bearer {user_token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(incomplete_cursor.status(), StatusCode::BAD_REQUEST);
+
+    let limited = submit(
+        state.clone(),
+        &user_token,
+        &format!("/support/reports/{report_id}/messages"),
+        r#"{"body":"one message too many"}"#,
+    )
+    .await;
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        response_json(limited).await["message"],
+        "Customer support messages are limited to 250 per 24 hours."
+    );
+
+    state
+        .pool
+        .get()
+        .await?
+        .execute("delete from bug_reports where id = $1", &[&report_id])
         .await?;
     Ok(())
 }

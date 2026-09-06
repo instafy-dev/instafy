@@ -11,7 +11,7 @@ export function EntryLoadingScreen() {
         <div aria-hidden="true">
           <OctoMark className="h-12 w-12" motion="thinking" />
         </div>
-        <p role="status" aria-live="polite" aria-atomic="true" className="text-sm text-slate-500 dark:text-slate-400">
+        <p role="status" aria-live="polite" aria-atomic="true" className="text-sm text-slate-600 dark:text-slate-400">
           Getting things ready…
         </p>
       </div>

@@ -14,6 +14,8 @@ import {
   type ConversationSendQueueEventDetail,
 } from "../../../services/runtimeController/sendQueue";
 import type { QueuedChatSendItem } from "./chatSendQueueStorage";
+import type { BrowserSessionPageTarget } from "./browserSessionPages";
+import { readQueuedComposerMetadata, withQueuedComposerMetadata } from "./chatSendQueueComposer";
 
 export type ServerQueuedChatSendItem = QueuedChatSendItem & {
   source: "server";
@@ -23,6 +25,10 @@ export type ServerQueuedChatSendItem = QueuedChatSendItem & {
 
 export type EnqueueServerSendQueuePayload = {
   message: string;
+  composerMessage?: string;
+  editorState?: string | null;
+  browserPageTarget?: BrowserSessionPageTarget | null;
+  browserLaunchMode?: "new_page" | null;
   targetAgentHandles: string[];
   metadata?: Record<string, unknown> | null;
   runtimeOverride?: SubmitConversationRuntimeOverride | null;
@@ -95,10 +101,11 @@ export function buildServerSendQueuePromptBody(
   payload: EnqueueServerSendQueuePayload,
 ): Record<string, unknown> {
   const intent = payload.intent ?? "feature";
+  const composerMetadata = withQueuedComposerMetadata(payload);
   const metadata =
     intent === "terminal_command"
-      ? payload.metadata ?? null
-      : withDefaultInteractiveWorkspaceExpectations(payload.metadata ?? null);
+      ? composerMetadata
+      : withDefaultInteractiveWorkspaceExpectations(composerMetadata);
   const runtimeOverride = payload.runtimeOverride?.runtimeId
     ? payload.runtimeOverride
     : null;
@@ -152,15 +159,16 @@ export function mapServerSendQueueEntryToQueuedItem(
   const runtimeOverride: SubmitConversationRuntimeOverride | null = runtimeId
     ? { runtimeId, runtimeDisplayName, preferRuntime }
     : null;
+  const restored = readQueuedComposerMetadata(metadata, promptText);
   return {
     id: entry.id,
-    message: promptText,
-    editorState: null,
+    message: restored.composer?.message ?? promptText,
+    editorState: restored.composer?.editorState ?? null,
     createdAt: Number.isFinite(createdAtMs) ? createdAtMs : Date.now(),
     targetAgentHandles: entry.targetAgentHandles,
-    browserPageTarget: null,
-    browserLaunchMode: null,
-    metadata,
+    browserPageTarget: restored.composer?.browserPageTarget ?? null,
+    browserLaunchMode: restored.composer?.browserLaunchMode ?? null,
+    metadata: restored.metadata,
     ...(runtimeOverride ? { runtimeOverride } : {}),
     source: "server",
     status: entry.status,
@@ -276,12 +284,20 @@ export function useChatServerSendQueue({
       if (!runtimeControllerEnabled || !conversationControllerId) {
         return false;
       }
+      let message: Record<string, unknown>;
+      try {
+        message = buildServerSendQueuePromptBody(payload);
+      } catch {
+        // No request was sent. The caller can preserve the full draft in its
+        // local queue; never mistake an older server entry for this write.
+        return false;
+      }
       const conversationId = conversationControllerId;
       const mutation = beginQueueMutation(conversationId);
       try {
         const entry = await enqueueSendQueueEntry({
           conversationId,
-          message: buildServerSendQueuePromptBody(payload),
+          message,
           targetAgentHandles: payload.targetAgentHandles,
         });
         if (!entry) {

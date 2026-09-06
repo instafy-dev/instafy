@@ -10,6 +10,7 @@ import {
 import { Camera, Xmark } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { Card } from "../../../components/Card";
+import { Checkbox } from "../../../components/Checkbox";
 import { Text } from "../../../components/Text";
 import { Textarea } from "../../../components/Textarea";
 import { StudioDialogBody, StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
@@ -20,19 +21,29 @@ import { controllerClient } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
 import { collectAppReleaseMetadata } from "../../../updates/releaseMetadata";
 import {
+  assertBugReportScreenshotTotalBytes,
   buildBugReportScreenshotDrafts,
   buildBugReportScreenshotDraftFromDataUrl,
   BUG_REPORT_MAX_SCREENSHOTS,
+  BUG_REPORT_MAX_SCREENSHOT_TOTAL_BYTES,
+  BUG_REPORT_SCREENSHOT_ACCEPT,
   formatBugReportFileSize,
+  isSupportedBugReportScreenshotMediaType,
   type BugReportScreenshotDraft,
 } from "./bugReportDrafts";
 import { BugReportScreenshotModal } from "./BugReportScreenshotModal";
+import { sanitizeBugReportLocation } from "./bugReportDiagnostics";
 
-const { submit: submitControllerBugReport } = controllerClient.bugReports;
+const {
+  submit: submitControllerBugReport,
+  createRequestId: createControllerBugReportRequestId,
+} = controllerClient.bugReports;
 
 interface BugReportDialogProps {
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
+  currentUserId: string;
+  isUserSessionCurrent: (expectedUserId: string) => boolean;
   initialMessage?: string;
   initialDetails?: string;
   initialScreenshots?: BugReportScreenshotDraft[];
@@ -40,10 +51,17 @@ interface BugReportDialogProps {
   activeConversationId: string | null;
   activeConversationLocalId?: string | null;
   activeRuntimeId: string | null;
-  userEmail: string | null;
   controllerProjectMissing: boolean;
   appLogs: BuildLogEntry[];
   buildLogs: BuildLogEntry[];
+}
+
+type BugReportSubmissionPayload = Parameters<typeof submitControllerBugReport>[0];
+
+interface BugReportSubmissionAttempt {
+  key: string;
+  requestId: string;
+  payload: BugReportSubmissionPayload;
 }
 
 function trimOptional(value: string): string | null {
@@ -79,6 +97,8 @@ function buildBugReportSummary(description: string): string {
 export function BugReportDialog({
   isOpen,
   onOpenChange,
+  currentUserId,
+  isUserSessionCurrent,
   initialMessage,
   initialDetails,
   initialScreenshots,
@@ -86,17 +106,30 @@ export function BugReportDialog({
   activeConversationId,
   activeConversationLocalId,
   activeRuntimeId,
-  userEmail,
   controllerProjectMissing,
   appLogs,
   buildLogs,
 }: BugReportDialogProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const submissionAttemptsRef = useRef(new Map<string, BugReportSubmissionAttempt>());
+  const submissionInFlightRef = useRef(false);
+  const mountedRef = useRef(true);
   const [description, setDescription] = useState(() => buildInitialDescription(initialMessage, initialDetails));
   const [screenshots, setScreenshots] = useState<BugReportScreenshotDraft[]>([]);
   const [selectedScreenshotId, setSelectedScreenshotId] = useState<string | null>(null);
+  const [includeDiagnostics, setIncludeDiagnostics] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const { showStatus } = useStatus();
+
+  useEffect(() => {
+    // React StrictMode intentionally runs effect setup/cleanup/setup once in
+    // development. Reassert the live state during setup so the second setup is
+    // not mistaken for an unmounted dialog by asynchronous submission guards.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!isOpen) {
@@ -105,6 +138,8 @@ export function BugReportDialog({
     setDescription(buildInitialDescription(initialMessage, initialDetails));
     setScreenshots(initialScreenshots?.map((screenshot) => ({ ...screenshot })) ?? []);
     setSelectedScreenshotId(null);
+    setIncludeDiagnostics(false);
+    submissionAttemptsRef.current.clear();
   }, [initialDetails, initialMessage, initialScreenshots, isOpen]);
 
   useEffect(() => {
@@ -127,14 +162,14 @@ export function BugReportDialog({
   const attachFiles = useCallback(
     async (files: File[]) => {
       try {
-        const drafts = await buildBugReportScreenshotDrafts(files, screenshots.length);
+        const drafts = await buildBugReportScreenshotDrafts(files, screenshots);
         setScreenshots((current) => [...current, ...drafts]);
       } catch (error) {
         const nextMessage = error instanceof Error ? error.message : "Unable to attach screenshot.";
         showStatus(nextMessage, "error", 3500);
       }
     },
-    [screenshots.length, showStatus],
+    [screenshots, showStatus],
   );
 
   const handleFileChange = useCallback(
@@ -155,7 +190,11 @@ export function BugReportDialog({
         return;
       }
       const imageFiles = Array.from(clipboardData.items ?? [])
-        .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+        .filter(
+          (item) =>
+            item.kind === "file" &&
+            isSupportedBugReportScreenshotMediaType(item.type),
+        )
         .map((item) => item.getAsFile())
         .filter((file): file is File => file instanceof File);
       if (imageFiles.length === 0) {
@@ -187,6 +226,13 @@ export function BugReportDialog({
         const nextDraft = buildBugReportScreenshotDraftFromDataUrl(dataUrl, {
           fileName: screenshots.find((draft) => draft.id === selectedScreenshotId)?.fileName,
         });
+        assertBugReportScreenshotTotalBytes(
+          screenshots.reduce(
+            (total, draft) =>
+              total + (draft.id === selectedScreenshotId ? nextDraft.byteLength : draft.byteLength),
+            0,
+          ),
+        );
         setScreenshots((current) =>
           current.map((draft) =>
             draft.id === selectedScreenshotId
@@ -215,46 +261,111 @@ export function BugReportDialog({
       showStatus("Add a short description before sending the report.", "error", 3500);
       return;
     }
+    try {
+      assertBugReportScreenshotTotalBytes(
+        screenshots.reduce((total, screenshot) => total + screenshot.byteLength, 0),
+      );
+    } catch (error) {
+      showStatus(
+        error instanceof Error ? error.message : "The screenshots are too large.",
+        "error",
+        3500,
+      );
+      return;
+    }
+    if (submissionInFlightRef.current) {
+      return;
+    }
+    const submissionUserId = currentUserId;
+    if (!isUserSessionCurrent(submissionUserId)) return;
 
+    const reportScreenshots = screenshots.map((screenshot) => ({
+      fileName: screenshot.fileName,
+      mediaType: screenshot.mediaType,
+      dataBase64: screenshot.dataBase64,
+      byteLength: screenshot.byteLength,
+    }));
+    const reportLogs = includeDiagnostics ? [...appLogs, ...buildLogs] : [];
+    const diagnosticMetadata = includeDiagnostics
+      ? {
+          location: sanitizeBugReportLocation(
+            typeof window !== "undefined" ? window.location.href : null,
+          ),
+          userAgent: typeof navigator !== "undefined" ? navigator.userAgent : null,
+          mode: import.meta.env.MODE,
+          controllerProjectMissing,
+          activeConversationLocalId,
+          build: instafyBuildInfo,
+        }
+      : {};
+    const basePayload = {
+      message: buildBugReportSummary(normalizedDescription),
+      details: normalizedDescription,
+      projectId: activeProjectId,
+      conversationId: activeConversationId,
+      runtimeId: activeRuntimeId,
+      metadata: diagnosticMetadata,
+      logs: reportLogs,
+      screenshots: reportScreenshots,
+      expectedUserId: submissionUserId,
+    } satisfies BugReportSubmissionPayload;
+    // Keep background diagnostics out of the retry identity. Once an opted-in
+    // upload may have reached the controller, a later render can contain new
+    // app/runtime logs; that must retry the exact captured payload and UUID,
+    // not create a second report merely because ambient logs advanced.
+    const submissionKey = JSON.stringify({
+      message: basePayload.message,
+      details: basePayload.details,
+      projectId: basePayload.projectId,
+      conversationId: basePayload.conversationId,
+      runtimeId: basePayload.runtimeId,
+      screenshots: basePayload.screenshots,
+      includeDiagnostics,
+      expectedUserId: basePayload.expectedUserId,
+    });
+
+    submissionInFlightRef.current = true;
     setSubmitting(true);
     try {
-      const releaseMetadata = await collectAppReleaseMetadata().catch(() => null);
-      const metadata: Record<string, unknown> = {
-        location: typeof window !== "undefined" ? window.location.href : null,
-        userAgent: typeof navigator !== "undefined" ? navigator.userAgent : null,
-        mode: import.meta.env.MODE,
-        userEmail,
-        controllerProjectMissing,
-        screenshotCount: screenshots.length,
-        activeConversationLocalId,
-        build: instafyBuildInfo,
-        release: releaseMetadata,
-      };
+      let attempt = submissionAttemptsRef.current.get(submissionKey);
+      if (!attempt) {
+        const releaseMetadata = includeDiagnostics
+          ? await collectAppReleaseMetadata().catch(() => null)
+          : null;
+        if (!mountedRef.current || !isUserSessionCurrent(submissionUserId)) return;
+        const payload: BugReportSubmissionPayload = {
+          ...basePayload,
+          metadata: includeDiagnostics
+            ? { ...diagnosticMetadata, release: releaseMetadata }
+            : {},
+        };
+        attempt = {
+          key: submissionKey,
+          requestId: createControllerBugReportRequestId(),
+          payload,
+        };
+        submissionAttemptsRef.current.set(submissionKey, attempt);
+      }
 
       const result = await submitControllerBugReport({
-        message: buildBugReportSummary(normalizedDescription),
-        details: normalizedDescription,
-        projectId: activeProjectId,
-        conversationId: activeConversationId,
-        runtimeId: activeRuntimeId,
-        metadata,
-        logs: [...appLogs, ...buildLogs],
-        screenshots: screenshots.map((screenshot) => ({
-          fileName: screenshot.fileName,
-          mediaType: screenshot.mediaType,
-          dataBase64: screenshot.dataBase64,
-          byteLength: screenshot.byteLength,
-        })),
+        ...attempt.payload,
+        clientRequestId: attempt.requestId,
       });
+      if (!mountedRef.current || !isUserSessionCurrent(submissionUserId)) return;
+      if (submissionAttemptsRef.current.get(attempt.key)?.requestId === attempt.requestId) {
+        submissionAttemptsRef.current.delete(attempt.key);
+      }
 
       const submittedId = result?.id ?? "unknown";
       showStatus(`Issue report sent (${submittedId.slice(0, 8)}…).`, "success", 4000);
       onOpenChange(false);
     } catch (error) {
+      if (!mountedRef.current || !isUserSessionCurrent(submissionUserId)) return;
       const nextMessage = error instanceof Error ? error.message : "Unable to submit issue report.";
       showStatus(nextMessage, "error", 4500);
     } finally {
-      setSubmitting(false);
+      submissionInFlightRef.current = false;
+      if (mountedRef.current) setSubmitting(false);
     }
   }, [
     activeConversationId,
@@ -265,10 +376,12 @@ export function BugReportDialog({
     buildLogs,
     controllerProjectMissing,
     description,
+    includeDiagnostics,
+    currentUserId,
+    isUserSessionCurrent,
     onOpenChange,
     screenshots,
     showStatus,
-    userEmail,
   ]);
 
   return (
@@ -283,7 +396,7 @@ export function BugReportDialog({
       <div className="flex max-h-[min(90dvh,48rem)] flex-col overflow-hidden" data-bug-report-overlay="true">
         <StudioDialogHeader
           title="Report issue"
-          description="Describe what broke. Space, conversation, runtime, logs, and build details are included automatically."
+          description="Describe what broke and review what information will be shared with support."
           descriptionClassName="max-w-xl"
           onClose={() => onOpenChange(false)}
           closeLabel="Close issue report"
@@ -309,14 +422,15 @@ export function BugReportDialog({
               <input
                 ref={fileInputRef}
                 type="file"
-                accept="image/*"
+                accept={BUG_REPORT_SCREENSHOT_ACCEPT}
                 multiple
                 className="hidden"
                 onChange={handleFileChange}
               />
             </div>
             <Text variant="caption" tone="secondary">
-              Paste screenshots directly into this field, or attach up to {BUG_REPORT_MAX_SCREENSHOTS} images.
+              Paste or attach up to {BUG_REPORT_MAX_SCREENSHOTS} PNG, JPEG, or WebP screenshots,
+              up to 4 MB each and {BUG_REPORT_MAX_SCREENSHOT_TOTAL_BYTES / (1024 * 1024)} MB total.
             </Text>
             <Textarea
               id="bug-report-description"
@@ -372,14 +486,42 @@ export function BugReportDialog({
                 ))}
               </div>
             ) : null}
-            <div className="grid grid-cols-1 gap-2 text-sm text-slate-600 dark:text-slate-300 sm:grid-cols-2">
-              <Text variant="caption" tone="secondary">Space: {activeProjectId ? activeProjectId.slice(0, 8) : "None"}</Text>
-              <Text variant="caption" tone="secondary">Conversation: {activeConversationId ? activeConversationId.slice(0, 8) : "None"}</Text>
-              <Text variant="caption" tone="secondary">Runtime: {activeRuntimeId ? activeRuntimeId.slice(0, 8) : "None"}</Text>
-              <Text variant="caption" tone="secondary">
-                Logs: {logSummary.app} app · {logSummary.runtime} runtime
-              </Text>
-            </div>
+            <Card tone="muted" radius="2xl" shadow="none" padding="sm" className="space-y-3">
+              <div>
+                <Text variant="bodyStrong">What will be sent</Text>
+                <Text variant="caption" tone="secondary" className="mt-1 block">
+                  Your description, the current space and conversation context, and only the screenshots shown above. Your signed-in identity and email are attached for ownership and support contact.
+                </Text>
+              </div>
+              <div className="grid grid-cols-1 gap-1 sm:grid-cols-3">
+                <Text variant="caption" tone="secondary">Space context: {activeProjectId ? "Included" : "None"}</Text>
+                <Text variant="caption" tone="secondary">Conversation context: {activeConversationId ? "Included" : "None"}</Text>
+                <Text variant="caption" tone="secondary">Runtime context: {activeRuntimeId ? "Included" : "None"}</Text>
+              </div>
+              <Checkbox
+                isSelected={includeDiagnostics}
+                onChange={setIncludeDiagnostics}
+                label="Include diagnostics"
+                description="Share app and runtime logs plus browser, build, release, and page-path information. This is off by default."
+                data-testid="bug-report-include-diagnostics"
+              />
+              {includeDiagnostics ? (
+                <Card tone="default" radius="xl" shadow="none" padding="sm" data-testid="bug-report-diagnostics-preview">
+                  <Text variant="caption" tone="secondary" className="font-medium">Diagnostics preview</Text>
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-slate-600 dark:text-slate-300">
+                    <li>{logSummary.app} app log entries and {logSummary.runtime} runtime log entries</li>
+                    <li>App mode, build identifier, and release information</li>
+                    <li>Browser or device user-agent information</li>
+                    <li>
+                      Page: {sanitizeBugReportLocation(typeof window !== "undefined" ? window.location.href : null) ?? "Unavailable"}
+                    </li>
+                  </ul>
+                  <Text variant="caption" tone="muted" className="mt-2 block">
+                    URL query parameters and fragments are removed. Your account email is used for ownership and contact, but is not duplicated inside optional diagnostics.
+                  </Text>
+                </Card>
+              ) : null}
+            </Card>
           </div>
 
           <div className="flex items-center justify-end gap-3">

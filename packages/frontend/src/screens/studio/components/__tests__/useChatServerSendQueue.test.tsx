@@ -28,6 +28,8 @@ import {
   reorderServerQueueEntries,
   useChatServerSendQueue,
 } from "../useChatServerSendQueue";
+import { queuedMentionComposer, QUEUED_MENTION_USER_ID } from "./fixtures/queuedMentionComposer";
+import { MAX_QUEUED_COMPOSER_BYTES, queuedComposerDispatchMessage } from "../chatSendQueueComposer";
 
 type HookResult = ReturnType<typeof useChatServerSendQueue>;
 
@@ -839,6 +841,34 @@ describe("buildServerSendQueuePromptBody", () => {
 });
 
 describe("mapServerSendQueueEntryToQueuedItem", () => {
+  it.each(["plain", "page", "new_page"])("roundtrips real picker nodes bound to the exact %s queued dispatch", (mode) => {
+    const composer = queuedMentionComposer();
+    const browserPageTarget = mode === "page" ? { id: "page-1", url: "https://example.test/", host: "example.test", label: "Example" } : null;
+    const browserLaunchMode = mode === "new_page" ? "new_page" as const : null;
+    const message = queuedComposerDispatchMessage({ message: composer.message, browserPageTarget, browserLaunchMode });
+    const body = buildServerSendQueuePromptBody({
+      message, composerMessage: composer.message, editorState: composer.editorState,
+      browserPageTarget, browserLaunchMode, targetAgentHandles: ["octo"],
+      metadata: { mentionedUserIds: [QUEUED_MENTION_USER_ID] },
+    });
+    const hydrated = mapServerSendQueueEntryToQueuedItem(createEntry({ message: body }));
+    expect(hydrated).toMatchObject({ ...composer, browserPageTarget, browserLaunchMode, metadata: { mentionedUserIds: [QUEUED_MENTION_USER_ID] } });
+    expect(hydrated?.metadata?.queuedComposer).toBeUndefined();
+  });
+
+  it("does not restore sidecar editor text over a different authoritative queued message", () => {
+    const composer = queuedMentionComposer();
+    const body = buildServerSendQueuePromptBody({ ...composer, targetAgentHandles: ["octo"] });
+    body.promptText = "Different server text";
+    expect(mapServerSendQueueEntryToQueuedItem(createEntry({ message: body }))).toMatchObject({ message: "Different server text", editorState: null });
+  });
+
+  it("bounds persisted composer data and rejects mismatched editor text", () => {
+    const composer = queuedMentionComposer("x".repeat(MAX_QUEUED_COMPOSER_BYTES));
+    expect(() => buildServerSendQueuePromptBody({ ...composer, targetAgentHandles: [] })).toThrow("Unable to preserve this draft");
+    expect(() => buildServerSendQueuePromptBody({ ...queuedMentionComposer(), message: "Unrelated text", targetAgentHandles: [] })).toThrow("Unable to preserve this draft");
+  });
+
   it("maps failed entries with their error message", () => {
     const item = mapServerSendQueueEntryToQueuedItem(
       createEntry({ status: "failed", errorMessage: "runtime offline" }),

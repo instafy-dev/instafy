@@ -94,6 +94,11 @@ wordmark. Reduced motion keeps this mark still, and the loading screen disappear
 when the destination or login form is ready. This exception does not animate login
 form logos, header logos, or runtime-waiting states.
 
+Initial Studio space resolution uses this same surface. After the workspace is visible, keep
+loading indicators local to their content instead of replacing the full screen. Local spinners,
+pulsing activity indicators, and status-text shimmer stop under reduced-motion preferences;
+their static label or icon remains visible. Loading text must remain legible in both themes.
+
 A clearly labeled landing-page workspace example may use the same thinking
 state beside its simulated active work. Keep one example visible at a time,
 provide a motion pause control, and suspend motion offscreen and in hidden

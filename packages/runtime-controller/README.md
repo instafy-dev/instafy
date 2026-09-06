@@ -41,6 +41,8 @@ This document explains how the Instafy runtime controller is structured and how 
 | Method | Route | Notes |
 | --- | --- | --- |
 | POST | `/dispatch-prompt` | Main entrypoint for conversations and module runs on an authorized existing project. Only service-role callers may bootstrap a missing project. Returns `{ runId, promptId, ... }`. |
+| POST | `/projects/:id/conversations/blank` | Creates a conversation. Private chats accept `initialParticipantUserIds` and return the IDs committed atomically with the conversation. |
+| POST | `/conversations/:id/messages/record` | Records a user or assistant message; human metadata may include canonical `mentionedUserIds`. |
 | POST | `/progress-callback` | Receives build/job progress (ephemeral JWT). Broadcasts progress events and updates runs. |
 | GET | `/events` | SSE stream; filters by `projectId`, `sessionId`, `conversationId`, `runId`, or `kinds`. |
 | GET | `/runs` | List runs for a project/session. |
@@ -56,19 +58,167 @@ This document explains how the Instafy runtime controller is structured and how 
 
 Refer to `src/main.rs` for the complete list, including agent callbacks and admin endpoints (`/runtime/stop`, `/runtime/idle-reaper`).
 
+### Conversation recipients
+
+Private creation accepts at most 32 UUID `initialParticipantUserIds`. Each target must already
+have project access; the request fails atomically with HTTP 403 otherwise. Initial participants
+require a private conversation and cannot be added with a scoped job credential. The successful
+response includes the normalized committed IDs, allowing clients to fail closed against older
+controllers that ignore this additive request field. Adding a participant later applies the same
+project-access requirement and never grants project membership.
+
+User-message metadata accepts at most 32 UUID `mentionedUserIds`, derived from selected human
+mention identities rather than display text. Record-only and prompt-dispatch paths validate and
+deduplicate the list; malformed metadata returns HTTP 400. The transactional notification producer
+unions these IDs with the creator and participants, excludes the sender, and filters by current
+conversation access. A private nonparticipant or a user without project access receives nothing.
+See [Notifications](../../docs/Notifications.md) for preferences, visible automation replies,
+recipient read state, and rollout requirements.
+
 ### Bug report submission limits
 
 Customer submissions to `/support/reports` and `/bug-reports` share a per-user
-ten-second cooldown. Reports spaced at least ten seconds apart are accepted without
-a daily count limit. A database advisory lock and the database clock enforce this
-spacing across controller instances; an early retry receives HTTP 429 with the
-remaining wait rounded up to whole seconds.
+ten-second cooldown and a durable rolling limit of 25 accepted reports per 24 hours.
+A database advisory lock, indexed database count, and the database clock enforce both
+limits across controller instances; an early retry receives HTTP 429 with the remaining
+wait rounded up to whole seconds. Customer follow-ups have a separate durable limit of
+250 accepted messages per account per 24 hours. Exact idempotent message replays do not
+consume the allowance. Service and verified operator submissions are exempt.
+Customer report creation accepts an optional UUID `clientRequestId`. Under the same
+per-account database lock, an exact normalized retry returns the original report with HTTP 200;
+reuse for different normalized/redacted content or attachments returns HTTP 409. The key and
+request digest are private database fields and never appear in report DTOs.
+Studio also sends `expectedUserId`; when present, the controller requires it to match the
+authenticated account before validating diagnostics or persisting the report. This prevents a
+draft captured under one account from being submitted under another account after a session
+change.
+Studio likewise sends `expected_user_id` on customer report-list requests. An account mismatch
+returns HTTP 409 before any summaries are selected, preventing an in-flight read prepared under
+one account from rendering another account's support inbox. The parameter remains optional for
+backward-compatible CLI clients.
+Customer PNG, JPEG, and WebP screenshots must have readable matching headers, dimensions no
+larger than 8,192 pixels per side, and no more than 25 million pixels. Their accepted attachment
+bytes share a database-serialized 32 MiB per-account rolling 24-hour limit. Exact report replays
+are resolved before this quota and therefore do not consume or re-check it. Screenshot file names
+also reject bidi and non-text control characters before they can reach an operator timeline.
 
 Invalid or repeated attempts remain bounded separately: `/support/reports` accepts
 at most five attempts per ten seconds, authenticated before buffering its larger
 body, and `/bug-reports` accepts at most thirty attempts per ten seconds. Existing
 authentication, project access, payload and screenshot limits still apply. These
 limits do not expand service-role or operator access.
+
+Initial customer `message` and `details` text rejects the same bidi and non-text control
+characters as follow-up messages; ordinary newlines and tabs remain supported.
+
+Customer diagnostics are sanitized again by the controller before persistence. Sensitive
+object keys, stringified JSON, header-style values, token/JWT/private-key patterns, and
+colon-delimited credentials are redacted. URL/DSN userinfo is removed and query strings and
+fragments are stripped. Scanning is bounded per string. This server-side boundary applies even
+when a client also provides a diagnostic preview.
+
+### Support report conversations
+
+Each customer report has a controller-projected, customer-visible message ledger:
+
+- `GET /support/reports/:id/messages` lists the authenticated reporter's latest 100 messages.
+- `POST /support/reports/:id/messages` adds a reporter follow-up.
+- `GET /bug-reports/:id/messages` lists the same safe projection for a bug-report operator.
+- `POST /bug-reports/:id/replies` publishes an explicit support reply.
+- `POST /bug-reports/:id/messages/reviewed` durably acknowledges the exact customer activity
+  snapshot supplied as `{ customerLastMessageAt }`; an exact retry returns HTTP 200 without
+  changing its audit actor, while changed or inconsistent activity returns HTTP 409.
+
+Posts accept `{ body, clientRequestId? }`; `clientRequestId` is an optional UUID and makes an
+exact retry idempotent. Reusing it for different content or an actor type is a conflict. Bodies
+are trimmed and limited to 4,000 Unicode characters and 16 KiB; spoofing bidi and non-text
+control characters are rejected. Customer posts are additionally limited to 30 per minute
+outside development mode. Operator replies require an interactive operator session and are
+rejected if the customer-visible body contains a credential/token/private-key sentinel. They may
+include `customerLastMessageAt` to atomically acknowledge exactly the snapshot being answered;
+the snapshot must still be unreviewed, so competing replies to the same work item receive HTTP
+409. Omitting it leaves the report in the response queue. A follow-up reopens a resolved report, while
+the first support reply advances an open report to `in_progress`. These transitions and explicit
+operator status changes append customer-visible system timeline entries.
+Customer and support authors share a 5,000-message per-thread cap. Lifecycle events have a
+separate bounded 1,000-row allowance. Once that allowance is full, authored messages and status
+transitions continue without an extra timeline event, so a report can still be reopened or
+resolved without allowing unbounded system rows.
+
+Operator summary/detail DTOs include `customerLastReviewedAt` and `needsResponse`; customer DTOs
+do not. `GET /bug-reports?needs_response=true` returns unseen customer activity oldest-first.
+Stable pagination uses the previous row's paired `after_customer_activity_at` and
+`after_customer_activity_id` query values. The cursor is independent of public replies, so an
+operator or agent can explicitly mark a report reviewed even when no customer response is needed.
+The general operator list is ordered by `createdAt` then report ID, both descending; pass paired
+`before_created_at` and `before_created_id` values for deterministic older pages. A legacy
+timestamp-only `before_created_at` request remains accepted. List items omit report details,
+reporter identifiers, source IDs, metadata, and logs; their summary `message` is capped at 500
+characters. The operator detail route retains the complete authorized record.
+Resolving a customer report requires `expectedCustomerLastMessageAt` on the operator PATCH; a
+missing or stale snapshot returns HTTP 409, and an exact snapshot is marked reviewed atomically
+with resolution. This prevents a follow-up arriving during a fix from being silently closed.
+Operator PATCH requests may additionally include `expectedUpdatedAt`; when supplied, any
+intervening triage update returns HTTP 409 instead of overwriting labels or other fields.
+New operator clients use `PATCH /bug-reports/:id/triage`, which requires a nonempty
+`expectedUpdatedAt` from the report they inspected. Missing/null or stale versions return HTTP
+409. Resolving a customer report also requires the matching `expectedCustomerLastMessageAt`.
+The separate route prevents an older controller from silently ignoring concurrency fields:
+it returns HTTP 404, and clients must not retry against the legacy PATCH endpoint. The legacy
+`PATCH /bug-reports/:id` remains available for existing integrations with its optional version
+guard. Deploy the migration and updated controllers before exposing the new operator clients.
+The returned `updatedAt` concurrency version is generated by the controller and advances on
+every support-thread or triage mutation. A legacy request `updatedAt` value is accepted and
+validated for wire compatibility but is no longer used as the stored version. `resolvedAt` is
+likewise validated for compatibility but ignored: the controller derives it only from status
+transitions. Explicit JSON `null` clears nullable assignee, duplicate, and GitHub-link fields;
+omitting one preserves it.
+
+Customer report lists are ordered by newest customer-visible activity. Items expose `activityAt`,
+and list responses add `hasMore` plus `nextCursor: { activityAt, id }`. Pass that cursor back as
+paired `before_activity_at` and `before_activity_id` query values to fetch older reports. Message
+responses likewise add `hasMore` and `nextCursor: { createdAt, id }`; pass paired
+`before_created_at` and `before_message_id` to fetch the next older page. Each page remains in
+chronological display order, so older pages can be prepended without reordering.
+For backward compatibility, customer report-list requests that pass only the legacy
+`before_created_at` cursor continue to filter and order by report creation time. When another page
+exists, that mode returns `nextCursor: { createdAt, id }` so callers can continue with paired
+`before_created_at` and `before_created_id` values without changing ordering modes.
+
+Customer summaries and details include `resolvedAt`, `hasUnreadSupportActivity`, and
+`hasUnreadResolution`. The list envelope also includes `unreadCount`, `unreadResolutionCount`, and
+`unnotifiedResolutionCount` across all of the account's reports, independently of pagination.
+After detail and the visible timeline have both loaded, the customer can send
+`POST /support/reports/:id/acknowledge` with `{ seenThrough }`, using the report's observed support
+activity timestamp. The cursor advances monotonically; a stale acknowledgement cannot hide newer
+support activity, and a report owned by another account returns the same not-found boundary as
+other customer report reads.
+
+Updated Studio uses the [durable notification platform](../../docs/Notifications.md) for
+customer-visible replies and resolution transitions, and disables the legacy resolution toast.
+The notification recipient's read state is independent of the report's support-activity cursor.
+
+Older clients can claim a newly resolved report for an in-app alert by sending
+`POST /support/resolution-alerts/claim` with `{ expectedUserId }`. The expected identity is required
+and must match the authenticated session; a mismatch returns HTTP 409 without claiming anything.
+The durable notification migration reserves this legacy claim for each new resolution transition
+in the same transaction as its event and delivery jobs, so an older client cannot also toast that
+resolution. It leaves the support seen cursor untouched; eligible earlier resolutions retain the
+legacy fallback described below.
+One conditional database update atomically claims all
+currently unread, not-yet-announced resolutions for that account, returning their count and newest
+report. Concurrent tabs/devices therefore produce one alert, while the separate seen cursor keeps
+the profile unread badge visible until the report timeline is actually viewed. Historical support
+activity and resolutions are backfilled as seen/announced only when these columns are first added;
+rerunning the migration never consumes later activity.
+
+All customer and operator bug-report route responses include `Cache-Control: no-store`.
+
+The `bug_report_messages` table contains customer-visible text only. Internal notes, agent
+reasoning, logs, workspace data, and private runtime context must never be written there. Direct
+`anon` and `authenticated` table privileges are revoked; browser clients go through the
+report-owner routes. Customer report details expose the affected project as context but do not
+expose source runtime, run, or conversation identifiers.
 
 ## Configuration
 Key environment variables (see `AppConfig::from_env` for defaults):
@@ -112,6 +262,32 @@ Key environment variables (see `AppConfig::from_env` for defaults):
 Additional fields include Redis settings for cross-controller `/events` fanout (`REDIS_URL`, optional `REDIS_NAMESPACE`, optional `REDIS_EVENTS_CHANNEL`), agent token TTLs, and GitHub workflow metadata. Keep environment-specific values in your orchestration layer (e.g., AWS ECS task definitions).
 
 ## Local Development
+
+### Startup service identity
+
+`SERVICE_RUNTIME_USER_ID` optionally supplies the controller's service-runtime
+user UUID (plain or base64-encoded). When it is absent and a server-side
+`SUPABASE_SERVICE_ROLE_KEY` is available, startup looks up or creates the service
+user through the Supabase admin API. `SERVICE_RUNTIME_USER_EMAIL` selects that
+identity (default `service-runtime@instafy.dev`); `SERVICE_RUNTIME_USER_PASSWORD`
+optionally supplies the password used only when creating it.
+
+Configuration loading performs blocking HTTP calls, so async startup runs it on
+a blocking worker before initializing the database pool. An explicit service
+UUID skips admin bootstrap. Without an admin key, or if bootstrap fails, the
+existing database lookup fallback remains available. Service-role keys and the
+service user's password stay controller-side; they are not browser settings.
+
+The startup regression suite launches the real controller with a cleared
+environment and an inert loopback Auth server. It needs neither Docker nor a
+database and never uses an existing Supabase account:
+
+```bash
+cargo test --locked --manifest-path packages/runtime-controller/Cargo.toml --test startup
+```
+
+### Running the controller
+
 1. Ensure Postgres + Supabase stack are running locally with the expected schema (see `packages/runtime-controller/migrations/`).
 2. Set the required env vars (at minimum `DATABASE_URL`, `SUPABASE_PROJECT_URL`, `CONTROLLER_INTERNAL_TOKEN`, `WORKSPACE_ROOT`, and an Ed25519 keypair via `RUNTIME_SIGNING_PRIVATE_KEY` / `RUNTIME_SIGNING_PUBLIC_KEY`).
 3. Use the provided scripts: `pnpm controller:up` to boot Supabase + the controller, and the matching `*:down` command when finished. Avoid backgrounding the controller manually; orphaned listeners block Playwright.

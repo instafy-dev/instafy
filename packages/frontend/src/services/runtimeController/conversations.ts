@@ -107,6 +107,7 @@ export interface DispatchControllerPromptResponse {
 
 export interface CreateControllerConversationResponse {
   conversationId: string;
+  initialParticipantUserIds?: string[];
 }
 
 export interface ProjectConversationTitleParams {
@@ -250,7 +251,7 @@ const inFlightBlankConversationRequests = new Map<
   string,
   Promise<CreateControllerConversationResponse | null>
 >();
-const cachedBlankConversationIds = new Map<string, string>();
+const cachedBlankConversations = new Map<string, CreateControllerConversationResponse>();
 const CONTROLLER_MESSAGE_RECORD_RETRY_DELAYS_MS = [300, 1_000] as const;
 const CONTROLLER_PARTICIPATION_TIMEOUT_MS = 2_000;
 
@@ -341,6 +342,7 @@ function extractConversationLocalIdFromMetadata(
 function buildBlankConversationRequestKey(params: {
   projectId: string;
   metadata: Record<string, unknown> | null | undefined;
+  initialParticipantUserIds?: string[];
 }): string | null {
   const projectId = params.projectId.trim();
   if (!projectId) {
@@ -350,7 +352,7 @@ function buildBlankConversationRequestKey(params: {
   if (!localId) {
     return null;
   }
-  return `${projectId}:${localId}`;
+  return JSON.stringify([projectId, localId, [...(params.initialParticipantUserIds ?? [])].sort()]);
 }
 
 export async function updateControllerConversationMetadata(params: {
@@ -548,11 +550,16 @@ export async function createControllerConversation(
   }
 }
 
+export interface CreateBlankControllerConversationParams extends Pick<
+  DispatchControllerPromptParams,
+  "projectId" | "sessionId" | "metadata" | "parentConversationId" | "threadKind" | "accessToken"
+> {
+  /** Authorized participants added atomically when creating a private conversation. */
+  initialParticipantUserIds?: string[];
+}
+
 export async function createBlankControllerConversation(
-  params: Pick<
-    DispatchControllerPromptParams,
-    "projectId" | "sessionId" | "metadata" | "parentConversationId" | "threadKind" | "accessToken"
-  >,
+  params: CreateBlankControllerConversationParams,
 ): Promise<CreateControllerConversationResponse | null> {
   if (!runtimeControllerEnabled) {
     return null;
@@ -575,6 +582,7 @@ export async function createBlankControllerConversation(
     metadata: safeJson(params.metadata) ?? {},
     parentConversationId: params.parentConversationId ?? undefined,
     threadKind: params.threadKind ?? undefined,
+    initialParticipantUserIds: params.initialParticipantUserIds,
   };
 
   const request = async (): Promise<CreateControllerConversationResponse | null> => {
@@ -604,6 +612,9 @@ export async function createBlankControllerConversation(
       const data = (await response.json()) as CreateControllerConversationResponse;
       return {
         conversationId: data.conversationId,
+        ...(Array.isArray(data.initialParticipantUserIds)
+          ? { initialParticipantUserIds: data.initialParticipantUserIds.filter((id): id is string => typeof id === "string") }
+          : {}),
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -618,15 +629,16 @@ export async function createBlankControllerConversation(
   const requestKey = buildBlankConversationRequestKey({
     projectId: params.projectId,
     metadata: params.metadata ?? null,
+    initialParticipantUserIds: params.initialParticipantUserIds,
   });
 
   if (!requestKey) {
     return await request();
   }
 
-  const cachedConversationId = cachedBlankConversationIds.get(requestKey) ?? null;
-  if (cachedConversationId) {
-    return { conversationId: cachedConversationId };
+  const cachedConversation = cachedBlankConversations.get(requestKey) ?? null;
+  if (cachedConversation) {
+    return cachedConversation;
   }
 
   const inFlight = inFlightBlankConversationRequests.get(requestKey);
@@ -640,7 +652,7 @@ export async function createBlankControllerConversation(
   inFlightBlankConversationRequests.set(requestKey, promise);
   const result = await promise;
   if (result?.conversationId) {
-    cachedBlankConversationIds.set(requestKey, result.conversationId);
+    cachedBlankConversations.set(requestKey, result);
   }
   return result;
 }

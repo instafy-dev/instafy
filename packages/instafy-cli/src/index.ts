@@ -76,7 +76,13 @@ import {
   providersRead,
 } from "./providers.js";
 import { diagnosticsRunResult, diagnosticsRuntimeEvents } from "./diagnostics.js";
-import { supportList, supportReport, supportShow } from "./support.js";
+import {
+  supportList,
+  supportMessages,
+  supportReply,
+  supportReport,
+  supportShow,
+} from "./support.js";
 
 export const program = new Command();
 program.showSuggestionAfterError();
@@ -1798,6 +1804,10 @@ const supportReportCommand = supportCommand
     collectStringOption,
     [],
   )
+  .option(
+    "--client-request-id <uuid>",
+    "Stable idempotency UUID to reuse when retrying this exact report",
+  )
   .option("--preview", "Show what would be uploaded without making a request")
   .option("--json", "Output the safe response as JSON");
 addServerUrlOptions(supportReportCommand);
@@ -1816,6 +1826,7 @@ supportReportCommand.action(async (summaryParts, opts) => {
       metadataFile: opts.metadataFile,
       logsFile: opts.logsFile,
       screenshots: opts.screenshot,
+      clientRequestId: opts.clientRequestId,
       preview: opts.preview,
       controllerUrl: opts.serverUrl,
       accessToken: opts.accessToken,
@@ -1833,7 +1844,23 @@ const supportListCommand = supportCommand
   .option("--limit <count>", "Maximum reports (1-100, default: 25)", Number.parseInt)
   .option("--status <status>", "Filter by open, in_progress, or resolved")
   .option("--space <id>", "Filter by space UUID")
-  .option("--before <timestamp>", "List reports created before an RFC3339 timestamp")
+  .option("--before <timestamp>", "Legacy: list reports created before an RFC3339 timestamp")
+  .option(
+    "--before-created-at <timestamp>",
+    "Continue from a legacy creation-time cursor",
+  )
+  .option(
+    "--before-created-id <uuid>",
+    "Stable report-id tie breaker paired with --before-created-at",
+  )
+  .option(
+    "--before-activity-at <timestamp>",
+    "Continue from a report activity cursor",
+  )
+  .option(
+    "--before-activity-id <uuid>",
+    "Stable report-id tie breaker paired with --before-activity-at",
+  )
   .option("--json", "Output the safe report summaries as JSON");
 addServerUrlOptions(supportListCommand);
 addAccessTokenOptions(supportListCommand, "Signed-in user access token");
@@ -1844,6 +1871,10 @@ supportListCommand.action(async (opts) => {
       status: opts.status,
       space: opts.space,
       before: opts.before,
+      beforeCreatedAt: opts.beforeCreatedAt,
+      beforeCreatedId: opts.beforeCreatedId,
+      beforeActivityAt: opts.beforeActivityAt,
+      beforeActivityId: opts.beforeActivityId,
       controllerUrl: opts.serverUrl,
       accessToken: opts.accessToken,
       json: opts.json,
@@ -1865,6 +1896,67 @@ supportShowCommand.action(async (reportId, opts) => {
   try {
     await supportShow({
       reportId,
+      controllerUrl: opts.serverUrl,
+      accessToken: opts.accessToken,
+      json: opts.json,
+    });
+  } catch (error) {
+    console.error(kleur.red(String(error)));
+    process.exit(1);
+  }
+});
+
+const supportMessagesCommand = supportCommand
+  .command("messages")
+  .description("List customer-visible follow-ups for one of your support reports")
+  .argument("<report-id>", "Support report UUID")
+  .option("--limit <count>", "Maximum messages (1-100, default: 100)", Number.parseInt)
+  .option(
+    "--before-created-at <timestamp>",
+    "Continue from an older-message cursor",
+  )
+  .option(
+    "--before-message-id <uuid>",
+    "Stable message-id tie breaker paired with --before-created-at",
+  )
+  .option("--json", "Output the safe message timeline as JSON");
+addServerUrlOptions(supportMessagesCommand);
+addAccessTokenOptions(supportMessagesCommand, "Signed-in user access token");
+supportMessagesCommand.action(async (reportId, opts) => {
+  try {
+    await supportMessages({
+      reportId,
+      limit: opts.limit,
+      beforeCreatedAt: opts.beforeCreatedAt,
+      beforeMessageId: opts.beforeMessageId,
+      controllerUrl: opts.serverUrl,
+      accessToken: opts.accessToken,
+      json: opts.json,
+    });
+  } catch (error) {
+    console.error(kleur.red(String(error)));
+    process.exit(1);
+  }
+});
+
+const supportReplyCommand = supportCommand
+  .command("reply")
+  .description("Add a follow-up to one of your support reports")
+  .argument("<report-id>", "Support report UUID")
+  .argument("<message...>", "Follow-up message")
+  .option(
+    "--client-request-id <uuid>",
+    "Stable request UUID to reuse only after an uncertain retry",
+  )
+  .option("--json", "Output the created customer-visible message as JSON");
+addServerUrlOptions(supportReplyCommand);
+addAccessTokenOptions(supportReplyCommand, "Signed-in user access token");
+supportReplyCommand.action(async (reportId, messageParts, opts) => {
+  try {
+    await supportReply({
+      reportId,
+      message: Array.isArray(messageParts) ? messageParts.join(" ") : String(messageParts ?? ""),
+      clientRequestId: opts.clientRequestId,
       controllerUrl: opts.serverUrl,
       accessToken: opts.accessToken,
       json: opts.json,

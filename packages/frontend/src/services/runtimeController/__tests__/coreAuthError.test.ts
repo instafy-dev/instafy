@@ -86,4 +86,35 @@ describe("emitControllerAuthError with an injected override token", () => {
     expect(core.isControllerDocumentReloadPending()).toBe(false);
     window.removeEventListener(core.CONTROLLER_AUTH_ERROR_EVENT, listener);
   });
+
+  it("does not emit an auth failure for an account-pinning conflict", async () => {
+    const core = await import("../core");
+    const received: number[] = [];
+    const listener = (event: Event) => {
+      received.push((event as CustomEvent<{ status: number }>).detail.status);
+    };
+    window.addEventListener(core.CONTROLLER_AUTH_ERROR_EVENT, listener);
+
+    await expect(
+      core.readControllerError(
+        new Response(
+          JSON.stringify({
+            message: "support alert session changed; refresh support and try again",
+          }),
+          { status: 409 },
+        ),
+        "support resolution alert claim failed",
+        {
+          baseUrl: "https://controller.example.test",
+          accessToken: "new-account-token",
+          credentialSource: "ambient",
+          generation: 2,
+        },
+      ),
+    ).resolves.toBe("support alert session changed; refresh support and try again");
+
+    expect(received).toEqual([]);
+    expect(core.isControllerDocumentReloadPending()).toBe(false);
+    window.removeEventListener(core.CONTROLLER_AUTH_ERROR_EVENT, listener);
+  });
 });
