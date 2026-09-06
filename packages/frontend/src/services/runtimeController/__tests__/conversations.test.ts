@@ -16,11 +16,36 @@ vi.mock("../core", () => ({
 }));
 
 import {
+  createBlankControllerConversation,
   fetchConversationMessagesFromController,
   recordControllerConversationMessage,
   resolveControllerConversationParticipation,
 } from "../conversations";
 import { readControllerError } from "../core";
+
+describe("createBlankControllerConversation initial participants", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("sends participant IDs in the atomic private creation request", async () => {
+    resolveControllerAccessTokenMock.mockResolvedValue("token-123");
+    const proof = { conversationId: "conversation-created", initialParticipantUserIds: ["aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"] };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(proof)));
+    vi.stubGlobal("fetch", fetchMock);
+    const request = {
+      projectId: "project-1",
+      metadata: { localId: "atomic-direct-local", visibility: "private", title: "Chat with teammate" },
+      initialParticipantUserIds: ["aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"],
+    };
+    await expect(createBlankControllerConversation(request)).resolves.toEqual(proof);
+    await expect(createBlankControllerConversation(request)).resolves.toEqual(proof);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("http://controller.test/projects/project-1/conversations/blank");
+    expect(JSON.parse(init.body)).toMatchObject({
+      metadata: { visibility: "private" }, initialParticipantUserIds: ["aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"],
+    });
+  });
+});
 
 describe("fetchConversationMessagesFromController", () => {
   beforeEach(() => {

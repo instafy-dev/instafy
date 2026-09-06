@@ -45,6 +45,33 @@ Eligible resolutions from before the notification migration retain the legacy
 claim fallback. Event/outbox failures roll back the reservation with the source
 transition.
 
+Human conversation messages notify the creator, explicit participants, and
+selected human mentions, excluding the sender and deduplicating overlapping
+recipients. Every recipient must still have current project and conversation
+access. Viewing a public conversation does not itself subscribe every project
+member. A mention does not grant private access or enroll someone for future
+replies. Private **Invite and send** explicitly enrolls the selected teammate
+before sending.
+
+Human mentions use the composer picker's selected user IDs. The controller
+accepts at most 32 UUIDs in message metadata `mentionedUserIds`, normalizes and
+deduplicates them, and preserves the same source key for human-only and agent
+dispatch messages. Plain text such as `@taylor` without a selected person is not
+a globally resolvable username; display handles can be ambiguous.
+
+Private-chat creation accepts `initialParticipantUserIds` and verifies each
+target's existing project access before committing the conversation and its
+participants together. Studio exposes the new chat only after that request
+succeeds and its response confirms the intended `initialParticipantUserIds`, so
+its first message cannot race a separate invitation. An older controller that
+ignores the field cannot release the composer without this confirmation.
+Invitations never grant project access, including in personal projects.
+
+For automation conversations, the owner receives the terminal automation event.
+Other authorized conversation participants receive visible assistant replies as
+`conversation.reply`. Quiet runs and telemetry remain suppressed; automation
+control failures still notify only the owner, without fanout to project members.
+
 `notification_event_types` is the versioned registry. V1 events store an empty
 payload; display text comes from static templates, not source content. To add a
 category of product events, add a registry entry, its authorization rule and
@@ -127,6 +154,17 @@ Studio's bell opens paginated All and Unread views, with read, read-all, archive
 and preference controls. The server owns monotonic seen/read/archive timestamps;
 a stale device cannot unread or unarchive a notification. Mark-all uses the page
 watermark. Toasts are transient presentation, not durable state.
+
+Reading a normal conversation acknowledges only persisted message IDs actually
+visible in the chat viewport while the document and chat pane are visible.
+Offscreen messages and messages covered by a dialog are not acknowledged. The
+account-pinned `POST /me/notifications/conversation-read` endpoint accepts a
+`conversationId`, at most 100 `messageIds`, and `expectedUserId`; it rechecks
+current access and marks only that user's matching `conversation.reply` events
+seen and read. It does not use a server-latest timestamp: concurrent arrivals,
+including backdated messages, stay unread until displayed. This cancels their
+pending external delivery only after those specific messages are read; support
+cursors remain independent.
 
 Canonical targets contain UUIDs only. Support targets use
 `/studio?supportReportId=<report-id>`; conversations use

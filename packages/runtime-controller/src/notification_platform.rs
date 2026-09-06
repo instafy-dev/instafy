@@ -98,6 +98,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/me/notifications/state", post(change_state))
         .route("/me/notifications/read-all", post(read_all))
         .route(
+            "/me/notifications/conversation-read",
+            post(read_conversation_messages),
+        )
+        .route(
             "/me/notifications/preferences",
             get(preferences).post(save_preferences),
         )
@@ -308,6 +312,72 @@ async fn change_state(
     ).await.map_err(|_| internal_error("Unable to update notification"))?;
     if changed == 0 {
         return Err(not_found("Notification not found"));
+    }
+    Ok(Json(OkBody { ok: true }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ConversationReadBody {
+    conversation_id: Uuid,
+    message_ids: Vec<Uuid>,
+    expected_user_id: Uuid,
+}
+
+async fn read_conversation_messages(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ConversationReadBody>,
+) -> ApiResult<OkBody> {
+    let context = authenticate_request(&state.config, &headers).await?;
+    let user = require_user_session(&context)?;
+    if user != body.expected_user_id {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ApiError::new(
+                "Notification session changed; refresh and try again",
+            )),
+        ));
+    }
+    if body.message_ids.len() > 100 {
+        return Err(bad_request("messageIds permits at most 100 message IDs"));
+    }
+    let connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|_| internal_error("Notification database unavailable"))?;
+    // Only exact persisted messages from the client's visible snapshot qualify.
+    // A server-latest or timestamp cutoff could swallow an unseen message that
+    // arrived during loading, including a late commit with an older timestamp.
+    // Authorization and mutation share one statement snapshot. Neither support
+    // cursors nor another recipient's notification state are modified here.
+    let result = connection
+        .query_one(
+            "with access as materialized (
+           select notification_conversation_authorized($1, $2) as allowed
+         ), marked as (
+           update notification_recipients r
+              set seen_at = coalesce(r.seen_at, clock_timestamp()),
+                  read_at = coalesce(r.read_at, clock_timestamp())
+             from notification_events e
+             join conversation_messages m on e.producer_key = 'conversation.reply:' || m.id::text
+             join conversations c on c.id = m.conversation_id and c.project_id = m.project_id
+            where (select allowed from access)
+              and r.user_id = $2 and r.event_id = e.id
+              and e.event_name = 'conversation.reply' and e.version = 1
+              and e.resource_type = 'conversation' and e.resource_id = $1
+              and e.conversation_id = $1 and e.project_id = m.project_id
+              and m.conversation_id = $1 and m.id = any($3::uuid[])
+           returning r.event_id
+         )
+         select allowed, (select count(*) from marked) as marked_count from access",
+            &[&body.conversation_id, &user, &body.message_ids],
+        )
+        .await
+        .map_err(|_| internal_error("Unable to mark conversation notifications read"))?;
+    if !result.get::<_, bool>("allowed") {
+        return Err(not_found("Conversation not found"));
     }
     Ok(Json(OkBody { ok: true }))
 }

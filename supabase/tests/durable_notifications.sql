@@ -238,3 +238,105 @@ insert into conversation_messages(id,conversation_id,project_id,run_id,role,cont
   ('00000000-0000-0000-0000-000000000066','00000000-0000-0000-0000-000000000030','00000000-0000-0000-0000-000000000020','00000000-0000-0000-0000-000000000070','user','human follow-up','00000000-0000-0000-0000-000000000002');
 select notification_test_assert((select count(*)=0 from notification_events where producer_key='conversation.reply:00000000-0000-0000-0000-000000000065'),'failed assistant completion has only run.failed alert');
 select notification_test_assert((select count(*)=1 from notification_events where producer_key='conversation.reply:00000000-0000-0000-0000-000000000066'),'failed run human follow-up remains a reply notification');
+
+-- Canonical human mentions notify authorized public-chat peers even before they
+-- join the conversation. Mentioning someone never enrolls or authorizes them.
+insert into auth.users(id,email) values
+  ('20000000-0000-0000-0000-000000000004','viewer@example.invalid');
+insert into projects(id,owner_user_id) values
+  ('20000000-0000-0000-0000-000000000021','00000000-0000-0000-0000-000000000003');
+insert into project_memberships(project_id,user_id,role) values
+  ('00000000-0000-0000-0000-000000000020','20000000-0000-0000-0000-000000000004','viewer');
+insert into conversations(id,project_id,created_by,visibility) values
+  ('20000000-0000-0000-0000-000000000030','00000000-0000-0000-0000-000000000020','00000000-0000-0000-0000-000000000001','public');
+insert into web_push_subscriptions(id,user_id,endpoint,p256dh,auth) values
+  ('20000000-0000-0000-0000-000000000040','00000000-0000-0000-0000-000000000002','https://push.example.invalid/mentioned-peer','fixture','fixture');
+insert into native_push_tokens(id,user_id,platform,token) values
+  ('20000000-0000-0000-0000-000000000041','00000000-0000-0000-0000-000000000002','ios','inert-mentioned-peer');
+insert into conversation_messages(id,conversation_id,project_id,role,content,created_by,metadata) values
+  ('20000000-0000-0000-0000-000000000060','20000000-0000-0000-0000-000000000030','00000000-0000-0000-0000-000000000020','user','private mention source text','00000000-0000-0000-0000-000000000001',
+   '{"mentionedUserIds":["00000000-0000-0000-0000-000000000002","00000000-0000-0000-0000-000000000002","00000000-0000-0000-0000-000000000001","00000000-0000-0000-0000-000000000003"]}');
+select notification_test_assert((select count(*)=1 and bool_and(r.user_id='00000000-0000-0000-0000-000000000002') from notification_recipients r join notification_events e on e.id=r.event_id where e.producer_key='conversation.reply:20000000-0000-0000-0000-000000000060'),'mention selects authorized peer once, excludes actor and wrong-project account');
+select notification_test_assert((select count(*)=2 from notification_delivery_jobs j join notification_events e on e.id=j.event_id where e.producer_key='conversation.reply:20000000-0000-0000-0000-000000000060'),'mentioned nonparticipant gets current web and iOS endpoint jobs');
+select notification_test_assert((select count(*)=0 from conversation_participants where conversation_id='20000000-0000-0000-0000-000000000030'),'mention does not enroll a participant');
+
+insert into conversation_participants(conversation_id,user_id) values
+  ('20000000-0000-0000-0000-000000000030','00000000-0000-0000-0000-000000000002');
+insert into conversation_messages(id,conversation_id,project_id,role,content,created_by,metadata) values
+  ('20000000-0000-0000-0000-000000000061','20000000-0000-0000-0000-000000000030','00000000-0000-0000-0000-000000000020','user','participant also mentioned','00000000-0000-0000-0000-000000000001',
+   '{"mentionedUserIds":["00000000-0000-0000-0000-000000000002"]}'),
+  ('20000000-0000-0000-0000-000000000062','00000000-0000-0000-0000-000000000030','00000000-0000-0000-0000-000000000020','user','private outsider mentioned','00000000-0000-0000-0000-000000000001',
+   '{"mentionedUserIds":["00000000-0000-0000-0000-000000000002"]}');
+select notification_test_assert((select count(*)=1 from notification_recipients r join notification_events e on e.id=r.event_id where e.producer_key='conversation.reply:20000000-0000-0000-0000-000000000061'),'mention plus participation creates one recipient');
+select notification_test_assert((select count(*)=0 from notification_recipients r join notification_events e on e.id=r.event_id where e.producer_key='conversation.reply:20000000-0000-0000-0000-000000000062'),'private mention cannot grant conversation access even with project membership');
+delete from conversation_participants where conversation_id='20000000-0000-0000-0000-000000000030';
+
+-- Invalid service/direct metadata cannot abort the source write or expand the
+-- bounded list. Display labels and nested/legacy aliases carry no recipient grant.
+insert into conversation_messages(id,conversation_id,project_id,role,content,created_by,metadata)
+select gen_random_uuid(),'20000000-0000-0000-0000-000000000030','00000000-0000-0000-0000-000000000020','user','malformed mention fixture','00000000-0000-0000-0000-000000000001',metadata
+from (values
+  ('{"mentionedUserIds":null}'::jsonb),
+  ('{"mentionedUserIds":"00000000-0000-0000-0000-000000000002"}'::jsonb),
+  ('{"mentionedUserIds":[null,2,true,{},[],"not-a-uuid","00000000000000000000000000000002"]}'::jsonb),
+  ('{"mentioned_user_ids":["00000000-0000-0000-0000-000000000002"],"prompt_metadata":{"mentionedUserIds":["00000000-0000-0000-0000-000000000002"]}}'::jsonb),
+  (jsonb_build_object('mentionedUserIds',to_jsonb(array_fill('00000000-0000-0000-0000-000000000002'::text,array[33]))))
+) cases(metadata);
+select notification_test_assert((select count(*)=0 from notification_recipients r join notification_events e on e.id=r.event_id join conversation_messages m on e.producer_key='conversation.reply:'||m.id where m.content='malformed mention fixture'),'malformed, nested, alias and oversized mention arrays are ignored');
+
+insert into notification_preferences(user_id,category,channel,enabled) values
+  ('00000000-0000-0000-0000-000000000002','conversations','web_push',false),
+  ('00000000-0000-0000-0000-000000000002','conversations','apns',false),
+  ('00000000-0000-0000-0000-000000000002','conversations','local',false);
+insert into conversation_messages(id,conversation_id,project_id,role,content,created_by,metadata) values
+  ('20000000-0000-0000-0000-000000000063','20000000-0000-0000-0000-000000000030','00000000-0000-0000-0000-000000000020','user','muted mixed-validity mention','00000000-0000-0000-0000-000000000001',
+   '{"mentionedUserIds":[false,"invalid","00000000-0000-0000-0000-000000000002"]}');
+select notification_test_assert((select count(*)=1 from notification_recipients r join notification_events e on e.id=r.event_id where e.producer_key='conversation.reply:20000000-0000-0000-0000-000000000063'),'muted mention remains in durable center and valid UUID survives invalid neighbors');
+select notification_test_assert((select count(*)=0 from notification_delivery_jobs j join notification_events e on e.id=j.event_id where e.producer_key='conversation.reply:20000000-0000-0000-0000-000000000063'),'muted mention creates no external delivery jobs');
+select notification_test_assert((select bool_and(not notification_delivery_authorized(j.id)) from notification_delivery_jobs j where j.user_id='00000000-0000-0000-0000-000000000002'),'mention delivery rechecks changed channel preferences');
+update notification_preferences set enabled=true where user_id='00000000-0000-0000-0000-000000000002';
+insert into conversation_messages(id,conversation_id,project_id,role,content,created_by,metadata) values
+  ('20000000-0000-0000-0000-000000000065','20000000-0000-0000-0000-000000000030','00000000-0000-0000-0000-000000000020','user','maximum mention array','00000000-0000-0000-0000-000000000001',
+   jsonb_build_object('mentionedUserIds',to_jsonb(array_fill('00000000-0000-0000-0000-000000000002'::text,array[32]))));
+select notification_test_assert((select count(*)=1 from notification_recipients r join notification_events e on e.id=r.event_id where e.producer_key='conversation.reply:20000000-0000-0000-0000-000000000065'),'maximum 32 mention array accepted and deduplicated');
+
+-- Team automation participants receive visible assistant replies while the
+-- owner receives only the terminal event. Project viewers alone are not fanout.
+insert into conversations(id,project_id,created_by,visibility,thread_kind) values
+  ('20000000-0000-0000-0000-000000000031','00000000-0000-0000-0000-000000000020','00000000-0000-0000-0000-000000000001','public','automation');
+insert into conversation_participants(conversation_id,user_id) values
+  ('20000000-0000-0000-0000-000000000031','00000000-0000-0000-0000-000000000002'),
+  ('20000000-0000-0000-0000-000000000031','00000000-0000-0000-0000-000000000003');
+insert into automations(id,project_id,user_id,name,schedule_kind,interval_hours,conversation_id,result_visibility) values
+  ('20000000-0000-0000-0000-000000000080','00000000-0000-0000-0000-000000000020','00000000-0000-0000-0000-000000000001','team fixture','hourly',1,'20000000-0000-0000-0000-000000000031','team');
+insert into runs(id,project_id,conversation_id,run_type) values
+  ('20000000-0000-0000-0000-000000000070','00000000-0000-0000-0000-000000000020','20000000-0000-0000-0000-000000000031','prompt'),
+  ('20000000-0000-0000-0000-000000000071','00000000-0000-0000-0000-000000000020','20000000-0000-0000-0000-000000000031','prompt'),
+  ('20000000-0000-0000-0000-000000000072','00000000-0000-0000-0000-000000000020','20000000-0000-0000-0000-000000000031','prompt');
+begin;
+update runs set status='success' where id='20000000-0000-0000-0000-000000000070';
+insert into conversation_messages(id,conversation_id,project_id,run_id,role,content,metadata) values
+  ('20000000-0000-0000-0000-000000000064','20000000-0000-0000-0000-000000000031','00000000-0000-0000-0000-000000000020','20000000-0000-0000-0000-000000000070','assistant','visible team result',
+   '{"mentionedUserIds":["20000000-0000-0000-0000-000000000004"]}');
+commit;
+select notification_test_assert((select count(*)=1 and bool_and(r.user_id='00000000-0000-0000-0000-000000000002') from notification_recipients r join notification_events e on e.id=r.event_id where e.producer_key='conversation.reply:20000000-0000-0000-0000-000000000064'),'team assistant reaches authorized participant only, excluding owner, stale participant and assistant-authored mentions');
+select notification_test_assert((select count(*)=1 and bool_and(r.user_id='00000000-0000-0000-0000-000000000001') from notification_recipients r join notification_events e on e.id=r.event_id where e.producer_key='automation.completed:run:20000000-0000-0000-0000-000000000070'),'team automation owner has one terminal receipt');
+select notification_test_assert((select count(*)=2 from notification_delivery_jobs j join notification_events e on e.id=j.event_id where e.producer_key='conversation.reply:20000000-0000-0000-0000-000000000064'),'team participant reply reaches existing web and iOS endpoints');
+
+begin;
+update runs set status='success' where id='20000000-0000-0000-0000-000000000071';
+insert into agent_jobs(id,project_id,run_id,status,outcome,summary,payload) values
+  ('20000000-0000-0000-0000-000000000090','00000000-0000-0000-0000-000000000020','20000000-0000-0000-0000-000000000071','completed','succeeded','NO_RESPONSE',
+   '{"metadata":{"groupParticipation":{"decision":"agent_evaluation","enforcedBy":"runtime-controller"}}}');
+commit;
+insert into conversation_messages(id,conversation_id,project_id,role,content,metadata)
+select gen_random_uuid(),'20000000-0000-0000-0000-000000000031','00000000-0000-0000-0000-000000000020','assistant','team telemetry fixture',metadata
+from (values ('{"messageType":"reasoning"}'::jsonb),('{"kind":"update"}'::jsonb),('{"messageType":"status"}'::jsonb),('{"kind":"runtime_alert"}'::jsonb)) cases(metadata);
+select notification_test_assert((select count(*)=2 from notification_events where conversation_id='20000000-0000-0000-0000-000000000031'),'quiet automation and telemetry add no participant or owner alerts');
+update runs set status='failed' where id='20000000-0000-0000-0000-000000000072';
+update automations set last_run_at=now(),last_error='private automation control failure' where id='20000000-0000-0000-0000-000000000080';
+select notification_test_assert((select count(*)=2 and bool_and(r.user_id='00000000-0000-0000-0000-000000000001') from notification_recipients r join notification_events e on e.id=r.event_id where e.event_name='automation.failed' and e.resource_id='20000000-0000-0000-0000-000000000080'),'automation control and launch failures remain owner-only');
+insert into conversation_messages(id,conversation_id,project_id,run_id,role,content) values
+  ('20000000-0000-0000-0000-000000000066','20000000-0000-0000-0000-000000000031','00000000-0000-0000-0000-000000000020','20000000-0000-0000-0000-000000000072','assistant','visible team failure response');
+select notification_test_assert((select count(*)=1 and bool_and(r.user_id='00000000-0000-0000-0000-000000000002') from notification_recipients r join notification_events e on e.id=r.event_id where e.producer_key='conversation.reply:20000000-0000-0000-0000-000000000066'),'visible failed automation reply reaches participant without duplicating owner failure');
+select notification_test_assert((select bool_and(payload='{}') from notification_events),'mention identities, names and source content never enter delivery payloads');

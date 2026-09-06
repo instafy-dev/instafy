@@ -285,3 +285,95 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "
     await deviceContext.close();
   });
 }
+
+test("reads only source messages exposed in the real browser viewport", async ({ page }, info) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const deps = await resolveViteReactDependencies(page);
+  const fixturePath = "/__conversation-read-fixture__";
+  const messageIds = Array.from({ length: 4 }, (_, index) => `55555555-5555-4555-8555-${String(index + 1).padStart(12, "0")}`);
+  const requests: { conversationId: string; messageIds: string[]; expectedUserId: string }[] = [];
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.route(`**${API_PATH}/me/notifications/conversation-read`, async (route) => {
+    expect(route.request().headers().authorization).toBe("Bearer conversation-read-fixture");
+    const body = route.request().postDataJSON();
+    expect(body.conversationId).toBe(PROJECT);
+    expect(body.expectedUserId).toBe(USER);
+    expect(body.messageIds.length).toBeLessThanOrEqual(100);
+    requests.push(body);
+    await route.fulfill({ json: { ok: true } });
+  });
+  await page.route("**/src/services/runtimeController/core.ts*", (route) => route.fulfill({ contentType: "application/javascript", body: `
+    export const runtimeControllerEnabled = true;
+    export const controllerBaseUrl = location.origin + ${JSON.stringify(API_PATH)};
+    export const resolveControllerRequestContext = async (accessToken) => ({ baseUrl: controllerBaseUrl, accessToken });
+    export const readControllerError = async (_response, fallback) => fallback;
+  ` }));
+  const main = `
+    import ReactNS from ${JSON.stringify(deps.react)};
+    import ReactDomClientNS from ${JSON.stringify(deps.reactDomClient)};
+    import { useConversationNotificationRead } from "/src/notifications/useConversationNotificationRead.ts";
+    import { setNotificationSession } from "/src/notifications/notificationSession.ts";
+    const React = ReactNS.default ?? ReactNS;
+    const { createRoot } = ReactDomClientNS.default ?? ReactDomClientNS;
+    const h = React.createElement;
+    setNotificationSession({ userId: ${JSON.stringify(USER)}, accessToken: "conversation-read-fixture" });
+    const sourceIds = ${JSON.stringify(messageIds)};
+    function Fixture() {
+      const rootRef = React.useRef(null);
+      const [covered, setCovered] = React.useState(true);
+      const [hidden, setHidden] = React.useState(false);
+      const [count, setCount] = React.useState(3);
+      useConversationNotificationRead({ currentUserId: ${JSON.stringify(USER)}, conversationId: ${JSON.stringify(PROJECT)}, rootRef });
+      return h("main", null,
+        h("h1", null, "Conversation visibility simulation"),
+        h("button", { onClick: () => setHidden((value) => !value), "data-testid": "toggle-chat" }, hidden ? "Show chat" : "Hide chat"),
+        h("button", { onClick: () => setCount(4), "data-testid": "append-message" }, "Receive another message"),
+        h("section", { hidden, style: { marginTop: 20 } },
+          h("div", { ref: rootRef, tabIndex: 0, "data-testid": "read-transcript", style: { height: 180, overflowY: "auto", border: "1px solid #94a3b8" } },
+            ...sourceIds.slice(0, count).map((id, index) => h("article", {
+              key: id, "data-chat-message-id": id,
+              style: { boxSizing: "border-box", height: 200, padding: 18, borderBottom: "1px solid #e2e8f0", background: "white" },
+            }, "Persisted source message " + (index + 1))),
+          ),
+        ),
+        covered ? h("div", { style: { position: "fixed", inset: 0, zIndex: 100, background: "#f1f5f9", padding: 24 } },
+          h("h2", null, "Another app dialog covers chat"),
+          h("button", { "data-testid": "uncover-chat", onClick: () => { setCovered(false); requestAnimationFrame(() => rootRef.current?.focus()); } }, "Return to chat"),
+        ) : null,
+      );
+    }
+    createRoot(document.getElementById("root")).render(h(React.StrictMode, null, h(Fixture)));
+  `;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+    <style>body { margin:16px; font:14px system-ui; background:#f8fafc; } h1 { font-size:20px; } button { padding:10px; margin:4px; }</style>
+    <script type="module">import RefreshRuntime from "/@react-refresh"; RefreshRuntime.injectIntoGlobalHook(window); window.$RefreshReg$=()=>{}; window.$RefreshSig$=()=>(type)=>type; window.__vite_plugin_react_preamble_installed__=true;</script>
+    <script type="module" src="/@vite/client"></script><script type="module" src="${fixturePath}/main.js"></script></head><body><div id="root"></div></body></html>`;
+  await page.route(`**${fixturePath}`, (route) => route.fulfill({ contentType: "text/html", body: html }));
+  await page.route(`**${fixturePath}/main.js`, (route) => route.fulfill({ contentType: "application/javascript", body: main }));
+  await page.goto(fixturePath);
+  await expect(page.getByTestId("uncover-chat")).toBeVisible();
+  // Dwell beyond the production 250ms coalescing window: an intersecting
+  // transcript beneath this opaque modal must remain unread.
+  await page.waitForTimeout(500);
+  expect(requests).toEqual([]);
+  await page.getByTestId("uncover-chat").click();
+  await expect.poll(() => requests.flatMap((request) => request.messageIds)).toEqual([messageIds[0]]);
+  const transcript = page.getByTestId("read-transcript");
+  await transcript.evaluate((element) => { element.scrollTop = 200; });
+  await expect.poll(() => requests.flatMap((request) => request.messageIds)).toEqual(messageIds.slice(0, 2));
+  await page.getByTestId("append-message").click();
+  await page.waitForTimeout(500);
+  expect(requests.flatMap((request) => request.messageIds)).toEqual(messageIds.slice(0, 2));
+  await page.getByTestId("toggle-chat").click();
+  await expect(transcript).toBeHidden();
+  await transcript.evaluate((element) => { element.scrollTop = 400; });
+  await page.waitForTimeout(500);
+  expect(requests.flatMap((request) => request.messageIds)).toEqual(messageIds.slice(0, 2));
+  await page.getByTestId("toggle-chat").click();
+  await transcript.evaluate((element) => { element.scrollTop = 400; });
+  await expect.poll(() => requests.flatMap((request) => request.messageIds)).toEqual(messageIds.slice(0, 3));
+  await capture(page, info, "conversation-visible-source-read");
+  expect(requests.flatMap((request) => request.messageIds)).not.toContain(messageIds[3]);
+  expect(errors).toEqual([]);
+});

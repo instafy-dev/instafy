@@ -75,6 +75,7 @@ import { ProviderBindingApprovalHost } from "./studio/components/ProviderBinding
 import { useRuntime } from "../runtime/useRuntime";
 import { type SubmitPromptResult } from "../prompts/usePromptActions";
 import { usePromptBootstrap } from "./studio/hooks/usePromptBootstrap";
+import { useCreatePrivateConversation } from "./studio/hooks/useCreatePrivateConversation";
 import { useConversations } from "../conversations/ConversationsProvider";
 import { isUUID } from "../utils/uuid";
 import { writeClipboardText } from "../runtime/runtimeMenuShared";
@@ -86,7 +87,7 @@ import { WorkspaceTabsProvider, useWorkspaceTabs } from "../workspace/WorkspaceT
 import type { WorkspaceGitReviewSource } from "../workspace/gitReviewTypes";
 import { ConversationHistoryTab } from "../workspace/ConversationHistoryTab";
 import { useWorkspaceActivity } from "../workspace/useWorkspaceActivity";
-import { WorkspaceControlsProvider, type PrivateChatTarget } from "./studio/workspaceControls";
+import { WorkspaceControlsProvider } from "./studio/workspaceControls";
 import { findReusableBlankConversation } from "../conversations/conversationAutoTitle";
 import {
   buildHomeAttentionEntries,
@@ -1432,83 +1433,22 @@ function StudioLayoutInner() {
     setLeftDrawer,
   ]);
 
-  const handleCreatePrivateConversation = useCallback(
-    (target: PrivateChatTarget) => {
-      requestHistoryPush();
-      if (!isLargeScreen) {
-        setLeftDrawer(null);
-      }
-      const projectId = activeProjectId && isUUID(activeProjectId) ? activeProjectId : null;
-      const userId = typeof target.userId === "string" ? target.userId.trim() : "";
-      if (!userId) {
-        return;
-      }
-      const titleName = target.displayName.trim() || "Teammate";
-      const title = `Chat with ${titleName}`;
-      const conversation = createConversation({
-        title,
-        visibility: "private",
-        messages: [
-          {
-            id: `assistant-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-            role: "assistant",
-            content: "This chat is private. Write @someone to invite them here.",
-            timestamp: Date.now(),
-            files: null,
-            messageType: "status",
-            metadata: null
-          }
-        ],
-        select: true,
-      });
-      selectConversation(conversation.localId);
-      markConversationRead(conversation.localId);
-      setPendingConversationTabOpenId(conversation.localId);
-      if (!projectId) {
-        return;
-      }
-      void (async () => {
-        try {
-          const response = await controllerClient.conversations.createBlank({
-            projectId,
-            metadata: {
-              title,
-              localId: conversation.localId,
-              visibility: "private",
-              privateWithUserId: userId,
-            }
-          });
-          if (!response?.conversationId) {
-            throw new Error("Controller unavailable. Try again shortly.");
-          }
-          setConversationControllerId(conversation.localId, response.conversationId);
-          const participants = await controllerClient.conversations.addParticipant({
-            conversationId: response.conversationId,
-            userId,
-            role: "member",
-            accessToken: null,
-          });
-          if (!participants) {
-            throw new Error("Unable to invite teammate.");
-          }
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          showStatus(`Can't start private chat: ${message}`, "error", 4500);
-        }
-      })();
-    },
-    [
-      activeProjectId,
-      createConversation,
-      isLargeScreen,
-      markConversationRead,
-      requestHistoryPush,
-      selectConversation,
-      setConversationControllerId,
-      setLeftDrawer,
-      showStatus,
-    ],
-  );
+  const handlePrivateConversationCreated = useCallback((conversation: { localId: string }) => {
+    requestHistoryPush();
+    if (!isLargeScreen) setLeftDrawer(null);
+    selectConversation(conversation.localId);
+    markConversationRead(conversation.localId);
+    setPendingConversationTabOpenId(conversation.localId);
+  }, [isLargeScreen, markConversationRead, requestHistoryPush, selectConversation, setLeftDrawer]);
+
+  const handleCreatePrivateConversation = useCreatePrivateConversation({
+    projectId: activeProjectId,
+    userId: currentUserId,
+    accessToken: auth.session?.access_token ?? null,
+    createConversation,
+    showStatus,
+    onCreated: handlePrivateConversationCreated,
+  });
 
   useEffect(() => {
     if (!pendingConversationTabOpenId) {
