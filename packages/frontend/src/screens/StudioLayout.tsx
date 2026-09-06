@@ -11,7 +11,7 @@ import { clearIdlePaused, markIdlePaused } from "../runtime/idlePauseRegistry";
 import { setRuntimeSizePreference } from "../runtime/runtimeSizePreference";
 import { isHostedRuntime, runtimeEntryIsReady } from "../runtime/utils/runtimeEntry";
 import { Button, IconButton } from "../components/Button";
-import { Card } from "../components/Card";
+import { ProjectAccessRecoveryBanner, StudioStartupGate } from "./StudioStartup";
 import { Badge } from "../components/Badge";
 import { Heading } from "../components/Heading";
 import { Surface } from "../components/Surface";
@@ -142,11 +142,13 @@ type GitReviewOpenDetail = {
 
 export function StudioLayout() {
   return (
-    <WorkspaceTabsProvider>
-      <SidePaneProvider>
-        <StudioLayoutInner />
-      </SidePaneProvider>
-    </WorkspaceTabsProvider>
+    <StudioStartupGate>
+      <WorkspaceTabsProvider>
+        <SidePaneProvider>
+          <StudioLayoutInner />
+        </SidePaneProvider>
+      </WorkspaceTabsProvider>
+    </StudioStartupGate>
   );
 }
 
@@ -1759,16 +1761,8 @@ function StudioLayoutInner() {
     requestHistoryPush();
     setLeftDrawer("files");
   }, [isLargeScreen, leftDrawer, requestHistoryPush, setLeftDrawer]);
-  if (authLoading) {
-    return <StudioLoadingScreen />;
-  }
-
   if (!user) {
     return null;
-  }
-
-  if (!projectInitialized) {
-    return <StudioLoadingScreen />;
   }
 
   const projectAccessBlocked = controllerProjectMissing;
@@ -2103,6 +2097,7 @@ function StudioLayoutInner() {
             inert={showMobileLeftDrawerOverlay || undefined}
           >
             <StudioTopBar notificationBell={notificationCenter.bell} />
+            <ProjectAccessRecoveryBanner />
             {/* relative: the participants drawer overlays the right edge of the
                 workspace content rather than pushing it, so it never competes
                 with the code/preview panel for width. */}
@@ -2510,22 +2505,6 @@ function DesktopRuntimeHelpDialog() {
           </div>
         </div>
       </Surface>
-    </div>
-  );
-}
-
-function StudioLoadingScreen() {
-  return (
-    <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-slate-100 via-white to-slate-50 dark:bg-none dark:bg-slate-950">
-      <Card
-        tone="default"
-        radius="2xl"
-        shadow="lg"
-        padding="sm"
-        className="border-purple-100 bg-white/80 px-4 py-3 text-sm font-medium text-purple-600 dark:border-slate-800 dark:bg-slate-900/70 dark:text-slate-200"
-      >
-        Preparing your studio workspace…
-      </Card>
     </div>
   );
 }

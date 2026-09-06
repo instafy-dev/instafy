@@ -1,6 +1,7 @@
 import { NavArrowRight, Plus, Puzzle, Trash } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { Card } from "../../../components/Card";
+import { LoadingStatus } from "../../../components/LoadingStatus";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
 import { Toggle } from "../../../components/Toggle";
@@ -69,10 +70,7 @@ export function InstalledSkillsSection({
           Select a space to manage skills.
         </Text>
       ) : loading && skills.length === 0 ? (
-        <div className="flex items-center gap-2 text-sm text-slate-500">
-          <Spinner tone="primary" size="sm" aria-hidden="true" />
-          Loading skills…
-        </div>
+        <LoadingStatus>Loading skills…</LoadingStatus>
       ) : error ? (
         <div className="space-y-2">
           <Text variant="caption" tone="muted">

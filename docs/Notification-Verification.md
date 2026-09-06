@@ -69,7 +69,8 @@ catalog check and `git diff --check` passed.
 
 ## Frontend and desktop
 
-The final complete frontend unit run passed **436 files / 2,951 tests**. Frontend
+The final complete frontend unit run passed **440 files / 2,988 tests**, including
+the subsequently integrated loading/recovery changes from protected main. Frontend
 TypeScript, ESLint, and the Vite production build passed. The build reported
 existing bundle-size and browser-data warnings.
 
