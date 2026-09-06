@@ -16,7 +16,7 @@ import { Heading } from "../../../components/Heading";
 import { Input } from "../../../components/Input";
 import { MenuItemContent } from "../../../components/MenuItemContent";
 import { Select } from "../../../components/Select";
-import { Spinner } from "../../../components/Spinner";
+import { LoadingStatus } from "../../../components/LoadingStatus";
 import { Text } from "../../../components/Text";
 import { Surface } from "../../../components/Surface";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
@@ -618,10 +618,9 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
             className="py-3 text-sm text-slate-500"
           >
             {remoteLoading ? (
-              <span className="inline-flex items-center gap-2">
-                <Spinner size="xs" aria-hidden="true" />
+              <LoadingStatus size="xs">
                 Loading spaces…
-              </span>
+              </LoadingStatus>
             ) : (
               "No spaces found yet."
             )}

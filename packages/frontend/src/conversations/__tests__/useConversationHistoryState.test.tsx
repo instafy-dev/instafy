@@ -40,6 +40,8 @@ function historyPage(conversationId: string, content: string): ControllerConvers
   };
 }
 
+let latestHistoryState: ReturnType<typeof useConversationHistoryState>;
+
 function Probe({
   conversationId,
   currentUserId,
@@ -49,7 +51,7 @@ function Probe({
   currentUserId: string | null;
   localContent?: string;
 }) {
-  const { messages, isInitialHistoryLoading } = useConversationHistoryState({
+  latestHistoryState = useConversationHistoryState({
     activeConversation: {
       ...createInitialConversation({ localId: `local-${conversationId}` }),
       controllerId: conversationId,
@@ -62,8 +64,9 @@ function Probe({
     setConversationControllerId: mocks.setConversationControllerId,
     replaceMessages: mocks.replaceMessages,
   });
+  const { messages, isInitialHistoryLoading, initialHistoryError } = latestHistoryState;
   return (
-    <div data-loading={String(isInitialHistoryLoading)}>
+    <div data-loading={String(isInitialHistoryLoading)} data-error={initialHistoryError ?? undefined}>
       {messages.map((message) => message.content).join("|")}
     </div>
   );
@@ -154,7 +157,58 @@ describe("useConversationHistoryState", () => {
     expect(queryClient.getQueryData(["conversation-messages", "user-1", "conversation-a"])).toBe(cachedHistory);
     expect(container.textContent).toBe("First conversation");
     expect(container.firstElementChild?.getAttribute("data-loading")).toBe("false");
+    expect(latestHistoryState.initialHistoryError).toBeNull();
     expect(mocks.setConversationControllerId).not.toHaveBeenCalled();
+  });
+
+  it("exposes exhausted cold-history failures and retries immediately on request", async () => {
+    mocks.listMessages.mockResolvedValue(null);
+
+    await select("conversation-a");
+    expect(latestHistoryState.isInitialHistoryLoading).toBe(true);
+    expect(latestHistoryState.initialHistoryError).toBeNull();
+    await advance(1_001);
+
+    expect(mocks.listMessages).toHaveBeenCalledTimes(2);
+    expect(latestHistoryState.isInitialHistoryLoading).toBe(false);
+    expect(latestHistoryState.initialHistoryError).toBe("Couldn't load messages.");
+    expect(mocks.setConversationControllerId).not.toHaveBeenCalled();
+
+    let resolveRetry!: (page: ControllerConversationMessagesPage) => void;
+    mocks.listMessages.mockImplementationOnce(() => new Promise((resolve) => { resolveRetry = resolve; }));
+    await act(async () => { void latestHistoryState.retryInitialHistory(); });
+    await advance(1);
+
+    expect(mocks.listMessages).toHaveBeenCalledTimes(3);
+    expect(latestHistoryState.isInitialHistoryLoading).toBe(true);
+    expect(latestHistoryState.initialHistoryError).toBeNull();
+    await act(async () => { void latestHistoryState.retryInitialHistory(); });
+    expect(mocks.listMessages).toHaveBeenCalledTimes(3);
+
+    await act(async () => { resolveRetry(historyPage("conversation-a", "Restored messages")); });
+    await advance(1);
+
+    expect(container.textContent).toBe("Restored messages");
+    expect(latestHistoryState.isInitialHistoryLoading).toBe(false);
+    expect(latestHistoryState.initialHistoryError).toBeNull();
+  });
+
+  it("does not report a failed refresh as an initial failure after an empty page loaded", async () => {
+    mocks.listMessages
+      .mockResolvedValueOnce({ messages: [], nextCursor: null, hasMore: false })
+      .mockResolvedValue(null);
+    await select("conversation-a");
+
+    await act(async () => {
+      window.dispatchEvent(new Event("instafy:controller-stream-reconnected"));
+    });
+    await advance(1_001);
+
+    expect(mocks.listMessages).toHaveBeenCalledTimes(3);
+    expect(queryClient.getQueryState(["conversation-messages", "user-1", "conversation-a"])?.status).toBe("error");
+    expect(latestHistoryState.messages).toEqual([]);
+    expect(latestHistoryState.isInitialHistoryLoading).toBe(false);
+    expect(latestHistoryState.initialHistoryError).toBeNull();
   });
 
   it("accepts a genuinely empty page without retrying or detaching the conversation", async () => {
@@ -179,6 +233,9 @@ describe("useConversationHistoryState", () => {
     expect(mocks.listMessages).toHaveBeenCalledTimes(1);
     expect(mocks.setConversationControllerId).toHaveBeenCalledWith("local-conversation-a", null);
     expect(container.firstElementChild?.getAttribute("data-loading")).toBe("false");
+    expect(latestHistoryState.initialHistoryError).toBeNull();
+    await act(async () => { await latestHistoryState.retryInitialHistory(); });
+    expect(mocks.listMessages).toHaveBeenCalledTimes(1);
   });
 
   it("purges warm history and local message copies after an explicit access denial", async () => {
@@ -199,6 +256,8 @@ describe("useConversationHistoryState", () => {
     expect(mocks.replaceMessages).toHaveBeenCalledWith("local-conversation-a", []);
     expect(mocks.setConversationControllerId).toHaveBeenCalledWith("local-conversation-a", null);
     expect(container.firstElementChild?.getAttribute("data-loading")).toBe("false");
+    expect(latestHistoryState.initialHistoryError).toBeNull();
+    await act(async () => { await latestHistoryState.retryInitialHistory(); });
     await advance(1_001);
     expect(mocks.listMessages).toHaveBeenCalledTimes(2);
   });
