@@ -104,14 +104,70 @@ describe("RemoteBrowserMobileKeyboard", () => {
       }),
       expect.objectContaining({
         type: "key",
-        kind: "rawKeyDown",
+        kind: "keyDown",
         key: "Enter",
+        text: "\r",
       }),
       expect.objectContaining({
         type: "key",
         kind: "keyUp",
         key: "Enter",
+        text: "",
       }),
+    ]);
+  });
+
+  it.each(["insertLineBreak", "insertParagraph"])("forwards software %s as one Enter action", async inputType => {
+    const onMessage = vi.fn();
+    await act(async () => {
+      root.render(<RemoteBrowserMobileKeyboard enabled onMessage={onMessage} />);
+    });
+    await act(async () => {
+      host.querySelector<HTMLButtonElement>('[data-testid="shared-browser-mobile-keyboard-open"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    const event = new InputEvent("beforeinput", { bubbles: true, cancelable: true, inputType });
+    await act(async () => {
+      host.querySelector<HTMLInputElement>('[data-testid="shared-browser-mobile-keyboard-input"]')
+        ?.dispatchEvent(event);
+    });
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(onMessage.mock.calls.map(([message]) => message)).toEqual([
+      {
+        type: "key", kind: "keyDown", key: "Enter", code: "Enter", text: "\r", modifiers: 0,
+        autoRepeat: false, windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+      },
+      {
+        type: "key", kind: "keyUp", key: "Enter", code: "Enter", text: "", modifiers: 0,
+        autoRepeat: false, windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13,
+      },
+    ]);
+  });
+
+  it.each<{ label: string; init: KeyboardEventInit; text: string; modifiers: number }>([
+    { label: "Shift+Enter", init: { key: "Enter", code: "Enter", shiftKey: true }, text: "\r", modifiers: 8 },
+    { label: "NumpadEnter", init: { key: "Enter", code: "NumpadEnter" }, text: "\r", modifiers: 0 },
+    { label: "Control+Enter", init: { key: "Enter", code: "Enter", ctrlKey: true }, text: "", modifiers: 2 },
+    { label: "Alt+Enter", init: { key: "Enter", code: "Enter", altKey: true }, text: "", modifiers: 1 },
+    { label: "Meta+Enter", init: { key: "Enter", code: "Enter", metaKey: true }, text: "", modifiers: 4 },
+  ])("preserves $label in a mobile field with a hardware keyboard", async ({ init, text, modifiers }) => {
+    const onMessage = vi.fn();
+    await act(async () => {
+      root.render(<RemoteBrowserMobileKeyboard enabled onMessage={onMessage} />);
+    });
+    await act(async () => {
+      host.querySelector<HTMLButtonElement>('[data-testid="shared-browser-mobile-keyboard-open"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await act(async () => {
+      host.querySelector<HTMLInputElement>('[data-testid="shared-browser-mobile-keyboard-input"]')
+        ?.dispatchEvent(new KeyboardEvent("keydown", { ...init, bubbles: true, cancelable: true }));
+    });
+
+    expect(onMessage.mock.calls.map(([message]) => message)).toEqual([
+      expect.objectContaining({ type: "key", kind: text ? "keyDown" : "rawKeyDown", code: init.code, text, modifiers }),
+      expect.objectContaining({ type: "key", kind: "keyUp", code: init.code, text: "", modifiers }),
     ]);
   });
 

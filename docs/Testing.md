@@ -91,10 +91,10 @@ prefetches its digest-pinned Postgres image with bounded retry/backoff and then
 disables implicit pulls; image acquisition may retry, while container, SQL, and
 schema-verification failures remain fatal. The Go and Rust jobs test
 the public service packages directly. The browser lanes below run real browser
-processes separately from frontend unit tests. Full-stack Studio, provider
-allocation, model-driven browsing, and cross-user collaboration suites remain
-available to contributors and downstream distributions, but are not included
-in these secret-free public browser checks.
+processes separately from frontend unit tests. The Shared Browser job also
+runs one signed-in Studio journey against real local authentication, the
+controller, and runtime agent. Cloud-provider allocation, model-driven
+browsing, and cross-user collaboration remain outside these public checks.
 
 Environment-gated suites remain non-required:
 - payments
@@ -130,6 +130,7 @@ under `packages/frontend/test-results/browser-ci/<lane>`.
 | `personal` | Real Electron profile/cookie persistence across restarts and projects, per-user isolation, clear, kill switch, and renderer ownership revocation (4 tests) | Installed workspace dependencies and compiled Desktop fixture; no Docker or database |
 | `browser-ui` | Real Chromium rendering of browser chrome, cursor overlay, approval layouts, rendered-frame checks, and mobile drawer safe-area geometry (13 tests) | Installed workspace dependencies and Playwright Chromium; no Docker, database, or controller |
 | Shared profile fixture | Real Chromium HttpOnly/JS cookies, localStorage and server cookie echo; production runtime save/restore; controller authorization, encrypted database storage, stale-writer rejection, and clear/no-resurrection | Disposable Linux, Xvfb, Chromium, Go, Rust, and fully migrated loopback Postgres |
+| Shared Studio fixture | Real signed-in application, authorized project creation, Shared launch, CDP pixels/input, periodic snapshot, acknowledged provider stop, replacement login restoration, and UI clear | Disposable Linux, Xvfb, Chromium, Go, Rust, `x11-utils`, `sqlite3`, `psql`, and fresh local Supabase including GoTrue |
 
 After `pnpm install --frozen-lockfile`, run Personal locally with:
 
@@ -165,10 +166,16 @@ It invokes explicitly selected Rust browser/controller tests, requires both
 completion receipts, and fails when dependencies or migrations are missing.
 The Shared job retains only a fixed-field `shared-profile/result.json` receipt
 under the browser CI results directory, never the profile archive or tokens.
-It refuses pre-existing `/tmp/instafy` resources. The standard hosted workflow
-uses Docker **only to provision disposable migrated Postgres**; Chromium and the
-runtime/controller test processes run natively on Linux. A separately
-provisioned compatible, migrated loopback database also works. No local Docker
+It refuses pre-existing `/tmp/instafy` resources. Both Shared fixtures check the
+actual X-display connection after the long builds. A failed profile fixture
+retains only fixed diagnostic categories from at most the last 64 KiB of its
+owned Chromium log, never raw log lines. Categories are observations, not a
+root-cause diagnosis; missing or unrecognized evidence remains explicit.
+
+The standard hosted workflow uses Docker to provision disposable migrated
+Supabase (Postgres and local authentication); Chromium and runtime/controller
+processes run natively on Linux. The profile-only command also accepts a
+separately provisioned compatible migrated loopback database. No local Docker
 installation is needed to run these checks on GitHub-hosted runners.
 
 The Shared fixture uses a test-only HTTP bridge so the browser receives real
@@ -177,6 +184,72 @@ not prove network egress enforcement, container isolation, provider stop
 ordering, full Studio streaming/control, or model-driven browsing. Those need
 their own larger integration fixtures; a green profile lane is not evidence
 that those paths ran.
+
+### Signed-in Shared Studio journey
+
+On a disposable Linux host with a **fresh, empty local Supabase stack**:
+
+```bash
+xvfb-run -a node scripts/shared-browser-studio-e2e.mjs
+```
+
+This separate runner deliberately does not import the general developer
+Playwright harness or its environment/credential loaders. It refuses an
+occupied database or pre-existing browser resources, obtains only the local
+stack configuration, and creates separate throwaway Studio and controller-service
+users with `mint-test-user.mjs`. The service identity is explicitly configured
+and never enters the renderer; automatic service-account bootstrap is not part
+of this lane. It creates the Studio user's project through the real
+authenticated controller API, then enables persistence for only that project
+on the disposable controller.
+
+The Studio-driving Playwright process uses an empty fixture home and a fresh
+browser context. The runner resolves and checks the installed, lockfile-pinned
+Chromium executable before that environment isolation, then passes only the
+executable path to Playwright. Sharing installed browser binaries does not share
+browser profiles, cookies, localStorage, or developer credentials. A missing
+installation fails the fixture preflight rather than skipping the journey.
+Runtime generations also receive distinct mode-0700 temporary directories
+directly below the owned fixture root. These paths are bounded to leave room
+for Chromium's ProcessSingleton Unix socket; nesting them below runtime and
+lease UUIDs exceeds Linux's socket-path limit and prevents Chromium startup.
+The temporary data stays fixture-owned and is removed during final cleanup.
+
+On failure the runner records only fixed provider-validation/launch stages,
+numeric response/exit codes, runtime/origin counts, and a closed vocabulary of
+runtime startup observations. The owned guardian drains process output with a
+bounded classifier; raw log text, grant bodies, URLs, and session material are
+never emitted or retained. These observations narrow the failing boundary but
+do not themselves establish a root cause or count as a passing journey.
+Response observers accept the application's `127.0.0.1` → `localhost`
+controller normalization only at the exact fixture port, including grant and
+clear responses. Browser capability/status and WebSocket diagnostics retain
+only fixed operation/event names, never payloads or connection URLs.
+
+The fresh database must contain only its unchanged migration-seeded provider.
+The runner registers its additional disposable provider through the controller's
+service-role-only API; environment fallback does not override a populated registry.
+
+Studio launches an actual native runtime-agent through a test-only loopback
+allocator implementing the controller's existing provider protocol. The
+production runtime restores and launches Chromium; Studio receives real
+controller grants and drives the real origin pixel/input paths. Only website
+traffic for the inert test origin is bridged into the owned HTTP fixture;
+production egress policy remains enabled. The fixture is not a cloud allocator,
+container-isolation or network-egress proof. The existing
+`VITE_DISABLE_AUTO_RUNTIME_ENSURE` switch disables background workspace
+allocation in this lane; the explicit Shared Browser UI launch remains real.
+
+Before restart, the runner inspects the actual encrypted stored snapshot for
+the test cookie records and localStorage marker. It then stops the runtime
+through the controller/provider acknowledgment path. A replacement must restore
+the exact website login state; the test does not rely on a final shutdown save.
+Finally, the visible clear action must retire the browser, start a fresh one,
+and show empty website data while Studio remains signed in. No model job is
+submitted. Only fixed-field result receipts are retained; traces, video,
+screenshots, raw service logs, profiles, and session values are not uploaded.
+Cleanup removes only this fixture's project, provider registration, both users,
+processes and temporary data, leaving the migration-seeded provider untouched.
 
 ## Stripe E2E
 - `PLAYWRIGHT_STRIPE_E2E=1 pnpm -C packages/frontend test:e2e:payments`

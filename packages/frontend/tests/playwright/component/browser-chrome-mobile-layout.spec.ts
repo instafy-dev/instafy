@@ -317,8 +317,8 @@ test("uses one real Chromium action per mobile keyboard control key", async ({ p
   expect(messages.filter((message) => message.type === "key")).toEqual([
     expect.objectContaining({ kind: "rawKeyDown", key: "Backspace" }),
     expect.objectContaining({ kind: "keyUp", key: "Backspace" }),
-    expect.objectContaining({ kind: "rawKeyDown", key: "Enter" }),
-    expect.objectContaining({ kind: "keyUp", key: "Enter" }),
+    expect.objectContaining({ kind: "keyDown", key: "Enter", text: "\r" }),
+    expect.objectContaining({ kind: "keyUp", key: "Enter", text: "" }),
   ]);
   expect(messages.filter((message) => message.type === "text")).toEqual([
     { type: "text", text: "a" },
