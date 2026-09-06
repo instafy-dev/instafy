@@ -10,7 +10,7 @@ import { DrawerHeader } from "../../../components/DrawerHeader";
 import { Heading } from "../../../components/Heading";
 import { MarkdownPreview } from "../../../components/MarkdownPreview";
 import { type MarkdownOutlineItem } from "../../../components/markdownOutline";
-import { Spinner } from "../../../components/Spinner";
+import { LoadingStatus } from "../../../components/LoadingStatus";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
 import { SearchInput } from "../../../components/SearchInput";
@@ -1909,10 +1909,7 @@ export function FilesPanel({
       >
         {showCenteredRootLoading ? (
           <div className="flex h-full min-h-[220px] items-center justify-center">
-            <div className="inline-flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-              <Spinner aria-hidden="true" size="sm" tone="slate" />
-              <span>{rootLoadingLabel}</span>
-            </div>
+            <LoadingStatus>{rootLoadingLabel}</LoadingStatus>
           </div>
         ) : normalizedSearch ? (
           <ul className={touchExplorer ? "space-y-1.5" : "space-y-1"}>
@@ -2319,6 +2316,11 @@ export function FilesPanel({
     return (
       <Editor
         key={editorKey}
+        loading={
+          <div className="flex h-full items-center justify-center">
+            <LoadingStatus>Loading file…</LoadingStatus>
+          </div>
+        }
         path={activeFile.path}
         defaultLanguage={getEditorLanguage(activeFile.path)}
         theme={resolvedTheme === "dark" ? STUDIO_MONACO_DARK_THEME : STUDIO_MONACO_LIGHT_THEME}
@@ -2365,8 +2367,8 @@ export function FilesPanel({
     switch (viewerState.mode) {
       case "loading":
         return (
-          <div className="flex h-full items-center justify-center text-sm text-slate-500">
-            Loading…
+          <div className="flex h-full items-center justify-center">
+            <LoadingStatus>Loading file…</LoadingStatus>
           </div>
         );
       case "text":

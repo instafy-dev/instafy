@@ -14,6 +14,22 @@ swimming above “Getting things ready…”, without a wordmark. The canonical 
 reduced-motion preferences, and the loading surface disappears once the destination or login
 form is ready. Login forms keep their static Octo mark.
 
+Studio keeps that same loading surface while resolving the initial space, so entry does not
+flash a second loading card. A stalled space-access lookup times out, keeps write capabilities
+disabled, and recovers through the normal access refresh. The workspace shows a retry notice
+while access remains unresolved. Successful entry has no added minimum display time.
+
+Once the workspace is open, loading stays inside the affected panel. File fetching and editor
+initialization use the same local status. Indicators announce their progress and respect
+reduced-motion preferences. A failed first chat-history load shows an explicit Retry action instead of looking
+like an empty chat. Previously loaded messages remain visible during background refresh failures.
+
+Settings lists keep their current-space rows visible during refresh. Automation refresh failures
+keep previously loaded rows with a persistent Retry notice; explicit access denial removes the
+cached rows. Secret and guest directories withhold protected records after a failed access check
+and show Retry rather than an empty-state claim. Switching account or space isolates loading
+results and closes space-specific editors.
+
 The landing workspace is an explicitly labeled interactive example. Visitors choose a scenario;
 it does not rotate automatically or create a real session. Octo's existing thinking animation
 appears only beside the example's active work. Motion can be paused and stops when the example

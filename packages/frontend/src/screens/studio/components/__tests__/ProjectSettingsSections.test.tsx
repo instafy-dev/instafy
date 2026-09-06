@@ -56,6 +56,7 @@ function createProps(
     projectMemberUpdatePendingId: null,
     projectMembers: [],
     projectMembersError: null,
+    onRetryProjectMembers: vi.fn(),
     projectMembersLoading: false,
     projectNameDirty: false,
     projectNameDraft: "Demo space",
@@ -133,5 +134,33 @@ describe("ProjectSettingsSections", () => {
     expect(
       document.querySelector<HTMLButtonElement>('[data-testid="project-member-invite-submit"]')?.disabled,
     ).toBe(true);
+  });
+
+  it("keeps guest rows visible while refreshing the same space", async () => {
+    const members = [{ userId: "guest-1", email: "guest@example.com", fullName: "A guest", role: "viewer", createdAt: "2026-09-06" }];
+    await act(async () => root.render(<ProjectSettingsSections {...createProps({
+      projectMembers: members,
+      sortedProjectMembers: members,
+      projectMembersLoading: true,
+    })} />));
+
+    const guests = container.querySelector('[data-testid="project-guests-section"]');
+    expect(guests?.textContent).toContain("A guest");
+    expect(guests?.querySelector('[role="status"]')?.textContent).toBe("Refreshing guests…");
+    expect(guests?.textContent).not.toContain("No guests have accepted access yet");
+  });
+
+  it("shows a guest load error with Retry instead of an empty state", async () => {
+    const onRetryProjectMembers = vi.fn();
+    await act(async () => root.render(<ProjectSettingsSections {...createProps({
+      projectMembersError: "Unable to load guests.", onRetryProjectMembers,
+    })} />));
+
+    const guests = container.querySelector('[data-testid="project-guests-section"]');
+    expect(guests?.querySelector('[role="alert"]')?.textContent).toBe("Unable to load guests.");
+    expect(guests?.textContent).not.toContain("No guests have accepted access yet");
+    const retry = [...guests!.querySelectorAll("button")].find((button) => button.textContent === "Retry");
+    await act(async () => retry!.click());
+    expect(onRetryProjectMembers).toHaveBeenCalledOnce();
   });
 });

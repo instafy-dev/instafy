@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
+import { useAuth } from "../providers/AuthProvider";
 import {
   type ControllerProjectMember,
   controllerClient,
@@ -13,14 +14,16 @@ interface ProjectMemberMutationResult {
 export const PROJECT_MEMBERS_REFRESH_INTERVAL_MS = 10_000;
 
 export function useProjectMembers(projectId: string | null) {
+  const { user } = useAuth();
+  const userId = user?.id ?? null;
   const {
     listMembers: listControllerProjectMembers,
     removeMember: removeControllerProjectMember,
     updateMemberRole: updateControllerProjectMemberRole,
   } = controllerClient.projects;
   const queryClient = useQueryClient();
-  const enabled = Boolean(projectId);
-  const queryKey = useMemo(() => ["project-members", projectId ?? null] as const, [projectId]);
+  const enabled = Boolean(projectId && userId);
+  const queryKey = useMemo(() => ["project-members", userId, projectId ?? null] as const, [projectId, userId]);
 
   const membersQuery = useQuery({
     queryKey,
@@ -29,7 +32,7 @@ export function useProjectMembers(projectId: string | null) {
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     queryFn: async () => {
-      if (!projectId) {
+      if (!projectId || !userId) {
         return [] as ControllerProjectMember[];
       }
       return await listControllerProjectMembers(projectId, { throwOnError: true });
@@ -52,7 +55,7 @@ export function useProjectMembers(projectId: string | null) {
 
   const updateMemberRoleMutation = useMutation({
     mutationFn: async (payload: { userId: string; role: string }) => {
-      if (!projectId) {
+      if (!projectId || !userId) {
         throw new Error("Select a project before updating members.");
       }
       return await updateControllerProjectMemberRole({
@@ -68,7 +71,7 @@ export function useProjectMembers(projectId: string | null) {
 
   const removeMemberMutation = useMutation({
     mutationFn: async (payload: { userId: string }) => {
-      if (!projectId) {
+      if (!projectId || !userId) {
         throw new Error("Select a project before removing members.");
       }
       return await removeControllerProjectMember({ projectId, userId: payload.userId });
