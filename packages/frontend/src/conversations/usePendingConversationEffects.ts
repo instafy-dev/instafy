@@ -1,5 +1,5 @@
 import { useEffect, type Dispatch, type MutableRefObject } from "react";
-import { notifyAssistantMessage, isAppInForeground } from "../notifications/assistantMessageNotifications";
+import { isAppInForeground } from "../notifications/assistantMessageNotifications";
 import type {
   ControllerConversationCreated,
   ControllerConversationMessage,
@@ -27,7 +27,6 @@ import {
   extractConversationOriginMessageIdFromMetadata,
   extractConversationOwnerAgentFromMetadata,
   extractConversationTitleFromMetadata,
-  formatNotificationBody,
   parseTimestamp,
   resolveConversationVisibility,
   resolveConversationVisibilityCandidate,
@@ -657,15 +656,9 @@ export function usePendingConversationEffects({
             chatMessage.authorId &&
             (!currentUserId || chatMessage.authorId !== currentUserId));
         if (shouldNotify) {
-          const body = formatNotificationBody(chatMessage.content);
-          if (body) {
-            notifiedMessageIdsRef.current.add(message.id);
-            void notifyAssistantMessage({
-              title: "Instafy",
-              body,
-              url: `/studio?projectId=${message.projectId}&conversationControllerId=${controllerId}`,
-            });
-          }
+          notifiedMessageIdsRef.current.add(message.id);
+          // The controller's durable event owns notification presentation. This
+          // stream still maintains message/read state and Home's Needs you lane.
         }
       }
       ackIds.push(message.id);

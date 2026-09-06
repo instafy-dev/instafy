@@ -39,6 +39,8 @@ describe("StudioSidebarAccountSection update indicator", () => {
     updatePresentation: AppUpdatePresentation;
     profileMenuOpen?: boolean;
     showInstallEntry?: boolean;
+    onOpenSupport?: () => void;
+    supportUnreadCount?: number;
   }) {
     await act(async () => {
       root.render(
@@ -64,6 +66,8 @@ describe("StudioSidebarAccountSection update indicator", () => {
           notificationsPending={false}
           notificationsEnabled={false}
           onToggleNotifications={vi.fn()}
+          onOpenSupport={input.onOpenSupport ?? vi.fn()}
+          supportUnreadCount={input.supportUnreadCount}
           onOpenDiagnostics={vi.fn()}
           hasAppLogErrors={false}
           updateDialogOpen={false}
@@ -147,5 +151,44 @@ describe("StudioSidebarAccountSection update indicator", () => {
     });
 
     expect(document.body.querySelector('[data-testid="profile-install-button"]')).toBeNull();
+  });
+
+  it("opens personal Support directly from the profile menu", async () => {
+    const onOpenSupport = vi.fn();
+    await renderAccount({
+      showLabels: true,
+      updatePresentation: presentation("neutral"),
+      profileMenuOpen: true,
+      onOpenSupport,
+    });
+
+    const supportButton = document.body.querySelector<HTMLElement>(
+      '[data-testid="profile-support-button"]',
+    );
+    expect(supportButton?.textContent).toContain("Support");
+    await act(async () => {
+      supportButton?.click();
+    });
+    expect(onOpenSupport).toHaveBeenCalledTimes(1);
+  });
+
+  it("badges unread support activity on the profile avatar and Support menu item", async () => {
+    await renderAccount({
+      showLabels: true,
+      updatePresentation: presentation("neutral"),
+      profileMenuOpen: true,
+      supportUnreadCount: 3,
+    });
+
+    expect(container.querySelector('[data-testid="profile-support-indicator"]')).not.toBeNull();
+    expect(
+      document.body.querySelector('[data-testid="profile-support-unread-count"]')?.textContent,
+    ).toBe("3");
+    const profileButton = container.querySelector('[data-testid="sidebar-profile-menu"]');
+    const descriptionId = profileButton?.getAttribute("aria-describedby");
+    expect(descriptionId).toBeTruthy();
+    expect(document.getElementById(descriptionId ?? "")?.textContent).toBe(
+      "3 unread support updates.",
+    );
   });
 });

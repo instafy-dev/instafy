@@ -7,6 +7,8 @@ import {
   type SetStateAction,
 } from "react";
 import type { StatusIntent } from "../../../status/useStatus";
+import { withUserMentionMetadata } from "../../../conversations/userMentions";
+import { queuedComposerDispatchMessage } from "./chatSendQueueComposer";
 import type { ChatSubmitOverride } from "./chatSubmitPlanning";
 import type { EditingQueuedChatItem, QueuedChatSendItem } from "./chatSendQueueStorage";
 import {
@@ -268,7 +270,11 @@ export function useChatSendQueueActions({
     };
     if (isServerQueuedChatSendItem(editingQueuedItem.item)) {
       void enqueueServerSendQueueItem({
-        message: restoredItem.message,
+        message: queuedComposerDispatchMessage(restoredItem),
+        composerMessage: restoredItem.message,
+        editorState: restoredItem.editorState,
+        browserPageTarget: restoredItem.browserPageTarget,
+        browserLaunchMode: restoredItem.browserLaunchMode,
         targetAgentHandles: restoredTargetHandles,
         metadata: restoredItem.metadata ?? null,
         ...(restoredItem.runtimeOverride
@@ -308,6 +314,13 @@ export function useChatSendQueueActions({
       focusInput({ force: true });
       return;
     }
+    let metadata: Record<string, unknown>;
+    try {
+      metadata = withUserMentionMetadata(editingQueuedItem.item.metadata, inputEditorState);
+    } catch (error) {
+      showStatus(error instanceof Error ? error.message : String(error), "error", 4500);
+      return;
+    }
     const selection = resolvePromptAgentTargets(trimmed, {
       useSticky: true,
       updateSticky: false,
@@ -324,7 +337,7 @@ export function useChatSendQueueActions({
       targetAgentHandles,
       browserPageTarget: editingQueuedItem.item.browserPageTarget,
       browserLaunchMode: editingQueuedItem.item.browserLaunchMode,
-      metadata: editingQueuedItem.item.metadata ?? null,
+      metadata,
       ...(editingQueuedItem.item.runtimeOverride
         ? { runtimeOverride: editingQueuedItem.item.runtimeOverride }
         : {}),
@@ -337,7 +350,11 @@ export function useChatSendQueueActions({
     };
     if (isServerQueuedChatSendItem(editingQueuedItem.item)) {
       void enqueueServerSendQueueItem({
-        message: trimmed,
+        message: queuedComposerDispatchMessage(updatedItem),
+        composerMessage: updatedItem.message,
+        editorState: updatedItem.editorState,
+        browserPageTarget: updatedItem.browserPageTarget,
+        browserLaunchMode: updatedItem.browserLaunchMode,
         targetAgentHandles,
         metadata: updatedItem.metadata ?? null,
         ...(updatedItem.runtimeOverride
@@ -370,6 +387,7 @@ export function useChatSendQueueActions({
     setChatSendQueueExpanded,
     setEditingQueuedItem,
     setPendingBrowserLaunchMode,
+    showStatus,
   ]);
 
   const handleSendEditedMessageNow = useCallback(async () => {
@@ -381,13 +399,20 @@ export function useChatSendQueueActions({
       focusInput({ force: true });
       return;
     }
+    let metadata: Record<string, unknown>;
+    try {
+      metadata = withUserMentionMetadata(editingQueuedItem.item.metadata, inputEditorState);
+    } catch (error) {
+      showStatus(error instanceof Error ? error.message : String(error), "error", 4500);
+      return;
+    }
     const ok = await submitMessage(
       {
         message: trimmed,
         editorState: inputEditorState ?? null,
         browserPageTarget: editingQueuedItem.item.browserPageTarget,
         browserLaunchMode: editingQueuedItem.item.browserLaunchMode,
-        metadata: editingQueuedItem.item.metadata ?? null,
+        metadata,
         runtimeOverride: editingQueuedItem.item.runtimeOverride ?? null,
       },
       { allowWhileBusy: true },
@@ -403,6 +428,7 @@ export function useChatSendQueueActions({
     inputValue,
     setEditingQueuedItem,
     setPendingBrowserLaunchMode,
+    showStatus,
     submitMessage,
   ]);
 

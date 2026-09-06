@@ -5,6 +5,7 @@ import { ChatsIcon } from "../components/AppIcons";
 import { IconButton } from "../components/Button";
 import { EntityRow } from "../components/EntityRow";
 import { Input } from "../components/Input";
+import { LoadingStatus } from "../components/LoadingStatus";
 import { ToolbarMenuSelect } from "../components/ToolbarMenuSelect";
 import { TreeDisclosureButton, TreeRowMarkerSlot } from "../components/TreeDisclosureButton";
 import { useConversations } from "../conversations/ConversationsProvider";
@@ -540,7 +541,7 @@ export function ConversationHistoryTab({
             className="flex h-full items-center justify-center px-4 py-10"
             data-testid="conversation-history-loading"
           >
-            <span className="text-sm text-slate-500 dark:text-slate-400">Loading conversations…</span>
+            <LoadingStatus>Loading conversations…</LoadingStatus>
           </div>
         ) : visibleRows.length === 0 ? (
           <div className="flex h-full items-center justify-center px-4 py-10">

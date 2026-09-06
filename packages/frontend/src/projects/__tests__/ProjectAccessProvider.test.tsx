@@ -72,6 +72,7 @@ import {
   ProjectAccessProvider,
   useProjectAccess,
 } from "../ProjectAccessProvider";
+import { ProjectAccessRecoveryBanner, StudioStartupGate } from "../../screens/StudioStartup";
 
 function AccessProbe() {
   const access = useProjectAccess();
@@ -83,6 +84,8 @@ function AccessProbe() {
       data-share={String(access.canShareProject)}
       data-resolved={String(access.projectCapabilitiesResolved)}
       data-blocked={String(access.projectAccessBlocked)}
+      data-initialized={String(access.projectInitialized)}
+      data-pending={String(access.projectAccessPending)}
     />
   );
 }
@@ -132,7 +135,135 @@ describe("ProjectAccessProvider capability refresh", () => {
     container.remove();
     window.localStorage.clear();
     window.sessionStorage.clear();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("keeps the shared Octo gate visible until the initial project lookup settles", async () => {
+    const lookup = deferred<ReturnType<typeof summaryFor>>();
+    mocks.getSummaryResult.mockReturnValueOnce(lookup.promise);
+    await act(async () => root.render(
+      <ProjectAccessProvider>
+        <AccessProbe />
+        <StudioStartupGate><p>Workspace ready</p></StudioStartupGate>
+      </ProjectAccessProvider>,
+    ));
+
+    const probe = container.querySelector('[data-testid="access-probe"]');
+    expect(container.querySelector('[data-testid="entry-loading-screen"]')).not.toBeNull();
+    expect(container.querySelector('[data-octo-motion="thinking"]')).not.toBeNull();
+    expect(container.querySelector('[role="status"]')?.textContent).toBe("Getting things ready…");
+    expect(container.textContent).not.toContain("Workspace ready");
+    expect(probe?.getAttribute("data-initialized")).toBe("false");
+    expect(probe?.getAttribute("data-pending")).toBe("true");
+    expect(probe?.getAttribute("data-write")).toBe("false");
+    expect(mocks.createControllerProject).not.toHaveBeenCalled();
+
+    await act(async () => lookup.resolve(summaryFor("viewer")));
+    expect(probe?.getAttribute("data-initialized")).toBe("true");
+    expect(probe?.getAttribute("data-pending")).toBe("false");
+    expect(probe?.getAttribute("data-role")).toBe("viewer");
+    expect(probe?.getAttribute("data-write")).toBe("false");
+    expect(container.querySelector('[data-testid="entry-loading-screen"]')).toBeNull();
+    expect(container.textContent).toContain("Workspace ready");
+  });
+
+  it.each(["unavailable", "rejected"])("recovers from an initial %s lookup without keeping the full-screen loader or granting access", async (failure) => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    if (failure === "rejected") {
+      mocks.getSummaryResult.mockRejectedValueOnce(new Error("network unavailable"));
+    } else {
+      mocks.getSummaryResult.mockResolvedValueOnce({
+        summary: null, notFound: false, forbidden: false, unauthorized: false,
+      });
+    }
+    mocks.getSummaryResult.mockResolvedValueOnce(summaryFor("viewer"));
+
+    await act(async () => root.render(
+      <ProjectAccessProvider>
+        <StudioStartupGate><AccessProbe /><ProjectAccessRecoveryBanner /></StudioStartupGate>
+      </ProjectAccessProvider>,
+    ));
+    const probe = container.querySelector('[data-testid="access-probe"]');
+    expect(probe?.getAttribute("data-initialized")).toBe("true");
+    expect(probe?.getAttribute("data-pending")).toBe("false");
+    expect(probe?.getAttribute("data-resolved")).toBe("false");
+    expect(probe?.getAttribute("data-write")).toBe("false");
+    expect(probe?.getAttribute("data-blocked")).toBe("false");
+    expect(container.querySelector('[data-testid="entry-loading-screen"]')).toBeNull();
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("Couldn’t check access");
+
+    await act(async () => vi.advanceTimersByTimeAsync(4_999));
+    expect(mocks.getSummaryResult).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(mocks.getSummaryResult).toHaveBeenCalledTimes(2);
+    expect(probe?.getAttribute("data-role")).toBe("viewer");
+    expect(probe?.getAttribute("data-resolved")).toBe("true");
+    expect(probe?.getAttribute("data-write")).toBe("false");
+    expect(mocks.createControllerProject).not.toHaveBeenCalled();
+    expect(mocks.removeProject).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    expect(mocks.setProjectName).toHaveBeenCalledWith(PROJECT_ID, "Shared space");
+    expect(mocks.setProjectOrg).toHaveBeenCalledWith(PROJECT_ID, { id: "org-1", name: "Team" });
+  });
+
+  it("lets the recovery banner retry the same access check immediately", async () => {
+    const retry = deferred<ReturnType<typeof summaryFor>>();
+    mocks.getSummaryResult
+      .mockResolvedValueOnce({ summary: null, notFound: false, forbidden: false, unauthorized: false })
+      .mockReturnValueOnce(retry.promise);
+    await act(async () => root.render(
+      <ProjectAccessProvider>
+        <StudioStartupGate><AccessProbe /><ProjectAccessRecoveryBanner /></StudioStartupGate>
+      </ProjectAccessProvider>,
+    ));
+    const retryButton = container.querySelector("button");
+    expect(retryButton?.textContent).toBe("Retry");
+    await act(async () => retryButton?.click());
+    expect(mocks.getSummaryResult).toHaveBeenCalledTimes(2);
+    expect(mocks.getSummaryResult).toHaveBeenLastCalledWith(PROJECT_ID);
+    expect(container.querySelector('[data-testid="access-probe"]')?.getAttribute("data-write")).toBe("false");
+
+    await act(async () => retry.resolve(summaryFor("viewer")));
+    expect(container.querySelector("button")).toBeNull();
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    expect(mocks.createControllerProject).not.toHaveBeenCalled();
+  });
+
+  it("cancels a pending recovery retry when the project provider unmounts", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    mocks.getSummaryResult.mockResolvedValue({
+      summary: null, notFound: false, forbidden: false, unauthorized: false,
+    });
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    expect(mocks.getSummaryResult).toHaveBeenCalledTimes(1);
+
+    await act(async () => root.render(null));
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+    expect(mocks.getSummaryResult).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["notFound", "forbidden", "unauthorized"])("keeps initial %s access failures blocked without a transient retry", async (failure) => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    mocks.getSummaryResult.mockResolvedValue({
+      summary: null, notFound: false, forbidden: false, unauthorized: false, [failure]: true,
+    });
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+
+    const probe = container.querySelector('[data-testid="access-probe"]');
+    expect(probe?.getAttribute("data-initialized")).toBe("true");
+    expect(probe?.getAttribute("data-blocked")).toBe("true");
+    expect(probe?.getAttribute("data-write")).toBe("false");
+    expect(mocks.removeProject).toHaveBeenCalledWith(PROJECT_ID);
+    await act(async () => vi.advanceTimersByTimeAsync(5_000));
+    expect(mocks.getSummaryResult).toHaveBeenCalledTimes(1);
+    expect(mocks.createControllerProject).not.toHaveBeenCalled();
   });
 
   it("demotes a live project after a targeted controller invalidation", async () => {

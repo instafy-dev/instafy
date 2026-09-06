@@ -1,3 +1,4 @@
+import { resolveDesktopNotificationClickTargetUrl, resolveDesktopNotificationBody } from "./deepLinks";
 import { BrowserWindow, Menu, Notification, app, dialog, ipcMain, net, shell } from "electron";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -101,6 +102,9 @@ import {
 type DesktopNotificationPayload = {
   title: string;
   body?: string;
+  url?: string;
+  eventId?: string;
+  accountId?: string;
 };
 
 type DesktopRuntimeStartRequest = {
@@ -2177,11 +2181,26 @@ app.whenReady().then(() => {
 
   ipcMain.handle(
     "instafy:notify",
-    async (_event, payload: DesktopNotificationPayload) => {
-      if (BrowserWindow.getAllWindows().some((window) => window.isFocused())) {
-        return;
-      }
-      new Notification({ title: payload.title, body: payload.body }).show();
+    async (event, payload: DesktopNotificationPayload) => {
+      assertAllowedCaller(event);
+      const target = resolveDesktopNotificationClickTargetUrl(payload, getStartUrl());
+      const session = await resolveVisibleSupabaseSession(event);
+      if (!target || !session?.userId || session.userId !== payload?.accountId ||
+        typeof payload.eventId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(payload.eventId)) return false;
+      if (BrowserWindow.getAllWindows().some((window) => window.isFocused())) return false;
+      const notification = new Notification({ title: "Instafy", body: resolveDesktopNotificationBody(payload.body) });
+      notification.on("click", () => {
+        void (async () => {
+          const window = BrowserWindow.getAllWindows().at(0);
+          if (window) {
+            const visible = await window.webContents.executeJavaScript(READ_VISIBLE_SUPABASE_SESSION_SCRIPT);
+            if (visible?.userId && visible.userId !== payload.accountId) return;
+          }
+          openUrlInMainWindow(target);
+        })().catch(() => {});
+      });
+      notification.show();
+      return true;
     }
   );
 

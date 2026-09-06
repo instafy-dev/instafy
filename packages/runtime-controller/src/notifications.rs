@@ -1,12 +1,14 @@
 #[cfg(test)]
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::net::{IpAddr, SocketAddr};
 #[cfg(test)]
 use std::sync::Mutex as StdMutex;
+use std::time::Duration;
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{Aes128Gcm, Nonce};
-use axum::extract::{Query, State};
+use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -27,7 +29,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value as JsonValue};
 use sha2::Sha256;
 use tokio_postgres::types::Json as PgJson;
-use tokio_postgres::types::ToSql;
 use uuid::Uuid;
 
 use crate::auth::{authenticate_request, require_user_session};
@@ -82,6 +83,7 @@ pub(crate) fn router() -> Router<AppState> {
             "/me/notifications/native-push/token/remove",
             post(remove_my_native_push_token),
         )
+        .layer(DefaultBodyLimit::max(8 * 1024))
 }
 
 #[derive(Debug, Deserialize)]
@@ -201,50 +203,6 @@ fn should_include_inbox_message(
     }
 
     true
-}
-
-fn push_skip_reason_for_message(message: &ConversationMessageRow) -> Option<&'static str> {
-    let role = message.role.trim();
-    if !(role.eq_ignore_ascii_case("assistant") || role.eq_ignore_ascii_case("user")) {
-        return Some("unsupported_role");
-    }
-
-    let metadata = message.metadata.as_object();
-    if role.eq_ignore_ascii_case("assistant") {
-        if let Some(kind) = metadata
-            .and_then(|map| map.get("kind"))
-            .and_then(JsonValue::as_str)
-            .map(str::trim)
-        {
-            if kind.eq_ignore_ascii_case("update") {
-                return Some("assistant_update_kind");
-            }
-        }
-    }
-
-    let message_type = normalize_metadata_string(
-        metadata.and_then(|map| map.get("messageType").or_else(|| map.get("message_type"))),
-    );
-    if let Some(message_type) = message_type.as_deref() {
-        if TIMELINE_MESSAGE_TYPES
-            .iter()
-            .any(|value| value == &message_type)
-        {
-            return Some("timeline_message_type");
-        }
-    }
-
-    None
-}
-
-fn push_debug_enabled() -> bool {
-    std::env::var("PUSH_NOTIFICATION_DEBUG")
-        .ok()
-        .map(|value| {
-            let normalized = value.trim().to_ascii_lowercase();
-            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
-        })
-        .unwrap_or(false)
 }
 
 async fn list_my_notification_inbox(
@@ -501,25 +459,6 @@ async fn acknowledge_my_notification_inbox_item(
     Ok(Json(NotificationInboxAckResponse { ok: true }))
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct PushNotificationPayload {
-    title: String,
-    body: String,
-    url: String,
-}
-
-fn build_notification_title(project: &crate::ProjectRecord) -> String {
-    let project_name = project
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    if let Some(name) = project_name {
-        return format!("Instafy · {name}");
-    }
-    "Instafy".to_string()
-}
-
 fn format_notification_body(content: &str) -> Option<String> {
     let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
     if normalized.is_empty() {
@@ -536,265 +475,20 @@ fn format_notification_body(content: &str) -> Option<String> {
     Some(truncated)
 }
 
-fn build_message_notification_body(message: &ConversationMessageRow) -> String {
-    if let Some(body) = format_notification_body(&message.content) {
-        return body;
-    }
-
-    if message.role.eq_ignore_ascii_case("assistant") {
-        "New assistant message".to_string()
-    } else {
-        "New message".to_string()
-    }
-}
-
-fn build_message_notification_url(project_id: &Uuid, conversation_id: &Uuid) -> String {
-    format!("/studio?projectId={project_id}&conversationControllerId={conversation_id}")
-}
-
-pub(crate) fn enqueue_message_push_notifications(state: AppState, message: ConversationMessageRow) {
+// Product producers write the durable notification outbox in their database transaction.
+// This legacy hook remains solely for existing producer suppression regression assertions.
+pub(crate) fn enqueue_message_push_notifications(
+    _state: AppState,
+    _message: ConversationMessageRow,
+) {
     #[cfg(test)]
     {
         *TEST_PUSH_ENQUEUE_COUNTS
             .lock()
             .expect("test push enqueue counter lock")
-            .entry(message.conversation_id)
+            .entry(_message.conversation_id)
             .or_default() += 1;
     }
-
-    let debug_enabled = push_debug_enabled();
-    if let Some(reason) = push_skip_reason_for_message(&message) {
-        if debug_enabled {
-            tracing::info!(
-                message_id = %message.id,
-                conversation_id = %message.conversation_id,
-                project_id = %message.project_id,
-                role = %message.role,
-                run_id = ?message.run_id,
-                skip_reason = reason,
-                "push dispatch skipped"
-            );
-        }
-        return;
-    }
-
-    if state.config.web_push_vapid_private_key.is_none() && state.config.apns_private_key.is_none()
-    {
-        if debug_enabled {
-            tracing::info!(
-                message_id = %message.id,
-                conversation_id = %message.conversation_id,
-                project_id = %message.project_id,
-                role = %message.role,
-                run_id = ?message.run_id,
-                "push dispatch skipped: no configured push providers"
-            );
-        }
-        return;
-    }
-
-    if debug_enabled {
-        tracing::info!(
-            message_id = %message.id,
-            conversation_id = %message.conversation_id,
-            project_id = %message.project_id,
-            role = %message.role,
-            run_id = ?message.run_id,
-            "push dispatch queued"
-        );
-    }
-
-    tokio::spawn(async move {
-        if let Err(error) = send_message_push_notifications(&state, &message).await {
-            tracing::warn!(
-                message_id = %message.id,
-                conversation_id = %message.conversation_id,
-                project_id = %message.project_id,
-                %error,
-                "push notification dispatch failed"
-            );
-        }
-    });
-}
-
-async fn send_message_push_notifications(
-    state: &AppState,
-    message: &ConversationMessageRow,
-) -> anyhow::Result<()> {
-    let debug_enabled = push_debug_enabled();
-
-    let mut connection = state.pool.get().await?;
-    let transaction = connection.transaction().await?;
-
-    let conversation = load_conversation_record(&transaction, &message.conversation_id)
-        .await
-        .map_err(|(status, Json(api_error))| {
-            anyhow::anyhow!(
-                "failed to load conversation {}: {} ({})",
-                message.conversation_id,
-                api_error.message,
-                status.as_u16()
-            )
-        })?;
-    let project = load_project_record(&transaction, &conversation.project_id)
-        .await
-        .map_err(|(status, Json(api_error))| {
-            anyhow::anyhow!(
-                "failed to load project {}: {} ({})",
-                conversation.project_id,
-                api_error.message,
-                status.as_u16()
-            )
-        })?;
-    let recipients =
-        load_notification_recipients(&transaction, &conversation, message.created_by).await?;
-
-    if debug_enabled {
-        tracing::info!(
-            message_id = %message.id,
-            conversation_id = %message.conversation_id,
-            project_id = %message.project_id,
-            role = %message.role,
-            run_id = ?message.run_id,
-            recipient_count = recipients.len(),
-            "push dispatch recipients resolved"
-        );
-    }
-
-    if recipients.is_empty() {
-        if debug_enabled {
-            tracing::info!(
-                message_id = %message.id,
-                conversation_id = %message.conversation_id,
-                project_id = %message.project_id,
-                role = %message.role,
-                run_id = ?message.run_id,
-                "push dispatch skipped: no recipients"
-            );
-        }
-        transaction.commit().await?;
-        return Ok(());
-    }
-
-    let notification_payload = PushNotificationPayload {
-        title: build_notification_title(&project),
-        body: build_message_notification_body(message),
-        url: build_message_notification_url(&project.id, &conversation.id),
-    };
-
-    if let Some(public_key) = state.config.web_push_vapid_public_key.as_deref() {
-        if let Some(private_key) = state.config.web_push_vapid_private_key.as_deref() {
-            let subject = state
-                .config
-                .web_push_vapid_subject
-                .as_deref()
-                .unwrap_or("mailto:notifications@instafy.dev");
-            match send_web_push_notifications(
-                state,
-                &transaction,
-                &recipients,
-                &notification_payload,
-                public_key,
-                private_key,
-                subject,
-            )
-            .await
-            {
-                Ok(summary) => {
-                    if debug_enabled {
-                        tracing::info!(
-                            message_id = %message.id,
-                            conversation_id = %message.conversation_id,
-                            project_id = %message.project_id,
-                            role = %message.role,
-                            run_id = ?message.run_id,
-                            endpoint_count = summary.endpoint_count,
-                            delivered_count = summary.delivered_count,
-                            expired_count = summary.expired_count,
-                            failed_count = summary.failed_count,
-                            "web push dispatch result"
-                        );
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        message_id = %message.id,
-                        conversation_id = %message.conversation_id,
-                        project_id = %message.project_id,
-                        %error,
-                        "web push delivery failed"
-                    );
-                }
-            }
-        }
-    } else if debug_enabled {
-        tracing::info!(
-            message_id = %message.id,
-            conversation_id = %message.conversation_id,
-            project_id = %message.project_id,
-            role = %message.role,
-            run_id = ?message.run_id,
-            "web push skipped: missing WEB_PUSH_VAPID_PUBLIC_KEY"
-        );
-    }
-
-    if state.config.web_push_vapid_public_key.is_some()
-        && state.config.web_push_vapid_private_key.is_none()
-        && debug_enabled
-    {
-        tracing::info!(
-            message_id = %message.id,
-            conversation_id = %message.conversation_id,
-            project_id = %message.project_id,
-            role = %message.role,
-            run_id = ?message.run_id,
-            "web push skipped: missing WEB_PUSH_VAPID_PRIVATE_KEY"
-        );
-    }
-
-    // Native push (APNs) is dispatched in a separate pipeline so web-only deployments still work.
-    if state.config.apns_private_key.is_some() {
-        if let Err(error) = send_native_push_notifications(
-            state,
-            &transaction,
-            &recipients,
-            message,
-            &notification_payload,
-        )
-        .await
-        {
-            tracing::warn!(
-                message_id = %message.id,
-                conversation_id = %message.conversation_id,
-                project_id = %message.project_id,
-                %error,
-                "native push delivery failed"
-            );
-        }
-    } else if debug_enabled {
-        tracing::info!(
-            message_id = %message.id,
-            conversation_id = %message.conversation_id,
-            project_id = %message.project_id,
-            role = %message.role,
-            run_id = ?message.run_id,
-            "native push skipped: APNS not configured"
-        );
-    }
-
-    if debug_enabled {
-        tracing::info!(
-            message_id = %message.id,
-            conversation_id = %message.conversation_id,
-            project_id = %message.project_id,
-            role = %message.role,
-            run_id = ?message.run_id,
-            "push dispatch completed"
-        );
-    }
-
-    transaction.commit().await?;
-    Ok(())
 }
 
 pub(crate) async fn load_notification_recipients(
@@ -867,124 +561,544 @@ pub(crate) async fn load_notification_recipients(
     Ok(list)
 }
 
-#[derive(Debug)]
-struct WebPushEndpoint {
-    id: Uuid,
-    endpoint: String,
-    p256dh: String,
-    auth: String,
+/// Only registry-generated display text and canonical resource links belong in this envelope.
+/// Raw conversation/support content is deliberately absent from the transport interface.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PushNotificationPayload {
+    pub(crate) event_id: Uuid,
+    pub(crate) account_id: Uuid,
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) url: String,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
-struct WebPushDispatchSummary {
-    endpoint_count: usize,
-    delivered_count: usize,
-    expired_count: usize,
-    failed_count: usize,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeliveryDisposition {
+    Success,
+    Transient,
+    Terminal,
+    Expired,
 }
 
-async fn send_web_push_notifications(
-    state: &AppState,
-    transaction: &tokio_postgres::Transaction<'_>,
-    recipients: &[Uuid],
-    payload: &PushNotificationPayload,
-    vapid_public_key: &str,
-    vapid_private_key: &str,
-    vapid_subject: &str,
-) -> anyhow::Result<WebPushDispatchSummary> {
-    let endpoints = load_web_push_endpoints(transaction, recipients).await?;
-    if endpoints.is_empty() {
-        return Ok(WebPushDispatchSummary::default());
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DeliveryResult {
+    pub(crate) disposition: DeliveryDisposition,
+    // Fixed internal codes only: never store provider response text, URLs, or tokens.
+    pub(crate) code: &'static str,
+}
+
+impl DeliveryResult {
+    fn new(disposition: DeliveryDisposition, code: &'static str) -> Self {
+        Self { disposition, code }
     }
+}
 
-    let mut summary = WebPushDispatchSummary {
-        endpoint_count: endpoints.len(),
-        ..WebPushDispatchSummary::default()
+const MAX_PUSH_ENDPOINT_BYTES: usize = 2048;
+const MAX_PUSH_PAYLOAD_BYTES: usize = 3072;
+const MAX_PROVIDER_RESPONSE_BYTES: usize = 1024;
+
+fn validate_push_payload(payload: &PushNotificationPayload, user_id: Uuid) -> bool {
+    if payload.account_id != user_id
+        || payload.event_id.is_nil()
+        || payload.title.is_empty()
+        || payload.title.len() > 160
+        || payload.body.len() > 512
+        || payload.title.chars().any(char::is_control)
+        || payload.body.chars().any(char::is_control)
+        || payload.url.len() > 1024
+        || !payload.url.starts_with("/studio?")
+        || payload.url.contains('\\')
+    {
+        return false;
+    }
+    let Ok(url) = reqwest::Url::parse(&format!("https://notification.invalid{}", payload.url))
+    else {
+        return false;
     };
-    let payload_bytes = serde_json::to_vec(payload)?;
-    let signing_key = decode_vapid_signing_key(vapid_private_key)?;
-    let mut expired: Vec<Uuid> = Vec::new();
+    if url.path() != "/studio" || url.fragment().is_some() {
+        return false;
+    }
+    let mut seen = HashSet::new();
+    for (key, value) in url.query_pairs() {
+        if !matches!(
+            key.as_ref(),
+            "projectId" | "conversationControllerId" | "supportReportId" | "notificationEventId"
+        ) || !seen.insert(key.into_owned())
+            || Uuid::parse_str(&value).is_err()
+        {
+            return false;
+        }
+    }
+    let support = seen.contains("supportReportId");
+    let project = seen.contains("projectId");
+    let conversation = seen.contains("conversationControllerId");
+    (support && !project && !conversation) || (!support && project)
+}
 
-    for endpoint in endpoints {
-        match send_single_web_push(
+fn is_public_push_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(ip) => {
+            let [a, b, c, _] = ip.octets();
+            !(a == 0
+                || a == 10
+                || a == 127
+                || (a == 100 && (64..=127).contains(&b))
+                || (a == 169 && b == 254)
+                || (a == 172 && (16..=31).contains(&b))
+                || (a == 192 && b == 0 && c == 0)
+                || (a == 192 && b == 0 && c == 2)
+                || (a == 192 && b == 88 && c == 99)
+                || (a == 192 && b == 168)
+                || (a == 198 && (18..=19).contains(&b))
+                || (a == 198 && b == 51 && c == 100)
+                || (a == 203 && b == 0 && c == 113)
+                || a >= 224)
+        }
+        IpAddr::V6(ip) => {
+            // Accept global unicast only. This excludes mapped IPv4, NAT64, local,
+            // multicast and unspecified ranges; also exclude special/tunnel/doc ranges.
+            let [a, b, ..] = ip.segments();
+            (a & 0xe000) == 0x2000
+                && !(a == 0x2001 && (b < 0x0200 || b == 0x0db8))
+                && a != 0x2002
+                && !(a == 0x3fff && b < 0x1000)
+        }
+    }
+}
+
+fn parse_web_push_endpoint(endpoint: &str) -> Result<reqwest::Url, &'static str> {
+    if endpoint.is_empty()
+        || endpoint.len() > MAX_PUSH_ENDPOINT_BYTES
+        || endpoint.chars().any(char::is_control)
+        || endpoint.contains('\\')
+    {
+        return Err("invalid_endpoint");
+    }
+    let url = reqwest::Url::parse(endpoint).map_err(|_| "invalid_endpoint")?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || url.port_or_known_default() != Some(443)
+    {
+        return Err("invalid_endpoint");
+    }
+    let host = url.host_str().ok_or("invalid_endpoint")?;
+    let host = host.trim_matches(['[', ']']);
+    if let Ok(address) = host.parse::<IpAddr>() {
+        if !is_public_push_address(address) {
+            return Err("unsafe_endpoint");
+        }
+    } else if !host.contains('.')
+        || host.ends_with('.')
+        || host.eq_ignore_ascii_case("localhost")
+        || [".localhost", ".local", ".internal", ".home", ".lan"]
+            .iter()
+            .any(|suffix| host.ends_with(suffix))
+    {
+        return Err("unsafe_endpoint");
+    }
+    Ok(url)
+}
+
+fn validate_resolved_addresses(addresses: &[SocketAddr]) -> Result<(), &'static str> {
+    if addresses.is_empty() {
+        return Err("endpoint_dns_failed");
+    }
+    if addresses
+        .iter()
+        .any(|address| !is_public_push_address(address.ip()))
+    {
+        return Err("unsafe_endpoint");
+    }
+    Ok(())
+}
+
+async fn resolve_push_endpoint(url: &reqwest::Url) -> Result<Vec<SocketAddr>, &'static str> {
+    let host = url
+        .host_str()
+        .ok_or("invalid_endpoint")?
+        .trim_matches(['[', ']']);
+    let addresses = if let Ok(address) = host.parse::<IpAddr>() {
+        vec![SocketAddr::new(address, 443)]
+    } else {
+        tokio::time::timeout(Duration::from_secs(5), tokio::net::lookup_host((host, 443)))
+            .await
+            .map_err(|_| "endpoint_dns_failed")?
+            .map_err(|_| "endpoint_dns_failed")?
+            .collect::<Vec<_>>()
+    };
+    validate_resolved_addresses(&addresses)?;
+    Ok(addresses)
+}
+
+fn secure_push_client(
+    url: &reqwest::Url,
+    addresses: &[SocketAddr],
+) -> Result<reqwest::Client, &'static str> {
+    validate_resolved_addresses(addresses)?;
+    // Resolve once, reject any private result, then pin that exact set for this attempt.
+    // No connection pool survives between attempts, so DNS changes are revalidated.
+    reqwest::Client::builder()
+        .https_only(true)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(15))
+        .resolve_to_addrs(url.host_str().ok_or("invalid_endpoint")?, addresses)
+        .build()
+        .map_err(|_| "provider_client_failed")
+}
+
+fn validate_web_push_keys(p256dh: &str, auth: &str) -> Result<(), &'static str> {
+    if p256dh.len() != 87 || auth.len() != 22 {
+        return Err("invalid_subscription_keys");
+    }
+    let public_key = BASE64URL
+        .decode(p256dh)
+        .map_err(|_| "invalid_subscription_keys")?;
+    let auth = BASE64URL
+        .decode(auth)
+        .map_err(|_| "invalid_subscription_keys")?;
+    if public_key.len() != 65 || public_key.first() != Some(&4) || auth.len() != 16 {
+        return Err("invalid_subscription_keys");
+    }
+    PublicKey::from_sec1_bytes(&public_key).map_err(|_| "invalid_subscription_keys")?;
+    Ok(())
+}
+
+fn validate_native_token(token: &str, platform: &str) -> Result<(), &'static str> {
+    if token.is_empty() || token.len() > 512 || token.chars().any(char::is_control) {
+        return Err("invalid_device_token");
+    }
+    // APNs tokens are variable-length opaque bytes represented as hexadecimal.
+    if platform == "ios"
+        && (token.len() % 2 != 0 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err("invalid_device_token");
+    }
+    Ok(())
+}
+
+fn provider_response_result(
+    channel: &str,
+    status: u16,
+    apns_reason: Option<&str>,
+) -> DeliveryResult {
+    use DeliveryDisposition::*;
+    if (200..300).contains(&status) {
+        DeliveryResult::new(Success, "accepted")
+    } else if status == 410
+        || (channel == "web_push" && status == 404)
+        || (channel == "apns" && status == 400 && apns_reason == Some("BadDeviceToken"))
+    {
+        DeliveryResult::new(Expired, "endpoint_expired")
+    } else if status == 408 || status == 425 || status == 429 || (500..600).contains(&status) {
+        DeliveryResult::new(
+            Transient,
+            if status == 429 {
+                "provider_rate_limited"
+            } else {
+                "provider_unavailable"
+            },
+        )
+    } else if status == 401 || status == 403 {
+        DeliveryResult::new(Terminal, "provider_auth_rejected")
+    } else {
+        DeliveryResult::new(Terminal, "provider_rejected")
+    }
+}
+
+async fn execute_push_request(request: reqwest::RequestBuilder, channel: &str) -> DeliveryResult {
+    let mut response = match request.send().await {
+        Ok(response) => response,
+        Err(_) => {
+            return DeliveryResult::new(DeliveryDisposition::Transient, "provider_network_error")
+        }
+    };
+    let status = response.status().as_u16();
+    if channel != "apns" || (200..300).contains(&status) {
+        return provider_response_result(channel, status, None);
+    }
+    // Only the bounded APNs reason is used for classification; response text is never persisted.
+    let mut body = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) if body.len() + chunk.len() <= MAX_PROVIDER_RESPONSE_BYTES => {
+                body.extend_from_slice(&chunk)
+            }
+            Ok(None) => break,
+            _ => return provider_response_result(channel, status, None),
+        }
+    }
+    let value = serde_json::from_slice::<JsonValue>(&body).ok();
+    provider_response_result(
+        channel,
+        status,
+        value
+            .as_ref()
+            .and_then(|value| value.get("reason"))
+            .and_then(JsonValue::as_str),
+    )
+}
+
+fn web_push_request(
+    client: &reqwest::Client,
+    url: &reqwest::Url,
+    jwt: &str,
+    public_key: &str,
+    payload: Vec<u8>,
+    event_id: Uuid,
+) -> reqwest::RequestBuilder {
+    client
+        .post(url.clone())
+        .header("TTL", "3600")
+        .header("Topic", event_id.simple().to_string())
+        .header("Authorization", format!("vapid t={jwt}, k={public_key}"))
+        .header("Content-Encoding", "aes128gcm")
+        .header("Content-Type", "application/octet-stream")
+        .body(payload)
+}
+
+fn apns_request(
+    client: &reqwest::Client,
+    url: &reqwest::Url,
+    jwt: &str,
+    bundle_id: &str,
+    payload: &PushNotificationPayload,
+) -> reqwest::RequestBuilder {
+    client
+        .post(url.clone())
+        .header("authorization", format!("bearer {jwt}"))
+        .header("apns-topic", bundle_id.trim())
+        .header("apns-push-type", "alert")
+        .header("apns-priority", "10")
+        .header("apns-id", payload.event_id.to_string())
+        .header("apns-collapse-id", payload.event_id.to_string())
+        .json(&json!({
+            "aps": { "alert": { "title": payload.title, "body": payload.body } },
+            "eventId": payload.event_id,
+            "accountId": payload.account_id,
+            "url": payload.url,
+        }))
+}
+
+// Recheck after DNS, client preparation and encryption. The snapshot also fences
+// a token re-registration/account switch while the attempt was being prepared.
+async fn revalidate_delivery_endpoint(
+    state: &AppState,
+    channel: &str,
+    endpoint_id: Uuid,
+    lease_token: Uuid,
+    payload: &PushNotificationPayload,
+    endpoint_updated_at: DateTime<Utc>,
+) -> Result<(), DeliveryResult> {
+    let connection = state.pool.get().await.map_err(|_| {
+        DeliveryResult::new(DeliveryDisposition::Transient, "endpoint_lookup_failed")
+    })?;
+    let generic_preview =
+        payload.title == "Instafy" && payload.body == "You have a new notification.";
+    let authorized: bool = connection.query_one(
+        "select exists(select 1 from notification_delivery_jobs j
+           where j.event_id=$1 and j.user_id=$2 and j.channel=$3 and j.endpoint_id=$4
+             and j.status='leased' and j.lease_until>clock_timestamp() and j.lease_token=$7
+             and notification_delivery_authorized(j.id)
+             and ($6 or not coalesce((select hide_previews from notification_settings where user_id=$2), true))
+             and case j.channel
+               when 'web_push' then exists(select 1 from web_push_subscriptions w where w.id=$4 and w.user_id=$2 and w.updated_at=$5)
+               when 'apns' then exists(select 1 from native_push_tokens n where n.id=$4 and n.user_id=$2 and n.platform='ios' and n.updated_at=$5)
+               else false end)",
+        &[&payload.event_id, &payload.account_id, &channel, &endpoint_id, &endpoint_updated_at, &generic_preview, &lease_token],
+    ).await.map_err(|_| DeliveryResult::new(DeliveryDisposition::Transient, "endpoint_lookup_failed"))?.get(0);
+    if authorized {
+        Ok(())
+    } else {
+        Err(DeliveryResult::new(
+            DeliveryDisposition::Terminal,
+            "delivery_eligibility_changed",
+        ))
+    }
+}
+
+/// Loads only the claimed account's endpoint, releases the database connection, then sends.
+/// The worker owns leasing, authorization, retry policy, and conditional expired-endpoint cleanup.
+pub(crate) async fn deliver_notification(
+    state: &AppState,
+    channel: &str,
+    endpoint_id: Uuid,
+    user_id: Uuid,
+    lease_token: Uuid,
+    payload: &PushNotificationPayload,
+) -> DeliveryResult {
+    use DeliveryDisposition::*;
+    if !validate_push_payload(payload, user_id) {
+        return DeliveryResult::new(Terminal, "invalid_payload");
+    }
+    let payload_bytes = match serde_json::to_vec(payload) {
+        Ok(bytes) if bytes.len() <= MAX_PUSH_PAYLOAD_BYTES => bytes,
+        _ => return DeliveryResult::new(Terminal, "invalid_payload"),
+    };
+    let query = match channel {
+        "web_push" => "select endpoint, p256dh, auth, updated_at from web_push_subscriptions where id = $1 and user_id = $2",
+        "apns" => "select token, environment, updated_at from native_push_tokens where id = $1 and user_id = $2 and platform = 'ios'",
+        _ => return DeliveryResult::new(Terminal, "unsupported_channel"),
+    };
+    let row = {
+        let connection = match state.pool.get().await {
+            Ok(connection) => connection,
+            Err(_) => return DeliveryResult::new(Transient, "endpoint_lookup_failed"),
+        };
+        match connection.query_opt(query, &[&endpoint_id, &user_id]).await {
+            Ok(Some(row)) => row,
+            Ok(None) => return DeliveryResult::new(Expired, "endpoint_missing"),
+            Err(_) => return DeliveryResult::new(Transient, "endpoint_lookup_failed"),
+        }
+    };
+    let endpoint_updated_at: DateTime<Utc> = row.get("updated_at");
+    if channel == "web_push" {
+        let (Some(private_key), Some(public_key)) = (
+            state.config.web_push_vapid_private_key.as_deref(),
+            state.config.web_push_vapid_public_key.as_deref(),
+        ) else {
+            return DeliveryResult::new(Terminal, "provider_not_configured");
+        };
+        let endpoint: String = row.get("endpoint");
+        let p256dh: String = row.get("p256dh");
+        let auth: String = row.get("auth");
+        if validate_web_push_keys(&p256dh, &auth).is_err() {
+            return DeliveryResult::new(Expired, "invalid_subscription_keys");
+        }
+        let url = match parse_web_push_endpoint(&endpoint) {
+            Ok(url) => url,
+            Err(code) => return DeliveryResult::new(Terminal, code),
+        };
+        let addresses = match resolve_push_endpoint(&url).await {
+            Ok(addresses) => addresses,
+            Err(code) => {
+                return DeliveryResult::new(
+                    if code == "endpoint_dns_failed" {
+                        Transient
+                    } else {
+                        Terminal
+                    },
+                    code,
+                )
+            }
+        };
+        let client = match secure_push_client(&url, &addresses) {
+            Ok(client) => client,
+            Err(code) => return DeliveryResult::new(Terminal, code),
+        };
+        let signing_key = match decode_vapid_signing_key(private_key) {
+            Ok(key)
+                if BASE64URL.encode(key.verifying_key().to_encoded_point(false).as_bytes())
+                    == public_key.trim() =>
+            {
+                key
+            }
+            _ => return DeliveryResult::new(Terminal, "provider_configuration_invalid"),
+        };
+        let subject = state
+            .config
+            .web_push_vapid_subject
+            .as_deref()
+            .unwrap_or("mailto:notifications@instafy.dev");
+        let jwt = match build_vapid_jwt(&signing_key, &url.origin().ascii_serialization(), subject)
+        {
+            Ok(jwt) => jwt,
+            Err(_) => return DeliveryResult::new(Terminal, "provider_configuration_invalid"),
+        };
+        let encrypted = match encrypt_web_push_payload(&p256dh, &auth, &payload_bytes) {
+            Ok(encrypted) => encrypted,
+            Err(_) => return DeliveryResult::new(Terminal, "payload_encryption_failed"),
+        };
+        if let Err(result) = revalidate_delivery_endpoint(
             state,
-            &signing_key,
-            vapid_public_key,
-            vapid_subject,
-            &endpoint.endpoint,
-            &endpoint.p256dh,
-            &endpoint.auth,
-            &payload_bytes,
+            channel,
+            endpoint_id,
+            lease_token,
+            payload,
+            endpoint_updated_at,
         )
         .await
         {
-            Ok(status) => {
-                if status.as_u16() == 404 || status.as_u16() == 410 {
-                    expired.push(endpoint.id);
-                    summary.expired_count += 1;
-                } else if status.is_success() {
-                    summary.delivered_count += 1;
-                } else {
-                    summary.failed_count += 1;
-                    tracing::debug!(
-                        subscription_id = %endpoint.id,
-                        endpoint = %endpoint.endpoint,
-                        status = status.as_u16(),
-                        "web push endpoint returned non-success status"
-                    );
-                }
-            }
-            Err(error) => {
-                summary.failed_count += 1;
-                tracing::debug!(
-                    subscription_id = %endpoint.id,
-                    endpoint = %endpoint.endpoint,
-                    %error,
-                    "failed to send web push notification"
-                );
-            }
+            return result;
         }
-    }
-
-    if !expired.is_empty() {
-        transaction
-            .execute(
-                "delete from web_push_subscriptions where id = any($1)",
-                &[&expired],
-            )
-            .await?;
-    }
-
-    Ok(summary)
-}
-
-async fn load_web_push_endpoints(
-    transaction: &tokio_postgres::Transaction<'_>,
-    recipients: &[Uuid],
-) -> anyhow::Result<Vec<WebPushEndpoint>> {
-    if recipients.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let recipient_param: [&(dyn ToSql + Sync); 1] = [&recipients];
-    let rows = transaction
-        .query(
-            "select id, endpoint, p256dh, auth
-             from web_push_subscriptions
-             where user_id = any($1)",
-            &recipient_param,
+        execute_push_request(
+            web_push_request(
+                &client,
+                &url,
+                &jwt,
+                public_key.trim(),
+                encrypted,
+                payload.event_id,
+            ),
+            channel,
         )
-        .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| WebPushEndpoint {
-            id: row.get("id"),
-            endpoint: row.get("endpoint"),
-            p256dh: row.get("p256dh"),
-            auth: row.get("auth"),
-        })
-        .collect())
+        .await
+    } else {
+        let (Some(private_key), Some(team_id), Some(key_id), Some(bundle_id)) = (
+            state.config.apns_private_key.as_deref(),
+            state.config.apns_team_id.as_deref(),
+            state.config.apns_key_id.as_deref(),
+            state.config.apns_bundle_id.as_deref(),
+        ) else {
+            return DeliveryResult::new(Terminal, "provider_not_configured");
+        };
+        let token: String = row.get("token");
+        let environment: String = row.get("environment");
+        if validate_native_token(&token, "ios").is_err() {
+            return DeliveryResult::new(Expired, "invalid_device_token");
+        }
+        let host = if environment == "sandbox" {
+            "api.sandbox.push.apple.com"
+        } else if environment == "production" {
+            "api.push.apple.com"
+        } else {
+            return DeliveryResult::new(Terminal, "invalid_device_environment");
+        };
+        let url = reqwest::Url::parse(&format!("https://{host}/3/device/{token}"))
+            .expect("fixed APNs endpoint and validated token");
+        let addresses = match resolve_push_endpoint(&url).await {
+            Ok(addresses) => addresses,
+            Err(code) => {
+                return DeliveryResult::new(
+                    if code == "endpoint_dns_failed" {
+                        Transient
+                    } else {
+                        Terminal
+                    },
+                    code,
+                )
+            }
+        };
+        let client = match secure_push_client(&url, &addresses) {
+            Ok(client) => client,
+            Err(code) => return DeliveryResult::new(Terminal, code),
+        };
+        let jwt = match build_apns_jwt(private_key, team_id, key_id) {
+            Ok(jwt) => jwt,
+            Err(_) => return DeliveryResult::new(Terminal, "provider_configuration_invalid"),
+        };
+        if let Err(result) = revalidate_delivery_endpoint(
+            state,
+            channel,
+            endpoint_id,
+            lease_token,
+            payload,
+            endpoint_updated_at,
+        )
+        .await
+        {
+            return result;
+        }
+        execute_push_request(
+            apns_request(&client, &url, &jwt, bundle_id, payload),
+            channel,
+        )
+        .await
+    }
 }
 
 fn decode_vapid_signing_key(raw: &str) -> anyhow::Result<SigningKey> {
@@ -999,19 +1113,6 @@ fn decode_vapid_signing_key(raw: &str) -> anyhow::Result<SigningKey> {
         .try_into()
         .map_err(|_| anyhow::anyhow!("WEB_PUSH_VAPID_PRIVATE_KEY must decode to 32 bytes"))?;
     Ok(SigningKey::from_bytes(&key_bytes.into())?)
-}
-
-fn derive_web_push_audience(endpoint: &str) -> anyhow::Result<String> {
-    let url = reqwest::Url::parse(endpoint)?;
-    let scheme = url.scheme();
-    let host = url
-        .host_str()
-        .ok_or_else(|| anyhow::anyhow!("push endpoint missing host"))?;
-    let mut origin = format!("{scheme}://{host}");
-    if let Some(port) = url.port() {
-        origin.push_str(&format!(":{port}"));
-    }
-    Ok(origin)
 }
 
 fn build_vapid_jwt(
@@ -1078,18 +1179,12 @@ fn hkdf_expand(prk: &[u8], info: &[u8], len: usize) -> anyhow::Result<Vec<u8>> {
     Ok(okm)
 }
 
-#[derive(Debug)]
-struct EncryptedWebPushPayload {
-    salt: String,
-    dh: String,
-    ciphertext: Vec<u8>,
-}
-
-fn encrypt_web_push_payload(
-    p256dh: &str,
-    auth: &str,
-    payload: &[u8],
-) -> anyhow::Result<EncryptedWebPushPayload> {
+fn encrypt_web_push_payload(p256dh: &str, auth: &str, payload: &[u8]) -> anyhow::Result<Vec<u8>> {
+    validate_web_push_keys(p256dh, auth).map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(
+        payload.len() <= MAX_PUSH_PAYLOAD_BYTES,
+        "push payload too large"
+    );
     let client_public_key_bytes = BASE64URL
         .decode(p256dh.trim().as_bytes())
         .map_err(|error| anyhow::anyhow!("invalid web push p256dh key: {error}"))?;
@@ -1110,8 +1205,25 @@ fn encrypt_web_push_payload(
     let sender_public_key_raw = sender_public_key_bytes.as_bytes();
 
     let shared = sender_secret.diffie_hellman(&client_public_key);
-    let prk = hkdf_extract(&client_auth_secret, shared.raw_secret_bytes().as_slice())?;
+    encrypt_web_push_record(
+        &client_public_key_bytes,
+        &client_auth_secret,
+        shared.raw_secret_bytes().as_ref(),
+        sender_public_key_raw,
+        &rand::random(),
+        payload,
+    )
+}
 
+fn encrypt_web_push_record(
+    client_public_key_bytes: &[u8],
+    client_auth_secret: &[u8],
+    shared_secret: &[u8],
+    sender_public_key_raw: &[u8],
+    salt: &[u8; 16],
+    payload: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    let prk = hkdf_extract(client_auth_secret, shared_secret)?;
     let mut info: Vec<u8> = Vec::with_capacity(
         "WebPush: info\0".as_bytes().len()
             + client_public_key_bytes.len()
@@ -1122,188 +1234,33 @@ fn encrypt_web_push_payload(
     info.extend_from_slice(sender_public_key_raw);
 
     let ikm = hkdf_expand(&prk, &info, 32)?;
-    let salt: [u8; 16] = rand::random();
-    let prk2 = hkdf_extract(&salt, &ikm)?;
+    let prk2 = hkdf_extract(salt, &ikm)?;
     let cek = hkdf_expand(&prk2, b"Content-Encoding: aes128gcm\0", 16)?;
     let nonce = hkdf_expand(&prk2, b"Content-Encoding: nonce\0", 12)?;
 
     let cipher = Aes128Gcm::new_from_slice(&cek)
         .map_err(|_| anyhow::anyhow!("failed to construct web push cipher"))?;
-    let nonce = Nonce::from_slice(&nonce);
+    let nonce: [u8; 12] = nonce
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid nonce length"))?;
+    let nonce = Nonce::from(nonce);
     let mut plaintext = Vec::with_capacity(payload.len() + 1);
     plaintext.extend_from_slice(payload);
     plaintext.push(0x02);
 
     let ciphertext = cipher
-        .encrypt(nonce, plaintext.as_ref())
+        .encrypt(&nonce, plaintext.as_ref())
         .map_err(|error| anyhow::anyhow!("failed to encrypt web push payload: {error}"))?;
 
-    Ok(EncryptedWebPushPayload {
-        salt: BASE64URL.encode(salt),
-        dh: BASE64URL.encode(sender_public_key_raw),
-        ciphertext,
-    })
-}
-
-async fn send_single_web_push(
-    state: &AppState,
-    signing_key: &SigningKey,
-    vapid_public_key: &str,
-    vapid_subject: &str,
-    endpoint: &str,
-    p256dh: &str,
-    auth: &str,
-    payload: &[u8],
-) -> anyhow::Result<StatusCode> {
-    let audience = derive_web_push_audience(endpoint)?;
-    let jwt = build_vapid_jwt(signing_key, &audience, vapid_subject)?;
-
-    let mut request = state
-        .http_client
-        .post(endpoint)
-        .header("TTL", "3600")
-        .header(
-            "Authorization",
-            format!("vapid t={jwt}, k={}", vapid_public_key.trim()),
-        );
-
-    match encrypt_web_push_payload(p256dh, auth, payload) {
-        Ok(encrypted) => {
-            request = request
-                .header("Content-Encoding", "aes128gcm")
-                .header("Content-Type", "application/octet-stream")
-                .header("Encryption", format!("salt={}", encrypted.salt))
-                .header(
-                    "Crypto-Key",
-                    format!("dh={}; p256ecdsa={}", encrypted.dh, vapid_public_key.trim()),
-                )
-                .body(encrypted.ciphertext);
-        }
-        Err(error) => {
-            tracing::debug!(
-                endpoint = %endpoint,
-                %error,
-                "unable to encrypt web push payload; sending without payload"
-            );
-            request = request
-                .header(
-                    "Crypto-Key",
-                    format!("p256ecdsa={}", vapid_public_key.trim()),
-                )
-                .body(Vec::new());
-        }
-    }
-
-    let response = request.send().await?;
-
-    Ok(StatusCode::from_u16(response.status().as_u16())?)
-}
-
-async fn send_native_push_notifications(
-    state: &AppState,
-    transaction: &tokio_postgres::Transaction<'_>,
-    recipients: &[Uuid],
-    message: &ConversationMessageRow,
-    payload: &PushNotificationPayload,
-) -> anyhow::Result<()> {
-    let Some(private_key_pem) = state.config.apns_private_key.as_deref() else {
-        return Ok(());
-    };
-    let Some(team_id) = state.config.apns_team_id.as_deref() else {
-        return Ok(());
-    };
-    let Some(key_id) = state.config.apns_key_id.as_deref() else {
-        return Ok(());
-    };
-    let Some(bundle_id) = state.config.apns_bundle_id.as_deref() else {
-        return Ok(());
-    };
-
-    let devices = load_native_push_tokens(transaction, recipients).await?;
-    if devices.is_empty() {
-        return Ok(());
-    }
-
-    let jwt = build_apns_jwt(private_key_pem, team_id, key_id)?;
-    let mut expired: Vec<Uuid> = Vec::new();
-
-    for device in devices {
-        let sandbox = if device.environment.eq_ignore_ascii_case("sandbox") {
-            true
-        } else {
-            state.config.apns_use_sandbox
-        };
-        match send_single_apns(
-            &state.http_client,
-            sandbox,
-            bundle_id,
-            &jwt,
-            &device.token,
-            message,
-            payload,
-        )
-        .await
-        {
-            Ok(status) => {
-                if status.as_u16() == 404 || status.as_u16() == 410 {
-                    expired.push(device.id);
-                }
-            }
-            Err(error) => {
-                tracing::debug!(
-                    token_id = %device.id,
-                    %error,
-                    "failed to deliver APNs notification"
-                );
-            }
-        }
-    }
-
-    if !expired.is_empty() {
-        transaction
-            .execute(
-                "delete from native_push_tokens where id = any($1)",
-                &[&expired],
-            )
-            .await?;
-    }
-
-    Ok(())
-}
-
-#[derive(Debug)]
-struct NativePushTokenRow {
-    id: Uuid,
-    token: String,
-    environment: String,
-}
-
-async fn load_native_push_tokens(
-    transaction: &tokio_postgres::Transaction<'_>,
-    recipients: &[Uuid],
-) -> anyhow::Result<Vec<NativePushTokenRow>> {
-    if recipients.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let rows = transaction
-        .query(
-            "select id, token, environment
-             from native_push_tokens
-             where user_id = any($1)
-               and platform = 'ios'",
-            &[&recipients],
-        )
-        .await?;
-
-    Ok(rows
-        .into_iter()
-        .map(|row| NativePushTokenRow {
-            id: row.get("id"),
-            token: row.get("token"),
-            environment: row.get("environment"),
-        })
-        .collect())
+    // RFC 8188 section 2.1: aes128gcm uses a binary body header, not the legacy
+    // Encryption/Crypto-Key HTTP headers. One record, with the final 0x02 delimiter.
+    let mut encoded = Vec::with_capacity(86 + ciphertext.len());
+    encoded.extend_from_slice(salt);
+    encoded.extend_from_slice(&4096u32.to_be_bytes());
+    encoded.push(65);
+    encoded.extend_from_slice(sender_public_key_raw);
+    encoded.extend_from_slice(&ciphertext);
+    Ok(encoded)
 }
 
 #[derive(Debug, Serialize)]
@@ -1325,48 +1282,6 @@ fn build_apns_jwt(private_key_pem: &str, team_id: &str, key_id: &str) -> anyhow:
     };
     encode(&header, &claims, &key)
         .map_err(|error| anyhow::anyhow!("failed to sign APNs token: {error}"))
-}
-
-async fn send_single_apns(
-    client: &reqwest::Client,
-    sandbox: bool,
-    bundle_id: &str,
-    jwt: &str,
-    device_token: &str,
-    message: &ConversationMessageRow,
-    payload: &PushNotificationPayload,
-) -> anyhow::Result<StatusCode> {
-    let host = if sandbox {
-        "api.sandbox.push.apple.com"
-    } else {
-        "api.push.apple.com"
-    };
-    let url = format!("https://{host}/3/device/{}", device_token.trim());
-    let apns_payload = json!({
-        "aps": {
-            "alert": {
-                "title": payload.title.as_str(),
-                "body": payload.body.as_str(),
-            }
-        },
-        "url": payload.url.as_str(),
-        "projectId": message.project_id,
-        "conversationId": message.conversation_id,
-        "messageId": message.id,
-        "role": message.role.as_str(),
-    });
-
-    let response = client
-        .post(url)
-        .header("authorization", format!("bearer {jwt}"))
-        .header("apns-topic", bundle_id.trim())
-        .header("apns-push-type", "alert")
-        .header("apns-priority", "10")
-        .json(&apns_payload)
-        .send()
-        .await?;
-
-    Ok(StatusCode::from_u16(response.status().as_u16())?)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1391,6 +1306,41 @@ struct WebPushSubscriptionResponse {
     subscription_id: String,
 }
 
+// Serialize each account's registration updates so concurrent clients cannot
+// exceed the cap. The lock and count live only in the short database transaction,
+// after endpoint DNS/key validation and before registration commit.
+async fn check_registration_capacity(
+    transaction: &tokio_postgres::Transaction<'_>,
+    user_id: Uuid,
+    channel: &str,
+    endpoint: &str,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let lock_key = format!("notification-endpoints:{user_id}");
+    transaction
+        .execute(
+            "select pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&lock_key],
+        )
+        .await
+        .map_err(|_| internal_error("Unable to register notification device"))?;
+    let query = match channel {
+        "web_push" => "select count(*) < 32 or coalesce(bool_or(endpoint = $2), false) from web_push_subscriptions where user_id = $1",
+        "apns" => "select count(*) < 32 or coalesce(bool_or(token = $2), false) from native_push_tokens where user_id = $1 and platform = 'ios'",
+        _ => return Err(bad_request("Unsupported notification channel")),
+    };
+    let allowed: bool = transaction
+        .query_one(query, &[&user_id, &endpoint])
+        .await
+        .map_err(|_| internal_error("Unable to register notification device"))?
+        .get(0);
+    if !allowed {
+        return Err(bad_request(
+            "At most 32 notification devices can be registered per channel",
+        ));
+    }
+    Ok(())
+}
+
 async fn upsert_my_web_push_subscription(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1400,32 +1350,41 @@ async fn upsert_my_web_push_subscription(
     let user_id = require_user_session(&context)?;
 
     let endpoint = body.endpoint.trim().to_string();
-    if endpoint.is_empty() {
-        return Err(bad_request("endpoint is required"));
-    }
+    let endpoint_url = parse_web_push_endpoint(&endpoint)
+        .map_err(|_| bad_request("endpoint must be a public HTTPS URL on port 443"))?;
+    let endpoint = endpoint_url.as_str().to_owned();
     let p256dh = body.keys.p256dh.trim().to_string();
-    if p256dh.is_empty() {
-        return Err(bad_request("keys.p256dh is required"));
-    }
     let auth = body.keys.auth.trim().to_string();
-    if auth.is_empty() {
-        return Err(bad_request("keys.auth is required"));
-    }
+    validate_web_push_keys(&p256dh, &auth)
+        .map_err(|_| bad_request("invalid Web Push subscription keys"))?;
 
     let user_agent = body.user_agent.as_deref().unwrap_or("").trim().to_string();
+    if user_agent.len() > 512 || user_agent.chars().any(char::is_control) {
+        return Err(bad_request(
+            "userAgent must be at most 512 bytes without control characters",
+        ));
+    }
+    resolve_push_endpoint(&endpoint_url)
+        .await
+        .map_err(|_| bad_request("endpoint must resolve only to public addresses"))?;
     let user_agent = if user_agent.is_empty() {
         None
     } else {
         Some(user_agent)
     };
 
-    let connection = state
+    let mut connection = state
         .pool
         .get()
         .await
         .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
 
-    let row = connection
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|_| internal_error("Unable to register notification device"))?;
+    check_registration_capacity(&transaction, user_id, "web_push", &endpoint).await?;
+    let row = transaction
         .query_one(
             "insert into web_push_subscriptions (user_id, endpoint, p256dh, auth, user_agent)
              values ($1, $2, $3, $4, $5)
@@ -1443,6 +1402,11 @@ async fn upsert_my_web_push_subscription(
             internal_error(format!("failed to upsert web push subscription: {error}"))
         })?;
     let subscription_id: Uuid = row.get("id");
+
+    transaction
+        .commit()
+        .await
+        .map_err(|_| internal_error("Unable to register notification device"))?;
 
     Ok(Json(WebPushSubscriptionResponse {
         ok: true,
@@ -1470,8 +1434,8 @@ async fn remove_my_web_push_subscription(
     let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
     let endpoint = body.endpoint.trim().to_string();
-    if endpoint.is_empty() {
-        return Err(bad_request("endpoint is required"));
+    if endpoint.is_empty() || endpoint.len() > MAX_PUSH_ENDPOINT_BYTES {
+        return Err(bad_request("endpoint must be between 1 and 2048 bytes"));
     }
 
     let connection = state
@@ -1510,17 +1474,31 @@ struct NativePushTokenResponse {
     token_id: String,
 }
 
-fn normalize_native_platform(value: Option<&str>) -> String {
-    match value.unwrap_or("").trim().to_lowercase().as_str() {
-        "android" => "android".to_string(),
-        _ => "ios".to_string(),
+fn normalize_native_platform(value: Option<&str>) -> Result<&'static str, &'static str> {
+    match value.unwrap_or("ios").trim().to_ascii_lowercase().as_str() {
+        "ios" => Ok("ios"),
+        "android" => Ok("android"),
+        _ => Err("platform must be ios or android"),
     }
 }
 
-fn normalize_native_environment(value: Option<&str>) -> String {
-    match value.unwrap_or("").trim().to_lowercase().as_str() {
-        "sandbox" => "sandbox".to_string(),
-        _ => "production".to_string(),
+fn normalize_native_environment(
+    value: Option<&str>,
+    default_sandbox: bool,
+) -> Result<&'static str, &'static str> {
+    match value
+        .unwrap_or(if default_sandbox {
+            "sandbox"
+        } else {
+            "production"
+        })
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "sandbox" => Ok("sandbox"),
+        "production" => Ok("production"),
+        _ => Err("environment must be sandbox or production"),
     }
 }
 
@@ -1533,19 +1511,29 @@ async fn upsert_my_native_push_token(
     let user_id = require_user_session(&context)?;
 
     let token = body.token.trim().to_string();
-    if token.is_empty() {
-        return Err(bad_request("token is required"));
+    let platform = normalize_native_platform(body.platform.as_deref()).map_err(bad_request)?;
+    if platform == "android" {
+        return Err(bad_request(
+            "Android push registration is disabled because delivery is not yet supported",
+        ));
     }
-    let platform = normalize_native_platform(body.platform.as_deref());
-    let environment = normalize_native_environment(body.environment.as_deref());
+    validate_native_token(&token, platform).map_err(bad_request)?;
+    let environment =
+        normalize_native_environment(body.environment.as_deref(), state.config.apns_use_sandbox)
+            .map_err(bad_request)?;
 
-    let connection = state
+    let mut connection = state
         .pool
         .get()
         .await
         .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
 
-    let row = connection
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|_| internal_error("Unable to register notification device"))?;
+    check_registration_capacity(&transaction, user_id, "apns", &token).await?;
+    let row = transaction
         .query_one(
             "insert into native_push_tokens (user_id, platform, environment, token)
              values ($1, $2, $3, $4)
@@ -1559,6 +1547,11 @@ async fn upsert_my_native_push_token(
         .await
         .map_err(|error| internal_error(format!("failed to upsert native push token: {error}")))?;
     let token_id: Uuid = row.get("id");
+
+    transaction
+        .commit()
+        .await
+        .map_err(|_| internal_error("Unable to register notification device"))?;
 
     Ok(Json(NativePushTokenResponse {
         ok: true,
@@ -1582,10 +1575,8 @@ async fn remove_my_native_push_token(
     let context = authenticate_request(&state.config, &headers).await?;
     let user_id = require_user_session(&context)?;
     let token = body.token.trim().to_string();
-    if token.is_empty() {
-        return Err(bad_request("token is required"));
-    }
-    let platform = normalize_native_platform(body.platform.as_deref());
+    let platform = normalize_native_platform(body.platform.as_deref()).map_err(bad_request)?;
+    validate_native_token(&token, platform).map_err(bad_request)?;
 
     let connection = state
         .pool
@@ -1603,3 +1594,7 @@ async fn remove_my_native_push_token(
 
     Ok(Json(RemoveWebPushSubscriptionResponse { ok: true }))
 }
+
+#[cfg(test)]
+#[path = "notification_transport_tests.rs"]
+mod notification_transport_tests;

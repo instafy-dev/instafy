@@ -247,6 +247,38 @@ describe("useConversationSubmitFlow group participation", () => {
     expect(sendPromptToControllerMock).not.toHaveBeenCalled();
   });
 
+  it.each([false, true])("forwards structured human mentions through %s assistant-enabled submissions", async (assistantEnabled) => {
+    resolveParticipationMock.mockResolvedValue("unsupported");
+    conversation.assistantEnabled = assistantEnabled;
+    conversation.extraAgentHandles = [];
+    const mentionedUserId = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+    const editorState = JSON.stringify({ root: { children: [{
+      type: "user-mention", userId: mentionedUserId, handle: "teammate", displayName: "Teammate",
+    }] } });
+    await act(async () => {
+      await flow!.handleSubmit("conversation-local", "@teammate please check this", {
+        editorState,
+        metadata: { mentionedUserIds: [USER_ID], preserved: true },
+      });
+    });
+    expect(appendMessages.mock.calls[0][1][0].metadata).toMatchObject({ mentionedUserIds: [mentionedUserId], preserved: true });
+    const write = assistantEnabled ? sendPromptToControllerMock : recordMessageToControllerMock;
+    expect(write).toHaveBeenCalled();
+    expect(write.mock.calls[0][2]).toMatchObject({ mentionedUserIds: [mentionedUserId], preserved: true });
+  });
+
+  it("rejects too many human mentions before appending or dispatching a message", async () => {
+    const editorState = JSON.stringify({ root: { children: Array.from({ length: 33 }, (_, i) => ({
+      type: "user-mention", userId: `${i.toString(16).padStart(8, "0")}-bbbb-4ccc-8ddd-eeeeeeeeeeee`, handle: `person${i}`,
+    })) } });
+    await act(async () => {
+      await flow!.handleSubmit("conversation-local", "Please check this", { editorState });
+    });
+    expect(appendMessages).not.toHaveBeenCalled();
+    expect(recordMessageToControllerMock).not.toHaveBeenCalled();
+    expect(sendPromptToControllerMock).not.toHaveBeenCalled();
+  });
+
   it("resolves ambient participation for the outer chat preflight", async () => {
     resolveParticipationMock.mockResolvedValue({
       decision: "silent",

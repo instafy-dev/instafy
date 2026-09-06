@@ -74,6 +74,8 @@ describe("project and organization request contexts", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   it("uses one immutable context while implicitly creating an organization and project", async () => {
@@ -204,6 +206,49 @@ describe("project and organization request contexts", () => {
       [forbiddenResponse, "get project failed", defaultRequestContext],
       [unauthorizedResponse, "get project failed", defaultRequestContext],
     ]);
+  });
+
+  it("aborts a stalled project lookup as unavailable without reporting revoked access", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    let requestSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn((_url: string, options: RequestInit) => {
+      requestSignal = options.signal as AbortSignal;
+      return new Promise<Response>((_resolve, reject) => {
+        requestSignal?.addEventListener("abort", () => reject(requestSignal?.reason), { once: true });
+      });
+    }));
+
+    const result = getControllerProjectSummaryResult("project-1");
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(requestSignal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(result).resolves.toEqual({
+      summary: null,
+      notFound: false,
+      forbidden: false,
+      unauthorized: false,
+    });
+    expect(requestSignal?.aborted).toBe(true);
+    expect(readControllerErrorMock).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("clears the deadline after a successful project lookup", async () => {
+    vi.useFakeTimers();
+    let requestSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, options: RequestInit) => {
+      requestSignal = options.signal as AbortSignal;
+      return new Response(JSON.stringify({ projectId: "project-1", effectiveRole: "viewer" }));
+    }));
+
+    await expect(getControllerProjectSummaryResult("project-1")).resolves.toMatchObject({
+      summary: { projectId: "project-1", effectiveRole: "viewer" },
+    });
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(requestSignal?.aborted).toBe(false);
   });
 });
 

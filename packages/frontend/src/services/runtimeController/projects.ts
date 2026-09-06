@@ -115,6 +115,7 @@ export interface ImportGithubProjectResult {
 const GITHUB_IMPORT_TIMEOUT_MS = 15 * 60 * 1000;
 const GITHUB_IMPORT_WORKSPACE_BUSY_RETRY_DELAYS_MS = [250, 500, 1_000, 2_000, 4_000, 8_000] as const;
 const ORG_INVITATION_TIMEOUT_MS = 12 * 1000;
+const PROJECT_SUMMARY_TIMEOUT_MS = 10_000;
 
 function isRetryableGithubImportWorkspaceBusy(error: {
   status: number;
@@ -632,6 +633,8 @@ export async function getControllerProjectSummaryResult(
   if (!accessToken) {
     return { summary: null, notFound: false, forbidden: false, unauthorized: false };
   }
+  const abortController = new AbortController();
+  const timeoutHandle = setTimeout(() => abortController.abort(), PROJECT_SUMMARY_TIMEOUT_MS);
   try {
     const response = await fetch(
       `${requestContext.baseUrl}/projects/${encodeURIComponent(normalizedProjectId)}`,
@@ -639,6 +642,7 @@ export async function getControllerProjectSummaryResult(
         headers: {
           authorization: `Bearer ${accessToken}`,
         },
+        signal: abortController.signal,
       },
     );
     if (response.status === 404) {
@@ -683,6 +687,8 @@ export async function getControllerProjectSummaryResult(
     const message = error instanceof Error ? error.message : String(error);
     console.warn("[runtime-controller] getControllerProjectSummary error:", message);
     return { summary: null, notFound: false, forbidden: false, unauthorized: false };
+  } finally {
+    clearTimeout(timeoutHandle);
   }
 }
 
