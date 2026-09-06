@@ -58,6 +58,14 @@ Run Instafy spaces locally and connect them back to Instafy Studio — from any 
   signed-in user.
 - `instafy support list` — list only your own support reports.
 - `instafy support show <reportId>` — inspect one of your own support reports.
+- `instafy support messages <reportId>` — read the customer-visible case timeline.
+- `instafy support reply <reportId> "More details"` — add a follow-up as the reporter.
+
+`support report` and `support reply` print their request UUID to stderr before sending. Reuse that
+value with `--client-request-id` only when retrying the exact same payload after an uncertain
+network result; using the same UUID for different content is rejected.
+Support list/message JSON includes `hasMore` and a stable `nextCursor`; pass its paired activity or
+message cursor flags to read the next page without skipping reports that share a cursor timestamp.
 - `instafy diagnostics runtime-events` — emit sanitized runtime events for the linked space as
   versioned JSON.
 - `instafy diagnostics run-result <runId>` — emit one authorized persisted run result as
@@ -96,7 +104,9 @@ explicit user access token), and the controller limits list/show operations to r
 that user. Reports use the currently linked space by default; pass `--no-linked-space` to omit that
 context. Diagnostics are opt-in: details, metadata, logs, and screenshots are uploaded only when
 their corresponding flags are supplied, and file inputs must stay within the active workspace.
-Use `--preview` to inspect the upload summary without sending a report.
+The signed-in account identity, including its email snapshot, is attached for report ownership and
+support contact; it is not part of the optional diagnostic payload. Use `--preview` to inspect the
+upload summary without sending a report.
 Ordinary users receive a minimized owner-only report view; full triage fields and attachment bytes
 require operator/service authorization.
 

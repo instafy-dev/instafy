@@ -1,3 +1,4 @@
+import { listProductNotifications, updateProductNotificationState, readAllProductNotifications, getProductNotificationPreferences, saveProductNotificationPreferences } from "../../services/runtimeController/productNotifications";
 import { createControllerClient } from "@instafy/sdk/controller-client";
 import {
   acknowledgeMyNotificationInboxItem,
@@ -20,6 +21,8 @@ import {
   createProjectAutomationInController,
   createProjectSecret,
   createBlankControllerConversation,
+  createControllerBugReportMessageRequestId,
+  createControllerBugReportRequestId,
   createCodexCredential,
   createControllerOrgInvitation,
   createControllerOrgInvitationStrict,
@@ -129,8 +132,14 @@ import {
   deriveGithubImportTargetPath,
   acceptControllerOrgInvitation,
   previewControllerOrgInvitation,
+  acknowledgeControllerBugReportActivity,
+  claimControllerSupportResolutionAlerts,
   getControllerBugReport,
+  listControllerBugReportMessagePage,
+  listControllerBugReportMessages,
+  listControllerBugReportPage,
   listControllerBugReports,
+  postControllerBugReportMessage,
   submitControllerBugReport,
   clearSharedBrowserData,
 } from "../../services/runtimeController";
@@ -313,6 +322,11 @@ export const controllerClient = createControllerClient({
     markSeen: markMyActivitySeen,
   }),
   notifications: Object.freeze({
+    list: listProductNotifications,
+    updateState: updateProductNotificationState,
+    readAll: readAllProductNotifications,
+    getPreferences: getProductNotificationPreferences,
+    savePreferences: saveProductNotificationPreferences,
     getWebPushVapidPublicKey,
     upsertWebPushSubscription: upsertMyWebPushSubscription,
     removeWebPushSubscription: removeMyWebPushSubscription,
@@ -366,7 +380,15 @@ export const controllerClient = createControllerClient({
   }),
   bugReports: Object.freeze({
     submit: submitControllerBugReport,
+    acknowledgeActivity: acknowledgeControllerBugReportActivity,
+    claimResolutionAlerts: claimControllerSupportResolutionAlerts,
     list: listControllerBugReports,
     get: getControllerBugReport,
+    listPage: listControllerBugReportPage,
+    listMessages: listControllerBugReportMessages,
+    listMessagePage: listControllerBugReportMessagePage,
+    postMessage: postControllerBugReportMessage,
+    createRequestId: createControllerBugReportRequestId,
+    createMessageRequestId: createControllerBugReportMessageRequestId,
   }),
 });

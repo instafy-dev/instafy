@@ -15,34 +15,52 @@ import {
   type OpenBugReportDetail,
 } from "./bugReportEvents";
 import { requestMotionAccessIfNeeded } from "./motionPermission";
+import { controllerClient } from "../../../sdk/instafy";
 import { getStoredShakeReportEnabled, setStoredShakeReportEnabled } from "./shakeReportPreference";
 import { NATIVE_SHAKE_REPORT_EVENT, useShakeToReport } from "./useShakeToReport";
 
 const SHAKE_SCREENSHOT_TIMEOUT_MS = 3_000;
 
 interface UseStudioBugReportControllerOptions {
+  currentUserId: string | null;
   activeProjectId: string | null;
   activeConversationId: string | null;
   activeConversationLocalId: string | null;
   activeRuntimeId: string | null;
-  userEmail: string | null;
   controllerProjectMissing: boolean;
   buildLogs: BuildLogEntry[];
+  legacyResolutionToasts?: boolean;
 }
 
 export function useStudioBugReportController({
+  currentUserId,
   activeProjectId,
   activeConversationId,
   activeConversationLocalId,
   activeRuntimeId,
-  userEmail,
   controllerProjectMissing,
   buildLogs,
+  legacyResolutionToasts = true,
 }: UseStudioBugReportControllerOptions) {
-  const { showStatus } = useStatus();
+  const { hideStatus, showStatus } = useStatus();
   const { logs: appLogs } = useAppLogs();
-  const [bugReportOpen, setBugReportOpen] = useState(false);
-  const [bugReportInboxOpen, setBugReportInboxOpen] = useState(false);
+  const [bugReportOpenForUserId, setBugReportOpenForUserId] = useState<string | null>(null);
+  const [bugReportInboxOpenForUserId, setBugReportInboxOpenForUserId] = useState<string | null>(
+    null,
+  );
+  const [bugReportInboxTarget, setBugReportInboxTarget] = useState<{
+    userId: string;
+    reportId: string;
+    requestKey: number;
+  } | null>(null);
+  const bugReportInboxTargetKeyRef = useRef(0);
+  const [supportUnreadSnapshot, setSupportUnreadSnapshot] = useState<{
+    userId: string | null;
+    count: number;
+  }>({ userId: null, count: 0 });
+  const supportPollGenerationRef = useRef(0);
+  const currentUserIdRef = useRef(currentUserId);
+  const resolutionToastUsersRef = useRef(new Map<string, string>());
   const [bugReportSeed, setBugReportSeed] = useState<OpenBugReportDetail | null>(null);
   const [bugReportSessionKey, setBugReportSessionKey] = useState(0);
   const [bugReportInitialScreenshots, setBugReportInitialScreenshots] = useState<
@@ -61,7 +79,122 @@ export function useStudioBugReportController({
     return () => {
       reportRequestRef.current += 1;
     };
+  }, [currentUserId]);
+
+  currentUserIdRef.current = currentUserId;
+  const bugReportOpen = currentUserId !== null && bugReportOpenForUserId === currentUserId;
+  const bugReportInboxOpen =
+    currentUserId !== null && bugReportInboxOpenForUserId === currentUserId;
+  const supportUnreadCount =
+    supportUnreadSnapshot.userId === currentUserId ? supportUnreadSnapshot.count : 0;
+
+  const handleOpenBugReportInbox = useCallback((reportId: string | null = null) => {
+    const userId = currentUserIdRef.current;
+    if (!userId) return;
+    setBugReportInboxTarget(
+      reportId
+        ? { userId, reportId, requestKey: ++bugReportInboxTargetKeyRef.current }
+        : null,
+    );
+    setBugReportInboxOpenForUserId(userId);
   }, []);
+  const isUserSessionCurrent = useCallback(
+    (expectedUserId: string) => currentUserIdRef.current === expectedUserId,
+    [],
+  );
+
+  const refreshSupportNotifications = useCallback(
+    async (notifyAboutResolution = true) => {
+      const requestUserId = currentUserId;
+      if (!requestUserId) {
+        setSupportUnreadSnapshot({ userId: null, count: 0 });
+        return;
+      }
+      const generation = ++supportPollGenerationRef.current;
+      try {
+        const page = await controllerClient.bugReports.listPage(100, null, requestUserId);
+        if (
+          generation !== supportPollGenerationRef.current ||
+          currentUserIdRef.current !== requestUserId
+        ) {
+          return;
+        }
+        setSupportUnreadSnapshot({ userId: requestUserId, count: page.unreadCount });
+        if (!legacyResolutionToasts || !notifyAboutResolution || page.unnotifiedResolutionCount <= 0) return;
+        const claim = await controllerClient.bugReports.claimResolutionAlerts(requestUserId);
+        if (currentUserIdRef.current !== requestUserId || claim.claimedCount <= 0) return;
+        const toastId = `support-resolution:${claim.latestReportId ?? "reports"}:${
+          claim.latestResolvedAt ?? "latest"
+        }`;
+        resolutionToastUsersRef.current.set(toastId, requestUserId);
+        showStatus(
+          claim.claimedCount === 1
+            ? "Your Instafy support report was resolved."
+            : `${claim.claimedCount} of your Instafy support reports were resolved.`,
+          "success",
+          12_000,
+          {
+            id: toastId,
+            actionLabel: claim.claimedCount === 1 ? "View report" : "View reports",
+            nonPreemptive: true,
+            onClose: () => {
+              if (resolutionToastUsersRef.current.get(toastId) === requestUserId) {
+                resolutionToastUsersRef.current.delete(toastId);
+              }
+            },
+            onAction: () => {
+              if (currentUserIdRef.current === requestUserId) {
+                handleOpenBugReportInbox(claim.latestReportId);
+              }
+            },
+          },
+        );
+      } catch {
+        // The support hub remains manually available. Background polling should
+        // never turn a transient controller or connectivity failure into noise.
+      }
+    },
+    [currentUserId, handleOpenBugReportInbox, legacyResolutionToasts, showStatus],
+  );
+
+  const handleSupportActivityAcknowledged = useCallback(() => {
+    void refreshSupportNotifications(false);
+  }, [refreshSupportNotifications]);
+
+  useEffect(() => {
+    supportPollGenerationRef.current += 1;
+    if (!currentUserId) {
+      setSupportUnreadSnapshot({ userId: null, count: 0 });
+      return;
+    }
+    const refreshWhenVisible = () => {
+      if (typeof document === "undefined" || document.visibilityState !== "hidden") {
+        void refreshSupportNotifications(true);
+      }
+    };
+    refreshWhenVisible();
+    const intervalId = window.setInterval(refreshWhenVisible, 20_000);
+    window.addEventListener("focus", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+      supportPollGenerationRef.current += 1;
+    };
+  }, [currentUserId, refreshSupportNotifications]);
+
+  useEffect(() => {
+    const resolutionToastUsers = resolutionToastUsersRef.current;
+    return () => {
+      for (const [toastId, toastUserId] of resolutionToastUsers) {
+        if (toastUserId === currentUserId) {
+          hideStatus(toastId);
+          resolutionToastUsers.delete(toastId);
+        }
+      }
+    };
+  }, [currentUserId, hideStatus]);
 
   const waitForAnimationFrames = useCallback(async (count = 2) => {
     if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
@@ -79,6 +212,8 @@ export function useStudioBugReportController({
       logAppInfo("Ignored shake issue report because the issue dialog is already open.");
       return;
     }
+    const requestUserId = currentUserIdRef.current;
+    if (!requestUserId) return;
     logAppInfo("Opening issue report from shake gesture.");
     const requestId = ++reportRequestRef.current;
     setBugReportSeed(null);
@@ -92,7 +227,8 @@ export function useStudioBugReportController({
       const screenshot = await Promise.race([
         (async () => {
           await waitForAnimationFrames(2);
-          if (captureExpired || requestId !== reportRequestRef.current) return null;
+          if (captureExpired || requestId !== reportRequestRef.current ||
+            currentUserIdRef.current !== requestUserId) return null;
           return captureCurrentScreenBugReportDraft();
         })(),
         new Promise<never>((_resolve, reject) => {
@@ -104,11 +240,12 @@ export function useStudioBugReportController({
           }, SHAKE_SCREENSHOT_TIMEOUT_MS);
         }),
       ]);
-      if (!screenshot || requestId !== reportRequestRef.current) return;
+      if (!screenshot || requestId !== reportRequestRef.current ||
+        currentUserIdRef.current !== requestUserId) return;
       setBugReportInitialScreenshots([screenshot]);
       logAppInfo("Captured current screen for shake issue report.");
     } catch (error) {
-      if (requestId !== reportRequestRef.current) return;
+      if (requestId !== reportRequestRef.current || currentUserIdRef.current !== requestUserId) return;
       setBugReportInitialScreenshots([]);
       const nextMessage =
         error instanceof Error
@@ -119,17 +256,19 @@ export function useStudioBugReportController({
     } finally {
       clearTimeout(captureTimeout);
     }
-    if (requestId !== reportRequestRef.current) return;
-    setBugReportOpen(true);
+    if (requestId !== reportRequestRef.current || currentUserIdRef.current !== requestUserId) return;
+    setBugReportOpenForUserId(requestUserId);
     logAppInfo("Issue report dialog opened from shake gesture.");
   }, [bugReportOpen, showStatus, waitForAnimationFrames]);
 
   const handleOpenManualBugReport = useCallback(async (detail?: OpenBugReportDetail | null) => {
+    const requestUserId = currentUserIdRef.current;
+    if (!requestUserId) return;
     reportRequestRef.current += 1;
     setBugReportSeed(detail ?? null);
     setBugReportInitialScreenshots([]);
     setBugReportSessionKey((current) => current + 1);
-    setBugReportOpen(true);
+    setBugReportOpenForUserId(requestUserId);
   }, []);
 
   const handleToggleShakeReport = useCallback(
@@ -303,10 +442,12 @@ export function useStudioBugReportController({
   const dialogs = (
     <>
       <BugReportDialog
-        key={bugReportSessionKey}
+        key={`${currentUserId ?? "signed-out"}:${bugReportSessionKey}`}
         isOpen={bugReportOpen}
+        currentUserId={currentUserId ?? ""}
+        isUserSessionCurrent={isUserSessionCurrent}
         onOpenChange={(open) => {
-          setBugReportOpen(open);
+          setBugReportOpenForUserId(open ? currentUserId : null);
           if (!open) {
             reportRequestRef.current += 1;
             setBugReportSeed(null);
@@ -320,12 +461,25 @@ export function useStudioBugReportController({
         activeConversationId={activeConversationId}
         activeConversationLocalId={activeConversationLocalId}
         activeRuntimeId={activeRuntimeId}
-        userEmail={userEmail}
         controllerProjectMissing={controllerProjectMissing}
         appLogs={appLogs}
         buildLogs={buildLogs}
       />
-      <BugReportInboxDialog isOpen={bugReportInboxOpen} onOpenChange={setBugReportInboxOpen} />
+      <BugReportInboxDialog
+        key={`support-inbox:${currentUserId ?? "signed-out"}`}
+        isOpen={bugReportInboxOpen}
+        currentUserId={currentUserId ?? ""}
+        isUserSessionCurrent={isUserSessionCurrent}
+        initialReportRequest={
+          bugReportInboxTarget?.userId === currentUserId ? bugReportInboxTarget : null
+        }
+        onOpenChange={(open) => {
+          setBugReportInboxOpenForUserId(open ? currentUserId : null);
+          if (!open) setBugReportInboxTarget(null);
+        }}
+        onSupportActivityAcknowledged={handleSupportActivityAcknowledged}
+        onReportIssue={() => void handleOpenManualBugReport()}
+      />
     </>
   );
 
@@ -338,6 +492,7 @@ export function useStudioBugReportController({
     shakeToReportStatus,
     shakeToReportDetail,
     onOpenBugReport: () => void handleOpenManualBugReport(),
-    onOpenBugReportInbox: () => setBugReportInboxOpen(true),
+    onOpenBugReportInbox: handleOpenBugReportInbox,
+    supportUnreadCount,
   };
 }

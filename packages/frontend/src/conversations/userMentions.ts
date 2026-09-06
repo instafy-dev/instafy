@@ -1,3 +1,28 @@
+import { isUUID } from "../utils/uuid";
+
+export const MAX_MENTIONED_USERS = 32;
+
+/** Only picker-backed editor nodes identify people; plain @text never does. */
+export function withUserMentionMetadata(
+  metadata: Record<string, unknown> | null | undefined,
+  editorState: string | null | undefined,
+): Record<string, unknown> {
+  const mentionedUserIds = [...new Set(
+    extractUserMentionTokensFromEditorState(editorState ?? null)
+      .map((token) => token.userId.toLowerCase())
+      .filter(isUUID),
+  )];
+  if (mentionedUserIds.length > MAX_MENTIONED_USERS) {
+    throw new Error(`Mention up to ${MAX_MENTIONED_USERS} people in one message.`);
+  }
+  const result = { ...metadata };
+  // Recompute this field for the submitted editor state, including when the
+  // private-chat invite prompt removed a structured mention.
+  delete result.mentionedUserIds;
+  if (mentionedUserIds.length > 0) result.mentionedUserIds = mentionedUserIds;
+  return result;
+}
+
 export type UserMentionToken = {
   userId: string;
   handle: string;
@@ -138,4 +163,3 @@ export function replaceUserMentionsWithPlainText(
     return { editorState, text };
   }
 }
-

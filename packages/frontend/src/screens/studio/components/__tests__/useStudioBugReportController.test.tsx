@@ -8,12 +8,19 @@ import type { BugReportScreenshotDraft } from "../bugReportDrafts";
 const mocks = vi.hoisted(() => ({
   capture: vi.fn(),
   showStatus: vi.fn(),
+  hideStatus: vi.fn(),
+  listPage: vi.fn(),
 }));
 
 vi.mock("@capacitor/core", () => ({ Capacitor: { isNativePlatform: () => true } }));
 vi.mock("../../../../debug/appLogs", () => ({ logAppInfo: vi.fn(), logAppWarn: vi.fn() }));
 vi.mock("../../../../debug/useAppLogs", () => ({ useAppLogs: () => ({ logs: [] }) }));
-vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus: mocks.showStatus }) }));
+vi.mock("../../../../status/useStatus", () => ({
+  useStatus: () => ({ showStatus: mocks.showStatus, hideStatus: mocks.hideStatus }),
+}));
+vi.mock("../../../../sdk/instafy", () => ({
+  controllerClient: { bugReports: { listPage: mocks.listPage } },
+}));
 vi.mock("../bugReportCapture", () => ({ captureCurrentScreenBugReportDraft: mocks.capture }));
 vi.mock("../BugReportInboxDialog", () => ({ BugReportInboxDialog: () => null }));
 vi.mock("../BugReportDialog", () => ({
@@ -35,13 +42,13 @@ import { dispatchOpenBugReport } from "../bugReportEvents";
 import { NATIVE_SHAKE_REPORT_EVENT } from "../useShakeToReport";
 import { useStudioBugReportController } from "../useStudioBugReportController";
 
-function Harness() {
+function Harness({ currentUserId = "00000000-0000-0000-0000-000000000001" }: { currentUserId?: string }) {
   return useStudioBugReportController({
+    currentUserId,
     activeProjectId: null,
     activeConversationId: null,
     activeConversationLocalId: null,
     activeRuntimeId: null,
-    userEmail: null,
     controllerProjectMissing: false,
     buildLogs: [],
   }).dialogs;
@@ -71,6 +78,7 @@ describe("shake issue report opening", () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     vi.clearAllMocks();
     mocks.capture.mockReset();
+    mocks.listPage.mockResolvedValue({ unreadCount: 0, unnotifiedResolutionCount: 0 });
     window.localStorage.clear();
     window.localStorage.setItem("instafy.shakeReportEnabled", "1");
     mocks.capture.mockResolvedValue(screenshot);
@@ -179,5 +187,21 @@ describe("shake issue report opening", () => {
     expect(mocks.capture).not.toHaveBeenCalled();
     expect(container.querySelector('[role="dialog"]')).toBeNull();
     expect(window.localStorage.getItem("instafy.shakeReportEnabled")).toBe("0");
+  });
+
+  it("drops a pending screenshot when the signed-in account changes", async () => {
+    const pending = deferredCapture();
+    mocks.capture.mockReturnValueOnce(pending.promise);
+    await mount();
+    await shake();
+    await advance(100);
+    expect(mocks.capture).toHaveBeenCalledTimes(1);
+    await act(async () => root.render(<Harness currentUserId="00000000-0000-0000-0000-000000000002" />));
+    await act(async () => pending.resolve(screenshot));
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    await act(async () => dispatchOpenBugReport({ message: "New account report" }));
+    expect(container.textContent).toContain("New account report");
+    expect(container.querySelector('[data-testid="screenshot-count"]')?.textContent).toBe("0");
+    expect(mocks.showStatus).not.toHaveBeenCalled();
   });
 });
