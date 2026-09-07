@@ -1,6 +1,8 @@
 // Stable, trusted build-time integration surface for frontend feature modules.
 // Keep this entrypoint composition-safe: application-bound runtime/UI modules
 // belong in the sibling runtime, UI, voice, or controller entrypoints.
+export { subscribeStudioPerformance } from "../telemetry/studioPerformance";
+export type { StudioPerformanceSample, StudioPerformanceOperation, StudioPerformanceOutcome } from "../telemetry/studioPerformance";
 export {
   createLazyFrontendRouteElement,
 } from "../features/frontendFeatureModule";
