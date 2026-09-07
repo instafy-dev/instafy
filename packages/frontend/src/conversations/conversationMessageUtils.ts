@@ -652,54 +652,94 @@ export function mapControllerMessageToChat(message: ControllerConversationMessag
   };
 }
 
+type MessageMergeKeys = { id: string; clientId: string | null; content: string };
+type MessageMergeEntry = { message: ChatMessage; keys: MessageMergeKeys };
+
+function messageMergeKeys(message: ChatMessage): MessageMergeKeys {
+  const clientId = resolveClientMessageIdFromMetadata(message.metadata ?? null);
+  return {
+    id: message.id,
+    clientId: clientId ? JSON.stringify([message.role, clientId]) : null,
+    content: JSON.stringify([message.role, message.content.trim(), serializeFileChanges(message.files)]),
+  };
+}
+
+// Most keys identify one message. Content keys can intentionally identify many
+// separate turns; retain their first position to preserve the existing merge
+// precedence. Only replacing/removing that first match scans its collision set.
+class MessageMergeIndex {
+  private readonly positions = new Map<string, { first: number; all: Set<number> }>();
+
+  add(key: string | null, position: number) {
+    if (key === null) return;
+    const bucket = this.positions.get(key);
+    if (!bucket) {
+      this.positions.set(key, { first: position, all: new Set([position]) });
+      return;
+    }
+    bucket.all.add(position);
+    bucket.first = Math.min(bucket.first, position);
+  }
+
+  remove(key: string | null, position: number) {
+    if (key === null) return;
+    const bucket = this.positions.get(key);
+    if (!bucket) return;
+    bucket.all.delete(position);
+    if (bucket.all.size === 0) {
+      this.positions.delete(key);
+    } else if (bucket.first === position) {
+      bucket.first = Infinity;
+      for (const candidate of bucket.all) bucket.first = Math.min(bucket.first, candidate);
+    }
+  }
+
+  first(key: string | null): number | undefined {
+    return key === null ? undefined : this.positions.get(key)?.first;
+  }
+}
+
 export function mergeAndSortMessages(messages: ChatMessage[]): ChatMessage[] {
   const sorted = [...messages].sort((a, b) => a.timestamp - b.timestamp);
-  const result: ChatMessage[] = [];
+  const entries: Array<MessageMergeEntry | null> = [];
+  const indexes = {
+    id: new MessageMergeIndex(),
+    clientId: new MessageMergeIndex(),
+    content: new MessageMergeIndex(),
+  };
+  const store = (message: ChatMessage, position = entries.length, keys = messageMergeKeys(message)) => {
+    const previousKeys = entries[position]?.keys;
+    entries[position] = { message, keys };
+    for (const key of ["id", "clientId", "content"] as const) {
+      if (previousKeys?.[key] !== keys[key]) {
+        if (previousKeys) indexes[key].remove(previousKeys[key], position);
+        indexes[key].add(keys[key], position);
+      }
+    }
+  };
 
   sorted.forEach((message) => {
-    const existingIndexById = result.findIndex((entry) => entry.id === message.id);
-    if (existingIndexById >= 0) {
-      result[existingIndexById] = mergeDuplicateMessage(result[existingIndexById], message);
+    const keys = messageMergeKeys(message);
+    const existingIndexById = indexes.id.first(keys.id);
+    if (existingIndexById !== undefined) {
+      store(mergeDuplicateMessage(entries[existingIndexById]!.message, message), existingIndexById);
       return;
     }
 
-    const messageMetadata =
-      message.metadata && typeof message.metadata === "object"
-        ? (message.metadata as Record<string, unknown>)
-        : null;
-    const clientMessageId = resolveClientMessageIdFromMetadata(messageMetadata);
-    if (clientMessageId) {
-      const existingIndexByClientMessageId = result.findIndex((entry) => {
-        if (entry.role !== message.role) {
-          return false;
-        }
-        const entryMetadata =
-          entry.metadata && typeof entry.metadata === "object"
-            ? (entry.metadata as Record<string, unknown>)
-            : null;
-        return resolveClientMessageIdFromMetadata(entryMetadata) === clientMessageId;
-      });
-      if (existingIndexByClientMessageId >= 0) {
-        result[existingIndexByClientMessageId] = mergeDuplicateMessage(
-          result[existingIndexByClientMessageId],
-          message,
-        );
-        return;
-      }
+    const existingIndexByClientMessageId = indexes.clientId.first(keys.clientId);
+    if (existingIndexByClientMessageId !== undefined) {
+      store(
+        mergeDuplicateMessage(entries[existingIndexByClientMessageId]!.message, message),
+        existingIndexByClientMessageId,
+      );
+      return;
     }
 
-    const normalizedContent = message.content.trim();
-    const serializedFiles = serializeFileChanges(message.files);
-    const sameContentIndex = result.findIndex(
-      (entry) =>
-        entry.role === message.role &&
-        entry.content.trim() === normalizedContent &&
-        serializeFileChanges(entry.files) === serializedFiles
-    );
-    if (sameContentIndex >= 0) {
-      const existing = result[sameContentIndex];
+    const sameContentIndex = indexes.content.first(keys.content);
+    if (sameContentIndex !== undefined) {
+      const existing = entries[sameContentIndex]!.message;
       if (isTimelineMessage(existing) || isTimelineMessage(message)) {
-        result.push(message);
+        store(message, entries.length, keys);
         return;
       }
       const incomingIsServer = isUuid(message.id);
@@ -777,28 +817,32 @@ export function mergeAndSortMessages(messages: ChatMessage[]): ChatMessage[] {
           }
 
           if (preferIncoming) {
-            result.splice(sameContentIndex, 1);
-            result.push(mergeDuplicateMessage(existing, message));
+            const removedKeys = entries[sameContentIndex]!.keys;
+            for (const key of ["id", "clientId", "content"] as const) {
+              indexes[key].remove(removedKeys[key], sameContentIndex);
+            }
+            entries[sameContentIndex] = null;
+            store(mergeDuplicateMessage(existing, message));
           }
           return;
         }
-        result.push(message);
+        store(message, entries.length, keys);
         return;
       }
 
       if (existingIsServer !== incomingIsServer) {
         const localPlaceholder = existingIsServer ? message : existing;
         const serverCopy = existingIsServer ? existing : message;
-        result[sameContentIndex] = mergeDuplicateMessage(localPlaceholder, serverCopy);
+        store(mergeDuplicateMessage(localPlaceholder, serverCopy), sameContentIndex);
         return;
       }
 
-      result.push(message);
+      store(message, entries.length, keys);
       return;
     }
 
-    result.push(message);
+    store(message, entries.length, keys);
   });
 
-  return result.sort(compareMessageDisplayOrder);
+  return entries.flatMap((entry) => entry ? [entry.message] : []).sort(compareMessageDisplayOrder);
 }
