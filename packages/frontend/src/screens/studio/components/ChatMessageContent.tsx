@@ -127,13 +127,23 @@ const WORKSPACE_FILE_PREVIEW_INTENT_EVENT = "instafy:workspace-file-preview-inte
 // Punctuation that reads as part of the chip before it and must not wrap alone.
 const CHIP_TRAILING_PUNCTUATION_REGEX = /^[:;,.!?)\]]+/;
 const INLINE_CODE_TOKEN_CLASS = [
-  "inline-flex items-center rounded-[0.34rem] bg-slate-950/[0.035] px-1.5 py-[0.08em] font-mono text-[0.92em] leading-[1.18] text-slate-700 ring-1 ring-inset ring-slate-900/10 shadow-[inset_0_-1px_0_rgba(15,23,42,0.07)] align-baseline",
-  "dark:bg-white/[0.055] dark:text-slate-200 dark:ring-white/[0.08] dark:shadow-[inset_0_-1px_0_rgba(255,255,255,0.045)]",
+  "inline rounded bg-slate-950/[0.025] px-[0.2em] py-[0.04em] font-mono text-[0.92em] leading-[1.18] text-slate-700 [box-decoration-break:clone] align-baseline",
+  "dark:bg-white/[0.035] dark:text-slate-200",
+].join(" ");
+const LONG_INLINE_CODE_CLASS = [
+  "my-2.5 block max-w-full whitespace-pre-wrap break-words [overflow-wrap:anywhere] rounded-lg bg-slate-950/[0.035] px-3 py-3 text-slate-700",
+  "dark:bg-white/[0.055] dark:text-slate-200",
 ].join(" ");
 const CODE_BLOCK_CLASS = [
-  "block max-w-full overflow-x-auto whitespace-pre rounded-xl bg-slate-950/[0.035] px-3 py-2 font-mono text-[0.85em] leading-normal text-slate-700 ring-1 ring-inset ring-slate-900/10 shadow-[inset_0_-1px_0_rgba(15,23,42,0.07)]",
-  "dark:bg-white/[0.055] dark:text-slate-200 dark:ring-white/[0.08] dark:shadow-[inset_0_-1px_0_rgba(255,255,255,0.045)]",
+  "block max-w-full overflow-x-auto whitespace-pre rounded-lg bg-slate-950/[0.035] px-3 py-3 font-mono text-[0.85em] leading-normal text-slate-700",
+  "dark:bg-white/[0.055] dark:text-slate-200",
 ].join(" ");
+
+// This is a layout decision for existing code tokens, not command detection.
+// Keep the exact text (including whitespace) for selection and copying.
+function inlineCodeNeedsBlock(value: string): boolean {
+  return value.length > 80 || value.includes("\n");
+}
 // Comfortable reading measure for prose only (#207): even after the bubble
 // shell stops overflowing, its own max-width still lets a line run to ~96
 // characters. 70ch keeps paragraphs and list items in the 45–75ch range
@@ -1562,11 +1572,13 @@ const MessageContentBody = memo(function MessageContentBody({
         );
       }
       if (token.type === "inline-code") {
+        const block = inlineCodeNeedsBlock(token.value);
         return (
           <code
             key={`${keyPrefix}-inline-code-${tokenIndex}`}
             data-testid="chat-message-inline-code"
-            className={INLINE_CODE_TOKEN_CLASS}
+            data-code-layout={block ? "block" : "inline"}
+            className={block ? "font-mono text-[0.92em] leading-normal" : INLINE_CODE_TOKEN_CLASS}
           >
             {token.value}
           </code>
@@ -1648,7 +1660,9 @@ const MessageContentBody = memo(function MessageContentBody({
 
   // An inline chip and the punctuation right after it are one unit: "`AGENTS.md`:"
   // must never wrap with the ":" orphaned on the next line (#191). A chip token
-  // followed by punctuation renders inside a no-break span with that punctuation.
+  // followed by punctuation renders with that punctuation. Text code may wrap
+  // within the available width; long snippets share their block with trailing
+  // punctuation, kept as a sibling outside the copyable code text.
   const renderInlineTokens = (line: string, keyPrefix: string): ReactNode[] => {
     const tokens = tokenizeChatLine(line, agentMentionHandles);
     const nodes: ReactNode[] = [];
@@ -1667,6 +1681,22 @@ const MessageContentBody = memo(function MessageContentBody({
         nextToken?.type === "text"
           ? (nextToken.value.match(CHIP_TRAILING_PUNCTUATION_REGEX)?.[0] ?? "")
           : "";
+      if (token.type === "inline-code" && inlineCodeNeedsBlock(token.value)) {
+        nodes.push(
+          <span
+            key={`${keyPrefix}-long-code-${tokenIndex}`}
+            data-testid="chat-message-long-code"
+            className={LONG_INLINE_CODE_CLASS}
+          >
+            {rendered}{gluedPunctuation}
+          </span>,
+        );
+        if (gluedPunctuation && nextToken?.type === "text") {
+          nodes.push(nextToken.value.slice(gluedPunctuation.length));
+          tokenIndex += 1;
+        }
+        continue;
+      }
       if (!gluedPunctuation || nextToken?.type !== "text") {
         nodes.push(rendered);
         continue;
@@ -1675,7 +1705,9 @@ const MessageContentBody = memo(function MessageContentBody({
         <span
           key={`${keyPrefix}-chip-glue-${tokenIndex}`}
           data-testid="chat-message-chip-glue"
-          className="whitespace-nowrap"
+          className={token.type === "inline-code"
+            ? "inline-block max-w-full whitespace-pre-wrap break-words [overflow-wrap:anywhere]"
+            : "whitespace-nowrap"}
         >
           {rendered}
           {gluedPunctuation}
@@ -1858,7 +1890,7 @@ const MessageContentBody = memo(function MessageContentBody({
             variant="body"
             tone="inherit"
             className={[
-              blockSpacingClassName,
+              blockIndex > 0 ? "mt-4" : "",
               PROSE_MEASURE_CLASS,
               "whitespace-pre-wrap break-words [overflow-wrap:anywhere]",
             ]
