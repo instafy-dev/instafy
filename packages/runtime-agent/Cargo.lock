@@ -2406,7 +2406,6 @@ dependencies = [
  "libc",
  "opentelemetry",
  "prost 0.14.3",
- "reqwest 0.12.28",
  "rustix 1.1.4",
  "serde",
  "serde_json",
