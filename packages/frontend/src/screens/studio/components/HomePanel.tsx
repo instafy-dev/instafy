@@ -1,22 +1,16 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { ChatLines, Check, Clock, Group, Plus, User, WarningTriangle } from "iconoir-react";
-import { MenuTrigger } from "react-aria-components";
 import { AttentionBadge } from "../../../components/AttentionBadge";
 import { Button, IconButton } from "../../../components/Button";
 import { FeedRow } from "../../../components/FeedRow";
 import { Heading } from "../../../components/Heading";
-import { MenuItemContent } from "../../../components/MenuItemContent";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
-import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
-import { StudioPopover } from "../../../components/aria/StudioPopover";
-import { DRAWER_ICON_BUTTON_TONE_CLASS } from "../../../components/listRowStyles";
 import { useConversations } from "../../../conversations/ConversationsProvider";
 import { useProjects } from "../../../projects/useProjects";
 import { useAuth } from "../../../providers/AuthProvider";
 import { controllerClient, type NotificationInboxItem } from "../../../sdk/instafy";
-import type { ActivityItem } from "../../../services/runtimeController/activity";
 import { useStatus } from "../../../status/useStatus";
 import { DARK_DIVIDER_BORDER_CLASS, DARK_RAIL_HOVER_CLASS } from "../../../theme/darkSurfaces";
 import { isUUID } from "../../../utils/uuid";
@@ -32,6 +26,7 @@ import {
   type HomeFeedEvent,
   type HomeFeedOrganizationRef,
 } from "../homeFeed";
+import { useHomeActivity } from "../useHomeActivity";
 import { useWorkspaceControls } from "../workspaceControls";
 import { CHAT_COLUMN_CLASS_NAME } from "./ChatColumn";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
@@ -53,14 +48,9 @@ const ROW_ACTION_CLASS =
 // Recent renders a page at a time; "Show more" reveals what is already in
 // memory first, then asks the controller for the next page of the ledger.
 const RECENT_LIMIT = 24;
-// Needs you folds after this many rows so a busy inbox cannot push Recent off
-// the screen; "Show N more" opens the rest in place.
-const NEEDS_PREVIEW_LIMIT = 8;
-// The ledger is polled at the inbox's cadence until the live stream lands.
-const ACTIVITY_POLL_MS = 20_000;
-// A poll that finds more than one page of new activity bridges the gap, but
-// never walks history forever on a device that has been closed for weeks.
-const CATCH_UP_MAX_PAGES = 3;
+// Keep recent activity within reach on phones, while wider panels show more.
+const UNREAD_PREVIEW_LIMIT = 8;
+const COMPACT_UNREAD_PREVIEW_LIMIT = 4;
 
 // Bare run counters ("3") leak in as previews; they say nothing on a row.
 function usablePreview(value: string | null | undefined): string | null {
@@ -115,7 +105,7 @@ function TeamChip({
     <button
       type="button"
       aria-pressed={selected}
-      aria-label={count > 0 ? `${label}, ${count} need you` : undefined}
+      aria-label={count > 0 ? `${label}, ${count} unread` : undefined}
       data-testid={testId}
       onClick={onPress}
       className={[
@@ -136,7 +126,7 @@ function LaneHeader({ label, action }: { label: string; action?: ReactNode }) {
   // Margin, not padding, so the box is 24px with or without an action.
   return (
     <div className={`mb-1.5 flex min-h-6 items-center justify-between gap-3 pointer-coarse:min-h-11 ${LANE_INSET_CLASS}`}>
-      <Text as="h2" variant="overline" tone="subtle">
+      <Text as="h2" variant="bodyStrong" tone="secondary">
         {label}
       </Text>
       {action}
@@ -144,29 +134,35 @@ function LaneHeader({ label, action }: { label: string; action?: ReactNode }) {
   );
 }
 
-function CaughtUpCut() {
+function EarlierActivityCut() {
   return (
     <div
       role="separator"
-      aria-label="You're caught up"
+      aria-label="Earlier activity"
       data-testid="home-since-cut"
       className={`flex items-center gap-3 py-1.5 ${LANE_INSET_CLASS}`}
     >
-      <span className="h-px flex-1 bg-primary-400/40" />
-      <Text as="span" variant="overline" tone="accent">
-        You're caught up
+      <span className="h-px flex-1 bg-slate-200/70 dark:bg-[var(--color-studio-dark-divider)]" />
+      <Text as="span" variant="caption" tone="muted">
+        Earlier activity
       </Text>
-      <span className="h-px flex-1 bg-primary-400/40" />
+      <span className="h-px flex-1 bg-slate-200/70 dark:bg-[var(--color-studio-dark-divider)]" />
     </div>
   );
 }
 
-function LaneMore({ label, onPress, testId }: { label: string; onPress: () => void; testId: string }) {
+function LaneMore({ label, onPress, testId, disabled = false, className }: {
+  label: string;
+  onPress: () => void;
+  testId: string;
+  disabled?: boolean;
+  className?: string;
+}) {
   // Sits on the rows' text inset; the button's own padding is pulled back so
   // its label lines up with the lane label above it.
   return (
-    <div className={`pt-1 ${LANE_INSET_CLASS}`}>
-      <Button type="button" variant="ghost" size="xs" radius="full" className="-ml-2" onPress={onPress} data-testid={testId}>
+    <div className={[`pt-1 ${LANE_INSET_CLASS}`, className].filter(Boolean).join(" ")}>
+      <Button type="button" variant="ghost" size="xs" radius="full" className="-ml-2" onPress={onPress} data-testid={testId} isDisabled={disabled}>
         {label}
       </Button>
     </div>
@@ -174,8 +170,11 @@ function LaneMore({ label, onPress, testId }: { label: string; onPress: () => vo
 }
 
 function EventIcon({ event }: { event: HomeFeedEvent }) {
+  if (event.kind === "run_failed") {
+    return <WarningTriangle className="h-4 w-4 text-rose-600 dark:text-rose-300" aria-hidden="true" />;
+  }
   // Identity when it is real (a named agent or a person); state only when
-  // non-default. An unread reply gets no marker: inside "Needs you" every
+  // non-default. An unread reply gets no marker: inside "Unread" every
   // row is unread, and the lane heading plus the mark-as-read control say so.
   if (event.actor?.handle) {
     return (
@@ -204,9 +203,6 @@ function EventIcon({ event }: { event: HomeFeedEvent }) {
   if (event.kind === "queued") {
     return <Clock className="h-4 w-4 text-amber-600 dark:text-amber-300" aria-hidden="true" />;
   }
-  if (event.kind === "run_failed") {
-    return <WarningTriangle className="h-4 w-4 text-rose-600 dark:text-rose-300" aria-hidden="true" />;
-  }
   if (event.kind === "run_finished") {
     return <Check className="h-4 w-4 text-emerald-600 dark:text-emerald-300" aria-hidden="true" />;
   }
@@ -222,7 +218,7 @@ function statusSubtitle(event: HomeFeedEvent, viewerUserId: string | null): stri
     case "run_finished":
       return "Run finished";
     case "run_failed":
-      return "Run failed";
+      return event.statusLabel ?? "Run failed";
     case "conversation": {
       if (event.source.type !== "activity") {
         return null;
@@ -236,41 +232,6 @@ function statusSubtitle(event: HomeFeedEvent, viewerUserId: string | null): stri
     default:
       return null;
   }
-}
-
-function newestActivityId(items: ActivityItem[]): string | null {
-  let newest: bigint | null = null;
-  for (const item of items) {
-    try {
-      const id = BigInt(item.id);
-      if (newest === null || id > newest) {
-        newest = id;
-      }
-    } catch {
-      // Not a numeric cursor; skip it.
-    }
-  }
-  return newest === null ? null : newest.toString();
-}
-
-function mergeActivity(current: ActivityItem[], incoming: ActivityItem[]): ActivityItem[] {
-  const seen = new Set(current.map((item) => item.id));
-  const merged = [...current];
-  for (const item of incoming) {
-    if (!seen.has(item.id)) {
-      seen.add(item.id);
-      merged.push(item);
-    }
-  }
-  return merged.sort((a, b) => {
-    try {
-      const left = BigInt(a.id);
-      const right = BigInt(b.id);
-      return left === right ? 0 : left > right ? -1 : 1;
-    } catch {
-      return 0;
-    }
-  });
 }
 
 interface HomePanelProps {
@@ -302,93 +263,16 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
     setRecentLimit(RECENT_LIMIT);
   }, [teamFilter]);
 
-  // The ledger: what happened across every team, from the controller.
-  const [activityItems, setActivityItems] = useState<ActivityItem[]>([]);
-  const [activityLoading, setActivityLoading] = useState(true);
-  const [activityNextBefore, setActivityNextBefore] = useState<string | null>(null);
-  const [activityHasMore, setActivityHasMore] = useState(false);
-  // The cut is where the previous visit ended; it is read once per visit and
-  // then advanced on the server so the next visit (on any device) starts here.
-  const [serverLastSeenEventId, setServerLastSeenEventId] = useState<string | null>(null);
-  const cutCapturedRef = useRef(false);
-  const seenAdvancedToRef = useRef<string | null>(null);
-
-  const advanceSeen = useCallback((items: ActivityItem[]) => {
-    const newest = newestActivityId(items);
-    if (!newest || seenAdvancedToRef.current === newest) {
-      return;
-    }
-    seenAdvancedToRef.current = newest;
-    void controllerClient.activity.markSeen({ lastSeenEventId: newest });
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    cutCapturedRef.current = false;
-    seenAdvancedToRef.current = null;
-    setActivityItems([]);
-    setActivityLoading(true);
-    const loadFirstPage = async () => {
-      const result = await controllerClient.activity.list({ limit: RECENT_LIMIT * 2 });
-      if (cancelled) return;
-      setActivityLoading(false);
-      if (!result.success) {
-        return;
-      }
-      const items = result.items ?? [];
-      setActivityItems(items);
-      setActivityNextBefore(result.nextBefore ?? null);
-      setActivityHasMore(result.hasMore === true);
-      if (!cutCapturedRef.current) {
-        cutCapturedRef.current = true;
-        setServerLastSeenEventId(result.lastSeenEventId ?? null);
-      }
-      advanceSeen(items);
-    };
-    void loadFirstPage();
-    const timer = window.setInterval(() => {
-      void (async () => {
-        // Catch up from the newest row we hold. Pages come back newest-first,
-        // so the first one always carries the new activity; if it says there
-        // is more, walk back a bounded number of pages to close the gap
-        // rather than leaving a hole in Recent. Rows dedupe by id.
-        const since = newestActivityId(activityItemsRef.current);
-        let result = await controllerClient.activity.list(
-          since ? { since, limit: 200 } : { limit: RECENT_LIMIT * 2 },
-        );
-        if (cancelled || !result.success) return;
-        const items = result.items ?? [];
-        if (items.length === 0) return;
-        setActivityItems((current) => mergeActivity(current, items));
-        advanceSeen(items);
-        for (let page = 0; page < CATCH_UP_MAX_PAGES; page += 1) {
-          if (!result.hasMore || !result.nextBefore) return;
-          result = await controllerClient.activity.list({ before: result.nextBefore, limit: 200 });
-          if (cancelled || !result.success) return;
-          const older = result.items ?? [];
-          if (older.length === 0) return;
-          setActivityItems((current) => mergeActivity(current, older));
-        }
-      })();
-    }, ACTIVITY_POLL_MS);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [advanceSeen, userEmail]);
-  const activityItemsRef = useRef<ActivityItem[]>([]);
-  useEffect(() => {
-    activityItemsRef.current = activityItems;
-  }, [activityItems]);
-
-  const loadMoreActivity = useCallback(async () => {
-    if (!activityNextBefore) return;
-    const result = await controllerClient.activity.list({ before: activityNextBefore, limit: RECENT_LIMIT });
-    if (!result.success) return;
-    setActivityItems((current) => mergeActivity(current, result.items ?? []));
-    setActivityNextBefore(result.nextBefore ?? null);
-    setActivityHasMore(result.hasMore === true);
-  }, [activityNextBefore]);
+  const {
+    activityItems,
+    activityLoading,
+    activityLoadingMore,
+    activityHasMore,
+    activityError,
+    serverLastSeenEventId,
+    loadMoreActivity,
+    retryActivity,
+  } = useHomeActivity(viewerUserId, RECENT_LIMIT);
 
   // Membership, not spaces, decides which teams get a chip: a team you just
   // joined (or created) has no space yet but still belongs on Home.
@@ -589,24 +473,19 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
         });
     }
   }, [activeProjectId, createConversation, markConversationRead, openConversationTab, requestUrlPush, setConversationControllerId]);
-  // The top bar's (+) 58px above this one on phones creates the same kind of
-  // conversation; two adjacent pluses must not mean two different things.
+  // Empty-state creation uses the same conversation action as the top bar.
   const startChat = onStartNewConversation ?? handleStartChat;
 
   const showTeamChips = feed.teams.length > 1;
-  // Team on a row only when it is not the default: multi-team, unfiltered.
-  // Personal rows never carry it — everything here is yours already.
+  // All is cross-team even when the loaded page contains only one team's
+  // activity. Keep the team and space together so each row identifies its scope.
   const showTeamOnRows = showTeamChips && feed.teamFilter === HOME_TEAM_FILTER_ALL;
-  const personalTeamKeys = useMemo(
-    () => new Set(feed.teams.filter((team) => team.isPersonal).map((team) => team.key)),
-    [feed.teams],
-  );
-  // Name the space only when the visible feed spans more than one — by name,
-  // since two "Untitled Space"s cannot be told apart by a label anyway.
-  const spansSpaces = useMemo(
-    () => new Set([...feed.needs, ...activityEvents].map((event) => event.project.name)).size > 1,
-    [activityEvents, feed.needs],
-  );
+  // Within one team, repeat space context only when multiple spaces are shown.
+  // Names can repeat across spaces; their identities determine provenance.
+  const spansSpaces = useMemo(() => {
+    const events = [...feed.needs, ...feed.activity.flatMap((day) => day.events)];
+    return new Set(events.map((event) => event.project.id).filter(Boolean)).size > 1;
+  }, [feed.activity, feed.needs]);
   // "New space" lands in the team being looked at, else the current one.
   const newSpaceOrgId =
     feed.teamFilter === HOME_TEAM_FILTER_ALL
@@ -614,11 +493,8 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
       : feed.teamFilter === HOME_PERSONAL_TEAM_KEY
         ? null
         : feed.teamFilter;
-  const newSpaceTeam = showTeamChips
-    ? (feed.teams.find((team) => team.key === teamKeyForOrgId(newSpaceOrgId)) ?? null)
-    : null;
-  const visibleNeeds = needsExpanded ? feed.needs : feed.needs.slice(0, NEEDS_PREVIEW_LIMIT);
-  const hiddenNeeds = feed.needs.length - visibleNeeds.length;
+  const visibleNeeds = needsExpanded ? feed.needs : feed.needs.slice(0, UNREAD_PREVIEW_LIMIT);
+  const canExpandUnread = !needsExpanded && feed.needs.length > COMPACT_UNREAD_PREVIEW_LIMIT;
   const filteredTeam = feed.teams.find((team) => team.key === feed.teamFilter) ?? null;
   const lanesEmpty = feed.needs.length === 0 && activityEvents.length === 0 && !activityLoading;
   const filteredTeamHasSpaces =
@@ -629,13 +505,14 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
       setRecentLimit((limit) => limit + RECENT_LIMIT);
       return;
     }
-    void loadMoreActivity().then(() => setRecentLimit((limit) => limit + RECENT_LIMIT));
+    void loadMoreActivity().then((loaded) => {
+      if (loaded) setRecentLimit((limit) => limit + RECENT_LIMIT);
+    });
   }, [activityTotal, loadMoreActivity, recentLimit]);
 
   const renderRow = (event: HomeFeedEvent, options: { divider: boolean }) => {
     const when = formatRelativeTimestamp(event.at);
-    const teamSuffix = showTeamOnRows && !personalTeamKeys.has(event.team.key) ? ` · ${event.team.name}` : "";
-    const where = spansSpaces ? `${event.project.name}${teamSuffix}` : null;
+    const where = [showTeamOnRows ? event.team.name : null, showTeamOnRows || spansSpaces ? event.project.name : null].filter(Boolean).join(" · ") || null;
     // A folded thread says how much is behind its newest state.
     const updates =
       event.group && event.group.count > 1
@@ -651,7 +528,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
         ? "Scheduled"
         : null;
     const rest =
-      [scheduled, updates, statusSubtitle(event, viewerUserId), usablePreview(event.preview)].filter(Boolean).join(" · ") ||
+      [scheduled, updates, statusSubtitle(event, viewerUserId), event.kind === "run_failed" ? null : usablePreview(event.preview)].filter(Boolean).join(" · ") ||
       null;
     return (
       <div key={event.key} className={[ROW_HOVER_CLASS, options.divider ? ROW_DIVIDER_CLASS : ""].filter(Boolean).join(" ")}>
@@ -670,18 +547,19 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
               </>
             ) : undefined
           }
+          subtitleClassName="!line-clamp-2 !whitespace-normal @min-[40rem]/home:!line-clamp-1"
           icon={<EventIcon event={event} />}
           iconClassName={ROW_ICON_CLASS}
           onPress={() => openEvent(event)}
           density="compact"
           verticalAlign="center"
           surface="plain"
-          // The wrapper owns the tint; a uniform 56px pitch on every pointer.
+          // The wrapper owns the tint; previews can wrap in a narrow panel.
           className="min-h-14 !rounded-none !bg-transparent pointer-coarse:min-h-14"
-          // One straight time column across both lanes. Below sm the column
-          // goes away: opening a row or "Mark all read" is how phones dismiss.
+          // One straight time column across both lanes. Narrow panels omit
+          // the read-action column; opening a row still marks it read.
           reserveTrailingAction
-          trailingActionClassName="w-8 justify-center transition-opacity max-sm:hidden pointer-coarse:w-11 pointer-fine:opacity-0 pointer-fine:group-hover/row:opacity-100 pointer-fine:group-focus-within/row:opacity-100"
+          trailingActionClassName="w-8 justify-center transition-opacity hidden @min-[40rem]/home:flex pointer-coarse:w-11 pointer-fine:opacity-0 pointer-fine:group-hover/row:opacity-100 pointer-fine:group-focus-within/row:opacity-100"
           trailingAction={
             event.dismissible ? (
               <IconButton
@@ -707,7 +585,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
 
   return (
     <SettingsShell title="Home" hideTitle testId="home-panel">
-      <div className={`${CHAT_COLUMN_CLASS_NAME} min-w-0 space-y-4`}>
+      <div className={`${CHAT_COLUMN_CLASS_NAME} @container/home min-w-0 space-y-4`}>
         <header className="flex items-center justify-between gap-2">
           {showTeamChips ? (
             <div
@@ -715,9 +593,9 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
               aria-label="Filter by team"
               data-testid="home-team-filters"
               // Scrolls on phones (many teams must not stack above the feed),
-              // wraps from sm up. The negative margins let the strip bleed to
+              // wraps in wide panels. The negative margins let the strip bleed to
               // the shell's edge without clipping chip focus rings.
-              className="no-scrollbar -my-1 -ml-3 flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto py-1 pl-3 sm:ml-0 sm:flex-initial sm:flex-wrap sm:overflow-visible sm:pl-0"
+              className="no-scrollbar -my-1 -ml-3 flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto py-1 pl-3 @min-[40rem]/home:ml-0 @min-[40rem]/home:flex-wrap @min-[40rem]/home:overflow-visible @min-[40rem]/home:pl-0"
             >
               <TeamChip
                 label="All"
@@ -742,48 +620,20 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
               Home
             </Heading>
           )}
-          <MenuTrigger>
-            <IconButton
-              type="button"
-              variant="ghost"
-              size="sm"
-              radius="full"
-              title="New"
-              aria-label="New chat or space"
-              data-testid="home-create"
-              className={`ml-auto shrink-0 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
-            >
-              <Plus className="h-4 w-4" aria-hidden="true" />
-            </IconButton>
-            <StudioPopover placement="bottom end" offset={6} className="w-64 p-1">
-              <StudioMenu
-                aria-label="Create"
-                onAction={(key) => {
-                  if (key === "chat") {
-                    startChat();
-                  } else if (key === "space") {
-                    onStartNewProject?.(newSpaceOrgId);
-                  }
-                }}
-              >
-                <StudioMenuItem id="chat" data-testid="home-new-chat">
-                  <MenuItemContent start={<ChatLines aria-hidden="true" />}>
-                    {currentProject ? `New chat in ${currentSpaceName}` : "New chat"}
-                  </MenuItemContent>
-                </StudioMenuItem>
-                {onStartNewProject ? (
-                  <StudioMenuItem id="space" data-testid="home-new-space">
-                    <MenuItemContent start={<Plus aria-hidden="true" />}>
-                      {newSpaceTeam ? `New space in ${newSpaceTeam.name}` : "New space"}
-                    </MenuItemContent>
-                  </StudioMenuItem>
-                ) : null}
-              </StudioMenu>
-            </StudioPopover>
-          </MenuTrigger>
         </header>
 
-        {feed.isEmpty && !activityLoading ? (
+        {activityError ? (
+          <div role="alert" className={`flex flex-wrap items-center gap-2 ${LANE_INSET_CLASS}`}>
+            <Text variant="caption" tone="danger">
+              {activityItems.length > 0 ? "Activity couldn’t be refreshed. Loaded items are still shown." : "Activity couldn’t be loaded."}
+            </Text>
+            <Button variant="ghost" size="xs" onPress={() => void retryActivity()} isDisabled={activityLoading || activityLoadingMore} data-testid="home-activity-retry">
+              Retry
+            </Button>
+          </div>
+        ) : null}
+
+        {feed.isEmpty && !activityLoading && !activityHasMore && !activityError ? (
           <section className="space-y-3" data-testid="home-empty">
             <Heading level={2} variant="subtitle">
               Nothing here yet
@@ -810,13 +660,16 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
               ) : null}
             </div>
           </section>
-        ) : filteredTeam && lanesEmpty ? (
+        ) : filteredTeam && lanesEmpty && !activityError ? (
           // A team with nothing in it yet is an invitation, not two empty lanes.
           <section className={`space-y-2 py-4 ${LANE_INSET_CLASS}`} data-testid="home-filter-empty">
             <Text as="p" variant="body" tone="muted">
-              {filteredTeamHasSpaces ? `Quiet in ${filteredTeam.name} so far.` : `No spaces in ${filteredTeam.name} yet.`}
+              {activityHasMore ? `No activity from ${filteredTeam.name} in the loaded history.` : filteredTeamHasSpaces ? `Quiet in ${filteredTeam.name} so far.` : `No spaces in ${filteredTeam.name} yet.`}
             </Text>
-            {!filteredTeamHasSpaces && onStartNewProject ? (
+            {activityHasMore ? (
+              <LaneMore label={activityLoadingMore ? "Loading…" : "Load older activity"} onPress={handleShowMoreRecent} disabled={activityLoadingMore} testId="home-recent-load-older" className="-mx-3" />
+            ) : null}
+            {!activityHasMore && !filteredTeamHasSpaces && onStartNewProject ? (
               <Button
                 variant="outline"
                 size="sm"
@@ -835,7 +688,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
             {feed.needs.length > 0 ? (
               <section data-testid="home-attention-section">
                 <LaneHeader
-                  label="Needs you"
+                  label="Unread"
                   action={
                     dismissibleNeeds.length > 0 ? (
                       <Button type="button" variant="ghost" size="xs" radius="full" onPress={handleMarkAllRead}>
@@ -845,11 +698,16 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
                   }
                 />
                 <div className="min-w-0">
-                  {visibleNeeds.map((event, index) => renderRow(event, { divider: index > 0 }))}
+                  {visibleNeeds.map((event, index) => (
+                    <div key={event.key} className={!needsExpanded && index >= COMPACT_UNREAD_PREVIEW_LIMIT ? "hidden @min-[40rem]/home:block" : undefined}>
+                      {renderRow(event, { divider: index > 0 })}
+                    </div>
+                  ))}
                 </div>
-                {hiddenNeeds > 0 ? (
+                {canExpandUnread ? (
                   <LaneMore
-                    label={`Show ${hiddenNeeds} more`}
+                    label={`View all ${feed.needs.length}`}
+                    className={feed.needs.length <= UNREAD_PREVIEW_LIMIT ? "@min-[40rem]/home:hidden" : undefined}
                     onPress={() => setNeedsExpanded(true)}
                     testId="home-attention-show-all"
                   />
@@ -858,10 +716,10 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
             ) : null}
 
             <section data-testid="home-recent-section">
-              <LaneHeader label="Recent" action={activityLoading ? <Spinner size="xs" /> : null} />
-              {activityEvents.length === 0 && !activityLoading ? (
+              <LaneHeader label="Recent activity" action={activityLoading ? <Spinner size="xs" /> : null} />
+              {activityEvents.length === 0 && !activityLoading && !activityError ? (
                 <Text as="p" variant="body" tone="muted" className={`py-2 ${LANE_INSET_CLASS}`} data-testid="home-recent-empty">
-                  Quiet so far.
+                  {activityHasMore ? "No recent activity in the loaded history." : "Quiet so far."}
                 </Text>
               ) : null}
               {(() => {
@@ -872,16 +730,16 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
                   const cutAtDayStart = feed.sinceCutIndex === dayStart;
                   return (
                     <div key={day.key} className="min-w-0">
-                      {cutAtDayStart ? <CaughtUpCut /> : null}
+                      {cutAtDayStart ? <EarlierActivityCut /> : null}
                       {feed.activity.length > 1 ? (
-                        // A sub-group label: a caption under the lane overline,
+                        // A sub-group label: a caption under the lane heading,
                         // and silent altogether when everything is one day.
                         <Text
                           as="p"
                           variant="caption"
-                          tone="subtle"
+                          tone="muted"
                           className={[
-                            `pb-1 pt-2.5 text-xxs font-medium ${LANE_INSET_CLASS}`,
+                            `pb-1 pt-2.5 font-medium ${LANE_INSET_CLASS}`,
                             dayIndex > 0 && !cutAtDayStart ? ROW_DIVIDER_CLASS : "",
                           ]
                             .filter(Boolean)
@@ -897,7 +755,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
                         const cutHere = feed.sinceCutIndex === index && index !== dayStart;
                         return (
                           <Fragment key={event.key}>
-                            {cutHere ? <CaughtUpCut /> : null}
+                            {cutHere ? <EarlierActivityCut /> : null}
                             {renderRow(event, { divider: index !== dayStart && !cutHere })}
                           </Fragment>
                         );
@@ -907,7 +765,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
                 });
               })()}
               {canShowMoreRecent ? (
-                <LaneMore label="Show more" onPress={handleShowMoreRecent} testId="home-recent-show-more" />
+                <LaneMore label={activityLoadingMore ? "Loading…" : activityEvents.length === 0 ? "Load older activity" : "Show more"} onPress={handleShowMoreRecent} disabled={activityLoadingMore} testId={activityEvents.length === 0 ? "home-recent-load-older" : "home-recent-show-more"} />
               ) : null}
             </section>
           </div>
