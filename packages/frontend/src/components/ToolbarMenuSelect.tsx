@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { NavArrowDown } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
 import { Button } from "./Button";
+import { ControlChevron } from "./ControlChevron";
 import { StudioPopover } from "./aria/StudioPopover";
 import { StudioMenu, StudioMenuItem } from "./aria/StudioMenu";
 
@@ -90,7 +90,7 @@ export function ToolbarMenuSelect({
         className={[TRIGGER_CLASS, className].filter(Boolean).join(" ")}
       >
         <span className="min-w-0 flex-1 truncate text-left">{selectedLabel}</span>
-        <NavArrowDown className="text-base text-slate-400" aria-hidden="true" />
+        <ControlChevron />
       </Button>
       <StudioPopover
         triggerRef={triggerRef}

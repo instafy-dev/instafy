@@ -25,10 +25,10 @@ export function SettingsSection({
   const showDescription = Boolean(description && (descriptionVisibility === "always" || isLargeScreen));
 
   return (
-    <section className={["space-y-3 px-1", className].filter(Boolean).join(" ")} data-testid={dataTestId}>
-      <div className="flex flex-col gap-3 sm:grid sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
+    <section className={["@container/settings-section space-y-3", className].filter(Boolean).join(" ")} data-testid={dataTestId}>
+      <div className="flex flex-col gap-2 @min-[28rem]/settings-section:grid @min-[28rem]/settings-section:grid-cols-[minmax(0,1fr)_auto] @min-[28rem]/settings-section:items-start">
         <div className="min-w-0">
-          <Text variant="bodyStrong" tone="secondary">
+          <Text as="h3" variant="bodyStrong" tone="primary">
             {title}
           </Text>
           {showDescription ? (
@@ -38,7 +38,7 @@ export function SettingsSection({
           ) : null}
         </div>
         {actions ? (
-          <div className="flex min-w-0 w-full items-start gap-2 self-start sm:w-auto sm:shrink-0 sm:justify-end">
+          <div className="flex min-w-0 w-full flex-wrap items-start gap-2 self-start @min-[28rem]/settings-section:w-auto @min-[28rem]/settings-section:justify-end">
             {actions}
           </div>
         ) : null}
