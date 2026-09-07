@@ -34,6 +34,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "browser-live-proof.spec.ts",
   "mobile-sidebar-safe-area.spec.ts",
   "shared-browser-approval-responsive.spec.ts",
+  "shared-browser-expanded-safe-area.spec.ts",
 ];
 
 export default defineConfig({
