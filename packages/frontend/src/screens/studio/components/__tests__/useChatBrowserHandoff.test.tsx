@@ -231,10 +231,29 @@ describe("useChatBrowserHandoff", () => {
     expect(value.onSubmit).not.toHaveBeenCalled();
   });
 
-  it("does not dispatch when the Personal runtime reports unavailable", async () => {
+  it("does not dispatch when the new Personal runtime reports unavailable", async () => {
+    const value = options({ transport: "personal" });
+    await render(value);
+    let pending!: Promise<unknown>;
+    await act(async () => { pending = resultRef.current!.continuePersonal("Continue", "ask").catch((error) => error); });
+    await render({ ...value, personal: { ...value.personal, agentPhase: "unavailable" } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(await pending).toMatchObject({ message: expect.stringContaining("not ready") });
+    expect(value.onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("bounds a retry when the old unavailable phase never clears", async () => {
     const value = options({ transport: "personal", personal: personal({ agentPhase: "unavailable" }) });
     await render(value);
-    await expect(resultRef.current!.continuePersonal("Continue", "ask")).rejects.toThrow(/not ready/);
+    let settled = false;
+    let pending!: Promise<unknown>;
+    await act(async () => {
+      pending = resultRef.current!.continuePersonal("Continue", "ask").catch((error) => error).finally(() => { settled = true; });
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(29_900); });
+    expect(settled).toBe(false);
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+    expect(await pending).toMatchObject({ message: expect.stringContaining("not ready") });
     expect(value.onSubmit).not.toHaveBeenCalled();
   });
 

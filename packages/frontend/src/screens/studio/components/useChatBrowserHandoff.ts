@@ -99,6 +99,11 @@ export function useChatBrowserHandoff(options: Options) {
       assertCurrent(captured, epoch);
       if (!resumed?.agentControlEnabled) return false;
       const deadline = Date.now() + 30_000;
+      // Resume queues the bridge's React state reset before its promise resolves.
+      // A retry must not mistake the still-rendered prior error for a new startup
+      // failure. Once the reset is observed, later failures remain fail-fast; if
+      // React skips that transition entirely, the bounded deadline still applies.
+      let awaitingRetryReset = captured.personal.agentPhase === "unavailable";
       // Runtime startup is asynchronous and allocates a new exact ID. Never send
       // through the revoked pre-takeover runtime or fall back to Shared Browser.
       while (!latest.current.personal.runtimeOverride?.runtimeId ||
@@ -106,7 +111,9 @@ export function useChatBrowserHandoff(options: Options) {
         latest.current.personal.status?.agentControlEnabled !== true ||
         latest.current.personal.agentPhase !== "ready") {
         assertCurrent(captured, epoch);
-        if (Date.now() >= deadline || latest.current.personal.agentPhase === "unavailable") {
+        const phase = latest.current.personal.agentPhase;
+        if (phase !== "unavailable") awaitingRetryReset = false;
+        if (Date.now() >= deadline || (!awaitingRetryReset && phase === "unavailable")) {
           throw new Error("Personal Browser control is not ready. Your input remains on the page; retry when ready.");
         }
         await new Promise((resolve) => window.setTimeout(resolve, 100));
