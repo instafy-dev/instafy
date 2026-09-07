@@ -30,6 +30,7 @@ import { runtimeDebugLog } from "../../../runtime/utils/runtimeDebug";
 import { generateUUID } from "../../../utils/uuid";
 import type { StatusIntent } from "../../../status/useStatus";
 import { useBrowserSessionActions } from "./useBrowserSessionActions";
+import { useExpandedBrowserViewport } from "./useExpandedBrowserViewport";
 import { BrowserCursorOverlay } from "./BrowserCursorOverlay";
 import { BrowserExpandButton } from "./BrowserExpandButton";
 import { BrowserHumanInputStatus } from "./BrowserHumanInputControls";
@@ -475,6 +476,7 @@ export function BrowserSessionModal({
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [containerNode, setContainerNode] = useState<HTMLDivElement | null>(null);
+  const [mobileKeyboardOccupiedHeight, setMobileKeyboardOccupiedHeight] = useState(0);
   const dockedRootRef = useRef<HTMLElement | null>(null);
   const rfbRef = useRef<BrowserSessionRfbLike | null>(null);
   const generatedBrowserSessionId = useMemo(() => generateUUID(), []);
@@ -735,7 +737,7 @@ export function BrowserSessionModal({
   );
   const fullscreenModalClassName = useMemo(
     () =>
-      "!h-dvh !w-screen !max-w-none !rounded-none !border-0 !shadow-none !overflow-hidden",
+      "!h-full !w-screen !max-w-none !rounded-none !border-0 !shadow-none !overflow-hidden",
     [],
   );
   const fullscreenDialogClassName = useMemo(
@@ -756,6 +758,7 @@ export function BrowserSessionModal({
     fullscreen,
     transportActive,
   });
+  const expandedViewportStyle = useExpandedBrowserViewport(isOpen && renderFullscreen);
   const isInlineDocked = presentation === "docked" && !renderFullscreen;
   const shouldViewportCollapseDocked =
     isInlineDocked && !fillContainer && (viewportHeight < 760 || smallViewport);
@@ -2702,6 +2705,7 @@ export function BrowserSessionModal({
           ) : null}
           <div
             ref={setContainerElement}
+            style={mobileKeyboardOccupiedHeight > 0 ? { bottom: mobileKeyboardOccupiedHeight } : undefined}
             className={[
               shouldCollapseDocked
                 ? "absolute inset-0 overflow-hidden opacity-0 pointer-events-none"
@@ -2781,6 +2785,7 @@ export function BrowserSessionModal({
                   humanInputEnabled && activeSharedBrowserViewerKind !== "rfb"
                 }
                 onMessage={dispatchMobileBrowserInput}
+                onOccupiedHeightChange={setMobileKeyboardOccupiedHeight}
               />
             </>
           ) : null}
@@ -2940,6 +2945,7 @@ export function BrowserSessionModal({
           isDismissable
           dialogAriaLabel="Browser session"
           className={fullscreenOverlayClassName}
+          style={expandedViewportStyle}
           modalClassName={fullscreenModalClassName}
           dialogClassName={fullscreenDialogClassName}
           data-testid="browser-session-modal"
@@ -2981,6 +2987,7 @@ export function BrowserSessionModal({
       isDismissable
       dialogAriaLabel="Browser session"
       className={fullscreen ? fullscreenOverlayClassName : undefined}
+      style={fullscreen ? expandedViewportStyle : undefined}
       modalClassName={fullscreen ? fullscreenModalClassName : modalClassName}
       dialogClassName={fullscreen ? fullscreenDialogClassName : "h-full"}
       data-testid="browser-session-modal"

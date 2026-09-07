@@ -16,7 +16,7 @@ export function BrowserExpandButton({
     <IconButton
       aria-expanded={expanded}
       aria-label={label}
-      className="shrink-0 text-slate-500 max-[540px]:h-10 max-[540px]:w-10 pointer-coarse:min-h-11 pointer-coarse:min-w-11 dark:text-slate-400"
+      className="shrink-0 max-[540px]:h-10 max-[540px]:w-10"
       data-testid={testId}
       onPress={onPress}
       radius="full"
