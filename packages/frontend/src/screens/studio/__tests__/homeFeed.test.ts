@@ -605,6 +605,111 @@ describe("buildHomeFeed with ledger rows", () => {
     expect(model.activity.flatMap((day) => day.events).length).toBe(0);
   });
 
+  const ledgerFeed = (activity: ActivityItem[], attentionEntries: HomeAttentionEntry[] = []) => buildHomeFeed({
+    attentionEntries,
+    recentConversations: [],
+    activity,
+    projects: [personalProject, acmeProject],
+    activeProject: personalProject,
+    conversations: [],
+    teamFilter: "all",
+    lastSeenAt: null,
+    now: NOW,
+  });
+
+  it.each(["run.finished", "run.failed"])("replaces a cached live run with its %s terminal event", (kind) => {
+    const model = ledgerFeed([
+      activityItem({ id: "20", kind: "run.started", live: true, run: { id: "run-1", status: "in_progress", promptId: null } }),
+      activityItem({ id: "21", kind, at: new Date(NOW).toISOString(), run: { id: "run-1", status: "completed", promptId: null } }),
+    ]);
+    expect(model.activity.flatMap((day) => day.events).map((event) => event.kind)).toEqual([
+      kind === "run.finished" ? "run_finished" : "run_failed",
+    ]);
+    expect(model.activity.some((day) => day.key === "live")).toBe(false);
+  });
+
+  it("keeps another genuinely live run in the same conversation", () => {
+    const model = ledgerFeed([
+      activityItem({ id: "20", kind: "run.started", live: true, run: { id: "run-old", status: "in_progress", promptId: null } }),
+      activityItem({ id: "22", kind: "run.started", live: true, at: new Date(NOW).toISOString(), run: { id: "run-new", status: "in_progress", promptId: null } }),
+      activityItem({ id: "21", kind: "run.finished", at: new Date(NOW - 60000).toISOString(), run: { id: "run-old", status: "completed", promptId: null } }),
+    ]);
+    expect(model.activity[0].key).toBe("live");
+    expect(model.activity[0].events.map((event) => event.key)).toEqual(["activity:22"]);
+  });
+
+  it("removes stale live state when a newer row carries the terminal run status", () => {
+    const model = ledgerFeed([
+      activityItem({ id: "20", kind: "run.started", live: true, run: { id: "run-1", status: "in_progress", promptId: null } }),
+      activityItem({ id: "21", run: { id: "run-1", status: "failed", promptId: null } }),
+    ]);
+    expect(model.activity.flatMap((day) => day.events).map((event) => event.kind)).toEqual(["reply"]);
+  });
+
+  it("keeps a failed inbox message unread and dismissible with its original acknowledgment source", () => {
+    const entry = inboxEntry(inboxItem({ lastMessageType: "error" }));
+    const model = ledgerFeed([], [entry]);
+    expect(model.needs[0]).toMatchObject({ kind: "run_failed", statusLabel: "Run failed", dismissible: true, source: { type: "inbox", entry } });
+    expect(model.activity).toEqual([]);
+    expect(model.teams.find((team) => team.key === "org-acme")?.needsCount).toBe(1);
+  });
+
+  it("merges a newer structured failure into an unread row without changing its acknowledgment source", () => {
+    const entry = inboxEntry(inboxItem({ conversationId: "c-server" }));
+    const model = ledgerFeed([
+      activityItem({ kind: "run.failed", data: { failureCode: "self_hosted_runtime_offline" } }),
+    ], [entry]);
+    expect(model.needs[0]).toMatchObject({ kind: "run_failed", statusLabel: "Runtime unavailable", dismissible: true, source: { type: "inbox", entry } });
+    expect(model.activity).toEqual([]);
+  });
+
+  it("does not relabel a newer ordinary reply with an older failure", () => {
+    const model = ledgerFeed([
+      activityItem({ kind: "run.failed", at: new Date(NOW - 3 * HOUR).toISOString() }),
+    ], [inboxEntry(inboxItem({ conversationId: "c-server", lastMessagePreview: "The run failed earlier, now fixed." }))]);
+    expect(model.needs[0].kind).toBe("reply");
+    expect(model.needs[0].statusLabel).toBeUndefined();
+  });
+
+  it("uses event order to resolve failure and reply rows written at the same time", () => {
+    const entry = inboxEntry(inboxItem({ conversationId: "c-server" }));
+    const model = ledgerFeed([
+      activityItem({ id: "20", kind: "conversation.reply" }),
+      activityItem({ id: "21", kind: "run.failed" }),
+    ], [entry]);
+    expect(model.needs[0].kind).toBe("run_failed");
+  });
+
+  it("keeps a local failure dismissible through its local conversation source", () => {
+    const local = localConversation();
+    const entry: HomeAttentionEntry = {
+      key: "reply-local-1",
+      title: local.title,
+      subtitle: "",
+      meta: null,
+      preview: "Failed",
+      kind: "reply",
+      statusLabel: "Run failed",
+      source: "conversation",
+      localConversationId: local.localId,
+      testId: "local-failure",
+    };
+    const model = buildHomeFeed({
+      attentionEntries: [entry], recentConversations: [], projects: [personalProject], activeProject: personalProject,
+      conversations: [local], teamFilter: "all", lastSeenAt: null, now: NOW,
+    });
+    expect(model.needs[0]).toMatchObject({ kind: "run_failed", dismissible: true, source: { type: "conversation", localConversationId: local.localId, entry } });
+    expect(model.activity).toEqual([]);
+  });
+
+  it.each([
+    ["automation.failed", "Automation failed"],
+    ["credit.exhausted", "Credits exhausted"],
+  ])("renders typed %s ledger failures", (kind, statusLabel) => {
+    const model = ledgerFeed([activityItem({ kind })]);
+    expect(model.activity[0].events[0]).toMatchObject({ kind: "run_failed", statusLabel });
+  });
+
   it("places the caught-up cut from the server-side event cursor", () => {
     const model = buildHomeFeed({
       attentionEntries: [],

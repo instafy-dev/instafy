@@ -215,4 +215,49 @@ describe("homeAttention", () => {
     expect(entries).toHaveLength(5);
     expect(entries.every((entry) => entry.source === "conversation")).toBe(true);
   });
+
+  it("preserves typed failures without guessing from the preview", () => {
+    const entries = buildHomeAttentionEntries({
+      currentSpaceName: "Alpha Space",
+      conversations: [],
+      inboxItems: [
+        createInboxItem("failed", { lastMessageType: "error", lastMessagePreview: "Backend said no" }),
+        createInboxItem("ordinary", { lastMessagePreview: "The previous run failed; it is fixed now." }),
+      ],
+    });
+    expect(entries.map((entry) => [entry.kind, entry.statusLabel])).toEqual([
+      ["reply", "Run failed"],
+      ["reply", undefined],
+    ]);
+    expect(entries[0].source).toBe("inbox");
+  });
+
+  it("retains the local unread source when its matching inbox message identifies a failure", () => {
+    const conversation = createConversation("local", { controllerId: "controller-local", unreadCount: 1 });
+    const entries = buildHomeAttentionEntries({
+      currentSpaceName: "Alpha Space",
+      conversations: [conversation],
+      inboxItems: [createInboxItem("controller-local", { lastMessageId: "local-message", lastMessageType: "error" })],
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ source: "conversation", kind: "reply", statusLabel: "Run failed", localConversationId: "local" });
+  });
+
+  it("uses structured local failure reasons and ignores an older inbox failure", () => {
+    const entries = buildHomeAttentionEntries({
+      currentSpaceName: "Alpha Space",
+      conversations: [
+        createConversation("failed", {
+          unreadCount: 1,
+          messages: [{ ...createMessage("failure", "Runtime details", Date.now()), messageType: "error", metadata: { details: { reason: "runtime_unavailable" } } }],
+        }),
+        createConversation("recovered", { unreadCount: 1 }),
+      ],
+      inboxItems: [createInboxItem("recovered", { lastMessageId: "older-failure", lastMessageType: "error" })],
+    });
+    expect(entries.map((entry) => [entry.title, entry.statusLabel])).toEqual([
+      ["Conversation failed", "Runtime unavailable"],
+      ["Conversation recovered", undefined],
+    ]);
+  });
 });
