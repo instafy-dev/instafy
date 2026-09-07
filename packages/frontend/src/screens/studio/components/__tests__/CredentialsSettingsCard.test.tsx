@@ -251,6 +251,58 @@ describe("CredentialsSettingsCard", () => {
     expect(container.querySelector('[data-testid="credentials-add-connection"]')).toBeNull();
   });
 
+  it.each(["failure", "rejection"])("preserves deferred credential %s feedback across section switches", async (outcome) => {
+    let finishTest!: () => void;
+    mocks.testCredential.mockReturnValueOnce(new Promise((resolve, reject) => {
+      finishTest = () => {
+        if (outcome === "rejection") {
+          reject(new Error(TOKEN_EXPIRED_ERROR));
+        } else {
+          resolve({ success: false, error: TOKEN_EXPIRED_ERROR });
+        }
+      };
+    }));
+    await act(async () => {
+      root.render(<CredentialsSettingsCard />);
+      await flush();
+    });
+    const testButton = () => container.querySelector<HTMLButtonElement>(
+      '[data-testid="credentials-connection-test-cred-old"]',
+    );
+    expect(testButton()).not.toBeNull();
+    await act(async () => { testButton()!.click(); await flush(); });
+    expect(testButton()!.disabled).toBe(true);
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-testid="settings-category-agents"]')!.click();
+      await flush();
+    });
+    expect(testButton()).toBeNull();
+    expect(container.querySelector('[data-testid="bots-create"]')).not.toBeNull();
+    await act(async () => { finishTest(); await flush(); });
+    expect(container.querySelector('[data-testid="bots-create"]')).not.toBeNull();
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-testid="settings-category-providers"]')!.click();
+      await flush();
+    });
+    expect(container.textContent).toContain("Needs reconnect");
+    expect(container.textContent).toContain("The saved AI login is stale. Reconnect it below, then test again.");
+    expect(testButton()!.disabled).toBe(false);
+    const reconnect = container.querySelector<HTMLButtonElement>(
+      '[data-testid="credentials-connection-reconnect-cred-old"]',
+    );
+    expect(reconnect).not.toBeNull();
+    expect(reconnect!.disabled).toBe(false);
+    expect(mocks.listCredentials).toHaveBeenCalledTimes(1);
+    expect(mocks.testCredential).toHaveBeenCalledTimes(1);
+
+    mocks.testCredential.mockResolvedValueOnce({ success: true, ok: true });
+    await act(async () => { testButton()!.click(); await flush(); });
+    expect(mocks.testCredential).toHaveBeenCalledTimes(2);
+    expect(mocks.testCredential).toHaveBeenLastCalledWith("cred-old");
+    expect(container.textContent).not.toContain("Needs reconnect");
+    expect(testButton()!.disabled).toBe(false);
+  });
+
   it("shows failed auth.json test feedback and an explicit reconnect action", async () => {
     mocks.testCredential.mockResolvedValue({
       success: false,
