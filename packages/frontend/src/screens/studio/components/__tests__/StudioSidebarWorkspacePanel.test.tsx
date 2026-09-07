@@ -83,6 +83,17 @@ describe("StudioSidebarWorkspacePanel", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it("moves focus into a mobile drill-in before the next animation frame", async () => {
+    const frame = vi.spyOn(window, "requestAnimationFrame").mockReturnValue(0);
+    try {
+      await act(async () => root.render(<Harness desktop={false} />));
+      const panel = container.querySelector('[data-testid="sidebar-project-switcher-menu"]')?.parentElement;
+      expect(panel).toBe(document.activeElement);
+    } finally {
+      frame.mockRestore();
+    }
+  });
+
   it.each(["close", "escape"])("dismisses with %s and returns focus to the sidebar trigger", async (action) => {
     await render();
     if (action === "close") {

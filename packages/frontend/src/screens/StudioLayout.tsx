@@ -2216,33 +2216,33 @@ function StudioLayoutInner() {
           </div>
 
           {!isLargeScreen && mobileSidebarOpen ? (
-          <StudioMobileSidebarOverlay onClose={() => handleMobileSidebarOpenChange(false)}>
-            <StudioSidebar
-              mobileOverlay
-              items={sidebarItems}
-              moreItems={sidebarMoreItems}
-              activePanel={sidebarActivePanel}
-              pinnedPanel={null}
-              onRequestClose={() => handleMobileSidebarOpenChange(false)}
-              onSelect={(panel) => {
-                handlePanelSelect(panel);
-                setMobileSidebarOpen(false);
-              }}
-              onOpenConversationHistory={() => {
-                handleOpenConversationHistory();
-                setMobileSidebarOpen(false);
-              }}
-              isConversationHistoryActive={isConversationHistoryActive}
-              workspaceSwitcherOpen={leftDrawer === "workspaces"}
-              onWorkspaceSwitcherOpenChange={handleWorkspaceSwitcherOpenChange}
-              workspaceSwitcherPortalTarget={workspaceSwitcherPortalTarget}
-              recentConversations={recentConversations}
-              activeConversationId={visibleChatId}
-              openConversationIds={openConversationIds}
-              onSelectConversation={handleSelectRecentConversation}
-              collapsed={false}
-            />
-          </StudioMobileSidebarOverlay>
+            <StudioMobileSidebarOverlay onClose={() => handleMobileSidebarOpenChange(false)}>
+              <StudioSidebar
+                mobileOverlay
+                items={sidebarItems}
+                moreItems={sidebarMoreItems}
+                activePanel={sidebarActivePanel}
+                pinnedPanel={null}
+                onRequestClose={() => handleMobileSidebarOpenChange(false)}
+                onSelect={(panel) => {
+                  handlePanelSelect(panel);
+                  setMobileSidebarOpen(false);
+                }}
+                onOpenConversationHistory={() => {
+                  handleOpenConversationHistory();
+                  setMobileSidebarOpen(false);
+                }}
+                isConversationHistoryActive={isConversationHistoryActive}
+                workspaceSwitcherOpen={leftDrawer === "workspaces"}
+                onWorkspaceSwitcherOpenChange={handleWorkspaceSwitcherOpenChange}
+                workspaceSwitcherPortalTarget={workspaceSwitcherPortalTarget}
+                recentConversations={recentConversations}
+                activeConversationId={visibleChatId}
+                openConversationIds={openConversationIds}
+                onSelectConversation={handleSelectRecentConversation}
+                collapsed={false}
+              />
+            </StudioMobileSidebarOverlay>
           ) : null}
 
           {showMobileLeftDrawerOverlay ? (
