@@ -38,13 +38,14 @@ vi.mock("../../../../sdk/instafy", async (importOriginal) => {
 vi.mock("../../../../conversations/ConversationsProvider", () => ({
   useConversations: () => ({
     resolveConversationByController,
+    activeConversation: { extraAgentHandles: ["custom-agent"] },
   }),
 }));
 
 vi.mock("../../../../conversations/useConversation", () => ({
-  useConversation: () => ({
-    agentHandles: [],
-  }),
+  useConversation: () => {
+    throw new Error("Message bodies must not mount conversation history or dispatch effects.");
+  },
 }));
 
 vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
@@ -88,6 +89,15 @@ describe("ChatMessageContent", () => {
     delete runtimeWindow.__INSTAFY_PENDING_OPEN_WORKSPACE_FILE__;
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
     vi.useRealTimers();
+  });
+
+  it("renders configured and supplied agent mentions without mounting a conversation controller", async () => {
+    await act(async () => {
+      root.render(<MessageContent content="Ask @custom-agent and @supplied-agent with @octo." mentionableAgentHandles={["supplied-agent"]} />);
+    });
+
+    expect(Array.from(container.querySelectorAll('[data-testid="chat-agent-mention"]')).map((node) => node.textContent))
+      .toEqual(["@custom-agent", "@supplied-agent", "@octo"]);
   });
 
   it("renders inline conversation, thread, and message references and opens the containing conversation", async () => {
