@@ -18,6 +18,7 @@ interface UseWorkspaceTabMutationControllerArgs {
   setActiveFile: (fileId: string | null) => void;
   setActivePanel: (panel: StudioPanel) => void;
   workspaceProjectId: string | null;
+  canPersistTabs: boolean;
   tabsRef: MutableRefObject<WorkspaceTabState[]>;
   activeTabIdRef: MutableRefObject<string | null>;
   activeConversationIdRef: MutableRefObject<string | null>;
@@ -35,6 +36,7 @@ export function useWorkspaceTabMutationController({
   setActiveFile,
   setActivePanel,
   workspaceProjectId,
+  canPersistTabs,
   tabsRef,
   activeTabIdRef,
   activeConversationIdRef,
@@ -161,7 +163,7 @@ export function useWorkspaceTabMutationController({
             : -1;
         const fallbackTab =
           fallbackIndex >= 0 ? nextTabsWithCloseability[fallbackIndex] ?? null : null;
-        if (workspaceProjectId) {
+        if (workspaceProjectId && canPersistTabs) {
           const currentState = persistedStateRef.current ?? { projects: {} };
           const conversationsToPersist = remainingConversationTabs.map(
             (tab) => tab.conversationId,
@@ -204,6 +206,7 @@ export function useWorkspaceTabMutationController({
     },
     [
       activeTabIdRef,
+      canPersistTabs,
       commitTabs,
       persistedStateRef,
       setActiveTabId,

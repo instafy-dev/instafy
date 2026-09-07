@@ -194,6 +194,7 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
   const activeConversationIdRef = useRef<string | null>(activeConversationId);
   const seenConversationIdsRef = useRef<Set<string>>(new Set());
   const conversationAutoOpenStartRef = useRef<number>(Date.now());
+  const tabsProjectRef = useRef(workspaceProjectId);
 
   // A space we have not opened before starts with a single local placeholder
   // while its real conversations are still being fetched. Giving that
@@ -278,6 +279,28 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
     setTabs,
     setActiveTabId,
   });
+
+  useEffect(() => {
+    if (tabsProjectRef.current === workspaceProjectId) return;
+    tabsProjectRef.current = workspaceProjectId;
+    appliedProjectRef.current = null;
+    // Keep same-space tabs during a partial refresh, but never leave the old
+    // space's chat/run tabs interactive while the destination is still loading.
+    // This intentionally bypasses commitTabs: it must not rewrite either
+    // space's saved conversation list before destination hydration finishes.
+    const nextTabs = tabsRef.current.filter((tab) => tab.kind !== "conversation" && tab.kind !== "jobThread");
+    tabsRef.current = nextTabs;
+    setTabs(nextTabs);
+    if (!nextTabs.some((tab) => tab.id === activeTabIdRef.current)) {
+      const fallback = nextTabs[0] ?? null;
+      if (fallback) {
+        setActiveTabInternal(fallback, { syncPanel: false, syncConversation: false });
+      } else {
+        activeTabIdRef.current = null;
+        setActiveTabId(null);
+      }
+    }
+  }, [setActiveTabInternal, workspaceProjectId]);
 
   const applyPersistedTabs = useCallback(() => {
     if (!workspaceProjectId) {
