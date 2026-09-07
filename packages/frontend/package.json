@@ -49,6 +49,7 @@
     "test:e2e": "node ./scripts/playwright-test.mjs",
     "test:e2e:component": "node ./scripts/playwright-test.mjs --project=component --max-failures=1",
     "test:e2e:bench": "PLAYWRIGHT_RUN_BENCH=1 node ./scripts/playwright-test.mjs tests/playwright/bench --max-failures=1",
+    "test:e2e:conversation-perf": "playwright test --config playwright.conversation-perf.config.ts",
     "test:e2e:smoke": "node ./scripts/playwright-test.mjs tests/playwright/smoke --max-failures=1",
     "test:e2e:smoke:core": "node ./scripts/playwright-test.mjs tests/playwright/api tests/playwright/smoke/conversation-smoke.spec.ts tests/playwright/smoke/file-explorer-ui.spec.ts tests/playwright/smoke/project-picker.spec.ts tests/playwright/smoke/runtime-ai-model-select.spec.ts --max-failures=1",
     "test:e2e:chat:voice:speech": "node ./scripts/playwright-test.mjs tests/playwright/smoke/chat-voice-speech.spec.ts --project=chromium --no-deps --max-failures=1",

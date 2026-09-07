@@ -46,6 +46,7 @@ import {
 import { useConversationControllerDispatch } from "./useConversationControllerDispatch";
 import { useConversationGoalContinuationEffects } from "./useConversationGoalContinuationEffects";
 import { ConversationMessageMetadataProvider } from "./ConversationMessageMetadata";
+import { studioPerformance } from "../telemetry/studioPerformance";
 
 const {
   listForProject: fetchProjectConversationsFromController,
@@ -333,6 +334,10 @@ export const ConversationsProvider = ({ children }: PropsWithChildren) => {
   );
 
   const selectConversation = useCallback((conversationId: string) => {
+    const current = latestStateRef.current;
+    if (current.activeId !== conversationId && current.conversations.some((entry) => entry.localId === conversationId)) {
+      studioPerformance.beginConversation(current.projectKey, conversationId);
+    }
     dispatch({ type: "SELECT", id: conversationId });
   }, []);
 

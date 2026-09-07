@@ -24,6 +24,23 @@ initialization use the same local status. Indicators announce their progress and
 reduced-motion preferences. A failed first chat-history load shows an explicit Retry action instead of looking
 like an empty chat. Previously loaded messages remain visible during background refresh failures.
 
+Files, Changes, reviews, and settings/management panels download their code when first opened.
+Chat and Home remain immediately available with the workspace. Panel downloads keep navigation
+and drawer Close controls available, show a local loading status, and offer Retry or Reload app on failure.
+Subsequent visits reuse the loaded panel code.
+
+An optional timing observer measures Studio startup and chat, space, and team switches; the
+public app sends no timing data by default. Its memory buffer holds at most 32 anonymous samples
+containing only the operation, outcome, duration, message-count bucket, narrow/wide viewport, and
+whether a readiness check was still waiting (`loadingShown`)—no identities, URLs, or message content.
+That flag includes access checks, discovery, conversation selection, and content loading; it does
+not prove that a spinner was painted or indicate a cache hit or miss. Readiness means the selected main chat or panel
+has committed and had a paint opportunity, including its code download; it does not wait for
+every later panel-data refresh. Trusted build-time integrations can subscribe and choose their
+own opt-in transport.
+Run-thread tabs use their displayed message count and wait for their parent chat's initial
+history. Explicit chat-history retries start a new timing attempt after a failed navigation.
+
 Settings lists keep their current-space rows visible during refresh. Automation refresh failures
 keep previously loaded rows with a persistent Retry notice; explicit access denial removes the
 cached rows. Secret and guest directories withhold protected records after a failed access check
