@@ -374,7 +374,7 @@ describe("PersonalBrowserSurface", () => {
     expect(model.navigate).not.toHaveBeenCalled();
   });
 
-  it("offers explicit browser and agent recovery actions instead of Pause", async () => {
+  it("offers recovery actions and keeps Pause reachable while native control is still enabled", async () => {
     const retryOpen = vi.fn();
     const errorModel = createModel();
     errorModel.retryOpen = retryOpen;
@@ -400,7 +400,10 @@ describe("PersonalBrowserSurface", () => {
     expect(browserRetry).toBeTruthy();
     await act(async () => browserRetry?.click());
     expect(retryOpen).toHaveBeenCalledTimes(1);
-    expect(container.querySelector('[aria-label="Pause agent control"]')).toBeNull();
+    const errorPause = container.querySelector<HTMLButtonElement>('[aria-label="Pause agent control"]');
+    expect(errorPause).not.toBeNull();
+    await act(async () => errorPause?.click());
+    expect(errorModel.setAgentControlEnabled).toHaveBeenCalledExactlyOnceWith(false, undefined);
 
     const retryAgentControl = vi.fn(async () => null);
     const agentErrorModel = createModel();
@@ -521,5 +524,59 @@ describe("PersonalBrowserSurface", () => {
     await render();
     expect(container.textContent).not.toContain("Done, continue");
     expect(onContinue).not.toHaveBeenCalled();
+  });
+
+  it("makes Done the only resume route after user-initiated takeover", async () => {
+    const model = createModel();
+    model.status = { ...model.status!, humanControlReady: false, approvalModes: ["ask", "routine"], approvalMode: "ask" };
+    model.setAgentControlEnabled = vi.fn(async () => ({ ...model.status!, agentControlEnabled: false, humanControlReady: true }));
+    const onContinue = vi.fn(async () => true);
+    const render = async () => act(async () => root.render(
+      <PersonalBrowserSurface active model={model} transportSelector={null} humanInputIdentityKey="conversation-a" onContinueAfterHumanInput={onContinue} />,
+    ));
+    await render();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-takeover"]')?.click());
+    expect(model.setAgentControlEnabled).toHaveBeenCalledExactlyOnceWith(false);
+    model.status = { ...model.status!, agentControlEnabled: false, humanControlReady: true };
+    await render();
+    expect(container.querySelector('[aria-label="Resume agent control"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Retry agent control"]')).toBeNull();
+    expect(container.textContent).toContain("use Done, continue to resume and send the next turn");
+    expect(container.textContent).not.toContain("Choose before Resume");
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')?.click());
+    expect(onContinue).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Take a fresh snapshot"), "ask");
+    expect(model.setAgentControlEnabled).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps failed handoff retries on Done while leaving Pause reachable after control resumes", async () => {
+    const model = createModel();
+    model.agentPhase = "unavailable";
+    model.agentError = "The previous continuation could not start";
+    model.status = { ...model.status!, agentControlEnabled: false, humanControlReady: true,
+      humanInputRequest: { version: 1, handoffId: "pending-manual-step", origin: "https://example.com", createdAtMs: Date.now(), expiresAtMs: Date.now() + 600_000, fields: [{ label: "Highlighted field 1" }] } };
+    let finish!: (sent: boolean) => void;
+    const onContinue = vi.fn().mockResolvedValueOnce(false).mockImplementationOnce(() => new Promise<boolean>((resolve) => { finish = resolve; }));
+    const render = async () => act(async () => root.render(
+      <PersonalBrowserSurface active model={model} transportSelector={null} humanInputIdentityKey="conversation-a" onContinueAfterHumanInput={onContinue} />,
+    ));
+    await render();
+    expect(container.querySelector('[aria-label="Resume agent control"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Retry agent control"]')).toBeNull();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')?.click());
+    expect(container.textContent).toContain("browser task was not sent");
+    expect(container.querySelector('[aria-label="Resume agent control"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Retry agent control"]')).toBeNull();
+    expect(model.setAgentControlEnabled).not.toHaveBeenCalled();
+    expect(model.retryAgentControl).not.toHaveBeenCalled();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="browser-human-input-continue"]')?.click());
+    model.status = { ...model.status!, agentControlEnabled: true, humanControlReady: false };
+    await render();
+    expect(container.querySelector('[aria-label="Retry agent control"]')).toBeNull();
+    const pause = container.querySelector<HTMLButtonElement>('[aria-label="Pause agent control"]');
+    expect(pause).not.toBeNull();
+    await act(async () => pause?.click());
+    expect(model.setAgentControlEnabled).toHaveBeenCalledExactlyOnceWith(false, undefined);
+    await act(async () => finish(false));
+    expect(onContinue).toHaveBeenCalledTimes(2);
   });
 });
