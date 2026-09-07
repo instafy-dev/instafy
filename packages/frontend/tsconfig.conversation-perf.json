@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "types": ["vite/client", "node"] },
+  "include": ["src/**/*.d.ts", "tests/playwright/conversation-perf/**/*.ts", "tests/playwright/conversation-perf/**/*.tsx", "playwright.conversation-perf.config.ts", "vite.conversation-perf.config.ts"],
+  "references": []
+}

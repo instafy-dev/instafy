@@ -24,6 +24,7 @@ import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { StudioDialogBody, StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
 import { Input } from "../../../components/Input";
 import { useStatus } from "../../../status/useStatus";
+import { studioPerformance } from "../../../telemetry/studioPerformance";
 import { useProfile } from "../../../profile/ProfileProvider";
 import { useProjects } from "../../../projects/useProjects";
 import { useMergedControllerProjects } from "../../../projects/useMergedControllerProjects";
@@ -721,6 +722,14 @@ export function StudioSidebar({
     orgId: workspaceOrgFilterId,
     includeAllOrgs: workspaceOrgKey === "all",
   });
+  const retryWorkspaceProjects = useCallback(() => {
+    if (pendingOrgSwitchKey) {
+      studioPerformance.begin("organization_switch", {
+        organizationId: pendingOrgSwitchKey === "personal" ? null : pendingOrgSwitchKey,
+      });
+    }
+    retryRemoteProjects();
+  }, [pendingOrgSwitchKey, retryRemoteProjects]);
   const controllerOrgInfoById = useMemo(() => {
     const map = new Map<string, { name: string; slug: string | null; avatarUrl: string | null }>();
     controllerOrgs.forEach((org) => {
@@ -919,6 +928,11 @@ export function StudioSidebar({
     // A programmatic reset abandons any in-flight team switch — clear the
     // pending markers or the clicked chip pulses forever and the sync effect
     // stays short-circuited by the stale ref.
+    if (pendingOrgContextSwitchRef.current) {
+      studioPerformance.cancelOrganizationDiscovery(
+        pendingOrgContextSwitchRef.current === "personal" ? null : pendingOrgContextSwitchRef.current,
+      );
+    }
     pendingOrgContextSwitchRef.current = null;
     setPendingOrgSwitchKey(null);
     setWorkspaceProjectQuery("");
@@ -933,6 +947,8 @@ export function StudioSidebar({
       if (!projectId || projectId === activeProjectId) {
         return;
       }
+      const destination = mergedProjects.find((entry) => entry.id === projectId);
+      studioPerformance.beginProject(projectId, destination?.orgId ?? null, activeProject?.orgId ?? null);
       if (!projectList.some((project) => project.id === projectId)) {
         const project = mergedProjects.find((entry) => entry.id === projectId);
         createProject({
@@ -944,7 +960,7 @@ export function StudioSidebar({
       }
       switchProject(projectId);
     },
-    [activeProjectId, createProject, mergedProjects, projectList, switchProject],
+    [activeProject?.orgId, activeProjectId, createProject, mergedProjects, projectList, switchProject],
   );
 
   const handleWorkspaceOrgChange = useCallback(
@@ -956,6 +972,8 @@ export function StudioSidebar({
       // successful discovery snapshot can resolve its destination.
       const pending =
         orgKey !== "all" && (activeProject?.orgId ?? "personal") !== orgKey ? orgKey : null;
+      if (pending) studioPerformance.begin("organization_switch", { organizationId: pending === "personal" ? null : pending });
+      else studioPerformance.cancel();
       pendingOrgContextSwitchRef.current = pending;
       setPendingOrgSwitchKey(pending);
     },
@@ -988,6 +1006,7 @@ export function StudioSidebar({
       (project) => (project.orgId ?? "personal") === pendingOrgKey,
     );
     if (orgProjects.length === 0) {
+      studioPerformance.cancel();
       showStatus("No spaces in this team yet — create one to get started.", "info", 3500);
       return;
     }
@@ -1174,7 +1193,7 @@ export function StudioSidebar({
       pendingOrgKey={pendingOrgSwitchKey}
       projectsError={mergedProjectsError}
       projectsRefreshing={mergedProjectsRefreshing}
-      onRetryProjects={retryRemoteProjects}
+      onRetryProjects={retryWorkspaceProjects}
       onWorkspaceOrgChange={handleWorkspaceOrgChange}
       onCreateOrg={
         runtimeControllerEnabled
