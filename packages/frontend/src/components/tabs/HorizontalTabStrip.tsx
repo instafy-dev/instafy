@@ -56,6 +56,7 @@ export function HorizontalTabStrip({
   testId,
 }: HorizontalTabStripProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const revealedActiveItemRef = useRef<HTMLElement | null>(null);
   const [hasOverflow, setHasOverflow] = useState(false);
   const [canScrollLeft, setCanScrollLeft] = useState(false);
   const [canScrollRight, setCanScrollRight] = useState(false);
@@ -79,6 +80,37 @@ export function HorizontalTabStrip({
     setCanScrollLeft(node.scrollLeft > 1);
     setCanScrollRight(node.scrollLeft < maxScrollLeft - 1);
   }, []);
+
+  const findActiveItem = useCallback(() => {
+    const candidates = viewportRef.current?.querySelectorAll<HTMLElement>(`[${activeItemAttribute}]`) ?? [];
+    return Array.from(candidates).find(
+      (candidate) => candidate.getAttribute(activeItemAttribute) === activeItemId,
+    );
+  }, [activeItemAttribute, activeItemId]);
+
+  const revealActiveItem = useCallback(() => {
+    const node = viewportRef.current;
+    // A strip can remain mounted while responsive navigation hides it. Reveal
+    // the active item after it has a visible viewport again.
+    if (!node || node.clientWidth === 0 || !activeItemId) {
+      return;
+    }
+    const activeNode = findActiveItem();
+    if (!activeNode) {
+      return;
+    }
+    const viewportLeft = node.getBoundingClientRect().left + node.clientLeft;
+    const viewportRight = viewportLeft + node.clientWidth;
+    const activeBounds = activeNode.getBoundingClientRect();
+    // Adjust only this strip; scrollIntoView can also move the surrounding page.
+    if (activeBounds.left < viewportLeft || activeBounds.width > node.clientWidth) {
+      node.scrollLeft += activeBounds.left - viewportLeft;
+    } else if (activeBounds.right > viewportRight) {
+      node.scrollLeft += activeBounds.right - viewportRight;
+    }
+    revealedActiveItemRef.current = activeNode;
+    syncScrollState();
+  }, [activeItemId, findActiveItem, syncScrollState]);
 
   const scrollByDirection = useCallback(
     (direction: HorizontalTabStripDirection) => {
@@ -131,6 +163,7 @@ export function HorizontalTabStrip({
       syncScrollState();
     };
     const handleResize = () => {
+      revealActiveItem();
       syncScrollState();
     };
     node.addEventListener("scroll", handleScroll, { passive: true });
@@ -138,9 +171,7 @@ export function HorizontalTabStrip({
 
     let resizeObserver: ResizeObserver | null = null;
     if (typeof ResizeObserver !== "undefined") {
-      resizeObserver = new ResizeObserver(() => {
-        syncScrollState();
-      });
+      resizeObserver = new ResizeObserver(handleResize);
       resizeObserver.observe(node);
       const contentNode = node.firstElementChild;
       if (contentNode instanceof HTMLElement) {
@@ -153,27 +184,22 @@ export function HorizontalTabStrip({
       window.removeEventListener("resize", handleResize);
       resizeObserver?.disconnect();
     };
-  }, [syncScrollState]);
+  }, [revealActiveItem, syncScrollState]);
 
   useEffect(() => {
     syncScrollState();
-  }, [children, overflowActions, syncScrollState]);
+    // Restored tabs may arrive after their active ID, including a layout whose
+    // overall width did not change. Ordinary child rerenders retain manual scroll.
+    if (findActiveItem() !== revealedActiveItemRef.current) {
+      revealActiveItem();
+    }
+  }, [children, findActiveItem, overflowActions, revealActiveItem, syncScrollState]);
 
   useEffect(() => {
-    if (!activeItemId) {
-      return;
-    }
-    const node = viewportRef.current;
-    if (!node) {
-      return;
-    }
-    const candidates = Array.from(node.querySelectorAll<HTMLElement>(`[${activeItemAttribute}]`));
-    const activeNode = candidates.find(
-      (candidate) => candidate.getAttribute(activeItemAttribute) === activeItemId,
-    );
-    activeNode?.scrollIntoView({ block: "nearest", inline: "nearest" });
-    syncScrollState();
-  }, [activeItemAttribute, activeItemId, syncScrollState]);
+    // Overflow controls take space when they first appear. Repeat after that
+    // layout change, but not when scrolling only updates enabled controls.
+    revealActiveItem();
+  }, [hasOverflow, revealActiveItem]);
 
   const hasOverflowActions = Boolean(overflowActions);
   const showInlineOverflowActions = hasOverflowActions && !hasOverflow;

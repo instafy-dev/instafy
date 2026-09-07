@@ -5,7 +5,6 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { useLocation, useNavigate } from "react-router-dom";
 import { ChatLines, Clock, Coins, Cpu, Cube, GitBranch, Globe, Group, Lock, Page, Puzzle, User, Xmark } from "iconoir-react";
 import { ResizablePanels } from "../components/ResizablePanels";
-import { CreditsPanel } from "./studio/components/CreditsPanel";
 import { fetchCreditPolicy } from "../credits/creditService";
 import { clearIdlePaused, markIdlePaused } from "../runtime/idlePauseRegistry";
 import { setRuntimeSizePreference } from "../runtime/runtimeSizePreference";
@@ -17,7 +16,6 @@ import { Heading } from "../components/Heading";
 import { Surface } from "../components/Surface";
 import { Text } from "../components/Text";
 import { ChatsIcon } from "../components/AppIcons";
-import { FilesPanel } from "./studio/components/FilesPanel";
 import {
   resolvePreferredFilesMobileViewForExplorerOpen,
   resolveStudioFilesMobileView,
@@ -25,9 +23,6 @@ import {
   type FilesPanelMobileView,
 } from "./studioFilesMobileView";
 import { buildGithubImportRetryIdentity } from "./studio/components/githubImportRetryRegistry";
-import { GitDiffView } from "./studio/components/GitDiffView";
-import { GitReviewView } from "./studio/components/GitReviewView";
-import { SourceControlDrawer } from "./studio/components/SourceControlDrawer";
 import { ParticipantsDrawer } from "./studio/components/ParticipantsDrawer";
 import {
   setParticipantsDrawerOpen,
@@ -44,14 +39,21 @@ import {
   type ControllerNoticeActionsContextValue,
 } from "./studio/components/ControllerNoticeActions";
 import { ProjectPickerPanel } from "./studio/components/ProjectPickerPanel";
-import { SettingsPanel } from "./studio/components/SettingsPanel";
-import { SecretsPanel } from "./studio/components/SecretsPanel";
-import { AiPanel } from "./studio/components/AiPanel";
-import { AutomationsPanel } from "./studio/components/AutomationsPanel";
-import { MachinesPanel } from "./studio/components/MachinesPanel";
 import { setMachinesPanelFocus } from "./studio/components/machinesPanelStore";
-import { ExtensionsPanel } from "./studio/components/ExtensionsPanel";
-import { SkillsPanel } from "./studio/components/SkillsPanel";
+import {
+  AiPanel,
+  AutomationsPanel,
+  CreditsPanel,
+  ExtensionsPanel,
+  FilesPanel,
+  GitDiffView,
+  GitReviewView,
+  MachinesPanel,
+  SecretsPanel,
+  SettingsPanel,
+  SkillsPanel,
+  SourceControlDrawer,
+} from "./studio/StudioLazyPanels";
 import { HomePanel } from "./studio/components/HomePanel";
 import { useStudioBugReportController } from "./studio/components/useStudioBugReportController";
 import { Status } from "../status/Status";
@@ -87,6 +89,7 @@ import { WorkspaceTabsProvider, useWorkspaceTabs } from "../workspace/WorkspaceT
 import type { WorkspaceGitReviewSource } from "../workspace/gitReviewTypes";
 import { ConversationHistoryTab } from "../workspace/ConversationHistoryTab";
 import { useWorkspaceActivity } from "../workspace/useWorkspaceActivity";
+import { useRecentConversations } from "../workspace/useRecentConversations";
 import { WorkspaceControlsProvider } from "./studio/workspaceControls";
 import { findReusableBlankConversation } from "../conversations/conversationAutoTitle";
 import {
@@ -109,6 +112,7 @@ import { controllerBaseUrl } from "../services/runtimeController/core";
 import { useAutoDesktopSpeechTunnel } from "../desktop/voiceTunnel/useAutoDesktopSpeechTunnel";
 import { useStudioLayoutChromeState } from "./useStudioLayoutChromeState";
 import { useStudioLayoutWorkspaceRouting } from "./useStudioLayoutWorkspaceRouting";
+import { StudioPanelPerformance } from "../telemetry/StudioPanelPerformance";
 
 
 const sidebarPrimaryAccentClass = "text-primary-600 dark:text-primary-500";
@@ -303,6 +307,7 @@ function StudioLayoutInner() {
     projectKey: conversationsProjectKey,
     conversations,
     activeConversationId,
+    remoteConversationHistoryResolved,
     createConversation,
     markConversationRead,
     selectConversation,
@@ -763,6 +768,8 @@ function StudioLayoutInner() {
   const {
     filesExplorerPortalTarget,
     handleFilesExplorerPortalRef,
+    workspaceSwitcherPortalTarget,
+    handleWorkspaceSwitcherPortalRef,
     handleLeftDrawerResizeStart,
     leftDrawer,
     leftDrawerResizing,
@@ -777,6 +784,24 @@ function StudioLayoutInner() {
     sourceControlOpenRequest,
     setSourceControlOpenRequest,
   } = useStudioLayoutChromeState({ isLargeScreen });
+  const visibleChatId = isChatSurfaceVisible && leftDrawer !== "history"
+    ? (activeWorkspaceTab?.kind === "conversation" || activeWorkspaceTab?.kind === "jobThread"
+      ? activeWorkspaceTab.conversationId
+      : activeConversationId)
+    : null;
+  const recentConversations = useRecentConversations({
+    conversations,
+    activeConversationId: visibleChatId,
+    userId: currentUserId,
+    projectKey: conversationsProjectKey,
+    // The local guest fallback has no authenticated remote history to wait for.
+    historyResolved: remoteConversationHistoryResolved || !auth.session,
+  });
+  const openConversationIds = useMemo(() => new Set(
+    workspaceTabs.flatMap((tab) => tab.kind === "conversation"
+      ? [tab.conversationId]
+      : []),
+  ), [workspaceTabs]);
   const {
     settingsTab,
     setSettingsTab,
@@ -1327,6 +1352,48 @@ function StudioLayoutInner() {
     }
   }, [isLargeScreen, leftDrawer, openPanelTab, requestHistoryPush, setLeftDrawer, setMobileSidebarOpen]);
 
+  const handleWorkspaceSwitcherOpenChange = useCallback((open: boolean) => {
+    if (open) {
+      if (leftDrawer !== "workspaces") {
+        requestHistoryPush();
+      }
+      setLeftDrawer("workspaces");
+      if (!isLargeScreen) {
+        setMobileSidebarOpen(true);
+      }
+    } else if (leftDrawer === "workspaces") {
+      requestHistoryPush();
+      setLeftDrawer(null);
+    }
+  }, [isLargeScreen, leftDrawer, requestHistoryPush, setLeftDrawer, setMobileSidebarOpen]);
+
+  const handleMobileSidebarOpenChange = useCallback((open: boolean) => {
+    setMobileSidebarOpen(open);
+    if (!open && leftDrawer === "workspaces") {
+      requestHistoryPush();
+      setLeftDrawer(null);
+    }
+  }, [leftDrawer, requestHistoryPush, setLeftDrawer, setMobileSidebarOpen]);
+
+  const handleOpenChatNavigation = useCallback(() => {
+    if (isLargeScreen) {
+      setSidebarCollapsed(false);
+      return;
+    }
+    if (leftDrawer) {
+      requestHistoryPush();
+      setLeftDrawer(null);
+    }
+    setMobileSidebarOpen(true);
+  }, [isLargeScreen, leftDrawer, requestHistoryPush, setLeftDrawer, setMobileSidebarOpen, setSidebarCollapsed]);
+
+  const handleSelectRecentConversation = useCallback((conversationId: string) => {
+    requestHistoryPush();
+    openConversationTab(conversationId, { preview: true });
+    setLeftDrawer(null);
+    setMobileSidebarOpen(false);
+  }, [openConversationTab, requestHistoryPush, setLeftDrawer, setMobileSidebarOpen]);
+
   const prepareWorkspaceForNewSession = useCallback((options?: { closeProjectLauncher?: boolean }) => {
     if (options?.closeProjectLauncher !== false) {
       setIsProjectLauncherOpen(false);
@@ -1701,7 +1768,7 @@ function StudioLayoutInner() {
     requestHistoryPush();
     setLeftDrawer(null);
     if (activeConversationId) {
-      openConversationTab(activeConversationId);
+      openConversationTab(activeConversationId, { preview: true });
       return;
     }
     openPanelTab("chat");
@@ -1800,7 +1867,7 @@ function StudioLayoutInner() {
   const shouldRenderFilesExplorerPortal =
     leftDrawer === "files" && !shouldShowFilesWorkspace;
   const showMobileLeftDrawerOverlay =
-    !isLargeScreen && leftDrawer !== null && !(leftDrawer === "files" && shouldShowFilesWorkspace);
+    !isLargeScreen && leftDrawer !== null && leftDrawer !== "workspaces" && !(leftDrawer === "files" && shouldShowFilesWorkspace);
   const topbarLocationOverride = showMobileLeftDrawerOverlay
     ? leftDrawer === "files"
       ? { title: "Files", icon: <Page className="text-[16px]" aria-hidden="true" /> }
@@ -1816,6 +1883,7 @@ function StudioLayoutInner() {
   const workspaceTabsElement = null;
 
   let workspaceContent: ReactNode;
+  let workspaceContentIsLazy = false;
   if (projectAccessBlocked) {
     const scroller = (
       <div className={`flex-1 overflow-y-auto ${scrollPaddingClass}`}>
@@ -1832,6 +1900,7 @@ function StudioLayoutInner() {
       </div>
     );
   } else if (shouldShowFilesWorkspace) {
+    workspaceContentIsLazy = true;
     workspaceContent = (
       <FilesPanel
         tabsSlot={workspaceTabsElement}
@@ -1867,10 +1936,12 @@ function StudioLayoutInner() {
       </div>
     );
   } else if (activeWorkspaceTab.kind === "gitDiff") {
+    workspaceContentIsLazy = true;
     workspaceContent = (
       <GitDiffView path={activeWorkspaceTab.path} commitRange={activeWorkspaceTab.commitRange} />
     );
   } else if (activeWorkspaceTab.kind === "gitReview") {
+    workspaceContentIsLazy = true;
     workspaceContent = <GitReviewView review={activeWorkspaceTab.review} />;
   } else if (activeWorkspaceTab.kind === "panel") {
     if (activeWorkspaceTab.panel === "chat") {
@@ -1882,6 +1953,7 @@ function StudioLayoutInner() {
         </div>
       );
     } else if (activeWorkspaceTab.panel === "sourceControl") {
+      workspaceContentIsLazy = true;
       workspaceContent = (
         <div className="flex h-full flex-col overflow-hidden">
           <SourceControlDrawer openRequest={sourceControlOpenRequest} />
@@ -1903,6 +1975,7 @@ function StudioLayoutInner() {
         </div>
       );
     } else {
+      workspaceContentIsLazy = activeWorkspaceTab.panel !== "home";
       const scroller = (
         <div className={`flex-1 overflow-y-auto ${scrollPaddingClass}`}>
           {activeWorkspaceTab.panel === "home" ? (
@@ -1932,6 +2005,21 @@ function StudioLayoutInner() {
         </div>
       );
     }
+  }
+  if (!isChatSurfaceVisible || projectAccessBlocked) {
+    workspaceContent = (
+      <StudioPanelPerformance
+        projectId={activeProjectId}
+        organizationId={activeProjectSummary?.orgId ?? null}
+        enabled={!activeProjectId || conversationsProjectKey === activeProjectId}
+        loading={!projectReadyForWorkspace || !workspaceContent || (!activeWorkspaceTab && !projectAccessBlocked)}
+        error={projectReadyForWorkspace && projectAccessBlocked}
+        deferred={workspaceContentIsLazy}
+        requestedPanel={projectAccessBlocked ? "projects" : activePanel}
+      >
+        {workspaceContent}
+      </StudioPanelPerformance>
+    );
   }
   const workspaceSurface = shouldShowFilesWorkspace ? (
     <div className="flex h-full min-w-0 flex-col overflow-hidden bg-white text-slate-700 shadow-sm dark:bg-[var(--color-studio-dark-panel)] dark:text-slate-200">
@@ -2010,6 +2098,7 @@ function StudioLayoutInner() {
             sidebarCollapsed,
             sidebarOpen: isLargeScreen ? !sidebarCollapsed : mobileSidebarOpen,
             onToggleSidebar: handleToggleSidebar,
+            onOpenChatNavigation: handleOpenChatNavigation,
             onStartNewProject: handleNewProject,
             onStartNewConversation: createFreshConversation,
             onStartPrivateConversation: handleCreatePrivateConversation,
@@ -2038,7 +2127,14 @@ function StudioLayoutInner() {
                 pinnedPanel={null}
                 onSelect={handlePanelSelect}
                 onOpenConversationHistory={handleOpenConversationHistory}
+                recentConversations={recentConversations}
+                activeConversationId={visibleChatId}
+                openConversationIds={openConversationIds}
+                onSelectConversation={handleSelectRecentConversation}
                 isConversationHistoryActive={isConversationHistoryActive}
+                workspaceSwitcherOpen={leftDrawer === "workspaces"}
+                onWorkspaceSwitcherOpenChange={handleWorkspaceSwitcherOpenChange}
+                workspaceSwitcherPortalTarget={workspaceSwitcherPortalTarget}
                 collapsed={sidebarCollapsed}
               />
           ) : null}
@@ -2056,6 +2152,12 @@ function StudioLayoutInner() {
                       requestHistoryPush();
                       setLeftDrawer(null);
                     }}
+                  />
+                ) : leftDrawer === "workspaces" ? (
+                  <div
+                    ref={handleWorkspaceSwitcherPortalRef}
+                    className="flex-1 min-h-0"
+                    data-testid="workspace-switcher-drawer"
                   />
                 ) : leftDrawer === "files" ? (
                   <div
@@ -2138,14 +2240,14 @@ function StudioLayoutInner() {
           </div>
 
           {!isLargeScreen && mobileSidebarOpen ? (
-            <StudioMobileSidebarOverlay onClose={() => setMobileSidebarOpen(false)}>
+            <StudioMobileSidebarOverlay onClose={() => handleMobileSidebarOpenChange(false)}>
               <StudioSidebar
                 mobileOverlay
                 items={sidebarItems}
                 moreItems={sidebarMoreItems}
                 activePanel={sidebarActivePanel}
                 pinnedPanel={null}
-                onRequestClose={() => setMobileSidebarOpen(false)}
+                onRequestClose={() => handleMobileSidebarOpenChange(false)}
                 onSelect={(panel) => {
                   handlePanelSelect(panel);
                   setMobileSidebarOpen(false);
@@ -2155,6 +2257,13 @@ function StudioLayoutInner() {
                   setMobileSidebarOpen(false);
                 }}
                 isConversationHistoryActive={isConversationHistoryActive}
+                workspaceSwitcherOpen={leftDrawer === "workspaces"}
+                onWorkspaceSwitcherOpenChange={handleWorkspaceSwitcherOpenChange}
+                workspaceSwitcherPortalTarget={workspaceSwitcherPortalTarget}
+                recentConversations={recentConversations}
+                activeConversationId={visibleChatId}
+                openConversationIds={openConversationIds}
+                onSelectConversation={handleSelectRecentConversation}
                 collapsed={false}
               />
             </StudioMobileSidebarOverlay>

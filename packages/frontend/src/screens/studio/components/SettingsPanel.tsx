@@ -138,9 +138,10 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
   const [projectDefaultsRefreshPending, setProjectDefaultsRefreshPending] = useState(false);
   const [settingsProviders, setSettingsProviders] = useState<LocalProviderSummary[]>([]);
   const [orgCategory, setOrgCategory] = useState<"members" | "ai" | "billing" | "danger">("members");
-  const [projectCategory, setProjectCategory] = useState<ProjectSettingsCategory>(
-    () => resolveProjectSettingsCategory(location.search) ?? "overview",
-  );
+  // The URL owns the selected category. A local optimistic copy can be reset
+  // from the previous URL while navigation is pending, especially for Overview
+  // whose canonical URL intentionally omits settingsCategory.
+  const projectCategory = resolveProjectSettingsCategory(location.search) ?? "overview";
   const [projectAiItemId, setProjectAiItemId] = useState<string | null>(null);
   const [profileCategory, setProfileCategory] = useState<"account" | "preferences">("account");
   const [gitAutoSyncAfterApply, setGitAutoSyncAfterApply] = useState<boolean>(() =>
@@ -1403,14 +1404,10 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
   );
 
   useEffect(() => {
-    const category = resolveProjectSettingsCategory(location.search);
-    if (category && category !== projectCategory) {
-      setProjectCategory(category);
-      if (category !== "ai") {
-        setProjectAiItemId(null);
-      }
+    if (projectCategory !== "ai") {
+      setProjectAiItemId(null);
     }
-  }, [location.search, projectCategory]);
+  }, [projectCategory]);
 
   const handleCategoryChange = useCallback(
     (next: string) => {
@@ -1422,10 +1419,6 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
       }
       if (activeTab === "project") {
         if (next === "overview" || next === "access" || next === "providers" || next === "ai" || next === "danger") {
-          setProjectCategory(next);
-          if (next !== "ai") {
-            setProjectAiItemId(null);
-          }
           syncSettingsCategoryParam(next);
         }
         return;

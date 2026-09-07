@@ -1,12 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Lock, MoreHoriz, Plus, Search, Trash, Xmark } from "iconoir-react";
+import { Check, Filter, Lock, MoreHoriz, Pin, Plus, Trash, Xmark } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
-import { ChatsIcon } from "../components/AppIcons";
 import { IconButton } from "../components/Button";
 import { EntityRow } from "../components/EntityRow";
 import { Input } from "../components/Input";
 import { LoadingStatus } from "../components/LoadingStatus";
-import { ToolbarMenuSelect } from "../components/ToolbarMenuSelect";
 import { TreeDisclosureButton, TreeRowMarkerSlot } from "../components/TreeDisclosureButton";
 import { useConversations } from "../conversations/ConversationsProvider";
 import { isEmptyConversationPlaceholder } from "../conversations/conversationState";
@@ -14,12 +12,17 @@ import type { ConversationLifecycleStatus } from "../conversations/Conversations
 import { MenuItemContent } from "../components/MenuItemContent";
 import { StudioPopover } from "../components/aria/StudioPopover";
 import { StudioMenu, StudioMenuItem, StudioMenuSeparator } from "../components/aria/StudioMenu";
-import { DRAWER_ICON_BUTTON_TONE_CLASS } from "../components/listRowStyles";
+import {
+  DRAWER_ICON_BUTTON_TONE_CLASS,
+  PICKER_LIST_ROW_ACTIVE_CLASS,
+  PICKER_LIST_ROW_GEOMETRY_CLASS,
+  pickerListRowTextClassName,
+} from "../components/listRowStyles";
+import { DARK_DIVIDER_BORDER_CLASS } from "../theme/darkSurfaces";
 import { controllerClient } from "../sdk/instafy";
 import { useWorkspaceTabs } from "./WorkspaceTabsProvider";
 import { useStatus } from "../status/useStatus";
-import { useBreakpoint } from "../hooks/useBreakpoint";
-import { useTouchLikeInput } from "../hooks/useTouchLikeInput";
+import { useStudioDesktopLayout } from "../screens/studio/useStudioDesktopLayout";
 import { DrawerHeader } from "../components/DrawerHeader";
 import { SearchInput } from "../components/SearchInput";
 
@@ -39,18 +42,17 @@ export function ConversationHistoryTab({
     setConversationTitle,
     remoteConversationHistoryResolved,
   } = useConversations();
-  const { tabs, closeTab, openConversationTab, requestUrlPush } = useWorkspaceTabs();
+  const { tabs, closeTab, keepTabOpen, openConversationTab, requestUrlPush } = useWorkspaceTabs();
   const { showStatus } = useStatus();
-  const isLargeScreen = useBreakpoint("lg");
-  const touchDrawer = useTouchLikeInput() && !isLargeScreen;
-  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const isLargeScreen = useStudioDesktopLayout();
+  const compactDrawer = isLargeScreen;
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<ConversationLifecycleStatus>("active");
+  const [filterMenuOpen, setFilterMenuOpen] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [mobileSearchOpen, setMobileSearchOpen] = useState(() => query.trim().length > 0);
   // Inline rename is only reachable through the row's "…" menu: the edit state
   // borrows the real Input look (border + focus ring) so it reads as editable,
-  // while plain selection stays a fill (EntityRow selected) — see #139.
+  // while plain selection stays a fill around the complete row — see #139.
   const [rename, setRename] = useState<{ conversationId: string; draft: string } | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameIgnoreBlurRef = useRef(false);
@@ -67,33 +69,14 @@ export function ConversationHistoryTab({
     return () => window.cancelAnimationFrame(frameId);
   }, [rename?.conversationId]);
 
-  useEffect(() => {
-    if (isLargeScreen) {
-      setMobileSearchOpen(false);
-      return;
-    }
-    if (query.trim().length > 0) {
-      setMobileSearchOpen(true);
-    }
-  }, [isLargeScreen, query]);
-
-  useEffect(() => {
-    if (isLargeScreen || !mobileSearchOpen) {
-      return;
-    }
-    const frameId = window.requestAnimationFrame(() => {
-      searchInputRef.current?.focus();
-    });
-    return () => window.cancelAnimationFrame(frameId);
-  }, [isLargeScreen, mobileSearchOpen]);
-
   const openConversationTabs = useMemo(() => {
     const conversationTabs = tabs.filter(
       (tab): tab is Extract<(typeof tabs)[number], { kind: "conversation" }> => tab.kind === "conversation"
     );
     const openIds = new Set(conversationTabs.map((tab) => tab.conversationId));
     const tabIdByConversationId = new Map(conversationTabs.map((tab) => [tab.conversationId, tab.id]));
-    return { openIds, tabIdByConversationId };
+    const previewIds = new Set(conversationTabs.filter((tab) => tab.preview).map((tab) => tab.conversationId));
+    return { openIds, tabIdByConversationId, previewIds };
   }, [tabs]);
 
   const conversationTreeIndex = useMemo(() => {
@@ -250,9 +233,7 @@ export function ConversationHistoryTab({
   );
 
   // The marker gutter exists for structure (disclosure arrows, nesting, the
-  // private-chat lock). A flat list of public chats — the common case — should
-  // not pay a whole column for it; the active dot alone never reserves the
-  // gutter and is overlaid on the row edge instead (#139).
+  // private-chat lock). A flat list of public chats does not reserve that column.
   const showMarkerGutter = useMemo(
     () =>
       visibleRows.some((row) => {
@@ -288,19 +269,15 @@ export function ConversationHistoryTab({
 
   const filterOptions = useMemo(
     () => [
-      { value: "active" as const, label: `Active (${counts.active})` },
-      { value: "archived" as const, label: `Archived (${counts.archived})` },
-      { value: "hidden" as const, label: `Hidden (${counts.hidden})` },
-      { value: "deleted" as const, label: `Trash (${counts.deleted})` },
+      { value: "active" as const, label: "Active", count: counts.active, title: "All chats" },
+      { value: "archived" as const, label: "Archived", count: counts.archived, title: "Archived chats" },
+      { value: "hidden" as const, label: "Hidden", count: counts.hidden, title: "Hidden chats" },
+      { value: "deleted" as const, label: "Trash", count: counts.deleted, title: "Trash" },
     ],
     [counts.active, counts.archived, counts.hidden, counts.deleted],
   );
-  const filterHeaderLabel: Record<ConversationLifecycleStatus, string> = {
-    active: "Active conversations",
-    archived: "Archived conversations",
-    hidden: "Hidden conversations",
-    deleted: "Trash",
-  };
+  const selectedFilter = filterOptions.find((option) => option.value === filter) ?? filterOptions[0];
+  const hasStatusFilter = filter !== "active";
 
   const handleConversationLifecycleChange = (
     conversationId: string,
@@ -421,121 +398,120 @@ export function ConversationHistoryTab({
     void commitRename();
   };
 
-  const handleToggleMobileSearch = () => {
-    if (mobileSearchOpen) {
-      if (query.trim().length > 0) {
-        setQuery("");
-      }
-      setMobileSearchOpen(false);
-      return;
-    }
-    setMobileSearchOpen(true);
-  };
-
-  const showSearchInput = isLargeScreen || mobileSearchOpen || touchDrawer;
-  const showCollapsedHeaderFilter = !isLargeScreen && !mobileSearchOpen && !touchDrawer;
-
-  const renderFilterSelect = (className: string) => (
-    <ToolbarMenuSelect
-      options={filterOptions.map((option) => ({ id: option.value, label: option.label }))}
-      value={filter}
-      onSelect={(value) => setFilter(value as ConversationLifecycleStatus)}
-      ariaLabel="Filter conversations by status"
-      triggerTestId="conversation-history-filter"
-      className={className}
-    />
-  );
-
   return (
-    <div className="flex h-full flex-col p-3" data-testid="conversation-history-panel">
-      <DrawerHeader
-        title="Chats"
-        subtitle={touchDrawer ? `${filterHeaderLabel[filter]} · ${counts[filter]}` : undefined}
-        density={touchDrawer ? "touch" : "compact"}
-        icon={
-          <ChatsIcon
-            className={[
-              touchDrawer ? "h-5 w-5" : "h-4 w-4",
-              "text-slate-700 dark:text-slate-200",
-            ].join(" ")}
-            aria-hidden="true"
+    <div className="flex h-full min-h-0 min-w-0 flex-col" data-testid="conversation-history-panel">
+      <div className={`shrink-0 space-y-3 border-b border-slate-200/70 px-4 pb-3 pt-4 ${DARK_DIVIDER_BORDER_CLASS}`}>
+        <DrawerHeader
+          title={selectedFilter.title}
+          titleAs="h2"
+          titleClassName="!text-base !font-semibold"
+          actions={
+            <>
+              {onStartNewConversation ? (
+                <IconButton
+                  variant="ghost"
+                  size={compactDrawer ? "sm" : "lg"}
+                  radius="full"
+                  aria-label="New chat"
+                  title="New chat"
+                  onPress={() => {
+                    setFilter("active");
+                    setQuery("");
+                    onStartNewConversation();
+                    if (!isLargeScreen) {
+                      onRequestClose?.();
+                    }
+                  }}
+                  data-testid="conversation-history-new-chat"
+                  className={DRAWER_ICON_BUTTON_TONE_CLASS}
+                >
+                  <Plus className="h-4 w-4" aria-hidden="true" />
+                </IconButton>
+              ) : null}
+              {onRequestClose ? (
+                <IconButton
+                  variant="ghost"
+                  size={compactDrawer ? "sm" : "lg"}
+                  radius="full"
+                  aria-label="Close chat history"
+                  title="Close chat history"
+                  onPress={onRequestClose}
+                  data-testid="conversation-history-close"
+                  className={DRAWER_ICON_BUTTON_TONE_CLASS}
+                >
+                  <Xmark className="h-4 w-4" aria-hidden="true" />
+                </IconButton>
+              ) : null}
+            </>
+          }
+        />
+        <div className="relative">
+          <SearchInput
+            id="conversation-history-search"
+            label="Search conversations"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search chats"
+            size="md"
+            radius="xl"
+            className={`pr-12 pointer-coarse:min-h-12 ${compactDrawer ? "min-h-10" : "min-h-12"}`}
+            data-testid="conversation-history-search"
           />
-        }
-        actions={
-          <>
-            {showCollapsedHeaderFilter ? renderFilterSelect("shrink-0") : null}
-            {!isLargeScreen && !mobileSearchOpen && !touchDrawer ? (
+          <div className="absolute right-1 top-1/2 -translate-y-1/2">
+            <MenuTrigger isOpen={filterMenuOpen} onOpenChange={setFilterMenuOpen}>
               <IconButton
                 variant="ghost"
-                size="xs"
-                radius="full"
-                aria-label="Search conversations"
-                title="Search conversations"
-                onPress={handleToggleMobileSearch}
-                data-testid="conversation-history-search-toggle"
-                className={`h-10 w-10 lg:h-6 lg:w-6 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
+                size={compactDrawer ? "sm" : "lg"}
+                radius="lg"
+                aria-label={`Filter chats: ${selectedFilter.label}`}
+                title={`Filter chats: ${selectedFilter.label}`}
+                data-testid="conversation-history-filter"
+                className={DRAWER_ICON_BUTTON_TONE_CLASS}
               >
-                <Search className="h-4 w-4" aria-hidden="true" />
+                <span className="relative h-4 w-4">
+                  <Filter className="h-4 w-4" aria-hidden="true" />
+                  {hasStatusFilter ? (
+                    <span
+                      aria-hidden="true"
+                      data-testid="conversation-history-filter-indicator"
+                      className="absolute -right-1 -top-1 h-1.5 w-1.5 rounded-full bg-primary-500"
+                    />
+                  ) : null}
+                </span>
               </IconButton>
-            ) : null}
-            {onStartNewConversation ? (
-              <IconButton
-                variant="ghost"
-                size={touchDrawer ? "lg" : "xs"}
-                radius="full"
-                aria-label="New chat"
-                title="New chat"
-                onPress={() => {
-                  onStartNewConversation();
-                  if (!isLargeScreen) {
-                    onRequestClose?.();
-                  }
-                }}
-                data-testid="conversation-history-new-chat"
-                className={touchDrawer ? DRAWER_ICON_BUTTON_TONE_CLASS : `h-10 w-10 lg:h-6 lg:w-6 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
-              >
-                <Plus className="h-4 w-4" aria-hidden="true" />
-              </IconButton>
-            ) : null}
-          </>
-        }
-      />
-
-      {showSearchInput ? (
-        <div className={["mt-3 flex items-center gap-2", touchDrawer ? "flex-wrap" : ""].join(" ")}>
-          <div className={touchDrawer ? "w-full" : "min-w-0 flex-1"}>
-            <SearchInput
-              ref={searchInputRef}
-              id="conversation-history-search"
-              label="Search conversations"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder={touchDrawer ? "Search chats or spaces" : "Search conversations"}
-              size={touchDrawer ? "lg" : "sm"}
-              radius={touchDrawer ? "full" : "xl"}
-              className={touchDrawer ? "bg-white/90 shadow-sm shadow-slate-900/5 dark:bg-[var(--color-studio-dark-raised-control)] dark:shadow-none" : undefined}
-              data-testid="conversation-history-search"
-            />
+              <StudioPopover placement="bottom end" offset={6} className="w-48 p-1">
+                <StudioMenu
+                  aria-label="Chat status"
+                  selectionMode="single"
+                  selectedKeys={new Set([filter])}
+                  onAction={(key) => {
+                    const selected = filterOptions.find((option) => option.value === key);
+                    if (selected) {
+                      setFilter(selected.value);
+                    }
+                    setFilterMenuOpen(false);
+                  }}
+                >
+                  {filterOptions.map((option) => (
+                    <StudioMenuItem
+                      key={option.value}
+                      id={option.value}
+                      textValue={`${option.label} (${option.count})`}
+                      className="pointer-coarse:min-h-11"
+                    >
+                      <MenuItemContent end={option.value === filter ? <Check aria-hidden="true" /> : undefined}>
+                        {option.label} ({option.count})
+                      </MenuItemContent>
+                    </StudioMenuItem>
+                  ))}
+                </StudioMenu>
+              </StudioPopover>
+            </MenuTrigger>
           </div>
-          {renderFilterSelect(touchDrawer ? "min-w-[9.5rem] flex-1" : "w-[8.5rem] shrink-0")}
-          {!isLargeScreen && !touchDrawer ? (
-            <IconButton
-              variant="ghost"
-              size="xs"
-              radius="full"
-              aria-label="Close conversation search"
-              title="Close search"
-              onPress={handleToggleMobileSearch}
-              data-testid="conversation-history-search-toggle"
-              className={`h-10 w-10 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
-            >
-              <Xmark className="h-4 w-4" aria-hidden="true" />
-            </IconButton>
-          ) : null}
         </div>
-      ) : null}
+      </div>
 
-      <div className={["flex-1 overflow-y-auto pr-1", touchDrawer ? "mt-4" : "mt-3"].join(" ")}>
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
         {historyPending ? (
           <div
             className="flex h-full items-center justify-center px-4 py-10"
@@ -548,7 +524,7 @@ export function ConversationHistoryTab({
             <span className="text-sm text-slate-500 dark:text-slate-400">No conversations found.</span>
           </div>
         ) : (
-          <div className={["flex flex-col", touchDrawer ? "gap-1.5" : "gap-1"].join(" ")} data-testid="conversation-history-list">
+          <div className="flex flex-col gap-1" data-testid="conversation-history-list">
             {visibleRows.map((row) => {
               const conversation = conversationTreeIndex.byId.get(row.id) ?? null;
               if (!conversation) {
@@ -565,20 +541,20 @@ export function ConversationHistoryTab({
                 if (shouldPush) {
                   requestUrlPush();
                 }
-                openConversationTab(conversation.localId);
+                openConversationTab(conversation.localId, { preview: true });
                 if (!isLargeScreen) {
                   onRequestClose?.();
                 }
               };
               const leadingMarker = showMarkerGutter ? (
-                <TreeRowMarkerSlot depth={row.depth} className={touchDrawer ? "h-8 w-8" : undefined}>
+                <TreeRowMarkerSlot depth={row.depth} className="max-[900px]:h-11 max-[900px]:w-11 pointer-coarse:h-11 pointer-coarse:w-11">
                   {row.hasChildren ? (
                     <TreeDisclosureButton
                       expanded={row.expanded}
                       label={row.expanded ? "Collapse threads" : "Expand threads"}
                       title={row.expanded ? "Collapse threads" : "Expand threads"}
                       testId="conversation-history-toggle"
-                      className={touchDrawer ? "h-8 w-8" : undefined}
+                      className="max-[900px]:h-11 max-[900px]:w-11 pointer-coarse:h-11 pointer-coarse:w-11 [&>svg]:h-4 [&>svg]:w-4"
                       onPress={() => {
                         setExpanded((current) => ({
                           ...current,
@@ -586,24 +562,10 @@ export function ConversationHistoryTab({
                         }));
                       }}
                     />
-                  ) : isActive ? (
-                    <span className={touchDrawer ? "h-2.5 w-2.5 rounded-full bg-primary-500" : "h-1.5 w-1.5 rounded-full bg-primary-500"} aria-hidden="true" />
                   ) : conversation.visibility === "private" ? (
-                    <Lock className={touchDrawer ? "h-5 w-5 text-slate-400 dark:text-slate-500" : "h-4 w-4 text-slate-400 dark:text-slate-500"} aria-hidden="true" />
+                    <Lock className={!compactDrawer ? "h-5 w-5 text-slate-400 dark:text-slate-500" : "h-4 w-4 text-slate-400 dark:text-slate-500"} aria-hidden="true" />
                   ) : null}
                 </TreeRowMarkerSlot>
-              ) : null;
-              // Without the gutter, the active dot rides the row's own edge so
-              // it costs no width. The row's left padding (below) is sized so
-              // the title glyphs keep a clear ~6px gap from the dot.
-              const overlayActiveDot = !showMarkerGutter && isActive ? (
-                <span
-                  className={[
-                    "absolute left-1 top-1/2 -translate-y-1/2 rounded-full bg-primary-500",
-                    touchDrawer ? "h-2 w-2" : "h-1.5 w-1.5",
-                  ].join(" ")}
-                  aria-hidden="true"
-                />
               ) : null;
               if (rename?.conversationId === conversation.localId) {
                 return (
@@ -639,36 +601,34 @@ export function ConversationHistoryTab({
               return (
                 <EntityRow
                   key={conversation.localId}
-                  containerClassName="gap-0"
+                  containerClassName={[
+                    "group/history-row !gap-0 rounded-xl pr-1 transition-colors",
+                    isActive
+                      ? PICKER_LIST_ROW_ACTIVE_CLASS
+                      : "hover:bg-slate-50 dark:hover:bg-[var(--color-studio-dark-rail-hover)]",
+                  ].join(" ")}
+                  surface="plain"
                   leadingAccessory={leadingMarker}
-                  title={
-                    overlayActiveDot ? (
-                      <>
-                        {overlayActiveDot}
-                        {conversation.title}
-                      </>
-                    ) : (
-                      conversation.title
-                    )
-                  }
+                  title={conversation.title}
                   pressable
                   selected={isActive}
-                  density={touchDrawer ? "rich" : "dense"}
+                  density="compact"
                   onPress={() => openConversation()}
                   isDisabled={isDeleted}
                   data-testid="conversation-history-item"
                   aria-current={isActive ? "page" : undefined}
-                  titleClassName={isDeleted ? "line-through text-slate-400 dark:text-slate-500" : ""}
+                  titleClassName={isDeleted ? "!font-normal line-through !text-slate-400 dark:!text-slate-500" : pickerListRowTextClassName(isActive)}
                   end={
                     // A conversation a schedule opens says so; nothing else changes.
                     conversation.threadKind === "automation" ? (
-                      <span className="text-xxs text-slate-400 dark:text-slate-500">Scheduled</span>
+                      <span className="text-xs text-slate-500 dark:text-slate-400">Scheduled</span>
                     ) : undefined
                   }
                   className={
                     [
-                      showMarkerGutter ? "pl-0" : touchDrawer ? "relative pl-[1.125rem]" : "relative pl-4",
-                      touchDrawer ? "rounded-2xl" : "",
+                      PICKER_LIST_ROW_GEOMETRY_CLASS,
+                      showMarkerGutter ? "!pl-1" : "!pl-3.5",
+                      "!border-0 !bg-transparent !rounded-xl !py-2",
                       isDeleted ? "opacity-70" : "",
                     ]
                       .filter(Boolean)
@@ -688,10 +648,11 @@ export function ConversationHistoryTab({
                           <IconButton
                             variant="ghost"
                             radius="full"
-                            size={touchDrawer ? "lg" : "xs"}
+                            size={compactDrawer ? "sm" : "lg"}
                             aria-label={`Manage ${conversation.title}`}
                             data-testid={`conversation-history-menu-${conversation.localId}`}
-                            className={DRAWER_ICON_BUTTON_TONE_CLASS}
+                            title={`Manage ${conversation.title}`}
+                            className={`max-[900px]:min-h-11 max-[900px]:min-w-11 ${DRAWER_ICON_BUTTON_TONE_CLASS}`}
                           >
                             <MoreHoriz className="h-4 w-4" aria-hidden="true" />
                           </IconButton>
@@ -700,7 +661,12 @@ export function ConversationHistoryTab({
                               aria-label="Conversation actions"
                               onAction={(key) => {
                                 const action = String(key);
-                                if (action === "rename") {
+                                if (action === "keep-open") {
+                                  const tabId = openConversationTabs.tabIdByConversationId.get(conversation.localId);
+                                  if (tabId) keepTabOpen(tabId);
+                                } else if (action === "close-tab") {
+                                  handleCloseConversationTab(conversation.localId);
+                                } else if (action === "rename") {
                                   beginRename(conversation.localId);
                                 } else if (action === "restore") {
                                   handleConversationLifecycleChange(conversation.localId, "active");
@@ -715,6 +681,16 @@ export function ConversationHistoryTab({
                                 }
                               }}
                             >
+                              {openConversationTabs.previewIds.has(conversation.localId) ? (
+                                <StudioMenuItem id="keep-open" data-testid="conversation-history-menu-keep-open">
+                                  <MenuItemContent start={<Pin aria-hidden="true" />}>Keep open</MenuItemContent>
+                                </StudioMenuItem>
+                              ) : null}
+                              {isOpen ? (
+                                <StudioMenuItem id="close-tab" data-testid="conversation-history-menu-close-tab">
+                                  <MenuItemContent start={<Xmark aria-hidden="true" />}>Close tab</MenuItemContent>
+                                </StudioMenuItem>
+                              ) : null}
                               {conversation.lifecycleStatus !== "deleted" ? (
                                 <StudioMenuItem id="rename" data-testid="conversation-history-menu-rename">
                                   <MenuItemContent>Rename</MenuItemContent>
@@ -756,27 +732,6 @@ export function ConversationHistoryTab({
                           </StudioPopover>
                         </MenuTrigger>
                       </div>
-                      {isOpen ? (
-                        <div
-                          onClick={(event) => {
-                            event.stopPropagation();
-                          }}
-                          onKeyDown={(event) => {
-                            event.stopPropagation();
-                          }}
-                        >
-                          <IconButton
-                            variant="ghost"
-                            radius="full"
-                            size={touchDrawer ? "lg" : "xs"}
-                            aria-label={`Close ${conversation.title}`}
-                            onPress={() => handleCloseConversationTab(conversation.localId)}
-                            className={DRAWER_ICON_BUTTON_TONE_CLASS}
-                          >
-                            <Xmark className="h-3.5 w-3.5" aria-hidden="true" />
-                          </IconButton>
-                        </div>
-                      ) : null}
                     </div>
                   }
                 />

@@ -101,7 +101,7 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
       radius="2xl"
       shadow="none"
       padding="sm"
-      className={compact ? "p-3" : ""}
+      className="@container/profile-editor"
     >
       {!compact ? (
         <div className="mb-4">
@@ -115,7 +115,7 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
       ) : null}
       <div className="flex flex-col gap-4">
         <div className="flex flex-wrap items-center gap-4">
-          <div className="flex h-14 w-14 items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-slate-50 text-sm font-semibold text-slate-700">
+          <div className="flex h-14 w-14 items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-slate-50 text-sm font-semibold text-slate-700 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-raised-control)] dark:text-slate-100">
             {avatarPreview ? (
               <img src={avatarPreview} alt="" className="h-full w-full object-cover" />
             ) : (
@@ -135,7 +135,7 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
               variant="outline"
               size="xs"
               radius="full"
-              className="gap-2 text-slate-600 hover:bg-slate-50 data-[hovered]:bg-slate-50"
+              className="gap-2"
             >
               <Camera className="text-base" aria-hidden="true" />
               Upload photo
@@ -146,7 +146,7 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
                 variant="outline"
                 size="xs"
                 radius="full"
-                className="gap-2 text-slate-500 hover:bg-slate-50 data-[hovered]:bg-slate-50"
+                className="gap-2"
               >
                 <Trash className="text-base" aria-hidden="true" />
                 Remove
@@ -177,17 +177,17 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
             placeholder="https://"
           />
         </Field>
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <Text as="p" variant="caption" tone="subtle">
+        <div className="flex flex-col gap-3 border-t border-slate-200/70 pt-3 dark:border-[color:var(--color-studio-dark-divider)] @min-[32rem]/profile-editor:flex-row @min-[32rem]/profile-editor:items-center @min-[32rem]/profile-editor:justify-between">
+          <Text as="p" variant="caption" tone="muted">
             {loading ? "Loading profile…" : "Changes update your team member name too."}
           </Text>
           <Button
             onPress={handleSave}
             isDisabled={!hasChanges || saving}
             variant="primary"
-            size="xs"
-            radius="full"
-            className="shadow-sm hover:bg-primary-700 data-[hovered]:bg-primary-700 disabled:bg-slate-400"
+            size="sm"
+            radius="xl"
+            className="w-full shrink-0 @min-[32rem]/profile-editor:w-auto"
           >
             {saving ? "Saving…" : "Save profile"}
           </Button>

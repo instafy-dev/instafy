@@ -1,4 +1,4 @@
-import { BellNotification, BellOff, ChatBubble, Download, HalfMoon, LogOut, Refresh, Settings, SunLight, User } from "iconoir-react";
+import { BellNotification, BellOff, ChatBubble, Download, HalfMoon, LogOut, Refresh, Settings, SmartphoneDevice, SunLight, User } from "iconoir-react";
 import { DialogTrigger } from "react-aria-components";
 import { useId, type MouseEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import { Button, IconButton } from "../../../components/Button";
@@ -8,6 +8,7 @@ import { Text } from "../../../components/Text";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
 import { DRAWER_SECTION_LABEL_CLASS } from "../../../components/listRowStyles";
+import { DARK_RAIL_HOVER_CLASS } from "../../../theme/darkSurfaces";
 import type { ResolvedTheme } from "../../../theme/ThemeProvider";
 import type { AppReleaseMetadata, AppUpdatePresentation } from "../../../updates/releaseMetadata";
 import { UpdateStatusDialog } from "./UpdateStatusDialog";
@@ -26,7 +27,8 @@ type StudioSidebarAccountSectionProps = {
   accountSubtitle: string | null;
   resolvedTheme: ResolvedTheme;
   onThemeModeChange: (value: ResolvedTheme) => void;
-  showInstallEntry: boolean;
+  installEntry: { kind: "desktop"; version: string } | { kind: "mobile-soon" } | null;
+  isLargeScreen: boolean;
   shouldRenderUpdateEntry: boolean;
   updatePresentation: AppUpdatePresentation | null;
   onUpdateEntryClick: () => void;
@@ -106,7 +108,8 @@ export function StudioSidebarAccountSection({
   accountSubtitle,
   resolvedTheme,
   onThemeModeChange,
-  showInstallEntry,
+  installEntry,
+  isLargeScreen,
   shouldRenderUpdateEntry,
   updatePresentation,
   onUpdateEntryClick,
@@ -132,6 +135,7 @@ export function StudioSidebarAccountSection({
 }: StudioSidebarAccountSectionProps) {
   const updateStatusDescriptionId = useId();
   const supportStatusDescriptionId = useId();
+  const showFooterInstall = installEntry?.kind === "desktop" && isLargeScreen;
   const accessibleUpdateStatus =
     shouldRenderUpdateEntry &&
     (updatePresentation?.emphasis === "attention" || updatePresentation?.emphasis === "danger")
@@ -182,6 +186,26 @@ export function StudioSidebarAccountSection({
       >
         {accessibleSupportStatus}
       </span>
+      {showFooterInstall ? (
+        <a
+          href="/install#desktop"
+          target="_blank"
+          rel="noreferrer"
+          aria-label="Get desktop app"
+          title={`Get desktop app · v${installEntry.version}`}
+          data-testid="sidebar-get-desktop"
+          className={[
+            "inline-flex min-h-10 items-center rounded-lg text-sm font-medium text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-400/60 dark:text-slate-400 dark:hover:text-slate-100 pointer-coarse:min-h-11",
+            DARK_RAIL_HOVER_CLASS,
+            showLabels ? "w-full gap-3 px-3" : "w-10 justify-center",
+          ].join(" ")}
+        >
+          <span className={showLabels ? "flex h-9 w-9 shrink-0 items-center justify-center" : undefined}>
+            <Download className="h-5 w-5" aria-hidden="true" />
+          </span>
+          {showLabels ? <span className="min-w-0 truncate">Get desktop app</span> : null}
+        </a>
+      ) : null}
       <DialogTrigger
         isOpen={profileMenuOpen}
         onOpenChange={(open) => onProfileMenuOpenChange(open)}
@@ -362,16 +386,19 @@ export function StudioSidebarAccountSection({
                   </MenuItemContent>
                 </StudioMenuItem>
               ) : null}
-              {showInstallEntry ? (
+              {installEntry && !showFooterInstall ? (
                 <StudioMenuItem
                   id="profile:install"
-                  href="/install#desktop"
+                  href={installEntry.kind === "mobile-soon" ? "/install#mobile" : "/install#desktop"}
                   target="_blank"
                   rel="noreferrer"
                   data-testid="profile-install-button"
                 >
-                  <MenuItemContent start={<Download aria-hidden="true" />}>
-                    Install Instafy
+                  <MenuItemContent
+                    start={installEntry.kind === "mobile-soon" ? <SmartphoneDevice aria-hidden="true" /> : <Download aria-hidden="true" />}
+                    end={installEntry.kind === "mobile-soon" ? <Text as="span" variant="caption" tone="muted">Soon</Text> : undefined}
+                  >
+                    {installEntry.kind === "mobile-soon" ? "Get the app" : "Get desktop app"}
                   </MenuItemContent>
                 </StudioMenuItem>
               ) : null}

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import type { WorkspaceGitReviewSource } from "../workspace/gitReviewTypes";
 
-export type LeftDrawerPanel = "history" | "files" | "sourceControl";
+export type LeftDrawerPanel = "history" | "files" | "sourceControl" | "workspaces";
 
 export type SourceControlOpenRequest = {
   key: number;
@@ -101,9 +101,14 @@ export function useStudioLayoutChromeState({
     startWidth: number;
   } | null>(null);
   const [filesExplorerPortalTarget, setFilesExplorerPortalTarget] = useState<HTMLDivElement | null>(null);
+  const [workspaceSwitcherPortalTarget, setWorkspaceSwitcherPortalTarget] = useState<HTMLDivElement | null>(null);
 
   const handleFilesExplorerPortalRef = useCallback((node: HTMLDivElement | null) => {
     setFilesExplorerPortalTarget((current) => (current === node ? current : node));
+  }, []);
+
+  const handleWorkspaceSwitcherPortalRef = useCallback((node: HTMLDivElement | null) => {
+    setWorkspaceSwitcherPortalTarget((current) => (current === node ? current : node));
   }, []);
 
   useEffect(() => {
@@ -195,15 +200,19 @@ export function useStudioLayoutChromeState({
   useEffect(() => {
     if (isLargeScreen) {
       setMobileSidebarOpen(false);
+    } else if (leftDrawer === "workspaces") {
+      setMobileSidebarOpen(true);
+    } else if (leftDrawer) {
+      setMobileSidebarOpen(false);
     }
-  }, [isLargeScreen]);
+  }, [isLargeScreen, leftDrawer]);
 
   useEffect(() => {
     if (!mobileSidebarOpen) {
       return;
     }
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
+      if (shouldDismissLeftDrawerForKeydown(event)) {
         setMobileSidebarOpen(false);
       }
     };
@@ -231,6 +240,8 @@ export function useStudioLayoutChromeState({
   return {
     filesExplorerPortalTarget,
     handleFilesExplorerPortalRef,
+    workspaceSwitcherPortalTarget,
+    handleWorkspaceSwitcherPortalRef,
     leftDrawer,
     leftDrawerResizing,
     leftDrawerWidth,

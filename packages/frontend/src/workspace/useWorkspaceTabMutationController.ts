@@ -1,5 +1,6 @@
 import { useCallback, type MutableRefObject, type ReactNode } from "react";
 import type { StudioPanel } from "../screens/studio/types";
+import { studioPerformance } from "../telemetry/studioPerformance";
 import {
   createTabForPanel,
   getTabIdForConversation,
@@ -18,6 +19,7 @@ interface UseWorkspaceTabMutationControllerArgs {
   setActiveFile: (fileId: string | null) => void;
   setActivePanel: (panel: StudioPanel) => void;
   workspaceProjectId: string | null;
+  canPersistTabs: boolean;
   tabsRef: MutableRefObject<WorkspaceTabState[]>;
   activeTabIdRef: MutableRefObject<string | null>;
   activeConversationIdRef: MutableRefObject<string | null>;
@@ -35,6 +37,7 @@ export function useWorkspaceTabMutationController({
   setActiveFile,
   setActivePanel,
   workspaceProjectId,
+  canPersistTabs,
   tabsRef,
   activeTabIdRef,
   activeConversationIdRef,
@@ -49,6 +52,14 @@ export function useWorkspaceTabMutationController({
       nextTab: WorkspaceTabState,
       options?: { syncPanel?: boolean; syncConversation?: boolean },
     ) => {
+      if (nextTab.id !== activeTabIdRef.current &&
+          (nextTab.kind === "conversation" || nextTab.kind === "jobThread") && workspaceProjectId) {
+        studioPerformance.beginConversation(workspaceProjectId, nextTab.conversationId);
+      } else if (nextTab.id !== activeTabIdRef.current && nextTab.kind !== "conversation" &&
+          !(nextTab.kind === "panel" && nextTab.panel === "chat")) {
+        studioPerformance.cancelConversation();
+      }
+      activeTabIdRef.current = nextTab.id;
       setActiveTabId(nextTab.id);
       if (nextTab.kind === "file") {
         setActiveFile(nextTab.fileId);
@@ -93,12 +104,14 @@ export function useWorkspaceTabMutationController({
     [
       activeConversationId,
       activeConversationIdRef,
+      activeTabIdRef,
       markConversationRead,
       selectConversation,
       setActiveFile,
       setActivePanel,
       setActiveTabId,
       suppressPanelSyncRef,
+      workspaceProjectId,
     ],
   );
 
@@ -159,7 +172,7 @@ export function useWorkspaceTabMutationController({
             : -1;
         const fallbackTab =
           fallbackIndex >= 0 ? nextTabsWithCloseability[fallbackIndex] ?? null : null;
-        if (workspaceProjectId) {
+        if (workspaceProjectId && canPersistTabs) {
           const currentState = persistedStateRef.current ?? { projects: {} };
           const conversationsToPersist = remainingConversationTabs.map(
             (tab) => tab.conversationId,
@@ -172,6 +185,7 @@ export function useWorkspaceTabMutationController({
               [workspaceProjectId]: {
                 conversations: conversationsToPersist,
                 activeConversationId: nextActiveConversationId,
+                previewConversationId: remainingConversationTabs.find((tab) => tab.preview)?.conversationId,
               },
             },
           };
@@ -201,6 +215,7 @@ export function useWorkspaceTabMutationController({
     },
     [
       activeTabIdRef,
+      canPersistTabs,
       commitTabs,
       persistedStateRef,
       setActiveTabId,
@@ -211,6 +226,13 @@ export function useWorkspaceTabMutationController({
     ],
   );
 
+  const keepTabOpen = useCallback((tabId: string) => {
+    const currentTabs = tabsRef.current;
+    const target = currentTabs.find((tab) => tab.id === tabId);
+    if (target?.kind !== "conversation" || !target.preview) return;
+    commitTabs(currentTabs.map((tab) => tab.id === tabId ? { ...target, preview: false } : tab));
+  }, [commitTabs, tabsRef]);
+
   const moveTab = useCallback(
     (tabId: string, targetIndex: number) => {
       const currentTabs = tabsRef.current;
@@ -220,14 +242,15 @@ export function useWorkspaceTabMutationController({
       }
       const clampedIndex = Math.max(0, Math.min(targetIndex, currentTabs.length - 1));
       if (currentIndex === clampedIndex) {
+        keepTabOpen(tabId);
         return;
       }
       const nextTabs = [...currentTabs];
       const [moved] = nextTabs.splice(currentIndex, 1);
-      nextTabs.splice(clampedIndex, 0, moved);
+      nextTabs.splice(clampedIndex, 0, moved.kind === "conversation" ? { ...moved, preview: false } : moved);
       commitTabs(nextTabs);
     },
-    [commitTabs, tabsRef],
+    [commitTabs, keepTabOpen, tabsRef],
   );
 
   const setTabDirty = useCallback(
@@ -242,7 +265,9 @@ export function useWorkspaceTabMutationController({
         return;
       }
       const nextTabs = [...currentTabs];
-      nextTabs[index] = { ...target, dirty };
+      nextTabs[index] = target.kind === "conversation" && dirty
+        ? { ...target, dirty, preview: false }
+        : { ...target, dirty };
       commitTabs(nextTabs);
     },
     [commitTabs, tabsRef],
@@ -307,6 +332,7 @@ export function useWorkspaceTabMutationController({
     setActiveTabInternal,
     ensureTabForPanel,
     focusTab,
+    keepTabOpen,
     closeTab,
     moveTab,
     setTabDirty,

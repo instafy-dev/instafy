@@ -20,6 +20,7 @@ import {
   type WorkspaceTabState,
 } from "./workspaceTabFactories";
 import type { PersistedWorkspaceGitReviewState } from "./workspaceTabPersistence";
+import { prepareConversationTabOpen } from "./workspaceConversationPreview";
 
 interface UseWorkspaceTabOpenersArgs {
   activeConversationId: string | null;
@@ -55,37 +56,33 @@ export function useWorkspaceTabOpeners({
       options?: {
         activate?: boolean;
         fallbackConversation?: ConversationState | null;
+        preview?: boolean;
       },
     ) => {
       if (!conversationId) {
         return;
       }
-      const tabId = getTabIdForConversation(conversationId);
-      let tab = tabsRef.current.find(
-        (entry) => entry.id === tabId,
-      ) as WorkspaceConversationTabState | undefined;
-      if (!tab) {
-        const fallbackConversation =
-          options?.fallbackConversation?.localId === conversationId
-            ? options.fallbackConversation
-            : null;
-        const conversation =
-          conversations.find((entry) => entry.localId === conversationId) ??
-          fallbackConversation ??
-          null;
-        if (!conversation || conversation.lifecycleStatus === "deleted") {
-          return;
-        }
-        const insertAt = (() => {
-          const index = tabsRef.current.findIndex((entry) => entry.kind !== "conversation");
-          return index === -1 ? tabsRef.current.length : index;
-        })();
-        tab = createTabForConversation(conversation);
-        commitTabs([
-          ...tabsRef.current.slice(0, insertAt),
-          tab,
-          ...tabsRef.current.slice(insertAt),
-        ]);
+      const fallbackConversation = options?.fallbackConversation?.localId === conversationId
+        ? options.fallbackConversation
+        : null;
+      const conversation = conversations.find((entry) => entry.localId === conversationId)
+        ?? fallbackConversation;
+      if (!conversation) {
+        const existing = tabsRef.current.find((entry): entry is WorkspaceConversationTabState => (
+          entry.kind === "conversation" && entry.conversationId === conversationId
+        ));
+        if (!existing) return;
+        const tab = existing.preview && !options?.preview ? { ...existing, preview: false } : existing;
+        if (tab !== existing) commitTabs(tabsRef.current.map((entry) => entry.id === tab.id ? tab : entry));
+        if (options?.activate !== false) setActiveTabInternal(tab);
+        return;
+      }
+      if (conversation.lifecycleStatus === "deleted") return;
+      const { tabs, tab } = prepareConversationTabOpen(
+        tabsRef.current, conversation, conversations, options?.preview === true,
+      );
+      if (tabs !== tabsRef.current) {
+        commitTabs(tabs);
       }
       if (options?.activate === false) {
         return;
@@ -110,6 +107,15 @@ export function useWorkspaceTabOpeners({
       if (!conversation || conversation.lifecycleStatus === "deleted") {
         return;
       }
+
+      // Opening a run is deliberate work in its conversation, so keep the
+      // parent before adding a child tab that must survive chat browsing.
+      const keptTabs = tabsRef.current.map((entry) => (
+        entry.kind === "conversation" && entry.conversationId === conversationId && entry.preview
+          ? { ...entry, preview: false }
+          : entry
+      ));
+      if (keptTabs.some((entry, index) => entry !== tabsRef.current[index])) commitTabs(keptTabs);
 
       const tabId = `workspace-job-thread-${jobId}`;
       let tab = tabsRef.current.find(

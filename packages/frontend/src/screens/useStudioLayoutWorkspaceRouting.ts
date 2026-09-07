@@ -151,7 +151,7 @@ export function doesWorkspaceTabMatchPanelRoute({
 }
 
 function isLeftDrawerPanel(value: string | null): value is LeftDrawerPanel {
-  return value === "history" || value === "files" || value === "sourceControl";
+  return value === "history" || value === "files" || value === "sourceControl" || value === "workspaces";
 }
 
 export function resolveLeftDrawerFromSearch(search: string): LeftDrawerPanel | null {
@@ -180,7 +180,7 @@ interface UseStudioLayoutWorkspaceRoutingParams {
   locationPathname: string;
   locationSearch: string;
   navigate: (to: { pathname: string; search: string }, options: { replace: boolean }) => void;
-  openConversationTab: (conversationId: string) => void;
+  openConversationTab: (conversationId: string, options?: { preview?: boolean }) => void;
   openJobThreadTab: (
     params: { conversationId: string; jobId: string; title?: string },
     options?: { activate?: boolean },
@@ -517,7 +517,7 @@ export function useStudioLayoutWorkspaceRouting({
         const targetConversationId = (resolvedConversationLocalId ?? activeConversationId ?? "").trim();
         if (targetConversationId) {
           applyingQueryParamsRef.current = true;
-          openConversationTab(targetConversationId);
+          openConversationTab(targetConversationId, { preview: true });
           applied = true;
         }
       } else {
@@ -546,7 +546,7 @@ export function useStudioLayoutWorkspaceRouting({
       const targetConversationId = (resolvedConversationLocalId ?? activeWorkspaceTabConversationId ?? "").trim();
       if (targetConversationId) {
         applyingQueryParamsRef.current = true;
-        openConversationTab(targetConversationId);
+        openConversationTab(targetConversationId, { preview: true });
         applied = true;
       }
     }
