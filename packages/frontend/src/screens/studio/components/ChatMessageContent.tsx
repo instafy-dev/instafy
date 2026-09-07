@@ -12,7 +12,6 @@ import {
 import { ChatBubble, GitBranch, QuoteMessage } from "iconoir-react";
 import { requestAgentProfile } from "./agentProfileOpen";
 import { useConversations } from "../../../conversations/ConversationsProvider";
-import { useConversation } from "../../../conversations/useConversation";
 import {
   getDefaultAssistantMentionToken,
   listBuiltInAssistantHandles,
@@ -1337,10 +1336,12 @@ export function MessageContent({
     [contentBlocks],
   );
   const quoteSourceReference = useMemo(() => extractReplyContextSourceReference(metadata), [metadata]);
-  const { agentHandles } = useConversation();
+  // Message rows only need metadata, not useConversation's history polling and run effects.
+  const { activeConversation, resolveConversationByController } = useConversations();
+  const extraAgentHandles = activeConversation?.extraAgentHandles;
   const agentMentionHandles = useMemo(() => {
     const handles = new Set<string>(listBuiltInAssistantHandles());
-    const mergedHandles = [...(agentHandles ?? []), ...(mentionableAgentHandles ?? [])];
+    const mergedHandles = [...(extraAgentHandles ?? []), ...(mentionableAgentHandles ?? [])];
     for (const handle of mergedHandles) {
       const trimmed = handle.trim();
       if (!trimmed) {
@@ -1354,9 +1355,8 @@ export function MessageContent({
       handles.add(normalized);
     }
     return handles;
-  }, [agentHandles, mentionableAgentHandles]);
+  }, [extraAgentHandles, mentionableAgentHandles]);
   const agentMentionClass = getAssistantMentionClass(resolveAssistantMentionToken(getDefaultAssistantMentionToken()));
-  const { resolveConversationByController } = useConversations();
   const { openConversationTab, openPanelTab, requestUrlPush } = useWorkspaceTabs();
   const { showStatus } = useStatus();
   const workspaceFilePreviewCacheRef = useRef<Map<string, WorkspaceFilePreviewCacheEntry>>(new Map());
