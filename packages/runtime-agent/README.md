@@ -12,6 +12,9 @@ Rust binary that runs inside the hosted runtime container. Responsibilities:
 - Execute Codex workflows (headless) for each leased job.
 - Collect Codex event logs and return artifacts via `/agent/complete`.
 
+Job heartbeat and secret-refresh tasks stop when their job finishes, including when a controller
+request is still in flight, so background cleanup cannot keep the worker from polling for its next job.
+
 ## Current state
 
 - The agent now embeds `codex-core` + `codex-exec` directly. We run conversations in-process, collect streaming events via the JSONL event processor, and surface the final assistant JSON without spawning the CLI.
