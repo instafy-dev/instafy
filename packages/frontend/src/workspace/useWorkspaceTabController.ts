@@ -92,6 +92,7 @@ export function useWorkspaceTabController({
     setActiveFile,
     setActivePanel,
     workspaceProjectId,
+    canPersistTabs,
     tabsRef,
     activeTabIdRef,
     activeConversationIdRef,

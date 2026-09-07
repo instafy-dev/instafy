@@ -237,4 +237,59 @@ describe("conversation preview tabs", () => {
     expect(ids()).toEqual(["a", "b"]);
     expect(previews()).toEqual(["b"]);
   });
+
+  it("clears the previous space's tabs while saved destination history is delayed", async () => {
+    const destination = { conversations: ["x", "y"], activeConversationId: "y", previewConversationId: "y" };
+    persistWorkspaceTabsState({ projects: {
+      [projectA]: { conversations: ["a", "b"], activeConversationId: "b" },
+      [projectB]: destination,
+    } });
+    fixture.activeConversationId = "b";
+    await render();
+    await act(async () => api.openJobThreadTab({ conversationId: "b", jobId: "run-b" }));
+    await act(async () => api.openPanelTab("home"));
+
+    fixture.projectId = projectB;
+    await render(); // The conversations reducer still holds A for one commit.
+    expect(ids()).toEqual([]);
+    expect(api.tabs.some((tab) => tab.kind === "jobThread")).toBe(false);
+    expect(api.activeTab?.kind === "panel" && api.activeTab.panel).toBe("home");
+
+    fixture.projectKey = projectB;
+    fixture.conversations = [conversation("x")];
+    fixture.activeConversationId = "x";
+    fixture.historyResolved = false;
+    await render();
+    await act(async () => api.closeTab(getTabIdForConversation("b")));
+    expect(ids()).toEqual([]);
+    expect(loadPersistedWorkspaceTabs()?.projects[projectB]).toEqual(destination);
+    await render(); // A failed/retrying fetch keeps the same unresolved snapshot.
+    expect(ids()).toEqual([]);
+
+    fixture.conversations = [conversation("x"), conversation("y")];
+    fixture.historyResolved = true;
+    await render();
+    expect(ids()).toEqual(["x", "y"]);
+    expect(previews()).toEqual(["y"]);
+    expect(api.activeTab?.kind === "panel" && api.activeTab.panel).toBe("home");
+  });
+
+  it("does not overwrite saved destination tabs when closing a partial hydration tab", async () => {
+    fixture.projectId = projectB;
+    fixture.projectKey = projectB;
+    fixture.conversations = [conversation("x")];
+    fixture.activeConversationId = "x";
+    fixture.historyResolved = false;
+    const destination = { conversations: ["x", "y"], activeConversationId: "y", previewConversationId: "y" };
+    persistWorkspaceTabsState({ projects: { [projectB]: destination } });
+    await render();
+    expect(ids()).toEqual(["x"]);
+    await act(async () => api.closeTab(getTabIdForConversation("x")));
+    expect(loadPersistedWorkspaceTabs()?.projects[projectB]).toEqual(destination);
+    fixture.conversations = [conversation("x"), conversation("y")];
+    fixture.historyResolved = true;
+    await render();
+    expect(ids()).toEqual(["x", "y"]);
+    expect(previews()).toEqual(["y"]);
+  });
 });
