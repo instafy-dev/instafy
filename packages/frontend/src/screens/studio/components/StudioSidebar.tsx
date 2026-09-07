@@ -610,7 +610,8 @@ export function StudioSidebar({
       setControllerOrgs(readCachedControllerOrgs(userEmail));
     }
     setOrgsFetchState("loading");
-    listControllerOrganizations()
+    const requestController = new AbortController();
+    listControllerOrganizations({ throwOnError: true, signal: requestController.signal })
       .then((orgs) => {
         if (!cancelled) {
           setControllerOrgs(orgs);
@@ -631,6 +632,7 @@ export function StudioSidebar({
     // (avatar/name) dispatch instafy:orgs-updated to re-run this fetch.
     return () => {
       cancelled = true;
+      requestController.abort();
     };
   }, [orgsRefreshEpoch, userEmail]);
 
@@ -680,6 +682,10 @@ export function StudioSidebar({
     mergedProjects,
     remoteLoading: mergedProjectsLoading,
     remoteLoadedScope,
+    remoteDiscoveryResolved,
+    remoteError: mergedProjectsError,
+    remoteRefreshing: mergedProjectsRefreshing,
+    retryRemoteProjects,
   } = useMergedControllerProjects({
     localProjects: projectList,
     orgId: workspaceOrgFilterId,
@@ -794,7 +800,7 @@ export function StudioSidebar({
     () => orgOptions.filter((org) => org.key !== "all"),
     [orgOptions],
   );
-  const orgDeckSelectedKey = workspaceOrgKey === "all" ? activeOrgKey : workspaceOrgKey;
+  const orgDeckSelectedKey = activeOrgKey;
   const orgDeckTeam = useMemo(
     () => orgDeckTeams.find((team) => team.key === orgDeckSelectedKey) ?? orgDeckTeams[0] ?? null,
     [orgDeckSelectedKey, orgDeckTeams],
@@ -940,15 +946,11 @@ export function StudioSidebar({
       setWorkspaceOrgKey(orgKey);
       setWorkspaceProjectQuery("");
       setWorkspaceProjectSearchOpen(false);
-      // Picking a team is a context switch, not just a list filter. The
-      // remote project list refetches for the selected org, so the actual
-      // switch happens in the effect below once that fetch settles.
+      // Keep the requested team separate from the active space until a
+      // successful discovery snapshot can resolve its destination.
       const pending =
         orgKey !== "all" && (activeProject?.orgId ?? "personal") !== orgKey ? orgKey : null;
       pendingOrgContextSwitchRef.current = pending;
-      // State mirror of the ref: the clicked chip highlights and pulses
-      // immediately, instead of nothing happening until the project list
-      // refetch settles seconds later.
       setPendingOrgSwitchKey(pending);
     },
     [activeProject?.orgId],
@@ -956,7 +958,7 @@ export function StudioSidebar({
 
   useEffect(() => {
     const pendingOrgKey = pendingOrgContextSwitchRef.current;
-    if (!pendingOrgKey || pendingOrgKey !== workspaceOrgKey || mergedProjectsLoading) {
+    if (!pendingOrgKey || pendingOrgKey !== workspaceOrgKey || mergedProjectsLoading || !remoteDiscoveryResolved) {
       return;
     }
     // The list must actually be FOR the pending org: right after a chip click
@@ -989,7 +991,7 @@ export function StudioSidebar({
         (a.name || "Untitled space").localeCompare(b.name || "Untitled space"),
       )[0].id;
     performProjectSwitch(targetId);
-  }, [activeProject?.orgId, mergedProjects, mergedProjectsLoading, performProjectSwitch, remoteLoadedScope, showStatus, workspaceOrgKey]);
+  }, [activeProject?.orgId, mergedProjects, mergedProjectsLoading, performProjectSwitch, remoteDiscoveryResolved, remoteLoadedScope, showStatus, workspaceOrgKey]);
 
   const handleProjectSwitch = useCallback(
     (projectId: string) => {
@@ -1187,6 +1189,11 @@ export function StudioSidebar({
     <StudioSidebarWorkspaceSwitcher
       orgOptions={orgOptions}
       workspaceOrgKey={workspaceOrgKey}
+      activeOrgKey={activeOrgKey}
+      pendingOrgKey={pendingOrgSwitchKey}
+      projectsError={mergedProjectsError}
+      projectsRefreshing={mergedProjectsRefreshing}
+      onRetryProjects={retryRemoteProjects}
       onWorkspaceOrgChange={handleWorkspaceOrgChange}
       onCreateOrg={
         runtimeControllerEnabled
@@ -1388,7 +1395,7 @@ export function StudioSidebar({
                       team={orgDeckTeam}
                       teamCount={orgDeckTeams.length}
                       otherAttentionCount={orgDeckOtherAttention}
-                      pending={pendingOrgSwitchKey !== null}
+                      pending={pendingOrgSwitchKey !== null && !mergedProjectsError}
                     />
                   </span>
                   {showLabels ? (
@@ -1448,7 +1455,7 @@ export function StudioSidebar({
                     team={orgDeckTeam}
                     teamCount={orgDeckTeams.length}
                     otherAttentionCount={orgDeckOtherAttention}
-                    pending={pendingOrgSwitchKey !== null}
+                    pending={pendingOrgSwitchKey !== null && !mergedProjectsError}
                   />
                 </span>
                 {showLabels ? (
