@@ -109,6 +109,9 @@ describe("CredentialsSettingsCard", () => {
     container = document.createElement("div");
     clearPendingAgentProfileTarget();
     mocks.isDesktop = true;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return new DOMRect(0, 0, this.dataset.testid === "credentials-settings-card" ? 960 : 0, 0);
+    });
     vi.stubGlobal("CSS", { escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, "\\$&") });
     document.body.appendChild(container);
     root = createRoot(container);
@@ -147,6 +150,7 @@ describe("CredentialsSettingsCard", () => {
       root.unmount();
     });
     container.remove();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
     clearPendingAgentProfileTarget();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
@@ -185,8 +189,9 @@ describe("CredentialsSettingsCard", () => {
     expect(container.querySelector('[data-testid="settings-category-providers"]')).not.toBeNull();
   });
 
-  it("offers the shared category picker on mobile instead of stacking both sections", async () => {
-    mocks.isDesktop = false;
+  it.each([false, true])("offers the shared category picker in a narrow pane (desktop: %s)", async (isDesktop) => {
+    mocks.isDesktop = isDesktop;
+    vi.mocked(HTMLElement.prototype.getBoundingClientRect).mockReturnValue(new DOMRect(0, 0, 480, 0));
     await act(async () => {
       root.render(<CredentialsSettingsCard />);
       await flush();
