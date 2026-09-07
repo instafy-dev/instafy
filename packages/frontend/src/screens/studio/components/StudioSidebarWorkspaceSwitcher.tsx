@@ -8,6 +8,9 @@ import { Text } from "../../../components/Text";
 import {
   DRAWER_ICON_BUTTON_TONE_CLASS,
   DRAWER_LIST_ROW_TEXT_CLASS,
+  PICKER_LIST_ROW_ACTIVE_CLASS,
+  PICKER_LIST_ROW_GEOMETRY_CLASS,
+  pickerListRowTextClassName,
 } from "../../../components/listRowStyles";
 import type { MergedProjectListItem } from "../../../projects/useMergedControllerProjects";
 import { getOrgInitials } from "../../../org/orgNaming";
@@ -15,8 +18,6 @@ import { AttentionBadge } from "../../../components/AttentionBadge";
 
 const WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS = `h-8 w-8 ${DRAWER_ICON_BUTTON_TONE_CLASS}`;
 const WORKSPACE_SWITCHER_ACTION_ICON_CLASS = "h-4 w-4";
-// Row geometry shared by every list row in this panel so left edges align.
-const SWITCHER_MENU_ROW_CLASS = "rounded-xl px-3.5 py-2";
 
 export const SIDEBAR_WORKSPACE_SWITCHER_DEFAULT_VISIBLE_LIMIT = 40;
 export const SIDEBAR_WORKSPACE_SWITCHER_SEARCH_VISIBLE_LIMIT = 80;
@@ -144,10 +145,11 @@ export function StudioSidebarWorkspaceSwitcher({
         className={[
           "flex w-full items-center gap-2.5 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-400/60",
           DRAWER_LIST_ROW_TEXT_CLASS,
-          SWITCHER_MENU_ROW_CLASS,
+          PICKER_LIST_ROW_GEOMETRY_CLASS,
+          pickerListRowTextClassName(isSelected),
           isSelected
-            ? "bg-slate-100 font-medium text-slate-900 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-50"
-            : "text-slate-700 hover:bg-slate-100 dark:text-slate-200 dark:hover:bg-[var(--color-studio-dark-active)]",
+            ? PICKER_LIST_ROW_ACTIVE_CLASS
+            : "hover:bg-slate-100 dark:hover:bg-[var(--color-studio-dark-active)]",
         ].join(" ")}
       >
         <span
@@ -202,10 +204,9 @@ export function StudioSidebarWorkspaceSwitcher({
       }
       className={[
         DRAWER_LIST_ROW_TEXT_CLASS,
-        SWITCHER_MENU_ROW_CLASS,
-        options.current
-          ? "bg-slate-100 font-medium text-slate-900 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-50"
-          : "",
+        PICKER_LIST_ROW_GEOMETRY_CLASS,
+        pickerListRowTextClassName(options.current),
+        options.current ? PICKER_LIST_ROW_ACTIVE_CLASS : "",
         "data-[selected]:bg-slate-100 dark:data-[selected]:bg-[var(--color-studio-dark-active)]",
       ]
         .filter(Boolean)
@@ -365,8 +366,7 @@ export function StudioSidebarWorkspaceSwitcher({
             {visibleProjects.map((project) => renderProjectRow(project, { current: false }))}
           </StudioMenu>
           {hiddenProjectCount > 0 ? (
-            // A flat line, not a card: this panel is already a floating
-            // surface (darkSurfaces rule 5), and the note is an aside.
+            // Keep the truncation note in the list's text column.
             <Text
               as="p"
               variant="caption"

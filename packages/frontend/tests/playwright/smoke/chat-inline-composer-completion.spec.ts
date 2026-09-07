@@ -68,12 +68,12 @@ test.describe("Chat inline composer completion", () => {
     // The composer is one row on every viewport; the wand lives in the "+"
     // menu everywhere, never as a control that appears while typing.
     await expect(page.getByTestId("chat-accept-suggestion-button")).toHaveCount(0);
-    await expect(page.getByTestId("chat-image-upload-button")).toBeVisible();
+    await expect(page.getByTestId("chat-image-upload-button")).toHaveCount(0);
     await page.getByTestId("composer-action-menu-trigger").click();
     const acceptAction = page.getByTestId("composer-action-menu-insert-suggestion");
     await expect(acceptAction).toBeVisible({ timeout: 30_000 });
-    // Image upload is inline at sm+, so it is not duplicated in the menu.
-    await expect(page.getByTestId("composer-action-menu-upload-image")).toHaveCount(0);
+    // Image upload uses the same menu entry on every viewport.
+    await expect(page.getByTestId("composer-action-menu-upload-image")).toBeVisible();
     await acceptAction.click();
 
     await expect(acceptAction).toBeHidden();
