@@ -389,7 +389,7 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
           isDisabled={!activeProjectId}
           data-testid="automations-create-button"
         >
-          New
+          New automation
         </Button>
       }
     >
@@ -408,8 +408,11 @@ function ProjectAutomationsPanel({ activeProjectId, userId }: { activeProjectId:
         {!activeProjectId ? (
           <Text tone="muted">Select a space to manage automations.</Text>
         ) : !loading && !loadError && sortedAutomations.length === 0 ? (
-          <div className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-950">
-            <Text tone="muted">No automations yet.</Text>
+          <div className="space-y-1 py-3" data-testid="automations-empty-state">
+            <Text variant="bodyStrong" tone="secondary">No automations yet.</Text>
+            <Text variant="caption" tone="muted">
+              Schedule a prompt to run once or repeat automatically.
+            </Text>
           </div>
         ) : (
           <div className="space-y-2">

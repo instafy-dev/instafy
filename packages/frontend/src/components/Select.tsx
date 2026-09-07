@@ -1,12 +1,12 @@
 import { forwardRef } from "react";
-import { NavArrowDown } from "iconoir-react";
+import { ControlChevron } from "./ControlChevron";
 
 type ControlSize = "xs" | "sm" | "md" | "lg";
 type ControlRadius = "md" | "lg" | "xl" | "2xl" | "full";
 type ControlTone = "default" | "muted";
 
 const BASE =
-  "appearance-none border text-midnight outline-none transition focus-visible:ring-2 focus-visible:ring-primary-400/40 focus-visible:border-primary-400 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400 dark:text-slate-100 dark:disabled:bg-slate-900 dark:disabled:text-slate-500";
+  "min-w-0 appearance-none border text-midnight outline-none transition pointer-coarse:min-h-11 focus-visible:ring-2 focus-visible:ring-primary-400/40 focus-visible:border-primary-400 disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400 dark:text-slate-100 dark:disabled:bg-[var(--color-studio-dark-active)] dark:disabled:text-slate-500";
 
 const SIZE_CLASSES: Record<ControlSize, string> = {
   xs: "px-2.5 py-1 text-base sm:text-xs",
@@ -31,8 +31,8 @@ const RADIUS_CLASSES: Record<ControlRadius, string> = {
 };
 
 const TONE_CLASSES: Record<ControlTone, string> = {
-  default: "border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-950",
-  muted: "border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-900/40",
+  default: "border-slate-200 bg-white dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-[var(--color-studio-dark-raised-control)]",
+  muted: "border-slate-200 bg-slate-50 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)]",
 };
 
 export type SelectProps = Omit<React.SelectHTMLAttributes<HTMLSelectElement>, "size"> & {
@@ -56,7 +56,7 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(function Select
   ref
 ) {
   return (
-    <div className={["relative", fullWidth ? "w-full" : "w-fit", className].filter(Boolean).join(" ")}>
+    <div className={["relative min-w-0", fullWidth ? "w-full" : "w-fit", className].filter(Boolean).join(" ")}>
       <select
         ref={ref}
         className={[
@@ -72,10 +72,9 @@ export const Select = forwardRef<HTMLSelectElement, SelectProps>(function Select
           .join(" ")}
         {...props}
       />
-      <NavArrowDown
-        className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-base text-slate-400 dark:text-slate-500"
-        aria-hidden="true"
-      />
+      <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2" aria-hidden="true">
+        <ControlChevron />
+      </span>
     </div>
   );
 });
