@@ -36,9 +36,15 @@ vi.mock("../../../../sdk/instafy", async (importOriginal) => {
 });
 
 vi.mock("../../../../conversations/ConversationsProvider", () => ({
-  useConversations: () => ({
-    resolveConversationByController,
-    activeConversation: { extraAgentHandles: ["custom-agent"] },
+  useConversations: () => {
+    throw new Error("Message bodies must not subscribe to composer draft state.");
+  },
+}));
+
+vi.mock("../../../../conversations/ConversationMessageMetadata", () => ({
+  useConversationMessageMetadata: () => ({
+    resolveConversationLocalId: (id: string) => resolveConversationByController(id)?.localId ?? null,
+    extraAgentHandles: ["custom-agent"],
   }),
 }));
 
