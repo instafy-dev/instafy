@@ -18,6 +18,7 @@ import { Button } from "../../../components/Button";
 import { OctoScrollMotionScope } from "../../../components/OctoMark";
 import { Spinner } from "../../../components/Spinner";
 import { useBreakpoint } from "../../../hooks/useBreakpoint";
+import { useStudioChatPerformance } from "../../../telemetry/useStudioChatPerformance";
 import { useConversationNotificationRead } from "../../../notifications/useConversationNotificationRead";
 import {
   addFloatingSurfaceViewportChangeListener,
@@ -537,6 +538,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const { showStatus } = useStatus();
   const {
     activeProjectId,
+    projectInitialized,
+    projectAccessPending,
     projectCapabilitiesResolved,
     effectiveProjectRole,
     canWriteProject,
@@ -5008,6 +5011,20 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     return visibleJobMessages;
   }, [activeConversationId, messages, normalizedJobThread]);
 
+  const beginHistoryRetry = useStudioChatPerformance({
+    projectId: activeProjectId,
+    organizationId: activeOrgId,
+    conversationId: normalizedJobThread?.conversationId ?? activeConversationId,
+    selectedConversationId: activeConversationId,
+    messageCount: normalizedJobThread ? jobThreadMessages.length : messages.length,
+    projectInitialized,
+    projectAccessPending,
+    conversationListResolved: remoteConversationHistoryResolved,
+    initialHistoryLoading: isInitialHistoryLoading,
+    error: Boolean(initialHistoryError || remoteConversationHistoryError),
+    enabled: conversationsProjectKey === activeProjectId,
+  });
+
   const handleContinueFromJobThread = useCallback(() => {
     if (!normalizedJobThread) {
       return;
@@ -5476,6 +5493,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                   <span>{initialHistoryError ?? remoteConversationHistoryError}</span>
                   <Button
                     onPress={() => {
+                      beginHistoryRetry();
                       if (initialHistoryError) void retryInitialHistory();
                       else retryRemoteConversationHistory();
                     }}
