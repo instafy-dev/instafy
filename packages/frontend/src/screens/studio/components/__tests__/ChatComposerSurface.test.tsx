@@ -577,7 +577,7 @@ describe("ChatComposerSurface", () => {
       renderCapture();
     });
     const renderCapture = () => renderLayout({
-      chatInputProps: { value: draft, draftKey: "conversation-1" } as never,
+      chatInputProps: { value: draft, draftKey: "test" } as never,
       showVoiceStatus: capturePhase !== "idle",
       voiceStatusMessage: capturePhase === "listening"
         ? "Recording. Heard: some additional words"
