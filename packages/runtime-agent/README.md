@@ -61,6 +61,11 @@ updated when the human running the workflow explicitly requests it.
 
 Proxy routing (burn/refund) still relies on the shared runtime proxy. Set the proxy variables documented in `docs/Architecture.md` to steer Codex traffic through it.
 
+The embedded engine's code mode requires the matching `codex-code-mode-host`
+executable beside `runtime-agent`. Build and ship both binaries. See
+[Codex engine upgrades](../../docs/Codex-Engine-Upgrades.md) for V8 build inputs,
+Astra metadata, native reviewer migration and coordinated rollout requirements.
+
 See `TODO.md` for upcoming work: streaming progress, implementing plan/approval, and tying into credit accounting.
 
 ## Realistic browser-skill simulation (local Codex auth)

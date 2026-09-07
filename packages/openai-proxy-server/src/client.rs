@@ -11,7 +11,7 @@ use crate::auth::{Credentials, response_indicates_chatgpt_token_expired};
 
 const APPLY_PATCH_GRAMMAR: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../codex/codex-rs/core/src/tools/handlers/apply_patch.lark"
+    "/../../codex/codex-rs/core/assets/tools/apply_patch.lark"
 ));
 
 /// Last-resort model for requests that carry no model AND resolve against a
@@ -19,6 +19,13 @@ const APPLY_PATCH_GRAMMAR: &str = include_str!(concat!(
 /// requests that name this id explicitly are served exactly this model.
 pub const DEFAULT_MODEL: &str = "gpt-5.5";
 pub const DEFAULT_INSTRUCTIONS: &str = include_str!("../prompt_gpt5_codex.md");
+pub(crate) const RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
+
+pub(crate) fn has_responses_lite_tools(input: &[Value]) -> bool {
+    input
+        .iter()
+        .any(|item| item.get("type").and_then(Value::as_str) == Some("additional_tools"))
+}
 
 #[derive(Debug, Clone)]
 pub struct CodexCompletion {
@@ -43,6 +50,10 @@ pub struct CodexClient {
     model: String,
     instructions: String,
     reasoning_effort: Option<String>,
+    reasoning_context: Option<String>,
+    responses_lite: bool,
+    responses_lite_include: Option<Vec<String>>,
+    responses_lite_store: Option<bool>,
     tools_enabled: bool,
     requested_tools: Option<Vec<Value>>,
     requested_tool_choice: Option<Value>,
@@ -132,6 +143,10 @@ impl CodexClient {
             model: DEFAULT_MODEL.to_string(),
             instructions: DEFAULT_INSTRUCTIONS.to_string(),
             reasoning_effort: None,
+            reasoning_context: None,
+            responses_lite: false,
+            responses_lite_include: None,
+            responses_lite_store: None,
             tools_enabled: true,
             requested_tools: None,
             requested_tool_choice: None,
@@ -153,6 +168,26 @@ impl CodexClient {
 
     pub fn with_reasoning_effort(mut self, effort: Option<String>) -> Self {
         self.reasoning_effort = effort;
+        self
+    }
+
+    pub fn with_responses_lite(mut self, enabled: bool) -> Self {
+        self.responses_lite = enabled;
+        self
+    }
+
+    pub fn with_responses_lite_state_controls(
+        mut self,
+        include: Option<Vec<String>>,
+        store: Option<bool>,
+    ) -> Self {
+        self.responses_lite_include = include;
+        self.responses_lite_store = store;
+        self
+    }
+
+    pub fn with_reasoning_context(mut self, context: Option<String>) -> Self {
+        self.reasoning_context = context;
         self
     }
 
@@ -224,6 +259,15 @@ impl CodexClient {
         } else {
             detect_upstream_wire_api(self.credentials.endpoint())
         };
+        let responses_lite = self.responses_lite || has_responses_lite_tools(input_items);
+        if responses_lite {
+            if upstream_wire_api != UpstreamWireApi::Responses {
+                bail!(
+                    "Responses Lite requires a Responses upstream; converting its tool surface is unsupported"
+                );
+            }
+            headers.insert(RESPONSES_LITE_HEADER, HeaderValue::from_static("true"));
+        }
         headers.insert(USER_AGENT, HeaderValue::from_str(&self.user_agent)?);
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if self.credentials.is_chatgpt() {
@@ -265,7 +309,7 @@ impl CodexClient {
         };
 
         let mut request_id_header: Option<String> = None;
-        let payload = if self.credentials.is_chatgpt() {
+        let mut payload = if self.credentials.is_chatgpt() {
             build_chatgpt_payload(
                 &self.model,
                 &self.instructions,
@@ -278,6 +322,7 @@ impl CodexClient {
                 self.requested_tool_choice.as_ref(),
                 self.requested_parallel_tool_calls,
                 self.requested_text_controls.as_ref(),
+                responses_lite,
             )
         } else {
             match upstream_wire_api {
@@ -293,6 +338,7 @@ impl CodexClient {
                     self.requested_tool_choice.as_ref(),
                     self.requested_parallel_tool_calls,
                     self.requested_text_controls.as_ref(),
+                    responses_lite,
                 ),
                 UpstreamWireApi::ChatCompletions => build_openai_chat_completions_payload(
                     &self.model,
@@ -313,6 +359,25 @@ impl CodexClient {
                 }
             }
         };
+
+        if upstream_wire_api == UpstreamWireApi::Responses {
+            if let Some(context) = &self.reasoning_context {
+                if !payload["reasoning"].is_object() {
+                    payload["reasoning"] = json!({});
+                }
+                payload["reasoning"]["context"] = Value::String(context.clone());
+            }
+            if responses_lite {
+                // Stateless Lite turns need the requested encrypted reasoning returned
+                // intact so the next turn can supply it as an input item.
+                if let Some(include) = &self.responses_lite_include {
+                    payload["include"] = json!(include);
+                }
+                if let Some(store) = self.responses_lite_store {
+                    payload["store"] = Value::Bool(store);
+                }
+            }
+        }
 
         if upstream_wire_api == UpstreamWireApi::GeminiCodeAssist {
             headers.insert(
@@ -478,6 +543,7 @@ fn build_openai_payload(
     requested_tool_choice: Option<&Value>,
     requested_parallel_tool_calls: Option<bool>,
     requested_text_controls: Option<&Value>,
+    responses_lite: bool,
 ) -> Value {
     let mut payload = json!({
         "model": model,
@@ -510,6 +576,15 @@ fn build_openai_payload(
             .unwrap_or_else(|| json!("auto"));
         payload["parallel_tool_calls"] =
             Value::Bool(requested_parallel_tool_calls.unwrap_or(false));
+    }
+
+    if responses_lite || has_responses_lite_tools(input_items) {
+        if let Some(choice) = requested_tool_choice {
+            payload["tool_choice"] = choice.clone();
+        }
+        if let Some(parallel) = requested_parallel_tool_calls {
+            payload["parallel_tool_calls"] = Value::Bool(parallel);
+        }
     }
 
     if let Some(text_controls) = requested_text_controls
@@ -710,6 +785,7 @@ fn build_chatgpt_payload(
     requested_tool_choice: Option<&Value>,
     requested_parallel_tool_calls: Option<bool>,
     requested_text_controls: Option<&Value>,
+    responses_lite: bool,
 ) -> Value {
     let reasoning_effort = requested_reasoning_effort
         .or_else(|| global_reasoning_effort())
@@ -736,11 +812,20 @@ fn build_chatgpt_payload(
             .unwrap_or_else(|| json!("auto"));
         payload["parallel_tool_calls"] =
             Value::Bool(requested_parallel_tool_calls.unwrap_or(false));
-    } else if tools_enabled {
+    } else if tools_enabled && !responses_lite && !has_responses_lite_tools(input_items) {
         let tool_metadata = resolve_chatgpt_tools(model);
         payload["tools"] = Value::Array(tool_metadata.tools);
         payload["tool_choice"] = Value::String("auto".to_string());
         payload["parallel_tool_calls"] = Value::Bool(tool_metadata.parallel_tool_calls);
+    }
+
+    if responses_lite || has_responses_lite_tools(input_items) {
+        if let Some(choice) = requested_tool_choice {
+            payload["tool_choice"] = choice.clone();
+        }
+        if let Some(parallel) = requested_parallel_tool_calls {
+            payload["parallel_tool_calls"] = Value::Bool(parallel);
+        }
     }
 
     if let Some(text_controls) = requested_text_controls
@@ -1825,6 +1910,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         assert_eq!(
@@ -1853,6 +1939,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         );
 
         assert!(payload.get("tools").is_none());
@@ -1895,6 +1982,7 @@ mod tests {
             Some(&tool_choice),
             Some(true),
             Some(&json!({"format": {"type": "text"}})),
+            false,
         );
 
         assert_eq!(payload["tools"], json!(tools));
@@ -1939,6 +2027,7 @@ mod tests {
             Some(&tool_choice),
             Some(false),
             Some(&json!({"format": {"type": "text"}})),
+            false,
         );
 
         assert_eq!(payload["tools"], json!(tools));

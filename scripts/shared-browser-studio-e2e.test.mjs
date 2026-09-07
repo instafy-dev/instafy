@@ -73,7 +73,8 @@ test("builds retain scrubbed toolchain locations without passing them to isolate
   const runner = await readFile(new URL("./shared-browser-studio-e2e.mjs", import.meta.url), "utf8");
   assert.match(runner, /const buildEnv = fixtureChildEnvironment\(process\.env\)/);
   assert.match(runner, /const run = \(command, args, options = \{\}\) => runOwnedProcess\(command, args,\s*\{ env: buildEnv, signal, \.\.\.options \}\)/);
-  assert.equal((runner.match(/await run\("cargo", \["build", [^\n]+?"--message-format=json"\]\)/g) ?? []).length, 2);
+  assert.equal((runner.match(/await run\("cargo", \["build", [^\n]+?"--message-format=json"\]\)/g) ?? []).length, 1);
+  assert.match(runner, /await run\(process\.execPath, \["scripts\/runtime-cargo\.mjs", "build", [^\n]+?"--bins", "--message-format=json"\]\)/);
 });
 
 test("Cargo artifact selection requires exactly one production binary with the requested name", () => {

@@ -163,12 +163,13 @@ instafy-desktop events --follow  # stream JSON lines in real time
 The helper expects the Rust runtime agent to be built locally. From the repository root:
 
 ```bash
-cargo build --manifest-path packages/runtime-agent/Cargo.toml
+node scripts/runtime-cargo.mjs build --locked --manifest-path packages/runtime-agent/Cargo.toml --bins
 ```
 
 By default the helper looks for `packages/runtime-agent/target/debug/runtime-agent`. Release
 builds are also supported (`target/release/runtime-agent`) and can be forced by building with
-`cargo build --release`.
+adding `--release` to that command. Keep the matching `codex-code-mode-host`
+executable beside `runtime-agent` for code-mode tool execution.
 
 ## Next steps
 

@@ -262,7 +262,7 @@ async function main() {
     }
 
     console.log("[cli-tunnel-e2e] Building runtime-agent...");
-    run("cargo", ["build", "--manifest-path", "packages/runtime-agent/Cargo.toml"]);
+    run(process.execPath, ["scripts/runtime-cargo.mjs", "build", "--manifest-path", "packages/runtime-agent/Cargo.toml", "--bins"]);
 
     console.log("[cli-tunnel-e2e] Building CLI...");
     run("pnpm", ["--filter", "@instafy/cli", "build"]);

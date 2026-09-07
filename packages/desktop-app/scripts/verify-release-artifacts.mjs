@@ -162,6 +162,12 @@ async function verifyRuntimeUnder(root) {
   );
   const resourcesPath = path.dirname(path.dirname(manifestPath));
   const executablePath = await resolveVerifiedBundledRuntimeAgent({ resourcesPath });
+  const hostPath = path.join(path.dirname(executablePath),
+    process.platform === "win32" ? "codex-code-mode-host.exe" : "codex-code-mode-host");
+  const hostProbe = run(hostPath, ["--version"], { capture: true, timeout: 20_000 });
+  if (!hostProbe.stdout.trim().startsWith("codex-code-mode-host ")) {
+    throw new Error("Extracted code-mode host returned an invalid version string.");
+  }
   const probe = run(executablePath, ["--version"], { capture: true, timeout: 20_000 });
   if (!probe.stdout.trim().startsWith("runtime-agent ")) {
     throw new Error(`Extracted runtime-agent returned an invalid version string: ${probe.stdout}`);
@@ -251,6 +257,7 @@ async function verifyWindowsArtifacts() {
     }
     const runtimePath = await verifyRuntimeUnder(extractionRoot);
     verifyWindowsAuthenticode(runtimePath);
+    verifyWindowsAuthenticode(path.join(path.dirname(runtimePath), "codex-code-mode-host.exe"));
   } finally {
     fs.rmSync(extractionRoot, { recursive: true, force: true });
   }

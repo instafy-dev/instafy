@@ -271,10 +271,18 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
+      - name: Set up Node.js for verified V8 artifact setup
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      - name: Test runtime Cargo artifact setup
+        run: node --test scripts/runtime-cargo.test.mjs
+
       - name: Check public Rust packages
         run: |
           cargo check --locked --tests --manifest-path packages/runtime-controller/Cargo.toml
-          cargo check --locked --tests --manifest-path packages/runtime-agent/Cargo.toml
+          node scripts/runtime-cargo.mjs check --locked --tests --manifest-path packages/runtime-agent/Cargo.toml
           cargo check --locked --tests --manifest-path packages/git-service/Cargo.toml
           cargo check --locked --tests --manifest-path packages/runtime-provider-service/Cargo.toml
           cargo check --locked --tests --manifest-path packages/tunnel-broker/Cargo.toml
@@ -385,8 +393,9 @@ jobs:
       - name: Run database-free Rust test suites
         run: |
           cargo test --manifest-path packages/runtime-contracts/Cargo.toml
-          cargo test --manifest-path packages/runtime-agent/Cargo.toml --no-run
-          cargo test --manifest-path packages/runtime-agent/Cargo.toml --lib --test controller_client -- --test-threads=1
+          node scripts/runtime-cargo.mjs test --manifest-path packages/runtime-agent/Cargo.toml --no-run
+          node scripts/runtime-cargo.mjs test --manifest-path packages/runtime-agent/Cargo.toml --lib --test controller_client -- --test-threads=1
+          node scripts/runtime-cargo.mjs test --manifest-path packages/runtime-agent/Cargo.toml --test proxy_integration codex_astra_ -- --test-threads=1
           cargo test --manifest-path packages/openai-proxy-server/Cargo.toml
           cargo test --manifest-path packages/origin-http-server/Cargo.toml
           cargo test --manifest-path packages/git-service/Cargo.toml

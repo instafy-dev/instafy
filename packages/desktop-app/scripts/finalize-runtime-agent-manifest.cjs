@@ -25,10 +25,13 @@ function resolvePackagedRuntimeBundle(context) {
       : path.join(context.appOutDir, "resources");
   const directory = path.join(resourcesPath, "runtime-agent");
   const filename = platform === "win32" ? "runtime-agent.exe" : "runtime-agent";
+  const hostFilename = platform === "win32" ? "codex-code-mode-host.exe" : "codex-code-mode-host";
   return {
     directory,
     executablePath: path.join(directory, filename),
     filename,
+    hostFilename,
+    hostPath: path.join(directory, hostFilename),
     manifestPath: path.join(directory, MANIFEST_FILENAME),
     platform,
   };
@@ -42,11 +45,12 @@ function requireStagedManifest(manifestPath, expected) {
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
   if (
     !manifest ||
-    manifest.schemaVersion !== 2 ||
+    manifest.schemaVersion !== 3 ||
     manifest.filename !== expected.filename ||
     manifest.platform !== expected.platform ||
     typeof manifest.arch !== "string" ||
-    !SOURCE_SHA_PATTERN.test(manifest.sourceSha || "")
+    !SOURCE_SHA_PATTERN.test(manifest.sourceSha || "") ||
+    manifest.codeModeHost?.filename !== expected.hostFilename
   ) {
     throw new Error(`Invalid staged runtime-agent manifest: ${manifestPath}`);
   }
@@ -60,14 +64,23 @@ function finalizeRuntimeAgentManifest(context) {
   if (!executableStats.isFile() || executableStats.isSymbolicLink()) {
     throw new Error(`Unsafe packaged runtime-agent executable: ${bundle.executablePath}`);
   }
+  const hostStats = fs.lstatSync(bundle.hostPath);
+  if (!hostStats.isFile() || hostStats.isSymbolicLink()) {
+    throw new Error(`Unsafe packaged code-mode host executable: ${bundle.hostPath}`);
+  }
   const manifest = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     filename: bundle.filename,
     platform: bundle.platform,
     arch: staged.arch,
     sizeBytes: executableStats.size,
     sha256: createHash("sha256").update(fs.readFileSync(bundle.executablePath)).digest("hex"),
     sourceSha: staged.sourceSha,
+    codeModeHost: {
+      filename: bundle.hostFilename,
+      sizeBytes: hostStats.size,
+      sha256: createHash("sha256").update(fs.readFileSync(bundle.hostPath)).digest("hex"),
+    },
   };
   const temporaryPath = `${bundle.manifestPath}.tmp-${process.pid}`;
   fs.writeFileSync(temporaryPath, `${JSON.stringify(manifest, null, 2)}\n`, {

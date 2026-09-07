@@ -16,8 +16,8 @@ use rmcp::ErrorData as McpError;
 use rmcp::ServiceExt;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, JsonObject, ListToolsResult,
-    PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, JsonObject,
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
 use serde_json::Map as JsonMap;
 use serde_json::Value as JsonValue;
@@ -675,7 +675,7 @@ fn terminal_consent_status(code: &'static str) -> JsonValue {
 }
 
 fn terminal_consent_call_result(code: &'static str) -> CallToolResult {
-    let mut result = CallToolResult::error(vec![Content::text(format!(
+    let mut result = CallToolResult::error(vec![ContentBlock::text(format!(
         "Shared Browser consent is blocked for this run ({code}). Start a fresh browser run before requesting another browser action."
     ))]);
     result.structured_content = Some(terminal_consent_signal(code));
@@ -752,20 +752,14 @@ impl ServerHandler for SharedBrowserMcpServer {
     ) -> impl std::future::Future<Output = std::result::Result<ListToolsResult, McpError>> + Send + '_
     {
         let tools = self.tools.clone();
-        async move {
-            Ok(ListToolsResult {
-                tools: (*tools).clone(),
-                next_cursor: None,
-                meta: None,
-            })
-        }
+        async move { Ok(ListToolsResult::with_all_items((*tools).clone())) }
     }
 
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> std::result::Result<CallToolResult, McpError> {
+    ) -> std::result::Result<CallToolResponse, McpError> {
         let browser_request = mcp_tool_request(request.name.as_ref(), request.arguments)
             .map_err(|error| McpError::invalid_params(error.to_string(), None))?;
         // rmcp may dispatch independent requests concurrently. The approval
@@ -781,17 +775,18 @@ impl ServerHandler for SharedBrowserMcpServer {
             Ok(payload) => {
                 let text = serde_json::to_string_pretty(&payload)
                     .unwrap_or_else(|_| "Shared Browser returned an unreadable result".to_string());
-                let mut result = CallToolResult::success(vec![Content::text(text)]);
+                let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
                 result.structured_content = Some(payload);
-                Ok(result)
+                Ok(result.into())
             }
             Err(SharedBrowserMcpExecutionFailure::TerminalConsent(code)) => {
-                Ok(terminal_consent_call_result(code))
+                Ok(terminal_consent_call_result(code).into())
             }
             Err(SharedBrowserMcpExecutionFailure::Other(error)) => {
-                Ok(CallToolResult::error(vec![Content::text(format!(
+                Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                     "Shared Browser action failed: {error:#}"
-                ))]))
+                ))])
+                .into())
             }
         }
     }

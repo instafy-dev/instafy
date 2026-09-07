@@ -88,7 +88,7 @@ runtime agent once after cloning the repository, then build the Node wrapper so 
 invoke it:
 
 ```bash
-cargo build --manifest-path packages/runtime-agent/Cargo.toml
+node scripts/runtime-cargo.mjs build --manifest-path packages/runtime-agent/Cargo.toml --bins
 pnpm --filter @instafy/desktop-runtime-agent build
 ```
 

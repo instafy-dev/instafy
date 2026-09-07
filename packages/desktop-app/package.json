@@ -59,7 +59,8 @@
         "from": "build/runtime-agent",
         "to": "runtime-agent",
         "filter": [
-          "runtime-agent*"
+          "runtime-agent*",
+          "codex-code-mode-host*"
         ]
       }
     ],
@@ -79,7 +80,8 @@
       "category": "public.app-category.developer-tools",
       "icon": "assets/icon.png",
       "binaries": [
-        "Contents/Resources/runtime-agent/runtime-agent"
+        "Contents/Resources/runtime-agent/runtime-agent",
+        "Contents/Resources/runtime-agent/codex-code-mode-host"
       ],
       "extendInfo": {
         "NSBluetoothAlwaysUsageDescription": "Instafy uses Bluetooth to connect to hardware selected by you.",
@@ -105,7 +107,8 @@
     "win": {
       "icon": "assets/icon.png",
       "signExts": [
-        "runtime-agent.exe"
+        "runtime-agent.exe",
+        "codex-code-mode-host.exe"
       ],
       "target": [
         {

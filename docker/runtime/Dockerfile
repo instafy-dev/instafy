@@ -108,9 +108,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN cargo install cargo-chef --version "${CARGO_CHEF_VERSION}" --locked
 WORKDIR /src
 COPY packages/runtime-agent/Cargo.toml packages/runtime-agent/Cargo.lock packages/runtime-agent/
-RUN mkdir -p packages/runtime-agent/src \
+RUN mkdir -p packages/runtime-agent/src/bin \
     && printf 'pub fn cargo_chef_placeholder() {}\n' > packages/runtime-agent/src/lib.rs \
-    && printf 'fn main() {}\n' > packages/runtime-agent/src/main.rs
+    && printf 'fn main() {}\n' > packages/runtime-agent/src/main.rs \
+    && printf 'fn main() {}\n' > packages/runtime-agent/src/bin/codex-code-mode-host.rs
 COPY packages/runtime-contracts/ packages/runtime-contracts/
 COPY packages/openai-proxy-server/ packages/openai-proxy-server/
 COPY packages/origin-http-server/ packages/origin-http-server/
@@ -126,9 +127,12 @@ FROM ${RUST_IMAGE} AS builder-deps
 ARG BUILD_PROFILE=dev
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential pkg-config libssl-dev libcap-dev protobuf-compiler \
-      clang lld curl \
+      clang lld curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY scripts/runtime-cargo.mjs /src/scripts/runtime-cargo.mjs
 ENV CARGO_HOME=/usr/local/cargo \
+    INSTAFY_RUSTY_V8_CACHE=/usr/local/cargo/rusty-v8 \
     RUSTFLAGS="-C link-arg=-fuse-ld=lld"
 WORKDIR /src/packages/runtime-agent
 COPY --from=chef /usr/local/cargo/bin/cargo-chef /usr/local/cargo/bin/cargo-chef
@@ -142,7 +146,8 @@ COPY --from=chef /src/recipe.json /src/recipe.json
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/packages/runtime-agent/target \
-    cargo chef cook --profile ${BUILD_PROFILE} --recipe-path /src/recipe.json --locked
+    --mount=type=cache,target=/usr/local/cargo/rusty-v8 \
+    node /src/scripts/runtime-cargo.mjs chef cook --profile ${BUILD_PROFILE} --recipe-path /src/recipe.json --locked
 
 ########################
 # Application builder
@@ -152,9 +157,12 @@ ARG BUILD_PROFILE=dev
 ARG BUILD_ARTIFACT_DIR=debug
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential pkg-config libssl-dev libcap-dev protobuf-compiler \
-      clang lld curl \
+      clang lld curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
+COPY scripts/runtime-cargo.mjs /src/scripts/runtime-cargo.mjs
 ENV CARGO_HOME=/usr/local/cargo \
+    INSTAFY_RUSTY_V8_CACHE=/usr/local/cargo/rusty-v8 \
     RUSTFLAGS="-C link-arg=-fuse-ld=lld"
 WORKDIR /src
 COPY packages/runtime-agent/ packages/runtime-agent/
@@ -166,10 +174,12 @@ COPY proto/ proto/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/packages/runtime-agent/target \
-    cargo build --profile ${BUILD_PROFILE} --manifest-path packages/runtime-agent/Cargo.toml --locked \
+    --mount=type=cache,target=/usr/local/cargo/rusty-v8 \
+    node /src/scripts/runtime-cargo.mjs build --profile ${BUILD_PROFILE} --manifest-path packages/runtime-agent/Cargo.toml --locked --bins \
     && cargo build --profile ${BUILD_PROFILE} --manifest-path packages/runtime-agent/Cargo.toml -p codex-linux-sandbox --locked \
     && mkdir -p /src/build-artifacts/${BUILD_ARTIFACT_DIR} \
     && cp /src/packages/runtime-agent/target/${BUILD_ARTIFACT_DIR}/runtime-agent /src/build-artifacts/${BUILD_ARTIFACT_DIR}/runtime-agent \
+    && cp /src/packages/runtime-agent/target/${BUILD_ARTIFACT_DIR}/codex-code-mode-host /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-code-mode-host \
     && cp /src/packages/runtime-agent/target/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox
 
 ########################
@@ -180,6 +190,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 FROM scratch AS binary-export
 ARG BUILD_ARTIFACT_DIR=debug
 COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/runtime-agent /runtime-agent
+COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-code-mode-host /codex-code-mode-host
 COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox /codex-linux-sandbox
 
 ########################
@@ -270,6 +281,7 @@ RUN npm install -g "npm@${NPM_VERSION}" && \
 ARG BUILD_PROFILE=dev
 ARG BUILD_ARTIFACT_DIR=debug
 COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/runtime-agent /usr/local/bin/runtime-agent
+COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-code-mode-host /usr/local/bin/codex-code-mode-host
 COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox /usr/local/bin/codex-linux-sandbox
 COPY --from=browser-egress-proxy-builder /out/browser-egress-proxy /usr/local/bin/browser-egress-proxy
 COPY --from=browser-webrtc-builder /out/browser-webrtc-sender /usr/local/bin/browser-webrtc-sender
@@ -448,6 +460,7 @@ RUN set -eu; \
 ARG BUILD_PROFILE=dev
 ARG BUILD_ARTIFACT_DIR=debug
 COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/runtime-agent /usr/local/bin/runtime-agent
+COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-code-mode-host /usr/local/bin/codex-code-mode-host
 COPY --from=builder /src/build-artifacts/${BUILD_ARTIFACT_DIR}/codex-linux-sandbox /usr/local/bin/codex-linux-sandbox
 COPY --from=browser-egress-proxy-builder /out/browser-egress-proxy /usr/local/bin/browser-egress-proxy
 COPY --from=browser-webrtc-builder /out/browser-webrtc-sender /usr/local/bin/browser-webrtc-sender
