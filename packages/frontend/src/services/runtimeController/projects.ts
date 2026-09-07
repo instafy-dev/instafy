@@ -9,6 +9,7 @@ import {
 } from "./core";
 export { deriveGithubImportTargetPath } from "./githubImportPath";
 import { logControllerRequestError } from "./logging";
+import { createControllerReadBudget } from "./readBudget";
 import { PERSONAL_ORG_LABEL } from "../../org/orgNaming";
 
 export interface ControllerProjectCreateParams {
@@ -115,7 +116,6 @@ export interface ImportGithubProjectResult {
 const GITHUB_IMPORT_TIMEOUT_MS = 15 * 60 * 1000;
 const GITHUB_IMPORT_WORKSPACE_BUSY_RETRY_DELAYS_MS = [250, 500, 1_000, 2_000, 4_000, 8_000] as const;
 const ORG_INVITATION_TIMEOUT_MS = 12 * 1000;
-const PROJECT_SUMMARY_TIMEOUT_MS = 10_000;
 
 function isRetryableGithubImportWorkspaceBusy(error: {
   status: number;
@@ -415,6 +415,7 @@ export async function bootstrapControllerProjectMemory(params: {
 
 export async function listControllerProjects(params?: {
   orgId?: string | null;
+  signal?: AbortSignal;
 }): Promise<ControllerProjectSummary[]> {
   const result = await listControllerProjectsResult(params);
   return result.status === "success" ? result.projects : [];
@@ -424,12 +425,14 @@ export async function listControllerProjects(params?: {
 // a failed refresh. Only an unsupported route permits legacy discovery.
 export async function listControllerProjectsResult(params?: {
   orgId?: string | null;
+  signal?: AbortSignal;
 }): Promise<ControllerProjectListResult> {
   if (!runtimeControllerEnabled) {
     return { status: "error" };
   }
+  const budget = createControllerReadBudget(params?.signal);
   try {
-    const requestContext = await resolveControllerRequestContext(null);
+    const requestContext = await budget.wait(() => resolveControllerRequestContext(null));
     const accessToken = requestContext.accessToken;
     if (!accessToken) {
       return { status: "error" };
@@ -438,23 +441,24 @@ export async function listControllerProjectsResult(params?: {
     const url = normalizedOrgId
       ? `${requestContext.baseUrl}/orgs/${encodeURIComponent(normalizedOrgId)}/projects`
       : `${requestContext.baseUrl}/projects`;
-    const response = await fetch(url, {
+    const response = await budget.wait(() => fetch(url, {
+      signal: budget.signal,
       headers: {
         authorization: `Bearer ${accessToken}`,
       },
-    });
+    }));
     if (response.status === 404 || response.status === 405) {
       return { status: "unsupported" };
     }
     if (!response.ok) {
-      const message = await readControllerError(
+      const message = await budget.wait(() => readControllerError(
         response,
         "list projects failed",
         requestContext,
-      );
+      ));
       throw new Error(message);
     }
-    const payload = (await response.json().catch(() => null)) as {
+    const payload = (await budget.wait(() => response.json().catch(() => null))) as {
       projects?: ControllerProjectSummary[];
     } | null;
     if (payload?.projects && Array.isArray(payload.projects)) {
@@ -467,9 +471,12 @@ export async function listControllerProjectsResult(params?: {
     }
     throw new Error("list projects returned an invalid response");
   } catch (error) {
+    params?.signal?.throwIfAborted();
     logControllerRequestError("[runtime-controller] listControllerProjects error:", error, {
       suppressLikelyConnectionNoise: true,
     });
+  } finally {
+    budget.dispose();
   }
   return { status: "error" };
 }
@@ -606,8 +613,9 @@ export async function importGithubProject(
 
 export async function getControllerProjectSummary(
   projectId: string,
+  options: { signal?: AbortSignal } = {},
 ): Promise<ControllerProjectSummary | null> {
-  const result = await getControllerProjectSummaryResult(projectId);
+  const result = await getControllerProjectSummaryResult(projectId, options);
   return result.summary;
 }
 
@@ -620,6 +628,7 @@ export interface ControllerProjectSummaryResult {
 
 export async function getControllerProjectSummaryResult(
   projectId: string,
+  options: { signal?: AbortSignal } = {},
 ): Promise<ControllerProjectSummaryResult> {
   if (!runtimeControllerEnabled) {
     return { summary: null, notFound: false, forbidden: false, unauthorized: false };
@@ -628,43 +637,48 @@ export async function getControllerProjectSummaryResult(
   if (!normalizedProjectId) {
     return { summary: null, notFound: false, forbidden: false, unauthorized: false };
   }
-  const requestContext = await resolveControllerRequestContext(null);
-  const accessToken = requestContext.accessToken;
-  if (!accessToken) {
-    return { summary: null, notFound: false, forbidden: false, unauthorized: false };
-  }
-  const abortController = new AbortController();
-  const timeoutHandle = setTimeout(() => abortController.abort(), PROJECT_SUMMARY_TIMEOUT_MS);
+  const budget = createControllerReadBudget(options.signal);
   try {
-    const response = await fetch(
+    const requestContext = await budget.wait(() => resolveControllerRequestContext(null));
+    const accessToken = requestContext.accessToken;
+    if (!accessToken) {
+      return { summary: null, notFound: false, forbidden: false, unauthorized: false };
+    }
+    const response = await budget.wait(() => fetch(
       `${requestContext.baseUrl}/projects/${encodeURIComponent(normalizedProjectId)}`,
       {
         headers: {
           authorization: `Bearer ${accessToken}`,
         },
-        signal: abortController.signal,
+        signal: budget.signal,
       },
-    );
+    ));
     if (response.status === 404) {
       return { summary: null, notFound: true, forbidden: false, unauthorized: false };
     }
     if (response.status === 403) {
-      await readControllerError(response, "get project failed", requestContext);
+      void response.body?.cancel().catch(() => undefined);
       return { summary: null, notFound: false, forbidden: true, unauthorized: false };
     }
     if (response.status === 401) {
-      await readControllerError(response, "get project failed", requestContext);
+      // Preserve the known authorization result if its error body or recovery
+      // handler stalls; callers must not mistake a denial for unavailable access.
+      try {
+        await budget.wait(() => readControllerError(response, "get project failed", requestContext));
+      } catch {
+        options.signal?.throwIfAborted();
+      }
       return { summary: null, notFound: false, forbidden: false, unauthorized: true };
     }
     if (!response.ok) {
-      const message = await readControllerError(
+      const message = await budget.wait(() => readControllerError(
         response,
         "get project failed",
         requestContext,
-      );
+      ));
       throw new Error(message);
     }
-    const body = (await response.json().catch(() => null)) as
+    const body = (await budget.wait(() => response.json().catch(() => null))) as
       | ControllerProjectSummary
       | null;
     if (!body || typeof body.projectId !== "string" || !body.projectId.trim()) {
@@ -684,11 +698,12 @@ export async function getControllerProjectSummaryResult(
       unauthorized: false,
     };
   } catch (error) {
+    options.signal?.throwIfAborted();
     const message = error instanceof Error ? error.message : String(error);
     console.warn("[runtime-controller] getControllerProjectSummary error:", message);
     return { summary: null, notFound: false, forbidden: false, unauthorized: false };
   } finally {
-    clearTimeout(timeoutHandle);
+    budget.dispose();
   }
 }
 
@@ -993,7 +1008,7 @@ export async function removeControllerProjectMember(params: {
 }
 
 export async function listControllerOrganizations(
-  options: { throwOnError?: boolean } = {},
+  options: { throwOnError?: boolean; signal?: AbortSignal } = {},
 ): Promise<ControllerOrgSummary[]> {
   if (!runtimeControllerEnabled) {
     if (options.throwOnError) {
@@ -1001,29 +1016,31 @@ export async function listControllerOrganizations(
     }
     return [];
   }
-  const requestContext = await resolveControllerRequestContext(null);
-  const accessToken = requestContext.accessToken;
-  if (!accessToken) {
-    if (options.throwOnError) {
-      throw new Error("Controller authentication is unavailable.");
-    }
-    return [];
-  }
+  const budget = createControllerReadBudget(options.signal);
   try {
-    const response = await fetch(`${requestContext.baseUrl}/orgs`, {
+    const requestContext = await budget.wait(() => resolveControllerRequestContext(null));
+    const accessToken = requestContext.accessToken;
+    if (!accessToken) {
+      if (options.throwOnError) {
+        throw new Error("Controller authentication is unavailable.");
+      }
+      return [];
+    }
+    const response = await budget.wait(() => fetch(`${requestContext.baseUrl}/orgs`, {
+      signal: budget.signal,
       headers: {
         authorization: `Bearer ${accessToken}`,
       },
-    });
+    }));
     if (!response.ok) {
-      const message = await readControllerError(
+      const message = await budget.wait(() => readControllerError(
         response,
         "list orgs failed",
         requestContext,
-      );
+      ));
       throw new Error(message);
     }
-    const payload = (await response.json().catch(() => null)) as {
+    const payload = (await budget.wait(() => response.json().catch(() => null))) as {
       orgs?: ControllerOrgSummary[];
     } | null;
     if (payload?.orgs && Array.isArray(payload.orgs)) {
@@ -1035,12 +1052,15 @@ export async function listControllerOrganizations(
       throw new Error("list orgs returned an invalid response");
     }
   } catch (error) {
+    options.signal?.throwIfAborted();
     logControllerRequestError("[runtime-controller] listControllerOrganizations error:", error, {
       suppressLikelyConnectionNoise: true,
     });
     if (options.throwOnError) {
       throw error;
     }
+  } finally {
+    budget.dispose();
   }
   return [];
 }

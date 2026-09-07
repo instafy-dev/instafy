@@ -116,7 +116,7 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
   const activeOrgId = activeProject?.orgId ?? null;
   const activeOrgName = getOrgDisplayName(activeProject?.orgName);
   const showAllOrgs = controllerClient.core.enabled && !activeOrgId;
-  const { mergedProjects, remoteLoading } = useMergedControllerProjects({
+  const { mergedProjects, remoteLoading, remoteError, remoteRefreshing, retryRemoteProjects } = useMergedControllerProjects({
     localProjects: projectList,
     orgId: activeOrgId,
     includeAllOrgs: showAllOrgs,
@@ -609,6 +609,17 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
       ) : null}
 
       <div className="flex flex-col gap-2 sm:gap-2.5">
+        {remoteError ? (
+          <Card tone="default" radius="2xl" shadow="none" padding="sm"
+            className="flex flex-wrap items-center justify-between gap-2 text-sm text-slate-600"
+            data-testid="project-picker-discovery-error">
+            <p role="status">{remoteError}</p>
+            <Button variant="outline" size="xs" onPress={retryRemoteProjects}
+              isDisabled={remoteRefreshing} data-testid="project-picker-discovery-retry">
+              {remoteRefreshing ? "Retrying…" : "Retry"}
+            </Button>
+          </Card>
+        ) : null}
         {filteredProjects.length === 0 ? (
           <Card
             tone="default"
@@ -621,6 +632,8 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
               <LoadingStatus size="xs">
                 Loading spaces…
               </LoadingStatus>
+            ) : remoteError ? (
+              "Spaces will appear when the connection recovers."
             ) : (
               "No spaces found yet."
             )}

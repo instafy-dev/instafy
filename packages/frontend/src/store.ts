@@ -479,6 +479,12 @@ export const useWorkspaceStore = create<SessionStore>()(
     if (!project) {
       return;
     }
+    if (
+      (project.org?.id ?? null) === (org.id ?? null) &&
+      (project.org?.name ?? null) === (org.name ?? null)
+    ) {
+      return;
+    }
     const nextProject: SiteBuilderState = {
       ...project,
       org: {
@@ -507,6 +513,9 @@ export const useWorkspaceStore = create<SessionStore>()(
     }
     const trimmed = name.trim();
     if (!trimmed) {
+      return;
+    }
+    if (project.metadata.projectName === trimmed) {
       return;
     }
     const nextProject: SiteBuilderState = {
