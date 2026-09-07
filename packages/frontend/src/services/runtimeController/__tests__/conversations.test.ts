@@ -55,6 +55,7 @@ describe("fetchConversationMessagesFromController", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -64,6 +65,22 @@ describe("fetchConversationMessagesFromController", () => {
 
     await expect(fetchConversationMessagesFromController({ conversationId: "conversation-1" }))
       .resolves.toBe("access_denied");
+  });
+
+  it("clears denied history from 403 headers without waiting for a stalled error body", async () => {
+    vi.useFakeTimers();
+    const cancelBody = vi.fn();
+    const response = new Response(new ReadableStream({ cancel: cancelBody }), { status: 403 });
+    const readBody = vi.spyOn(response, "text").mockImplementation(() => new Promise(() => undefined));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response));
+
+    await expect(fetchConversationMessagesFromController({ conversationId: "conversation-1" }))
+      .resolves.toBe("access_denied");
+
+    expect(readControllerError).not.toHaveBeenCalled();
+    expect(readBody).not.toHaveBeenCalled();
+    expect(cancelBody).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("keeps HTTP 401 retryable after the existing auth-recovery handler runs", async () => {
@@ -95,6 +112,226 @@ describe("fetchConversationMessagesFromController", () => {
     await expect(fetchConversationMessagesFromController(request)).resolves.toEqual({
       messages: [], nextCursor: null, hasMore: false,
     });
+  });
+
+  it("does not start an already canceled history request", async () => {
+    const abortController = new AbortController();
+    abortController.abort();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchConversationMessagesFromController({
+      conversationId: "conversation-1", signal: abortController.signal,
+    })).rejects.toBe(abortController.signal.reason);
+    expect(resolveControllerAccessTokenMock).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not send a read canceled while authentication was resolving", async () => {
+    vi.useFakeTimers();
+    let resolveToken!: (token: string) => void;
+    resolveControllerAccessTokenMock.mockReturnValue(new Promise<string>((resolve) => {
+      resolveToken = resolve;
+    }));
+    const abortController = new AbortController();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const request = fetchConversationMessagesFromController({
+      conversationId: "conversation-1", signal: abortController.signal,
+    });
+    const rejection = expect(request).rejects.toMatchObject({ name: "AbortError" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    abortController.abort();
+    await rejection;
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+
+    resolveToken("token-123");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("bounds credential resolution and consumes late authentication rejection", async () => {
+    vi.useFakeTimers();
+    let rejectToken!: (error: Error) => void;
+    resolveControllerAccessTokenMock.mockReturnValue(new Promise<string>((_resolve, reject) => {
+      rejectToken = reject;
+    }));
+    const abortController = new AbortController();
+    const removeListener = vi.spyOn(abortController.signal, "removeEventListener");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const request = fetchConversationMessagesFromController({
+      conversationId: "conversation-1", signal: abortController.signal,
+    });
+    const rejection = expect(request).rejects.toMatchObject({ name: "TimeoutError" });
+
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    await rejection;
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(removeListener).toHaveBeenCalledWith("abort", expect.any(Function));
+    expect(vi.getTimerCount()).toBe(0);
+
+    rejectToken(new Error("Late authentication failure"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("shares one deadline across authentication and the HTTP request", async () => {
+    vi.useFakeTimers();
+    let resolveToken!: (token: string) => void;
+    resolveControllerAccessTokenMock.mockReturnValue(new Promise<string>((resolve) => {
+      resolveToken = resolve;
+    }));
+    const fetchMock = vi.fn(() => new Promise<Response>(() => undefined));
+    vi.stubGlobal("fetch", fetchMock);
+    const request = fetchConversationMessagesFromController({ conversationId: "conversation-1" });
+    const rejection = expect(request).rejects.toMatchObject({ name: "TimeoutError" });
+
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(fetchMock).not.toHaveBeenCalled();
+    resolveToken("token-123");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(2_000);
+    await rejection;
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("cleans up the deadline and caller listener when no credential is available", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    resolveControllerAccessTokenMock.mockResolvedValue(null);
+    const abortController = new AbortController();
+    const removeListener = vi.spyOn(abortController.signal, "removeEventListener");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchConversationMessagesFromController({
+      conversationId: "conversation-1", signal: abortController.signal,
+    })).resolves.toBeNull();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(removeListener).toHaveBeenCalledWith("abort", expect.any(Function));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("aborts an obsolete read without turning cancellation into a retryable failure", async () => {
+    vi.useFakeTimers();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const abortController = new AbortController();
+    const removeListener = vi.spyOn(abortController.signal, "removeEventListener");
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+    const request = fetchConversationMessagesFromController({
+      conversationId: "conversation-1", signal: abortController.signal,
+    });
+    const rejection = expect(request).rejects.toMatchObject({ name: "AbortError" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    abortController.abort();
+
+    await rejection;
+    expect(fetchMock.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+    expect(removeListener).toHaveBeenCalledWith("abort", expect.any(Function));
+    expect(vi.getTimerCount()).toBe(0);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it.each(["headers", "body"])("bounds stalled history %s to ten seconds", async (stage) => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
+      const pending = new Promise<never>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+      });
+      return stage === "headers"
+        ? pending
+        : Promise.resolve({ ok: true, status: 200, json: () => pending });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const request = fetchConversationMessagesFromController({ conversationId: "conversation-1" });
+    const rejection = expect(request).rejects.toMatchObject({ name: "TimeoutError" });
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(fetchMock.mock.calls[0]?.[1]?.signal?.aborted).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(1);
+
+    await rejection;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("also bounds a stalled retryable error body", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 503 })));
+    vi.mocked(readControllerError).mockImplementationOnce(() => new Promise(() => undefined));
+    const request = fetchConversationMessagesFromController({ conversationId: "conversation-1" });
+    const rejection = expect(request).rejects.toMatchObject({ name: "TimeoutError" });
+
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    await rejection;
+    expect(readControllerError).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("cleans up its deadline and caller listener after a successful read", async () => {
+    vi.useFakeTimers();
+    const abortController = new AbortController();
+    const removeListener = vi.spyOn(abortController.signal, "removeEventListener");
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      messages: [], hasMore: false,
+    })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchConversationMessagesFromController({
+      conversationId: "conversation-1", cursor: "message-50", limit: 50,
+      signal: abortController.signal,
+    })).resolves.toEqual({ messages: [], nextCursor: null, hasMore: false });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      "http://controller.test/conversations/conversation-1/messages?limit=50&cursor=message-50",
+    );
+    expect(vi.getTimerCount()).toBe(0);
+    expect(removeListener).toHaveBeenCalledWith("abort", expect.any(Function));
+    abortController.abort();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(fetchMock.mock.calls[0]?.[1]?.signal?.aborted).toBe(false);
+  });
+
+  it("re-resolves recovered authentication on the caller's next bounded attempt", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const abortController = new AbortController();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 401 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ messages: [], hasMore: false })));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.mocked(readControllerError).mockImplementationOnce(async () => {
+      resolveControllerAccessTokenMock.mockResolvedValue("recovered-token");
+      return "Expired credential";
+    });
+    const request = { conversationId: "conversation-1", signal: abortController.signal };
+
+    await expect(fetchConversationMessagesFromController(request)).resolves.toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+    await expect(fetchConversationMessagesFromController(request)).resolves.toEqual({
+      messages: [], nextCursor: null, hasMore: false,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1]?.[1]).toMatchObject({
+      headers: { authorization: "Bearer recovered-token" }, signal: expect.any(AbortSignal),
+    });
+    expect(abortController.signal.aborted).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 
