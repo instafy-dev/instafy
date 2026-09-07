@@ -266,7 +266,7 @@ describe("useChatScrollController", () => {
     ]} />));
     const scroller = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
     scroller.scrollTop = 450;
-    scroller.dispatchEvent(new Event("scroll"));
+    await act(async () => { scroller.dispatchEvent(new Event("scroll")); });
     expect(getConversationScrollAnchorMessageId(conversationId)).toBe("reading");
 
     await act(async () => root.render(null));
@@ -284,10 +284,10 @@ describe("useChatScrollController", () => {
     await act(async () => root.render(<AnchorHarness conversationId={conversationId} scrollHeight={1200} rows={rows} />));
     const scroller = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
     scroller.scrollTop = 430;
-    scroller.dispatchEvent(new Event("scroll"));
+    await act(async () => { scroller.dispatchEvent(new Event("scroll")); });
     await act(async () => root.render(null));
     await act(async () => root.render(<AnchorHarness conversationId={conversationId} loading scrollHeight={200} rows={[]} />));
-    container.querySelector('[data-testid="anchor-scroll"]')?.dispatchEvent(new Event("scroll"));
+    await act(async () => { container.querySelector('[data-testid="anchor-scroll"]')?.dispatchEvent(new Event("scroll")); });
     expect(getConversationScrollAnchorMessageId(conversationId)).toBe("reading");
     await act(async () => root.render(<AnchorHarness conversationId={conversationId} scrollHeight={1200} rows={rows} />));
     const restored = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
@@ -307,7 +307,7 @@ describe("useChatScrollController", () => {
     ]} />));
     const scroller = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
     scroller.scrollTop = 300;
-    scroller.dispatchEvent(new Event("scroll"));
+    await act(async () => { scroller.dispatchEvent(new Event("scroll")); });
     await act(async () => root.render(null));
     await act(async () => root.render(<AnchorHarness conversationId={conversationId} scrollHeight={800} rows={[
       { id: "retained", top: 0, height: 400 }, { id: "new", top: 400, height: 400 },
@@ -324,12 +324,12 @@ describe("useChatScrollController", () => {
     ]} />));
     const scroller = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
     scroller.scrollTop = 450;
-    scroller.dispatchEvent(new Event("scroll"));
+    await act(async () => { scroller.dispatchEvent(new Event("scroll")); });
     const rows = [{ id: "reading", top: 0, height: 400 }, { id: "newest", top: 400, height: 400 }];
     await act(async () => root.render(<AnchorHarness conversationId={conversationId} scrollHeight={800} rows={rows} />));
     expect(scroller.scrollTop).toBe(50);
     scroller.scrollTop = 100;
-    scroller.dispatchEvent(new Event("scroll"));
+    await act(async () => { scroller.dispatchEvent(new Event("scroll")); });
     rows[0].top = 20;
     await act(async () => resizeCallback?.([], {} as ResizeObserver));
     expect(scroller.scrollTop).toBe(100);
@@ -353,12 +353,12 @@ describe("useChatScrollController", () => {
     await act(async () => root.render(<AnchorHarness conversationId="anchor-switch-a" scrollHeight={1200} rows={rows} />));
     const scroller = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
     scroller.scrollTop = 430;
-    scroller.dispatchEvent(new Event("scroll"));
+    await act(async () => { scroller.dispatchEvent(new Event("scroll")); });
 
     await act(async () => root.render(<AnchorHarness conversationId="anchor-switch-b" scrollHeight={1200} rows={rows} />));
     expect(scroller.scrollTop).toBe(1000);
     scroller.scrollTop = 70;
-    scroller.dispatchEvent(new Event("scroll"));
+    await act(async () => { scroller.dispatchEvent(new Event("scroll")); });
     await act(async () => root.render(<AnchorHarness conversationId="anchor-switch-a" scrollHeight={1200} rows={rows} />));
     expect(scroller.scrollTop).toBe(430);
     await act(async () => root.render(<AnchorHarness conversationId="anchor-switch-b" scrollHeight={1200} rows={rows} />));

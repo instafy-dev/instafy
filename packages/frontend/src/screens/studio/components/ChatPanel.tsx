@@ -1854,34 +1854,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const openImageLightbox = useCallback((src: string, alt: string) => {
     setImageLightbox({ src, alt });
   }, []);
-  const {
-    autoScrollSuspendedRef,
-    autoScrollPendingRef,
-    handleScrollContentRef,
-    lastComposerScrollTopRef,
-    lastScrollHeightRef,
-    recordScrollPosition,
-    requestOlderMessages,
-    scrollContainerRef,
-    scrollToBottom,
-    setAutoScrollSuspended,
-    shouldAutoScrollRef,
-    showHistoryLoadButton,
-  } = useChatScrollController({
-    activeConversationId,
-    hasMoreHistory,
-    isHistoryLoading,
-    isInitialHistoryLoading,
-    loadOlderMessages,
-    messages,
-  });
-
-  useConversationNotificationRead({
-    currentUserId,
-    conversationId: activeConversationControllerId,
-    rootRef: scrollContainerRef,
-    enabled: browserSubtab === "chat" && !jobThread,
-  });
 
   const activeConversation = useMemo(
     () => conversations.find((conversation) => conversation.localId === activeConversationId) ?? null,
@@ -2623,6 +2595,39 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
     return [...jobThreads, ...threadMessages];
   }, [activeConversation?.controllerId, collapsedConversationMessages, previewThreads, messages]);
+
+  const {
+    autoScrollSuspendedRef,
+    autoScrollPendingRef,
+    handleScrollContentRef,
+    hasNewMessages,
+    jumpToLatest,
+    lastComposerScrollTopRef,
+    lastScrollHeightRef,
+    recordScrollPosition,
+    requestOlderMessages,
+    scrollContainerRef,
+    scrollToBottom,
+    setAutoScrollSuspended,
+    shouldAutoScrollRef,
+    showHistoryLoadButton,
+    showJumpToLatest,
+  } = useChatScrollController({
+    activeConversationId,
+    hasMoreHistory,
+    isHistoryLoading,
+    isInitialHistoryLoading,
+    loadOlderMessages,
+    messages,
+    displayedMessages,
+  });
+
+  useConversationNotificationRead({
+    currentUserId,
+    conversationId: activeConversationControllerId,
+    rootRef: scrollContainerRef,
+    enabled: browserSubtab === "chat" && !jobThread,
+  });
 
   useEffect(() => {
     if (autoRevealHistoryConversationRef.current !== activeConversationId) {
@@ -5410,6 +5415,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       </div>
       <ChatTranscriptViewport
         ariaLabel={conversationLabel}
+        onJumpToLatest={showJumpToLatest ? jumpToLatest : undefined}
+        hasNewMessages={hasNewMessages}
         onScroll={handleScroll}
         onContextMenu={handleConversationContextMenu}
         scrollContainerRef={scrollContainerRef}

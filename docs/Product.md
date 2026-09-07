@@ -129,6 +129,10 @@ Reading position follows the first visible message and its offset, including aft
 pages are trimmed. If that message is no longer loaded, the view starts at the oldest available
 message, where earlier history can be requested. Conversations left at the bottom keep following
 new messages.
+When reading above the latest messages, a **Jump to latest** button stays above the composer.
+It changes to **New messages** when visible messages (including attachments) arrive, without moving
+their reading position. Jumping or scrolling to the bottom clears the notice and resumes
+following. Initial history loads and older-page prepends do not count as new arrivals.
 
 This does not restore an entire
 editor session: file and panel tabs currently carry across space switches, while file selection

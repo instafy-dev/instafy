@@ -7,7 +7,9 @@ import {
   type MutableRefObject,
 } from "react";
 import type { ChatMessage } from "../types";
+import { isTimelineMessage } from "../../../conversations/conversationMessageUtils";
 import type { AiCredentialsGateState } from "./AiCredentialsStatusBubble";
+import { shouldDisplayChatMessage } from "./chatMessagePresentation";
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 24;
 const SCROLL_SNAPSHOT_INTERVAL_MS = 250;
@@ -73,6 +75,7 @@ type UseChatScrollControllerOptions = {
   isInitialHistoryLoading?: boolean;
   loadOlderMessages: () => void | Promise<unknown>;
   messages: ChatMessage[];
+  displayedMessages?: ChatMessage[];
 };
 
 type UseChatAutoScrollSyncOptions = {
@@ -115,11 +118,23 @@ export function useChatScrollController({
   isInitialHistoryLoading = false,
   loadOlderMessages,
   messages,
+  displayedMessages = messages,
 }: UseChatScrollControllerOptions) {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const [scrollContentNode, setScrollContentNode] = useState<HTMLDivElement | null>(null);
   const [historyWindowUnderfilled, setHistoryWindowUnderfilled] = useState(false);
   const [historyAutoFillExhausted, setHistoryAutoFillExhausted] = useState(false);
+  const [latestIndicator, setLatestIndicator] = useState({
+    conversationId: activeConversationId,
+    away: false,
+    newMessages: false,
+  });
+  // One message-row marker distinguishes arrivals from older-page prepends without
+  // retaining message bodies, ID sets, or state for inactive conversations.
+  const latestMessageRef = useRef<{
+    conversationId: string | null;
+    tail: { id: string; timestamp: number; contentLength: number } | null;
+  }>({ conversationId: null, tail: null });
   const autoScrollSuspendedRef = useRef(false);
   const shouldAutoScrollRef = useRef(true);
   const autoScrollPendingRef = useRef(false);
@@ -166,6 +181,20 @@ export function useChatScrollController({
     messageAnchor: null,
   });
 
+  const syncLatestIndicator = useCallback((newMessages = false) => {
+    const conversationId = activeConversationIdRef.current;
+    const node = scrollContainerRef.current;
+    const away = Boolean(conversationId && node && !autoScrollSuspendedRef.current &&
+      node.scrollHeight - node.scrollTop - node.clientHeight > AUTO_SCROLL_BOTTOM_THRESHOLD_PX);
+    setLatestIndicator((current) => {
+      const nextNewMessages = away && (newMessages ||
+        (current.conversationId === conversationId && current.newMessages));
+      return current.conversationId === conversationId && current.away === away && current.newMessages === nextNewMessages
+        ? current
+        : { conversationId, away, newMessages: nextNewMessages };
+    });
+  }, []);
+
   const saveCurrentConversationScrollSnapshot = useCallback(() => {
     const conversationId = activeConversationIdRef.current;
     const node = scrollContainerRef.current;
@@ -173,6 +202,7 @@ export function useChatScrollController({
       return;
     }
     const distanceFromBottom = node.scrollHeight - (node.scrollTop + node.clientHeight);
+    syncLatestIndicator();
     conversationScrollSnapshots.set(conversationId, {
       scrollTop: node.scrollTop,
       scrollHeight: node.scrollHeight,
@@ -180,7 +210,7 @@ export function useChatScrollController({
       wasAtBottom: distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX,
       anchor: distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX ? null : readVisibleMessageAnchor(node),
     });
-  }, []);
+  }, [syncLatestIndicator]);
 
   const cancelScrollAnimation = useCallback(() => {
     if (scrollAnimationFrameRef.current !== null && typeof window !== "undefined") {
@@ -199,8 +229,9 @@ export function useChatScrollController({
       }
       cancelScrollAnimation();
       shouldAutoScrollRef.current = false;
+      syncLatestIndicator();
     },
-    [cancelScrollAnimation],
+    [cancelScrollAnimation, syncLatestIndicator],
   );
 
   const clearHistoryScrollAnchor = useCallback(() => {
@@ -290,6 +321,7 @@ export function useChatScrollController({
       node.scrollTop = targetTop;
       lastScrollHeightRef.current = node.scrollHeight;
       autoScrollPendingRef.current = false;
+      syncLatestIndicator();
       return;
     }
 
@@ -349,7 +381,14 @@ export function useChatScrollController({
     };
 
     scrollAnimationFrameRef.current = window.requestAnimationFrame(animate);
-  }, [cancelScrollAnimation, saveCurrentConversationScrollSnapshot]);
+  }, [cancelScrollAnimation, saveCurrentConversationScrollSnapshot, syncLatestIndicator]);
+
+  const jumpToLatest = useCallback(() => {
+    clearHistoryScrollAnchor();
+    cancelScrollAnimation();
+    shouldAutoScrollRef.current = true;
+    scrollToBottom({ behavior: "auto" });
+  }, [cancelScrollAnimation, clearHistoryScrollAnchor, scrollToBottom]);
 
   useLayoutEffect(() => {
     const conversationChanged = restoredConversationIdRef.current !== activeConversationId;
@@ -421,6 +460,45 @@ export function useChatScrollController({
     saveCurrentConversationScrollSnapshot();
   }, [activeConversationId, applyHistoryScrollAnchor, cancelScrollAnimation, clearHistoryScrollAnchor, isInitialHistoryLoading, measureHistoryWindowUnderfill, messages, saveCurrentConversationScrollSnapshot, scrollToBottom, startHistoryScrollAnchor]);
 
+  useLayoutEffect(() => {
+    const previous = latestMessageRef.current;
+    const isArrivalMessage = (message: ChatMessage) => shouldDisplayChatMessage(message) &&
+      (!isTimelineMessage(message) || Boolean(message.files?.length));
+    // Activity rows can follow an assistant response while it is still
+    // streaming. Track the last displayed message so hidden/activity rows
+    // neither mask its new text nor create a notice themselves. Visible
+    // image/file-only messages count even when their text is empty.
+    let tail: ChatMessage | undefined;
+    for (let index = displayedMessages.length - 1; index >= 0; index -= 1) {
+      if (isArrivalMessage(displayedMessages[index])) {
+        tail = displayedMessages[index];
+        break;
+      }
+    }
+    const nextTail = tail ? { id: tail.id, timestamp: tail.timestamp, contentLength: tail.content.length } : null;
+    latestMessageRef.current = {
+      conversationId: activeConversationId,
+      tail: isInitialHistoryLoading ? null : nextTail,
+    };
+    if (previous.conversationId !== activeConversationId || isInitialHistoryLoading || !previous.tail || !tail) {
+      setLatestIndicator((current) => current.conversationId === activeConversationId && !current.newMessages
+        ? current
+        : { conversationId: activeConversationId, away: current.conversationId === activeConversationId && current.away, newMessages: false });
+      return;
+    }
+    if (autoScrollSuspendedRef.current || shouldAutoScrollRef.current) return;
+
+    const previousTailIndex = displayedMessages.findIndex((message) => message.id === previous.tail!.id);
+    const appended = previousTailIndex >= 0
+      ? displayedMessages.slice(previousTailIndex + 1).some(isArrivalMessage)
+      // A newest-page refresh can replace a disconnected cached range. Only
+      // a later tail counts; trimming or replacing with older history cannot.
+      : tail.timestamp > previous.tail.timestamp;
+    const streaming = tail.id === previous.tail.id &&
+      tail.content.length > previous.tail.contentLength;
+    if (appended || streaming) syncLatestIndicator(true);
+  }, [activeConversationId, displayedMessages, isInitialHistoryLoading, syncLatestIndicator]);
+
   const handleScrollContentRef = useCallback((node: HTMLDivElement | null) => {
     setScrollContentNode(node);
   }, []);
@@ -468,6 +546,8 @@ export function useChatScrollController({
       if (autoScrollPendingRef.current) {
         return;
       }
+      shouldAutoScrollRef.current = !autoScrollSuspendedRef.current &&
+        node.scrollHeight - node.scrollTop - node.clientHeight <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
       saveCurrentConversationScrollSnapshot();
     };
     node.addEventListener("scroll", handleScroll, { passive: true });
@@ -517,6 +597,7 @@ export function useChatScrollController({
         return;
       }
       measureHistoryWindowUnderfill();
+      syncLatestIndicator();
       if (applyHistoryScrollAnchor()) {
         return;
       }
@@ -559,7 +640,7 @@ export function useChatScrollController({
         window.cancelAnimationFrame(frameId);
       }
     };
-  }, [applyHistoryScrollAnchor, measureHistoryWindowUnderfill, scrollContentNode, scrollToBottom]);
+  }, [applyHistoryScrollAnchor, measureHistoryWindowUnderfill, scrollContentNode, scrollToBottom, syncLatestIndicator]);
 
   useLayoutEffect(() => {
     if (!historyPaginationRef.current.pending || isHistoryLoading) {
@@ -664,6 +745,8 @@ export function useChatScrollController({
     autoScrollPendingRef,
     handleScrollContentRef,
     historyWindowUnderfilled,
+    hasNewMessages: latestIndicator.conversationId === activeConversationId && latestIndicator.newMessages,
+    jumpToLatest,
     lastComposerScrollTopRef,
     lastScrollHeightRef,
     recordScrollPosition: saveCurrentConversationScrollSnapshot,
@@ -673,6 +756,7 @@ export function useChatScrollController({
     setAutoScrollSuspended,
     shouldAutoScrollRef,
     showHistoryLoadButton,
+    showJumpToLatest: !isInitialHistoryLoading && latestIndicator.conversationId === activeConversationId && latestIndicator.away,
   };
 }
 

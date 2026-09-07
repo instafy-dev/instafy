@@ -2,7 +2,7 @@
 
 import { act, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatSpeakerStickyOverlay, ChatTranscriptViewport } from "../ChatTranscriptViewport";
 import type { StickyChatSpeaker } from "../chatSpeakerMarker";
 
@@ -27,7 +27,8 @@ const humanSpeaker: StickyChatSpeaker = {
  * read as a grey bar to him. The pill has since moved into the conversation
  * roster row above the transcript, so this component no longer needs to know
  * about it at all — these tests pin that the scroller is plain: no mask, no
- * absolute layer, nothing painted over message text.
+ * speaker layer or band painted over message text. An optional jump-to-latest
+ * action is separate from the removed speaker decoration.
  */
 describe("ChatTranscriptViewport", () => {
   let container: HTMLDivElement;
@@ -48,7 +49,11 @@ describe("ChatTranscriptViewport", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  async function renderViewport(options: { scrollPaddingBottom?: number | null } = {}) {
+  async function renderViewport(options: {
+    scrollPaddingBottom?: number | null;
+    onJumpToLatest?: () => void;
+    hasNewMessages?: boolean;
+  } = {}) {
     const scrollContainerRef = createRef<HTMLDivElement>();
     await act(async () => {
       root.render(
@@ -56,6 +61,8 @@ describe("ChatTranscriptViewport", () => {
           ariaLabel="Conversation"
           scrollContainerRef={scrollContainerRef}
           scrollPaddingBottom={options.scrollPaddingBottom}
+          onJumpToLatest={options.onJumpToLatest}
+          hasNewMessages={options.hasNewMessages}
         >
           <p data-testid="transcript-line">First message</p>
         </ChatTranscriptViewport>,
@@ -104,6 +111,64 @@ describe("ChatTranscriptViewport", () => {
       expect(readStyle(scroller).maskImage || "").toBe("");
       expect(readStyle(scroller).WebkitMaskImage || "").toBe("");
     }
+  });
+
+  it("offers an accessible jump action above the composer without changing transcript content", async () => {
+    const onJumpToLatest = vi.fn();
+    const { scroller } = await renderViewport({ onJumpToLatest, scrollPaddingBottom: 144 });
+    let button = container.querySelector<HTMLButtonElement>('[data-testid="chat-jump-to-latest"]')!;
+    expect(button.getAttribute("aria-label")).toBe("Jump to latest");
+    expect(button.parentElement?.style.bottom).toBe("144px");
+    expect(button.className).toContain("pointer-coarse:min-h-11");
+    expect(scroller.contains(button)).toBe(false);
+    expect(scroller.textContent).toBe("First message");
+
+    await renderViewport({ onJumpToLatest, hasNewMessages: true, scrollPaddingBottom: 144 });
+    button = container.querySelector<HTMLButtonElement>('[data-testid="chat-jump-to-latest"]')!;
+    expect(button.getAttribute("aria-label")).toBe("New messages, jump to latest");
+    expect(button.querySelector('[aria-live="polite"]')?.textContent).toBe("New messages");
+    await act(async () => { button.click(); });
+    expect(onJumpToLatest).toHaveBeenCalledTimes(1);
+    await renderViewport();
+    expect(container.querySelector('[data-testid="chat-jump-to-latest"]')).toBeNull();
+  });
+
+  it("returns keyboard focus to the transcript after activating the jump action", async () => {
+    const onJumpToLatest = vi.fn();
+    const { scroller } = await renderViewport({ onJumpToLatest });
+    const button = container.querySelector<HTMLButtonElement>('[data-testid="chat-jump-to-latest"]')!;
+    await act(async () => {
+      button.focus();
+      button.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+    });
+    await act(async () => {
+      button.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true, cancelable: true }));
+    });
+    expect(onJumpToLatest).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(scroller);
+    expect(scroller.tabIndex).toBe(-1);
+  });
+
+  it("preserves composer focus when pressing the jump action with a pointer", async () => {
+    const onJumpToLatest = vi.fn();
+    await renderViewport({ onJumpToLatest });
+    const input = document.createElement("textarea");
+    container.appendChild(input);
+    const button = container.querySelector<HTMLButtonElement>('[data-testid="chat-jump-to-latest"]')!;
+    await act(async () => {
+      input.focus();
+      button.dispatchEvent(new MouseEvent("mousedown", { button: 0, bubbles: true, cancelable: true }));
+      // jsdom does not implement the native focus default action of mousedown.
+      // Deliver it explicitly so this checks the real Button focus prevention.
+      button.focus();
+    });
+    expect(document.activeElement).toBe(input);
+    await act(async () => {
+      button.dispatchEvent(new MouseEvent("mouseup", { button: 0, bubbles: true, cancelable: true }));
+      button.click();
+    });
+    expect(onJumpToLatest).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(input);
   });
 });
 
