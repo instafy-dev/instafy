@@ -23,6 +23,7 @@ import {
   resolveChatInputMaxHeightPx,
 } from "./chatInputGrowth";
 import { useCoarsePointer } from "../../../../hooks/useCoarsePointer";
+import { textControlSizes } from "../../../../styles/typography";
 import type { ControllerProjectMember } from "../../../../sdk/instafy";
 import { installBrowserUseVirtualClipboardForAutomation } from "./browserUseVirtualClipboard";
 
@@ -281,7 +282,7 @@ function ChatInputEditor(
         <div
           aria-hidden="true"
           data-testid="chat-input-ghost-suggestion"
-          className={`pointer-events-none absolute inset-x-0 bottom-0 z-10 overflow-hidden whitespace-pre-wrap break-words pr-2 text-base leading-5 text-slate-400 sm:text-sm dark:text-slate-600 ${overlayTopClass}`}
+          className={`pointer-events-none absolute inset-x-0 bottom-0 z-10 overflow-hidden whitespace-pre-wrap break-words pr-2 ${textControlSizes.sm} text-slate-400 dark:text-slate-600 ${overlayTopClass}`}
         >
           <span className="invisible">{value}</span>
           <span className="opacity-70 dark:opacity-45">{displayedGhostSuggestionRemainder}</span>
@@ -290,7 +291,7 @@ function ChatInputEditor(
       {showRecordingIndicator ? (
         <div
           aria-hidden="true"
-          className={`pointer-events-none absolute inset-0 z-10 overflow-hidden text-base leading-5 sm:text-sm ${overlayPaddingClass}`}
+          className={`pointer-events-none absolute inset-0 z-10 overflow-hidden ${textControlSizes.sm} ${overlayPaddingClass}`}
         >
           {value.length > 0 ? (
             <span className="whitespace-pre-wrap break-words text-transparent">{value}</span>
@@ -332,7 +333,7 @@ function ChatInputEditor(
             // truth (see chatInputGrowth.ts).
             style={maxHeightPx === null ? undefined : { maxHeight: `${maxHeightPx}px` }}
             data-max-height-px={maxHeightPx ?? undefined}
-            className={`relative z-0 w-full overflow-auto whitespace-pre-wrap break-words text-base leading-5 text-slate-900 outline-none sm:text-sm dark:text-slate-100 ${editorBoxClass} ${
+            className={`relative z-0 w-full overflow-auto whitespace-pre-wrap break-words ${textControlSizes.sm} text-slate-900 outline-none dark:text-slate-100 ${editorBoxClass} ${
               readOnly ? "cursor-not-allowed opacity-60" : ""
             }`}
           />
@@ -340,7 +341,7 @@ function ChatInputEditor(
         placeholder={
           showGhostSuggestion || showRecordingIndicator ? null : (
             <div
-              className={`pointer-events-none absolute inset-x-0 z-10 block overflow-hidden text-ellipsis whitespace-nowrap pr-2 text-base leading-5 text-slate-400 sm:text-sm dark:text-slate-500 ${overlayTopClass} ${
+              className={`pointer-events-none absolute inset-x-0 z-10 block overflow-hidden text-ellipsis whitespace-nowrap pr-2 ${textControlSizes.sm} text-slate-400 dark:text-slate-500 ${overlayTopClass} ${
                 readOnly ? "opacity-60" : ""
               }`}
             >

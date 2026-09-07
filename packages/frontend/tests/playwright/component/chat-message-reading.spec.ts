@@ -132,7 +132,9 @@ for (const width of [360, 899, 900, 1024]) {
         expect(metrics.gap).toBeCloseTo(16, 1);
         expect(metrics.fontSize).toBe("14px");
         expect(metrics.lineHeight).toBe(width >= 900 ? "21px" : "22.75px");
-        expect(metrics.fontFamily.split(",")[0].trim()).toBe(width >= 900 ? "-apple-system" : "Inter");
+        expect(metrics.fontFamily.split(",")[0].trim()).toBe("-apple-system");
+        expect(metrics.fontFamily).toContain("system-ui");
+        expect(metrics.fontFamily).not.toContain("Inter");
         for (const prose of [body.locator("li").first(), body.locator("blockquote p")]) {
           await expect(prose).toHaveCSS("font-family", metrics.fontFamily);
           await expect(prose).toHaveCSS("font-size", metrics.fontSize);

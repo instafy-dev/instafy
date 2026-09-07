@@ -1,4 +1,5 @@
 import { forwardRef } from "react";
+import { textControlSizes } from "../styles/typography";
 
 type ControlSize = "xs" | "sm" | "md" | "lg";
 type ControlRadius = "md" | "lg" | "xl" | "2xl" | "full";
@@ -11,10 +12,10 @@ const UNSTYLED_BASE =
   "bg-transparent text-midnight placeholder:text-slate-400 outline-none disabled:cursor-not-allowed disabled:text-slate-400 dark:text-slate-100 dark:placeholder:text-slate-500 dark:disabled:text-slate-500";
 
 const SIZE_CLASSES: Record<ControlSize, string> = {
-  xs: "px-2.5 py-1 text-base sm:text-xs",
-  sm: "px-3 py-1.5 text-base sm:text-sm",
-  md: "px-3.5 py-2 text-base sm:text-sm",
-  lg: "px-4 py-2.5 text-base",
+  xs: `px-2.5 py-1 ${textControlSizes.xs}`,
+  sm: `px-3 py-1.5 ${textControlSizes.sm}`,
+  md: `px-3.5 py-2 ${textControlSizes.md}`,
+  lg: `px-4 py-2.5 ${textControlSizes.lg}`,
 };
 
 const RADIUS_CLASSES: Record<ControlRadius, string> = {

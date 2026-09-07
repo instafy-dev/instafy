@@ -19,6 +19,7 @@ import {
   listBuiltInAssistantHandles,
 } from "../../../assistants/localBuiltInAssistantCatalog";
 import { Text } from "../../../components/Text";
+import { textVariants } from "../../../styles/typography";
 import { controllerClient } from "../../../sdk/instafy";
 import { useStatus } from "../../../status/useStatus";
 import {
@@ -1789,8 +1790,7 @@ const MessageContentBody = memo(function MessageContentBody({
   return (
     <div
       className={className ?? [
-        "text-sm leading-relaxed min-[900px]:leading-normal",
-        "min-[900px]:[font-family:-apple-system,BlinkMacSystemFont,'Segoe_UI',system-ui,sans-serif]",
+        textVariants.body,
         "break-words [overflow-wrap:anywhere]",
       ].join(" ")}
     >
@@ -1898,7 +1898,7 @@ const MessageContentBody = memo(function MessageContentBody({
             className={[
               blockIndex > 0 ? "mt-4" : "",
               PROSE_MEASURE_CLASS,
-              "min-[900px]:leading-normal whitespace-pre-wrap break-words [overflow-wrap:anywhere]",
+              "whitespace-pre-wrap break-words [overflow-wrap:anywhere]",
             ]
               .filter(Boolean)
               .join(" ")}

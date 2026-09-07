@@ -92,8 +92,9 @@
   --color-mint: #a0f0d0;
   --color-sunshine: #ffd166;
 
-  --font-instafy: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-instafy: var(--font-sans);
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 
   --text-xxs: 0.6875rem;
   --text-xxs--line-height: 1rem;
@@ -118,6 +119,21 @@
 .dark {
   --color-primary-500: var(--color-brand-blue-dark);
   --color-secondary-500: var(--color-brand-sand-dark);
+}
+
+/* Keep the reading role below utilities so compact caller overrides such as
+   leading-tight and text-xs still win, including on wide layouts. */
+@layer components {
+  .text-body {
+    font-size: var(--text-sm);
+    line-height: 1.625;
+  }
+
+  @media (min-width: 900px) {
+    .text-body {
+      line-height: 1.5;
+    }
+  }
 }
 
 :root {
