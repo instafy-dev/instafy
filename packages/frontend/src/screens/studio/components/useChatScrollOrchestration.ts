@@ -29,6 +29,38 @@ const HISTORY_AUTO_FILL_SAFETY_CAP_PAGES = 15;
 const HISTORY_AUTO_FILL_MAX_STALLED_PAGES = 2;
 const HISTORY_AUTO_FILL_MIN_PROGRESS_PX = 4;
 const HISTORY_UNDERFILL_THRESHOLD_PX = 4;
+const CHAT_SCROLL_MESSAGE_SELECTOR = "[data-chat-scroll-message-id]";
+
+type MessageScrollAnchor = { messageId: string; offset: number };
+
+function readVisibleMessageAnchor(node: HTMLDivElement): MessageScrollAnchor | null {
+  const rows = node.querySelectorAll<HTMLElement>(CHAT_SCROLL_MESSAGE_SELECTOR);
+  const viewport = node.getBoundingClientRect();
+  // Rows remain in transcript order, including any deferred-rendering shells.
+  // Find the first visible one without measuring every earlier message.
+  let low = 0;
+  let high = rows.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (rows[middle].getBoundingClientRect().bottom <= viewport.top) low = middle + 1;
+    else high = middle;
+  }
+  const row = rows[low];
+  if (!row) return null;
+  const rect = row.getBoundingClientRect();
+  const messageId = row.dataset.chatScrollMessageId;
+  return messageId && rect.top < viewport.bottom
+    ? { messageId, offset: rect.top - viewport.top }
+    : null;
+}
+
+function findMessageAnchorRow(node: HTMLDivElement, anchor: MessageScrollAnchor): HTMLElement | null {
+  // Compare dataset values rather than interpolating arbitrary message IDs in a selector.
+  for (const row of node.querySelectorAll<HTMLElement>(CHAT_SCROLL_MESSAGE_SELECTOR)) {
+    if (row.dataset.chatScrollMessageId === anchor.messageId) return row;
+  }
+  return null;
+}
 
 type ScrollToBottomOptions = {
   behavior?: "auto" | "smooth";
@@ -38,6 +70,7 @@ type UseChatScrollControllerOptions = {
   activeConversationId: string | null;
   hasMoreHistory: boolean;
   isHistoryLoading: boolean;
+  isInitialHistoryLoading?: boolean;
   loadOlderMessages: () => void | Promise<unknown>;
   messages: ChatMessage[];
 };
@@ -65,14 +98,21 @@ type ConversationScrollSnapshot = {
   scrollHeight: number;
   clientHeight: number;
   wasAtBottom: boolean;
+  anchor: MessageScrollAnchor | null;
 };
 
 const conversationScrollSnapshots = new Map<string, ConversationScrollSnapshot>();
+
+export function getConversationScrollAnchorMessageId(conversationId: string | null): string | null {
+  const snapshot = conversationId ? conversationScrollSnapshots.get(conversationId) : null;
+  return snapshot && !snapshot.wasAtBottom ? snapshot.anchor?.messageId ?? null : null;
+}
 
 export function useChatScrollController({
   activeConversationId,
   hasMoreHistory,
   isHistoryLoading,
+  isInitialHistoryLoading = false,
   loadOlderMessages,
   messages,
 }: UseChatScrollControllerOptions) {
@@ -108,24 +148,28 @@ export function useChatScrollController({
     scrollHeight: 0,
   });
   const activeConversationIdRef = useRef<string | null>(activeConversationId);
+  const restoredConversationIdRef = useRef<string | null>(null);
+  const restoringInitialHistoryRef = useRef(false);
   const historyScrollAnchorRef = useRef<{
     active: boolean;
     baseScrollTop: number;
     baseScrollHeight: number;
     appliedScrollTop: number;
     timeoutId: number | null;
+    messageAnchor: MessageScrollAnchor | null;
   }>({
     active: false,
     baseScrollTop: 0,
     baseScrollHeight: 0,
     appliedScrollTop: 0,
     timeoutId: null,
+    messageAnchor: null,
   });
 
   const saveCurrentConversationScrollSnapshot = useCallback(() => {
     const conversationId = activeConversationIdRef.current;
     const node = scrollContainerRef.current;
-    if (!conversationId || !node || autoScrollSuspendedRef.current) {
+    if (!conversationId || !node || autoScrollSuspendedRef.current || autoScrollPendingRef.current) {
       return;
     }
     const distanceFromBottom = node.scrollHeight - (node.scrollTop + node.clientHeight);
@@ -134,6 +178,7 @@ export function useChatScrollController({
       scrollHeight: node.scrollHeight,
       clientHeight: node.clientHeight,
       wasAtBottom: distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX,
+      anchor: distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX ? null : readVisibleMessageAnchor(node),
     });
   }, []);
 
@@ -169,6 +214,7 @@ export function useChatScrollController({
       baseScrollHeight: 0,
       appliedScrollTop: 0,
       timeoutId: null,
+      messageAnchor: null,
     };
   }, []);
 
@@ -193,20 +239,28 @@ export function useChatScrollController({
       return false;
     }
 
-    const nextScrollTop = anchor.baseScrollTop + Math.max(0, node.scrollHeight - anchor.baseScrollHeight);
+    const anchorRow = anchor.messageAnchor ? findMessageAnchorRow(node, anchor.messageAnchor) : null;
+    if (anchor.messageAnchor && !anchorRow) {
+      clearHistoryScrollAnchor();
+      return false;
+    }
+    const nextScrollTop = anchorRow && anchor.messageAnchor
+      ? node.scrollTop + anchorRow.getBoundingClientRect().top - node.getBoundingClientRect().top - anchor.messageAnchor.offset
+      : anchor.baseScrollTop + Math.max(0, node.scrollHeight - anchor.baseScrollHeight);
     node.scrollTop = nextScrollTop;
-    anchor.appliedScrollTop = nextScrollTop;
+    anchor.appliedScrollTop = node.scrollTop;
     lastScrollHeightRef.current = node.scrollHeight;
     return true;
   }, [clearHistoryScrollAnchor]);
 
-  const startHistoryScrollAnchor = useCallback((node: HTMLDivElement) => {
+  const startHistoryScrollAnchor = useCallback((node: HTMLDivElement, messageAnchor: MessageScrollAnchor | null = null) => {
     clearHistoryScrollAnchor();
     historyScrollAnchorRef.current = {
       active: true,
       baseScrollTop: node.scrollTop,
       baseScrollHeight: node.scrollHeight,
       appliedScrollTop: node.scrollTop,
+      messageAnchor,
       timeoutId:
         typeof window !== "undefined"
           ? window.setTimeout(() => {
@@ -298,7 +352,13 @@ export function useChatScrollController({
   }, [cancelScrollAnimation, saveCurrentConversationScrollSnapshot]);
 
   useLayoutEffect(() => {
+    const conversationChanged = restoredConversationIdRef.current !== activeConversationId;
     activeConversationIdRef.current = activeConversationId;
+    restoredConversationIdRef.current = activeConversationId;
+    if (conversationChanged) {
+      historyPaginationRef.current = { pending: false, scrollHeight: 0 };
+      clearHistoryScrollAnchor();
+    }
     const node = scrollContainerRef.current;
     if (!node || !activeConversationId) {
       return;
@@ -313,7 +373,33 @@ export function useChatScrollController({
     }
 
     const snapshot = conversationScrollSnapshots.get(activeConversationId) ?? null;
+    if (!conversationChanged && !restoringInitialHistoryRef.current) {
+      // Pagination already owns its prepend/settle correction. Otherwise only
+      // reanchor a reader; normal new-message bottom-following stays with the
+      // existing scroll synchronizer.
+      if (historyPaginationRef.current.pending) return;
+      if (historyScrollAnchorRef.current.active) {
+        if (!historyScrollAnchorRef.current.messageAnchor) {
+          applyHistoryScrollAnchor();
+          return;
+        }
+        clearHistoryScrollAnchor();
+      }
+      if (!snapshot?.anchor || snapshot.wasAtBottom) return;
+    }
+    if (snapshot && !snapshot.wasAtBottom && isInitialHistoryLoading) {
+      cancelScrollAnimation();
+      shouldAutoScrollRef.current = false;
+      // Keep the loading placeholder from becoming the saved reading position
+      // or triggering bottom-following before the target rows arrive.
+      autoScrollPendingRef.current = true;
+      restoringInitialHistoryRef.current = true;
+      return;
+    }
+    restoringInitialHistoryRef.current = false;
+    if (historyPaginationRef.current.pending) return;
     if (!snapshot || snapshot.wasAtBottom) {
+      cancelScrollAnimation();
       shouldAutoScrollRef.current = true;
       scrollToBottom({ behavior: "auto" });
       return;
@@ -322,9 +408,18 @@ export function useChatScrollController({
     cancelScrollAnimation();
     shouldAutoScrollRef.current = false;
     const maxScrollTop = Math.max(0, node.scrollHeight - node.clientHeight);
-    node.scrollTop = Math.min(snapshot.scrollTop, maxScrollTop);
+    const anchorRow = snapshot.anchor ? findMessageAnchorRow(node, snapshot.anchor) : null;
+    const target = anchorRow && snapshot.anchor
+      ? node.scrollTop + anchorRow.getBoundingClientRect().top - node.getBoundingClientRect().top - snapshot.anchor.offset
+      // An evicted anchor belongs to older history. Start at the oldest loaded
+      // row so the reader can continue paging back, rather than jumping to an
+      // unrelated message at the former absolute offset.
+      : snapshot.anchor ? 0 : snapshot.scrollTop;
+    node.scrollTop = Math.max(0, Math.min(target, maxScrollTop));
     lastScrollHeightRef.current = node.scrollHeight;
-  }, [activeConversationId, cancelScrollAnimation, measureHistoryWindowUnderfill, scrollToBottom]);
+    if (anchorRow && snapshot.anchor) startHistoryScrollAnchor(node, snapshot.anchor);
+    saveCurrentConversationScrollSnapshot();
+  }, [activeConversationId, applyHistoryScrollAnchor, cancelScrollAnimation, clearHistoryScrollAnchor, isInitialHistoryLoading, measureHistoryWindowUnderfill, messages, saveCurrentConversationScrollSnapshot, scrollToBottom, startHistoryScrollAnchor]);
 
   const handleScrollContentRef = useCallback((node: HTMLDivElement | null) => {
     setScrollContentNode(node);

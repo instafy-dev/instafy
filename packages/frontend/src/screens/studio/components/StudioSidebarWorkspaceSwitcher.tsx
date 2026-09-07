@@ -1,5 +1,5 @@
 import { Plus, Search, Settings } from "iconoir-react";
-import { IconButton } from "../../../components/Button";
+import { Button, IconButton } from "../../../components/Button";
 import { MenuItemContent } from "../../../components/MenuItemContent";
 import { SearchInput } from "../../../components/SearchInput";
 import { SidebarMenuSection } from "../../../components/SidebarMenuSection";
@@ -48,6 +48,11 @@ export type SidebarWorkspaceOrgOption = {
 type StudioSidebarWorkspaceSwitcherProps = {
   orgOptions: SidebarWorkspaceOrgOption[];
   workspaceOrgKey: string;
+  activeOrgKey?: string;
+  pendingOrgKey?: string | null;
+  projectsError?: string | null;
+  projectsRefreshing?: boolean;
+  onRetryProjects?: () => void;
   onWorkspaceOrgChange: (orgKey: string) => void;
   onOpenOrgSettings?: () => void;
   onCreateOrg?: () => void;
@@ -76,6 +81,11 @@ type StudioSidebarWorkspaceSwitcherProps = {
 export function StudioSidebarWorkspaceSwitcher({
   orgOptions,
   workspaceOrgKey,
+  activeOrgKey = workspaceOrgKey,
+  pendingOrgKey = null,
+  projectsError = null,
+  projectsRefreshing = false,
+  onRetryProjects,
   onWorkspaceOrgChange,
   onOpenOrgSettings,
   onCreateOrg,
@@ -118,6 +128,8 @@ export function StudioSidebarWorkspaceSwitcher({
 
   const renderTeamRow = (org: SidebarWorkspaceOrgOption) => {
     const isSelected = org.key === selectedOrgKey;
+    const isCurrent = org.key === activeOrgKey && org.key !== "all";
+    const isPending = org.key === pendingOrgKey && !projectsError;
     const isAll = org.key === "all";
     const attention = isAll ? totalOrgAttention : (orgAttentionCounts[org.key] ?? 0);
     return (
@@ -126,6 +138,7 @@ export function StudioSidebarWorkspaceSwitcher({
         type="button"
         aria-label={`Show team ${org.label}`}
         aria-pressed={isSelected}
+        aria-busy={isPending || undefined}
         data-testid={`sidebar-org-chip-${org.key}`}
         onClick={() => onWorkspaceOrgChange(org.key)}
         className={[
@@ -162,9 +175,9 @@ export function StudioSidebarWorkspaceSwitcher({
         </span>
         <span className="min-w-0 flex-1 truncate">{isAll ? "All teams" : org.label}</span>
         <span className="flex shrink-0 items-center gap-1.5">
-          {isSelected ? (
+          {isCurrent || isSelected ? (
             <span className="text-3xs font-medium uppercase tracking-[0.08em] text-slate-400 dark:text-slate-500">
-              Current
+              {isCurrent ? "Current" : isPending ? "Switching…" : "Selected"}
             </span>
           ) : null}
           <AttentionBadge
@@ -259,6 +272,19 @@ export function StudioSidebarWorkspaceSwitcher({
           {orgOptions.map(renderTeamRow)}
         </div>
       </SidebarMenuSection>
+
+      {projectsError ? (
+        <div className="mx-3.5 mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600 dark:text-slate-300"
+          data-testid="sidebar-project-discovery-error">
+          <p role="status">{projectsError}</p>
+          {onRetryProjects ? (
+            <Button variant="outline" size="xs" onPress={onRetryProjects}
+              isDisabled={projectsRefreshing} data-testid="sidebar-project-discovery-retry">
+              {projectsRefreshing ? "Retrying…" : "Retry"}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
 
       <SidebarMenuSection
         className="mt-4"

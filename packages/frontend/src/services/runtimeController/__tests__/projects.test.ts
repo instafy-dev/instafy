@@ -67,6 +67,89 @@ function resetControllerMocks() {
   );
 }
 
+describe("bounded project discovery reads", () => {
+  const summaryUnavailable = { summary: null, notFound: false, forbidden: false, unauthorized: false };
+  const reads = [
+    { name: "all projects", read: (signal?: AbortSignal) => listControllerProjectsResult({ signal }), failure: { status: "error" } },
+    { name: "organization projects", read: (signal?: AbortSignal) => listControllerProjectsResult({ orgId: "org-1", signal }), failure: { status: "error" } },
+    { name: "organizations", read: (signal?: AbortSignal) => listControllerOrganizations({ signal }), failure: [] },
+    { name: "project access", read: (signal?: AbortSignal) => getControllerProjectSummaryResult("project-1", { signal }), failure: summaryUnavailable },
+  ];
+
+  beforeEach(() => {
+    resetControllerMocks();
+    vi.useFakeTimers();
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it.each(reads)("cancels $name before credentials resolve without sending a late HTTP request", async ({ read }) => {
+    let resolveContext!: (context: typeof defaultRequestContext) => void;
+    resolveControllerRequestContextMock.mockReturnValue(new Promise((resolve) => { resolveContext = resolve; }));
+    const caller = new AbortController();
+    const removeListener = vi.spyOn(caller.signal, "removeEventListener");
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const request = read(caller.signal);
+    const rejected = expect(request).rejects.toMatchObject({ name: "AbortError" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    caller.abort();
+    await rejected;
+    expect(vi.getTimerCount()).toBe(0);
+    expect(removeListener).toHaveBeenCalledWith("abort", expect.any(Function));
+
+    resolveContext(defaultRequestContext);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(reads.flatMap((read) => ["credentials", "headers", "body"].map((stage) => ({ ...read, stage }))))(
+    "bounds stalled $name $stage to ten seconds",
+    async ({ read, failure, stage }) => {
+      if (stage === "credentials") {
+        resolveControllerRequestContextMock.mockReturnValue(new Promise(() => undefined));
+      }
+      const fetchMock = vi.fn().mockImplementation(() => stage === "headers"
+        ? new Promise(() => undefined)
+        : Promise.resolve({ ok: true, status: 200, json: () => new Promise(() => undefined) }));
+      vi.stubGlobal("fetch", fetchMock);
+      const request = read();
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      await expect(request).resolves.toEqual(failure);
+      expect(vi.getTimerCount()).toBe(0);
+      if (stage === "credentials") expect(fetchMock).not.toHaveBeenCalled();
+      else expect(fetchMock.mock.calls[0]?.[1]?.signal.aborted).toBe(true);
+    },
+  );
+
+  it("returns forbidden access from headers without awaiting the error body", async () => {
+    const cancelBody = vi.fn();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(new ReadableStream({ cancel: cancelBody }), { status: 403 })));
+    await expect(getControllerProjectSummaryResult("project-1")).resolves.toEqual({
+      ...summaryUnavailable, forbidden: true,
+    });
+    expect(readControllerErrorMock).not.toHaveBeenCalled();
+    expect(cancelBody).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("retains a known unauthorized result when its auth-recovery error read stalls", async () => {
+    readControllerErrorMock.mockReturnValue(new Promise(() => undefined));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 401 })));
+    const request = getControllerProjectSummaryResult("project-1");
+    await vi.advanceTimersByTimeAsync(10_000);
+    await expect(request).resolves.toEqual({ ...summaryUnavailable, unauthorized: true });
+    expect(readControllerErrorMock).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
 describe("project and organization request contexts", () => {
   beforeEach(() => {
     resetControllerMocks();
@@ -201,9 +284,8 @@ describe("project and organization request contexts", () => {
       unauthorized: false,
     });
 
-    expect(readControllerErrorMock).toHaveBeenCalledTimes(2);
+    expect(readControllerErrorMock).toHaveBeenCalledTimes(1);
     expect(readControllerErrorMock.mock.calls).toEqual([
-      [forbiddenResponse, "get project failed", defaultRequestContext],
       [unauthorizedResponse, "get project failed", defaultRequestContext],
     ]);
   });
@@ -328,6 +410,7 @@ describe("strict controller membership discovery", () => {
     });
     expect(fetchMock).toHaveBeenCalledWith("http://controller.test/orgs/org-1/projects", {
       headers: { authorization: "Bearer token-123" },
+      signal: expect.any(AbortSignal),
     });
   });
 
