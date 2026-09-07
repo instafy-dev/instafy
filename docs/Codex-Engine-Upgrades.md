@@ -20,6 +20,9 @@ Astra also selects Responses Lite. Its tool definitions travel in
 `parallel_tool_calls` field to `false` in this mode. That is distinct from the
 catalog's parallel capability. The proxy must preserve the Lite input, reasoning
 context and tool controls without injecting a legacy default tool list.
+The catalog's legacy parallel-support marker is no longer exposed by the typed
+`ModelInfo`; verify actual outgoing controls instead of inferring them from that
+marker.
 
 Preserve explicit `CODEX_MODEL=gpt-6-astra` and
 `CODEX_RUNTIME_REASONING_EFFORT=max` where configured. A controller-supplied
