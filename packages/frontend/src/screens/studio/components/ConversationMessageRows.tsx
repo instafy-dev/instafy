@@ -9,7 +9,6 @@ import {
   extractAgentIdentityFromMetadata,
   extractRunIdFromMetadata,
   resolveAssistantHandleForMessage,
-  resolvePreviousAssistantHandle,
   shouldShowAssistantAvatarForMessage,
   shouldShowAssistantIdentityForMessage,
 } from "./chatAssistantIdentity";
@@ -36,6 +35,8 @@ import {
 } from "./chatHumanIdentity";
 import { shouldSuppressOuterAvatarForConversationThread } from "./conversationThreadPreviewLayout";
 import { sanitizeChatMessageCopyEvent } from "./chatSelectionCopy";
+import { DeferredChatMessageRow, DeferredChatRows } from "./DeferredChatMessageRow";
+import { getConversationScrollAnchorMessageId } from "./useChatScrollOrchestration";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -228,6 +229,8 @@ export function ConversationMessageRows({
   }, []);
 
   const rows: JSX.Element[] = [];
+  const anchorMessageId = getConversationScrollAnchorMessageId(conversationLocalId);
+  const anchorIndex = anchorMessageId ? messages.findIndex((message) => message.id === anchorMessageId) : -1;
   const assistantContextMessages = allConversationMessages ?? messages;
   const multiAgentGroupByParentJob = buildMultiAgentGroupByParentJob(assistantContextMessages);
   const workflowSpineKeys = messages.map((message) =>
@@ -247,6 +250,7 @@ export function ConversationMessageRows({
     }
   };
 
+  let lastAssistantHandle: string | null = null;
   for (const [messageIndex, message] of messages.entries()) {
         flushTimedRowsBefore(message.timestamp);
         const normalizedCurrentUserId = typeof currentUserId === "string" ? currentUserId.trim() : "";
@@ -261,11 +265,11 @@ export function ConversationMessageRows({
         const messageAgentIdentityFromRun =
           messageRunId ? runAgentIdentityByRunId.get(messageRunId) ?? null : null;
         const messageAgentIdentity = messageAgentIdentityFromMetadata ?? messageAgentIdentityFromRun;
-        const previousAssistantHandle = resolvePreviousAssistantHandle(
-          messages,
-          messageIndex,
-          runAgentHandleByRunId,
-        );
+        // Keep the last attributable assistant across human/controller rows
+        // without rescanning the full preceding transcript for each message.
+        const previousAssistantHandle = lastAssistantHandle;
+        const currentAssistantHandle = resolveAssistantHandleForMessage(message, runAgentHandleByRunId);
+        if (currentAssistantHandle) lastAssistantHandle = currentAssistantHandle;
         const previousVisibleAssistantHandle = resolvePreviousVisibleAssistantDisplayHandle(
           messages,
           messageIndex,
@@ -517,9 +521,17 @@ export function ConversationMessageRows({
               : { kind: "boundary" };
 
         rows.push(
-          <ChatBubbleRow
+          <DeferredChatMessageRow
             key={message.id}
-            testId="chat-message-row"
+            message={message}
+            layoutKey={`${isLeftAligned}:${Boolean(speakerIdentity)}:${Boolean(narrowSpeakerIdentity)}`}
+            eager={anchorIndex >= 0 ? Math.abs(messageIndex - anchorIndex) <= 10 : messageIndex >= messages.length - 20}
+            eligible={
+              ["", "message", "text", "assistant_message", "user_message"].includes(normalizedMessageType) &&
+              !hasImageAttachments && !hasFileChanges && !workflowSpineKey
+            }
+          >
+          <ChatBubbleRow
             align={isLeftAligned ? "left" : "right"}
             avatar={avatar}
             collapseAvatarOnNarrow={avatar !== null}
@@ -534,7 +546,8 @@ export function ConversationMessageRows({
             workflowSpineContinuesAfter={spineBridgeAfter}
           >
             {bubble}
-          </ChatBubbleRow>,
+          </ChatBubbleRow>
+          </DeferredChatMessageRow>,
         );
       }
 
@@ -543,5 +556,5 @@ export function ConversationMessageRows({
     timedSyntheticRowIndex += 1;
   }
 
-  return <>{rows}</>;
+  return <DeferredChatRows key={conversationLocalId} messageCount={messages.length}>{rows}</DeferredChatRows>;
 }
