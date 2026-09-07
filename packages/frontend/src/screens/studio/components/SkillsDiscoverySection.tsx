@@ -1,4 +1,5 @@
-import { ChatLines, NavArrowRight, Plus, Puzzle, Refresh } from "iconoir-react";
+import { useId, useState } from "react";
+import { ChatLines, Filter, NavArrowDown, NavArrowRight, Plus, Puzzle, Search } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { Card } from "../../../components/Card";
 import { LoadingStatus } from "../../../components/LoadingStatus";
@@ -8,6 +9,7 @@ import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
 import { Toggle } from "../../../components/Toggle";
 import type { ControllerSkillDiscoveryItem } from "../../../sdk/instafy";
+import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
 
 type SkillsDiscoveryInstalledSkill = {
   id: string;
@@ -97,6 +99,15 @@ export function SkillsDiscoverySection({
   onOpenExistingSkill,
   onDiscoveredSkillAction,
 }: SkillsDiscoverySectionProps) {
+  const isLargeScreen = useStudioDesktopLayout();
+  const [filtersExpanded, setFiltersExpanded] = useState(false);
+  const filtersId = useId();
+  const changedFilterCount = [
+    discoveryLaneFilter !== "all",
+    discoveryCategoryFilter !== "all",
+    discoverySort !== "relevance",
+  ].filter(Boolean).length;
+
   return (
     <Card tone="default" radius="2xl" className="space-y-4" data-testid="skills-discovery-card">
       <div className="space-y-1">
@@ -109,21 +120,23 @@ export function SkillsDiscoverySection({
       </div>
 
       <div className="space-y-2">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <SearchInput
-            id="skills-discovery-query-input"
-            label="Search skills"
-            value={discoveryQuery}
-            onChange={(event) => onDiscoveryQueryChange(event.target.value)}
-            placeholder="Search skills (for example: playwright browser)"
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                onDiscoverySearchSubmit();
-              }
-            }}
-            inputTestId="skills-discovery-query"
-          />
+        <div className="flex min-w-0 items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <SearchInput
+              id="skills-discovery-query-input"
+              label="Search skills"
+              value={discoveryQuery}
+              onChange={(event) => onDiscoveryQueryChange(event.target.value)}
+              placeholder="Search skills…"
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  onDiscoverySearchSubmit();
+                }
+              }}
+              inputTestId="skills-discovery-query"
+            />
+          </div>
           <Button
             variant="outline"
             size="sm"
@@ -131,77 +144,104 @@ export function SkillsDiscoverySection({
             onPress={onDiscoverySearchSubmit}
             isDisabled={!hasProject || discoveryLoading}
             data-testid="skills-discovery-search"
+            aria-label="Search skills"
+            className="shrink-0"
           >
             {discoveryLoading ? (
               <Spinner tone="primary" size="sm" aria-hidden="true" />
             ) : (
-              <Refresh className="h-4 w-4" aria-hidden="true" />
+              <Search className="h-4 w-4" aria-hidden="true" />
             )}
             Search
           </Button>
         </div>
 
-        <div className="grid gap-2 sm:grid-cols-3">
-          <label className="space-y-1">
-            <Text as="span" variant="caption" tone="muted">
-              Source
-            </Text>
-            <Select
-              value={discoveryLaneFilter}
-              onChange={(event) => onDiscoveryLaneFilterChange(event.target.value)}
-              disabled={!hasProject || discoveryLoading}
-              tone="muted"
-              data-testid="skills-discovery-source-select"
+        {!isLargeScreen ? (
+          <div className="flex items-center justify-between gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              radius="lg"
+              aria-expanded={filtersExpanded}
+              aria-controls={filtersExpanded ? filtersId : undefined}
+              onPress={() => setFiltersExpanded((expanded) => !expanded)}
+              data-testid="skills-discovery-filters-toggle"
             >
-              <option value="all">All ({totalDiscoveryCount})</option>
-              <option value="curated">Curated ({discoveryLaneCounts.curated})</option>
-              <option value="registry">Registry ({discoveryLaneCounts.registry})</option>
-              <option value="long_tail">Community ({discoveryLaneCounts.longTail})</option>
-            </Select>
-          </label>
+              <Filter className="h-4 w-4" aria-hidden="true" />
+              Filters{changedFilterCount > 0 ? ` (${changedFilterCount})` : ""}
+              <NavArrowDown className={`h-4 w-4 transition-transform ${filtersExpanded ? "rotate-180" : ""}`} aria-hidden="true" />
+            </Button>
+            {!discoveryError && !discoveryLoading ? (
+              <Text variant="caption" tone="muted">
+                {preparedDiscoveryResults.length} result{preparedDiscoveryResults.length === 1 ? "" : "s"}
+              </Text>
+            ) : null}
+          </div>
+        ) : null}
 
-          <label className="space-y-1">
-            <Text as="span" variant="caption" tone="muted">
-              Category
-            </Text>
-            <Select
-              value={discoveryCategoryFilter}
-              onChange={(event) => onDiscoveryCategoryFilterChange(event.target.value)}
-              disabled={!hasProject || discoveryLoading || discoveryCategoryOptions.length === 0}
-              tone="muted"
-              data-testid="skills-discovery-category-select"
-            >
-              <option value="all">All categories</option>
-              {discoveryCategoryOptions.map((entry) => (
-                <option key={entry.name} value={entry.normalizedValue}>
-                  {entry.name} ({entry.count})
-                </option>
-              ))}
-            </Select>
-          </label>
+        {isLargeScreen || filtersExpanded ? (
+          <div id={filtersId} className="grid gap-2 @min-[36rem]/settings-content:grid-cols-3" data-testid="skills-discovery-filters">
+            <label className="min-w-0 space-y-1">
+              <Text as="span" variant="caption" tone="muted">
+                Source
+              </Text>
+              <Select
+                value={discoveryLaneFilter}
+                onChange={(event) => onDiscoveryLaneFilterChange(event.target.value)}
+                disabled={!hasProject || discoveryLoading}
+                tone="muted"
+                data-testid="skills-discovery-source-select"
+              >
+                <option value="all">All ({totalDiscoveryCount})</option>
+                <option value="curated">Curated ({discoveryLaneCounts.curated})</option>
+                <option value="registry">Registry ({discoveryLaneCounts.registry})</option>
+                <option value="long_tail">Community ({discoveryLaneCounts.longTail})</option>
+              </Select>
+            </label>
 
-          <label className="space-y-1">
-            <Text as="span" variant="caption" tone="muted">
-              Sort
-            </Text>
-            <Select
-              value={discoverySort}
-              onChange={(event) => onDiscoverySortChange(event.target.value)}
-              disabled={!hasProject || discoveryLoading}
-              tone="muted"
-              data-testid="skills-discovery-sort-select"
-            >
-              <option value="relevance">Relevance</option>
-              <option value="stars_desc">Stars</option>
-              <option value="name_asc">Name (A-Z)</option>
-            </Select>
-          </label>
-        </div>
+            <label className="min-w-0 space-y-1">
+              <Text as="span" variant="caption" tone="muted">
+                Category
+              </Text>
+              <Select
+                value={discoveryCategoryFilter}
+                onChange={(event) => onDiscoveryCategoryFilterChange(event.target.value)}
+                disabled={!hasProject || discoveryLoading || discoveryCategoryOptions.length === 0}
+                tone="muted"
+                data-testid="skills-discovery-category-select"
+              >
+                <option value="all">All categories</option>
+                {discoveryCategoryOptions.map((entry) => (
+                  <option key={entry.name} value={entry.normalizedValue}>
+                    {entry.name} ({entry.count})
+                  </option>
+                ))}
+              </Select>
+            </label>
+
+            <label className="min-w-0 space-y-1">
+              <Text as="span" variant="caption" tone="muted">
+                Sort
+              </Text>
+              <Select
+                value={discoverySort}
+                onChange={(event) => onDiscoverySortChange(event.target.value)}
+                disabled={!hasProject || discoveryLoading}
+                tone="muted"
+                data-testid="skills-discovery-sort-select"
+              >
+                <option value="relevance">Relevance</option>
+                <option value="stars_desc">Stars</option>
+                <option value="name_asc">Name (A-Z)</option>
+              </Select>
+            </label>
+          </div>
+        ) : null}
       </div>
 
       {discoveryLoading ? <LoadingStatus>Searching skills…</LoadingStatus> : null}
 
-      {!discoveryError && !discoveryLoading ? (
+      {isLargeScreen && !discoveryError && !discoveryLoading ? (
         <Text variant="caption" tone="muted">
           {preparedDiscoveryResults.length} result{preparedDiscoveryResults.length === 1 ? "" : "s"}
         </Text>
