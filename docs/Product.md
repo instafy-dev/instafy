@@ -59,11 +59,13 @@ is offscreen, the browser tab is hidden, or reduced motion is enabled. Header ma
 
 ## Chat readability
 
+At viewport widths of 900px and above, chat messages use the native system font at 14px with a
+21px line height. Narrower layouts keep the existing Inter font and 22.75px line height at 14px.
 Chat messages separate paragraphs with 16px of space and use a soft background for inline code.
 Code snippets longer than 80 characters or containing a newline appear in a bounded, wrapping
 block; short snippets stay inline. This presentation preserves the original message and code
-text, including punctuation. Existing fonts, line height, heading structure, list indentation,
-and interactive file references retain their behavior. Explicit fenced code blocks preserve
+text, including punctuation. Heading structure, list indentation, monospace code, and
+interactive file references retain their behavior. Explicit fenced code blocks preserve
 their source whitespace and scroll horizontally when needed.
 
 ## Header

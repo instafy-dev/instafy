@@ -146,8 +146,8 @@ function inlineCodeNeedsBlock(value: string): boolean {
 }
 // Comfortable reading measure for prose only (#207): even after the bubble
 // shell stops overflowing, its own max-width still lets a line run to ~96
-// characters. 70ch keeps paragraphs and list items in the 45–75ch range
-// `leading-relaxed` was tuned for. Deliberately not applied to code blocks,
+// characters. 70ch keeps paragraphs and list items at a readable line length.
+// Deliberately not applied to code blocks,
 // command/output blocks, diff or file-change lists, tables, or image rows —
 // those want the full bubble width.
 const PROSE_MEASURE_CLASS = "max-w-[70ch]";
@@ -1787,7 +1787,13 @@ const MessageContentBody = memo(function MessageContentBody({
   };
 
   return (
-    <div className={className ?? "text-sm leading-relaxed break-words [overflow-wrap:anywhere]"}>
+    <div
+      className={className ?? [
+        "text-sm leading-relaxed min-[900px]:leading-normal",
+        "min-[900px]:[font-family:-apple-system,BlinkMacSystemFont,'Segoe_UI',system-ui,sans-serif]",
+        "break-words [overflow-wrap:anywhere]",
+      ].join(" ")}
+    >
       {contentBlocks.map((block, blockIndex) => {
         const blockSpacingClassName = blockIndex > 0 ? "mt-2" : block.kind === "list" ? "mt-1" : "";
         const teamFlow = block.kind === "paragraph" ? parseTeamFlowLine(block.line) : null;
@@ -1892,7 +1898,7 @@ const MessageContentBody = memo(function MessageContentBody({
             className={[
               blockIndex > 0 ? "mt-4" : "",
               PROSE_MEASURE_CLASS,
-              "whitespace-pre-wrap break-words [overflow-wrap:anywhere]",
+              "min-[900px]:leading-normal whitespace-pre-wrap break-words [overflow-wrap:anywhere]",
             ]
               .filter(Boolean)
               .join(" ")}
