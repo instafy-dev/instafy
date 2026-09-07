@@ -121,14 +121,43 @@ test("browser UI lane requires the mobile sidebar geometry regression", async (t
 test("minimum count cannot hide a replaced Shared full-modal safe-area case", async (t) => {
   const contract = REQUIRED_BROWSER_LANES["browser-ui"];
   assert.ok(contract.files.includes("shared-browser-expanded-safe-area.spec.ts"));
-  assert.equal(contract.titles.length, 6);
-  for (const requiredTitle of contract.titles) {
+  const safeAreaTitles = contract.titles.filter((title) => title.startsWith("expanded Shared "));
+  assert.equal(safeAreaTitles.length, 6);
+  for (const requiredTitle of safeAreaTitles) {
     const run = setup(t, "browser-ui");
     const tests = browserUiInventory(run).map((item) => item.title === requiredTitle
       ? { ...item, title: "unrelated passing geometry test" } : item);
     run.begin(tests); run.pass(tests);
     assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" }, requiredTitle);
   }
+});
+
+test("browser UI requires both portrait and short-landscape session/status cases", async (t) => {
+  const contract = REQUIRED_BROWSER_LANES["browser-ui"];
+  assert.equal(contract.minimumTests, 26);
+  assert.ok(contract.files.includes("shared-browser-sessions-responsive.spec.ts"));
+  const sessionTitles = contract.titles.filter((title) => title.startsWith("Shared sessions and saved status "));
+  assert.deepEqual(sessionTitles, [
+    "Shared sessions and saved status stay usable in portrait",
+    "Shared sessions and saved status stay usable in short landscape",
+  ]);
+  for (const requiredTitle of sessionTitles) {
+    const run = setup(t, "browser-ui");
+    const tests = browserUiInventory(run).map((item) => item.title === requiredTitle
+      ? { ...item, title: "unrelated passing session test" } : item);
+    run.begin(tests); run.pass(tests);
+    assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" }, requiredTitle);
+  }
+});
+
+test("browser UI cannot omit the retained-editor Unicode input regression", async (t) => {
+  const requiredTitle = "keeps Unicode remote input out of a previously focused local editor";
+  assert.ok(REQUIRED_BROWSER_LANES["browser-ui"].titles.includes(requiredTitle));
+  const run = setup(t, "browser-ui");
+  const tests = browserUiInventory(run).map((item) => item.title === requiredTitle
+    ? { ...item, title: "unrelated passing keyboard test" } : item);
+  run.begin(tests); run.pass(tests);
+  assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" });
 });
 
 test("receipt write errors cannot be swallowed into a green Playwright result", async (t) => {

@@ -15,13 +15,14 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
     ],
   },
   "browser-ui": {
-    minimumTests: 23,
+    minimumTests: 26,
     files: [
       "browser-chrome-mobile-layout.spec.ts",
       "browser-cobrowsing-ui.spec.ts",
       "browser-cursor-overlay.spec.ts",
       "shared-browser-approval-responsive.spec.ts",
       "shared-browser-expanded-safe-area.spec.ts",
+      "shared-browser-sessions-responsive.spec.ts",
       "browser-live-proof.spec.ts",
       "mobile-sidebar-safe-area.spec.ts",
     ],
@@ -32,6 +33,9 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "expanded Shared modal respects web safe areas",
       "expanded Shared modal respects macOS safe areas",
       "expanded Shared modal respects mobile safe areas",
+      "Shared sessions and saved status stay usable in portrait",
+      "Shared sessions and saved status stay usable in short landscape",
+      "keeps Unicode remote input out of a previously focused local editor",
     ],
   },
   "shared-studio": {

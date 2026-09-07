@@ -37,7 +37,7 @@ export async function constrainBrowserPanelForCdp(page: Page) {
     .toBe(FIXTURE_PANEL_WIDTH_PX);
 }
 
-function isBrowserControlGrantResponse(response: Response) {
+function isBrowserGrantResponse(response: Response, access: "control" | "view") {
   if (!response.ok() || response.request().method() !== "POST") {
     return false;
   }
@@ -61,7 +61,7 @@ function isBrowserControlGrantResponse(response: Response) {
       body.protocol === "http" &&
       Array.isArray(body.scopes) &&
       body.scopes.includes("browser.view") &&
-      body.scopes.includes("browser.control") &&
+      body.scopes.includes("browser.control") === (access === "control") &&
       typeof body.preferRuntime === "string" &&
       body.preferRuntime.length > 0 &&
       typeof body.browserSessionId === "string" &&
@@ -74,16 +74,17 @@ function isBrowserControlGrantResponse(response: Response) {
 
 export async function openSharedBrowser(
   page: Page,
-  options: { constrainForCdp?: boolean } = {},
+  options: { constrainForCdp?: boolean; access?: "control" | "view" } = {},
 ): Promise<BrowserGrantBinding> {
   const constrainForCdp = options.constrainForCdp ?? true;
   if (constrainForCdp) {
     await constrainBrowserPanelForCdp(page);
   }
   await installSharedBrowserSocketProbe(page);
-  const grantResponsePromise = page.waitForResponse(isBrowserControlGrantResponse, {
-    timeout: 240_000,
-  });
+  const grantResponsePromise = page.waitForResponse(
+    (response) => isBrowserGrantResponse(response, options.access ?? "control"),
+    { timeout: 240_000 },
+  );
 
   await page.evaluate(() => {
     window.dispatchEvent(new CustomEvent("instafy:browser-open", { detail: {} }));

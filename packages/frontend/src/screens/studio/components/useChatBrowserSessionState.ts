@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { BUG_REPORT_DIALOG_STATE_EVENT, type BugReportDialogStateDetail } from "./bugReportEvents";
 
 type UseChatBrowserSessionStateOptions = {
+  currentUserId: string | null;
   activeConversationControllerId: string | null;
   activeConversationId: string | null;
   activeProjectId: string | null;
@@ -20,6 +21,7 @@ function sanitizeRuntimeId(runtimeId: string | null | undefined): string | null 
 }
 
 export function useChatBrowserSessionState({
+  currentUserId,
   activeConversationControllerId,
   activeConversationId,
   activeProjectId,
@@ -30,12 +32,15 @@ export function useChatBrowserSessionState({
 }: UseChatBrowserSessionStateOptions) {
   const [browserSessionOpen, setBrowserSessionOpen] = useState(false);
   const [browserSessionRuntimeId, setBrowserSessionRuntimeId] = useState<string | null>(null);
+  const [exactBrowserRuntimeId, setExactBrowserRuntimeId] = useState<string | null>(null);
   const browserSessionStateStorageKey = useMemo(() => {
-    if (!activeProjectId || !activeConversationId) {
+    if (!currentUserId || !activeProjectId || !activeConversationId) {
       return null;
     }
-    return `instafy:browser-session:${activeProjectId}:${activeConversationId}`;
-  }, [activeConversationId, activeProjectId]);
+    return `instafy:browser-session:${currentUserId}:${activeProjectId}:${activeConversationId}`;
+  }, [activeConversationId, activeProjectId, currentUserId]);
+  const currentIdentityRef = useRef(browserSessionStateStorageKey);
+  currentIdentityRef.current = browserSessionStateStorageKey;
   const browserSessionStateLoadedKeyRef = useRef<string | null>(null);
   const browserSessionStateScopeKeyRef = useRef<string | null>(null);
   const browserSessionStateDirtyRef = useRef(false);
@@ -49,6 +54,7 @@ export function useChatBrowserSessionState({
     browserSessionStateLoadedKeyRef.current = null;
     browserSessionStateDirtyRef.current = false;
     setBrowserSessionRuntimeId(null);
+    setExactBrowserRuntimeId(null);
     setBrowserSessionOpen(false);
     setBrowserSessionStateHydrated(false);
   }, [browserSessionStateStorageKey]);
@@ -60,6 +66,7 @@ export function useChatBrowserSessionState({
     if (!browserSessionStateStorageKey) {
       browserSessionStateLoadedKeyRef.current = null;
       setBrowserSessionRuntimeId(null);
+      setExactBrowserRuntimeId(null);
       setBrowserSessionOpen(false);
       setBrowserSessionStateHydrated(false);
       return;
@@ -73,6 +80,7 @@ export function useChatBrowserSessionState({
       const raw = window.sessionStorage.getItem(browserSessionStateStorageKey);
       if (!raw) {
         setBrowserSessionRuntimeId(null);
+        setExactBrowserRuntimeId(null);
         setBrowserSessionOpen(false);
         setBrowserSessionStateHydrated(true);
         return;
@@ -80,6 +88,7 @@ export function useChatBrowserSessionState({
       const parsed = JSON.parse(raw) as {
         open?: unknown;
         runtimeId?: unknown;
+        exactRuntimeId?: unknown;
       };
       const open = typeof parsed?.open === "boolean" ? parsed.open : false;
       const runtimeId =
@@ -87,10 +96,12 @@ export function useChatBrowserSessionState({
           ? parsed.runtimeId.trim()
           : null;
       setBrowserSessionRuntimeId(runtimeId);
+      setExactBrowserRuntimeId(parsed.exactRuntimeId === runtimeId ? runtimeId : null);
       setBrowserSessionOpen(open || Boolean(runtimeId));
       setBrowserSessionStateHydrated(true);
     } catch {
       setBrowserSessionRuntimeId(null);
+      setExactBrowserRuntimeId(null);
       setBrowserSessionOpen(false);
       setBrowserSessionStateHydrated(true);
     }
@@ -111,12 +122,13 @@ export function useChatBrowserSessionState({
         JSON.stringify({
           open: browserSessionOpen,
           runtimeId: browserSessionRuntimeId,
+          exactRuntimeId: exactBrowserRuntimeId,
         }),
       );
     } catch {
       // ignore session storage write failures
     }
-  }, [browserSessionOpen, browserSessionRuntimeId, browserSessionStateHydrated, browserSessionStateStorageKey]);
+  }, [browserSessionOpen, browserSessionRuntimeId, exactBrowserRuntimeId, browserSessionStateHydrated, browserSessionStateStorageKey]);
 
   const resolvedBrowserRuntimeId = browserSessionRuntimeId ?? null;
   const preferredBrowserRuntimeId =
@@ -126,19 +138,33 @@ export function useChatBrowserSessionState({
   const browserSessionReopenAfterBugReportRef = useRef(false);
 
   const openBrowserSession = useCallback((runtimeId: string | null) => {
+    if (!browserSessionStateStorageKey || currentIdentityRef.current !== browserSessionStateStorageKey) return;
     browserSessionStateDirtyRef.current = true;
     const sanitizedRuntimeId = sanitizeRuntimeId(runtimeId);
     if (sanitizedRuntimeId) {
       setBrowserSessionRuntimeId(sanitizedRuntimeId);
+      setExactBrowserRuntimeId((current) => current === sanitizedRuntimeId ? current : null);
     }
     setBrowserSessionOpen(true);
     setBrowserSessionExpandRequestToken((current) => current + 1);
-  }, []);
+  }, [browserSessionStateStorageKey]);
+
+  const resumeBrowserSession = useCallback((runtimeId: string) => {
+    if (!browserSessionStateStorageKey || currentIdentityRef.current !== browserSessionStateStorageKey) return;
+    const normalized = sanitizeRuntimeId(runtimeId);
+    if (!normalized) return;
+    browserSessionStateDirtyRef.current = true;
+    setBrowserSessionRuntimeId(normalized);
+    setExactBrowserRuntimeId(normalized);
+    setBrowserSessionOpen(true);
+    setBrowserSessionExpandRequestToken((current) => current + 1);
+  }, [browserSessionStateStorageKey]);
 
   const handleBrowserSessionOpenChange = useCallback((open: boolean) => {
+    if (!browserSessionStateStorageKey || currentIdentityRef.current !== browserSessionStateStorageKey) return;
     browserSessionStateDirtyRef.current = true;
     setBrowserSessionOpen(open);
-  }, []);
+  }, [browserSessionStateStorageKey]);
 
   const requestBrowserSessionExpand = useCallback(() => {
     setBrowserSessionExpandRequestToken((current) => current + 1);
@@ -194,14 +220,15 @@ export function useChatBrowserSessionState({
   ]);
 
   const handleHiddenBrowserSessionUnavailable = useCallback(() => {
-    if (!hasHiddenBrowserSession) {
+    if (!hasHiddenBrowserSession || !browserSessionStateStorageKey || currentIdentityRef.current !== browserSessionStateStorageKey) {
       return;
     }
     browserSessionStateDirtyRef.current = true;
     setBrowserSessionRuntimeId(null);
+    setExactBrowserRuntimeId(null);
     setBrowserSessionOpen(false);
     void refreshRuntimeStatuses();
-  }, [hasHiddenBrowserSession, refreshRuntimeStatuses]);
+  }, [browserSessionStateStorageKey, hasHiddenBrowserSession, refreshRuntimeStatuses]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -229,26 +256,33 @@ export function useChatBrowserSessionState({
       const runtimeIdFromArgs = typeof args[0] === "string" ? args[0].trim() : "";
       const runtimeIdFromDetail = typeof detail?.runtimeId === "string" ? detail.runtimeId.trim() : "";
       const runtimeId = runtimeIdFromArgs || runtimeIdFromDetail;
-      openBrowserSession(runtimeId || null);
+      if (runtimeId) resumeBrowserSession(runtimeId);
+      else openBrowserSession(null);
     };
     window.addEventListener("instafy:browser-open", handler);
     return () => {
       window.removeEventListener("instafy:browser-open", handler);
     };
-  }, [activeConversationControllerId, activeConversationId, openBrowserSession]);
+  }, [activeConversationControllerId, activeConversationId, openBrowserSession, resumeBrowserSession]);
 
   const handleBrowserRuntimeIdResolved = useCallback(
     (runtimeId: string | null) => {
+      if (!browserSessionStateStorageKey || currentIdentityRef.current !== browserSessionStateStorageKey) return;
       browserSessionStateDirtyRef.current = true;
       const sanitizedRuntimeId = sanitizeRuntimeId(runtimeId);
       setBrowserSessionRuntimeId(sanitizedRuntimeId);
+      setExactBrowserRuntimeId(sanitizedRuntimeId);
       setSessionRuntimeOverride(sanitizedRuntimeId);
     },
-    [setSessionRuntimeOverride],
+    [browserSessionStateStorageKey, setSessionRuntimeOverride],
   );
 
   return {
     browserSessionOpen,
+    browserSessionStateHydrated: Boolean(browserSessionStateStorageKey) && browserSessionStateHydrated &&
+      browserSessionStateLoadedKeyRef.current === browserSessionStateStorageKey &&
+      browserSessionStateScopeKeyRef.current === browserSessionStateStorageKey,
+    exactBrowserRuntimeId,
     browserSessionExpandRequestToken,
     handleBrowserRuntimeIdResolved,
     handleBrowserSessionOpenChange,
@@ -256,6 +290,7 @@ export function useChatBrowserSessionState({
     handleToggleBrowserSession,
     hasHiddenBrowserSession,
     openBrowserSession,
+    resumeBrowserSession,
     preferredBrowserRuntimeId,
     requestBrowserSessionExpand,
     resolvedBrowserRuntimeId,

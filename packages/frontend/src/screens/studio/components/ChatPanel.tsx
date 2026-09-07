@@ -44,6 +44,7 @@ import { parseInviteCommandRequest } from "../../../conversations/inviteCommand"
 import { resolveGroupParticipationReplyTargets } from "../../../conversations/groupParticipation";
 import { getChatClientSessionId } from "../../../conversations/chatClientIdentity";
 import { generateUUID } from "../../../utils/uuid";
+import { useSharedBrowserResume } from "./useSharedBrowserResume";
 import { useConversations } from "../../../conversations/ConversationsProvider";
 import { useConversationParticipants } from "../../../conversations/useConversationParticipants";
 import {
@@ -446,6 +447,8 @@ function hasVisibleConversationAnchor(messages: ChatMessage[]): boolean {
 export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null } = {}) {
   const location = useLocation();
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const currentUserId = user?.id ?? null;
   const runtimeMenu = useRuntimeMenuOptions();
   const rootRef = useRef<HTMLDivElement>(null);
   const {
@@ -601,6 +604,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   }, [activeConversationId, conversations]);
   const {
     browserSessionOpen,
+    browserSessionStateHydrated,
+    exactBrowserRuntimeId,
     browserSessionExpandRequestToken,
     handleBrowserRuntimeIdResolved,
     handleBrowserSessionOpenChange,
@@ -608,10 +613,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     handleToggleBrowserSession,
     hasHiddenBrowserSession,
     openBrowserSession,
+    resumeBrowserSession,
     preferredBrowserRuntimeId,
     requestBrowserSessionExpand,
     resolvedBrowserRuntimeId,
   } = useChatBrowserSessionState({
+    currentUserId,
     activeConversationControllerId,
     activeConversationId,
     activeProjectId: activeProjectId ?? null,
@@ -807,8 +814,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const projectMemberContextLoading = Boolean(
     activeProjectId && projectMembersResolvedProjectId !== activeProjectId,
   );
-  const { user } = useAuth();
-  const currentUserId = user?.id ?? null;
   const {
     participants: conversationParticipants,
     loading: conversationParticipantsLoading,
@@ -892,6 +897,26 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     setSharedBrowserActivated(true);
     setBrowserTransport("shared");
   }, []);
+  const resumeSharedBrowser = useCallback((runtimeId: string) => {
+    revealSharedBrowserApproval();
+    resumeBrowserSession(runtimeId);
+  }, [resumeBrowserSession, revealSharedBrowserApproval]);
+  const replaceSharedBrowserResumeSearch = useCallback((search: string) => {
+    navigate({ pathname: location.pathname, search, hash: location.hash }, { replace: true });
+  }, [location.hash, location.pathname, navigate]);
+  const { runtimeId: requestedSharedBrowserRuntimeId, acknowledgeRuntimeResolved } = useSharedBrowserResume({
+    search: location.search,
+    projectId: activeProjectId ?? null,
+    userId: currentUserId,
+    ready: browserTransportPreferenceResolved && browserSessionStateHydrated &&
+      conversationsProjectKey === activeProjectId && Boolean(activeConversationId),
+    onResume: resumeSharedBrowser,
+    onReplaceSearch: replaceSharedBrowserResumeSearch,
+  });
+  const handleSharedBrowserRuntimeResolved = useCallback((runtimeId: string | null) => {
+    acknowledgeRuntimeResolved(runtimeId);
+    handleBrowserRuntimeIdResolved(runtimeId);
+  }, [acknowledgeRuntimeResolved, handleBrowserRuntimeIdResolved]);
   useSharedBrowserApprovalTransport({
     pending: sharedBrowserApprovalPending,
     transport: browserTransport,
@@ -5337,6 +5362,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     projectId={activeProjectId ?? null}
                     browserSessionId={sharedBrowserSurfaceSessionId}
                     preferRuntimeId={preferredBrowserRuntimeId}
+                    resumeRuntimeId={requestedSharedBrowserRuntimeId ?? exactBrowserRuntimeId}
                     expandRequestToken={browserSessionExpandRequestToken}
                     presentation="docked"
                     fillContainer
@@ -5369,7 +5395,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     sharedBrowserWebRtcCapabilities={
                       sharedBrowserCapabilities?.webrtc ?? null
                     }
-                    onRuntimeIdResolved={handleBrowserRuntimeIdResolved}
+                    onRuntimeIdResolved={handleSharedBrowserRuntimeResolved}
                     onStatus={showStatus}
                   />
                 </div>

@@ -37,6 +37,27 @@ the authorization boundary.
 
 There is no Team runtime mode. Adding one later requires host-local consent, separate browser/workspace/shell/network/hardware grants, visible viewer/controller identity, expirations, an immediate kill switch, audit events, live socket revocation, and an OS sandbox. See [Self-Hosted-Runtime-Security.md](./Self-Hosted-Runtime-Security.md).
 
+## Resume on another device
+
+**Sessions & resume** shows the current runtime identity and a **Copy resume link**
+action. The link contains only the space and runtime UUIDs; it grants no access
+and transfers no cookies, webpage URL, field values or browser-control token.
+Open it while signed in on another device to request that exact live Shared
+session. The new device is a separate participant and must acquire input control
+through the existing collaboration controls.
+
+Without an exact resume target, one eligible live Shared session is reused;
+multiple sessions require an explicit choice. A missing target and failed
+discovery never silently allocate or select a different browser. Reconnects stay
+pinned to the resolved session, and **Start new session** is an explicit
+Builder-or-higher action. Choosing or starting another session updates an incoming
+resume link once that session resolves, so closing, reopening or reloading keeps
+the new selection without replaying the original link. This resumes the runtime's currently focused live tab,
+not a per-device tab selection or a saved browsing-history record. If a runtime
+has ended, profile recovery and its limitations below still apply.
+Local resume preferences are scoped to the signed-in account, space and conversation;
+an account switch does not inherit another account's saved session choice.
+
 ## One browser shell, three pixel transports
 
 The Studio always owns the address bar, Go/history controls, status, errors, action ticker, and AI cursor. The runtime owns the page and profile.
@@ -552,6 +573,23 @@ otherwise public sites; a future denylist may reduce prompt volume but is not
 an authorization substitute.
 
 ## Shared profile persistence and clearing
+
+The **Sessions & resume** panel reports controller-owned save metadata. **Login
+recovery off** means the project's persistence policy is disabled, not that its
+current remote browser cannot be shared. When enabled, a missing snapshot is
+shown as not ready; otherwise the panel shows the last acknowledged save time
+and whether that snapshot came from the currently selected runtime. An older
+snapshot may remain stored after policy is disabled. A failed or incompatible
+status request is **unknown**, never assumed to mean enabled or disabled.
+
+`GET /projects/:project_id/browser-profile/status` requires an authenticated
+user with project read access, including viewers. It returns only `enabled`,
+`lastSavedAt`, and `savedByRuntimeId`, with `Cache-Control: no-store`; it never
+reads or decrypts the archive and grants no runtime or input authority. The
+panel refreshes while open and visible, suppresses overlapping requests, and
+discards responses belonging to a previous account or project. This is a record
+of successful stored snapshots, not a live health check of every runtime's
+snapshot writer or a guarantee that the latest page changes were saved.
 
 Durable Shared Browser state reuses the Project Secrets security boundary
 rather than introducing another vault. The controller encrypts the pruned

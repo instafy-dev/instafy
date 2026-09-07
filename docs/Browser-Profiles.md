@@ -31,7 +31,10 @@ cannot import either profile.
   survive. Signing out of Instafy revokes browser control; it does not erase that
   user's disk profile. Another account gets a different profile.
 - **Shared, another viewing device or pixel transport:** it is the same remote
-  browser, not a copy. WebRTC, CDP screencast, and RFB do not select new profiles.
+  browser, not a copy. Use **Sessions & resume → Copy resume link** to select the
+  exact running session on another signed-in device. Multiple sessions require
+  a choice; an unavailable target does not silently create a replacement.
+  WebRTC, CDP screencast, and RFB do not select new profiles.
 - **Shared, replacement runtime:** recovery requires enabled durable persistence
   and a usable saved snapshot. Persistence is default-off and controller-owned.
 - **Shared, separate active runtimes:** there is no live cookie synchronization.
