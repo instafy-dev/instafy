@@ -1,10 +1,15 @@
-import { NavArrowRight, Plus, Puzzle, Trash } from "iconoir-react";
+import { MoreHoriz, NavArrowRight, Plus, Puzzle, Trash } from "iconoir-react";
+import { MenuTrigger } from "react-aria-components";
 import { Button, IconButton } from "../../../components/Button";
 import { Card } from "../../../components/Card";
 import { LoadingStatus } from "../../../components/LoadingStatus";
+import { MenuItemContent } from "../../../components/MenuItemContent";
 import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
 import { Toggle } from "../../../components/Toggle";
+import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
+import { StudioPopover } from "../../../components/aria/StudioPopover";
+import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
 
 type InstalledSkillsSectionSkill = {
   id: string;
@@ -54,6 +59,7 @@ export function InstalledSkillsSection({
   onUninstallSkill,
   onOpenSkillFile,
 }: InstalledSkillsSectionProps) {
+  const isLargeScreen = useStudioDesktopLayout();
   return (
     <Card tone="default" radius="2xl" className="space-y-4">
       <div className="space-y-1">
@@ -138,9 +144,26 @@ export function InstalledSkillsSection({
                       )}
                     </span>
                     <div className="min-w-0 space-y-1">
-                      <Text variant="bodyStrong" tone="primary" className="truncate">
-                        {skill.title}
-                      </Text>
+                      {isLargeScreen ? (
+                        <Text variant="bodyStrong" tone="primary" className="line-clamp-2 break-words @min-[36rem]/settings-content:line-clamp-1">
+                          {skill.title}
+                        </Text>
+                      ) : (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onPress={() => onOpenSkillFile(skill)}
+                          aria-label={`Open ${skill.title}`}
+                          title="Open skill file"
+                          isDisabled={togglePendingSkillId !== null || uninstallPendingSkillId !== null}
+                          className="min-w-0 max-w-full text-left pointer-coarse:min-h-11"
+                          data-testid={`skills-open-file-${skill.slug}`}
+                        >
+                          <Text as="span" variant="bodyStrong" tone="primary" className="line-clamp-2 break-words">
+                            {skill.title}
+                          </Text>
+                        </Button>
+                      )}
                       <Text variant="caption" tone="muted" className="line-clamp-2">
                         {skill.description ?? skill.slug}
                       </Text>
@@ -158,34 +181,68 @@ export function InstalledSkillsSection({
                       }
                       data-testid={`skills-toggle-${skill.slug}`}
                     />
-                    <IconButton
-                      variant="ghost"
-                      size="sm"
-                      radius="full"
-                      onPress={() => onUninstallSkill(skill)}
-                      aria-label={`Uninstall ${skill.title}`}
-                      title="Uninstall skill"
-                      className="text-rose-500 hover:text-rose-600 data-[hovered]:text-rose-600 dark:text-rose-300 dark:hover:text-rose-200 dark:data-[hovered]:text-rose-200"
-                      isDisabled={
-                        togglePendingSkillId !== null ||
-                        (uninstallPendingSkillId !== null && uninstallPendingSkillId !== skill.id)
-                      }
-                      data-testid={`skills-uninstall-${skill.slug}`}
-                    >
-                      <Trash className="h-4 w-4" aria-hidden="true" />
-                    </IconButton>
-                    <IconButton
-                      variant="ghost"
-                      size="sm"
-                      radius="full"
-                      onPress={() => onOpenSkillFile(skill)}
-                      aria-label={`Open ${skill.title}`}
-                      title="Open skill file"
-                      isDisabled={togglePendingSkillId !== null || uninstallPendingSkillId !== null}
-                      data-testid={`skills-open-file-${skill.slug}`}
-                    >
-                      <NavArrowRight className="h-4 w-4" aria-hidden="true" />
-                    </IconButton>
+                    {isLargeScreen ? (
+                      <IconButton
+                        variant="ghost"
+                        size="sm"
+                        radius="full"
+                        onPress={() => onUninstallSkill(skill)}
+                        aria-label={`Uninstall ${skill.title}`}
+                        title="Uninstall skill"
+                        className="text-rose-500 hover:text-rose-600 data-[hovered]:text-rose-600 dark:text-rose-300 dark:hover:text-rose-200 dark:data-[hovered]:text-rose-200"
+                        isDisabled={
+                          togglePendingSkillId !== null ||
+                          (uninstallPendingSkillId !== null && uninstallPendingSkillId !== skill.id)
+                        }
+                        data-testid={`skills-uninstall-${skill.slug}`}
+                      >
+                        <Trash className="h-4 w-4" aria-hidden="true" />
+                      </IconButton>
+                    ) : null}
+                    {isLargeScreen ? (
+                      <IconButton
+                        variant="ghost"
+                        size="sm"
+                        radius="full"
+                        onPress={() => onOpenSkillFile(skill)}
+                        aria-label={`Open ${skill.title}`}
+                        title="Open skill file"
+                        isDisabled={togglePendingSkillId !== null || uninstallPendingSkillId !== null}
+                        data-testid={`skills-open-file-${skill.slug}`}
+                      >
+                        <NavArrowRight className="h-4 w-4" aria-hidden="true" />
+                      </IconButton>
+                    ) : (
+                      <MenuTrigger>
+                        <IconButton
+                          variant="ghost"
+                          size="sm"
+                          radius="full"
+                          aria-label={`Actions for ${skill.title}`}
+                          title="Skill actions"
+                          isDisabled={togglePendingSkillId !== null || uninstallPendingSkillId !== null}
+                          data-testid={`skills-actions-${skill.slug}`}
+                        >
+                          <MoreHoriz className="h-4 w-4" aria-hidden="true" />
+                        </IconButton>
+                        <StudioPopover placement="bottom end" offset={6} className="w-52 p-1">
+                          <StudioMenu
+                            aria-label={`Actions for ${skill.title}`}
+                            onAction={(key) => {
+                              if (key === "open") onOpenSkillFile(skill);
+                              if (key === "uninstall") onUninstallSkill(skill);
+                            }}
+                          >
+                            <StudioMenuItem id="open" textValue="Open skill file" className="pointer-coarse:min-h-11">
+                              <MenuItemContent start={<NavArrowRight aria-hidden="true" />}>Open skill file</MenuItemContent>
+                            </StudioMenuItem>
+                            <StudioMenuItem id="uninstall" textValue="Uninstall skill" data-testid={`skills-uninstall-${skill.slug}`} className="pointer-coarse:min-h-11">
+                              <MenuItemContent start={<Trash aria-hidden="true" />} textClassName="text-rose-600 dark:text-rose-400">Uninstall skill</MenuItemContent>
+                            </StudioMenuItem>
+                          </StudioMenu>
+                        </StudioPopover>
+                      </MenuTrigger>
+                    )}
                   </div>
                 </div>
 

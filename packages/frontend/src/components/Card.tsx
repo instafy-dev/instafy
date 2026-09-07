@@ -1,9 +1,10 @@
 import type { ReactNode } from "react";
 import { Surface, type SurfaceProps } from "./Surface";
 
-type CardPadding = "sm" | "md" | "lg";
+type CardPadding = "none" | "sm" | "md" | "lg";
 
 const PADDING_CLASSES: Record<CardPadding, string> = {
+  none: "p-0",
   sm: "p-3",
   md: "p-4",
   lg: "p-5"

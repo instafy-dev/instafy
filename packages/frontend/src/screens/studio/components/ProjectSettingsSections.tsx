@@ -166,7 +166,7 @@ export function ProjectSettingsSections({
             description="Rename this space. Guests will see the updated name in the studio header and invite links."
           >
             <SettingsSurface>
-              <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto_auto] md:items-end">
+              <div className="grid gap-2 @min-[32rem]/settings-content:grid-cols-[minmax(0,1fr)_auto_auto] @min-[32rem]/settings-content:items-end">
                 <div className="min-w-0">
                   <Text variant="caption" tone="muted">
                     Name
@@ -196,7 +196,7 @@ export function ProjectSettingsSections({
                   size="sm"
                   radius="xl"
                   data-testid="project-settings-name-save"
-                  className="w-full md:w-auto"
+                  className="w-full @min-[32rem]/settings-content:w-auto"
                 >
                   {projectNameSaving ? "Saving…" : "Save"}
                 </Button>
@@ -207,7 +207,7 @@ export function ProjectSettingsSections({
                   size="sm"
                   radius="xl"
                   data-testid="project-settings-name-cancel"
-                  className="w-full md:w-auto"
+                  className="w-full @min-[32rem]/settings-content:w-auto"
                 >
                   Cancel
                 </Button>
@@ -221,7 +221,7 @@ export function ProjectSettingsSections({
             data-testid="project-defaults-section"
           >
             <SettingsSurface>
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex flex-col gap-3 @min-[32rem]/settings-content:flex-row @min-[32rem]/settings-content:items-center @min-[32rem]/settings-content:justify-between">
                 <div className="min-w-0">
                   <Text variant="bodyStrong" tone="secondary">
                     Refresh defaults
@@ -237,7 +237,7 @@ export function ProjectSettingsSections({
                   size="sm"
                   radius="xl"
                   data-testid="project-defaults-refresh"
-                  className="w-full sm:w-auto"
+                  className="w-full @min-[32rem]/settings-content:w-auto"
                 >
                   {projectDefaultsRefreshPending ? "Refreshing…" : "Refresh defaults"}
                 </Button>
@@ -266,7 +266,7 @@ export function ProjectSettingsSections({
           </Text>
         ) : null}
         <SettingsSurface className="space-y-3">
-          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(180px,220px)]">
+          <div className="grid gap-3 @min-[32rem]/settings-content:grid-cols-[minmax(0,1fr)_minmax(180px,220px)]">
             <div className="min-w-0">
               <Text variant="caption" tone="muted">
                 Email
@@ -355,7 +355,7 @@ export function ProjectSettingsSections({
               size="sm"
               radius="xl"
               data-testid="project-member-invite-submit"
-              className="w-full sm:w-auto"
+              className="w-full @min-[32rem]/settings-content:w-auto"
             >
               {projectInvitePending ? "Preparing…" : "Prepare"}
             </Button>
@@ -370,14 +370,16 @@ export function ProjectSettingsSections({
           </SettingsSection>
 
           <SettingsSection
-            title="Pending invitations"
-            actions={
-              <Text variant="caption" tone="muted" data-testid="project-invitations-count">
-                {projectInvitations.length}
-              </Text>
+            title={
+              <span className="inline-flex flex-wrap items-center gap-2">
+                Pending invitations
+                <Text as="span" variant="caption" tone="muted" data-testid="project-invitations-count">
+                  {projectInvitations.length}
+                </Text>
+              </span>
             }
           >
-        <SettingsSurface className="overflow-hidden p-0">
+        <SettingsSurface padding="none" className="overflow-hidden">
           {projectInvitationsError ? (
             <Text variant="caption" tone="danger" className="px-3 py-3">
               {projectInvitationsError}
@@ -387,7 +389,7 @@ export function ProjectSettingsSections({
               Loading invitations…
             </Text>
           ) : projectInvitations.length === 0 ? (
-            <Text variant="caption" tone="muted" className="px-3 py-3">
+            <Text variant="body" tone="muted" className="px-3 py-3">
               No pending invitations.
             </Text>
           ) : (
@@ -444,7 +446,7 @@ export function ProjectSettingsSections({
                         size="xs"
                         radius="lg"
                         fullWidth={false}
-                        className="w-32"
+                        className="w-32 shrink-0"
                       >
                         <option value="viewer">Viewer</option>
                         <option value="builder">Builder</option>
@@ -493,7 +495,7 @@ export function ProjectSettingsSections({
           </Text>
         ) : null}
         <SettingsSurface className="space-y-3">
-          <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+          <div className="grid gap-2 @min-[32rem]/settings-content:grid-cols-[minmax(0,1fr)_auto] @min-[32rem]/settings-content:items-end">
             <div>
               <Text variant="caption" tone="muted">
                 {inviteLinkUrl ? "Access for replacement link" : "Access"}
@@ -516,7 +518,7 @@ export function ProjectSettingsSections({
               size="sm"
               radius="xl"
               data-testid="org-invite-link-create"
-              className="w-full md:w-auto"
+              className="w-full @min-[32rem]/settings-content:w-auto"
             >
               {inviteLinkPending ? "Working…" : inviteLinkUrl ? "Rotate link" : "Create link"}
             </Button>
@@ -526,7 +528,7 @@ export function ProjectSettingsSections({
               <Text variant="caption" tone="muted">
                 Current link · {activeInviteLinkRole === "builder" ? "Read & write" : "Read-only"}
               </Text>
-              <div className="grid gap-2 md:grid-cols-[minmax(0,1fr)_auto_auto] md:items-center">
+              <div className="grid gap-2 @min-[32rem]/settings-content:grid-cols-[minmax(0,1fr)_auto_auto] @min-[32rem]/settings-content:items-center">
                 <Input value={inviteLinkUrl} readOnly data-testid="org-invite-link-url" className="min-w-0" />
                 <Button
                   onPress={onCopyInviteLink}
@@ -534,7 +536,7 @@ export function ProjectSettingsSections({
                   size="sm"
                   radius="xl"
                   data-testid="org-invite-link-copy"
-                  className="w-full md:w-auto"
+                  className="w-full @min-[32rem]/settings-content:w-auto"
                 >
                   Copy current link
                 </Button>
@@ -545,7 +547,7 @@ export function ProjectSettingsSections({
                   size="sm"
                   radius="xl"
                   data-testid="org-invite-link-revoke"
-                  className="w-full md:w-auto"
+                  className="w-full @min-[32rem]/settings-content:w-auto"
                 >
                   Revoke
                 </Button>
@@ -577,12 +579,12 @@ export function ProjectSettingsSections({
         ) : null}
         {!projectMembersLoading && !projectMembersError && projectMembers.length === 0 ? (
           <SettingsSurface>
-            <Text variant="body" tone="secondary">
+            <Text variant="body" tone="muted">
               No guests have accepted access yet.
             </Text>
           </SettingsSurface>
         ) : projectMembers.length > 0 ? (
-          <SettingsSurface className="overflow-hidden p-0">
+          <SettingsSurface padding="none" className="overflow-hidden">
             <div className="divide-y divide-slate-200/70 dark:divide-slate-800">
               {sortedProjectMembers.map((member) => {
                 const rawLabel = member.fullName || member.email || member.userId;
@@ -606,17 +608,17 @@ export function ProjectSettingsSections({
 
                 return (
                   <div key={member.userId} className="px-3 py-3" data-testid={`project-member-row-${member.userId}`}>
-                    <div className="flex items-start justify-between gap-3">
+                    <div className="flex flex-col gap-3 @min-[32rem]/settings-content:flex-row @min-[32rem]/settings-content:items-start @min-[32rem]/settings-content:justify-between">
                       <div className="flex min-w-0 items-start gap-3">
                         <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full border border-slate-200 bg-slate-100 text-xs font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-100">
                           {initials}
                         </div>
                         <div className="min-w-0">
-                          <Text variant="bodyStrong" tone="primary" className="truncate">
+                          <Text variant="bodyStrong" tone="primary" className="break-words" title={label}>
                             {label}
                           </Text>
-                          <Text variant="caption" tone="muted" className="truncate">
-                            <span className="font-mono">{secondary}</span>
+                          <Text variant="caption" tone="muted" className="break-all">
+                            <span>{secondary}</span>
                             {isSelf ? " · You" : ""}
                           </Text>
                         </div>
@@ -629,13 +631,13 @@ export function ProjectSettingsSections({
                         size="xs"
                         radius="lg"
                         fullWidth={false}
-                        className="w-32"
+                        className="w-32 shrink-0"
                       >
                         <option value="viewer">Read-only</option>
                         <option value="builder">Read &amp; write</option>
                       </Select>
                     </div>
-                    <div className="mt-2 flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
                       <span>Joined {new Date(member.createdAt).toLocaleDateString()}</span>
                       <Button
                         onPress={() => onRemoveProjectMember(member.userId, label)}

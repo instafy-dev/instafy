@@ -19,6 +19,20 @@ export const DRAWER_SECTION_LABEL_CLASS = "text-xxs tracking-[0.12em]";
 
 export const DRAWER_LIST_ROW_TEXT_CLASS = "text-sm leading-5";
 
+// Selection in navigation pickers is a flat fill; keyboard focus keeps its own ring.
+export const PICKER_LIST_ROW_ACTIVE_CLASS =
+  "bg-slate-100 dark:bg-[var(--color-studio-dark-active)]";
+
+// Compact navigation lists share row geometry, with larger targets on phones and touch screens.
+export const PICKER_LIST_ROW_GEOMETRY_CLASS =
+  "min-h-9 rounded-xl px-3.5 py-2 max-[900px]:min-h-11 pointer-coarse:min-h-11";
+
+export function pickerListRowTextClassName(active: boolean): string {
+  return active
+    ? "!font-medium !text-slate-900 dark:!text-slate-50"
+    : "!font-normal !text-slate-700 dark:!text-slate-200";
+}
+
 export const DRAWER_LIST_ROW_META_CLASS = "text-xs text-slate-500 dark:text-slate-400";
 
 export const DRAWER_ICON_BUTTON_TONE_CLASS =

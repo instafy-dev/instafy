@@ -129,7 +129,7 @@ export function OrgMembersSettingsSections({
       >
         {canManageOrgMembers ? (
           <SettingsSurface className="space-y-3">
-            <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(180px,220px)]">
+            <div className="grid gap-3 @min-[32rem]/settings-content:grid-cols-[minmax(0,1fr)_minmax(180px,220px)]">
               <div className="min-w-0">
                 <Text variant="caption" tone="muted">
                   Email
@@ -219,7 +219,7 @@ export function OrgMembersSettingsSections({
                 size="sm"
                 radius="xl"
                 data-testid="org-member-invite-submit"
-                className="w-full sm:w-auto"
+                className="w-full @min-[32rem]/settings-content:w-auto"
               >
                 {invitePending ? "Preparing…" : "Prepare"}
               </Button>
@@ -242,27 +242,29 @@ export function OrgMembersSettingsSections({
 
       {canManageOrgMembers ? (
         <SettingsSection
-          title="Pending invitations"
-          actions={
-            <div className="flex items-center gap-2">
-              <Text variant="caption" tone="muted" data-testid="org-invitations-count">
+          title={
+            <span className="inline-flex flex-wrap items-center gap-2">
+              Pending invitations
+              <Text as="span" variant="caption" tone="muted" data-testid="org-invitations-count">
                 {invitationsCountLabel}
               </Text>
-              {hasInvitations && !invitationsError ? (
-                <Button
-                  onPress={() => setInvitationsExpanded((value) => !value)}
-                  variant="ghost"
-                  size="xs"
-                  radius="full"
-                  data-testid="org-invitations-toggle"
-                >
-                  {invitationsExpanded ? "Hide" : "Review"}
-                </Button>
-              ) : null}
-            </div>
+            </span>
+          }
+          actions={
+            hasInvitations && !invitationsError ? (
+              <Button
+                onPress={() => setInvitationsExpanded((value) => !value)}
+                variant="ghost"
+                size="xs"
+                radius="full"
+                data-testid="org-invitations-toggle"
+              >
+                {invitationsExpanded ? "Hide" : "Review"}
+              </Button>
+            ) : null
           }
         >
-          <SettingsSurface className={showInvitationsList ? "overflow-hidden p-0" : "space-y-1"}>
+          <SettingsSurface padding="none" className="overflow-hidden">
             {invitationsError ? (
               <Text variant="caption" tone="danger" className="px-3 py-3">
                 {invitationsError}
@@ -272,18 +274,18 @@ export function OrgMembersSettingsSections({
                 Loading invitations…
               </Text>
             ) : invitations.length === 0 ? (
-              <Text variant="caption" tone="muted" className="px-3 py-3">
+              <Text variant="body" tone="muted" className="px-3 py-3">
                 No pending invitations.
               </Text>
             ) : !showInvitationsList ? (
-              <>
+              <div className="space-y-1 p-3">
                 <Text variant="body" tone="secondary">
                   {invitationsCountLabel} pending invitation{invitations.length === 1 ? "" : "s"}.
                 </Text>
                 <Text variant="caption" tone="muted">
                   Review the list only when you need to cancel an invite.
                 </Text>
-              </>
+              </div>
             ) : (
               <div className="divide-y divide-slate-200/70 dark:divide-slate-800">
                 {sortedInvitations.map((invite) => {
@@ -340,7 +342,7 @@ export function OrgMembersSettingsSections({
                           size="xs"
                           radius="lg"
                           fullWidth={false}
-                          className="w-32"
+                          className="w-32 shrink-0"
                         >
                           <option value="viewer">Viewer</option>
                           <option value="builder">Builder</option>
@@ -394,7 +396,7 @@ export function OrgMembersSettingsSections({
           </div>
         }
       >
-        <SettingsSurface className="space-y-3 overflow-hidden p-0">
+        <SettingsSurface padding="none" className="space-y-3 overflow-hidden">
           <div className="px-3 pt-3">
             <Input
               placeholder="Search by name, email, or id"
@@ -409,7 +411,7 @@ export function OrgMembersSettingsSections({
               Loading members…
             </Text>
           ) : members.length === 0 ? (
-            <Text variant="caption" tone="muted" className="px-3 pb-3">
+            <Text variant="body" tone="muted" className="px-3 pb-3">
               No people have access yet.
             </Text>
           ) : !showMembersList ? (
@@ -448,17 +450,17 @@ export function OrgMembersSettingsSections({
                     className="px-3 py-3"
                     data-testid={`org-member-row-${member.userId}`}
                   >
-                    <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="flex flex-col gap-3 @min-[32rem]/settings-content:flex-row @min-[32rem]/settings-content:items-start @min-[32rem]/settings-content:justify-between">
                       <div className="flex min-w-0 items-start gap-3">
                         <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full border border-slate-200 bg-slate-100 text-xs font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-100">
                           {initials}
                         </div>
                         <div className="min-w-0">
-                          <Text variant="bodyStrong" tone="primary" className="truncate">
+                          <Text variant="bodyStrong" tone="primary" className="break-words" title={label}>
                             {label}
                           </Text>
-                          <Text variant="caption" tone="muted" className="truncate">
-                            <span className="font-mono">{secondary}</span>
+                          <Text variant="caption" tone="muted" className="break-all">
+                            <span>{secondary}</span>
                             {isSelf ? " · You" : ""}
                           </Text>
                         </div>
@@ -472,7 +474,7 @@ export function OrgMembersSettingsSections({
                         size="xs"
                         radius="lg"
                         fullWidth={false}
-                        className="w-32"
+                        className="w-32 shrink-0"
                       >
                         <option value="viewer">Viewer</option>
                         <option value="builder">Builder</option>
