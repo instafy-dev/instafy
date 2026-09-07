@@ -18,6 +18,7 @@ vi.mock("../core", () => ({
 import {
   createBlankControllerConversation,
   fetchConversationMessagesFromController,
+  fetchProjectConversationsFromController,
   recordControllerConversationMessage,
   resolveControllerConversationParticipation,
 } from "../conversations";
@@ -44,6 +45,48 @@ describe("createBlankControllerConversation initial participants", () => {
     expect(JSON.parse(init.body)).toMatchObject({
       metadata: { visibility: "private" }, initialParticipantUserIds: ["aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"],
     });
+  });
+});
+
+describe("bounded project conversation discovery", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    resolveControllerAccessTokenMock.mockReset();
+    resolveControllerAccessTokenMock.mockResolvedValue("token-123");
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it.each(["credentials", "headers", "body"])("bounds stalled %s to ten seconds", async (stage) => {
+    if (stage === "credentials") resolveControllerAccessTokenMock.mockReturnValue(new Promise(() => undefined));
+    const fetchMock = vi.fn().mockImplementation(() => stage === "headers"
+      ? new Promise(() => undefined)
+      : Promise.resolve({ ok: true, status: 200, json: () => new Promise(() => undefined) }));
+    vi.stubGlobal("fetch", fetchMock);
+    const request = fetchProjectConversationsFromController({ projectId: "project-1" });
+    await vi.advanceTimersByTimeAsync(10_000);
+    await expect(request).resolves.toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+    if (stage === "credentials") expect(fetchMock).not.toHaveBeenCalled();
+    else expect(fetchMock.mock.calls[0]?.[1]?.signal.aborted).toBe(true);
+  });
+
+  it("forwards project-switch cancellation to the pending transport", async () => {
+    const fetchMock = vi.fn<(url: string, init?: RequestInit) => Promise<Response>>()
+      .mockImplementation(() => new Promise<Response>(() => undefined));
+    vi.stubGlobal("fetch", fetchMock);
+    const caller = new AbortController();
+    const request = fetchProjectConversationsFromController({ projectId: "project-1", signal: caller.signal });
+    const rejected = expect(request).rejects.toMatchObject({ name: "AbortError" });
+    await vi.advanceTimersByTimeAsync(0);
+    caller.abort();
+    await rejected;
+    expect(fetchMock.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
 

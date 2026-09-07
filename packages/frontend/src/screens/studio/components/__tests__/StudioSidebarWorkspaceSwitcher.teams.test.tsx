@@ -113,4 +113,41 @@ describe("StudioSidebarWorkspaceSwitcher team rows", () => {
     expect(rows.length).toBe(1);
     expect(rows[0].textContent).toBe("PPersonalCurrent");
   });
+
+  it("keeps Current on the active team while a requested team is waiting or failed", async () => {
+    const onRetryProjects = vi.fn();
+    await render(root, {
+      workspaceOrgKey: "fp", activeOrgKey: "acme", pendingOrgKey: "fp",
+    });
+    const current = container.querySelector('[data-testid="sidebar-org-chip-acme"]');
+    const requested = container.querySelector('[data-testid="sidebar-org-chip-fp"]');
+    expect(current?.textContent).toContain("Current");
+    expect(requested?.textContent).toContain("Switching…");
+    expect(requested?.getAttribute("aria-busy")).toBe("true");
+
+    await render(root, {
+      workspaceOrgKey: "fp", activeOrgKey: "acme", pendingOrgKey: "fp",
+      projectsError: "Couldn't load spaces.", onRetryProjects,
+    });
+    expect(current?.textContent).toContain("Current");
+    expect(requested?.textContent).toContain("Selected");
+    expect(requested?.textContent).not.toContain("Current");
+    expect(requested?.hasAttribute("aria-busy")).toBe(false);
+    expect(container.querySelector('[data-testid="sidebar-project-discovery-error"]')?.textContent)
+      .toContain("Couldn't load spaces.");
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-testid="sidebar-project-discovery-retry"]')?.click();
+    });
+    expect(onRetryProjects).toHaveBeenCalledTimes(1);
+
+    await render(root, {
+      workspaceOrgKey: "fp", activeOrgKey: "acme", pendingOrgKey: "fp",
+      projectsError: "Couldn't load spaces.", projectsRefreshing: true, onRetryProjects,
+    });
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="sidebar-project-discovery-retry"]')?.disabled).toBe(true);
+    expect(container.textContent).toContain("Retrying…");
+    await render(root, { workspaceOrgKey: "fp", activeOrgKey: "fp" });
+    expect(requested?.textContent).toContain("Current");
+    expect(container.querySelector('[data-testid="sidebar-project-discovery-error"]')).toBeNull();
+  });
 });
