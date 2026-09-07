@@ -101,12 +101,14 @@ ANDROID_DEVICE_SERIAL='<adb serial>' \
 
 The command requires a debuggable `dev.instafy.studio` APK, one ready USB-debugging device (or `ANDROID_DEVICE_SERIAL`), Playwright dependencies, and a current `pnpm -C packages/frontend cap:sync`. It resolves `adb` from `ANDROID_ADB`, `PATH`, `ANDROID_SDK_ROOT`/`ANDROID_HOME`, or the usual user SDK directories. It does not require login, a controller, a project, or a conversation fixture.
 
-The proof opens `/studio` only to load the built route chunks, waits 12 seconds, and verifies all of the following before and after a force-stop/cold relaunch:
+The proof opens `/studio`, accepts the normal signed-out redirect to `/login`, waits 12 seconds, and verifies all of the following before and after a force-stop/cold relaunch:
 
 - `InstafyRuntimeConfig.disableNativeOta` is `true`.
 - `LiveUpdate.getCurrentBundle().bundleId` is `null`.
-- The loaded `index`, `StudioRoute`, and `StudioProviders` JavaScript bytes exactly match `packages/frontend/android/app/src/main/assets/public/assets`; their SHA-256 hashes are included in the JSON output.
+- The exact module entry named by the synced `index.html` was requested as a script. Its served bytes and those of the emitted `StudioRoute` chunk exactly match `packages/frontend/android/app/src/main/assets/public/assets`. A separately emitted `StudioProviders` chunk is also checked when present; builds may include it inside `StudioRoute` instead. Their SHA-256 hashes are included in the JSON output.
 - `files/_capacitor_live_update_bundles` contains no retained bundle directory.
+
+The bounded asset probes fetch bytes without executing lazy modules or sending credentials. Each asset's `observedBeforeProbe` distinguishes resources the page requested from explicit probes; `standaloneStudioProvidersAsset: null` means the synced build emitted no separate provider chunk. This proves served asset identity, not successful login or an authenticated Studio mount. Missing emitted files, HTTP failures, and wrong bytes (including an HTML fallback) fail the proof. Run its credential-free regression tests with `node --test scripts/android-debug-ota-proof.test.mjs`.
 
 `shared_prefs/CapawesomeLiveUpdate.xml` may be recreated by plugin initialization with a null current bundle. Its presence is reported for diagnostics and is **not** a failure; a selected bundle id or retained bundle directory is the failure condition. Use `ANDROID_OTA_PROOF_WAIT_MS` only when a slower phone needs a longer observation window, and `ANDROID_APP_ID`/`ANDROID_MAIN_ACTIVITY` only when validating a deliberately renamed debug application.
 

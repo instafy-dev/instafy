@@ -253,7 +253,7 @@ for (const assetName of ["index", "StudioRoute", "StudioProviders"]) {
   expectContains(
     debugOtaProof,
     `"${assetName}"`,
-    `${relative(paths.debugOtaProof)} must byte-compare the loaded ${assetName} JavaScript asset`,
+    `${relative(paths.debugOtaProof)} must identify the emitted ${assetName} JavaScript proof asset`,
   );
 }
 

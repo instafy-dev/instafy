@@ -46,14 +46,6 @@ Environment:
   ANDROID_OTA_PROOF_REPORT      optional JSON report output path
 `;
 
-if (process.argv.includes("--help") || process.argv.includes("-h")) {
-  process.stdout.write(helpText);
-  process.exit(0);
-}
-if (process.argv.length > 2) {
-  throw new Error(`Unknown argument: ${process.argv[2]}. Use --help for usage.`);
-}
-
 function readPositiveInteger(name, fallback) {
   const raw = process.env[name]?.trim();
   if (!raw) return fallback;
@@ -265,22 +257,48 @@ function assetRole(file) {
   return null;
 }
 
-async function loadProofRoute(page) {
+export function readSyncedProofAssets(assetRoot = syncedAssetRoot) {
+  const html = fs.readFileSync(path.join(assetRoot, "..", "index.html"), "utf8");
+  const entryFiles = [...html.matchAll(/<script\b(?=[^>]*\btype=["']module["'])[^>]*\bsrc=["']\/assets\/([^"']+)["'][^>]*>/gu)]
+    .map((match) => match[1]);
+  assert.equal(entryFiles.length, 1, "Expected exactly one module entry in the synced Android index.html.");
+  assert.equal(assetRole(entryFiles[0]), "index", "The synced Android module entry is not an index JavaScript asset.");
+  const files = fs.readdirSync(assetRoot);
+  const routeFiles = files.filter((file) => assetRole(file) === "StudioRoute");
+  const providerFiles = files.filter((file) => assetRole(file) === "StudioProviders");
+  assert.equal(routeFiles.length, 1, "Expected exactly one synced StudioRoute JavaScript asset; run a clean cap:sync.");
+  assert(providerFiles.length <= 1, "Multiple synced StudioProviders assets were found; run a clean cap:sync.");
+  // StudioProviders can be bundled into StudioRoute instead of emitted as its
+  // own chunk. Report that explicitly; never invent or silently skip a URL.
+  const assets = [...entryFiles, ...routeFiles, ...providerFiles].map((file) => {
+    assert.equal(path.basename(file), file, `Unexpected synced proof asset path: ${file}`);
+    return { role: assetRole(file), file, syncedBytes: fs.readFileSync(path.join(assetRoot, file)) };
+  });
+  for (const asset of assets) {
+    for (const match of asset.syncedBytes.toString("utf8").matchAll(/["'](?:\.\/|\/assets\/)(StudioProviders-[^"'\/]+\.js)["']/gu)) {
+      assert(providerFiles.includes(match[1]), `Referenced StudioProviders asset ${match[1]} is missing from the synced Android bundle.`);
+    }
+  }
+  return assets;
+}
+
+export async function loadProofRoute(page, proofAssets) {
   const current = new URL(page.url());
   const target = new URL("/studio", current.origin);
   await page.goto(target.toString(), { waitUntil: "domcontentloaded", timeout: 60_000 });
-  await page.waitForFunction(() => {
-    const files = performance.getEntriesByType("resource").map((entry) => {
+  const entry = proofAssets.find((asset) => asset.role === "index");
+  assert(entry, "No synced module entry was found.");
+  await page.waitForFunction((entryFile) => {
+    return performance.getEntriesByType("resource").some((entry) => {
       try {
-        return new URL(entry.name).pathname.split("/").pop() || "";
+        const url = new URL(entry.name);
+        return entry.initiatorType === "script" && url.origin === location.origin &&
+          url.pathname === `/assets/${entryFile}`;
       } catch {
-        return "";
+        return false;
       }
     });
-    return files.some((file) => /^index-[^.]+\.js$/u.test(file))
-      && files.some((file) => /^StudioRoute-[^.]+\.js$/u.test(file))
-      && files.some((file) => /^StudioProviders-[^.]+\.js$/u.test(file));
-  }, null, { timeout: 30_000 });
+  }, entry.file, { timeout: 30_000 });
 }
 
 async function readNativeState(page) {
@@ -316,62 +334,66 @@ async function readNativeState(page) {
   };
 }
 
-async function readLoadedAssets(page) {
-  const encodedAssets = await page.evaluate(async () => {
-    const candidates = [...new Set(performance.getEntriesByType("resource").map((entry) => entry.name))]
-      .map((url) => {
-        try {
-          const file = new URL(url).pathname.split("/").pop() || "";
-          return /^(?:index|StudioRoute|StudioProviders)-[^.]+\.js$/u.test(file) ? { file, url } : null;
-        } catch {
-          return null;
-        }
-      })
-      .filter(Boolean);
+export async function readServedAssets(page, proofAssets) {
+  const encodedAssets = await page.evaluate(async (candidates) => {
+    // Capture observations before our fetches add resource entries. Fetching a
+    // lazy chunk proves its served bytes; it does not execute that module or
+    // demonstrate that an authenticated Studio tree mounted.
+    const observedUrls = new Set(performance.getEntriesByType("resource")
+      .filter((entry) => entry.initiatorType !== "fetch")
+      .map((entry) => entry.name));
     const results = [];
     for (const candidate of candidates) {
-      const response = await fetch(candidate.url, { cache: "no-store" });
-      if (!response.ok) throw new Error(`Failed to read loaded asset ${candidate.file}: ${response.status}`);
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      let binary = "";
-      for (let offset = 0; offset < bytes.length; offset += 32_768) {
-        binary += String.fromCharCode(...bytes.subarray(offset, offset + 32_768));
+      const url = new URL(`/assets/${candidate.file}`, location.origin).toString();
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15_000);
+      try {
+        const response = await fetch(url, {
+          cache: "no-store", credentials: "omit", redirect: "error", signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`Failed to read served asset ${candidate.file}: ${response.status}`);
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        let binary = "";
+        for (let offset = 0; offset < bytes.length; offset += 32_768) {
+          binary += String.fromCharCode(...bytes.subarray(offset, offset + 32_768));
+        }
+        results.push({ file: candidate.file, base64: btoa(binary), observedBeforeProbe: observedUrls.has(url) });
+      } finally {
+        clearTimeout(timeout);
       }
-      results.push({ file: candidate.file, base64: btoa(binary) });
     }
     return results;
-  });
+  }, proofAssets.map(({ file }) => ({ file })));
 
-  const assets = encodedAssets.map(({ file, base64 }) => {
-    const role = assetRole(file);
-    assert(role, `Unexpected proof asset name: ${file}`);
-    const localPath = path.join(syncedAssetRoot, path.basename(file));
-    assert(fs.existsSync(localPath), `Loaded WebView asset ${file} is absent from the synced Android bundle.`);
+  assert.equal(encodedAssets.length, proofAssets.length, "The WebView did not return every requested proof asset.");
+  const assets = encodedAssets.map(({ file, base64, observedBeforeProbe }) => {
+    const expected = proofAssets.find((asset) => asset.file === file);
+    assert(expected, `Unexpected proof asset name: ${file}`);
     const loadedBytes = Buffer.from(base64, "base64");
-    const syncedBytes = fs.readFileSync(localPath);
     assert(
-      loadedBytes.equals(syncedBytes),
-      `Loaded WebView asset ${file} is not byte-identical to packages/frontend/android assets.`,
+      loadedBytes.equals(expected.syncedBytes),
+      `Served WebView asset ${file} is not byte-identical to packages/frontend/android assets.`,
     );
     return {
-      role,
+      role: expected.role,
       file,
+      observedBeforeProbe,
       bytes: loadedBytes.byteLength,
       sha256: crypto.createHash("sha256").update(loadedBytes).digest("hex"),
     };
   }).sort((left, right) => left.file.localeCompare(right.file));
 
-  for (const role of ["index", "StudioRoute", "StudioProviders"]) {
-    assert(assets.some((asset) => asset.role === role), `No loaded ${role} JavaScript asset was found.`);
+  for (const expected of proofAssets) {
+    assert(assets.some((asset) => asset.file === expected.file), `No served ${expected.role} JavaScript asset was found.`);
   }
   return assets;
 }
 
-async function verifyPhase(label) {
+async function verifyPhase(label, proofAssets) {
   let session = null;
   try {
     session = await connectToWebView();
-    await loadProofRoute(session.page);
+    await loadProofRoute(session.page, proofAssets);
     await sleep(settleMs);
     const native = await readNativeState(session.page);
     const filesystem = nativeFilesystemState();
@@ -380,7 +402,7 @@ async function verifyPhase(label) {
       [],
       `${label}: the debug app downloaded or retained content in the native OTA bundle directory.`,
     );
-    const assets = await readLoadedAssets(session.page);
+    const assets = await readServedAssets(session.page, proofAssets);
     return {
       pid: session.pid,
       url: session.page.url(),
@@ -394,23 +416,33 @@ async function verifyPhase(label) {
 }
 
 async function main() {
+  if (process.argv.includes("--help") || process.argv.includes("-h")) {
+    process.stdout.write(helpText);
+    return;
+  }
+  if (process.argv.length > 2) {
+    throw new Error(`Unknown argument: ${process.argv[2]}. Use --help for usage.`);
+  }
   settleMs = readPositiveInteger("ANDROID_OTA_PROOF_WAIT_MS", 12_000);
   reportPath = process.env.ANDROID_OTA_PROOF_REPORT?.trim()
     ? path.resolve(process.env.ANDROID_OTA_PROOF_REPORT.trim())
     : null;
+  const proofAssets = readSyncedProofAssets();
   adbPath = resolveAdb();
   serial = selectDevice(adbPath);
   const requireFromFrontend = createRequire(path.join(frontendRoot, "package.json"));
   ({ chromium } = requireFromFrontend("@playwright/test"));
-  const initial = await verifyPhase("initial launch");
+  const initial = await verifyPhase("initial launch", proofAssets);
   adb(["shell", "am", "force-stop", appId]);
   await sleep(500);
-  const relaunch = await verifyPhase("cold relaunch");
+  const relaunch = await verifyPhase("cold relaunch", proofAssets);
   const report = {
     ok: true,
     appId,
     serial,
     settleMs,
+    proofScope: "served_asset_identity",
+    standaloneStudioProvidersAsset: proofAssets.find((asset) => asset.role === "StudioProviders")?.file ?? null,
     initial,
     relaunch,
   };
@@ -421,10 +453,13 @@ async function main() {
   console.log(JSON.stringify({ ...report, reportPath }, null, 2));
 }
 
-main().catch((error) => {
-  console.error(JSON.stringify({
-    ok: false,
-    error: error instanceof Error ? error.message : String(error),
-  }, null, 2));
-  process.exitCode = 1;
-});
+if (process.argv[1] && fs.existsSync(process.argv[1]) &&
+  fs.realpathSync(process.argv[1]) === fs.realpathSync(__filename)) {
+  main().catch((error) => {
+    console.error(JSON.stringify({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    }, null, 2));
+    process.exitCode = 1;
+  });
+}
