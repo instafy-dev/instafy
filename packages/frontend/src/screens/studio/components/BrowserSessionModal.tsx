@@ -38,6 +38,10 @@ import { browserPageOrigin, selectSharedBrowserHumanInput } from "./browserHando
 import { ActionTicker } from "./ActionTicker";
 import { SharedBrowserCollaborationControls } from "./SharedBrowserCollaborationControls";
 import { SharedBrowserDataClearAction } from "./SharedBrowserDataClearAction";
+import { SharedBrowserSessionControl } from "./SharedBrowserSessionControl";
+import { SharedBrowserProfileStatus } from "./SharedBrowserProfileStatus";
+import { buildSharedBrowserResumeUrl } from "./sharedBrowserResume";
+import { resolvePublicAppUrl } from "../../../utils/publicAppUrl";
 import { SharedBrowserParticipantPointers } from "./SharedBrowserParticipantPointers";
 import { collaborationSelfOwnsControl } from "./sharedBrowserCollaboration";
 import { useSharedBrowserCollaboration } from "./useSharedBrowserCollaboration";
@@ -49,7 +53,9 @@ import {
 import { browserSessionWsDebugFields } from "./browserSessionDebug";
 import {
   coalesceBrowserRuntimeEnsure,
-  resolveBrowserRuntimeCandidate,
+  listBrowserRuntimeCandidates,
+  resolveBrowserRuntimeSelection,
+  type BrowserRuntimeCandidate,
   resolveAutoRecyclableBrowserRuntimeIdentity,
   waitForBrowserRuntimeOrigin,
 } from "./browserSessionRuntimeEnsure";
@@ -95,7 +101,7 @@ import {
   type SharedBrowserControlOwner,
 } from "./sharedBrowserControlOwner";
 
-type BrowserSessionStatus = "idle" | "connecting" | "connected" | "error";
+type BrowserSessionStatus = "idle" | "selecting" | "connecting" | "connected" | "error";
 type BrowserSessionPresentation = "modal" | "docked";
 type BrowserViewportMode = "fit" | "native";
 type DockedBrowserLayoutMetrics = {
@@ -274,6 +280,10 @@ function BrowserSessionStatusPill({
   status: BrowserSessionStatus;
   compact?: boolean;
 }) {
+  if (status === "selecting") {
+    return <span className={`inline-flex h-7 shrink-0 items-center rounded-full border border-slate-300/80 bg-slate-100/80 text-xxs font-medium text-slate-600 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300 ${compact ? "px-1.5" : "px-2"}`}
+      data-testid="browser-session-status" role="status" aria-live="polite">Choose session</span>;
+  }
   const state: BrowserChromeState =
     status === "connected" ? "ready" : status === "error" ? "unavailable" : "starting";
   const detail =
@@ -396,6 +406,7 @@ export function BrowserSessionModal({
   projectId,
   browserSessionId: suppliedBrowserSessionId,
   preferRuntimeId,
+  resumeRuntimeId = null,
   onRuntimeIdResolved,
   presentation = "modal",
   hideCollapsedConnectedCard = false,
@@ -429,6 +440,7 @@ export function BrowserSessionModal({
   projectId: string | null;
   browserSessionId?: string | null;
   preferRuntimeId: string | null;
+  resumeRuntimeId?: string | null;
   onRuntimeIdResolved?: ((runtimeId: string) => void) | null;
   presentation?: BrowserSessionPresentation;
   hideCollapsedConnectedCard?: boolean;
@@ -594,6 +606,63 @@ export function BrowserSessionModal({
   );
   const [runtimeLimitActionBusy, setRuntimeLimitActionBusy] = useState(false);
   const [forcedRuntimeId, setForcedRuntimeId] = useState<string | null>(null);
+  const selectionScope = `${currentUserId ?? ""}:${projectId ?? ""}:${resumeRuntimeId ?? ""}`;
+  const selectionScopeRef = useRef(selectionScope);
+  selectionScopeRef.current = selectionScope;
+  const pinnedSessionRef = useRef<{ scope: string; runtimeId: string } | null>(null);
+  const [runtimeChoice, setRuntimeChoice] = useState<{ scope: string; runtimeId: string } | null>(null);
+  const [sessionIdentity, setSessionIdentity] = useState<{ scope: string; runtimeId: string } | null>(null);
+  const [sessionChooserOpen, setSessionChooserOpen] = useState(false);
+  const [sessionChoices, setSessionChoices] = useState<{
+    scope: string; candidates: BrowserRuntimeCandidate[]; loading: boolean; error: string | null;
+  }>({ scope: selectionScope, candidates: [], loading: false, error: null });
+  useLayoutEffect(() => {
+    // A previous account/project/link cannot carry its explicit creation or
+    // selection request into the new authenticated surface.
+    setForcedRuntimeId(null);
+    setRuntimeChoice(null);
+    setSessionIdentity(null);
+    setSessionChooserOpen(false);
+    pinnedSessionRef.current = null;
+  }, [selectionScope]);
+  const chosenRuntimeId = runtimeChoice?.scope === selectionScope ? runtimeChoice.runtimeId : null;
+  const selectedSessionRuntimeId = sessionIdentity?.scope === selectionScope ? sessionIdentity.runtimeId : null;
+  const sessionResumeUrl = useMemo(() => projectId && selectedSessionRuntimeId
+    ? buildSharedBrowserResumeUrl(resolvePublicAppUrl("/studio"), { projectId, runtimeId: selectedSessionRuntimeId })
+    : null, [projectId, selectedSessionRuntimeId]);
+  const refreshSessionChoices = useCallback(async () => {
+    if (!projectId) return;
+    const scope = selectionScope;
+    setSessionChoices((current) => ({ scope, candidates: current.scope === scope ? current.candidates : [], loading: true, error: null }));
+    try {
+      const snapshot = await controllerClient.runtimes.fetchStatus({ projectId });
+      if (selectionScopeRef.current !== scope) return;
+      if (!snapshot || !Array.isArray(snapshot.runtimes)) throw new Error("Session discovery is unavailable.");
+      setSessionChoices({ scope, candidates: listBrowserRuntimeCandidates(snapshot.runtimes), loading: false, error: null });
+    } catch {
+      if (selectionScopeRef.current === scope) {
+        setSessionChoices({ scope, candidates: [], loading: false, error: "Could not load Shared sessions. Try refreshing." });
+      }
+    }
+  }, [projectId, selectionScope]);
+  const chooseSession = useCallback((runtimeId: string) => {
+    // Only a currently discovered project session can be selected here. The
+    // controller independently reauthorizes the exact runtime at connection.
+    if (sessionChoices.scope !== selectionScope || !sessionChoices.candidates.some((item) => item.runtimeId === runtimeId)) return;
+    setRuntimeChoice({ scope: selectionScope, runtimeId });
+    pinnedSessionRef.current = { scope: selectionScope, runtimeId };
+    setSessionIdentity({ scope: selectionScope, runtimeId });
+    setForcedRuntimeId(null);
+    setSessionChooserOpen(false);
+    setConnectAttempt((value) => value + 1);
+  }, [selectionScope, sessionChoices]);
+  const startNewSession = useCallback(() => {
+    if (!canControlBrowser || !projectId || !window.confirm("Start a separate Shared Browser session? This does not close another running session. Saved logins are restored only when this space has persistence enabled.")) return;
+    setSessionChooserOpen(false);
+    setSessionChoices({ scope: selectionScope, candidates: [], loading: false, error: null });
+    setForcedRuntimeId(generateUUID());
+    setConnectAttempt((value) => value + 1);
+  }, [canControlBrowser, projectId, selectionScope]);
   const permittedSharedBrowserViewerKinds = useMemo(
     () =>
       humanInputEnabled
@@ -698,7 +767,8 @@ export function BrowserSessionModal({
     (connectedScopeKey ? connectedBrowserSessionScopes.has(connectedScopeKey) : false);
   const displayStatus = !error && status === "connecting" && hasConnectedHint ? "connected" : status;
   const shouldCollapseDocked =
-    shouldUseDesktopDockedCard || (shouldViewportCollapseDocked && displayStatus !== "connected");
+    displayStatus !== "selecting" &&
+    (shouldUseDesktopDockedCard || (shouldViewportCollapseDocked && displayStatus !== "connected"));
   // Tail the agent's browser actions while the live view is shown, so we can draw
   // the AI cursor and caption what it's doing. Gated to match where the overlay
   // renders (connected and not collapsed) so a hidden/collapsed session doesn't
@@ -884,23 +954,8 @@ export function BrowserSessionModal({
         });
         return true;
       }
-      if (!forcedRuntimeId) {
-        autoRetryCountRef.current = 0;
-        setStatus("connecting");
-        setError(null);
-        setWsUrl(null);
-        setBrowserInputWsUrl(null);
-        setWebRtcConnection(null);
-        setForcedRuntimeId(generateUUID());
-        setConnectAttempt((value) => value + 1);
-        runtimeDebugLog("browser-session:fresh-runtime-retry", {
-          ...browserSessionWsDebugFields(debugWsUrl),
-          reason,
-          forcedRuntimeId,
-          viewer: activeSharedBrowserViewerKind,
-        });
-        return true;
-      }
+      // A failed reconnect must never silently become a different browser.
+      // Starting a replacement is an explicit action in Sessions & resume.
       return false;
     },
     [
@@ -1113,8 +1168,11 @@ export function BrowserSessionModal({
       connectionGeneration !== browserConnectionGenerationRef.current;
     const startupAbortController = new AbortController();
     const existingConnection = browserOriginConnectionRef.current;
+    const exactRuntimeId = chosenRuntimeId ?? resumeRuntimeId ??
+      (pinnedSessionRef.current?.scope === selectionScope ? pinnedSessionRef.current.runtimeId : null);
     const preservingConnection =
       existingConnection?.projectId === projectId &&
+      (!exactRuntimeId || existingConnection.runtimeId === exactRuntimeId) &&
       (!forcedRuntimeId || existingConnection.runtimeId === forcedRuntimeId);
     if (!preservingConnection) {
       setStatus("connecting");
@@ -1146,12 +1204,37 @@ export function BrowserSessionModal({
         return;
       }
       const statusEntries = Array.isArray(statusSnapshot?.runtimes) ? statusSnapshot.runtimes : [];
+      if (!statusSnapshot) {
+        setStatus("error");
+        setError("Could not discover Shared sessions. Refresh sessions to retry.");
+        setSessionChooserOpen(true);
+        setSessionChoices({ scope: selectionScope, candidates: [], loading: false, error: "Session discovery is unavailable; no new browser was started." });
+        return;
+      }
+      const candidates = listBrowserRuntimeCandidates(statusEntries);
+      setSessionChoices({ scope: selectionScope, candidates, loading: false, error: null });
       if (!forcedRuntimeId) {
-        const existingBrowserRuntime = resolveBrowserRuntimeCandidate(
-          statusEntries,
-          requestedPreferRuntimeId,
-        );
-        if (existingBrowserRuntime) {
+        const selection = resolveBrowserRuntimeSelection(statusEntries, exactRuntimeId);
+        if (selection.kind === "choose" || selection.kind === "missing" || (selection.kind === "new" && !canControlBrowser)) {
+          const message = selection.kind === "missing"
+            ? "The requested Shared session is not available. Refresh or explicitly choose another session."
+            : selection.kind === "new"
+              ? "No Shared session is available. Ask a space builder to start one."
+              : "Several Shared sessions are running. Choose the session to resume.";
+          setStatus(selection.kind === "choose" ? "selecting" : "error");
+          setError(selection.kind === "choose" ? null : message);
+          setBrowserOriginConnection(null);
+          setCollaborationWsUrl(null);
+          setCollaborationConnectionKey(null);
+          setWsUrl(null);
+          setBrowserInputWsUrl(null);
+          setWebRtcConnection(null);
+          setSessionChoices({ scope: selectionScope, candidates, loading: false, error: message });
+          setSessionChooserOpen(true);
+          return;
+        }
+        if (selection.kind === "selected") {
+          const existingBrowserRuntime = selection.candidate;
           runtimeId = existingBrowserRuntime.runtimeId;
           originId = existingBrowserRuntime.originId;
           originEndpoint = existingBrowserRuntime.endpoint;
@@ -1375,6 +1458,8 @@ export function BrowserSessionModal({
       }
 
       onRuntimeIdResolved?.(runtimeId);
+      pinnedSessionRef.current = { scope: selectionScope, runtimeId };
+      setSessionIdentity({ scope: selectionScope, runtimeId });
 
       // Runtime discovery is also what unlocks the versioned capability
       // request in the parent. Do not briefly connect the legacy RFB lane and
@@ -1443,9 +1528,12 @@ export function BrowserSessionModal({
     canControlBrowser,
     connectAttempt,
     forcedRuntimeId,
+    chosenRuntimeId,
     isOpen,
     onRuntimeIdResolved,
     projectId,
+    resumeRuntimeId,
+    selectionScope,
     sharedBrowserCapabilitiesAvailable,
     sharedBrowserCapabilitiesResolved,
   ]);
@@ -2530,6 +2618,22 @@ export function BrowserSessionModal({
           Routine browsing allowed for this turn · Take over or stop the turn to revoke.
         </div>
       ) : null}
+      {!shouldCollapseDocked && projectId ? <SharedBrowserSessionControl
+        runtimeId={selectedSessionRuntimeId ?? chosenRuntimeId ?? resumeRuntimeId}
+        resumeUrl={sessionResumeUrl}
+        open={sessionChooserOpen}
+        busy={sessionChoices.scope === selectionScope && sessionChoices.loading}
+        candidates={sessionChoices.scope === selectionScope ? sessionChoices.candidates : []}
+        error={sessionChoices.scope === selectionScope ? sessionChoices.error : null}
+        selectionRequired={status === "selecting"}
+        canStart={canControlBrowser}
+        onOpenChange={(open) => { setSessionChooserOpen(open); if (open) void refreshSessionChoices(); }}
+        onChoose={chooseSession}
+        onStart={startNewSession}
+        onRefresh={() => { void refreshSessionChoices(); setConnectAttempt((value) => value + 1); }}
+      >
+        {sessionChooserOpen ? <SharedBrowserProfileStatus projectId={projectId} runtimeId={selectedSessionRuntimeId} currentUserId={currentUserId} active /> : null}
+      </SharedBrowserSessionControl> : null}
       {!shouldCollapseDocked && humanInputIdentityKey ? (
         <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState} />
       ) : null}
@@ -2690,7 +2794,7 @@ export function BrowserSessionModal({
             </div>
           ) : null}
           {compactCardBody}
-          {!shouldCollapseDocked && (displayStatus !== "connected" || error) ? (
+          {!shouldCollapseDocked && displayStatus !== "selecting" && (displayStatus !== "connected" || error) ? (
             <div
               className={[
                 "pointer-events-none absolute inset-0 flex items-center justify-center p-6",

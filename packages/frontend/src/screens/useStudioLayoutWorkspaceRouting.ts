@@ -12,6 +12,7 @@ import type { SettingsTab, StudioPanel } from "./studio/types";
 import { resolveStudioUrlProjectId } from "./studioProjectUrlSync";
 import { readPendingProjectSwitch } from "./pendingProjectSwitch";
 import type { LeftDrawerPanel } from "./useStudioLayoutChromeState";
+import { clearStaleSharedBrowserResumeTarget } from "./studio/components/sharedBrowserResume";
 
 type UrlNavigationMode = "push" | "replace" | null;
 
@@ -780,6 +781,7 @@ export function useStudioLayoutWorkspaceRouting({
       jobId: activeWorkspaceTabJobId,
       reviewTabId: activeWorkspaceReviewTabId,
     });
+    changed = clearStaleSharedBrowserResumeTarget(params, resolvedProjectId) || changed;
     changed = syncParam("projectId", resolvedProjectId) || changed;
     changed = syncParam("conversationId", projectScopedRouteValues.conversationId) || changed;
     changed = syncParam("jobId", projectScopedRouteValues.jobId) || changed;

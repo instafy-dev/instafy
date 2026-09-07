@@ -159,7 +159,7 @@ under `packages/frontend/test-results/browser-ci/<lane>`.
 | Lane | What it proves | Local requirements |
 | --- | --- | --- |
 | `personal` | Real Electron profile/cookie persistence across restarts and projects, per-user isolation, clear, kill switch, renderer ownership revocation, and native form-owner/type descriptors (4 tests) | Installed workspace dependencies and compiled Desktop fixture; no Docker or database |
-| `browser-ui` | Real Chromium rendering of browser chrome, cursor overlay, routine approval, expansion/takeover sequencing, rendered-frame checks, full Shared modal safe-area geometry, and mobile drawer safe-area geometry (23 tests) | Installed workspace dependencies and Playwright Chromium; no Docker, database, or controller |
+| `browser-ui` | Real Chromium rendering of browser chrome, cursor overlay, routine approval, expansion/takeover sequencing, rendered-frame checks, full Shared modal safe-area geometry, phone session/resume/save-status controls, retained-editor Unicode input isolation, and mobile drawer safe-area geometry (26 tests) | Installed workspace dependencies and Playwright Chromium; no Docker, database, or controller |
 | Shared co-browsing tool fixture | Production browser tools in real Chromium: one routine grant across two sites, highlighted manual fields, fresh continuation observation, and local action timings | Installed workspace dependencies and locked Playwright Chromium; no Docker, database, controller, model or real accounts |
 | Shared profile fixture | Real Chromium HttpOnly/JS cookies, localStorage and server cookie echo; production runtime save/restore; controller authorization, encrypted database storage, stale-writer rejection, and clear/no-resurrection | Disposable Linux, Xvfb, Chromium, Go, Rust, and fully migrated loopback Postgres |
 | Shared Studio fixture | Real signed-in application, authorized project creation, Shared launch, CDP pixels/input, periodic snapshot, acknowledged provider stop, replacement login restoration, and UI clear | Disposable Linux, Xvfb, Chromium, Go, Rust, `x11-utils`, `sqlite3`, `psql`, and fresh local Supabase including GoTrue |
@@ -186,6 +186,19 @@ be used explicitly with
 `PLAYWRIGHT_BROWSER_UI_CHANNEL=chrome pnpm test:browser:ci browser-ui`.
 That verifies the installed channel, not the lockfile's Chromium revision;
 CI always installs and uses the locked Playwright browser.
+
+The two Shared session/status cases mount the complete production modal at
+390×844 and 844×390 with touch input and safe-area insets. They verify bounded
+scrolling, readable save-status guidance, 44px touch controls, token-free resume
+links, and exact session selection. Controller/status responses, transport and
+clipboard delivery are simulated; these cases do not prove a live cross-device
+runtime, native clipboard integration, or login recovery.
+
+The retained-editor input case uses the production CDP/WebRTC input binding and
+real Chromium pointer/keyboard events. It checks that Unicode text aimed at the
+remote canvas cannot edit a previously focused local draft, and that disabled
+input authority forwards no text. Its message sink is simulated; it does not
+prove every operating-system IME or noncancelable composition event sequence.
 
 The required **Browser UI rendering** job also runs the real co-browsing tool
 fixture before the UI lane. Run it locally with:

@@ -1,4 +1,5 @@
 import { expect, test, type BrowserContext, type Page } from "@playwright/test";
+import { parseSharedBrowserCollaborationServerMessage } from "../../../src/screens/studio/components/sharedBrowserCollaboration.js";
 
 import {
   clearRuntimePreference,
@@ -11,10 +12,13 @@ import {
 import {
   authenticatedActorLabel,
   collaborationAction,
+  collaborationSocketProbeSnapshot,
   collaborationState,
+  disruptLatestCollaborationSocket,
   expectExistingInputAccepted,
   expectExistingInputRejected,
   expectSharedBlankSurfacePainted,
+  inputSocketProbeSnapshot,
   openSharedBrowser,
   sharedSurface,
   waitForOpenInputSocket,
@@ -143,6 +147,18 @@ async function openProjectSettings(page: Page) {
   await expect(page.getByTestId("project-access-section")).toBeVisible();
 }
 
+async function currentCollaboration(page: Page) {
+  const entries = await collaborationSocketProbeSnapshot(page);
+  const entry = entries.filter((candidate) => candidate.open).at(-1);
+  const message = parseSharedBrowserCollaborationServerMessage(entry?.latestState);
+  if (!entry?.participantId || message?.type !== "state") return null;
+  return {
+    participantId: entry.participantId,
+    state: message,
+    entryCount: entries.length,
+  };
+}
+
 test.describe("Org Shared Browser collaboration", () => {
   test.skip(
     !ENABLED,
@@ -151,6 +167,7 @@ test.describe("Org Shared Browser collaboration", () => {
   test.setTimeout(480_000);
 
   let activeProjectId: string | null = null;
+  let disposableOwnerUserId: string | null = null;
 
   test.afterEach(async ({ page }) => {
     await resetRuntimeUserState(page, {
@@ -158,6 +175,11 @@ test.describe("Org Shared Browser collaboration", () => {
       source: "org-shared-browser-collaboration:cleanup",
     }).catch(() => {});
     activeProjectId = null;
+    if (disposableOwnerUserId) {
+      const userId = disposableOwnerUserId;
+      disposableOwnerUserId = null;
+      await deleteDisposableTestUser(userId);
+    }
   });
 
   test("shares one page and gives exactly one named human control", async ({
@@ -282,6 +304,153 @@ test.describe("Org Shared Browser collaboration", () => {
       if (memberDisposableUserId) {
         await deleteDisposableTestUser(memberDisposableUserId).catch(() => {});
       }
+    }
+  });
+
+  test("shares one driver across two devices of one account and a read-only teammate", async ({
+    page,
+    browser,
+  }) => {
+    page.setDefaultTimeout(60_000);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    disposableOwnerUserId = (await loginAsGuest(page)).disposableUserId;
+    expect(disposableOwnerUserId, "three-participant fixture requires a disposable owner").toBeTruthy();
+    const projectId = await prepareStudio(page, { waitForHostedRuntime: false });
+    if (!projectId) throw new Error("Project id missing for three-participant collaboration.");
+    activeProjectId = projectId;
+    await clearRuntimePreference(page, {
+      projectId,
+      source: "org-shared-browser-collaboration:three-participants",
+    });
+    let secondDeviceContext: BrowserContext | null = null;
+    let viewerContext: BrowserContext | null = null;
+    let viewerUserId: string | null = null;
+    try {
+      await openProjectSettings(page);
+      await page.getByTestId("org-invite-link-role").selectOption("viewer");
+      await page.getByTestId("org-invite-link-create").click();
+      const inviteUrl = await page.getByTestId("org-invite-link-url").inputValue();
+      if (!inviteUrl) throw new Error("Shared Browser read-only invite link is missing.");
+      await page.getByTestId("sidebar-nav-chat").click();
+      await expect(page.getByTestId("chat-input")).toBeVisible();
+
+      // Copy only this test account's browser state, in memory, to model its
+      // second device. Never write signed sessions to retained test artifacts.
+      secondDeviceContext = await browser.newContext({
+        storageState: await page.context().storageState(),
+        viewport: { width: 1440, height: 900 },
+      });
+      const secondDevice = await secondDeviceContext.newPage();
+      const secondDeviceUrl = new URL(page.url());
+      secondDeviceUrl.searchParams.set("projectId", projectId);
+      secondDeviceUrl.searchParams.set("panel", "chat");
+      await secondDevice.goto(secondDeviceUrl.toString(), { waitUntil: "domcontentloaded" });
+      expect(await waitForStoreProjectId(secondDevice, projectId, 30_000)).toBe(true);
+      await secondDevice.getByTestId("sidebar-nav-chat").click();
+      await expect(secondDevice.getByTestId("chat-input")).toBeVisible();
+      expect(await authenticatedActorLabel(secondDevice)).toBe(await authenticatedActorLabel(page));
+      expect(await secondDevice.evaluate(async (ownerUserId) => {
+        const client = (window as Window & {
+          __INSTAFY_SUPABASE__?: { auth: { getUser: () => Promise<{ data: { user: { id: string } | null } }> } };
+        }).__INSTAFY_SUPABASE__;
+        return (await client?.auth.getUser())?.data.user?.id === ownerUserId;
+      }, disposableOwnerUserId)).toBe(true);
+
+      viewerContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+      const viewer = await viewerContext.newPage();
+      viewerUserId = (await loginAsGuest(viewer)).disposableUserId;
+      expect(viewerUserId, "read-only participant must be a separate disposable user").toBeTruthy();
+      expect(viewerUserId).not.toBe(disposableOwnerUserId);
+      await viewer.goto(inviteUrl, { waitUntil: "domcontentloaded" });
+      await viewer.waitForURL((url) => url.pathname.includes("/studio"));
+      expect(await waitForStoreProjectId(viewer, projectId, 30_000)).toBe(true);
+      await viewer.getByTestId("sidebar-nav-chat").click();
+
+      const firstBinding = await openSharedBrowser(page);
+      await expect(collaborationState(page)).toContainText("You control");
+      const secondBinding = await openSharedBrowser(secondDevice);
+      const viewerBinding = await openSharedBrowser(viewer, { access: "view" });
+      for (const binding of [secondBinding, viewerBinding]) {
+        expect(binding).toMatchObject({ runtimeId: firstBinding.runtimeId, originId: firstBinding.originId });
+      }
+      expect(new Set([firstBinding, secondBinding, viewerBinding].map((binding) => binding.browserSessionId)).size).toBe(3);
+      const pages = [page, secondDevice, viewer];
+      for (const participantPage of pages) {
+        await expectSharedBlankSurfacePainted(participantPage);
+        await expect.poll(async () => (await currentCollaboration(participantPage))?.state.participants.length).toBe(3);
+      }
+      const first = (await currentCollaboration(page))!;
+      const second = (await currentCollaboration(secondDevice))!;
+      const readOnly = (await currentCollaboration(viewer))!;
+      expect(new Set([first.participantId, second.participantId, readOnly.participantId]).size).toBe(3);
+      expect(first.state.participants.find((participant) => participant.id === readOnly.participantId)?.canControl).toBe(false);
+      expect(new Set(first.state.participants.map((participant) => participant.pageId)).size).toBe(1);
+      expect(first.state.participants.every((participant) => Boolean(participant.pageId))).toBe(true);
+      await expect(collaborationAction(viewer)).toHaveCount(0);
+      await expect(sharedSurface(viewer)).toHaveAttribute("data-input-enabled", "false");
+      expect(await inputSocketProbeSnapshot(viewer)).toEqual([]);
+      await waitForOpenInputSocket(page);
+      await waitForOpenInputSocket(secondDevice);
+      await expectExistingInputAccepted(page, FIRST_TARGET);
+
+      await expect(collaborationAction(secondDevice)).toHaveAttribute("data-action", "request");
+      await collaborationAction(secondDevice).click();
+      await expect(collaborationAction(secondDevice)).toBeDisabled();
+      await expect.poll(async () => (await currentCollaboration(page))?.state.requests).toEqual([second.participantId]);
+      await expect(collaborationAction(page)).toHaveAttribute("data-action", "grant");
+      await collaborationAction(page).click();
+      for (const participantPage of pages) {
+        await expect.poll(async () => (await currentCollaboration(participantPage))?.state.controlOwner).toEqual({
+          kind: "human", participantId: second.participantId,
+        });
+      }
+      await expect(sharedSurface(page)).toHaveAttribute("data-input-enabled", "false");
+      await expect(sharedSurface(secondDevice)).toHaveAttribute("data-input-enabled", "true");
+      await expect(collaborationState(secondDevice)).toContainText("You control");
+      // A former driver's already-open, normally authenticated input channel
+      // must follow the handoff; matching account names confer no authority.
+      await expectExistingInputRejected(page, FIRST_TARGET);
+      await expectExistingInputAccepted(secondDevice, SECOND_TARGET);
+
+      const disrupted = await disruptLatestCollaborationSocket(secondDevice);
+      await expect(sharedSurface(secondDevice)).toHaveAttribute("data-input-enabled", "false", { timeout: 3_000 });
+      await expect.poll(async () => {
+        const connected = await currentCollaboration(secondDevice);
+        return connected && {
+          participantId: connected.participantId,
+          entryCount: connected.entryCount,
+          count: connected.state.participants.length,
+          owner: connected.state.controlOwner,
+        };
+      }, { timeout: 9_000, message: "same device reconnects within the server's 10-second grace" }).toEqual({
+        participantId: second.participantId,
+        entryCount: disrupted.entryCount + 1,
+        count: 3,
+        owner: { kind: "human", participantId: second.participantId },
+      });
+      await expect(sharedSurface(secondDevice)).toHaveAttribute("data-input-enabled", "true");
+      await expectExistingInputRejected(page, FIRST_TARGET);
+      await expectExistingInputAccepted(secondDevice, SECOND_TARGET);
+
+      await expect(collaborationAction(secondDevice)).toHaveAttribute("data-action", "release");
+      await collaborationAction(secondDevice).click();
+      for (const participantPage of pages) {
+        await expect.poll(async () => (await currentCollaboration(participantPage))?.state.controlOwner).toBeNull();
+        await expect(sharedSurface(participantPage)).toHaveAttribute("data-input-enabled", "false");
+      }
+      // View-only remains view-only even when control is available.
+      await expect(collaborationAction(viewer)).toHaveCount(0);
+      expect(await inputSocketProbeSnapshot(viewer)).toEqual([]);
+      await expect(collaborationAction(page)).toHaveAttribute("data-action", "take");
+      await collaborationAction(page).click();
+      await expect(collaborationState(page)).toContainText("You control");
+      await expect(sharedSurface(page)).toHaveAttribute("data-input-enabled", "true");
+      await expectExistingInputAccepted(page, FIRST_TARGET);
+      await expectExistingInputRejected(secondDevice, SECOND_TARGET);
+    } finally {
+      await secondDeviceContext?.close().catch(() => {});
+      await viewerContext?.close().catch(() => {});
+      if (viewerUserId) await deleteDisposableTestUser(viewerUserId);
     }
   });
 });

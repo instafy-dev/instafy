@@ -3,6 +3,10 @@ import {
   resolveProjectSettingsCategory,
   type ProjectSettingsCategory,
 } from "../settingsRoute";
+import {
+  parseSharedBrowserResumeTarget,
+  SHARED_BROWSER_RUNTIME_PARAM,
+} from "./sharedBrowserResume";
 
 const STUDIO_PANELS = new Set<StudioPanel>([
   "home",
@@ -64,6 +68,15 @@ export function buildDesktopStudioDeepLink(
   if (currentUrl) {
     try {
       const current = new URL(currentUrl);
+      const resumeTarget = current.pathname === "/studio"
+        ? parseSharedBrowserResumeTarget(current.search)
+        : null;
+      if (resumeTarget && resumeTarget.projectId === normalizedProjectId?.toLowerCase()) {
+        params.set("projectId", resumeTarget.projectId);
+        params.set("panel", "chat");
+        params.set(SHARED_BROWSER_RUNTIME_PARAM, resumeTarget.runtimeId);
+        return `instafy://studio?${params.toString()}`;
+      }
       const panel = resolveStudioPanel(current.searchParams.get("panel"));
       if (panel) {
         params.set("panel", panel);

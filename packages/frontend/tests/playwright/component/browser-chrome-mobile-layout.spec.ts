@@ -329,3 +329,81 @@ test("uses one real Chromium action per mobile keyboard control key", async ({ p
     { type: "text", text: "a" },
   ]);
 });
+
+test("keeps Unicode remote input out of a previously focused local editor", async ({ page }) => {
+  // Use the production binding and actual Chromium pointer/keyboard defaults.
+  // The message sink is simulated; remote transport/authorization is covered
+  // by the separate Shared runtime tests.
+  const fixturePath = "/__remote-browser-text-input-fixture__";
+  await page.route(`**${fixturePath}`, (route) => route.fulfill({
+    contentType: "text/html",
+    body: `<!doctype html><html><head><meta charset="utf-8" />
+      <style>body { font: 16px sans-serif; } canvas { display: block; border: 2px solid #888; }
+      [contenteditable] { margin-top: 20px; padding: 16px; border: 1px solid #888; }</style>
+      </head><body>
+      <canvas id="remote" tabindex="0" width="600" height="240" aria-label="Remote page"></canvas>
+      <div id="composer" contenteditable="true" aria-label="Local draft">Local draft stays here.</div>
+      <script type="module">
+        import { attachRemoteBrowserInput } from "/src/screens/studio/components/remoteBrowserInput.ts";
+        window.__inputMessages = [];
+        window.__beforeInputs = [];
+        window.__inputEnabled = true;
+        const canvas = document.getElementById("remote");
+        attachRemoteBrowserInput(canvas, {
+          enabled: () => window.__inputEnabled,
+          getViewport: () => ({ width: 600, height: 240, deviceWidth: 600, deviceHeight: 240, dpr: 1 }),
+          send: (message) => window.__inputMessages.push(message),
+        });
+        canvas.addEventListener("beforeinput", (event) => window.__beforeInputs.push({
+          inputType: event.inputType, canceled: event.defaultPrevented, cancelable: event.cancelable,
+        }));
+        window.__inputReady = true;
+      </script></body></html>`,
+  }));
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto(fixturePath);
+  await expect.poll(() => page.evaluate(() => Boolean(
+    (window as Window & { __inputReady?: boolean }).__inputReady,
+  ))).toBe(true);
+  const composer = page.locator("#composer");
+  const canvas = page.locator("#remote");
+  await composer.click();
+  await canvas.click();
+  await expect(canvas).toBeFocused();
+  expect(await page.evaluate(() => document.getSelection()?.anchorNode?.parentElement
+    ?.closest("[contenteditable]")?.id)).toBe("composer");
+
+  const phrase = "Desktop to phone — inert test";
+  await page.keyboard.type(phrase);
+  await expect(composer).toHaveText("Local draft stays here.");
+  await expect(canvas).toBeFocused();
+  const messages = await page.evaluate(() => (
+    window as Window & { __inputMessages?: Array<{ type: string; kind?: string; text?: string }> }
+  ).__inputMessages ?? []);
+  expect(messages.filter((message) => message.type === "text" ||
+    (message.type === "key" && message.kind === "keyDown"))
+    .map((message) => message.text ?? "").join("")).toBe(phrase);
+  expect(await page.evaluate(() => (
+    window as Window & { __beforeInputs?: unknown[] }
+  ).__beforeInputs)).toEqual([
+    { inputType: "insertText", canceled: true, cancelable: true },
+  ]);
+
+  await page.evaluate(() => {
+    (window as Window & { __inputEnabled?: boolean }).__inputEnabled = false;
+  });
+  await page.keyboard.insertText("— inert blocked");
+  await expect(composer).toHaveText("Local draft stays here.");
+  await expect(canvas).toBeFocused();
+  expect(await page.evaluate(() => (
+    window as Window & { __inputMessages?: unknown[] }
+  ).__inputMessages?.length)).toBe(messages.length);
+  expect(await page.evaluate(() => (
+    window as Window & { __beforeInputs?: unknown[] }
+  ).__beforeInputs)).toEqual([
+    { inputType: "insertText", canceled: true, cancelable: true },
+    { inputType: "insertText", canceled: true, cancelable: true },
+  ]);
+  expect(errors).toEqual([]);
+});
