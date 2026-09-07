@@ -214,6 +214,7 @@ import { truncate } from "./chatContentHelpers";
 import { resolveChatComposerAffordances } from "./chatComposerAffordances";
 import { useChatInvitePromptHandlers } from "./useChatInvitePromptHandlers";
 import { useChatComposerAttachments } from "./useChatComposerAttachments";
+import { useChatComposerPreviewTab } from "./useChatComposerPreviewTab";
 import { useChatSendQueueActions } from "./useChatSendQueueActions";
 import { useChatSendQueuePresentation } from "./useChatSendQueuePresentation";
 import {
@@ -658,7 +659,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const handleBackToChat = useCallback(() => {
     setBrowserSubtab("chat");
   }, []);
-  const { onOpenProjectSettings, homeAttentionCount = 0 } = useWorkspaceControls();
+  const { onOpenProjectSettings, onOpenChatNavigation, homeAttentionCount = 0 } = useWorkspaceControls();
   const activeConversationEntry = useMemo(() => {
     if (!activeConversationId) {
       return null;
@@ -666,7 +667,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     return conversations.find((conversation) => conversation.localId === activeConversationId) ?? null;
   }, [activeConversationId, conversations]);
   const isAtLeastSmallViewport = useBreakpoint("sm");
-  const { showComposerHomeButton, touchLikeInput } = useStudioNavigationPosture();
+  const { showComposerNavigationButton, touchLikeInput } = useStudioNavigationPosture();
   const compactBrowserViewport = !isAtLeastSmallViewport;
   const [browserPanelSize, setBrowserPanelSize] = useState<{
     width: number;
@@ -1009,7 +1010,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const handlePreparedEmailInviteConsumed = useCallback(() => {
     setPreparedEmailInviteFromCommand(null);
   }, []);
-  const { openPanelTab, openConversationTab, openJobThreadTab, requestUrlPush } = useWorkspaceTabs();
+  const { tabs: workspaceTabs, keepTabOpen, openPanelTab, openConversationTab, openJobThreadTab, requestUrlPush } = useWorkspaceTabs();
+  const { keepComposerTabOpen, keepComposerTabOpenForEdit } = useChatComposerPreviewTab({
+    conversationId: activeConversationId,
+    inputValue,
+    inputEditorState,
+    tabs: workspaceTabs,
+    keepTabOpen,
+  });
   const { pendingConversationInviteId, clearConversationInvite } = useWorkspaceUi();
   const canUseDesktopConnect = canUseDesktopCodexAuthJson();
   const [notificationsNudgeOpen, setNotificationsNudgeOpen] = useState(false);
@@ -1834,6 +1842,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     openImagePicker,
     removeImageAttachment,
   } = useChatComposerAttachments({
+    draftKey: JSON.stringify([currentUserId, activeProjectId, activeConversationId]),
+    onAttachmentsAdded: keepComposerTabOpen,
     isInputLocked: () => onboardingInputLocked,
     showStatus,
   });
@@ -1903,6 +1913,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   const handleChatInputChange = useCallback(
     (nextValue: string, nextEditorState: string) => {
+      keepComposerTabOpenForEdit(nextValue, nextEditorState);
       latestInputValueRef.current = nextValue;
       if (!nextValue.trim()) {
         pendingReplyContextRef.current = null;
@@ -1969,6 +1980,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       activeConversationId,
       broadcastTyping,
       chatClientSessionId,
+      keepComposerTabOpenForEdit,
       onInputChange,
       typingRealtimeEnabled,
     ]
@@ -2024,6 +2036,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         : undefined;
     const pendingReplyContext = pendingReplyContextRef.current;
     const candidateMessage = baseOverride?.message ?? latestInputValueRef.current ?? "";
+    if (candidateMessage.length > 0 || imageAttachments.length > 0) {
+      keepComposerTabOpen();
+    }
     const metadata =
       explicitMetadata !== undefined
         ? explicitMetadata
@@ -2067,7 +2082,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       }
     }
     return submitted;
-  }, [ensureProjectWriteAccess, removeServerMessageStash, restoredMessageStash]);
+  }, [ensureProjectWriteAccess, imageAttachments.length, keepComposerTabOpen, removeServerMessageStash, restoredMessageStash]);
 
   // Conversational undo (#165): the Undo chip on an agent message dispatches a
   // window event; this panel owns the composer, so it turns the request into a
@@ -4136,6 +4151,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       return false;
     }
 
+    keepComposerTabOpen();
     const restoredEnvelope = restoredMessageStash
       ? normalizeChatMessageStashEnvelope(restoredMessageStash.composerEnvelope)
       : null;
@@ -4204,6 +4220,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     ensureProjectWriteAccess,
     focusInput,
     imageAttachments.length,
+    keepComposerTabOpen,
     onInputChange,
     pendingBrowserLaunchMode,
     personalBrowser.runtimeOverride,
@@ -5712,11 +5729,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         showVoiceStatus={showVoiceStatus}
         voiceStatusMessage={voiceStatusMessage}
         providerTriggerNoticeProps={providerTriggerNoticeProps}
-        showComposerHomeButton={showComposerHomeButton}
-        onOpenHome={() => {
-          requestUrlPush();
-          openPanelTab("home");
-        }}
+        showComposerNavigationButton={showComposerNavigationButton && Boolean(onOpenChatNavigation)}
+        onOpenNavigation={() => onOpenChatNavigation?.()}
         homeAttentionCount={homeAttentionCount}
         homeAttentionBadge={homeAttentionBadge}
         composerActionMenuProps={{
@@ -5775,9 +5789,15 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           voiceError: voiceDebugState.lastError,
           voiceInteractionMode: "hold",
           disabled: projectWriteDisabled || sendingAttachment,
-          onVoicePressStart: handleStartVoiceInputHold,
+          onVoicePressStart: () => {
+            keepComposerTabOpen();
+            return handleStartVoiceInputHold();
+          },
           onVoicePressEnd: handleStopVoiceInputHold,
-          onVoiceTap: handleChatVoiceTap,
+          onVoiceTap: () => {
+            keepComposerTabOpen();
+            handleChatVoiceTap();
+          },
         }}
         sendButtonDisabled={projectWriteDisabled || sendButtonDisabled}
         sendButtonVariant={sendButtonVariant}

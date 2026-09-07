@@ -22,6 +22,8 @@ import type { WorkspaceGitReviewSource } from "./gitReviewTypes";
 
 export interface WorkspaceConversationTabState {
   kind: "conversation";
+  /** A browsing tab that the next conversation selection may replace. */
+  preview?: boolean;
   id: string;
   conversationId: string;
   title: string;
