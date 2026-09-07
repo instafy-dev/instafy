@@ -13,6 +13,7 @@ import { createDefaultCodeWorkspace } from "./code/defaults";
 import { createDefaultBillingState } from "./credits/defaults";
 import { writePendingProjectSwitch } from "./screens/pendingProjectSwitch";
 import { isUUID } from "./utils/uuid";
+import { studioPerformance } from "./telemetry/studioPerformance";
 
 type HistoryEntry = SiteBuilderState;
 
@@ -464,6 +465,9 @@ export const useWorkspaceStore = create<SessionStore>()(
     const project = store.projects[projectId];
     if (!project) {
       return;
+    }
+    if (projectId !== store.activeProjectId) {
+      studioPerformance.beginProject(projectId, project.org?.id ?? null, store.state.org?.id ?? null);
     }
     writePendingProjectSwitch(projectId);
     set({

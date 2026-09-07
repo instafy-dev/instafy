@@ -15,6 +15,7 @@ import {
 import type { MergedProjectListItem } from "../../../projects/useMergedControllerProjects";
 import { getOrgInitials } from "../../../org/orgNaming";
 import { AttentionBadge } from "../../../components/AttentionBadge";
+import { useStudioPerformanceContent } from "../../../telemetry/useStudioPerformanceContent";
 
 const WORKSPACE_SWITCHER_ACTION_BUTTON_CLASS = `h-8 w-8 ${DRAWER_ICON_BUTTON_TONE_CLASS}`;
 const WORKSPACE_SWITCHER_ACTION_ICON_CLASS = "h-4 w-4";
@@ -104,6 +105,16 @@ export function StudioSidebarWorkspaceSwitcher({
   projectAttentionCounts = {},
   orgAttentionCounts = {},
 }: StudioSidebarWorkspaceSwitcherProps) {
+  useStudioPerformanceContent({
+    projectId: null,
+    organizationId: pendingOrgKey === "personal" ? null : pendingOrgKey,
+    conversationId: null,
+    messageCount: 0,
+    // Discovery retains an earlier error while Retry is running. Observe the
+    // new attempt as loading until its settled result is visible again.
+    loading: projectsRefreshing || !projectsError,
+    error: Boolean(projectsError) && !projectsRefreshing,
+  }, Boolean(pendingOrgKey));
   const trimmedWorkspaceProjectQuery = workspaceProjectQuery.trim();
   const projectVisibleLimit =
     trimmedWorkspaceProjectQuery.length > 0
