@@ -666,11 +666,13 @@ export function BrowserSessionModal({
   );
   const fullscreenModalClassName = useMemo(
     () =>
-      "!h-screen !w-screen !max-w-none !rounded-none !border-0 !bg-transparent !shadow-none !overflow-hidden",
+      "!h-dvh !w-screen !max-w-none !rounded-none !border-0 !shadow-none !overflow-hidden",
     [],
   );
   const fullscreenDialogClassName = useMemo(
-    () => "!m-0 !h-full !w-full !border-0 !p-0 !outline-none",
+    // The overlay is edge-to-edge, but controls must clear native window
+    // chrome and mobile cutouts. Keep the insets inside the painted modal.
+    () => "!m-0 !h-full !w-full !border-0 !outline-none pt-[var(--instafy-safe-area-inset-top)] pb-[var(--instafy-safe-area-inset-bottom)] pl-[var(--instafy-safe-area-inset-left)] pr-[var(--instafy-safe-area-inset-right)]",
     [],
   );
   const forceViewportFullscreenDocked = shouldForceDockedBrowserFullscreen({

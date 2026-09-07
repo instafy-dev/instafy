@@ -304,6 +304,11 @@ At normal desktop widths Studio follows the runtime preference, so WebRTC is the
 
 ## Responsive and touch behavior
 
+Expanded Shared Browser keeps its toolbar and viewport inside the device's
+safe-area insets, including macOS window controls and mobile cutouts. The
+background still fills the screen; ordinary web browsers with zero insets
+retain the full viewport. Insets update when a device rotates.
+
 ### Manual input handoff
 
 The browser bar exposes **Take over** for a manual step. Agent-requested handoff

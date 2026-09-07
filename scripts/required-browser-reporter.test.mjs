@@ -21,6 +21,16 @@ function setup(t, lane = "personal") {
   };
 }
 
+function browserUiInventory(run) {
+  const contract = REQUIRED_BROWSER_LANES["browser-ui"];
+  return Array.from({ length: contract.minimumTests }, (_, index) => ({
+    ...run.tests[0],
+    id: String(index),
+    title: contract.titles[index] ?? `other browser UI case ${index}`,
+    location: { file: `/fixture/${contract.files[index % contract.files.length]}` },
+  }));
+}
+
 test("accepts actual first-attempt passes and writes a bounded receipt", async (t) => {
   const run = setup(t); run.begin(); run.pass();
   assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "passed" });
@@ -99,17 +109,26 @@ test("browser UI lane requires the mobile sidebar geometry regression", async (t
   const run = setup(t, "browser-ui");
   const contract = REQUIRED_BROWSER_LANES["browser-ui"];
   assert.ok(contract.files.includes("mobile-sidebar-safe-area.spec.ts"));
-  const tests = Array.from({ length: contract.minimumTests }, (_, index) => ({
-    ...run.tests[0],
-    id: String(index),
-    location: { file: `/fixture/${contract.files[index % contract.files.length]}` },
-  }));
+  const tests = browserUiInventory(run);
   run.begin(tests); run.pass(tests);
   assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "passed" });
   const missing = tests.map((item) => item.location.file.endsWith("mobile-sidebar-safe-area.spec.ts")
     ? { ...item, location: { file: "/fixture/browser-live-proof.spec.ts" } } : item);
   run.begin(missing);
   assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" });
+});
+
+test("minimum count cannot hide a replaced Shared full-modal safe-area case", async (t) => {
+  const contract = REQUIRED_BROWSER_LANES["browser-ui"];
+  assert.ok(contract.files.includes("shared-browser-expanded-safe-area.spec.ts"));
+  assert.equal(contract.titles.length, 6);
+  for (const requiredTitle of contract.titles) {
+    const run = setup(t, "browser-ui");
+    const tests = browserUiInventory(run).map((item) => item.title === requiredTitle
+      ? { ...item, title: "unrelated passing geometry test" } : item);
+    run.begin(tests); run.pass(tests);
+    assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" }, requiredTitle);
+  }
 });
 
 test("receipt write errors cannot be swallowed into a green Playwright result", async (t) => {
