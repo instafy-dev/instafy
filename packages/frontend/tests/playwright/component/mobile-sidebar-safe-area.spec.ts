@@ -94,7 +94,7 @@ for (const dark of [false, true]) {
       expect(geometry.scrollHeight).toBe(layout.height);
     }
 
-    await page.getByRole("button", { name: "Close sidebar", exact: true }).click({ position: { x: 380, y: 400 } });
+    await page.getByTestId("mobile-sidebar-overlay").click({ position: { x: 380, y: 400 } });
     await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
     expect(errors).toEqual([]);
   });

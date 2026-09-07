@@ -87,6 +87,7 @@ import { WorkspaceTabsProvider, useWorkspaceTabs } from "../workspace/WorkspaceT
 import type { WorkspaceGitReviewSource } from "../workspace/gitReviewTypes";
 import { ConversationHistoryTab } from "../workspace/ConversationHistoryTab";
 import { useWorkspaceActivity } from "../workspace/useWorkspaceActivity";
+import { useRecentConversations } from "../workspace/useRecentConversations";
 import { WorkspaceControlsProvider } from "./studio/workspaceControls";
 import { findReusableBlankConversation } from "../conversations/conversationAutoTitle";
 import {
@@ -303,6 +304,7 @@ function StudioLayoutInner() {
     projectKey: conversationsProjectKey,
     conversations,
     activeConversationId,
+    remoteConversationHistoryResolved,
     createConversation,
     markConversationRead,
     selectConversation,
@@ -763,6 +765,8 @@ function StudioLayoutInner() {
   const {
     filesExplorerPortalTarget,
     handleFilesExplorerPortalRef,
+    workspaceSwitcherPortalTarget,
+    handleWorkspaceSwitcherPortalRef,
     handleLeftDrawerResizeStart,
     leftDrawer,
     leftDrawerResizing,
@@ -777,6 +781,24 @@ function StudioLayoutInner() {
     sourceControlOpenRequest,
     setSourceControlOpenRequest,
   } = useStudioLayoutChromeState({ isLargeScreen });
+  const visibleChatId = isChatSurfaceVisible && leftDrawer !== "history"
+    ? (activeWorkspaceTab?.kind === "conversation" || activeWorkspaceTab?.kind === "jobThread"
+      ? activeWorkspaceTab.conversationId
+      : activeConversationId)
+    : null;
+  const recentConversations = useRecentConversations({
+    conversations,
+    activeConversationId: visibleChatId,
+    userId: currentUserId,
+    projectKey: conversationsProjectKey,
+    // The local guest fallback has no authenticated remote history to wait for.
+    historyResolved: remoteConversationHistoryResolved || !auth.session,
+  });
+  const openConversationIds = useMemo(() => new Set(
+    workspaceTabs.flatMap((tab) => tab.kind === "conversation"
+      ? [tab.conversationId]
+      : []),
+  ), [workspaceTabs]);
   const {
     settingsTab,
     setSettingsTab,
@@ -1327,6 +1349,48 @@ function StudioLayoutInner() {
     }
   }, [isLargeScreen, leftDrawer, openPanelTab, requestHistoryPush, setLeftDrawer, setMobileSidebarOpen]);
 
+  const handleWorkspaceSwitcherOpenChange = useCallback((open: boolean) => {
+    if (open) {
+      if (leftDrawer !== "workspaces") {
+        requestHistoryPush();
+      }
+      setLeftDrawer("workspaces");
+      if (!isLargeScreen) {
+        setMobileSidebarOpen(true);
+      }
+    } else if (leftDrawer === "workspaces") {
+      requestHistoryPush();
+      setLeftDrawer(null);
+    }
+  }, [isLargeScreen, leftDrawer, requestHistoryPush, setLeftDrawer, setMobileSidebarOpen]);
+
+  const handleMobileSidebarOpenChange = useCallback((open: boolean) => {
+    setMobileSidebarOpen(open);
+    if (!open && leftDrawer === "workspaces") {
+      requestHistoryPush();
+      setLeftDrawer(null);
+    }
+  }, [leftDrawer, requestHistoryPush, setLeftDrawer, setMobileSidebarOpen]);
+
+  const handleOpenChatNavigation = useCallback(() => {
+    if (isLargeScreen) {
+      setSidebarCollapsed(false);
+      return;
+    }
+    if (leftDrawer) {
+      requestHistoryPush();
+      setLeftDrawer(null);
+    }
+    setMobileSidebarOpen(true);
+  }, [isLargeScreen, leftDrawer, requestHistoryPush, setLeftDrawer, setMobileSidebarOpen, setSidebarCollapsed]);
+
+  const handleSelectRecentConversation = useCallback((conversationId: string) => {
+    requestHistoryPush();
+    openConversationTab(conversationId, { preview: true });
+    setLeftDrawer(null);
+    setMobileSidebarOpen(false);
+  }, [openConversationTab, requestHistoryPush, setLeftDrawer, setMobileSidebarOpen]);
+
   const prepareWorkspaceForNewSession = useCallback((options?: { closeProjectLauncher?: boolean }) => {
     if (options?.closeProjectLauncher !== false) {
       setIsProjectLauncherOpen(false);
@@ -1701,7 +1765,7 @@ function StudioLayoutInner() {
     requestHistoryPush();
     setLeftDrawer(null);
     if (activeConversationId) {
-      openConversationTab(activeConversationId);
+      openConversationTab(activeConversationId, { preview: true });
       return;
     }
     openPanelTab("chat");
@@ -1800,7 +1864,7 @@ function StudioLayoutInner() {
   const shouldRenderFilesExplorerPortal =
     leftDrawer === "files" && !shouldShowFilesWorkspace;
   const showMobileLeftDrawerOverlay =
-    !isLargeScreen && leftDrawer !== null && !(leftDrawer === "files" && shouldShowFilesWorkspace);
+    !isLargeScreen && leftDrawer !== null && leftDrawer !== "workspaces" && !(leftDrawer === "files" && shouldShowFilesWorkspace);
   const topbarLocationOverride = showMobileLeftDrawerOverlay
     ? leftDrawer === "files"
       ? { title: "Files", icon: <Page className="text-[16px]" aria-hidden="true" /> }
@@ -2010,6 +2074,7 @@ function StudioLayoutInner() {
             sidebarCollapsed,
             sidebarOpen: isLargeScreen ? !sidebarCollapsed : mobileSidebarOpen,
             onToggleSidebar: handleToggleSidebar,
+            onOpenChatNavigation: handleOpenChatNavigation,
             onStartNewProject: handleNewProject,
             onStartNewConversation: createFreshConversation,
             onStartPrivateConversation: handleCreatePrivateConversation,
@@ -2038,7 +2103,14 @@ function StudioLayoutInner() {
                 pinnedPanel={null}
                 onSelect={handlePanelSelect}
                 onOpenConversationHistory={handleOpenConversationHistory}
+                recentConversations={recentConversations}
+                activeConversationId={visibleChatId}
+                openConversationIds={openConversationIds}
+                onSelectConversation={handleSelectRecentConversation}
                 isConversationHistoryActive={isConversationHistoryActive}
+                workspaceSwitcherOpen={leftDrawer === "workspaces"}
+                onWorkspaceSwitcherOpenChange={handleWorkspaceSwitcherOpenChange}
+                workspaceSwitcherPortalTarget={workspaceSwitcherPortalTarget}
                 collapsed={sidebarCollapsed}
               />
           ) : null}
@@ -2056,6 +2128,12 @@ function StudioLayoutInner() {
                       requestHistoryPush();
                       setLeftDrawer(null);
                     }}
+                  />
+                ) : leftDrawer === "workspaces" ? (
+                  <div
+                    ref={handleWorkspaceSwitcherPortalRef}
+                    className="flex-1 min-h-0"
+                    data-testid="workspace-switcher-drawer"
                   />
                 ) : leftDrawer === "files" ? (
                   <div
@@ -2138,26 +2216,33 @@ function StudioLayoutInner() {
           </div>
 
           {!isLargeScreen && mobileSidebarOpen ? (
-            <StudioMobileSidebarOverlay onClose={() => setMobileSidebarOpen(false)}>
-              <StudioSidebar
-                mobileOverlay
-                items={sidebarItems}
-                moreItems={sidebarMoreItems}
-                activePanel={sidebarActivePanel}
-                pinnedPanel={null}
-                onRequestClose={() => setMobileSidebarOpen(false)}
-                onSelect={(panel) => {
-                  handlePanelSelect(panel);
-                  setMobileSidebarOpen(false);
-                }}
-                onOpenConversationHistory={() => {
-                  handleOpenConversationHistory();
-                  setMobileSidebarOpen(false);
-                }}
-                isConversationHistoryActive={isConversationHistoryActive}
-                collapsed={false}
-              />
-            </StudioMobileSidebarOverlay>
+          <StudioMobileSidebarOverlay onClose={() => handleMobileSidebarOpenChange(false)}>
+            <StudioSidebar
+              mobileOverlay
+              items={sidebarItems}
+              moreItems={sidebarMoreItems}
+              activePanel={sidebarActivePanel}
+              pinnedPanel={null}
+              onRequestClose={() => handleMobileSidebarOpenChange(false)}
+              onSelect={(panel) => {
+                handlePanelSelect(panel);
+                setMobileSidebarOpen(false);
+              }}
+              onOpenConversationHistory={() => {
+                handleOpenConversationHistory();
+                setMobileSidebarOpen(false);
+              }}
+              isConversationHistoryActive={isConversationHistoryActive}
+              workspaceSwitcherOpen={leftDrawer === "workspaces"}
+              onWorkspaceSwitcherOpenChange={handleWorkspaceSwitcherOpenChange}
+              workspaceSwitcherPortalTarget={workspaceSwitcherPortalTarget}
+              recentConversations={recentConversations}
+              activeConversationId={visibleChatId}
+              openConversationIds={openConversationIds}
+              onSelectConversation={handleSelectRecentConversation}
+              collapsed={false}
+            />
+          </StudioMobileSidebarOverlay>
           ) : null}
 
           {showMobileLeftDrawerOverlay ? (

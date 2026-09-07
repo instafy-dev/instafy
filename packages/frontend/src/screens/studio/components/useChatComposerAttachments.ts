@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type ChangeEvent,
@@ -16,6 +17,7 @@ export type PendingChatImageAttachment = {
 };
 
 type ShowStatus = (message: string, intent?: StatusIntent, durationMs?: number) => void;
+const EMPTY_ATTACHMENTS: PendingChatImageAttachment[] = [];
 
 function revokePreviewUrl(previewUrl: string) {
   try {
@@ -26,15 +28,39 @@ function revokePreviewUrl(previewUrl: string) {
 }
 
 export function useChatComposerAttachments({
+  draftKey,
   isInputLocked,
   showStatus,
+  onAttachmentsAdded,
 }: {
+  draftKey: string;
   isInputLocked: () => boolean;
   showStatus: ShowStatus;
+  onAttachmentsAdded?: () => void;
 }) {
-  const [imageAttachments, setImageAttachments] = useState<PendingChatImageAttachment[]>([]);
-  const imageAttachmentPreviewUrlsRef = useRef<string[]>([]);
+  const attachmentDraftsRef = useRef(new Map<string, PendingChatImageAttachment[]>());
+  const [attachmentDrafts, setAttachmentDrafts] = useState(attachmentDraftsRef.current);
+  const imageAttachments = attachmentDrafts.get(draftKey) ?? EMPTY_ATTACHMENTS;
   const imageInputRef = useRef<HTMLInputElement | null>(null);
+  const activeDraftKeyRef = useRef(draftKey);
+
+  useLayoutEffect(() => {
+    activeDraftKeyRef.current = draftKey;
+    if (imageInputRef.current) imageInputRef.current.value = "";
+  }, [draftKey]);
+
+  // Keep callbacks bound to their originating chat, including an upload/send
+  // that completes after the user has already selected another conversation.
+  const setImageAttachments = useCallback((update: (
+    previous: PendingChatImageAttachment[],
+  ) => PendingChatImageAttachment[]) => {
+    const drafts = new Map(attachmentDraftsRef.current);
+    const next = update(drafts.get(draftKey) ?? EMPTY_ATTACHMENTS);
+    if (next.length > 0) drafts.set(draftKey, next);
+    else drafts.delete(draftKey);
+    attachmentDraftsRef.current = drafts;
+    setAttachmentDrafts(drafts);
+  }, [draftKey]);
 
   const openImagePicker = useCallback(() => {
     imageInputRef.current?.click();
@@ -48,10 +74,10 @@ export function useChatComposerAttachments({
       return [];
     });
     const input = imageInputRef.current;
-    if (input) {
+    if (input && activeDraftKeyRef.current === draftKey) {
       input.value = "";
     }
-  }, []);
+  }, [draftKey, setImageAttachments]);
 
   const removeImageAttachment = useCallback((attachmentId: string) => {
     setImageAttachments((previous) => {
@@ -61,7 +87,7 @@ export function useChatComposerAttachments({
       }
       return previous.filter((attachment) => attachment.id !== attachmentId);
     });
-  }, []);
+  }, [setImageAttachments]);
 
   const attachImageFiles = useCallback(
     (files: File[]) => {
@@ -100,9 +126,10 @@ export function useChatComposerAttachments({
         return;
       }
 
+      onAttachmentsAdded?.();
       setImageAttachments((previous) => [...previous, ...nextAttachments]);
     },
-    [showStatus],
+    [onAttachmentsAdded, setImageAttachments, showStatus],
   );
 
   const handleImageInputChange = useCallback(
@@ -193,14 +220,11 @@ export function useChatComposerAttachments({
   );
 
   useEffect(() => {
-    imageAttachmentPreviewUrlsRef.current = imageAttachments.map((attachment) => attachment.previewUrl);
-  }, [imageAttachments]);
-
-  useEffect(() => {
     return () => {
-      for (const previewUrl of imageAttachmentPreviewUrlsRef.current) {
-        revokePreviewUrl(previewUrl);
+      for (const attachments of attachmentDraftsRef.current.values()) {
+        for (const attachment of attachments) revokePreviewUrl(attachment.previewUrl);
       }
+      attachmentDraftsRef.current.clear();
     };
   }, []);
 

@@ -43,6 +43,13 @@ is offscreen, the browser tab is hidden, or reduced motion is enabled. Header ma
 ## Header
 The Studio header is owner-first: `Team/Personal > Space`, followed by runtime status and the user menu.
 
+In wide desktop browsers, **Get desktop app** sits above the sidebar profile and becomes
+an icon with a tooltip when the sidebar is collapsed. Compact desktop browser windows keep
+the action in the profile menu. It appears only when a verified desktop release is available.
+Mobile browsers show **Get the app · Soon** in the profile menu, linking to the mobile
+availability section; iOS and Android downloads are marked coming soon. Native apps hide
+these acquisition actions and retain their existing update controls.
+
 ## Switching teams and chats
 
 The team switcher opens the most recently visited space in the selected team, falling back to
@@ -55,6 +62,14 @@ Space discovery, organization lists, access summaries and conversation lists hav
 deadline covering authentication and response reads; navigation cancels superseded reads.
 Failed conversation-list reads show an error and Retry after the first failed attempt while
 automatic recovery continues. Cached chats stay visible during refresh failures.
+
+On desktop and wide browser layouts, **Team & spaces** opens in the same resizable side
+panel as **All chats**, Files and Changes. These panels share one slot, so opening one
+replaces the other while the current conversation stays visible. Team and space selection
+keeps its existing grouped list; choosing a space closes the picker. The close control or
+Escape returns to the sidebar. On narrow layouts the picker remains a drill-in inside
+navigation, with Back returning to the recent chats list. Browser history remembers the
+picker through `workspaceTab=workspaces`.
 
 Open conversation tabs are remembered per space in the current browser. Previously loaded chat
 history stays visible while refreshing, including when a refresh fails; transient failures retry
@@ -87,7 +102,48 @@ This does not restore an entire
 editor session: file and panel tabs currently carry across space switches, while file selection
 and explorer state reset for the destination space.
 
-## Composer delivery actions
+The sidebar's **Chats** section starts expanded and shows up to six recently visited active
+conversations in the current space. Selecting a row opens a preview or focuses its existing tab;
+closing a tab does not remove the conversation from recent chats. **Browse all chats** opens
+the existing searchable history. New chat creation lives in the top bar and full chat history;
+the sidebar Chats row only expands or collapses its recent list. Visit order is stored locally
+per account and space. Quick-list rows stay in place while switching among listed chats,
+including when reopening mobile navigation. Opening a chat outside the list adds it at the
+top, replacing the least recently visited row if the list is full. History refreshes and
+title or status updates preserve the remaining row order. The full history has an always-visible search field with its status
+filter inside, and New chat and Close actions beside the title. A non-default filter changes
+the heading and marks the filter icon; counts live in the filter menu. Starting a chat clears
+the search and returns to active chats. Per-chat actions, including closing an open tab,
+live in its More menu.
+
+At widths below 900px, the composer's lower-left menu opens the navigation drawer with Chats
+expanded. Selecting a recent chat closes the drawer, making chat switching two taps. On wider
+layouts, the expanded sidebar offers direct selection; a collapsed sidebar opens the same list
+in a popover. Home remains in the sidebar, and the top menu remains available when the composer
+is hidden while scrolling.
+
+Browsing existing chats through recents, history or browser Back reuses one preview conversation
+tab per space. Wide layouts show its title in italics. Reading, scrolling and focusing the
+composer keep it replaceable. Typing, attaching a file, starting voice input or sending a
+message keeps the tab open; **New chat** also creates a tab that stays open. Double-clicking a
+tab, dragging it or choosing **Keep open** from its menu does the same explicitly. Chats with
+drafts, queued or running work, or open job threads remain protected. Replacing a preview only
+changes the tab: the conversation remains available in Chats. Previously open tabs stay open,
+and the preview state is remembered per space alongside them. Mobile chat selection uses the
+same preview behavior without adding another step to the two-tap switching flow.
+
+## Composer
+
+The composer uses one compact, rounded writing row on phones and wider screens. It grows
+with the draft, then scrolls within the editor. Image upload and other message tools live
+in the `+` menu.
+
+On clients with voice input, the trailing action is the microphone for an empty draft and
+Send or Steer for a text or image draft. Recording and transcription keep the microphone
+available until capture finishes. Use **Dictate message** in `+` to start voice input with
+an existing draft. Clients without voice input retain the Send control.
+
+### Delivery actions
 
 The composer exposes three one-shot actions instead of a persistent delivery mode:
 

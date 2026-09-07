@@ -1,39 +1,25 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { desktopTitleBarFree } from "../../../lib/desktopShell";
 import { DialogTrigger } from "react-aria-components";
 import {
-  ChatLines,
   Cube,
-  Lock,
   MoreHoriz,
   NavArrowLeft,
-  NavArrowRight,
-  Plus,
+  Pin,
   SidebarCollapse,
   SidebarExpand,
   Xmark
 } from "iconoir-react";
-import { HomeIcon } from "../../../components/AppIcons";
 import { Button, IconButton } from "../../../components/Button";
 import { Badge } from "../../../components/Badge";
-import { EntityRow } from "../../../components/EntityRow";
-import { SearchInput } from "../../../components/SearchInput";
-import { Spinner } from "../../../components/Spinner";
 import { Text } from "../../../components/Text";
-import { StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
-import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import { useProject } from "../../../projects/useProject";
 import { useProjects } from "../../../projects/useProjects";
 import { useRuntime } from "../../../runtime/useRuntime";
-import {
-  controllerClient,
-  type ControllerProjectMember,
-} from "../../../sdk/instafy";
 import { WorkspaceTabs } from "../../../workspace/WorkspaceTabs";
 import { useWorkspaceTabs } from "../../../workspace/WorkspaceTabsProvider";
 import { useConversations } from "../../../conversations/ConversationsProvider";
-import { useAuth } from "../../../providers/AuthProvider";
 import {
   desktopSpeechTunnelBridgeAvailable,
   readDesktopSpeechTunnelStatus,
@@ -46,7 +32,6 @@ import {
 } from "../../../desktop/voiceHost/client";
 import { describeDesktopVoiceStatusSummary } from "../../../desktop/voiceStatusSummary";
 import {
-  DARK_ACTIVE_SURFACE_CLASS,
   DARK_CANVAS_CLASS,
   DARK_CONTROL_HOVER_CLASS,
   DARK_DIVIDER_BORDER_CLASS,
@@ -56,77 +41,35 @@ import {
 } from "../../../theme/darkSurfaces";
 import { useWorkspaceControls } from "../workspaceControls";
 import { useStudioNavigationPosture } from "../useStudioNavigationPosture";
-import { DesktopInstallTopBarAction } from "./DesktopInstallTopBarAction";
-
-const {
-  listMembers: listControllerOrgMembers,
-} = controllerClient.organizations;
-const {
-  listMembers: listControllerProjectMembers,
-} = controllerClient.projects;
+import { StudioNewChatButton } from "./StudioNewChatButton";
 
 const COMPACT_TAB_SELECTOR_CLASS =
   "h-10 min-w-0 justify-between gap-2 rounded-xl !border-transparent !bg-slate-100 px-2.5 !text-slate-950 !shadow-none hover:!bg-slate-100 data-[hovered]:!bg-slate-100 focus-visible:ring-white/16 focus-visible:ring-offset-white max-[375px]:min-h-11 dark:!bg-white/[0.06] dark:!text-slate-50 dark:hover:!bg-white/[0.09] dark:data-[hovered]:!bg-white/[0.09] dark:focus-visible:ring-white/16 dark:focus-visible:ring-offset-[var(--color-studio-dark-rail)]";
-
-function resolvePrivateChatDisplayName(member: ControllerProjectMember): string {
-  const fullName = typeof member.fullName === "string" ? member.fullName.trim() : "";
-  if (fullName) {
-    return fullName;
-  }
-  const email = typeof member.email === "string" ? member.email.trim() : "";
-  if (email) {
-    return email;
-  }
-  return "Teammate";
-}
-
-function resolvePrivateChatSubtitle(member: ControllerProjectMember): string | null {
-  const fullName = typeof member.fullName === "string" ? member.fullName.trim() : "";
-  const email = typeof member.email === "string" ? member.email.trim() : "";
-  if (fullName && email) {
-    return email;
-  }
-  return null;
-}
 
 export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNode } = {}) {
   const {
     activeProjectName,
     onStartNewConversation,
-    onStartPrivateConversation,
     showChatActions = false,
     onToggleSidebar,
     sidebarOpen,
-    homeAttentionCount = 0,
     onOpenProjectSettings,
     topbarLocationOverride,
   } = useWorkspaceControls();
-  const { projectList, activeProjectId } = useProjects();
+  const { activeProjectId } = useProjects();
   const { projectAccessBlocked } = useProject();
-  const { user } = useAuth();
-  const currentUserId = user?.id ?? null;
 
   const [tabMenuOpen, setTabMenuOpen] = useState(false);
-  const [newChatMenuOpen, setNewChatMenuOpen] = useState(false);
-  const [privateChatPickerOpen, setPrivateChatPickerOpen] = useState(false);
-  const [privateChatQuery, setPrivateChatQuery] = useState("");
-  const [privateChatTargets, setPrivateChatTargets] = useState<ControllerProjectMember[]>([]);
-  const [privateChatTargetsLoading, setPrivateChatTargetsLoading] = useState(false);
-  const [privateChatTargetsLoaded, setPrivateChatTargetsLoaded] = useState(false);
   const [desktopVoiceHostStatus, setDesktopVoiceHostStatus] = useState<DesktopVoiceHostBridgeStatus | null>(null);
   const [desktopSpeechTunnelStatus, setDesktopSpeechTunnelStatus] = useState<DesktopSpeechTunnelBridgeStatus | null>(null);
   const [desktopVoiceStatusLoading, setDesktopVoiceStatusLoading] = useState(false);
-  const privateChatTargetsRequestRef = useRef<Promise<ControllerProjectMember[]> | null>(null);
-  const privateChatTargetsEpochRef = useRef(0);
-  const newChatTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const newChatInteractionModalityRef = useRef<"pointer" | "keyboard" | null>(null);
 
-  const { tabs: workspaceTabs, activeTabId, focusTab, closeTab, requestUrlPush, openPanelTab, openConversationTab } = useWorkspaceTabs();
+  const { tabs: workspaceTabs, activeTabId, focusTab, closeTab, keepTabOpen, requestUrlPush, openConversationTab } = useWorkspaceTabs();
   const { conversations } = useConversations();
   const { runtime } = useRuntime();
   const controllerProjectMissing = runtime.controllerProjectMissing || projectAccessBlocked;
   const shouldShowNewChat = showChatActions && Boolean(onStartNewConversation);
-  const { isLargeScreen, showTopbarHomeButton } = useStudioNavigationPosture();
+  const { isLargeScreen } = useStudioNavigationPosture();
 
   const activeWorkspaceTab = useMemo(() => {
     if (!activeTabId) {
@@ -147,14 +90,6 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
     }
     return conversations.find((conversation) => conversation.controllerId === parentId || conversation.localId === parentId) ?? null;
   }, [activeConversation?.parentConversationId, conversations]);
-  const isRootConversationContext =
-    activeWorkspaceTab?.kind === "conversation" &&
-    activeConversation !== null &&
-    !(activeConversation.parentConversationId?.trim());
-  const isRootChatContext =
-    (activeWorkspaceTab?.kind === "panel" && activeWorkspaceTab.panel === "chat") ||
-    isRootConversationContext;
-  const showTopbarHomeShortcut = showTopbarHomeButton && isRootChatContext;
   const topbarLocationIcon = topbarLocationOverride?.icon ?? activeWorkspaceTab?.icon ?? (
     <Cube className="text-[16px]" aria-hidden="true" />
   );
@@ -166,9 +101,6 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
     requestUrlPush();
     openConversationTab(parentConversation.localId);
   }, [openConversationTab, parentConversation, requestUrlPush]);
-  const homeAttentionBadge = homeAttentionCount > 9 ? "9+" : homeAttentionCount.toString();
-  const homeButtonActive =
-    activeWorkspaceTab?.kind === "panel" && activeWorkspaceTab.panel === "home";
   const desktopVoiceStatusEnabled =
     isLargeScreen &&
     Boolean(activeProjectId?.trim()) &&
@@ -225,161 +157,6 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
     [activeProjectId, desktopSpeechTunnelStatus, desktopVoiceHostStatus, desktopVoiceStatusLoading],
   );
 
-  useEffect(() => {
-    privateChatTargetsEpochRef.current += 1;
-    privateChatTargetsRequestRef.current = null;
-    setNewChatMenuOpen(false);
-    setPrivateChatPickerOpen(false);
-    setPrivateChatQuery("");
-    setPrivateChatTargets([]);
-    setPrivateChatTargetsLoading(false);
-    setPrivateChatTargetsLoaded(false);
-  }, [activeProjectId, currentUserId]);
-
-  const loadPrivateChatTargets = useCallback(async (): Promise<ControllerProjectMember[]> => {
-    if (privateChatTargetsLoaded) {
-      return privateChatTargets;
-    }
-    if (privateChatTargetsRequestRef.current) {
-      return privateChatTargetsRequestRef.current;
-    }
-
-    const epoch = privateChatTargetsEpochRef.current;
-    const inflight = (async (): Promise<ControllerProjectMember[]> => {
-      if (!activeProjectId) {
-        if (epoch === privateChatTargetsEpochRef.current) {
-          setPrivateChatTargets([]);
-          setPrivateChatTargetsLoaded(true);
-          setPrivateChatTargetsLoading(false);
-        }
-        return [];
-      }
-
-      if (epoch === privateChatTargetsEpochRef.current) {
-        setPrivateChatTargetsLoading(true);
-      }
-
-      try {
-        const project = projectList.find((entry) => entry.id === activeProjectId) ?? null;
-        const orgId = project?.orgId ?? null;
-        const [orgMembers, projectMembers] = await Promise.all([
-          orgId ? listControllerOrgMembers(orgId) : Promise.resolve([]),
-          listControllerProjectMembers(activeProjectId),
-        ]);
-        const members = orgId ? [...orgMembers, ...projectMembers] : projectMembers;
-
-        const filtered: ControllerProjectMember[] = [];
-        const seenUserIds = new Set<string>();
-        for (const member of members) {
-          const userId = typeof member.userId === "string" ? member.userId.trim() : "";
-          if (!userId || userId === currentUserId) {
-            continue;
-          }
-          if (seenUserIds.has(userId)) {
-            continue;
-          }
-          seenUserIds.add(userId);
-          filtered.push(member);
-        }
-        filtered.sort((a, b) => {
-          const labelA = `${a.fullName ?? ""} ${a.email ?? ""}`.trim().toLowerCase();
-          const labelB = `${b.fullName ?? ""} ${b.email ?? ""}`.trim().toLowerCase();
-          return labelA.localeCompare(labelB);
-        });
-
-        if (epoch === privateChatTargetsEpochRef.current) {
-          setPrivateChatTargets(filtered);
-          setPrivateChatTargetsLoaded(true);
-        }
-        return filtered;
-      } catch {
-        if (epoch === privateChatTargetsEpochRef.current) {
-          setPrivateChatTargets([]);
-          setPrivateChatTargetsLoaded(true);
-        }
-        return [];
-      } finally {
-        if (epoch === privateChatTargetsEpochRef.current) {
-          setPrivateChatTargetsLoading(false);
-        }
-      }
-    })();
-
-    privateChatTargetsRequestRef.current = inflight;
-    try {
-      return await inflight;
-    } finally {
-      if (privateChatTargetsRequestRef.current === inflight) {
-        privateChatTargetsRequestRef.current = null;
-      }
-    }
-  }, [
-    activeProjectId,
-    currentUserId,
-    privateChatTargets,
-    privateChatTargetsLoaded,
-    projectList,
-  ]);
-
-  const filteredPrivateChatTargets = useMemo(() => {
-    const query = privateChatQuery.trim().toLowerCase();
-    if (!query) {
-      return privateChatTargets;
-    }
-    return privateChatTargets.filter((member) => {
-      const displayName = resolvePrivateChatDisplayName(member).toLowerCase();
-      const email = (member.email ?? "").trim().toLowerCase();
-      return displayName.includes(query) || email.includes(query);
-    });
-  }, [privateChatQuery, privateChatTargets]);
-
-  const handleNewChatMenuOpenChange = useCallback(
-    (open: boolean) => {
-      setNewChatMenuOpen(open);
-      if (!open && newChatInteractionModalityRef.current === "pointer") {
-        requestAnimationFrame(() => {
-          newChatTriggerRef.current?.blur();
-        });
-      }
-      if (open && onStartPrivateConversation && !privateChatTargetsLoaded && !privateChatTargetsLoading) {
-        void loadPrivateChatTargets();
-      }
-      if (!open) {
-        newChatInteractionModalityRef.current = null;
-      }
-    },
-    [
-      loadPrivateChatTargets,
-      onStartPrivateConversation,
-      privateChatTargetsLoaded,
-      privateChatTargetsLoading,
-    ],
-  );
-
-  useEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-    if (!shouldShowNewChat || privateChatTargetsLoaded || privateChatTargetsLoading) {
-      return;
-    }
-    if (!onStartPrivateConversation) {
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      void loadPrivateChatTargets();
-    }, 400);
-    return () => {
-      window.clearTimeout(timer);
-    };
-  }, [
-    loadPrivateChatTargets,
-    onStartPrivateConversation,
-    privateChatTargetsLoaded,
-    privateChatTargetsLoading,
-    shouldShowNewChat,
-  ]);
-
   const handleSelectWorkspaceTab = useCallback(
     (tabId: string) => {
       if (!tabId) {
@@ -426,7 +203,7 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
                 <span aria-hidden="true" className="shrink-0 text-slate-400 dark:text-slate-400">
                   {tab.icon}
                 </span>
-                <span className="min-w-0 flex-1 truncate text-left">{tab.title}</span>
+                <span className={`min-w-0 flex-1 truncate text-left ${isLargeScreen && tab.kind === "conversation" && tab.preview ? "italic" : ""}`}>{tab.title}</span>
                 {tab.badge ? (
                   <span
                     className="inline-flex h-4 min-w-[1rem] shrink-0 items-center justify-center rounded-full bg-primary-500/90 px-1 text-3xs font-semibold leading-none text-white dark:bg-primary-500/85"
@@ -436,6 +213,20 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
                   </span>
                 ) : null}
               </Button>
+              {tab.kind === "conversation" && tab.preview ? (
+                <IconButton
+                  onPress={() => keepTabOpen(tab.id)}
+                  variant="ghost"
+                  size="xs"
+                  radius="full"
+                  aria-label={`Keep ${tab.title} open`}
+                  title="Keep open"
+                  data-testid={`topbar-tab-keep-open-${tab.id}`}
+                  className={`text-slate-400 hover:bg-slate-100 data-[hovered]:bg-slate-100 dark:text-slate-400 ${DARK_CONTROL_HOVER_CLASS}`}
+                >
+                  <Pin className="h-4 w-4" aria-hidden="true" />
+                </IconButton>
+              ) : null}
               {tab.closable ? (
                 <IconButton
                   onPress={() => closeTab(tab.id)}
@@ -513,41 +304,6 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
     </IconButton>
   ) : null;
 
-  const newChatMenu = shouldShowNewChat ? (
-    <StudioDialogPopover placement="bottom start" offset={8} className="w-80 p-3" data-testid="chat-new-chat-menu-popover">
-      <div className="flex flex-col gap-1.5">
-        <EntityRow
-          title="Public chat"
-          surface="interactive"
-          pressable
-          start={<ChatLines className="h-4 w-4 text-slate-400 dark:text-slate-400" aria-hidden="true" />}
-          onPress={() => {
-            setNewChatMenuOpen(false);
-            onStartNewConversation?.();
-          }}
-          data-testid="chat-new-chat-public"
-        />
-
-        {onStartPrivateConversation ? (
-          <EntityRow
-            title="Private chat"
-            surface="interactive"
-            pressable
-            start={<Lock className="h-4 w-4 text-slate-400 dark:text-slate-400" aria-hidden="true" />}
-            end={<NavArrowRight className="h-4 w-4 text-slate-400 dark:text-slate-400" aria-hidden="true" />}
-            onPress={() => {
-              setNewChatMenuOpen(false);
-              setPrivateChatPickerOpen(true);
-              setPrivateChatQuery("");
-              void loadPrivateChatTargets();
-            }}
-            data-testid="chat-new-chat-private"
-          />
-        ) : null}
-      </div>
-    </StudioDialogPopover>
-  ) : null;
-
   const desktopTabActionButtonClassName =
     `h-[48px] w-12 flex-none rounded-none border border-transparent px-0 text-slate-500 transition-colors hover:bg-slate-100/80 hover:text-slate-900 data-[hovered]:bg-slate-100/80 data-[hovered]:text-slate-900 focus-visible:ring-white/16 focus-visible:ring-offset-white dark:text-slate-300 dark:hover:text-slate-50 dark:data-[hovered]:text-slate-50 dark:focus-visible:ring-white/16 dark:focus-visible:ring-offset-[var(--color-studio-dark-rail)] [aria-expanded=true]:dark:bg-white/[0.05] ${DARK_RAIL_HOVER_CLASS}`;
   const desktopParentConversationButton = parentConversation ? (
@@ -618,32 +374,18 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
           emptyStateContent={!hasDesktopTabs ? desktopEmptyStateTab : undefined}
           tabStripActions={
             shouldShowNewChat ? (
-              <DialogTrigger isOpen={newChatMenuOpen} onOpenChange={handleNewChatMenuOpenChange}>
-                <IconButton
-                  ref={newChatTriggerRef}
-                  variant="ghost"
-                  size="sm"
-                  radius="none"
-                  aria-label="New chat"
-                  data-testid="chat-new-conversation"
-                  className={desktopTabActionButtonClassName}
-                  onPointerDown={() => {
-                    newChatInteractionModalityRef.current = "pointer";
-                  }}
-                  onKeyDown={() => {
-                    newChatInteractionModalityRef.current = "keyboard";
-                  }}
-                >
-                  <Plus className="h-[18px] w-[18px]" aria-hidden="true" />
-                </IconButton>
-                {newChatMenu}
-              </DialogTrigger>
+              <StudioNewChatButton
+                testId="chat-new-conversation"
+                size="sm"
+                radius="none"
+                className={desktopTabActionButtonClassName}
+              />
             ) : null
           }
           actions={
             hasDesktopTabs ? (
               <div className="flex items-center">
-                <>{notificationBell}<DesktopInstallTopBarAction enabled={isLargeScreen} /></>
+                {notificationBell}
                 <DialogTrigger
                   isOpen={tabMenuOpen}
                   onOpenChange={(open) => setTabMenuOpen((current) => (open && current ? false : open))}
@@ -661,9 +403,7 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
                   {tabsMenu}
                 </DialogTrigger>
               </div>
-            ) : (
-              <>{notificationBell}<DesktopInstallTopBarAction enabled={isLargeScreen} /></>
-            )
+            ) : notificationBell
           }
         />
       ) : isLargeScreen ? (
@@ -688,37 +428,6 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
               </IconButton>
             ) : null}
             {parentConversationButton}
-            {!isLargeScreen && onToggleSidebar && !sidebarOpen && showTopbarHomeShortcut ? (
-              <IconButton
-                onPress={() => {
-                  requestUrlPush();
-                  openPanelTab("home");
-                }}
-                variant="ghost"
-                radius="full"
-                size="md"
-                aria-label="Open home"
-                aria-current={homeButtonActive ? "page" : undefined}
-                data-testid="topbar-home-button"
-                className={[
-                  "relative h-10 w-10",
-                  homeButtonActive
-                    ? `bg-slate-100 text-slate-900 dark:text-slate-50 ${DARK_ACTIVE_SURFACE_CLASS}`
-                    : "bg-transparent text-slate-600 dark:text-slate-200",
-                ].join(" ")}
-              >
-                <HomeIcon className="h-5 w-5" aria-hidden="true" />
-                {homeAttentionCount > 0 ? (
-                  <span
-                    aria-hidden="true"
-                    data-testid="topbar-home-badge"
-                    className="absolute right-[1px] top-[1px] flex h-3.5 min-w-[0.875rem] items-center justify-center rounded-full bg-primary-600 px-1 text-3xs font-semibold leading-none text-white ring-2 ring-white translate-x-[16%] -translate-y-[16%] dark:bg-primary-500 dark:ring-slate-950"
-                  >
-                    {homeAttentionBadge}
-                  </span>
-                ) : null}
-              </IconButton>
-            ) : null}
             {isLargeScreen ? projectNameLabel : null}
           </div>
 
@@ -751,34 +460,15 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
             ) : null}
 
             {shouldShowNewChat ? (
-              <DialogTrigger isOpen={newChatMenuOpen} onOpenChange={handleNewChatMenuOpenChange}>
-                <IconButton
-                  ref={newChatTriggerRef}
-                  variant="ghost"
-                  radius="full"
-                  size="md"
-                  data-testid="topbar-new-conversation"
-                  aria-label="New chat"
-                  className={`h-10 w-10 rounded-full border border-transparent bg-transparent shadow-none focus-visible:ring-white/16 focus-visible:ring-offset-white dark:focus-visible:ring-white/16 dark:focus-visible:ring-offset-[var(--color-studio-dark-rail)] [aria-expanded=true]:dark:bg-white/[0.05] ${DARK_RAIL_HOVER_CLASS}`}
-                  onPointerDown={() => {
-                    newChatInteractionModalityRef.current = "pointer";
-                  }}
-                  onKeyDown={() => {
-                    newChatInteractionModalityRef.current = "keyboard";
-                  }}
-                >
-                  <Plus className="text-base" aria-hidden="true" />
-                </IconButton>
-                {newChatMenu}
-              </DialogTrigger>
+              <StudioNewChatButton />
             ) : null}
             {notificationBell}
-            <DesktopInstallTopBarAction enabled={isLargeScreen} variant="compact" />
           </div>
         </div>
       ) : (
         <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-4 py-2 max-[375px]:px-3 max-[375px]:py-1">
           <div className="flex min-w-0 items-center gap-2">
+            {/* Keep navigation reachable while the chat composer hides during scrolling. */}
             {onToggleSidebar ? (
               <IconButton
                 onPress={onToggleSidebar}
@@ -798,37 +488,6 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
               </IconButton>
             ) : null}
             {parentConversationButton}
-            {onToggleSidebar && !sidebarOpen && showTopbarHomeShortcut ? (
-              <IconButton
-                onPress={() => {
-                  requestUrlPush();
-                  openPanelTab("home");
-                }}
-                variant="ghost"
-                radius="full"
-                size="md"
-                aria-label="Open home"
-                aria-current={homeButtonActive ? "page" : undefined}
-                data-testid="topbar-home-button"
-                className={[
-                  "relative h-10 w-10",
-                  homeButtonActive
-                    ? `bg-slate-100 text-slate-900 dark:text-slate-50 ${DARK_ACTIVE_SURFACE_CLASS}`
-                    : "bg-transparent text-slate-600 dark:text-slate-200",
-                ].join(" ")}
-              >
-                <HomeIcon className="h-5 w-5" aria-hidden="true" />
-                {homeAttentionCount > 0 ? (
-                  <span
-                    aria-hidden="true"
-                    data-testid="topbar-home-badge"
-                    className="absolute right-[1px] top-[1px] flex h-3.5 min-w-[0.875rem] items-center justify-center rounded-full bg-primary-600 px-1 text-3xs font-semibold leading-none text-white ring-2 ring-white translate-x-[16%] -translate-y-[16%] dark:bg-primary-500 dark:ring-slate-950"
-                  >
-                    {homeAttentionBadge}
-                  </span>
-                ) : null}
-              </IconButton>
-            ) : null}
           </div>
 
           <div className="flex min-w-0 flex-1 justify-start">
@@ -863,136 +522,11 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
           <div className="flex items-center justify-end">
             {notificationBell}
             {shouldShowNewChat ? (
-              <DialogTrigger isOpen={newChatMenuOpen} onOpenChange={handleNewChatMenuOpenChange}>
-                <IconButton
-                  ref={newChatTriggerRef}
-                  variant="ghost"
-                  radius="full"
-                  size="md"
-                  data-testid="topbar-new-conversation"
-                  aria-label="New chat"
-                  className={`h-10 w-10 rounded-full border border-transparent bg-transparent shadow-none focus-visible:ring-white/16 focus-visible:ring-offset-white dark:focus-visible:ring-white/16 dark:focus-visible:ring-offset-[var(--color-studio-dark-rail)] [aria-expanded=true]:dark:bg-white/[0.05] ${DARK_RAIL_HOVER_CLASS}`}
-                  onPointerDown={() => {
-                    newChatInteractionModalityRef.current = "pointer";
-                  }}
-                  onKeyDown={() => {
-                    newChatInteractionModalityRef.current = "keyboard";
-                  }}
-                >
-                  <Plus className="text-base" aria-hidden="true" />
-                </IconButton>
-                {newChatMenu}
-              </DialogTrigger>
+              <StudioNewChatButton />
             ) : null}
           </div>
         </div>
       )}
-      <StudioDialogModal
-        isOpen={privateChatPickerOpen}
-        onOpenChange={(open) => {
-          setPrivateChatPickerOpen(open);
-          if (!open) {
-            setPrivateChatQuery("");
-          }
-        }}
-        isDismissable
-        dialogAriaLabel="Start private chat"
-        data-testid="chat-private-chat-modal"
-        modalClassName="max-h-[min(90dvh,42rem)] max-w-xl overflow-hidden p-0"
-      >
-        <div className="flex max-h-[min(90dvh,42rem)] flex-col">
-          <StudioDialogHeader
-            title="Private chat"
-            description="Choose one teammate to start a private conversation."
-            descriptionClassName="mt-1 text-sm"
-            onClose={() => {
-              setPrivateChatPickerOpen(false);
-              setPrivateChatQuery("");
-            }}
-            closeLabel="Close private chat picker"
-            className="px-4 py-3"
-          />
-
-          <div className="flex-1 overflow-y-auto px-4 pb-4 pt-3">
-            <SearchInput
-              id="private-chat-target-search"
-              label="Search teammates"
-              value={privateChatQuery}
-              onChange={(event) => setPrivateChatQuery(event.target.value)}
-              placeholder="Search teammates…"
-              autoFocus
-              data-testid="chat-private-chat-search"
-            />
-
-            {privateChatTargetsLoading ? (
-              <div className="mt-4 flex items-center gap-2 text-sm text-slate-500 dark:text-slate-300">
-                <Spinner aria-hidden="true" size="xs" />
-                Loading teammates…
-              </div>
-            ) : privateChatTargets.length === 0 ? (
-              <div className="mt-4 space-y-3">
-                <Text as="p" variant="caption" tone="muted" className="text-sm leading-relaxed">
-                  Invite a teammate to unlock private chats in this space.
-                </Text>
-                {onOpenProjectSettings ? (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    radius="full"
-                    onPress={() => {
-                      setPrivateChatPickerOpen(false);
-                      setPrivateChatQuery("");
-                      onOpenProjectSettings();
-                    }}
-                  >
-                    Invite teammate
-                  </Button>
-                ) : null}
-              </div>
-            ) : filteredPrivateChatTargets.length === 0 ? (
-              <div className="mt-4 space-y-3">
-                <Text as="p" variant="caption" tone="muted" className="text-sm leading-relaxed">
-                  No teammates match that search.
-                </Text>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  radius="full"
-                  className="justify-start"
-                  onPress={() => setPrivateChatQuery("")}
-                >
-                  Clear search
-                </Button>
-              </div>
-            ) : (
-              <div className="mt-4 space-y-2" data-testid="chat-private-chat-list">
-                {filteredPrivateChatTargets.map((member) => {
-                  const userId = typeof member.userId === "string" ? member.userId.trim() : "";
-                  if (!userId) {
-                    return null;
-                  }
-                  const displayName = resolvePrivateChatDisplayName(member);
-                  return (
-                    <EntityRow
-                      key={userId}
-                      title={displayName}
-                      subtitle={resolvePrivateChatSubtitle(member) ?? undefined}
-                      surface="interactive"
-                      pressable
-                      onPress={() => {
-                        setPrivateChatPickerOpen(false);
-                        setPrivateChatQuery("");
-                        onStartPrivateConversation?.({ userId, displayName });
-                      }}
-                      data-testid={`chat-private-chat-target-${userId}`}
-                    />
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-      </StudioDialogModal>
     </header>
   );
 }
