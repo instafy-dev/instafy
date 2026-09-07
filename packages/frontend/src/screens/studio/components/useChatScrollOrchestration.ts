@@ -462,8 +462,15 @@ export function useChatScrollController({
 
   useLayoutEffect(() => {
     const previous = latestMessageRef.current;
-    const isArrivalMessage = (message: ChatMessage) => shouldDisplayChatMessage(message) &&
-      (!isTimelineMessage(message) || Boolean(message.files?.length));
+    const isArrivalMessage = (message: ChatMessage) => {
+      // buildParentConversationThreadMessage previews are appended after the
+      // chronological parent messages. Their stable tail must not mask a new
+      // parent reply inserted before them (including the run-thread form).
+      const isStandaloneThreadPreview = message.id.startsWith("conversation-thread-preview:") ||
+        message.id.startsWith("conversation-thread-run-thread:");
+      return !isStandaloneThreadPreview && shouldDisplayChatMessage(message) &&
+        (!isTimelineMessage(message) || Boolean(message.files?.length));
+    };
     // Activity rows can follow an assistant response while it is still
     // streaming. Track the last displayed message so hidden/activity rows
     // neither mask its new text nor create a notice themselves. Visible

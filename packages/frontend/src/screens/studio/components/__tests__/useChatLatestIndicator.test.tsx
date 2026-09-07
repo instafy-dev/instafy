@@ -25,6 +25,7 @@ type HarnessProps = {
   historyLoading?: boolean;
   loadOlderMessages?: () => Promise<unknown>;
   clientHeight?: number;
+  trailingPreview?: ChatMessage;
 };
 
 // Both real hooks see the same geometry as the DOM. A real scroll event is
@@ -36,10 +37,11 @@ function Harness({
   historyLoading = false,
   loadOlderMessages,
   clientHeight = VIEWPORT_HEIGHT,
+  trailingPreview,
 }: HarnessProps) {
   const displayedMessages = useMemo(
-    () => collapseLifecycleMessages(messages).filter(shouldDisplayChatMessage),
-    [messages],
+    () => [...collapseLifecycleMessages(messages).filter(shouldDisplayChatMessage), ...(trailingPreview ? [trailingPreview] : [])],
+    [messages, trailingPreview],
   );
   const metrics = useRef({ scrollHeight: displayedMessages.length * ROW_HEIGHT, clientHeight });
   metrics.current = { scrollHeight: displayedMessages.length * ROW_HEIGHT, clientHeight };
@@ -256,6 +258,32 @@ describe("chat latest-message indicator", () => {
     await render({ conversationId, messages: [...messages, setup] });
     expect(container.querySelector('[data-chat-scroll-message-id="setup"]')).toBeNull();
     expect(indicator()).toBe("Jump to latest");
+  });
+
+  it.each([
+    { id: "conversation-thread-preview:child", messageType: "conversation_thread" },
+    { id: "conversation-thread-run-thread:child", messageType: "agent_job_thread" },
+  ])("keeps parent arrivals and streaming visible with a trailing $messageType preview", async ({ id, messageType }) => {
+    const conversationId = scope();
+    const messages = history(conversationId);
+    const trailingPreview: ChatMessage = {
+      ...message(id, "", 0), messageType,
+      metadata: { threadLocalId: "child", linkedThreadId: "child" },
+    };
+    await render({ conversationId, messages, trailingPreview });
+    await scroll(430);
+    const anchor = visibleAnchor();
+    const reply = message("new-parent-reply", "New reply", 20);
+    await render({ conversationId, messages: [...messages, reply], trailingPreview });
+    expect(container.querySelectorAll("[data-chat-scroll-message-id]").item(13).getAttribute("data-chat-scroll-message-id")).toBe(id);
+    expect(visibleAnchor()).toEqual(anchor);
+    expect(indicator()).toBe("New messages");
+    await click("jump");
+    await scroll(430);
+    expect(indicator()).toBe("Jump to latest");
+    await render({ conversationId, messages: [...messages, { ...reply, content: `${reply.content} continues streaming` }], trailingPreview });
+    expect(visibleAnchor()).toEqual(anchor);
+    expect(indicator()).toBe("New messages");
   });
 
   it.each([
