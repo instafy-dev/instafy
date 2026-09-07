@@ -1,7 +1,7 @@
-import { useMemo, useRef, type ComponentType, type ReactNode } from "react";
-import { NavArrowDown } from "iconoir-react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type FocusEvent, type ReactNode } from "react";
 import { MenuTrigger } from "react-aria-components";
-import { Card } from "../../../components/Card";
+import { ControlChevron } from "../../../components/ControlChevron";
+import { pickerListRowTextClassName } from "../../../components/listRowStyles";
 import { EntityRow } from "../../../components/EntityRow";
 import { Heading } from "../../../components/Heading";
 import { Text } from "../../../components/Text";
@@ -61,6 +61,32 @@ export function SettingsShell({
   navTestId = "settings-category-nav",
 }: SettingsShellProps) {
   const isLargeScreen = useStudioDesktopLayout();
+  const shellRef = useRef<HTMLDivElement | null>(null);
+  const [hasWideContainer, setHasWideContainer] = useState(false);
+  const navigationFocusRef = useRef<HTMLElement | null>(null);
+  const wideContainerRef = useRef(false);
+  const useSideNavigation = isLargeScreen && hasWideContainer;
+
+  useLayoutEffect(() => {
+    const shell = shellRef.current;
+    if (!shell) return;
+    const syncWidth = () => {
+      // Reserve enough room for useful form fields beside the category list.
+      // The viewport alone does not account for Studio's open side panels.
+      const wide = shell.getBoundingClientRect().width >= 768;
+      if (wide === wideContainerRef.current) return;
+      wideContainerRef.current = wide;
+      setHasWideContainer(wide);
+    };
+    syncWidth();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", syncWidth);
+      return () => window.removeEventListener("resize", syncWidth);
+    }
+    const observer = new ResizeObserver(syncWidth);
+    observer.observe(shell);
+    return () => observer.disconnect();
+  }, []);
   const hasCategories = Boolean(categories && categories.length > 0 && activeCategoryId && onCategoryChange);
   const showTitle = !hideTitle && (titleVisibility === "always" || isLargeScreen);
   const subtitleAllowed = subtitleVisibility === "always" || isLargeScreen;
@@ -75,13 +101,36 @@ export function SettingsShell({
   const showHeader = showTitle || showSubtitle || showScope || Boolean(actions);
   const mobileCategoryTriggerRef = useRef<HTMLButtonElement | null>(null);
   const mobileChildTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const handleNavigationFocus = useCallback((event: FocusEvent<HTMLElement>) => {
+    navigationFocusRef.current = event.target;
+  }, []);
+  const handleNavigationBlur = useCallback((event: FocusEvent<HTMLElement>) => {
+    // A user leaving navigation must not be pulled back by a later resize.
+    // Removal during a presentation change is handled by the layout effect.
+    if (event.target.isConnected) navigationFocusRef.current = null;
+  }, []);
+
+  useLayoutEffect(() => {
+    const previousFocus = navigationFocusRef.current;
+    if (!previousFocus || previousFocus.isConnected) return;
+    navigationFocusRef.current = null;
+    if (document.activeElement && document.activeElement !== document.body) return;
+    if (useSideNavigation) {
+      const navigation = shellRef.current?.querySelector("[data-settings-navigation]");
+      const selectedPage = navigation?.querySelector<HTMLButtonElement>('[aria-current="page"]:not(:disabled)');
+      const selectedLocation = navigation?.querySelector<HTMLButtonElement>('[aria-current="location"]:not(:disabled)');
+      (selectedPage ?? selectedLocation)?.focus();
+    } else {
+      (mobileChildTriggerRef.current ?? mobileCategoryTriggerRef.current)?.focus();
+    }
+  }, [useSideNavigation]);
 
   const desktopNavContent = useMemo(() => {
     if (!hasCategories || !categories) {
       return null;
     }
     return (
-      <div className="space-y-2.5">
+      <div className="space-y-1">
         {categories.map((category) => {
           const active = category.id === activeCategoryId;
           const Icon = category.icon;
@@ -94,6 +143,10 @@ export function SettingsShell({
                 pressable
                 isDisabled={category.disabled}
                 data-testid={category.testId ?? `settings-category-${category.id}`}
+                aria-current={active ? (category.children?.length ? "location" : "page") : undefined}
+                titleClassName={category.danger
+                  ? "!text-rose-600 dark:!text-rose-400"
+                  : pickerListRowTextClassName(active)}
                 surface={active ? "selected" : "interactive"}
                 density="compact"
                 className={[
@@ -109,13 +162,7 @@ export function SettingsShell({
                   .join(" ")}
               />
               {active && category.children && category.children.length > 0 && onChildCategoryChange ? (
-                <Card
-                  tone="muted"
-                  radius="xl"
-                  shadow="none"
-                  padding="sm"
-                  className="ml-3 space-y-1 p-1.5 dark:border-slate-800/90 dark:bg-slate-900/60"
-                >
+                <div className="ml-3 space-y-1">
                   {category.children.map((child) => (
                     <EntityRow
                       key={`${category.id}:${child.id}`}
@@ -124,6 +171,8 @@ export function SettingsShell({
                       pressable
                       isDisabled={child.disabled}
                       data-testid={child.testId ?? `settings-category-${category.id}-${child.id}`}
+                      aria-current={child.id === activeChildCategoryId ? "page" : undefined}
+                      titleClassName={pickerListRowTextClassName(child.id === activeChildCategoryId)}
                       surface={child.id === activeChildCategoryId ? "selected" : "interactive"}
                       density="compact"
                       className={[
@@ -136,7 +185,7 @@ export function SettingsShell({
                         .join(" ")}
                     />
                   ))}
-                </Card>
+                </div>
               ) : null}
             </div>
           );
@@ -146,7 +195,7 @@ export function SettingsShell({
   }, [activeCategoryId, activeChildCategoryId, categories, hasCategories, onCategoryChange, onChildCategoryChange]);
 
   const mobileNavContent = useMemo(() => {
-    if (!hasCategories || !categories || isLargeScreen) {
+    if (!hasCategories || !categories || useSideNavigation) {
       return null;
     }
     const activeCategory = categories.find((category) => category.id === activeCategoryId) ?? categories[0] ?? null;
@@ -163,7 +212,7 @@ export function SettingsShell({
               <activeCategory.icon className="h-4 w-4 text-slate-400 dark:text-slate-500" aria-hidden={true} />
             ) : null
           }
-          end={<NavArrowDown className="h-4 w-4 text-slate-400 dark:text-slate-500" aria-hidden="true" />}
+          end={<ControlChevron />}
           pressable
           isDisabled={categories.every((category) => category.disabled)}
           data-testid={`${navTestId}-picker`}
@@ -208,14 +257,14 @@ export function SettingsShell({
     activeCategoryId,
     categories,
     hasCategories,
-    isLargeScreen,
+    useSideNavigation,
     navLabel,
     navTestId,
     onCategoryChange,
   ]);
 
   const mobileChildNavContent = useMemo(() => {
-    if (!hasCategories || !categories || isLargeScreen || !activeCategoryId || !onChildCategoryChange) {
+    if (!hasCategories || !categories || useSideNavigation || !activeCategoryId || !onChildCategoryChange) {
       return null;
     }
     const activeCategory = categories.find((category) => category.id === activeCategoryId) ?? null;
@@ -234,7 +283,7 @@ export function SettingsShell({
         <EntityRow
           ref={mobileChildTriggerRef}
           title={activeChildCategory.label}
-          end={<NavArrowDown className="h-4 w-4 text-slate-400 dark:text-slate-500" aria-hidden="true" />}
+          end={<ControlChevron />}
           pressable
           isDisabled={activeCategory.children.every((child) => child.disabled)}
           data-testid={`${navTestId}-child-picker`}
@@ -274,7 +323,7 @@ export function SettingsShell({
     activeChildCategoryId,
     categories,
     hasCategories,
-    isLargeScreen,
+    useSideNavigation,
     navTestId,
     onChildCategoryChange,
   ]);
@@ -284,26 +333,21 @@ export function SettingsShell({
       return null;
     }
     return (
-      <Card
-        tone="subtle"
-        radius="2xl"
-        shadow="none"
-        padding="sm"
-        className="space-y-2 p-2 dark:border-slate-800/90 dark:bg-slate-950/85"
-      >
+      <nav aria-label={`${title} ${navLabel.toLowerCase()}`} data-settings-navigation className="space-y-2" onFocusCapture={handleNavigationFocus} onBlurCapture={handleNavigationBlur}>
         {mobileNavContent}
         {mobileChildNavContent}
-      </Card>
+      </nav>
     );
-  }, [mobileChildNavContent, mobileNavContent]);
+  }, [handleNavigationBlur, handleNavigationFocus, mobileChildNavContent, mobileNavContent, navLabel, title]);
 
   return (
     <div
+      ref={shellRef}
       className={[
         // One horizontal inset per breakpoint: the large-screen gutter must
         // not compete with sm:px-4 (an unprefixed px-6 always lost to it).
         "relative mx-auto w-full max-w-6xl space-y-3 px-3 py-3 sm:space-y-4",
-        isLargeScreen ? "sm:px-6" : "sm:px-4",
+        hasWideContainer ? "sm:px-6" : "sm:px-4",
         className,
       ]
         .filter(Boolean)
@@ -342,29 +386,18 @@ export function SettingsShell({
       {mobileNavGroup}
 
       {hasCategories && desktopNavContent ? (
-        <div className={["grid gap-4", isLargeScreen ? "grid-cols-[14rem_minmax(0,1fr)]" : ""].join(" ")}>
-          {isLargeScreen ? (
-            <div className="block">
-              <Card
-                tone="subtle"
-                radius="2xl"
-                shadow="none"
-                padding="sm"
-                className="sticky top-4 border-slate-200/70 bg-white/95 backdrop-blur-sm dark:border-slate-800/90 dark:bg-slate-950/85"
-              >
-                <Text as="p" variant="overline" tone="muted" className="px-1">
-                  {navLabel}
-                </Text>
-                <div className="mt-2" data-testid={navTestId}>
-                  {desktopNavContent}
-                </div>
-              </Card>
-            </div>
+        <div className={["grid gap-4", useSideNavigation ? "grid-cols-[12rem_minmax(0,1fr)]" : ""].join(" ")}>
+          {useSideNavigation ? (
+            <nav aria-label={`${title} ${navLabel.toLowerCase()}`} data-settings-navigation onFocusCapture={handleNavigationFocus} onBlurCapture={handleNavigationBlur}>
+              <div className="sticky top-4" data-testid={navTestId}>
+                {desktopNavContent}
+              </div>
+            </nav>
           ) : null}
-          <div className="min-w-0 space-y-4">{children}</div>
+          <div className="@container/settings-content min-w-0 space-y-4">{children}</div>
         </div>
       ) : (
-        <div className="min-w-0 space-y-4">{children}</div>
+        <div className="@container/settings-content min-w-0 space-y-4">{children}</div>
       )}
     </div>
   );

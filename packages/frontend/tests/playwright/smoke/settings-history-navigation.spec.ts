@@ -16,11 +16,22 @@ async function openOrgSettings(page: Page) {
 }
 
 async function openProjectSettings(page: Page) {
+  if (!(await page.getByTestId("sidebar-project-button").isVisible())) {
+    await page.getByTestId("topbar-sidebar-toggle").click();
+  }
   await page.getByTestId("sidebar-project-button").click();
   await expect(page.getByTestId("sidebar-project-switcher-menu")).toBeVisible();
   await page.getByTestId("sidebar-project-settings").click();
   await expect(page.getByTestId("settings-panel")).toBeVisible();
   await expect(page.getByTestId("project-settings-section")).toBeVisible();
+}
+
+async function selectProjectCategory(page: Page, category: string) {
+  const picker = page.getByTestId("settings-category-nav-picker");
+  if (await picker.isVisible()) {
+    await picker.click();
+  }
+  await page.getByTestId(`settings-category-project-${category}`).click();
 }
 
 async function openProfileSettings(page: Page) {
@@ -89,4 +100,41 @@ test.describe("Settings browser history", () => {
       .poll(async () => await page.evaluate(() => window.localStorage.getItem("instafy.git.autoSyncAfterApply")))
       .toBe("1");
   });
+
+  for (const width of [1280, 390]) {
+    test(`project categories return to Overview and restore deep links at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await openProjectSettings(page);
+
+      // All named destinations must be able to return to the omitted/default
+      // category. Previously an optimistic state update re-applied the old URL
+      // before navigation settled, and the missing param never corrected it.
+      for (const category of ["danger", "access", "providers"]) {
+        await selectProjectCategory(page, category);
+        await expect(page).toHaveURL(new RegExp(`settingsCategory=${category}`));
+        if (category === "danger") {
+          await expect(page.getByTestId("settings-danger-zone")).toBeVisible();
+        }
+        await selectProjectCategory(page, "overview");
+        await expect(page).not.toHaveURL(/settingsCategory=/);
+        await expect(page.getByTestId("project-settings-name-input")).toBeVisible();
+        await expect(page.getByTestId("settings-danger-zone")).toHaveCount(0);
+      }
+
+      await selectProjectCategory(page, "providers");
+      await expect(page).toHaveURL(/settingsCategory=providers/);
+      const providersUrl = page.url();
+      await page.reload();
+      await expect(page.getByTestId("project-providers-section")).toBeVisible();
+
+      await selectProjectCategory(page, "overview");
+      await expect(page.getByTestId("project-settings-name-input")).toBeVisible();
+      const overviewUrl = page.url();
+      await page.goto(providersUrl);
+      await expect(page.getByTestId("project-providers-section")).toBeVisible();
+      await page.goBack();
+      await expect(page).toHaveURL(overviewUrl);
+      await expect(page.getByTestId("project-settings-name-input")).toBeVisible();
+    });
+  }
 });
