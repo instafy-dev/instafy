@@ -219,6 +219,94 @@ pub(super) enum ClientMessage {
     },
 }
 
+fn parse_client_message(text: &str) -> Result<ClientMessage, serde_json::Error> {
+    #[derive(Deserialize)]
+    struct MessageTag {
+        #[serde(rename = "type")]
+        kind: String,
+    }
+
+    // With arbitrary_precision enabled, serde's internally tagged enum buffers
+    // fractional numbers as its private number representation. Deserializing
+    // that buffered value directly into f64 then fails. Select only the tag,
+    // and parse float-bearing variants from the original bounded JSON string.
+    // Strict structs preserve numeric token types, duplicate/unknown-field
+    // rejection and integer widths without accepting number-like JSON maps.
+    match serde_json::from_str::<MessageTag>(text)?.kind.as_str() {
+        "resize" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct ResizeInput {
+                #[serde(rename = "type")]
+                _message_type: String,
+                width: u32,
+                height: u32,
+                dpr: f64,
+            }
+            let input: ResizeInput = serde_json::from_str(text)?;
+            Ok(ClientMessage::Resize {
+                width: input.width,
+                height: input.height,
+                dpr: input.dpr,
+            })
+        }
+        "mouse" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct MouseInput {
+                #[serde(rename = "type")]
+                _message_type: String,
+                kind: MouseEventKind,
+                x: f64,
+                y: f64,
+                #[serde(default = "default_mouse_button")]
+                button: MouseButton,
+                #[serde(default)]
+                modifiers: u8,
+                #[serde(default)]
+                buttons: u8,
+                #[serde(default = "default_click_count", rename = "clickCount")]
+                click_count: u8,
+            }
+            let input: MouseInput = serde_json::from_str(text)?;
+            Ok(ClientMessage::Mouse {
+                kind: input.kind,
+                x: input.x,
+                y: input.y,
+                button: input.button,
+                modifiers: input.modifiers,
+                buttons: input.buttons,
+                click_count: input.click_count,
+            })
+        }
+        "wheel" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct WheelInput {
+                #[serde(rename = "type")]
+                _message_type: String,
+                x: f64,
+                y: f64,
+                #[serde(rename = "deltaX")]
+                delta_x: f64,
+                #[serde(rename = "deltaY")]
+                delta_y: f64,
+                #[serde(default)]
+                modifiers: u8,
+            }
+            let input: WheelInput = serde_json::from_str(text)?;
+            Ok(ClientMessage::Wheel {
+                x: input.x,
+                y: input.y,
+                delta_x: input.delta_x,
+                delta_y: input.delta_y,
+                modifiers: input.modifiers,
+            })
+        }
+        _ => serde_json::from_str(text),
+    }
+}
+
 impl ClientMessage {
     pub fn parse(text: &str) -> Result<Self, OriginError> {
         if text.len() > CLIENT_MESSAGE_MAX_BYTES {
@@ -226,7 +314,7 @@ impl ClientMessage {
                 "screencast input message is too large",
             ));
         }
-        serde_json::from_str(text)
+        parse_client_message(text)
             .map_err(|_| OriginError::bad_request("invalid screencast input message"))
     }
 
@@ -513,6 +601,137 @@ mod tests {
             r#"{"type":"mouse","kind":"mousePressed","x":40,"y":20,"button":"left","extra":"no"}"#,
         )
         .is_err());
+    }
+
+    #[test]
+    fn browser_input_fractional_numbers_reach_the_allowlisted_commands() {
+        let viewport = Viewport::new(390, 512, 1.0).expect("viewport");
+        for (kind, buttons) in [("mousePressed", 1), ("mouseReleased", 0)] {
+            let packet = format!(
+                r#"{{"type":"mouse","kind":"{kind}","x":70.3984375,"y":310,"button":"left","buttons":{buttons},"modifiers":0,"clickCount":1}}"#
+            );
+            let mouse = ClientMessage::parse(&packet).expect("real fractional phone pointer");
+            let (method, params) = mouse
+                .to_cdp_command(viewport)
+                .expect("valid fractional pointer")
+                .expect("mouse command");
+            assert_eq!(method, "Input.dispatchMouseEvent");
+            assert_eq!(params["x"].as_f64(), Some(70.3984375));
+            assert_eq!(params["y"].as_f64(), Some(310.0));
+            assert_eq!(params["type"], kind);
+            assert_eq!(params["buttons"], buttons);
+        }
+
+        let moved = ClientMessage::parse(
+            r#"{"kind":"mouseMoved","x":7.03984375e1,"y":310.125,"type":"mouse"}"#,
+        )
+        .expect("fractional movement with a trailing tag");
+        let (_, params) = moved
+            .to_cdp_command(viewport)
+            .expect("valid movement")
+            .expect("movement command");
+        assert_eq!(params["x"].as_f64(), Some(70.3984375));
+        assert_eq!(params["y"].as_f64(), Some(310.125));
+        assert_eq!(params["button"], "none");
+        assert_eq!(params["clickCount"], 1);
+    }
+
+    #[test]
+    fn browser_input_fractional_wheel_and_dpr_preserve_their_values() {
+        let viewport = Viewport::new(390, 512, 1.0).expect("viewport");
+        let wheel = ClientMessage::parse(
+            r#"{"type":"wheel","x":70.3984375,"y":310.125,"deltaX":-0.75,"deltaY":1.025e1}"#,
+        )
+        .expect("fractional touch scroll");
+        let (method, params) = wheel
+            .to_cdp_command(viewport)
+            .expect("valid wheel")
+            .expect("wheel command");
+        assert_eq!(method, "Input.dispatchMouseEvent");
+        assert_eq!(params["x"].as_f64(), Some(70.3984375));
+        assert_eq!(params["y"].as_f64(), Some(310.125));
+        assert_eq!(params["deltaX"].as_f64(), Some(-0.75));
+        assert_eq!(params["deltaY"].as_f64(), Some(10.25));
+        assert_eq!(params["modifiers"], 0);
+
+        let resize =
+            ClientMessage::parse(r#"{"width":390,"height":512,"dpr":1.25,"type":"resize"}"#)
+                .expect("fractional device pixel ratio");
+        assert_eq!(resize.viewport().expect("valid resize").unwrap().dpr, 1.25);
+        let (method, params) = resize
+            .to_cdp_command(viewport)
+            .expect("valid resize command")
+            .expect("resize command");
+        assert_eq!(method, "Emulation.setDeviceMetricsOverride");
+        assert_eq!(params["deviceScaleFactor"].as_f64(), Some(1.25));
+    }
+
+    #[test]
+    fn browser_input_float_fields_require_real_finite_json_numbers() {
+        for invalid in [
+            r#""1.25""#,
+            "null",
+            "true",
+            "[]",
+            "{}",
+            r#"{"value":1.25}"#,
+            r#"{"$serde_json::private::Number":"1.25"}"#,
+            "1e400",
+            "-1e400",
+            "NaN",
+            "Infinity",
+        ] {
+            for packet in [
+                format!(r#"{{"type":"mouse","kind":"mousePressed","x":{invalid},"y":20}}"#),
+                format!(r#"{{"type":"mouse","kind":"mouseReleased","x":20,"y":{invalid}}}"#),
+                format!(r#"{{"type":"wheel","x":{invalid},"y":20,"deltaX":0,"deltaY":1}}"#),
+                format!(r#"{{"type":"wheel","x":20,"y":{invalid},"deltaX":0,"deltaY":1}}"#),
+                format!(r#"{{"type":"wheel","x":20,"y":20,"deltaX":{invalid},"deltaY":1}}"#),
+                format!(r#"{{"type":"wheel","x":20,"y":20,"deltaX":0,"deltaY":{invalid}}}"#),
+                format!(r#"{{"type":"resize","width":390,"height":512,"dpr":{invalid}}}"#),
+            ] {
+                assert!(ClientMessage::parse(&packet).is_err(), "accepted {packet}");
+            }
+        }
+    }
+
+    #[test]
+    fn browser_input_float_variants_keep_strict_fields_integer_types_and_bounds() {
+        for packet in [
+            r#"{"type":"mouse","type":"mouse","kind":"mousePressed","x":1.5,"y":2}"#,
+            r#"{"type":"mouse","kind":"mousePressed","x":1.5,"x":1.5,"y":2}"#,
+            r#"{"type":"mouse","kind":"mousePressed","x":1.5,"y":2,"deltaX":0}"#,
+            r#"{"type":"wheel","x":1.5,"y":2,"deltaX":0,"deltaY":1,"button":"left"}"#,
+            r#"{"type":"resize","width":390,"height":512,"dpr":1.25,"x":0}"#,
+            r#"{"type":"mouse","kind":"mousePressed","x":1.5,"y":2,"buttons":1.5}"#,
+            r#"{"type":"mouse","kind":"mousePressed","x":1.5,"y":2,"buttons":256}"#,
+            r#"{"type":"mouse","kind":"mousePressed","x":1.5,"y":2,"clickCount":1.5}"#,
+            r#"{"type":"mouse","kind":"mousePressed","x":1.5,"y":2,"modifiers":-1}"#,
+            r#"{"type":"resize","width":390.5,"height":512,"dpr":1.25}"#,
+            r#"{"type":"resize","width":390,"height":512.5,"dpr":1.25}"#,
+        ] {
+            assert!(ClientMessage::parse(packet).is_err(), "accepted {packet}");
+        }
+
+        let viewport = Viewport::new(390, 512, 1.0).expect("viewport");
+        for packet in [
+            r#"{"type":"mouse","kind":"mousePressed","x":-0.5,"y":2}"#,
+            r#"{"type":"mouse","kind":"mousePressed","x":391.5,"y":2}"#,
+            r#"{"type":"mouse","kind":"mousePressed","x":1.5,"y":513.5}"#,
+            r#"{"type":"mouse","kind":"mousePressed","x":1.5,"y":2,"buttons":32}"#,
+            r#"{"type":"mouse","kind":"mousePressed","x":1.5,"y":2,"modifiers":16}"#,
+            r#"{"type":"mouse","kind":"mousePressed","x":1.5,"y":2,"clickCount":0}"#,
+            r#"{"type":"wheel","x":1.5,"y":2,"deltaX":4096.5,"deltaY":0}"#,
+            r#"{"type":"wheel","x":1.5,"y":2,"deltaX":0,"deltaY":-4096.5}"#,
+            r#"{"type":"resize","width":390,"height":512,"dpr":0.499}"#,
+            r#"{"type":"resize","width":390,"height":512,"dpr":3.001}"#,
+        ] {
+            let message = ClientMessage::parse(packet).expect("valid numeric syntax");
+            assert!(
+                message.to_cdp_command(viewport).is_err(),
+                "accepted {packet}"
+            );
+        }
     }
 
     #[test]

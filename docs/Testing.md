@@ -200,6 +200,11 @@ remote canvas cannot edit a previously focused local draft, and that disabled
 input authority forwards no text. Its message sink is simulated; it does not
 prove every operating-system IME or noncancelable composition event sequence.
 
+Origin protocol unit tests also preserve fractional pointer coordinates, wheel
+deltas, and device pixel ratios with the runtime's actual JSON parser features.
+They retain strict field/type checks and the existing finite-value and viewport
+bounds; successful integer-coordinate clicks alone are insufficient coverage.
+
 The required **Browser UI rendering** job also runs the real co-browsing tool
 fixture before the UI lane. Run it locally with:
 
