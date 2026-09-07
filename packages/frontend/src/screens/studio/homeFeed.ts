@@ -1,6 +1,6 @@
 import { getOrgDisambiguator, getOrgDisplayName, isPersonalOrgName } from "../../org/orgNaming";
 import type { ConversationState } from "../../conversations/ConversationsProvider";
-import type { HomeAttentionEntry } from "./homeAttention";
+import { homeFailureStatusLabel, type HomeAttentionEntry, type HomeFailureStatusLabel } from "./homeAttention";
 import type { ActivityItem } from "../../services/runtimeController/activity";
 
 /**
@@ -38,6 +38,8 @@ export interface HomeFeedEvent {
   kind: HomeFeedKind;
   title: string;
   preview: string | null;
+  /** Short failure summary derived from structured message/event data. */
+  statusLabel?: HomeFailureStatusLabel;
   /** Epoch ms; null when the source has no usable timestamp. */
   at: number | null;
   project: { id: string; name: string };
@@ -251,6 +253,8 @@ function kindForActivity(item: ActivityItem): HomeFeedKind | null {
     case "run.finished":
       return "run_finished";
     case "run.failed":
+    case "automation.failed":
+    case "credit.exhausted":
       return "run_failed";
     default:
       return null;
@@ -271,6 +275,20 @@ function actorForActivity(item: ActivityItem): HomeFeedActor | null {
 function activityEventId(item: ActivityItem): number | null {
   const parsed = Number(item.id);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function runKeyForActivity(item: ActivityItem): string | null {
+  return item.run?.id ? `${item.project?.id ?? ""}:${item.run.id.trim().toLowerCase()}` : null;
+}
+
+function isTerminalRunActivity(item: ActivityItem): boolean {
+  return item.kind === "run.finished" || item.kind === "run.failed" ||
+    item.kind === "automation.failed" || item.kind === "credit.exhausted" ||
+    ["succeeded", "failed", "canceled", "cancelled", "completed"].includes(item.run?.status ?? "");
+}
+
+function isLiveKind(kind: HomeFeedKind): boolean {
+  return kind === "running" || kind === "queued";
 }
 
 // Work in flight sits at the top of Recent as a live group: running before
@@ -353,9 +371,10 @@ export function buildHomeFeed({
       return {
         key: entry.key,
         lane: "needs",
-        kind: entry.kind,
+        kind: entry.statusLabel || homeFailureStatusLabel(item.lastMessageType) ? "run_failed" : entry.kind,
         title: entry.title,
         preview: entry.preview,
+        statusLabel: entry.statusLabel ?? homeFailureStatusLabel(item.lastMessageType),
         at: parseTimestamp(item.lastMessageAt),
         project: { id: item.projectId, name: getSpaceLabel(item.projectName) },
         team: { key: teamKey, name: teamNameFor(teamKey, getOrgDisplayName(item.orgName ?? null)) },
@@ -374,9 +393,10 @@ export function buildHomeFeed({
     return {
       key: entry.key,
       lane: "needs",
-      kind: entry.kind,
+      kind: entry.statusLabel ? "run_failed" : entry.kind,
       title: entry.title,
       preview: entry.preview,
+      statusLabel: entry.statusLabel,
       at: local ? conversationTimestamp(local) : null,
       project: { id: activeProject?.id ?? "", name: getSpaceLabel(activeProject?.name) },
       team: { key: teamKey, name: teamNameFor(teamKey, "Personal") },
@@ -387,19 +407,20 @@ export function buildHomeFeed({
       source: { type: "conversation", localConversationId: entry.localConversationId, entry },
     };
   });
-  const needsAll: HomeFeedEvent[] = attentionAll
-    .filter((event) => event.kind === "reply")
-    .sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
   const localLive: HomeFeedEvent[] = attentionAll
-    .filter((event) => event.kind !== "reply")
+    .filter((event) => isLiveKind(event.kind))
     .map((event) => ({ ...event, lane: "activity" as const }));
+
+  // Incremental polling leaves old started rows in the cache. A terminal row
+  // invalidates only its own run, even when another run in the chat is live.
+  const terminalRunKeys = new Set(ledger.filter(isTerminalRunActivity).map(runKeyForActivity).filter(Boolean));
 
   // Ledger rows from the controller: replies, new conversations and run
   // lifecycle across every team. Unknown kinds are skipped, not shown raw.
   const serverEvents: HomeFeedEvent[] = ledger.flatMap((item): HomeFeedEvent[] => {
     const projectId = item.project?.id ?? "";
     const kind = kindForActivity(item);
-    if (!projectId || !kind) {
+    if (!projectId || !kind || (kind === "running" && terminalRunKeys.has(runKeyForActivity(item)))) {
       return [];
     }
     rememberTeam(item.org?.id ?? null, item.org?.name ?? null);
@@ -411,6 +432,7 @@ export function buildHomeFeed({
         kind,
         title: item.title ?? (kind === "conversation" ? "New conversation" : "Conversation"),
         preview: item.preview,
+        statusLabel: kind === "run_failed" ? homeFailureStatusLabel(item.kind, item.data) : undefined,
         at: parseTimestamp(item.at),
         project: { id: projectId, name: getSpaceLabel(item.project?.name) },
         team: { key: teamKey, name: teamNameFor(teamKey, getOrgDisplayName(item.org?.name ?? null)) },
@@ -422,6 +444,35 @@ export function buildHomeFeed({
       },
     ];
   });
+  const newestServerEventByConversation = new Map<string, HomeFeedEvent>();
+  for (const event of serverEvents) {
+    const key = dedupeKeyFor(event);
+    const current = newestServerEventByConversation.get(key);
+    const eventId = event.source.type === "activity" ? activityEventId(event.source.item) ?? 0 : 0;
+    const currentId = current?.source.type === "activity" ? activityEventId(current.source.item) ?? 0 : 0;
+    if (!current || (event.at ?? 0) > (current.at ?? 0) || (event.at === current.at && eventId > currentId)) {
+      newestServerEventByConversation.set(key, event);
+    }
+  }
+  const needsAll: HomeFeedEvent[] = attentionAll
+    .filter((event) => !isLiveKind(event.kind))
+    .map((event) => {
+      const latest = newestServerEventByConversation.get(canonicalKey(event));
+      // Preserve the unread source: opening/marking read still acknowledges the
+      // inbox or local conversation. An older failure must not relabel a reply.
+      if (latest?.kind === "run_failed" && latest.at !== null && event.at !== null && latest.at >= event.at) {
+        return {
+          ...event,
+          kind: latest.kind,
+          statusLabel: latest.statusLabel,
+          preview: latest.preview ?? event.preview,
+          at: latest.at,
+          actor: latest.actor ?? event.actor,
+        };
+      }
+      return event;
+    })
+    .sort((a, b) => (b.at ?? 0) - (a.at ?? 0));
   // The active space's own in-flight work is already known locally (and is
   // instant); a server row for the same conversation would double it.
   const localLiveKeys = new Set(localLive.map(canonicalKey));
