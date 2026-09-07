@@ -85,6 +85,7 @@ describe("useMergedControllerProjects accessible discovery", () => {
       root.unmount();
     });
     container.remove();
+    vi.useRealTimers();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -103,7 +104,7 @@ describe("useMergedControllerProjects accessible discovery", () => {
       root.render(<Harness resultRef={resultRef} />);
     });
 
-    expect(listProjectsMock).toHaveBeenCalledWith();
+    expect(listProjectsMock).toHaveBeenCalledWith({ signal: expect.any(AbortSignal) });
     expect(listOrganizationsMock).not.toHaveBeenCalled();
     expect(resultRef.current?.remoteLoadedScope).toBeNull();
     expect(resultRef.current?.mergedProjects).toEqual([
@@ -136,9 +137,10 @@ describe("useMergedControllerProjects accessible discovery", () => {
       root.render(<Harness resultRef={resultRef} />);
     });
 
-    expect(listProjectsMock).toHaveBeenNthCalledWith(1);
+    expect(listProjectsMock).toHaveBeenNthCalledWith(1, { signal: expect.any(AbortSignal) });
     expect(listProjectsMock).toHaveBeenNthCalledWith(2, {
       orgId: "44444444-4444-4444-8444-444444444444",
+      signal: expect.any(AbortSignal),
     });
     expect(resultRef.current?.mergedProjects).toEqual([
       expect.objectContaining({
@@ -250,6 +252,136 @@ describe("useMergedControllerProjects accessible discovery", () => {
     expect(listOrganizationsMock).not.toHaveBeenCalled();
   });
 
+  it("recovers a failed first discovery for the requested team without a foreground event", async () => {
+    vi.useFakeTimers();
+    listProjectsMock.mockResolvedValueOnce({ status: "error" })
+      .mockResolvedValueOnce(successfulProjects([projectA, projectB]));
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => { root.render(<Harness resultRef={resultRef} orgId="org-a" />); });
+    await act(async () => { root.render(<Harness resultRef={resultRef} orgId="org-b" />); });
+
+    expect(resultRef.current?.remoteLoadedScope).toBeNull();
+    expect(resultRef.current?.remoteError).toBe("Couldn't load spaces.");
+    expect(resultRef.current?.remoteRefreshing).toBe(false);
+    await act(async () => { await vi.advanceTimersByTimeAsync(999); });
+    expect(listProjectsMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+
+    expect(listProjectsMock).toHaveBeenCalledTimes(2);
+    expect(resultRef.current?.remoteProjects).toEqual([projectB]);
+    expect(resultRef.current?.remoteLoadedScope).toBe("org-b");
+    expect(resultRef.current?.remoteError).toBeNull();
+    expect(resultRef.current?.remoteLoading).toBe(false);
+  });
+
+  it("bounds automatic retries and allows explicit recovery after they are exhausted", async () => {
+    vi.useFakeTimers();
+    listProjectsMock.mockResolvedValue({ status: "error" });
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => { root.render(<Harness resultRef={resultRef} orgId="org-b" />); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+
+    expect(listProjectsMock).toHaveBeenCalledTimes(4);
+    expect(resultRef.current?.remoteLoadedScope).toBeNull();
+    expect(resultRef.current?.remoteError).toBe("Couldn't load spaces.");
+    const retry = deferred<ReturnType<typeof successfulProjects>>();
+    listProjectsMock.mockReturnValueOnce(retry.promise);
+    await act(async () => {
+      resultRef.current?.retryRemoteProjects();
+      resultRef.current?.retryRemoteProjects();
+    });
+    expect(listProjectsMock).toHaveBeenCalledTimes(5);
+    expect(resultRef.current?.remoteRefreshing).toBe(true);
+    expect(resultRef.current?.remoteError).toBe("Couldn't load spaces.");
+    await act(async () => { retry.resolve(successfulProjects([projectB])); });
+
+    expect(resultRef.current?.remoteProjects).toEqual([projectB]);
+    expect(resultRef.current?.remoteError).toBeNull();
+    expect(resultRef.current?.remoteRefreshing).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["personal spaces", "an empty personal scope"])("resolves a requested personal scope only after discovery succeeds with %s", async (resultKind) => {
+    vi.useFakeTimers();
+    const firstRead = deferred<{ status: "error" }>();
+    const retry = deferred<ReturnType<typeof successfulProjects>>();
+    const personalProjects = resultKind === "personal spaces"
+      ? [{ projectId: "personal-project", projectName: "Personal space", orgId: null }]
+      : [];
+    listProjectsMock.mockReturnValueOnce(firstRead.promise).mockReturnValueOnce(retry.promise);
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => { root.render(<Harness resultRef={resultRef} orgId="org-a" />); });
+    await act(async () => { root.render(<Harness resultRef={resultRef} orgId={null} />); });
+
+    expect(resultRef.current?.remoteLoadedScope).toBeNull();
+    expect(resultRef.current?.remoteDiscoveryResolved).toBe(false);
+    await act(async () => { firstRead.resolve({ status: "error" }); });
+
+    // A settled failure is no longer busy, but must not consume the pending
+    // personal selection as though an authoritative empty list had arrived.
+    expect(resultRef.current?.remoteLoading).toBe(false);
+    expect(resultRef.current?.remoteDiscoveryResolved).toBe(false);
+    expect(resultRef.current?.remoteError).toBe("Couldn't load spaces.");
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(resultRef.current?.remoteRefreshing).toBe(true);
+    expect(resultRef.current?.remoteDiscoveryResolved).toBe(false);
+
+    await act(async () => { retry.resolve(successfulProjects(personalProjects)); });
+
+    expect(resultRef.current?.remoteLoadedScope).toBeNull();
+    expect(resultRef.current?.remoteDiscoveryResolved).toBe(true);
+    expect(resultRef.current?.remoteProjects).toEqual(personalProjects);
+    expect(resultRef.current?.remoteError).toBeNull();
+  });
+
+  it("keeps a warm list visible throughout a failed refresh and its retry", async () => {
+    vi.useFakeTimers();
+    const retry = deferred<ReturnType<typeof successfulProjects>>();
+    listProjectsMock.mockResolvedValueOnce(successfulProjects([projectA, projectB]))
+      .mockResolvedValueOnce({ status: "error" }).mockReturnValueOnce(retry.promise);
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => { root.render(<Harness resultRef={resultRef} orgId="org-a" />); });
+    await act(async () => { window.dispatchEvent(new Event("focus")); });
+    await act(async () => { root.render(<Harness resultRef={resultRef} orgId="org-b" />); });
+
+    expect(resultRef.current?.remoteProjects).toEqual([projectB]);
+    expect(resultRef.current?.remoteError).toBe("Couldn't refresh spaces. Your saved list is still shown.");
+    await act(async () => { await vi.advanceTimersByTimeAsync(1_000); });
+    expect(resultRef.current?.remoteRefreshing).toBe(true);
+    expect(resultRef.current?.remoteLoading).toBe(false);
+    expect(resultRef.current?.remoteProjects).toEqual([projectB]);
+    await act(async () => { retry.resolve(successfulProjects([projectB])); });
+    expect(resultRef.current?.remoteError).toBeNull();
+  });
+
+  it("cancels a pending discovery on account change and ignores its late response", async () => {
+    const first = deferred<ReturnType<typeof successfulProjects>>();
+    listProjectsMock.mockReturnValueOnce(first.promise).mockResolvedValueOnce(successfulProjects([projectB]));
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => { root.render(<Harness resultRef={resultRef} orgId="org-a" />); });
+    const signal = listProjectsMock.mock.calls[0]?.[0].signal as AbortSignal;
+    authStateMock.user = { id: "user-2" };
+    await act(async () => { root.render(<Harness resultRef={resultRef} orgId="org-b" />); });
+    expect(signal.aborted).toBe(true);
+    await act(async () => { first.resolve(successfulProjects([projectA])); });
+
+    expect(resultRef.current?.remoteProjects).toEqual([projectB]);
+    expect(resultRef.current?.remoteError).toBeNull();
+  });
+
+  it("cancels scheduled retries when discovery unmounts", async () => {
+    vi.useFakeTimers();
+    listProjectsMock.mockResolvedValue({ status: "error" });
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => { root.render(<Harness resultRef={resultRef} />); });
+    await act(async () => { root.render(null); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+
+    expect(listProjectsMock).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each(["organizations", "projects"])("retains warm discovery when legacy %s discovery fails", async (failureSource) => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     listProjectsMock.mockResolvedValueOnce(successfulProjects([projectA, projectB]))
@@ -266,7 +398,7 @@ describe("useMergedControllerProjects accessible discovery", () => {
       await act(async () => { window.dispatchEvent(new Event("focus")); });
       expect(resultRef.current?.remoteProjects).toEqual([projectA, projectB]);
       expect(resultRef.current?.remoteLoading).toBe(false);
-      expect(listOrganizationsMock).toHaveBeenCalledWith({ throwOnError: true });
+      expect(listOrganizationsMock).toHaveBeenCalledWith({ throwOnError: true, signal: expect.any(AbortSignal) });
     } finally {
       warn.mockRestore();
     }
@@ -289,6 +421,7 @@ describe("useMergedControllerProjects accessible discovery", () => {
 
     expect(resultRef.current?.remoteProjects).toEqual([]);
     expect(resultRef.current?.remoteLoading).toBe(true);
+    expect(resultRef.current?.remoteDiscoveryResolved).toBe(false);
     await act(async () => {
       nextDiscovery.resolve(successfulProjects([projectB]));
       nextRequested.resolve({ summary: projectB });
@@ -362,8 +495,8 @@ describe("useMergedControllerProjects accessible discovery", () => {
 
     expect(listProjectsMock).toHaveBeenCalledTimes(3);
     expect(listOrganizationsMock).toHaveBeenCalledTimes(1);
-    expect(listProjectsMock).toHaveBeenNthCalledWith(2, { orgId: "org-a" });
-    expect(listProjectsMock).toHaveBeenNthCalledWith(3, { orgId: "org-b" });
+    expect(listProjectsMock).toHaveBeenNthCalledWith(2, { orgId: "org-a", signal: expect.any(AbortSignal) });
+    expect(listProjectsMock).toHaveBeenNthCalledWith(3, { orgId: "org-b", signal: expect.any(AbortSignal) });
     expect(resultRef.current?.remoteProjects).toEqual([projectB]);
     expect(resultRef.current?.remoteLoading).toBe(false);
   });

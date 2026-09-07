@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -51,6 +52,7 @@ const runtimeControllerEnabled = controllerClient.core.enabled;
 type ControllerConversationFetcher = (args: {
   projectId: string;
   limit: number;
+  signal?: AbortSignal;
 }) => Promise<ControllerProjectConversation[] | null>;
 
 type ControllerConversationMetadataUpdater = (args: {
@@ -102,9 +104,19 @@ export function useConversationControllerSync({
   const completedSyncEpochsRef = useRef<Map<string, number>>(new Map());
   const hydrationFailuresRef = useRef<Map<string, number>>(new Map());
   const hydrationRetryTimerRef = useRef<number | null>(null);
-  const [resolvedProjectKeys, setResolvedProjectKeys] = useState<ReadonlySet<string>>(
+  const cancelHydrationRef = useRef<(() => void) | null>(null);
+  const [historyError, setHistoryError] = useState<{ scope: string; message: string } | null>(null);
+  const [resolvedScopes, setResolvedScopes] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  const hydrationScope = `${state.projectKey}:${currentUserId ?? "anonymous"}`;
+  const retryRemoteConversationHistory = useCallback(() => {
+    cancelHydrationRef.current?.();
+    hydrationFailuresRef.current.delete(hydrationScope);
+    completedSyncEpochsRef.current.delete(hydrationScope);
+    setHistoryError((current) => current?.scope === hydrationScope ? null : current);
+    bumpControllerConversationSyncEpoch();
+  }, [bumpControllerConversationSyncEpoch, hydrationScope]);
 
   useEffect(() => {
     if (!runtimeControllerEnabled) {
@@ -183,8 +195,10 @@ export function useConversationControllerSync({
     }
 
     let cancelled = false;
+    const abortController = new AbortController();
+    let retryDelayTimer: ReturnType<typeof setTimeout> | undefined;
+    let finishRetryDelay: (() => void) | undefined;
     const projectId = state.projectKey;
-    const hydrationScope = `${projectId}:${currentUserId ?? "anonymous"}`;
     if (
       completedSyncEpochsRef.current.get(hydrationScope) ===
       controllerConversationSyncEpoch
@@ -192,19 +206,51 @@ export function useConversationControllerSync({
       return;
     }
 
+    const cancelHydration = () => {
+      cancelled = true;
+      abortController.abort();
+      if (retryDelayTimer !== undefined) clearTimeout(retryDelayTimer);
+      finishRetryDelay?.();
+      if (hydrationRetryTimerRef.current !== null) {
+        window.clearTimeout(hydrationRetryTimerRef.current);
+        hydrationRetryTimerRef.current = null;
+      }
+    };
+    cancelHydrationRef.current = cancelHydration;
+
     void (async () => {
       let remoteConversations: Awaited<ReturnType<ControllerConversationFetcher>> = null;
       for (let attempt = 0; attempt < 4 && !cancelled; attempt += 1) {
-        remoteConversations = await fetchProjectConversationsFromController({
-          projectId,
-          limit: 50,
-        });
+        try {
+          remoteConversations = await fetchProjectConversationsFromController({
+            projectId,
+            limit: 50,
+            signal: abortController.signal,
+          });
+        } catch {
+          if (cancelled) return;
+          remoteConversations = null;
+        }
+        if (cancelled) return;
         if (remoteConversations !== null) {
           break;
         }
-        await new Promise((resolve) =>
-          setTimeout(resolve, Math.min(500 * (attempt + 1), 2_000)),
-        );
+        // The first unavailable attempt is already actionable. Subsequent
+        // automatic retries must not keep a cold list looking perpetually busy.
+        setHistoryError((current) => current?.scope === hydrationScope ? current : {
+          scope: hydrationScope,
+          message: hydratedScopesRef.current.has(hydrationScope)
+            ? "Couldn't refresh conversations. Your saved chats are still shown."
+            : "Couldn't load conversations.",
+        });
+        await new Promise<void>((resolve) => {
+          finishRetryDelay = resolve;
+          retryDelayTimer = setTimeout(() => {
+            retryDelayTimer = undefined;
+            finishRetryDelay = undefined;
+            resolve();
+          }, Math.min(500 * (attempt + 1), 2_000));
+        });
       }
       if (cancelled) {
         return;
@@ -230,6 +276,7 @@ export function useConversationControllerSync({
         return;
       }
       hydrationFailuresRef.current.delete(hydrationScope);
+      setHistoryError((current) => current?.scope === hydrationScope ? null : current);
 
       const latestState = latestStateRef.current;
       if (latestState.projectKey !== projectId) {
@@ -243,11 +290,11 @@ export function useConversationControllerSync({
           hydrationScope,
           controllerConversationSyncEpoch,
         );
-        setResolvedProjectKeys((current) => {
-          if (current.has(projectId)) {
+        setResolvedScopes((current) => {
+          if (current.has(hydrationScope)) {
             return current;
           }
-          return new Set([...current, projectId]);
+          return new Set([...current, hydrationScope]);
         });
         return;
       }
@@ -540,20 +587,17 @@ export function useConversationControllerSync({
         hydrationScope,
         controllerConversationSyncEpoch,
       );
-      setResolvedProjectKeys((current) => {
-        if (current.has(projectId)) {
+      setResolvedScopes((current) => {
+        if (current.has(hydrationScope)) {
           return current;
         }
-        return new Set([...current, projectId]);
+        return new Set([...current, hydrationScope]);
       });
     })();
 
     return () => {
-      cancelled = true;
-      if (hydrationRetryTimerRef.current !== null) {
-        window.clearTimeout(hydrationRetryTimerRef.current);
-        hydrationRetryTimerRef.current = null;
-      }
+      cancelHydration();
+      if (cancelHydrationRef.current === cancelHydration) cancelHydrationRef.current = null;
     };
   }, [
     bumpControllerConversationSyncEpoch,
@@ -562,6 +606,7 @@ export function useConversationControllerSync({
     currentUserId,
     dispatch,
     fetchProjectConversationsFromController,
+    hydrationScope,
     latestStateRef,
     projectAccessBlocked,
     projectAccessPending,
@@ -569,11 +614,16 @@ export function useConversationControllerSync({
     updateControllerConversationMetadata,
   ]);
 
-  return (
-    !runtimeControllerEnabled ||
-    !isUuid(state.projectKey) ||
-    controllerProjectMissing ||
-    projectAccessBlocked ||
-    resolvedProjectKeys.has(state.projectKey)
-  );
+  return {
+    remoteConversationHistoryResolved:
+      !runtimeControllerEnabled ||
+      !isUuid(state.projectKey) ||
+      controllerProjectMissing ||
+      projectAccessBlocked ||
+      resolvedScopes.has(hydrationScope),
+    remoteConversationHistoryError:
+      !controllerProjectMissing && !projectAccessPending && !projectAccessBlocked &&
+      historyError?.scope === hydrationScope ? historyError.message : null,
+    retryRemoteConversationHistory,
+  };
 }

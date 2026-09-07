@@ -6,6 +6,7 @@ import {
   safeJson,
 } from "./core";
 import { logControllerRequestError } from "./logging";
+import { createControllerReadBudget } from "./readBudget";
 
 export interface DispatchControllerPromptParams {
   projectId: string;
@@ -238,6 +239,7 @@ export interface FetchProjectConversationsParams {
   rootConversationId?: string | null;
   threadKind?: string | null;
   accessToken?: string | null;
+  signal?: AbortSignal;
 }
 
 export interface FetchConversationMessagesParams {
@@ -255,7 +257,6 @@ const inFlightBlankConversationRequests = new Map<
 const cachedBlankConversations = new Map<string, CreateControllerConversationResponse>();
 const CONTROLLER_MESSAGE_RECORD_RETRY_DELAYS_MS = [300, 1_000] as const;
 const CONTROLLER_PARTICIPATION_TIMEOUT_MS = 2_000;
-const CONVERSATION_HISTORY_TIMEOUT_MS = 10_000;
 
 function normalizeClientMessageId(value: unknown): string | null {
   if (typeof value !== "string") {
@@ -1121,29 +1122,6 @@ export async function interruptControllerConversationRuns(params: {
   return canceledRunIds;
 }
 
-async function waitForHistoryStep<T>(
-  signal: AbortSignal,
-  start: () => Promise<T>,
-): Promise<T> {
-  signal.throwIfAborted();
-  let handleAbort!: () => void;
-  const canceled = new Promise<never>((_resolve, reject) => {
-    handleAbort = () => reject(signal.reason);
-    signal.addEventListener("abort", handleAbort, { once: true });
-  });
-  try {
-    // Authentication cannot itself be canceled. The race stops waiting for it
-    // and also consumes any late rejection, without starting the next step.
-    const operation = Promise.resolve().then(() => {
-      signal.throwIfAborted();
-      return start();
-    });
-    return await Promise.race([operation, canceled]);
-  } finally {
-    signal.removeEventListener("abort", handleAbort);
-  }
-}
-
 export async function fetchConversationMessagesFromController(
   params: FetchConversationMessagesParams,
 ): Promise<ControllerConversationMessagesPage | "not_found" | "access_denied" | null> {
@@ -1151,19 +1129,12 @@ export async function fetchConversationMessagesFromController(
     return null;
   }
 
-  params.signal?.throwIfAborted();
-  const abortController = new AbortController();
-  const handleAbort = () => abortController.abort(params.signal?.reason);
-  params.signal?.addEventListener("abort", handleAbort, { once: true });
-  const timeoutHandle = setTimeout(() => {
-    abortController.abort(new DOMException("Conversation history request timed out.", "TimeoutError"));
-  }, CONVERSATION_HISTORY_TIMEOUT_MS);
-
+  const budget = createControllerReadBudget(params.signal);
   try {
-    const requestContext = await waitForHistoryStep(abortController.signal, () =>
+    const requestContext = await budget.wait(() =>
       resolveControllerRequestContext(params.accessToken ?? null),
     );
-    abortController.signal.throwIfAborted();
+    budget.signal.throwIfAborted();
     const sessionToken = requestContext.accessToken;
     if (!sessionToken) {
       console.warn(
@@ -1176,16 +1147,16 @@ export async function fetchConversationMessagesFromController(
     if (params.limit) search.set("limit", String(params.limit));
     if (params.cursor) search.set("cursor", params.cursor);
 
-    const response = await waitForHistoryStep(abortController.signal, () => fetch(
+    const response = await budget.wait(() => fetch(
       `${requestContext.baseUrl}/conversations/${params.conversationId}/messages?${search.toString()}`,
       {
         headers: {
           authorization: `Bearer ${sessionToken}`,
         },
-        signal: abortController.signal,
+        signal: budget.signal,
       },
     ));
-    abortController.signal.throwIfAborted();
+    budget.signal.throwIfAborted();
 
     if (response.status === 404) {
       return "not_found";
@@ -1201,7 +1172,7 @@ export async function fetchConversationMessagesFromController(
 
     if (!response.ok) {
       throw new Error(
-        await waitForHistoryStep(abortController.signal, () => readControllerError(
+        await budget.wait(() => readControllerError(
           response,
           "fetch messages failed",
           requestContext,
@@ -1209,10 +1180,10 @@ export async function fetchConversationMessagesFromController(
       );
     }
 
-    const data = await waitForHistoryStep<ControllerConversationMessagesPage>(
-      abortController.signal, () => response.json(),
+    const data = await budget.wait<ControllerConversationMessagesPage>(
+      () => response.json(),
     );
-    abortController.signal.throwIfAborted();
+    budget.signal.throwIfAborted();
     const normalized: ControllerConversationMessagesPage = {
       messages: (data.messages ?? []).map((message) => ({
         ...message,
@@ -1228,7 +1199,7 @@ export async function fetchConversationMessagesFromController(
   } catch (error) {
     // Let query cancellation stop the entire page chain. Returning null here
     // would turn an obsolete read into a retryable history failure.
-    abortController.signal.throwIfAborted();
+    budget.signal.throwIfAborted();
     const message = error instanceof Error ? error.message : String(error);
     console.warn(
       "[runtime-controller] fetch conversation messages error:",
@@ -1236,8 +1207,7 @@ export async function fetchConversationMessagesFromController(
     );
     return null;
   } finally {
-    clearTimeout(timeoutHandle);
-    params.signal?.removeEventListener("abort", handleAbort);
+    budget.dispose();
   }
 }
 
@@ -1248,55 +1218,55 @@ export async function fetchProjectConversationsFromController(
     return null;
   }
 
-  const requestContext = await resolveControllerRequestContext(
-    params.accessToken ?? null,
-  );
-  const sessionToken = requestContext.accessToken;
-
-  if (!sessionToken) {
-    console.warn(
-      "[runtime-controller] No access token available; skipping project conversations fetch.",
-    );
-    return null;
-  }
-
-  const search = new URLSearchParams();
-  if (params.limit) {
-    search.set("limit", String(params.limit));
-  }
-  if (params.rootsOnly) {
-    search.set("rootsOnly", "true");
-  }
-  if (params.parentConversationId) {
-    search.set("parentConversationId", params.parentConversationId);
-  }
-  if (params.rootConversationId) {
-    search.set("rootConversationId", params.rootConversationId);
-  }
-  if (params.threadKind) {
-    search.set("threadKind", params.threadKind);
-  }
-
+  const budget = createControllerReadBudget(params.signal);
   try {
-    const response = await fetch(
+    const requestContext = await budget.wait(() => resolveControllerRequestContext(params.accessToken ?? null));
+    const sessionToken = requestContext.accessToken;
+
+    if (!sessionToken) {
+      console.warn(
+        "[runtime-controller] No access token available; skipping project conversations fetch.",
+      );
+      return null;
+    }
+
+    const search = new URLSearchParams();
+    if (params.limit) {
+      search.set("limit", String(params.limit));
+    }
+    if (params.rootsOnly) {
+      search.set("rootsOnly", "true");
+    }
+    if (params.parentConversationId) {
+      search.set("parentConversationId", params.parentConversationId);
+    }
+    if (params.rootConversationId) {
+      search.set("rootConversationId", params.rootConversationId);
+    }
+    if (params.threadKind) {
+      search.set("threadKind", params.threadKind);
+    }
+
+    const response = await budget.wait(() => fetch(
       `${requestContext.baseUrl}/projects/${params.projectId}/conversations?${search.toString()}`,
       {
+        signal: budget.signal,
         headers: {
           authorization: `Bearer ${sessionToken}`,
         },
       },
-    );
+    ));
 
     if (!response.ok) {
-      const errorMessage = await readControllerError(
+      const errorMessage = await budget.wait(() => readControllerError(
         response,
         "fetch project conversations failed",
         requestContext,
-      );
+      ));
       throw new Error(errorMessage);
     }
 
-    const data = (await response.json()) as ControllerProjectConversation[];
+    const data = (await budget.wait(() => response.json())) as ControllerProjectConversation[];
     return (data ?? []).map((conversation) => ({
       ...conversation,
       metadata:
@@ -1305,6 +1275,7 @@ export async function fetchProjectConversationsFromController(
           : {},
     }));
   } catch (error) {
+    params.signal?.throwIfAborted();
     logControllerRequestError(
       "[runtime-controller] fetch project conversations error:",
       error,
@@ -1313,5 +1284,7 @@ export async function fetchProjectConversationsFromController(
       },
     );
     return null;
+  } finally {
+    budget.dispose();
   }
 }

@@ -45,6 +45,7 @@ import {
 } from "./useConversationProviderEffects";
 import { useConversationControllerDispatch } from "./useConversationControllerDispatch";
 import { useConversationGoalContinuationEffects } from "./useConversationGoalContinuationEffects";
+import { ConversationMessageMetadataProvider } from "./ConversationMessageMetadata";
 
 const {
   listForProject: fetchProjectConversationsFromController,
@@ -86,6 +87,8 @@ type ConversationDebugSnapshot = {
 interface ConversationsContextValue {
   projectKey: string;
   remoteConversationHistoryResolved: boolean;
+  remoteConversationHistoryError: string | null;
+  retryRemoteConversationHistory: () => void;
   conversations: ConversationState[];
   activeConversationId: string | null;
   activeConversation: ConversationState | null;
@@ -230,7 +233,11 @@ export const ConversationsProvider = ({ children }: PropsWithChildren) => {
     lastProjectIdRef.current = projectKey;
   }, [projectKey]);
 
-  const remoteConversationHistoryResolved = useConversationControllerSync({
+  const {
+    remoteConversationHistoryResolved,
+    remoteConversationHistoryError,
+    retryRemoteConversationHistory,
+  } = useConversationControllerSync({
     state,
     currentUserId,
     controllerProjectMissing,
@@ -522,6 +529,8 @@ export const ConversationsProvider = ({ children }: PropsWithChildren) => {
     () => ({
       projectKey: state.projectKey,
       remoteConversationHistoryResolved,
+      remoteConversationHistoryError,
+      retryRemoteConversationHistory,
       conversations: state.conversations,
       activeConversationId: state.activeId,
       activeConversation,
@@ -548,6 +557,8 @@ export const ConversationsProvider = ({ children }: PropsWithChildren) => {
     [
       state.projectKey,
       remoteConversationHistoryResolved,
+      remoteConversationHistoryError,
+      retryRemoteConversationHistory,
       state.conversations,
       state.activeId,
       activeConversation,
@@ -573,7 +584,13 @@ export const ConversationsProvider = ({ children }: PropsWithChildren) => {
     ]
   );
 
-  return <ConversationsContext.Provider value={value}>{children}</ConversationsContext.Provider>;
+  return (
+    <ConversationsContext.Provider value={value}>
+      <ConversationMessageMetadataProvider conversations={state.conversations} activeConversationId={state.activeId}>
+        {children}
+      </ConversationMessageMetadataProvider>
+    </ConversationsContext.Provider>
+  );
 };
 
 export function useConversations(): ConversationsContextValue {

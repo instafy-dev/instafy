@@ -295,6 +295,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     }
 
     let cancelled = false;
+    const abortController = new AbortController();
     const requestId = Symbol("project-bootstrap");
     activeRequestRef.current = requestId;
 
@@ -362,7 +363,11 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
         let createdBecauseMissing = false;
         let projectSummaryResult = mintedProject
           ? { summary: null, notFound: false, forbidden: false, unauthorized: false }
-          : await getControllerProjectSummaryResult(targetProjectId);
+          : await getControllerProjectSummaryResult(targetProjectId, { signal: abortController.signal });
+
+        if (cancelled || activeRequestRef.current !== requestId) {
+          return;
+        }
 
         const projectBlocked =
           !mintedProject &&
@@ -545,6 +550,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
 
     return () => {
       cancelled = true;
+      abortController.abort();
     };
   }, [
     activeProjectId,
@@ -607,11 +613,12 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     }
 
     const token = Symbol("org-hydration");
+    const abortController = new AbortController();
     orgHydrationRef.current = { key, token };
 
     void (async () => {
       try {
-        const result = await getControllerProjectSummaryResult(targetProjectId);
+        const result = await getControllerProjectSummaryResult(targetProjectId, { signal: abortController.signal });
         if (orgHydrationRef.current?.token !== token) {
           return;
         }
@@ -656,12 +663,22 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
           id: summary.orgId,
           name: getOrgDisplayName(summary.orgName),
         });
+      } catch (error) {
+        if (!abortController.signal.aborted && import.meta.env.DEV) {
+          console.warn("Failed to hydrate project organization", error);
+        }
       } finally {
         if (orgHydrationRef.current?.token === token) {
           orgHydrationRef.current = null;
         }
       }
     })();
+    return () => {
+      abortController.abort();
+      if (orgHydrationRef.current?.token === token) {
+        orgHydrationRef.current = null;
+      }
+    };
   }, [
     activeProjectId,
     createProject,
@@ -690,6 +707,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     let refreshRequested = false;
     let accessInvalidationVersion = 0;
     let retryTimer: number | null = null;
+    let requestController: AbortController | null = null;
 
     const scheduleRetry = (delayMs = PROJECT_SUMMARY_RETRY_BACKOFF_MS) => {
       if (retryTimer !== null) {
@@ -716,9 +734,11 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
         retryTimer = null;
       }
       refreshInFlight = true;
+      const abortController = new AbortController();
+      requestController = abortController;
       const refreshVersion = accessInvalidationVersion;
       try {
-        const result = await getControllerProjectSummaryResult(targetProjectId);
+        const result = await getControllerProjectSummaryResult(targetProjectId, { signal: abortController.signal });
         if (cancelled || refreshVersion !== accessInvalidationVersion) {
           return;
         }
@@ -763,14 +783,15 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
         setProjectAccessBlocked(false);
         setProjectAccessUnavailable(false);
       } catch (error) {
-        if (import.meta.env.DEV) {
+        if (!abortController.signal.aborted && import.meta.env.DEV) {
           console.warn("Failed to refresh project access", error);
         }
-        if (!cancelled) {
+        if (!cancelled && !abortController.signal.aborted) {
           setProjectAccessUnavailable(true);
           scheduleRetry();
         }
       } finally {
+        if (requestController === abortController) requestController = null;
         refreshInFlight = false;
         if (refreshRequested && !cancelled) {
           refreshRequested = false;
@@ -793,6 +814,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
         return;
       }
       accessInvalidationVersion += 1;
+      requestController?.abort();
       setProjectCapabilities((current) =>
         current?.projectId === targetProjectId ? null : current,
       );
@@ -820,6 +842,7 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       cancelled = true;
+      requestController?.abort();
       window.clearInterval(intervalId);
       if (retryTimer !== null) {
         window.clearTimeout(retryTimer);
