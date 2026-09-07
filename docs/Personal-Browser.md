@@ -211,7 +211,11 @@ locked rather than falsely claiming control has returned.
 **Done, continue** is an explicit new browser turn, not resumption of a suspended
 tool call. During a manual step, it is the only resume-and-send action: ordinary
 toolbar Resume and Retry agent control are hidden, including after a failed
-continuation. Pause remains available whenever agent control is enabled.
+continuation. Retrying Done waits for the fresh runtime's readiness rather than
+reusing the previous attempt's error; startup remains bounded to 30 seconds and
+never dispatches through a stale runtime. Pause remains available whenever agent
+control is enabled. If startup fails before a fresh runtime can be identified,
+use Pause to return manual control before retrying Done.
 Done clears highlights and creates fresh control authority; the new
 turn observes the page again instead of replaying old indices. Changing the
 account/project/page binding or an expired request cannot silently continue work.
