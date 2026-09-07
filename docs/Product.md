@@ -98,7 +98,9 @@ panel as **All chats**, Files and Changes. These panels share one slot, so openi
 replaces the other while the current conversation stays visible. Team and space selection
 keeps its existing grouped list; choosing a space closes the picker. The close control or
 Escape returns to the sidebar. On narrow layouts the picker remains a drill-in inside
-navigation, with Back returning to the recent chats list. Browser history remembers the
+navigation, with Back returning to the recent chats list. Android's system Back dismisses
+the focused picker or topmost dialog first, then navigation, without reversing a team or
+space switch. Browser history remembers the
 picker through `workspaceTab=workspaces`.
 
 Open conversation tabs are remembered per space in the current browser. Previously loaded chat

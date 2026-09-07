@@ -1,6 +1,7 @@
 import { Capacitor } from "@capacitor/core";
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { Dialog, Modal, ModalOverlay } from "react-aria-components";
+import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 
 interface SidebarStatusBarSession {
   users: number;
@@ -100,6 +101,16 @@ export function StudioMobileSidebarOverlay({
   onClose: () => void;
 }) {
   useSidebarStatusBarOverlay();
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  useNativeBackButtonAction(true, () => {
+    // Use the same dismissal path as Escape: a focused Team & spaces drill-in
+    // consumes it first, and React Aria dismisses only the topmost modal. Native
+    // Back must not fall through to WebView history while navigation is open.
+    const target = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+      ? document.activeElement
+      : dialogRef.current;
+    target?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  });
 
   return (
     <ModalOverlay
@@ -119,7 +130,7 @@ export function StudioMobileSidebarOverlay({
           paddingLeft: "var(--instafy-safe-area-inset-left)",
         }}
       >
-        <Dialog aria-label="Navigation and recent chats" className="h-full outline-none">
+        <Dialog ref={dialogRef} aria-label="Navigation and recent chats" className="h-full outline-none">
           {children}
         </Dialog>
       </Modal>

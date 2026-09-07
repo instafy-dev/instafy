@@ -154,7 +154,11 @@ describe("mobile sidebar status-bar coverage", () => {
     getPlatform.mockReturnValue(platform);
     await renderOverlay();
     expect(setOverlaysWebView).not.toHaveBeenCalled();
-    expect(addListener).not.toHaveBeenCalled();
+    if (platform === "android") {
+      expect(addListener).toHaveBeenCalledWith("backButton", expect.any(Function));
+    } else {
+      expect(addListener).not.toHaveBeenCalled();
+    }
   });
 
   it("removes a listener that finishes registering after the drawer closes", async () => {
