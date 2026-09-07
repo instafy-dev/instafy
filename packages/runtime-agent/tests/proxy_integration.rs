@@ -2262,6 +2262,506 @@ async fn codex_proxy_direct_personal_browser_mcp_probe_inner() -> Result<()> {
     Ok(())
 }
 
+#[derive(Default)]
+struct AstraUpgradeStub {
+    bounded_browser: bool,
+    requests: Mutex<Vec<Value>>,
+    root_steps: AtomicUsize,
+    child_requests: AtomicUsize,
+    responses_lite_requests: AtomicUsize,
+}
+
+fn declared_fixture_tools(tools: &Value) -> Vec<(Option<String>, String)> {
+    let mut declared = Vec::new();
+    for tool in tools.as_array().into_iter().flatten() {
+        if tool["type"] == "namespace" {
+            let namespace = tool["name"].as_str().map(str::to_string);
+            for (_, name) in declared_fixture_tools(&tool["tools"]) {
+                declared.push((namespace.clone(), name));
+            }
+        } else if let Some(name) = tool["name"].as_str() {
+            declared.push((None, name.to_string()));
+        } else if let Some(kind) = tool["type"].as_str() {
+            // Provider-native tools such as web_search and tool_search have
+            // no name field and must still participate in boundary checks.
+            declared.push((None, kind.to_string()));
+        }
+    }
+    declared
+}
+
+fn astra_fixture_tools(request: &Value) -> &Value {
+    request["input"]
+        .as_array()
+        .and_then(|items| items.iter().find(|item| item["type"] == "additional_tools"))
+        .map(|item| &item["tools"])
+        .unwrap_or(&request["tools"])
+}
+
+async fn handle_astra_upgrade_stub(
+    State(state): State<Arc<AstraUpgradeStub>>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> impl IntoResponse {
+    // This endpoint has only synthetic credentials and is reachable through
+    // the real Instafy proxy, never as the runtime's configured provider URL.
+    if headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        != Some("Bearer fixture-upstream-key")
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if headers
+        .get("x-openai-internal-codex-responses-lite")
+        .and_then(|value| value.to_str().ok())
+        == Some("true")
+    {
+        state.responses_lite_requests.fetch_add(1, Ordering::SeqCst);
+    }
+    let serialized_input = payload
+        .get("input")
+        .map(Value::to_string)
+        .unwrap_or_default();
+    let is_root = serialized_input.contains("ASTRA_ROOT_FIXTURE");
+    let reviewer_completed = serialized_input.contains("REVIEWER_COMPLETE");
+    let declared_tools = declared_fixture_tools(astra_fixture_tools(&payload));
+    let snapshot_tool = declared_tools
+        .iter()
+        .find(|(_, name)| name == "snapshot" || name.ends_with("__snapshot"));
+    let snapshot_returned = payload["input"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item["type"] == "function_call_output"
+                && item["call_id"] == "astra-snapshot"
+                && item["output"]
+                    .to_string()
+                    .contains(PERSONAL_BROWSER_MCP_PROBE_URL)
+        })
+    });
+    state.requests.lock().await.push(payload);
+    let output = if state.bounded_browser {
+        if state.root_steps.fetch_add(1, Ordering::SeqCst) == 0 {
+            let Some((namespace, name)) = snapshot_tool else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": {"message": format!(
+                        "bounded browser fixture requires a directly advertised snapshot tool; got {declared_tools:?}"
+                    )}})),
+                )
+                    .into_response();
+            };
+            let mut call = json!({
+                "type": "function_call", "call_id": "astra-snapshot", "name": name,
+                "arguments": "{}",
+            });
+            if let Some(namespace) = namespace {
+                call["namespace"] = json!(namespace);
+            }
+            call
+        } else {
+            // A synthetic final answer must depend on the actual broker result;
+            // otherwise a missing tool declaration can look like browser success.
+            if !snapshot_returned {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": {"message":
+                        "bounded browser fixture did not receive its MCP snapshot result"
+                    }})),
+                )
+                    .into_response();
+            }
+            json!({
+                "id": "astra-browser-final", "type": "message", "role": "assistant", "phase": "final_answer",
+                "content": [{"type": "output_text", "text": json!({"summary": PERSONAL_BROWSER_MCP_PROBE_URL, "files": [], "actions": []}).to_string()}],
+            })
+        }
+    } else if is_root {
+        let step = state.root_steps.fetch_add(1, Ordering::SeqCst);
+        match step {
+            0 => json!({
+                "type": "custom_tool_call", "call_id": "astra-exec", "name": "exec",
+                "input": "text(await tools.exec_command({cmd: \"printf astra_code_mode_marker > astra-proof.txt; cat astra-proof.txt\", login: false, max_output_tokens: 1000}));",
+            }),
+            1 => json!({
+                "type": "function_call", "call_id": "astra-spawn", "namespace": "collaboration", "name": "spawn_agent",
+                "arguments": json!({"task_name": "reviewer", "message": "ASTRA_REVIEWER_FIXTURE: finish the isolated review with the fixture result.", "fork_turns": "none"}).to_string(),
+            }),
+            2 => json!({
+                "type": "function_call", "call_id": "astra-wait", "namespace": "collaboration", "name": "wait_agent",
+                "arguments": json!({"timeout_ms": 10000}).to_string(),
+            }),
+            3 => json!({
+                "type": "function_call", "call_id": "astra-list", "namespace": "collaboration", "name": "list_agents",
+                "arguments": "{}",
+            }),
+            _ if !reviewer_completed && step < 8 => json!({
+                "type": "function_call", "call_id": format!("astra-wait-{step}"), "namespace": "collaboration", "name": "wait_agent",
+                "arguments": json!({"timeout_ms": 10000}).to_string(),
+            }),
+            _ => json!({
+                "id": "astra-final", "type": "message", "role": "assistant", "phase": "final_answer",
+                "content": [{"type": "output_text", "text": "{\"summary\":\"Astra execution and review complete\",\"files\":[],\"actions\":[]}"}],
+            }),
+        }
+    } else {
+        state.child_requests.fetch_add(1, Ordering::SeqCst);
+        json!({
+            "id": "reviewer-final", "type": "message", "role": "assistant", "phase": "final_answer",
+            "content": [{"type": "output_text", "text": "REVIEWER_COMPLETE"}],
+        })
+    };
+    let response = json!({
+        "id": Uuid::new_v4().to_string(), "object": "response", "status": "completed", "model": "gpt-6-astra",
+        "output": [output],
+        "usage": {"input_tokens": 25, "output_tokens": 25, "total_tokens": 50},
+    });
+    // The real proxy requests a complete JSON response for API-key upstreams,
+    // then converts that response to SSE for the embedded Codex client.
+    Json(response).into_response()
+}
+
+/// Secret-free, deterministic integration proof against the exact embedded
+/// engine. Unlike the opt-in live probes, this never loads host auth.json.
+#[test]
+fn codex_astra_upgrade_executes_code_mode_and_native_review_through_proxy() -> Result<()> {
+    run_astra_upgrade_proxy_fixture(false)
+}
+
+#[test]
+fn codex_astra_bounded_browser_uses_only_browser_tools_through_proxy() -> Result<()> {
+    run_astra_upgrade_proxy_fixture(true)
+}
+
+fn run_astra_upgrade_proxy_fixture(bounded_browser: bool) -> Result<()> {
+    const STACK_SIZE: usize = 32 * 1024 * 1024;
+    std::thread::Builder::new()
+        .name("astra-upgrade-proxy-fixture".to_string())
+        .stack_size(STACK_SIZE)
+        .spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(STACK_SIZE)
+                .enable_all()
+                .build()?
+                .block_on(codex_astra_upgrade_proxy_fixture(bounded_browser))
+        })?
+        .join()
+        .map_err(|_| anyhow::anyhow!("Astra upgrade fixture thread panicked"))?
+}
+
+async fn codex_astra_upgrade_proxy_fixture(bounded_browser: bool) -> Result<()> {
+    let _env_lock = env_guard().await;
+    let workspace = TempDir::new()?;
+    let codex_home = TempDir::new()?;
+    fs::write(
+        codex_home.path().join("config.toml"),
+        "model = \"gpt-6-astra\"\nmodel_reasoning_effort = \"max\"\nproject_doc_max_bytes = 0\n",
+    )?;
+    fs::write(
+        codex_home.path().join("auth.json"),
+        json!({"OPENAI_API_KEY": "fixture-runtime-proxy-key"}).to_string(),
+    )?;
+    let _isolated_env = [
+        (
+            "CODEX_HOME",
+            codex_home.path().to_string_lossy().to_string(),
+        ),
+        (
+            "CODEX_AUTH_PATH",
+            codex_home
+                .path()
+                .join("auth.json")
+                .to_string_lossy()
+                .to_string(),
+        ),
+        ("CODEX_MODEL", "gpt-6-astra".to_string()),
+        ("CODEX_MODEL_PROVIDER", "openai".to_string()),
+        ("CODEX_RUNTIME_REASONING_EFFORT", "max".to_string()),
+        ("CODEX_AGENT_REASONING_EFFORT", String::new()),
+        ("OPENAI_API_KEY", "fixture-runtime-proxy-key".to_string()),
+        ("CODEX_API_KEY", "fixture-runtime-proxy-key".to_string()),
+        ("CODEX_MAX_RUN_RETRIES", "0".to_string()),
+        ("CODEX_RUN_TIMEOUT_SECONDS", "90".to_string()),
+        ("PROXY_REQUIRE_CONTROLLER_AUTH", "0".to_string()),
+        ("PROXY_REQUIRE_CREDENTIAL_CLAIM", "0".to_string()),
+        ("PROXY_CONTROLLER_BASE_URL", String::new()),
+        ("CONTROLLER_BASE_URL", String::new()),
+        ("CONTROLLER_INTERNAL_TOKEN", String::new()),
+        ("PROXY_CREDENTIAL_LEASE_TOKEN", String::new()),
+        ("PROXY_SIGNING_SECRET", String::new()),
+    ]
+    .into_iter()
+    .map(|(key, value)| EnvGuard::set(key, value))
+    .collect::<Vec<_>>();
+
+    let browser_fixture = if bounded_browser {
+        let project_id = Uuid::new_v4().to_string();
+        let browser_state = Arc::new(PersonalBrowserMcpProbeState {
+            expected_token: "fixture-browser-token".to_string(),
+            expected_project_id: project_id.clone(),
+            completed_calls: AtomicUsize::new(0),
+        });
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let address = listener.local_addr()?;
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let guard = ChildGuard::new(shutdown_tx);
+        let state = browser_state.clone();
+        let task = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/mcp", post(handle_personal_browser_mcp_probe))
+                    .with_state(state),
+            )
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_rx.await;
+            })
+            .await
+        });
+        let env = vec![
+            EnvGuard::set(
+                "INSTAFY_PERSONAL_BROWSER_CONTROL_URL",
+                format!("http://{address}"),
+            ),
+            EnvGuard::set(
+                "INSTAFY_PERSONAL_BROWSER_CONTROL_TOKEN",
+                "fixture-browser-token",
+            ),
+            EnvGuard::set("INSTAFY_PERSONAL_BROWSER_PROJECT_ID", project_id),
+            EnvGuard::set(
+                "INSTAFY_RUNTIME_AGENT_BIN",
+                std::env::current_exe()?.to_string_lossy(),
+            ),
+        ];
+        Some((browser_state, guard, task, env))
+    } else {
+        None
+    };
+    let state = Arc::new(AstraUpgradeStub {
+        bounded_browser,
+        ..Default::default()
+    });
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let upstream_address = listener.local_addr()?;
+    let (upstream_tx, upstream_rx) = oneshot::channel();
+    let upstream_guard = ChildGuard::new(upstream_tx);
+    let upstream_state = state.clone();
+    let upstream_task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/responses", post(handle_astra_upgrade_stub))
+                .with_state(upstream_state),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = upstream_rx.await;
+        })
+        .await
+    });
+    let proxy_port = reserve_port()?;
+    let proxy_addr = SocketAddr::from(([127, 0, 0, 1], proxy_port));
+    let credentials = auth::Credentials::ApiKey {
+        key: "fixture-upstream-key".to_string(),
+        endpoint: Some(format!("http://{upstream_address}/responses")),
+        default_model: None,
+    };
+    let (proxy_tx, proxy_rx) = oneshot::channel();
+    let proxy_guard = ChildGuard::new(proxy_tx);
+    let proxy_task = tokio::spawn(async move {
+        proxy::run_proxy_with_shutdown(proxy_addr, Some(credentials), async move {
+            let _ = proxy_rx.await;
+        })
+        .await
+    });
+    wait_for_port(proxy_port).await?;
+    let _proxy_url = EnvGuard::set("OPENAI_BASE_URL", format!("http://{proxy_addr}/v1"));
+    let _proxy_root = EnvGuard::set("PROXY_BASE_URL", format!("http://{proxy_addr}"));
+    let host_program = PathBuf::from(env!("CARGO_BIN_EXE_codex-code-mode-host"));
+    assert!(
+        host_program.is_file(),
+        "build the companion code-mode host before running the fixture: {}",
+        host_program.display()
+    );
+    let client = CodexClient::new(runtime_agent::codex::CodexConfig {
+        workspace_dir: workspace.path().to_path_buf(),
+    })
+    .with_code_mode_host_program(host_program);
+    let prompt = if bounded_browser {
+        "ASTRA_ROOT_FIXTURE: use the dedicated Personal Browser snapshot tool, then report the exact URL returned by that tool."
+    } else {
+        "ASTRA_ROOT_FIXTURE: run the local proof command, spawn the isolated native reviewer, wait, inspect its status, and finish."
+    };
+    let output = client
+        .execute_with_options(
+            prompt,
+            None,
+            CodexRunOptions {
+                disable_shell_tool: bounded_browser,
+                expect_browser_session: bounded_browser,
+                personal_browser: bounded_browser,
+                reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::High),
+                require_first_tool_call: true,
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    if bounded_browser {
+        assert_eq!(output.final_json["summary"], PERSONAL_BROWSER_MCP_PROBE_URL);
+        assert_eq!(count_command_executions_in_events(&output.events), 0);
+        assert_eq!(
+            browser_fixture
+                .as_ref()
+                .unwrap()
+                .0
+                .completed_calls
+                .load(Ordering::SeqCst),
+            1
+        );
+    } else {
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("astra-proof.txt"))?,
+            "astra_code_mode_marker"
+        );
+        assert_eq!(
+            output.final_json["summary"],
+            "Astra execution and review complete"
+        );
+        assert!(
+            output
+                .events
+                .iter()
+                .any(|event| event["item"]["type"] == "command_execution"
+                    && event["item"]["status"] == "completed"
+                    && event["item"]["exit_code"] == 0)
+        );
+        assert!(
+            output
+                .events
+                .iter()
+                .any(|event| event["item"]["type"] == "sub_agent_activity"
+                    && event["item"]["agent_path"] == "/root/reviewer"
+                    && event["item"]["activity"] == "started")
+        );
+        assert!(
+            output
+                .events
+                .iter()
+                .any(|event| event["item"]["type"] == "collab_tool_call"
+                    && event["item"]["tool"] == "wait"
+                    && event["item"]["status"] == "completed")
+        );
+        assert!(
+            state.child_requests.load(Ordering::SeqCst) >= 1,
+            "native reviewer never sampled through proxy"
+        );
+    }
+    let requests = state.requests.lock().await;
+    assert!(requests.len() >= if bounded_browser { 2 } else { 6 });
+    assert_eq!(
+        state.responses_lite_requests.load(Ordering::SeqCst),
+        requests.len(),
+        "proxy lost the Responses Lite transport header"
+    );
+    for request in requests.iter() {
+        assert_eq!(request["model"], "gpt-6-astra");
+        assert_eq!(
+            request["reasoning"]["effort"], "max",
+            "explicit max changed before reaching the fixture provider"
+        );
+        assert_eq!(request["reasoning"]["context"], "all_turns");
+        assert_eq!(
+            request["parallel_tool_calls"], false,
+            "Responses Lite must retain its wire-level serial flag even when model metadata supports parallel tools"
+        );
+        assert!(
+            request.get("tools").is_none(),
+            "proxy injected tools into a Responses Lite request"
+        );
+        let first_item = &request["input"][0];
+        assert_eq!(first_item["type"], "additional_tools");
+        assert_eq!(first_item["role"], "developer");
+        assert_eq!(request["input"][1]["role"], "developer");
+    }
+    assert_eq!(requests[0]["tool_choice"], "required");
+    let tools = declared_fixture_tools(astra_fixture_tools(&requests[0]));
+    if bounded_browser {
+        assert!(
+            tools
+                .iter()
+                .any(|(_, name)| name == "snapshot" || name.ends_with("__snapshot"))
+        );
+        // Core MCP resource helpers address the same single allowed server;
+        // every other tool must be the browser's advertised snapshot action.
+        assert!(
+            tools.iter().all(|(_, name)| name == "snapshot"
+                || name.ends_with("__snapshot")
+                || matches!(
+                    name.as_str(),
+                    "list_mcp_resources" | "list_mcp_resource_templates" | "read_mcp_resource"
+                )),
+            "bounded browser exposed tools outside its MCP capability: {tools:?}"
+        );
+        assert!(
+            requests.iter().any(
+                |request| request["input"]
+                    .as_array()
+                    .is_some_and(|items| items.iter().any(|item| item["type"]
+                        == "function_call_output"
+                        && item["call_id"] == "astra-snapshot"
+                        && item["output"]
+                            .to_string()
+                            .contains(PERSONAL_BROWSER_MCP_PROBE_URL)))
+            )
+        );
+    } else {
+        assert!(
+            tools.iter().any(
+                |(namespace, name)| namespace.as_deref() == Some("collaboration")
+                    && name == "spawn_agent"
+            ),
+            "Astra v2 tools missing: {tools:?}"
+        );
+        assert!(!tools.iter().any(|(_, name)| name == "close_agent"));
+        assert!(
+            requests.iter().any(|request| {
+                let input = request["input"].to_string();
+                input.contains("ASTRA_REVIEWER_FIXTURE") && !input.contains("ASTRA_ROOT_FIXTURE")
+            }),
+            "fresh reviewer inherited parent context"
+        );
+        assert!(
+            requests.iter().any(
+                |request| request["input"]
+                    .as_array()
+                    .is_some_and(|items| items.iter().any(|item| item["type"]
+                        == "custom_tool_call_output"
+                        && item["call_id"] == "astra-exec"
+                        && item["output"]
+                            .to_string()
+                            .contains("astra_code_mode_marker")))
+            ),
+            "code mode did not return real command output to the provider"
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|request| request["input"].to_string().contains("REVIEWER_COMPLETE")),
+            "reviewer report was not delivered to parent"
+        );
+    }
+    drop(requests);
+    drop(proxy_guard);
+    proxy_task.await??;
+    drop(upstream_guard);
+    upstream_task.await??;
+    if let Some((_, guard, task, _env)) = browser_fixture {
+        drop(guard);
+        task.await??;
+    }
+    Ok(())
+}
+
 fn registration_for_live(runtime_id: Uuid) -> Registration {
     Registration {
         runtime_id,

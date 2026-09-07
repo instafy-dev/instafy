@@ -19,20 +19,29 @@ async function fixture() {
   await fs.promises.mkdir(directory, { recursive: true });
   await fs.promises.writeFile(executablePath, "verified runtime fixture", { mode: 0o755 });
   const contents = await fs.promises.readFile(executablePath);
+  const hostFilename = process.platform === "win32" ? "codex-code-mode-host.exe" : "codex-code-mode-host";
+  const hostPath = path.join(directory, hostFilename);
+  await fs.promises.writeFile(hostPath, "verified code-mode host fixture", { mode: 0o755 });
+  const hostContents = await fs.promises.readFile(hostPath);
   const manifest = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     filename,
     platform: process.platform,
     arch: process.arch,
     sizeBytes: contents.byteLength,
     sha256: createHash("sha256").update(contents).digest("hex"),
     sourceSha: "a".repeat(40),
+    codeModeHost: {
+      filename: hostFilename,
+      sizeBytes: hostContents.byteLength,
+      sha256: createHash("sha256").update(hostContents).digest("hex"),
+    },
   };
   await fs.promises.writeFile(
     path.join(directory, "runtime-agent-manifest.json"),
     JSON.stringify(manifest),
   );
-  return { resourcesPath, executablePath, manifest };
+  return { resourcesPath, executablePath, hostPath, manifest };
 }
 
 test("resolves only the platform-matched checksum-verified bundled runtime", async (t) => {
@@ -84,5 +93,25 @@ test("rejects tampered, mismatched, and symlinked bundled runtimes", async (t) =
       resolveVerifiedBundledRuntimeAgent({ resourcesPath: linked.resourcesPath }),
       /missing or unsafe/,
     );
+  }
+});
+
+
+test("requires an intact code-mode host from the same verified bundle", async (t) => {
+  for (const mutation of ["missing", "tampered", "wrong-name", "legacy-manifest"]) {
+    const value = await fixture();
+    t.after(() => fs.rmSync(value.resourcesPath, { recursive: true, force: true }));
+    if (mutation === "missing") await fs.promises.unlink(value.hostPath);
+    if (mutation === "tampered") {
+      // Preserve size to prove the digest is checked too.
+      await fs.promises.writeFile(value.hostPath, "x".repeat(value.manifest.codeModeHost.sizeBytes));
+    }
+    if (mutation === "wrong-name" || mutation === "legacy-manifest") {
+      const manifest = mutation === "wrong-name"
+        ? { ...value.manifest, codeModeHost: { ...value.manifest.codeModeHost, filename: "other-host" } }
+        : { ...value.manifest, schemaVersion: 2 };
+      await fs.promises.writeFile(path.join(value.resourcesPath, "runtime-agent", "runtime-agent-manifest.json"), JSON.stringify(manifest));
+    }
+    await assert.rejects(resolveVerifiedBundledRuntimeAgent({ resourcesPath: value.resourcesPath }));
   }
 });

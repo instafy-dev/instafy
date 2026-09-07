@@ -6,16 +6,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
-use codex_config::{DEFAULT_MCP_SERVER_ENVIRONMENT_ID, McpServerConfig, McpServerTransportConfig};
+use codex_config::{
+    DEFAULT_MCP_SERVER_ENVIRONMENT_ID, McpServerConfig, McpServerTransportConfig,
+    ToolExposureSurface,
+};
 use codex_core::config::{
     Config, ConfigBuilder, ConfigOverrides, ManagedFeatures, find_codex_home,
     set_project_trust_level,
 };
 use codex_core::test_support::EmptyUserInstructionsProvider;
 use codex_core::{
-    CodexAppsToolsCache, CodexThread, NewThread, SteerInputError, ThreadManager,
+    CodexAppsToolsCache, CodexThread, NewThread, StartThreadOptions, ThreadManager,
     build_models_manager, init_state_db, local_agent_graph_store_from_state_db,
-    resolve_installation_id, thread_store_from_config,
+    passthrough_image_store, resolve_installation_id, thread_store_from_config,
 };
 use codex_exec_server::{EnvironmentManager, LOCAL_ENVIRONMENT_ID, LOCAL_FS};
 use codex_extension_api::empty_extension_registry;
@@ -33,8 +36,12 @@ use codex_protocol::items::{AgentMessageContent, TurnItem};
 use codex_protocol::models::{ContentItem, MessagePhase, ResponseItem};
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::{
-    AskForApproval, CodexErrorInfo, Event, EventMsg, McpServerRefreshConfig, Op, SandboxPolicy,
-    SessionSource, ThreadSettingsOverrides, TurnEnvironmentSelection, TurnEnvironmentSelections,
+    AskForApproval, CodexErrorInfo, Event, EventMsg, Op, SandboxPolicy, SessionSource,
+    ThreadSettingsOverrides, TurnEnvironmentSelection, TurnEnvironmentSelections,
+};
+use codex_protocol::turn_input::{
+    NotSubmittedReason, StartIfIdleSubmission, SteerSubmission, TurnInput, TurnInputRequest,
+    TurnStartOptions,
 };
 use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -76,7 +83,7 @@ const DEFAULT_CODEX_MAX_RUN_RETRIES: usize = 1;
 const DEFAULT_CODEX_RETRY_BASE_DELAY_MS: u64 = 1500;
 const DEFAULT_CODEX_CANCEL_SHUTDOWN_TIMEOUT_SECONDS: u64 = 5;
 const SHARED_BROWSER_CONFIRMED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(8);
-const SHARED_BROWSER_EXECUTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+const CODEX_EXECUTION_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_COMMAND_OUTPUT_EVENT_CHARS: usize = 4096;
 const MAX_COMMAND_OUTPUT_BUFFER_CHARS: usize = 8192;
 const BROWSER_MODE_DEVELOPER_INSTRUCTIONS: &str = r#"Browser/UI execution run:
@@ -571,6 +578,7 @@ pub struct CodexConfig {
 #[derive(Debug, Clone)]
 pub struct CodexClient {
     config: CodexConfig,
+    code_mode_host_program: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -652,11 +660,117 @@ impl<T> Drop for AbortTaskOnDrop<T> {
     }
 }
 
+struct CodexRunCleanup {
+    outcome: tokio::sync::watch::Sender<Option<std::result::Result<(), String>>>,
+}
+
+impl Default for CodexRunCleanup {
+    fn default() -> Self {
+        // Before a manager exists there are no threads requiring cleanup.
+        let (outcome, _) = tokio::sync::watch::channel(Some(Ok(())));
+        Self { outcome }
+    }
+}
+
+impl CodexRunCleanup {
+    fn require_shutdown(&self) {
+        self.outcome.send_replace(None);
+    }
+
+    fn finish(&self, result: &Result<()>) {
+        self.outcome.send_replace(Some(
+            result
+                .as_ref()
+                .map(|_| ())
+                .map_err(|error| format!("{error:#}")),
+        ));
+    }
+
+    async fn wait(&self, cleanup_timeout: Duration) -> Result<()> {
+        let mut outcome = self.outcome.subscribe();
+        timeout(cleanup_timeout, async move {
+            loop {
+                if let Some(result) = outcome.borrow().clone() {
+                    return result.map_err(anyhow::Error::msg);
+                }
+                outcome.changed().await.context("Codex cleanup acknowledgement was lost; runtime recycle required")?;
+            }
+        })
+        .await
+        .map_err(|_| anyhow!("Codex thread cleanup was not confirmed within {} milliseconds; runtime recycle required", cleanup_timeout.as_millis()))?
+    }
+}
+
+struct CodexThreadsGuard {
+    manager: Option<Arc<ThreadManager>>,
+    cleanup: Arc<CodexRunCleanup>,
+}
+
+impl CodexThreadsGuard {
+    fn new(manager: Arc<ThreadManager>, cleanup: Arc<CodexRunCleanup>) -> Self {
+        cleanup.require_shutdown();
+        Self {
+            manager: Some(manager),
+            cleanup,
+        }
+    }
+
+    async fn shutdown(&mut self) -> Result<()> {
+        let Some(manager) = self.manager.as_ref() else {
+            return Ok(());
+        };
+        let result = shutdown_codex_threads(manager).await;
+        self.cleanup.finish(&result);
+        self.manager.take();
+        result
+    }
+}
+
+impl Drop for CodexThreadsGuard {
+    fn drop(&mut self) {
+        // Timeouts and parent-task cancellation can drop execute_inner before
+        // its awaited finalizer. Keep the manager alive until every resident
+        // reviewer has received bounded shutdown, including idle v2 children.
+        if let Some(manager) = self.manager.take() {
+            let cleanup = self.cleanup.clone();
+            tokio::spawn(async move {
+                let result = shutdown_codex_threads(&manager).await;
+                cleanup.finish(&result);
+                if let Err(error) = result {
+                    tracing::error!(%error, "Codex thread cleanup failed after cancellation");
+                }
+            });
+        }
+    }
+}
+
+async fn shutdown_codex_threads(manager: &ThreadManager) -> Result<()> {
+    let report = manager
+        .shutdown_all_threads_bounded(Duration::from_secs(
+            DEFAULT_CODEX_CANCEL_SHUTDOWN_TIMEOUT_SECONDS,
+        ))
+        .await;
+    if !report.is_complete() {
+        return Err(anyhow!(
+            "Codex thread shutdown incomplete (admission uncertain: {}, {} submission failures, {} timed out); runtime recycle required",
+            report.admission_failed,
+            report.submit_failed.len(),
+            report.timed_out.len(),
+        ));
+    }
+    Ok(())
+}
+
 async fn start_codex_thread(
     thread_manager: Arc<ThreadManager>,
     config: Config,
 ) -> CodexResult<NewThread> {
-    run_on_fresh_task(async move { thread_manager.start_thread(config).await }).await
+    run_on_fresh_task(async move {
+        thread_manager
+            .start_thread(StartThreadOptions::new(config))
+            .await
+    })
+    .await
 }
 
 async fn resume_codex_thread(
@@ -667,7 +781,13 @@ async fn resume_codex_thread(
 ) -> CodexResult<NewThread> {
     run_on_fresh_task(async move {
         thread_manager
-            .resume_thread_from_rollout(config, rollout_path, auth_manager, None, false)
+            .resume_thread_from_rollout(
+                config,
+                rollout_path,
+                auth_manager,
+                None,
+                Default::default(),
+            )
             .await
     })
     .await
@@ -675,7 +795,17 @@ async fn resume_codex_thread(
 
 impl CodexClient {
     pub fn new(config: CodexConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            code_mode_host_program: None,
+        }
+    }
+
+    /// Select a companion host for embeddings with a nonstandard executable
+    /// layout. Normal packaged runs use Codex's sibling-host discovery.
+    pub fn with_code_mode_host_program(mut self, host_program: PathBuf) -> Self {
+        self.code_mode_host_program = Some(host_program);
+        self
     }
 
     pub fn from_env(workspace_dir: &Path) -> Option<Self> {
@@ -714,61 +844,58 @@ impl CodexClient {
         let mut attempt: usize = 0;
         loop {
             let mut attempt_options = options.clone();
-            let shared_browser_cancel_signal = if attempt_options.shared_browser {
-                let signal = attempt_options
-                    .cancel_signal
-                    .clone()
-                    .unwrap_or_else(JobCancelSignal::new);
+            let external_cancel_signal = attempt_options.cancel_signal.clone();
+            let cancel_signal = if attempt_options.shared_browser {
+                let signal = external_cancel_signal.clone().unwrap_or_default();
                 signal.reset_shared_browser_shutdown_confirmation();
-                attempt_options.cancel_signal = Some(signal.clone());
-                Some(signal)
+                signal
             } else {
-                None
+                // A run deadline must not cancel the caller's lease signal: a
+                // confirmed cleanup may permit another attempt on that lease.
+                JobCancelSignal::new()
             };
-            let shared_browser_shutdown_confirmation = shared_browser_cancel_signal.clone();
+            attempt_options.cancel_signal = Some(cancel_signal.clone());
+            let shared_browser_shutdown_confirmation = attempt_options
+                .shared_browser
+                .then(|| cancel_signal.clone());
+            let cleanup = Arc::new(CodexRunCleanup::default());
             let result = if on_event.is_none() {
-                // Callback-free production runs own every input needed by execute_inner, so they
-                // can use a fresh task stack. Callback-bearing runs retain the direct path because
-                // the borrowed callback is intentionally non-'static.
-                let client = Self::new(self.config.clone());
+                // Preserve embedding settings such as a custom companion-host
+                // layout when moving the run to a fresh task stack.
+                let client = self.clone();
                 let prompt = prompt.to_string();
-                let options = attempt_options;
+                let cleanup_for_run = cleanup.clone();
                 run_on_fresh_task(async move {
                     let mut no_event_callback = None;
-                    if let Some(cancel_signal) = shared_browser_cancel_signal {
-                        Ok(Self::run_shared_browser_with_deadline(
-                            run_timeout,
-                            SHARED_BROWSER_EXECUTION_DRAIN_TIMEOUT,
-                            cancel_signal,
-                            client.execute_inner(&prompt, &mut no_event_callback, options),
-                        )
-                        .await)
-                    } else {
-                        timeout(
-                            run_timeout,
-                            client.execute_inner(&prompt, &mut no_event_callback, options),
-                        )
-                        .await
-                    }
+                    Self::run_with_deadline(
+                        run_timeout,
+                        CODEX_EXECUTION_DRAIN_TIMEOUT,
+                        cancel_signal,
+                        external_cancel_signal,
+                        client.execute_inner(
+                            &prompt,
+                            &mut no_event_callback,
+                            attempt_options,
+                            cleanup_for_run,
+                        ),
+                    )
+                    .await
                 })
                 .await
             } else {
-                if let Some(cancel_signal) = shared_browser_cancel_signal {
-                    Ok(Self::run_shared_browser_with_deadline(
-                        run_timeout,
-                        SHARED_BROWSER_EXECUTION_DRAIN_TIMEOUT,
-                        cancel_signal,
-                        self.execute_inner(prompt, &mut on_event, attempt_options),
-                    )
-                    .await)
-                } else {
-                    timeout(
-                        run_timeout,
-                        self.execute_inner(prompt, &mut on_event, attempt_options),
-                    )
-                    .await
-                }
+                Self::run_with_deadline(
+                    run_timeout,
+                    CODEX_EXECUTION_DRAIN_TIMEOUT,
+                    cancel_signal,
+                    external_cancel_signal,
+                    self.execute_inner(prompt, &mut on_event, attempt_options, cleanup.clone()),
+                )
+                .await
             };
+            // Early errors or an uncooperative timed-out future can drop the
+            // manager guard. Await its actual cleanup acknowledgement before
+            // reporting completion or admitting another attempt.
+            cleanup.wait(CODEX_EXECUTION_DRAIN_TIMEOUT).await?;
             if shared_browser_shutdown_confirmation
                 .as_ref()
                 .is_some_and(|signal| !signal.shared_browser_shutdown_is_confirmed())
@@ -778,10 +905,16 @@ impl CodexClient {
                 ));
             }
             match result {
-                Ok(Ok(output)) => return Ok(output),
-                Ok(Err(error)) => {
+                Ok(output) => return Ok(output),
+                Err(error) => {
                     let error_text = format!("{error:#}");
-                    let should_retry = attempt < max_retries && should_retry_codex_run(&error_text);
+                    let should_retry = attempt < max_retries
+                        && !options
+                            .cancel_signal
+                            .as_ref()
+                            .is_some_and(JobCancelSignal::is_canceled)
+                        && !error_text.contains("runtime recycle required")
+                        && should_retry_codex_run(&error_text);
                     if !should_retry {
                         return Err(error);
                     }
@@ -792,23 +925,7 @@ impl CodexClient {
                         max_retries,
                         delay_ms = delay.as_millis(),
                         error = %error_text,
-                        "Codex run failed with a transient upstream error; retrying"
-                    );
-                    tokio::time::sleep(delay).await;
-                }
-                Err(_) => {
-                    let should_retry = attempt < max_retries;
-                    if !should_retry {
-                        return Err(anyhow!("Codex run timed out"));
-                    }
-
-                    let delay = codex_retry_delay(retry_base_delay, attempt);
-                    tracing::warn!(
-                        attempt = attempt + 1,
-                        max_retries,
-                        delay_ms = delay.as_millis(),
-                        timeout_secs = run_timeout.as_secs(),
-                        "Codex run timed out; retrying"
+                        "Codex run failed with a transient upstream error after confirmed cleanup; retrying"
                     );
                     tokio::time::sleep(delay).await;
                 }
@@ -817,30 +934,43 @@ impl CodexClient {
         }
     }
 
-    async fn run_shared_browser_with_deadline<T>(
+    async fn run_with_deadline<T>(
         run_timeout: Duration,
         cleanup_timeout: Duration,
         cancel_signal: JobCancelSignal,
+        external_cancel_signal: Option<JobCancelSignal>,
         future: impl Future<Output = Result<T>>,
     ) -> Result<T> {
         tokio::pin!(future);
-        tokio::select! {
+        let timed_out = tokio::select! {
             output = &mut future => return output,
-            _ = tokio::time::sleep(run_timeout) => {
-                cancel_signal.cancel();
-            }
-            _ = cancel_signal.cancelled() => {}
-        }
-        // Give cooperative cancellation a bounded window to reach the
-        // confirmed-shutdown finalizer. If it cannot, return while the
-        // authority marker remains fail-closed; the guard then recycles the
-        // runtime instead of leaving the job hung indefinitely.
-        timeout(cleanup_timeout, &mut future)
+            _ = tokio::time::sleep(run_timeout) => true,
+            _ = async {
+                if let Some(signal) = external_cancel_signal {
+                    signal.cancelled().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => false,
+        };
+        cancel_signal.cancel();
+        let result = timeout(cleanup_timeout, &mut future)
             .await
             .map_err(|_| anyhow!(
-                "Shared Browser execution did not reach confirmed shutdown within {} milliseconds after cancellation; runtime recycle required",
+                "Codex execution did not reach shutdown within {} milliseconds after cancellation; runtime recycle required",
                 cleanup_timeout.as_millis()
-            ))?
+            ))?;
+        if timed_out {
+            // Cleanup errors take precedence over a retryable deadline error.
+            if let Err(error) = &result
+                && format!("{error:#}").contains("runtime recycle required")
+            {
+                return result;
+            }
+            Err(anyhow!("Codex run timed out"))
+        } else {
+            result
+        }
     }
 
     #[allow(unused_assignments)]
@@ -849,6 +979,7 @@ impl CodexClient {
         prompt: &str,
         on_event: &mut Option<&mut (dyn FnMut(&JsonValue) -> Result<()> + Send)>,
         options: CodexRunOptions,
+        cleanup: Arc<CodexRunCleanup>,
     ) -> Result<CodexRunOutput> {
         let browser_mode = options.expect_browser_session;
         let personal_browser_mode =
@@ -1222,7 +1353,9 @@ impl CodexClient {
                 config.codex_home.display()
             )
         })?;
-        let auth_manager = AuthManager::shared_from_config(&config, true).await;
+        let auth_manager = AuthManager::shared_from_config(&config, true)
+            .await
+            .context("failed to initialize Codex authentication")?;
         // runtime-agent embeds Codex as a library, so there is no Codex CLI executable
         // available to back exec-server helper re-entry points here.
         let environment_manager = Arc::new(EnvironmentManager::default_for_tests());
@@ -1231,7 +1364,7 @@ impl CodexClient {
         let installation_id = resolve_installation_id(&config.codex_home)
             .await
             .context("failed to resolve Codex installation id")?;
-        let thread_manager = Arc::new(ThreadManager::new(
+        let mut thread_manager = ThreadManager::new(
             &config,
             auth_manager.clone(),
             build_models_manager(&config, auth_manager.clone()),
@@ -1241,12 +1374,22 @@ impl CodexClient {
             empty_extension_registry(),
             Arc::new(EmptyUserInstructionsProvider),
             None,
+            passthrough_image_store(),
             thread_store,
             local_agent_graph_store_from_state_db(state_db.as_ref()),
             installation_id,
             None,
             None,
-        ));
+        );
+        if let Some(host_program) = &self.code_mode_host_program {
+            thread_manager = thread_manager.with_code_mode_session_provider(Arc::new(
+                codex_code_mode::ProcessOwnedCodeModeSessionProvider::with_host_program(
+                    host_program.clone(),
+                ),
+            ));
+        }
+        let thread_manager = Arc::new(thread_manager);
+        let mut threads_guard = CodexThreadsGuard::new(Arc::clone(&thread_manager), cleanup);
         let thread_mode_key = thread_mode_key(browser_mode);
         let mut active_thread_id = extract_thread_id_from_provider_state(
             options.provider_conversation_state.as_ref(),
@@ -1412,36 +1555,9 @@ impl CodexClient {
             personal_browser_mode,
             !config.mcp_servers.is_empty(),
         ) {
-            let mcp_servers = serde_json::to_value(&*config.mcp_servers).unwrap_or_else(|err| {
-                tracing::warn!(error = %err, "failed to serialize MCP server config for refresh");
-                json!({})
-            });
-            let mcp_oauth_credentials_store_mode = serde_json::to_value(
-                config.mcp_oauth_credentials_store_mode,
-            )
-            .unwrap_or_else(|err| {
-                tracing::warn!(
-                    error = %err,
-                    "failed to serialize MCP OAuth store mode for refresh"
-                );
-                JsonValue::Null
-            });
-            let auth_keyring_backend_kind =
-                serde_json::to_value(config.auth_keyring_backend_kind()).unwrap_or_else(|err| {
-                    tracing::warn!(
-                        error = %err,
-                        "failed to serialize MCP auth keyring backend kind for refresh"
-                    );
-                    JsonValue::Null
-                });
+            conversation.refresh_mcp_config(config.clone()).await;
             conversation
-                .submit(Op::RefreshMcpServers {
-                    config: McpServerRefreshConfig {
-                        mcp_servers,
-                        mcp_oauth_credentials_store_mode,
-                        auth_keyring_backend_kind,
-                    },
-                })
+                .submit(Op::RefreshMcpServers)
                 .await
                 .context("failed to request MCP server refresh before MCP-focused turn")?;
         }
@@ -1481,13 +1597,14 @@ impl CodexClient {
         });
 
         let bounded_browser_mode = personal_browser_mode || shared_browser_mode;
-        let active_turn_id = conversation
-            .submit(Op::UserInput {
-                items,
-                final_output_json_schema,
-                additional_context: Default::default(),
-                responsesapi_client_metadata,
-                thread_settings: ThreadSettingsOverrides {
+        let submission = conversation
+            .start_turn_if_idle(TurnInputRequest::user_input(items)
+                .on_start(TurnStartOptions {
+                    final_output_json_schema,
+                    ..Default::default()
+                })
+                .with_responses_metadata(responsesapi_client_metadata)
+                .with_thread_settings(ThreadSettingsOverrides {
                     // Browser-bound turns deliberately select no execution
                     // environment. MCP tools do not require one, while every
                     // filesystem, image, patch, and shell tool does. Ordinary
@@ -1509,10 +1626,15 @@ impl CodexClient {
                     service_tier: None,
                     collaboration_mode: None,
                     personality: default_personality,
-                },
-            })
+                }))
             .await
             .context("failed to submit prompt to Codex")?;
+        let active_turn_id = match submission {
+            StartIfIdleSubmission::Started { turn_id } => turn_id,
+            StartIfIdleSubmission::NotSubmitted { reason } => {
+                return Err(anyhow!("Codex declined runtime turn start: {reason:?}"));
+            }
+        };
 
         let mut last_agent_message: Option<String> = None;
         let mut last_agent_message_event: Option<String> = None;
@@ -1767,13 +1889,20 @@ impl CodexClient {
         }
         .await;
 
-        if options.shared_browser {
+        let shutdown_confirmation = if options.shared_browser {
             let Some(shutdown_confirmation) = cancel_signal.as_ref() else {
                 return Err(anyhow!(
                     "Shared Browser execution lost its shutdown confirmation signal"
                 ));
             };
             confirm_shared_browser_shutdown(&conversation).await?;
+            Some(shutdown_confirmation)
+        } else {
+            None
+        };
+
+        threads_guard.shutdown().await?;
+        if let Some(shutdown_confirmation) = shutdown_confirmation {
             shutdown_confirmation.confirm_shared_browser_shutdown();
         }
 
@@ -1809,33 +1938,45 @@ async fn apply_active_turn_input(conversation: &CodexThread, command: ActiveTurn
         text_elements: Vec::new(),
     }];
     let outcome = match conversation
-        .steer_input(
-            items,
-            Default::default(),
-            Some(&command.expected_turn_id),
-            Some(command_id.to_string()),
-            None,
+        .steer_turn(
+            TurnInputRequest::new(TurnInput::UserInput {
+                content: items,
+                client_id: Some(command_id.to_string()),
+            }),
+            command.expected_turn_id.clone(),
         )
         .await
     {
-        Ok(codex_turn_id) => ActiveTurnInputOutcome::Applied { codex_turn_id },
-        Err(error) => {
-            let error_message = match error {
-                SteerInputError::NoActiveTurn(_) => "Codex turn completed before input submission",
-                SteerInputError::ExpectedTurnMismatch { .. } => {
-                    "Codex active turn changed before input submission"
-                }
-                SteerInputError::ActiveTurnNotSteerable { .. } => {
-                    "Codex active turn does not accept steering input"
-                }
-                SteerInputError::EmptyInput => "Codex rejected empty steering input",
-            };
-            ActiveTurnInputOutcome::Rejected {
-                error_message: error_message.to_string(),
-            }
-        }
+        Ok(SteerSubmission::Steered { turn_id }) => ActiveTurnInputOutcome::Applied {
+            codex_turn_id: turn_id,
+        },
+        Ok(SteerSubmission::NotSubmitted { reason }) => ActiveTurnInputOutcome::Rejected {
+            error_message: steering_rejection_message(&reason).to_string(),
+        },
+        Err(error) => ActiveTurnInputOutcome::Rejected {
+            error_message: format!("Codex steering submission failed: {error}"),
+        },
     };
     command.acknowledge(outcome);
+}
+
+fn steering_rejection_message(reason: &NotSubmittedReason) -> &'static str {
+    match reason {
+        NotSubmittedReason::NoActiveTurn => "Codex turn completed before input submission",
+        NotSubmittedReason::ExpectedTurnMismatch { .. } => {
+            "Codex active turn changed before input submission"
+        }
+        NotSubmittedReason::ActiveTurnNotSteerable { .. } => {
+            "Codex active turn does not accept steering input"
+        }
+        NotSubmittedReason::EmptyInput => "Codex rejected empty steering input",
+        NotSubmittedReason::ActiveTurnOutputSchemaMismatch => {
+            "Codex active turn output schema changed before input submission"
+        }
+        NotSubmittedReason::NotIdle
+        | NotSubmittedReason::PendingTriggerTurn
+        | NotSubmittedReason::PlanMode => "Codex declined steering input",
+    }
 }
 
 async fn confirm_shared_browser_shutdown(conversation: &CodexThread) -> Result<()> {
@@ -2528,6 +2669,7 @@ fn install_browser_mcp_servers(
                     ("x-instafy-project-id".to_string(), project_id),
                 ])),
                 env_http_headers: None,
+                http_headers_helper: None,
             }),
         );
     }
@@ -2628,6 +2770,7 @@ fn local_browser_mcp_server_config(transport: McpServerTransportConfig) -> McpSe
         enabled: true,
         required: true,
         supports_parallel_tool_calls: false,
+        omit_tools_from: None,
         disabled_reason: None,
         startup_timeout_sec: Some(Duration::from_secs(10)),
         tool_timeout_sec: Some(Duration::from_secs(90)),
@@ -2649,6 +2792,12 @@ fn browser_mcp_server_config(transport: McpServerTransportConfig) -> McpServerCo
         enabled: true,
         required: true,
         supports_parallel_tool_calls: false,
+        // This turn has one fixed browser inventory. Keep those tools directly
+        // callable even when the model normally discovers MCP tools on demand.
+        omit_tools_from: Some(vec![
+            ToolExposureSurface::Deferred,
+            ToolExposureSurface::CodeMode,
+        ]),
         disabled_reason: None,
         startup_timeout_sec: Some(Duration::from_secs(10)),
         tool_timeout_sec: Some(Duration::from_secs(40)),
@@ -2691,6 +2840,13 @@ fn validate_bounded_browser_mcp_server_set(
             "bounded browser MCP server does not match the exact browser tool allowlist"
         ));
     }
+    if server.omit_tools_from.as_deref()
+        != Some([ToolExposureSurface::Deferred, ToolExposureSurface::CodeMode].as_slice())
+    {
+        return Err(anyhow!(
+            "bounded browser MCP tools must be exposed directly without discovery or code mode"
+        ));
+    }
     if server.disabled_tools.is_some() {
         return Err(anyhow!(
             "bounded browser MCP server must not carry an additional disabled-tool policy"
@@ -2712,6 +2868,7 @@ pub fn personal_browser_capability_contract() -> Result<JsonValue> {
         bearer_token_env_var: None,
         http_headers: None,
         env_http_headers: None,
+        http_headers_helper: None,
     });
     let servers = HashMap::from([(PERSONAL_BROWSER_MCP_SERVER_NAME.to_string(), server)]);
     validate_bounded_browser_mcp_server_set(&servers, PERSONAL_BROWSER_MCP_SERVER_NAME)?;
@@ -2801,11 +2958,26 @@ fn apply_bounded_browser_security_overrides(config: &mut Config, enabled: bool) 
     }
 
     disable_bounded_browser_features(&mut config.features)?;
+    // Model catalog selectors take precedence over the legacy feature flags.
+    // Preserve the model's context/reasoning metadata while restricting its
+    // tool surface to the single browser capability for this runtime turn.
+    config.agents_enabled = false;
+    let mut catalog = match config.model_catalog.take() {
+        Some(catalog) => catalog,
+        None => codex_models_manager::bundled_models_response()
+            .context("failed to load bounded browser model metadata")?,
+    };
+    for model in &mut catalog.models {
+        model.tool_mode = Some(codex_protocol::openai_models::ToolMode::Direct);
+        model.experimental_supported_tools.clear();
+    }
+    config.model_catalog = Some(catalog);
     config
         .web_search_mode
         .set(WebSearchMode::Disabled)
         .context("failed to disable web search for bounded browser turn")?;
     config.experimental_request_user_input_enabled = false;
+    config.update_plan_enabled = false;
     config.include_skill_instructions = false;
     config.include_apps_instructions = false;
     Ok(())
@@ -2830,9 +3002,11 @@ fn disable_bounded_browser_features(features: &mut ManagedFeatures) -> Result<()
 }
 
 fn bounded_browser_disabled_features() -> impl Iterator<Item = Feature> {
+    // UnifiedExec selects the only remaining shell backend and is normalized
+    // on by upstream unless managed requirements disable it. ShellTool=false
+    // and the empty turn environment set prevent any shell tool registration.
     [
         Feature::ShellTool,
-        Feature::UnifiedExec,
         Feature::ShellZshFork,
         Feature::UnifiedExecZshFork,
         Feature::ExecPermissionApprovals,
@@ -2841,6 +3015,10 @@ fn bounded_browser_disabled_features() -> impl Iterator<Item = Feature> {
         Feature::CodeMode,
         Feature::CodeModeBufferedExec,
         Feature::CodeModeHost,
+        Feature::DeferredExecutor,
+        Feature::TokenBudget,
+        Feature::CurrentTimeReminder,
+        Feature::SleepTool,
         Feature::SpawnCsv,
         Feature::MultiAgentV2,
         Feature::Collab,
@@ -2887,6 +3065,7 @@ fn turn_environment_selections(
             environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
             cwd: PathUri::from_abs_path(&default_cwd),
             workspace_roots: vec![PathUri::from_abs_path(&default_cwd)],
+            config: codex_protocol::protocol::EnvironmentConfigState::FromThread,
         }]
     };
     TurnEnvironmentSelections::new(default_cwd, environments)
@@ -3067,6 +3246,7 @@ struct CodexEventStreamAdapter {
     last_agent_message_delta_id: Option<String>,
     completed_agent_message_seen: bool,
     last_total_token_usage: Option<JsonValue>,
+    sub_agent_activity_ids: HashSet<String>,
 }
 
 impl CodexEventStreamAdapter {
@@ -3096,6 +3276,18 @@ impl CodexEventStreamAdapter {
             EventMsg::ItemCompleted(item_completed) => {
                 self.collect_completed_turn_item(&item_completed.item)
             }
+            EventMsg::ItemStarted(item_started) => {
+                if let TurnItem::CollabAgentToolCall(call) = &item_started.item {
+                    return vec![collab_tool_event("item.started", call)];
+                }
+                Vec::new()
+            }
+            EventMsg::SubAgentActivity(activity) => self.collect_sub_agent_activity(
+                &activity.event_id,
+                &activity.kind,
+                &activity.agent_thread_id,
+                &activity.agent_path,
+            ),
             EventMsg::RawResponseItem(raw) => self.collect_raw_response_item(&raw.item),
             EventMsg::AgentReasoning(reasoning) => vec![json!({
                 "type": "item.completed",
@@ -3363,6 +3555,17 @@ impl CodexEventStreamAdapter {
     }
 
     fn collect_completed_turn_item(&mut self, item: &TurnItem) -> Vec<JsonValue> {
+        if let TurnItem::CollabAgentToolCall(call) = item {
+            return vec![collab_tool_event("item.completed", call)];
+        }
+        if let TurnItem::SubAgentActivity(activity) = item {
+            return self.collect_sub_agent_activity(
+                &activity.id,
+                &activity.kind,
+                &activity.agent_thread_id,
+                &activity.agent_path,
+            );
+        }
         let TurnItem::AgentMessage(message) = item else {
             return Vec::new();
         };
@@ -3382,6 +3585,31 @@ impl CodexEventStreamAdapter {
             value["item"]["phase"] = json!(phase);
         }
         vec![value]
+    }
+
+    fn collect_sub_agent_activity(
+        &mut self,
+        id: &str,
+        kind: &codex_protocol::protocol::SubAgentActivityKind,
+        thread_id: &ThreadId,
+        path: &codex_protocol::AgentPath,
+    ) -> Vec<JsonValue> {
+        // Codex can emit both the typed item and its legacy event projection.
+        // Persist the activity once without treating a reviewer's completion
+        // as the parent assistant's final answer.
+        if !self.sub_agent_activity_ids.insert(id.to_string()) {
+            return Vec::new();
+        }
+        vec![json!({
+            "type": "item.completed",
+            "item": {
+                "id": id,
+                "type": "sub_agent_activity",
+                "activity": kind,
+                "agent_thread_id": thread_id,
+                "agent_path": path,
+            },
+        })]
     }
 
     fn collect_raw_response_item(&mut self, item: &ResponseItem) -> Vec<JsonValue> {
@@ -3420,6 +3648,25 @@ impl CodexEventStreamAdapter {
             }
         }))
     }
+}
+
+fn collab_tool_event(
+    event_type: &str,
+    call: &codex_protocol::items::CollabAgentToolCallItem,
+) -> JsonValue {
+    // Keep lifecycle evidence while excluding child prompts and final report
+    // bodies; those are not parent assistant messages.
+    json!({
+        "type": event_type,
+        "item": {
+            "id": call.id,
+            "type": "collab_tool_call",
+            "tool": call.tool,
+            "status": call.status,
+            "sender_thread_id": call.sender_thread_id,
+            "receiver_thread_ids": call.receiver_thread_ids,
+        },
+    })
 }
 
 fn append_capped_command_output(buffer: &mut String, chunk: &[u8]) {
@@ -3888,16 +4135,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_browser_deadline_cancels_but_awaits_fail_closed_cleanup() {
+    async fn codex_deadline_awaits_cleanup_without_canceling_the_lease() {
         let cancel_signal = JobCancelSignal::new();
         let signal_for_run = cancel_signal.clone();
         let cleanup_completed = Arc::new(AtomicBool::new(false));
         let cleanup_for_run = cleanup_completed.clone();
 
-        let output = CodexClient::run_shared_browser_with_deadline(
+        let lease_signal = JobCancelSignal::new();
+        let output = CodexClient::run_with_deadline(
             Duration::from_millis(10),
             Duration::from_millis(100),
             cancel_signal.clone(),
+            Some(lease_signal.clone()),
             async move {
                 signal_for_run.cancelled().await;
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -3908,15 +4157,18 @@ mod tests {
         .await;
 
         assert_eq!(
-            output.expect("cooperative cleanup should finish"),
-            "stopped"
+            output
+                .expect_err("deadline should remain visible")
+                .to_string(),
+            "Codex run timed out"
         );
+        assert!(!lease_signal.is_canceled());
         assert!(cancel_signal.is_canceled());
         assert!(cleanup_completed.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
-    async fn shared_browser_external_cancellation_bounds_uncooperative_cleanup() {
+    async fn codex_external_cancellation_bounds_uncooperative_cleanup() {
         let cancel_signal = JobCancelSignal::new();
         cancel_signal.cancel();
         let future_dropped = Arc::new(AtomicBool::new(false));
@@ -3924,10 +4176,11 @@ mod tests {
 
         let result = timeout(
             Duration::from_millis(100),
-            CodexClient::run_shared_browser_with_deadline(
+            CodexClient::run_with_deadline(
                 Duration::from_secs(60),
                 Duration::from_millis(20),
                 cancel_signal.clone(),
+                Some(cancel_signal.clone()),
                 async move {
                     let _drop_marker = DropMarker(future_dropped_for_run);
                     std::future::pending::<Result<()>>().await
@@ -4153,6 +4406,7 @@ mod tests {
                 bearer_token_env_var: None,
                 http_headers: None,
                 env_http_headers: None,
+                http_headers_helper: None,
             })
         };
         let servers = HashMap::from([
@@ -4165,6 +4419,36 @@ mod tests {
                 .expect_err("additional MCP server must fail closed")
                 .to_string();
         assert!(error.contains("exactly one MCP server"));
+    }
+
+    #[test]
+    fn bounded_browser_contract_rejects_deferred_or_hidden_browser_tools() {
+        for omitted_surfaces in [
+            None,
+            Some(Vec::new()),
+            Some(vec![ToolExposureSurface::CodeMode]),
+            Some(vec![ToolExposureSurface::Deferred]),
+            Some(vec![
+                ToolExposureSurface::Deferred,
+                ToolExposureSurface::CodeMode,
+                ToolExposureSurface::Direct,
+            ]),
+        ] {
+            let mut server = browser_mcp_server_config(McpServerTransportConfig::StreamableHttp {
+                url: "http://127.0.0.1/contract-only".to_string(),
+                bearer_token_env_var: None,
+                http_headers: None,
+                env_http_headers: None,
+                http_headers_helper: None,
+            });
+            server.omit_tools_from = omitted_surfaces;
+            let servers = HashMap::from([(PERSONAL_BROWSER_MCP_SERVER_NAME.to_string(), server)]);
+            let error =
+                validate_bounded_browser_mcp_server_set(&servers, PERSONAL_BROWSER_MCP_SERVER_NAME)
+                    .expect_err("browser tools must remain directly callable")
+                    .to_string();
+            assert!(error.contains("exposed directly"));
+        }
     }
 
     #[test]
@@ -4436,6 +4720,161 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[tokio::test]
+    async fn astra_bundled_metadata_resolves_without_fallback() {
+        use codex_models_manager::manager::{ModelsManager, StaticModelsManager};
+
+        let manager = StaticModelsManager::new(
+            None,
+            codex_models_manager::bundled_models_response().expect("bundled catalog"),
+        );
+        let model = manager
+            .get_model_info("gpt-6-astra", &Default::default())
+            .await;
+        assert!(!model.used_fallback_model_metadata);
+        let metadata = serde_json::to_value(&model).expect("model metadata");
+        assert_eq!(metadata["tool_mode"], "code_mode_only");
+        assert_eq!(metadata["multi_agent_version"], "v2");
+        assert_eq!(metadata["shell_type"], "unified_exec");
+        assert_eq!(metadata["apply_patch_tool_type"], "freeform");
+        assert_eq!(metadata["supports_parallel_tool_calls"], true);
+        assert_eq!(metadata["use_responses_lite"], true);
+        assert_eq!(metadata["context_window"], 272000);
+        assert_eq!(metadata["max_context_window"], 872000);
+        assert_eq!(metadata["default_reasoning_level"], "low");
+        assert!(
+            model
+                .supported_reasoning_levels
+                .iter()
+                .any(|level| level.effort == ReasoningEffort::Max)
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_threads_guard_stops_all_idle_threads_on_finish_and_drop() -> Result<()> {
+        let home = tempfile::tempdir()?;
+        let workspace = tempfile::tempdir()?;
+        let mut config = ConfigBuilder::default()
+            .codex_home(home.path().to_path_buf())
+            .harness_overrides(ConfigOverrides {
+                cwd: Some(workspace.path().to_path_buf()),
+                model: Some("gpt-6-astra".to_string()),
+                ephemeral: Some(true),
+                ..Default::default()
+            })
+            .build()
+            .await?;
+        config.model_catalog = Some(codex_models_manager::bundled_models_response()?);
+        config.model_provider.base_url = Some("http://127.0.0.1:1/v1".to_string());
+        let auth = AuthManager::shared_from_config(&config, false).await?;
+        for drop_guard in [false, true] {
+            let manager = Arc::new(ThreadManager::new(
+                &config,
+                auth.clone(),
+                build_models_manager(&config, auth.clone()),
+                CodexAppsToolsCache::default(),
+                SessionSource::Exec,
+                Arc::new(EnvironmentManager::default_for_tests()),
+                empty_extension_registry(),
+                Arc::new(EmptyUserInstructionsProvider),
+                None,
+                passthrough_image_store(),
+                thread_store_from_config(&config, None),
+                None,
+                "fixture-installation".to_string(),
+                None,
+                None,
+            ));
+            let first = start_codex_thread(manager.clone(), config.clone()).await?;
+            let second = start_codex_thread(manager.clone(), config.clone()).await?;
+            let cleanup = Arc::new(CodexRunCleanup::default());
+            let mut guard = CodexThreadsGuard::new(manager.clone(), cleanup.clone());
+            // A queued controller steer can outlive the actual turn. The new
+            // typed submission must reject it instead of starting a fresh turn.
+            let (sender, receiver, _cancellation) =
+                crate::active_turn_input::active_turn_input_channel(1);
+            receiver.set_ready(Some("finished-turn".to_string()));
+            let pending_ack = tokio::spawn(async move {
+                sender
+                    .submit(
+                        uuid::Uuid::new_v4(),
+                        "stale controller input".to_string(),
+                        "finished-turn".to_string(),
+                    )
+                    .await
+            });
+            apply_active_turn_input(&first.thread, receiver.recv().await.expect("queued steer"))
+                .await;
+            assert_eq!(
+                pending_ack.await?,
+                ActiveTurnInputOutcome::Rejected {
+                    error_message: "Codex turn completed before input submission".to_string(),
+                }
+            );
+            if drop_guard {
+                drop(guard);
+            } else {
+                guard.shutdown().await?;
+            }
+            cleanup.wait(Duration::from_secs(10)).await?;
+            timeout(Duration::from_secs(1), async {
+                first.thread.wait_until_terminated().await;
+                second.thread.wait_until_terminated().await;
+                while manager.get_thread(first.thread_id).await.is_ok()
+                    || manager.get_thread(second.thread_id).await.is_ok()
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .context("runtime manager left an idle reviewer running")?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn codex_event_stream_preserves_v2_reviewer_activity_without_finalizing_parent() {
+        use codex_protocol::protocol::{SubAgentActivityEvent, SubAgentActivityKind};
+
+        let mut adapter = CodexEventStreamAdapter::default();
+        let reviewer_id = ThreadId::new();
+        let reviewer_path: codex_protocol::AgentPath =
+            serde_json::from_value(json!("/root/reviewer")).expect("reviewer path");
+        for (id, kind, activity) in [
+            ("spawn", SubAgentActivityKind::Started, "started"),
+            ("done", SubAgentActivityKind::Completed, "completed"),
+            (
+                "interrupt",
+                SubAgentActivityKind::Interrupted,
+                "interrupted",
+            ),
+        ] {
+            let item = TurnItem::SubAgentActivity(codex_protocol::items::SubAgentActivityItem {
+                id: id.to_string(),
+                kind,
+                agent_thread_id: reviewer_id,
+                agent_path: reviewer_path.clone(),
+            });
+            let projected = adapter.collect_completed_turn_item(&item);
+            assert_eq!(projected[0]["item"]["type"], "sub_agent_activity");
+            assert_eq!(projected[0]["item"]["activity"], activity);
+            assert_eq!(projected[0]["item"]["agent_path"], "/root/reviewer");
+            assert!(latest_completed_agent_message_from_events(&projected).is_none());
+            let duplicate = adapter.collect(&Event {
+                id: id.to_string(),
+                msg: EventMsg::SubAgentActivity(SubAgentActivityEvent {
+                    event_id: id.to_string(),
+                    occurred_at_ms: 0,
+                    kind,
+                    agent_thread_id: reviewer_id,
+                    agent_path: reviewer_path.clone(),
+                }),
+            });
+            assert!(duplicate.is_empty());
+        }
+        assert!(!adapter.completed_agent_message_seen);
     }
 
     #[test]
@@ -5183,6 +5622,8 @@ required = true
         let started = adapter.collect(&Event {
             id: "evt_begin".to_string(),
             msg: EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
+                plugin_id: None,
+                script_path: None,
                 call_id: "call_1".to_string(),
                 process_id: None,
                 turn_id: "turn_1".to_string(),
@@ -5211,6 +5652,8 @@ required = true
         let completed = adapter.collect(&Event {
             id: "evt_end".to_string(),
             msg: EventMsg::ExecCommandEnd(ExecCommandEndEvent {
+                plugin_id: None,
+                script_path: None,
                 call_id: "call_1".to_string(),
                 process_id: None,
                 turn_id: "turn_1".to_string(),
@@ -5254,6 +5697,7 @@ required = true
                 app_name: None,
                 action_name: None,
                 plugin_id: None,
+                read_only_hint: None,
                 duration: Duration::from_millis(1),
                 result: Ok(CallToolResult {
                     content: vec![json!({
@@ -5297,6 +5741,8 @@ required = true
         let _ = adapter.collect(&Event {
             id: "evt_begin".to_string(),
             msg: EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
+                plugin_id: None,
+                script_path: None,
                 call_id: "call_1".to_string(),
                 process_id: None,
                 turn_id: "turn_1".to_string(),
@@ -5322,6 +5768,8 @@ required = true
         let completed = adapter.collect(&Event {
             id: "evt_end".to_string(),
             msg: EventMsg::ExecCommandEnd(ExecCommandEndEvent {
+                plugin_id: None,
+                script_path: None,
                 call_id: "call_1".to_string(),
                 process_id: None,
                 turn_id: "turn_1".to_string(),
@@ -5415,6 +5863,7 @@ required = true
         let completed = adapter.collect(&Event {
             id: "evt_item_completed".to_string(),
             msg: EventMsg::ItemCompleted(ItemCompletedEvent {
+                started_at_ms: None,
                 thread_id: ThreadId::new(),
                 turn_id: "turn_1".to_string(),
                 item: TurnItem::AgentMessage(codex_protocol::items::AgentMessageItem {
@@ -5424,6 +5873,8 @@ required = true
                     }],
                     phase: None,
                     memory_citation: None,
+                    delivery: None,
+                    questions: None,
                 }),
                 completed_at_ms: 0,
             }),
@@ -5460,6 +5911,7 @@ required = true
         let completed = adapter.collect(&Event {
             id: "evt_item_completed".to_string(),
             msg: EventMsg::ItemCompleted(ItemCompletedEvent {
+                started_at_ms: None,
                 thread_id: ThreadId::new(),
                 turn_id: "turn_1".to_string(),
                 item: TurnItem::AgentMessage(codex_protocol::items::AgentMessageItem {
@@ -5469,6 +5921,8 @@ required = true
                     }],
                     phase: Some(MessagePhase::Commentary),
                     memory_citation: None,
+                    delivery: None,
+                    questions: None,
                 }),
                 completed_at_ms: 0,
             }),
@@ -5488,6 +5942,8 @@ required = true
                     }],
                     phase: Some(MessagePhase::Commentary),
                     memory_citation: None,
+                    delivery: None,
+                    questions: None,
                 },
             )),
             None
@@ -5504,6 +5960,8 @@ required = true
                 message: "I am checking the project files.".to_string(),
                 phase: Some(MessagePhase::Commentary),
                 memory_citation: None,
+                delivery: None,
+                questions: None,
             }),
         });
 
@@ -5516,6 +5974,8 @@ required = true
                 message: "I am checking the project files.".to_string(),
                 phase: Some(MessagePhase::Commentary),
                 memory_citation: None,
+                delivery: None,
+                questions: None,
             }),
             None
         );
@@ -5616,6 +6076,7 @@ required = true
             output_tokens: 250,
             reasoning_output_tokens: 50,
             total_tokens: 1250,
+            codex_rollout_budget_units: None,
         };
         let _ = adapter.collect(&Event {
             id: "evt_tokens".to_string(),

@@ -12,8 +12,8 @@ use rmcp::ErrorData as McpError;
 use rmcp::ServiceExt;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, JsonObject, ListToolsResult,
-    PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, JsonObject,
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use tokio::process::Child;
@@ -403,20 +403,14 @@ impl ServerHandler for LocalBrowserMcpServer {
     ) -> impl std::future::Future<Output = std::result::Result<ListToolsResult, McpError>> + Send + '_
     {
         let tools = self.tools.clone();
-        async move {
-            Ok(ListToolsResult {
-                tools: (*tools).clone(),
-                next_cursor: None,
-                meta: None,
-            })
-        }
+        async move { Ok(ListToolsResult::with_all_items((*tools).clone())) }
     }
 
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
-    ) -> std::result::Result<CallToolResult, McpError> {
+    ) -> std::result::Result<CallToolResponse, McpError> {
         if request.name.as_ref() != "observe" {
             return Err(McpError::invalid_params(
                 "unknown owner-local browser tool",
@@ -428,15 +422,16 @@ impl ServerHandler for LocalBrowserMcpServer {
         let _guard = self.execution_lock.lock().await;
         match execute_observation(&self.config, &self.workspace, parsed).await {
             Ok(payload) => {
-                let mut result = CallToolResult::success(vec![Content::text(
+                let mut result = CallToolResult::success(vec![ContentBlock::text(
                     serde_json::to_string_pretty(&payload).unwrap_or_default(),
                 )]);
                 result.structured_content = Some(payload);
-                Ok(result)
+                Ok(result.into())
             }
-            Err(error) => Ok(CallToolResult::error(vec![Content::text(format!(
+            Err(error) => Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                 "Owner-local browser observation failed: {error:#}"
-            ))])),
+            ))])
+            .into()),
         }
     }
 }

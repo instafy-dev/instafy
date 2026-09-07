@@ -21,8 +21,8 @@ use uuid::Uuid;
 
 use crate::auth::{Credentials, response_indicates_chatgpt_token_expired};
 use crate::client::{
-    CodexClient, CodexCompletion, DEFAULT_INSTRUCTIONS, DEFAULT_MODEL, conversation_id_enabled,
-    normalize_reasoning_effort,
+    CodexClient, CodexCompletion, DEFAULT_INSTRUCTIONS, DEFAULT_MODEL, RESPONSES_LITE_HEADER,
+    conversation_id_enabled, has_responses_lite_tools, normalize_reasoning_effort,
 };
 use crate::controller_client::ControllerCreditsError;
 use crate::controller_integration::{ControllerIntegration, CreditBurn as ControllerCreditBurn};
@@ -731,6 +731,10 @@ fn extract_controller_error_message(body: &str) -> Option<String> {
 
 struct RemoteResponseControls<'a> {
     reasoning_effort: Option<&'a str>,
+    reasoning_context: Option<&'a str>,
+    responses_lite: bool,
+    responses_lite_include: Option<&'a Vec<String>>,
+    responses_lite_store: Option<bool>,
     requested_tools: Option<&'a Vec<Value>>,
     requested_tool_choice: Option<&'a Value>,
     requested_parallel_tool_calls: Option<bool>,
@@ -773,14 +777,28 @@ fn build_remote_completion_client(
 ) -> Result<(CodexClient, String, String)> {
     let endpoint_for_error = format_endpoint_for_error(creds.endpoint());
     let upstream_model = resolve_model_for_credentials(options.requested_model, &creds);
-    let instructions = build_proxy_instructions(
-        options.proxy_base_instructions,
-        options.claims,
-        Some(&creds),
-        &upstream_model,
-        options.auth_mode,
-        options.payload.get("instructions").and_then(Value::as_str),
-    );
+    let responses_lite = options
+        .response_controls
+        .as_ref()
+        .is_some_and(|controls| controls.responses_lite);
+    let instructions = if responses_lite {
+        // Native Lite already carries its instructions as identified developer items.
+        options
+            .payload
+            .get("instructions")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        build_proxy_instructions(
+            options.proxy_base_instructions,
+            options.claims,
+            Some(&creds),
+            &upstream_model,
+            options.auth_mode,
+            options.payload.get("instructions").and_then(Value::as_str),
+        )
+    };
     let mut client = CodexClient::new(creds)
         .map_err(anyhow::Error::from)?
         .with_model(upstream_model.clone())
@@ -790,6 +808,12 @@ fn build_remote_completion_client(
     if let Some(controls) = options.response_controls.as_ref() {
         client = client
             .with_reasoning_effort(controls.reasoning_effort.map(str::to_string))
+            .with_reasoning_context(controls.reasoning_context.map(str::to_string))
+            .with_responses_lite(controls.responses_lite)
+            .with_responses_lite_state_controls(
+                controls.responses_lite_include.cloned(),
+                controls.responses_lite_store,
+            )
             .with_response_controls(
                 controls.requested_tools.cloned(),
                 controls.requested_tool_choice.cloned(),
@@ -922,6 +946,7 @@ fn spawn_credential_usage_report(
 async fn create_response(
     State(state): State<ProxyState>,
     AuthenticatedProxyClaims(claims): AuthenticatedProxyClaims,
+    headers: HeaderMap,
     Json(payload): Json<Value>,
 ) -> Result<impl IntoResponse, AppError> {
     // Empty = absent: resolve_model_for_credentials substitutes the
@@ -934,7 +959,44 @@ async fn create_response(
         .unwrap_or_default()
         .to_string();
 
-    let input_items = extract_input_items(&payload).map_err(AppError::bad_request)?;
+    let responses_lite = headers
+        .get(RESPONSES_LITE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+        || payload
+            .get("input")
+            .and_then(Value::as_array)
+            .is_some_and(|items| has_responses_lite_tools(items));
+    let input_items = if responses_lite {
+        payload
+            .get("input")
+            .and_then(Value::as_array)
+            .filter(|items| !items.is_empty() && items.iter().all(Value::is_object))
+            .cloned()
+            .ok_or_else(|| {
+                AppError::bad_request(anyhow::anyhow!(
+                    "Responses Lite requires an array of input items"
+                ))
+            })?
+    } else {
+        extract_input_items(&payload).map_err(AppError::bad_request)?
+    };
+    let (responses_lite_include, responses_lite_store) = if responses_lite {
+        (
+            payload
+                .get("include")
+                .map(|value| serde_json::from_value::<Vec<String>>(value.clone()))
+                .transpose()
+                .map_err(AppError::bad_request)?,
+            payload
+                .get("store")
+                .map(|value| serde_json::from_value::<bool>(value.clone()))
+                .transpose()
+                .map_err(AppError::bad_request)?,
+        )
+    } else {
+        (None, None)
+    };
 
     let auth_mode = proxy_auth_mode(&state.backend, claims.as_ref());
     let mut credit_guard = if let Some(ref claims) = claims {
@@ -980,6 +1042,12 @@ async fn create_response(
         plain_text_completion,
         response_controls: Some(RemoteResponseControls {
             reasoning_effort: reasoning_effort.as_deref(),
+            reasoning_context: payload
+                .pointer("/reasoning/context")
+                .and_then(Value::as_str),
+            responses_lite,
+            responses_lite_include: responses_lite_include.as_ref(),
+            responses_lite_store,
             requested_tools: requested_tools.as_ref(),
             requested_tool_choice: requested_tool_choice.as_ref(),
             requested_parallel_tool_calls,
@@ -1166,6 +1234,10 @@ async fn create_chat_completion(
         plain_text_completion,
         response_controls: Some(RemoteResponseControls {
             reasoning_effort: reasoning_effort.as_deref(),
+            reasoning_context: None,
+            responses_lite: false,
+            responses_lite_include: None,
+            responses_lite_store: None,
             requested_tools: None,
             requested_tool_choice: None,
             requested_parallel_tool_calls: None,

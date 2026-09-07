@@ -31,25 +31,34 @@ test("finalizes the manifest over the exact post-sign runtime bytes", (t) => {
   fs.mkdirSync(directory, { recursive: true });
   const executablePath = path.join(directory, "runtime-agent");
   const manifestPath = path.join(directory, "runtime-agent-manifest.json");
+  const hostPath = path.join(directory, "codex-code-mode-host");
+  fs.writeFileSync(hostPath, "unsigned host", { mode: 0o755 });
   fs.writeFileSync(executablePath, "unsigned bytes", { mode: 0o755 });
   fs.writeFileSync(
     manifestPath,
     JSON.stringify({
-      schemaVersion: 2,
+      schemaVersion: 3,
       filename: "runtime-agent",
       platform: "darwin",
       arch: "arm64",
       sizeBytes: 1,
       sha256: "0".repeat(64),
       sourceSha: "a".repeat(40),
+      codeModeHost: { filename: "codex-code-mode-host" },
     }),
   );
 
   finalizeRuntimeAgentManifest(context);
   fs.writeFileSync(executablePath, "signed bytes", { mode: 0o755 });
+  fs.writeFileSync(hostPath, "signed host", { mode: 0o755 });
   const finalized = finalizeRuntimeAgentManifest(context).manifest;
 
   assert.equal(finalized.sourceSha, "a".repeat(40));
+  assert.deepEqual(finalized.codeModeHost, {
+    filename: "codex-code-mode-host",
+    sizeBytes: Buffer.byteLength("signed host"),
+    sha256: createHash("sha256").update("signed host").digest("hex"),
+  });
   assert.equal(finalized.sizeBytes, Buffer.byteLength("signed bytes"));
   assert.equal(
     finalized.sha256,
@@ -71,16 +80,18 @@ test("finalizes the Windows runtime in the signed app directory before NSIS pack
   const executablePath = path.join(directory, "runtime-agent.exe");
   const manifestPath = path.join(directory, "runtime-agent-manifest.json");
   fs.writeFileSync(executablePath, "authenticode-signed bytes");
+  fs.writeFileSync(path.join(directory, "codex-code-mode-host.exe"), "signed host bytes");
   fs.writeFileSync(
     manifestPath,
     JSON.stringify({
-      schemaVersion: 2,
+      schemaVersion: 3,
       filename: "runtime-agent.exe",
       platform: "win32",
       arch: "x64",
       sizeBytes: 1,
       sha256: "0".repeat(64),
       sourceSha: "b".repeat(40),
+      codeModeHost: { filename: "codex-code-mode-host.exe" },
     }),
   );
 
