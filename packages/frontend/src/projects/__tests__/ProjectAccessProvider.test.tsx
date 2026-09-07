@@ -169,6 +169,47 @@ describe("ProjectAccessProvider capability refresh", () => {
     expect(container.textContent).toContain("Workspace ready");
   });
 
+  it("aborts a pending startup access read when its provider unmounts", async () => {
+    let signal: AbortSignal | undefined;
+    mocks.getSummaryResult.mockImplementation((_projectId: string, options: { signal: AbortSignal }) => {
+      signal = options.signal;
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(signal?.reason));
+      });
+    });
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    expect(signal?.aborted).toBe(false);
+
+    await act(async () => root.render(null));
+
+    expect(signal?.aborted).toBe(true);
+    expect(mocks.createControllerProject).not.toHaveBeenCalled();
+  });
+
+  it("cancels a superseded access refresh and starts the fresh check promptly", async () => {
+    let staleSignal: AbortSignal | undefined;
+    mocks.getSummaryResult
+      .mockResolvedValueOnce(summaryFor("admin"))
+      .mockImplementationOnce((_projectId: string, options: { signal: AbortSignal }) => {
+        staleSignal = options.signal;
+        return new Promise((_resolve, reject) => {
+          staleSignal?.addEventListener("abort", () => reject(staleSignal?.reason));
+        });
+      })
+      .mockResolvedValueOnce(summaryFor("viewer"));
+    await act(async () => root.render(<ProjectAccessProvider><AccessProbe /></ProjectAccessProvider>));
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(staleSignal?.aborted).toBe(false);
+
+    await act(async () => window.dispatchEvent(new CustomEvent(PROJECT_ACCESS_REFRESH_EVENT, {
+      detail: { projectId: PROJECT_ID },
+    })));
+
+    expect(staleSignal?.aborted).toBe(true);
+    expect(mocks.getSummaryResult).toHaveBeenCalledTimes(3);
+    expect(container.querySelector('[data-testid="access-probe"]')?.getAttribute("data-role")).toBe("viewer");
+  });
+
   it.each(["unavailable", "rejected"])("recovers from an initial %s lookup without keeping the full-screen loader or granting access", async (failure) => {
     vi.useFakeTimers();
     vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
@@ -224,7 +265,7 @@ describe("ProjectAccessProvider capability refresh", () => {
     expect(retryButton?.textContent).toBe("Retry");
     await act(async () => retryButton?.click());
     expect(mocks.getSummaryResult).toHaveBeenCalledTimes(2);
-    expect(mocks.getSummaryResult).toHaveBeenLastCalledWith(PROJECT_ID);
+    expect(mocks.getSummaryResult).toHaveBeenLastCalledWith(PROJECT_ID, { signal: expect.any(AbortSignal) });
     expect(container.querySelector('[data-testid="access-probe"]')?.getAttribute("data-write")).toBe("false");
 
     await act(async () => retry.resolve(summaryFor("viewer")));

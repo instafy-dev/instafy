@@ -666,6 +666,47 @@ describe("ConversationMessageRows", () => {
     ).toEqual(["octo", "octo"]);
   });
 
+  it("does not repeatedly scan earlier human messages while resolving assistant identities", async () => {
+    let firstMessageRoleReads = 0;
+    const firstHumanMessage = createMessage({
+      id: "first-human-message",
+      role: "user",
+      authorId: "user-1",
+      content: "First note.",
+    });
+    Object.defineProperty(firstHumanMessage, "role", {
+      get: () => {
+        firstMessageRoleReads += 1;
+        return "user";
+      },
+    });
+    const messages = [
+      firstHumanMessage,
+      ...Array.from({ length: 150 }, (_, index) => createMessage({
+        id: `human-note-${index}`,
+        role: "user",
+        authorId: "user-1",
+        content: "Another note.",
+        timestamp: index + 1,
+      })),
+      createMessage({
+        id: "assistant-after-notes",
+        content: "I reviewed the notes.",
+        timestamp: 152,
+        metadata: { agent: { handle: "reviewer", avatarSeed: "reviewer" } },
+      }),
+    ];
+
+    await renderSpeakerBoundaryMessages(messages);
+
+    // Rendering this row and its neighbor may inspect its role, but resolving
+    // every later speaker must not revisit it once per message.
+    expect(firstMessageRoleReads).toBeLessThan(50);
+    expect(container.querySelectorAll('[data-testid="chat-message-row"]')).toHaveLength(messages.length);
+    expect(container.querySelector('[data-testid="chat-speaker-inline"] [data-agent-handle]')
+      ?.getAttribute("data-agent-handle")).toBe("reviewer");
+  });
+
   it("restores the inline assistant identity after a controller boundary", async () => {
     const firstAssistantMessage = createMessage({
       id: "assistant-before-controller",
