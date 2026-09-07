@@ -14,6 +14,7 @@ import { installDesktopUpdateBootstrap } from "./desktop/updates/bootstrap";
 import { installNativeOtaBootstrap } from "./mobile/ota/bootstrap";
 import { installNativeDeepLinkBootstrap } from "./native/nativeDeepLinks";
 import { installStudioPerformanceNavigation } from "./telemetry/studioPerformanceNavigation";
+import { installNativeAppForegroundBridge } from "./native/appForeground";
 
 const NOTIFICATIONS_DEBUG_STORAGE_KEY = "instafy.notifications.debug";
 const SW_PUSH_DEBUG_EVENT = "instafy:sw-push-debug";
@@ -76,7 +77,9 @@ installServiceWorkerPushDebugListener();
 installDesktopUpdateBootstrap();
 void installNativeOtaBootstrap();
 installNativeDeepLinkBootstrap(router);
+const disposeNativeForeground = installNativeAppForegroundBridge();
 const disposePerformanceNavigation = installStudioPerformanceNavigation(router);
+if (import.meta.hot) import.meta.hot.dispose(disposeNativeForeground);
 if (import.meta.hot) import.meta.hot.dispose(disposePerformanceNavigation);
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(

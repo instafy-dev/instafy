@@ -16,6 +16,7 @@ import { useAuth } from "../providers/AuthProvider";
 import { useStatus } from "../status/useStatus";
 import { controllerClient } from "../sdk/instafy";
 import { isAppInForeground } from "../notifications/assistantMessageNotifications";
+import { subscribeAppForeground } from "../native/appForeground";
 import { isUuid } from "./conversationMessageUtils";
 import {
   DEFAULT_CONVERSATION_ROUTING_PREFERENCES,
@@ -182,11 +183,11 @@ export const ConversationsProvider = ({ children }: PropsWithChildren) => {
     };
 
     recordBackgroundState();
-    document.addEventListener("visibilitychange", recordBackgroundState);
+    const unsubscribeForeground = subscribeAppForeground(recordBackgroundState);
     window.addEventListener("blur", recordBackgroundState);
 
     return () => {
-      document.removeEventListener("visibilitychange", recordBackgroundState);
+      unsubscribeForeground();
       window.removeEventListener("blur", recordBackgroundState);
     };
   }, []);

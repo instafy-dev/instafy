@@ -2,13 +2,23 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-const mocks = vi.hoisted(() => ({ list: vi.fn(), state: vi.fn(), readAll: vi.fn(), getPreferences: vi.fn(), savePreferences: vi.fn(), navigate: vi.fn(), show: vi.fn(), hide: vi.fn(), foreground: false, subscription: false }));
+const mocks = vi.hoisted(() => ({ list: vi.fn(), state: vi.fn(), readAll: vi.fn(), getPreferences: vi.fn(), savePreferences: vi.fn(), navigate: vi.fn(), show: vi.fn(), hide: vi.fn(), foreground: false, subscription: false, native: false, nativeListener: null as ((event: { isActive: boolean }) => void) | null }));
+vi.mock("@capacitor/core", () => ({ Capacitor: { isNativePlatform: () => mocks.native, getPlatform: () => mocks.native ? "android" : "web" } }));
+vi.mock("@capacitor/app", () => ({ App: {
+  addListener: async (_event: string, listener: (event: { isActive: boolean }) => void) => { mocks.nativeListener = listener; return { remove: async () => undefined }; },
+  getState: async () => ({ isActive: false }),
+} }));
 vi.mock("../../sdk/instafy", () => ({ controllerClient: { notifications: { list: mocks.list, updateState: mocks.state, readAll: mocks.readAll, getPreferences: mocks.getPreferences, savePreferences: mocks.savePreferences } } }));
 vi.mock("../../status/useStatus", () => ({ useStatus: () => ({ showStatus: mocks.show, hideStatus: mocks.hide }) }));
 vi.mock("../notificationPresentation", () => ({ NOTIFICATION_RECEIVED_EVENT: "instafy:notification-received", claimNotificationPresentation: async () => true }));
-vi.mock("../assistantMessageNotifications", () => ({ areMessageNotificationsEnabled: () => false, enableMessageNotifications: async () => true, isAppInForeground: () => mocks.foreground, notifyAssistantMessage: vi.fn() }));
+vi.mock("../assistantMessageNotifications", async () => {
+  const { isAppForeground } = await import("../../native/appForeground");
+  return { areMessageNotificationsEnabled: () => false, enableMessageNotifications: async () => true, isAppInForeground: () => mocks.native ? isAppForeground() : mocks.foreground, notifyAssistantMessage: vi.fn() };
+});
 vi.mock("../webPushRegistration", () => ({ hasActiveWebPushSubscription: async () => mocks.subscription }));
 import { useNotificationCenter } from "../useNotificationCenter";
+import { installNativeAppForegroundBridge } from "../../native/appForeground";
+import { focusManager } from "@tanstack/react-query";
 const A = "11111111-1111-4111-8111-111111111111";
 const B = "22222222-2222-4222-8222-222222222222";
 const event = (id = A) => ({ id, eventName: "support.reply", version: 1, category: "support", resourceId: id, resourceType: "support_report", occurredAt: "2026-09-06T12:00:00Z", title: "Instafy", body: "Support replied to your report.", url: `/studio?supportReportId=${id}`, readAt: null, seenAt: null, archivedAt: null });
@@ -20,6 +30,7 @@ function Harness({ userId = A }: { userId?: string }) {
 }
 let root: Root;
 let container: HTMLDivElement;
+let disposeNative: (() => void) | undefined;
 async function click(text: string) {
   const button = [...document.querySelectorAll("button")].find((node) => node.textContent?.trim() === text);
   expect(button, `button ${text}`).toBeTruthy();
@@ -28,12 +39,12 @@ async function click(text: string) {
 async function open() { await act(async () => (document.querySelector('[data-testid="notification-center-bell"]') as HTMLButtonElement).click()); }
 beforeEach(async () => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
-  vi.clearAllMocks(); mocks.foreground = false; mocks.subscription = false;
+  vi.clearAllMocks(); mocks.foreground = false; mocks.subscription = false; mocks.native = false; mocks.nativeListener = null; disposeNative = undefined;
   mocks.list.mockResolvedValue(page()); mocks.state.mockResolvedValue(undefined); mocks.readAll.mockResolvedValue(undefined); mocks.getPreferences.mockResolvedValue(preferences); mocks.savePreferences.mockResolvedValue(preferences);
   container = document.createElement("div"); document.body.append(container); root = createRoot(container);
   await act(async () => root.render(<Harness />));
 });
-afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
+afterEach(async () => { await act(async () => root.unmount()); disposeNative?.(); focusManager.setFocused(undefined); container.remove(); vi.restoreAllMocks(); vi.useRealTimers(); });
 describe("notification center", () => {
   it("shows the durable unread badge and opens the exact support report", async () => {
     expect(container.querySelector('[data-testid="notification-center-unread"]')?.textContent).toBe("1");
@@ -102,6 +113,42 @@ describe("notification center", () => {
     mocks.state.mockClear();
     await act(async () => options.onShow());
     expect(mocks.state).not.toHaveBeenCalled();
+  });
+
+  it("does not poll or mark a background native toast seen with a visible WebView, and refreshes once on resume", async () => {
+    await act(async () => root.render(null));
+    vi.useFakeTimers();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    mocks.native = true;
+    disposeNative = installNativeAppForegroundBridge(); await vi.dynamicImportSettled();
+    mocks.list.mockClear(); mocks.state.mockClear(); mocks.show.mockClear();
+    await act(async () => root.render(<Harness />));
+    await act(async () => vi.advanceTimersByTimeAsync(20_000));
+    expect(mocks.list).not.toHaveBeenCalled();
+    expect(mocks.show).not.toHaveBeenCalled();
+    expect(mocks.state).not.toHaveBeenCalled();
+    await act(async () => mocks.nativeListener?.({ isActive: true }));
+    expect(mocks.list).toHaveBeenCalledTimes(2); // One page and its independent unread presentation page.
+    expect(mocks.show).toHaveBeenCalledOnce();
+    await act(async () => {
+      mocks.nativeListener?.({ isActive: true });
+      window.dispatchEvent(new Event("focus"));
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(mocks.list).toHaveBeenCalledTimes(2);
+    const firstToast = mocks.show.mock.calls[0][3];
+    await act(async () => {
+      mocks.nativeListener?.({ isActive: false });
+      firstToast.onShow();
+    });
+    expect(mocks.state).not.toHaveBeenCalled();
+    await act(async () => vi.advanceTimersByTimeAsync(20_000));
+    expect(mocks.list).toHaveBeenCalledTimes(2);
+    await act(async () => mocks.nativeListener?.({ isActive: true }));
+    expect(mocks.list).toHaveBeenCalledTimes(4);
+    const currentToast = mocks.show.mock.calls.at(-1)![3];
+    await act(async () => currentToast.onShow());
+    expect(mocks.state).toHaveBeenCalledExactlyOnceWith({ id: A, action: "seen", accessToken: `token-${A}` });
   });
 
 });

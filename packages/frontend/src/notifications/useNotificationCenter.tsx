@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Bell } from "iconoir-react";
+import { Capacitor } from "@capacitor/core";
 import { controllerClient } from "../sdk/instafy";
 import { Button, IconButton } from "../components/Button";
 import { StudioDialogModal } from "../components/aria/StudioModal";
@@ -8,6 +9,7 @@ import { useStatus } from "../status/useStatus";
 import { NOTIFICATION_CATEGORIES, NOTIFICATION_CHANNELS, type NotificationPage, type NotificationPreferences, type ProductNotification, type NotificationPreference } from "./notificationContract";
 import { claimNotificationPresentation, NOTIFICATION_RECEIVED_EVENT } from "./notificationPresentation";
 import { areMessageNotificationsEnabled, enableMessageNotifications, isAppInForeground, notifyAssistantMessage } from "./assistantMessageNotifications";
+import { subscribeAppForeground } from "../native/appForeground";
 
 const CATEGORY_LABELS = { support: "Support", conversations: "Conversations", runs: "Runs", automations: "Automations" };
 const CHANNEL_LABELS = { web_push: "Browser push", apns: "iPhone push", local: "In-app and desktop alerts" };
@@ -76,8 +78,10 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
   useEffect(() => {
     if (!userId || !accessToken) return;
     let stopped = false;
+    const native = Capacitor.isNativePlatform();
+    let nativeForeground = isAppInForeground();
     const poll = async () => {
-      if (stopped) return;
+      if (stopped || (native && !isAppInForeground())) return;
       if (!(openRef.current && paginatedRef.current)) await refresh();
       if (!current(userId, accessToken) || stopped) return;
       // Poll independently of the selected filter; pagination never drives presentation.
@@ -91,8 +95,7 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
         if (!prefs || prefs.preferences.some((pref) => pref.category === item.category && pref.channel === "local" && !pref.enabled)) continue;
         const foreground = isAppInForeground();
         if (!foreground && !areMessageNotificationsEnabled()) continue;
-        const { Capacitor } = await import("@capacitor/core");
-        if (Capacitor.isNativePlatform()) {
+        if (native) {
           if (!foreground) continue;
         } else if (!window.instafyDesktop) {
           const webPushEnabled = prefs.preferences.find((pref) => pref.category === item.category && pref.channel === "web_push")?.enabled ?? true;
@@ -127,9 +130,16 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
     void poll();
     const timer = window.setInterval(() => void poll(), 20_000);
     const receive = () => void poll();
-    window.addEventListener("focus", receive);
+    const focus = () => { if (!native) receive(); };
+    const unsubscribeForeground = native ? subscribeAppForeground(() => {
+      const foreground = isAppInForeground();
+      if (foreground === nativeForeground) return;
+      nativeForeground = foreground;
+      if (foreground) receive();
+    }) : () => undefined;
+    window.addEventListener("focus", focus);
     window.addEventListener(NOTIFICATION_RECEIVED_EVENT, receive);
-    return () => { stopped = true; window.clearInterval(timer); window.removeEventListener("focus", receive); window.removeEventListener(NOTIFICATION_RECEIVED_EVENT, receive); };
+    return () => { stopped = true; window.clearInterval(timer); unsubscribeForeground(); window.removeEventListener("focus", focus); window.removeEventListener(NOTIFICATION_RECEIVED_EVENT, receive); };
   }, [accessToken, current, navigate, refresh, setPage, showStatus, userId]);
 
   const mutate = async (operation: () => Promise<unknown>) => {

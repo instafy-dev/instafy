@@ -2,6 +2,7 @@ import { routeNotificationClick } from "./notificationPresentation";
 import { notificationStorageKey, getNotificationSession, isNotificationSessionCurrent } from "./notificationSession";
 import { canonicalNotificationUrl, safeNotificationBody } from "./notificationContract";
 import { Capacitor } from "@capacitor/core";
+import { isAppForeground } from "../native/appForeground";
 import { ensureWebPushSubscriptionRegistered, hasActiveWebPushSubscription, unregisterWebPushSubscription } from "./webPushRegistration";
 import { requestNativePushTokenRegistered, unregisterNativePushToken } from "./nativePushRegistration";
 
@@ -113,7 +114,7 @@ export function isAppInForeground(): boolean {
   if (typeof document === "undefined") {
     return true;
   }
-  const visible = document.visibilityState === "visible";
+  const visible = isAppForeground();
   if (Capacitor.isNativePlatform()) {
     return visible;
   }

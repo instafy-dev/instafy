@@ -155,6 +155,29 @@ To make this work end-to-end:
 - Ensure `instafy://auth` is allowlisted in Supabase Auth “Redirect URLs” (local dev is in `supabase/supabase/config.toml`).
 - Ensure the native projects register the `instafy` URL scheme (iOS `Info.plist`, Android `AndroidManifest.xml`).
 
+## Foreground and conversation reads
+
+Native WebViews can keep `document.visibilityState` equal to `visible` after the
+app moves to Home or the app switcher. The frontend combines document visibility
+with Capacitor's `App.appStateChange` and initial `App.getState()` result. Until
+native activity is confirmed, automatic message exposure acknowledgements are
+disabled. Returning to the app refreshes stale queries that opt into focus
+refresh, resumes foreground polling, and requires a fresh viewport observation
+before acknowledging visible conversation messages. Browser focus behavior is
+unchanged.
+
+For physical QA, inspect `document.documentElement.dataset.instafyNativeAppState`
+(`unknown`, `active`, or `inactive`) and `dataset.instafyAppForeground` (`true` or
+`false`). These diagnostic attributes contain no account or conversation data.
+Compare them with the actual foreground Activity/screen, test Home and the app
+switcher, and verify an incoming message while away remains unread until the
+conversation is shown. An OS-suspended timer is not evidence that the app's own
+visibility checks are correct. The focused regression lane is:
+
+```bash
+pnpm --filter @instafy/frontend exec vitest run src/native/__tests__/appForeground.test.ts src/notifications/__tests__/useConversationNotificationRead.test.tsx src/notifications/__tests__/NotificationCenter.test.tsx
+```
+
 ## Push notifications (iOS)
 
 The native iOS build defers the system notification prompt until you opt in (Studio top bar) or
