@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, type KeyboardEvent, type ReactNode, type RefObject } from "react";
+import { useLayoutEffect, useId, useRef, type KeyboardEvent, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { Xmark } from "iconoir-react";
 import { IconButton } from "../../../components/Button";
@@ -28,12 +28,13 @@ export function StudioSidebarWorkspacePanel({
   const titleId = useId();
   const panelRef = useRef<HTMLDivElement | null>(null);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!open || (desktop && !portalTarget)) {
       return;
     }
-    const frame = window.requestAnimationFrame(() => panelRef.current?.focus());
-    return () => window.cancelAnimationFrame(frame);
+    // Move focus before the new panel can receive keyboard input. Delaying a
+    // frame leaves Escape on the old trigger and can close the parent modal.
+    panelRef.current?.focus();
   }, [desktop, open, portalTarget]);
 
   const dismiss = () => {
