@@ -19,7 +19,7 @@ export type TextVariant = keyof typeof textVariants;
 export const textTones = {
   primary: "text-midnight dark:text-slate-50",
   secondary: "text-slate-700 dark:text-slate-200",
-  muted: "text-slate-500 dark:text-slate-400",
+  muted: "text-slate-600 dark:text-slate-400",
   subtle: "text-slate-400 dark:text-slate-500",
   inherit: "text-inherit",
   inverse: "text-white",
