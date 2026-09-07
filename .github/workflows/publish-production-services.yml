@@ -177,6 +177,29 @@ jobs:
         with:
           version: v0.35.0
 
+      - name: Set up Go for the controller image fixture
+        if: ${{ matrix.key == 'controller' }}
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.26.x"
+          cache: false
+
+      - name: Build the isolated controller startup fixture
+        if: ${{ matrix.key == 'controller' }}
+        working-directory: scripts/controller-startup-smoke
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+          GOTOOLCHAIN: local
+          GOPROXY: "off"
+          GOSUMDB: "off"
+        run: |
+          set -euo pipefail
+          go test -count=1 ./...
+          go vet ./...
+          go build -trimpath -o "$RUNNER_TEMP/controller-startup-smoke" .
+
       - name: Install pinned Trivy
         env:
           TRIVY_VERSION: "0.72.0"
@@ -319,6 +342,33 @@ jobs:
               ref: $ref
             }' > "${IMAGE_KEY}.json"
 
+      - name: Verify the published controller startup by digest
+        if: ${{ matrix.key == 'controller' }}
+        id: controller-startup
+        shell: bash
+        env:
+          RELEASE_COMMIT: ${{ needs.authorize.outputs.commit_sha }}
+        run: |
+          set -euo pipefail
+          immutable_ref="$(jq -er '.ref | select(test("^ghcr.io/instafy-dev/instafy-runtime-controller@sha256:[0-9a-f]{64}$"))' controller.json)"
+          # Use only this job's temporary GITHUB_TOKEN for registry acquisition.
+          # Drop the login before the fixture executes; the runner also supplies
+          # an empty Docker config and never passes host credentials to the image.
+          docker pull --platform linux/amd64 "$immutable_ref"
+          docker logout ghcr.io
+          node scripts/controller-image-smoke.mjs controller.json "$RELEASE_COMMIT" \
+            "$RUNNER_TEMP/controller-startup-smoke" \
+            "$RUNNER_TEMP/controller-startup-result.json"
+
+      - name: Retain controller startup evidence
+        if: ${{ always() && matrix.key == 'controller' && (steps.controller-startup.outcome == 'success' || steps.controller-startup.outcome == 'failure') }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: controller-startup-smoke
+          path: ${{ runner.temp }}/controller-startup-result.json
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Upload immutable image record
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -410,6 +460,7 @@ jobs:
             echo "- Public core: \`$RELEASE_COMMIT\`"
             echo "- Platform: \`linux/amd64\`"
             echo "- All seven images passed Trivy vulnerability and secret scans."
+            echo "- The exact controller image passed all three isolated startup checks before database IO."
             echo
             echo '```json'
             cat production-service-release-manifest.json

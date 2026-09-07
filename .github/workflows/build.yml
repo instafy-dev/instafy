@@ -172,6 +172,7 @@ jobs:
             scripts/check-public-boundary-workflow.test.mjs \
             scripts/check-production-image-inputs.test.mjs \
             scripts/check-production-services-workflow.test.mjs \
+            scripts/controller-image-smoke.test.mjs \
             scripts/check-public-release-workflows.test.mjs \
             scripts/check-changesets.test.mjs \
             scripts/verify-changeset-pack.test.mjs \
@@ -251,6 +252,16 @@ jobs:
       - name: Test browser WebRTC sender
         working-directory: packages/browser-webrtc-sender
         run: go test ./...
+
+      - name: Test controller image startup fixture
+        working-directory: scripts/controller-startup-smoke
+        env:
+          GOTOOLCHAIN: local
+          GOPROXY: "off"
+          GOSUMDB: "off"
+        run: |
+          go test -race -count=1 ./...
+          go vet ./...
 
   rust:
     name: Rust packages
