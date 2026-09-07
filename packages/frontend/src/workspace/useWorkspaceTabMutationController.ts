@@ -1,5 +1,6 @@
 import { useCallback, type MutableRefObject, type ReactNode } from "react";
 import type { StudioPanel } from "../screens/studio/types";
+import { studioPerformance } from "../telemetry/studioPerformance";
 import {
   createTabForPanel,
   getTabIdForConversation,
@@ -51,6 +52,13 @@ export function useWorkspaceTabMutationController({
       nextTab: WorkspaceTabState,
       options?: { syncPanel?: boolean; syncConversation?: boolean },
     ) => {
+      if (nextTab.id !== activeTabIdRef.current &&
+          (nextTab.kind === "conversation" || nextTab.kind === "jobThread") && workspaceProjectId) {
+        studioPerformance.beginConversation(workspaceProjectId, nextTab.conversationId);
+      } else if (nextTab.id !== activeTabIdRef.current && nextTab.kind !== "conversation" &&
+          !(nextTab.kind === "panel" && nextTab.panel === "chat")) {
+        studioPerformance.cancelConversation();
+      }
       activeTabIdRef.current = nextTab.id;
       setActiveTabId(nextTab.id);
       if (nextTab.kind === "file") {
@@ -103,6 +111,7 @@ export function useWorkspaceTabMutationController({
       setActivePanel,
       setActiveTabId,
       suppressPanelSyncRef,
+      workspaceProjectId,
     ],
   );
 

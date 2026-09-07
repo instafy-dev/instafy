@@ -8,6 +8,7 @@ import type { StudioPanel } from "../../screens/studio/types";
 import { WorkspaceTabsProvider, useWorkspaceTabs } from "../WorkspaceTabsProvider";
 import { getTabIdForConversation } from "../workspaceTabFactories";
 import { loadPersistedWorkspaceTabs, persistWorkspaceTabsState } from "../workspaceTabPersistence";
+import { studioPerformance, type StudioPerformanceSample } from "../../telemetry/studioPerformance";
 
 const projectA = "11111111-1111-4111-8111-111111111111";
 const projectB = "22222222-2222-4222-8222-222222222222";
@@ -79,6 +80,7 @@ describe("conversation preview tabs", () => {
     fixture.activePanel = "chat";
     fixture.historyResolved = true;
     vi.clearAllMocks();
+    studioPerformance.clear();
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -87,6 +89,7 @@ describe("conversation preview tabs", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    studioPerformance.clear();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -103,6 +106,43 @@ describe("conversation preview tabs", () => {
     expect(previews()).toEqual(["e"]);
     expect(api.activeTabId).toBe(getTabIdForConversation("e"));
     expect(fixture.conversations.map((entry) => entry.localId)).toEqual(["a", "b", "c", "d", "e"]);
+  });
+
+  it.each(["home", "code", "settings"] as const)("supersedes a pending chat switch when opening %s", async (panel) => {
+    save(["a", "b"]);
+    await render();
+    studioPerformance.clear();
+    const samples: StudioPerformanceSample[] = [];
+    const stop = studioPerformance.subscribe((sample) => samples.push(sample));
+    try {
+      await openPreview("b");
+      expect(samples).toEqual([]);
+      await act(async () => api.openPanelTab(panel));
+      expect(samples).toMatchObject([{ operation: "conversation_switch", outcome: "superseded" }]);
+      studioPerformance.observe({
+        projectId: projectA, organizationId: null, conversationId: "b", messageCount: 1, loading: false, error: false,
+      })?.();
+      expect(samples).toHaveLength(1);
+    } finally {
+      stop();
+    }
+  });
+
+  it("begins a measurement when opening a run thread of the already selected conversation", async () => {
+    save(["a"]);
+    await render();
+    studioPerformance.clear();
+    const samples: StudioPerformanceSample[] = [];
+    const stop = studioPerformance.subscribe((sample) => samples.push(sample));
+    try {
+      await act(async () => api.openJobThreadTab({ conversationId: "a", jobId: "run-a" }));
+      studioPerformance.observe({
+        projectId: projectA, organizationId: null, conversationId: "a", messageCount: 3, loading: false, error: false,
+      })?.();
+      expect(samples).toMatchObject([{ operation: "conversation_switch", outcome: "ready", messageCountBucket: "1-50" }]);
+    } finally {
+      stop();
+    }
   });
 
   it("restores preview ownership and does not resurrect replaced tabs during refresh or Back", async () => {

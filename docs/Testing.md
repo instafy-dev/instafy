@@ -10,6 +10,7 @@
 - Focused smoke subset: `pnpm test:e2e:smoke`
 - Controller-focused subset: `pnpm test:e2e:controller`
 - Benchmarks only: `pnpm test:e2e:bench`
+- Large-chat navigation/cache benchmark: `pnpm --filter @instafy/frontend test:e2e:conversation-perf`
 - Headed: `pnpm test:e2e:headed`
 - Target a failing spec: `pnpm -C packages/frontend test:e2e -- tests/playwright/app.spec.ts -g "renders landing hero content"`
 
@@ -17,6 +18,16 @@ The default `pnpm test:e2e` loop is intentionally product-focused:
 - it covers the regular Playwright regression surface
 - it does not load the opt-in benchmark specs under `tests/playwright/bench`
 - benchmark coverage stays available through `pnpm test:e2e:bench`, which sets `PLAYWRIGHT_RUN_BENCH=1`
+
+The separate [conversation performance lane](../packages/frontend/tests/playwright/conversation-perf/README.md)
+builds the production history/transcript components against synthetic HTTP. It needs no live
+account, controller, database or compute. It measures repeated warm switches, cancellation and
+failure recovery, cache eviction and post-GC Chromium heap across a navigation soak. Its fixture
+org/space/tab controls exercise conversation scopes; full Studio navigation and access checks
+remain the responsibility of the application suites. Install Playwright Chromium first, or set
+`PLAYWRIGHT_BROWSER_UI_CHANNEL=chrome` to select an installed Chrome explicitly. Measurements are
+written under `packages/frontend/test-results/conversation-perf/`; serialized cache payload and
+actual V8 heap are reported separately.
 
 Public Build keeps its existing job names:
 
