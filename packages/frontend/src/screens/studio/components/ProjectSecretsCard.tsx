@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { Plus } from "iconoir-react";
 import { Badge } from "../../../components/Badge";
+import { Heading } from "../../../components/Heading";
 import { Button } from "../../../components/Button";
 import { Checkbox } from "../../../components/Checkbox";
 import { Field } from "../../../components/Field";
@@ -24,7 +26,6 @@ import {
   setPendingProjectSecretPrefill,
   type PendingProjectSecretPrefill,
 } from "./secretManagerDeepLink";
-import { SettingsAddButton } from "./SettingsAddButton";
 import { SettingsSurface } from "./SettingsSurface";
 
 type SecretModalMode = "create" | "edit";
@@ -620,7 +621,21 @@ function ScopedProjectSecretsCard({ projectId, userId }: { projectId: string | n
 
   return (
     <>
-      <div className="space-y-3 px-1" data-testid="project-secrets-card">
+      <div className="space-y-3" data-testid="project-secrets-card">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <Heading level={3}>Secrets</Heading>
+          <Button
+            onPress={() => openCreateModal(null)}
+            isDisabled={!projectId || loading || Boolean(loadError)}
+            variant="primary"
+            size="sm"
+            radius="xl"
+            data-testid="project-secret-create"
+          >
+            <Plus className="h-4 w-4" aria-hidden="true" />
+            Create secret
+          </Button>
+        </div>
         {!projectId ? (
           <SettingsSurface>
             <Text variant="caption" tone="muted">
@@ -644,26 +659,17 @@ function ScopedProjectSecretsCard({ projectId, userId }: { projectId: string | n
 
         {projectId ? (
           <div className="space-y-3">
-            <div className="flex items-center justify-end">
-              <SettingsAddButton
-                onPress={() => openCreateModal(null)}
-                isDisabled={loading || Boolean(loadError)}
-                data-testid="project-secret-create"
-                ariaLabel="Create secret"
-                title="Create secret"
-              />
-            </div>
             {!loading && !loadError && activeSecrets.length === 0 ? (
-              <div className="space-y-1 px-1 py-1">
-                <Text variant="bodyStrong" tone="primary" className="text-sm">
+              <SettingsSurface className="space-y-1">
+                <Text variant="bodyStrong" tone="secondary">
                   No secrets yet.
                 </Text>
-                <Text variant="caption" tone="muted" className="text-sm leading-relaxed">
-                  Add API keys and tokens from the + button when Octo or your runtimes need them.
+                <Text variant="body" tone="muted">
+                  Store API keys and tokens for agents and runtimes in this space.
                 </Text>
-              </div>
+              </SettingsSurface>
             ) : (
-              <SettingsSurface className="overflow-hidden p-0">
+              <SettingsSurface padding="none" className="overflow-hidden">
                 <ul className="divide-y divide-slate-200/70 dark:divide-slate-800">
                 {activeSecrets.map((secret) => {
                   const busy = actionPendingId === secret.id;
