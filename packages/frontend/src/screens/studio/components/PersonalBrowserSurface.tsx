@@ -447,7 +447,7 @@ export function PersonalBrowserSurface({
         }
         actions={
           <>
-          {ready && model.agentPhase === "unavailable" ? (
+          {ready && !model.status?.agentControlEnabled && model.agentPhase === "unavailable" && !humanInputState.active ? (
             <IconButton
               aria-label="Retry agent control"
               className="max-[540px]:h-10 max-[540px]:w-10"
@@ -459,7 +459,7 @@ export function PersonalBrowserSurface({
             >
               <Refresh className="h-3.5 w-3.5" aria-hidden="true" />
             </IconButton>
-          ) : ready ? (
+          ) : model.status?.agentControlEnabled || (ready && !humanInputState.active) ? (
             <IconButton
               aria-label={model.status?.agentControlEnabled ? "Pause agent control" : "Resume agent control"}
               isDisabled={!model.status?.agentControlEnabled && model.status?.humanControlReady === false}
@@ -534,7 +534,9 @@ export function PersonalBrowserSurface({
             Always allow routine browsing until paused
           </label>
           <span className="text-slate-500 dark:text-slate-400">
-            {humanInputLocked
+            {humanInputState.active
+              ? "When ready, use Done, continue to resume and send the next turn."
+              : humanInputLocked
               ? "Take over to change approvals."
               : "Choose before Resume. High-impact actions still ask; secrets stay manual."}
           </span>

@@ -209,7 +209,10 @@ remain blocked. A 15-second drain timeout reports an error but keeps the shield
 locked rather than falsely claiming control has returned.
 
 **Done, continue** is an explicit new browser turn, not resumption of a suspended
-tool call. Resume clears highlights and creates fresh control authority; the new
+tool call. During a manual step, it is the only resume-and-send action: ordinary
+toolbar Resume and Retry agent control are hidden, including after a failed
+continuation. Pause remains available whenever agent control is enabled.
+Done clears highlights and creates fresh control authority; the new
 turn observes the page again instead of replaying old indices. Changing the
 account/project/page binding or an expired request cannot silently continue work.
 Passwords, codes and payment values stay in the page and must not be entered in

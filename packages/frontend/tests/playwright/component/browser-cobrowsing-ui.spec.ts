@@ -15,20 +15,23 @@ async function mountPersonalControls(page: Page) {
     const { createRoot } = ReactDomClientNS.default ?? ReactDomClientNS;
     const h = React.createElement;
     window.__bounds = [];
+    window.__controlCalls = [];
     window.instafyDesktop = { personalBrowserSetBounds: async (bounds) => { window.__bounds.push(bounds); } };
     function Fixture() {
       const [native, setNative] = React.useState({ agentControlEnabled: false, humanControlReady: true, approvalMode: "ask" });
+      const [agentError, setAgentError] = React.useState(null);
       window.__confirmNativeDrain = () => setNative((value) => ({ ...value, humanControlReady: true }));
       const status = { supported:true, enabled:true, state:"ready", visible:true, url:"https://fixture.example.test/form", canGoBack:false, canGoForward:false, ownerId:"owner-1", projectId:"project-1", approvalModes:["ask","routine"], ...native };
       const model = {
-        agentError:null, agentPhase:native.agentControlEnabled ? "ready" : "idle", available:true, checked:true,
+        agentError, agentPhase:agentError ? "unavailable" : native.agentControlEnabled ? "ready" : "idle", available:true, checked:true,
         clearDataError:null, clearDataState:"idle", clearNavigationError:()=>{}, clearData:async()=>null,
         close:async()=>{ throw new Error("Expansion must not close the browser"); }, goBack:async()=>null,
         goForward:async()=>null, navigate:async()=>null, navigationError:null, ownerId:"owner-1", reload:async()=>null,
-        recovering:false, retryAgentControl:async()=>null, retryOpen:()=>{}, runtimeOverride:null, status,
+        recovering:false, retryAgentControl:async()=>{ window.__retryCalls = (window.__retryCalls ?? 0) + 1; return null; }, retryOpen:()=>{}, runtimeOverride:null, status,
         setAgentControlEnabled:async(enabled, approvalMode="ask")=> {
           const next = { ...status, agentControlEnabled:enabled, humanControlReady:false, approvalMode };
           window.__lastApprovalMode = approvalMode;
+          window.__controlCalls.push(enabled);
           setNative(next);
           return next;
         },
@@ -37,7 +40,18 @@ async function mountPersonalControls(page: Page) {
         h(PersonalBrowserSurface, {
           active:true, compactChrome:true, model, humanInputIdentityKey:"user:project:conversation:personal",
           transportSelector:h(BrowserTransportSelector,{ checked:true,compact:true,mode:"personal",personalAvailable:true,onModeChange:()=>{} }),
-          onContinueAfterHumanInput:async(message)=> { window.__continuation = message; setNative({agentControlEnabled:true,humanControlReady:false,approvalMode:"ask"}); return true; },
+          onContinueAfterHumanInput:async(message)=> {
+            window.__continuationAttempts = (window.__continuationAttempts ?? 0) + 1;
+            if (window.__failNextContinuation) {
+              window.__failNextContinuation = false;
+              setAgentError("Fixture continuation failed; try Done again");
+              return false;
+            }
+            window.__continuation = message;
+            setAgentError(null);
+            setNative({agentControlEnabled:true,humanControlReady:false,approvalMode:"ask"});
+            return true;
+          },
         }),
       );
     }
@@ -64,21 +78,34 @@ for (const width of [360, 900]) {
     await page.getByTestId("browser-human-input-takeover").click();
     await expect(page.getByTestId("browser-human-input-controls")).toContainText("Waiting for agent control to stop");
     await expect(page.getByTestId("browser-human-input-continue")).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Resume agent control", exact: true })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Resume agent control", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Retry agent control", exact: true })).toHaveCount(0);
 
     await page.getByTestId("personal-browser-fullscreen-toggle").click();
     await expect(page.getByRole("dialog", { name: "Personal Browser", exact: true })).toBeVisible();
     await expect(page.getByTestId("browser-human-input-controls")).toContainText("Waiting for agent control to stop");
     await page.evaluate(() => (window as unknown as { __confirmNativeDrain: () => void }).__confirmNativeDrain());
     await expect(page.getByTestId("browser-human-input-continue")).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Resume agent control", exact: true })).toHaveCount(0);
+    await expect(page.getByText("When ready, use Done, continue to resume and send the next turn.")).toBeVisible();
     const screenshotPath = testInfo.outputPath(`personal-takeover-expanded-${width}px.png`);
     await page.screenshot({ animations: "disabled", path: screenshotPath });
     await testInfo.attach(`Expanded Personal takeover at ${width}px`, { contentType: "image/png", path: screenshotPath });
     await page.getByTestId("personal-browser-fullscreen-toggle").click();
     await expect(page.getByRole("dialog", { name: "Personal Browser", exact: true })).toHaveCount(0);
     await expect(page.getByTestId("browser-human-input-continue")).toBeVisible();
+    await page.evaluate(() => { (window as { __failNextContinuation?: boolean }).__failNextContinuation = true; });
+    await page.getByTestId("browser-human-input-continue").click();
+    await expect(page.getByTestId("browser-human-input-controls")).toContainText("browser task was not sent");
+    await expect(page.getByRole("button", { name: "Resume agent control", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Retry agent control", exact: true })).toHaveCount(0);
+    expect(await page.evaluate(() => (window as { __controlCalls?: boolean[] }).__controlCalls)).toEqual([true, false]);
+    expect(await page.evaluate(() => (window as { __retryCalls?: number }).__retryCalls ?? 0)).toBe(0);
+    await expect(page.getByTestId("browser-human-input-continue")).toBeEnabled();
     await page.getByTestId("browser-human-input-continue").click();
     await expect.poll(() => page.evaluate(() => (window as { __continuation?: string }).__continuation)).toContain("Take a fresh snapshot");
+    expect(await page.evaluate(() => (window as { __continuationAttempts?: number }).__continuationAttempts)).toBe(2);
+    await expect(page.getByRole("button", { name: "Pause agent control", exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
     expect(errors).toEqual([]);
   });
