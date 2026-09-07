@@ -48,6 +48,7 @@ mod multi_agent_plan;
 mod notification_platform;
 mod notifications;
 mod operator_admin;
+mod operator_metrics;
 mod org_limits;
 mod origins;
 mod ota;
@@ -462,6 +463,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(workspace::router())
         .merge(ota::router())
         .merge(operator_admin::router())
+        .merge(operator_metrics::router())
         .merge(desktop_updates::router())
         .merge(edge_downloads::router())
         .merge(telemetry::router())
