@@ -113,6 +113,47 @@ for (const presentation of ["docked", "modal"] as const) {
       await testInfo.attach("Full expanded Shared modal", { path: screenshot, contentType: "image/png" });
 
       if (layout.name === "mobile") {
+        // Android Chrome/Safari can resize only VisualViewport for the IME;
+        // resizing the Playwright page itself would miss the portal's 100dvh bug.
+        await expand.focus();
+        await page.evaluate(() => {
+          (window as Window & { __expandedBrowserViewport?: Element | null }).__expandedBrowserViewport =
+            document.querySelector('[data-testid="browser-session-viewport"]');
+          Object.defineProperties(window.visualViewport!, {
+            height: { configurable: true, value: 386 },
+            offsetTop: { configurable: true, value: 0 },
+          });
+          window.visualViewport!.dispatchEvent(new Event("resize"));
+        });
+        const assertVisibleBounds = async (top: number) => {
+          await expect.poll(() => page.evaluate(() => {
+            const dialog = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Browser session"]')!;
+            const rect = dialog.getBoundingClientRect();
+            const viewport = document.querySelector<HTMLElement>('[data-testid="browser-session-viewport"]')!;
+            return {
+              top: rect.top, height: rect.height, viewportBottom: viewport.getBoundingClientRect().bottom,
+              layoutHeight: window.innerHeight,
+              sameViewport: viewport === (window as Window & { __expandedBrowserViewport?: Element | null }).__expandedBrowserViewport,
+            };
+          })).toEqual({ top, height: 386, viewportBottom: top + 386 - layout.bottom, layoutHeight: layout.height, sameViewport: true });
+          await expect(expand).toBeFocused();
+          await expect(expand).toHaveAttribute("aria-expanded", "true");
+        };
+        await assertVisibleBounds(0);
+        await page.evaluate(() => {
+          Object.defineProperty(window.visualViewport!, "offsetTop", { configurable: true, value: 35 });
+          window.visualViewport!.dispatchEvent(new Event("scroll"));
+        });
+        await assertVisibleBounds(35);
+        const keyboardScreenshot = testInfo.outputPath(`expanded-shared-${presentation}-visual-keyboard.png`);
+        await page.screenshot({ path: keyboardScreenshot, animations: "disabled" });
+        await testInfo.attach("Expanded production modal with simulated visual-only keyboard shrink", { path: keyboardScreenshot, contentType: "image/png" });
+        await page.evaluate(() => {
+          Reflect.deleteProperty(window.visualViewport!, "height");
+          Reflect.deleteProperty(window.visualViewport!, "offsetTop");
+          window.visualViewport!.dispatchEvent(new Event("resize"));
+        });
+        await assertGeometry(layout);
         const landscape = { width: 844, height: 390, top: 0, right: 59, bottom: 21, left: 59 };
         await page.setViewportSize(landscape);
         await setInsets(page, landscape);

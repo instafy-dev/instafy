@@ -330,6 +330,20 @@ safe-area insets, including macOS window controls and mobile cutouts. The
 background still fills the screen; ordinary web browsers with zero insets
 retain the full viewport. Insets update when a device rotates.
 
+The expanded portal also follows the visual viewport when a mobile keyboard
+shrinks only the visible area. The app's open Keyboard input bar reserves its
+own space above that keyboard, so it does not cover the remote page. These
+layout changes keep the same session, control lease, and focused app input;
+they do not automatically expand or reopen a browser.
+
+After a driver-authorized viewport shrink, the origin waits for Chromium to
+acknowledge the resize, rechecks input control, and scrolls an already-focused
+editable into view without changing focus or reading its value. This adjustment
+covers the main document and open shadow roots, not fields inside iframes.
+
+Navigation and expansion use the common icon-button styling; the address Go
+control also keeps a 44px minimum touch target on coarse-pointer devices.
+
 ### Manual input handoff
 
 The browser bar exposes **Take over** for a manual step. Agent-requested handoff

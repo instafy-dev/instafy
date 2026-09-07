@@ -2,6 +2,7 @@ import {
   type ClipboardEvent as ReactClipboardEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -82,11 +83,14 @@ function virtualKeyMessages(
 export function RemoteBrowserMobileKeyboard({
   enabled,
   onMessage,
+  onOccupiedHeightChange,
 }: {
   enabled: boolean;
   onMessage: (message: RemoteBrowserVirtualInputMessage) => void;
+  onOccupiedHeightChange?: (height: number) => void;
 }) {
   const [open, setOpen] = useState(false);
+  const barRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const composingRef = useRef(false);
   const compositionCommitPendingRef = useRef(false);
@@ -99,6 +103,35 @@ export function RemoteBrowserMobileKeyboard({
       setOpen(false);
     }
   }, [enabled]);
+
+  useLayoutEffect(() => {
+    const bar = barRef.current;
+    const parent = bar?.parentElement;
+    if (!enabled || !open || !bar || !parent) {
+      onOccupiedHeightChange?.(0);
+      return;
+    }
+    const measure = () => {
+      const bounds = bar.getBoundingClientRect();
+      const parentBounds = parent.getBoundingClientRect();
+      // Reserve the visible app input bar and its bottom gap, not the OS
+      // keyboard inset (the expanded visual viewport already accounts for it).
+      const visible = [bounds.width, bounds.height, parentBounds.height].every((size) => Number.isFinite(size) && size > 0);
+      const occupied = parentBounds.bottom - bounds.top;
+      onOccupiedHeightChange?.(visible && Number.isFinite(occupied)
+        ? Math.max(0, Math.min(parentBounds.height, Math.ceil(occupied))) : 0);
+    };
+    measure();
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(measure) : null;
+    observer?.observe(bar);
+    observer?.observe(parent);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", measure);
+      onOccupiedHeightChange?.(0);
+    };
+  }, [enabled, onOccupiedHeightChange, open]);
 
   useEffect(() => {
     const input = inputRef.current;
@@ -274,6 +307,7 @@ export function RemoteBrowserMobileKeyboard({
 
   return (
     <div
+      ref={barRef}
       className="pointer-events-none absolute inset-x-2 z-30 hidden justify-end [@media(pointer:coarse)]:flex"
       data-browser-session-safe-zone="true"
       data-testid="shared-browser-mobile-keyboard"

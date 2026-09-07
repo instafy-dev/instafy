@@ -47,6 +47,7 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
     function Fixture() {
       const [agentControls, setAgentControls] = React.useState(false);
       const [expanded, setExpanded] = React.useState(false);
+      const [keyboardHeight, setKeyboardHeight] = React.useState(0);
       const compact = shouldUseCompactBrowserChrome({
         containerWidth: window.innerWidth,
         compactViewport: window.innerWidth < 640,
@@ -105,10 +106,14 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
           toolbarActions: h(React.Fragment, null, collaboration, h(BrowserExpandButton, { expanded, onPress: () => setExpanded(!expanded) })),
           interactionEnabled: false,
         }),
-        h(RemoteBrowserMobileKeyboard, {
-          enabled: true,
-          onMessage: (message) => window.__remoteKeyboardMessages.push(message),
-        }),
+        h("div", { "data-testid": "keyboard-layout-stage", style: { position: "relative", height: 240 } },
+          h("div", { "data-testid": "keyboard-layout-viewer", style: { position: "absolute", inset: 0, bottom: keyboardHeight } }),
+          h(RemoteBrowserMobileKeyboard, {
+            enabled: true,
+            onOccupiedHeightChange: setKeyboardHeight,
+            onMessage: (message) => window.__remoteKeyboardMessages.push(message),
+          }),
+        ),
       );
     }
     createRoot(document.getElementById("root")).render(h(Fixture));
@@ -309,6 +314,13 @@ test("uses one real Chromium action per mobile keyboard control key", async ({ p
   await expect(input).toHaveAttribute("autocapitalize", "none");
   await expect(input).toHaveAttribute("autocorrect", "off");
   await expect(input).toHaveAttribute("spellcheck", "false");
+  // The app input reserves its measured footer; it does not cover the remote
+  // surface. This fixture substitutes the transport, not the keyboard control.
+  await expect.poll(async () => {
+    const viewer = await page.getByTestId("keyboard-layout-viewer").boundingBox();
+    const bar = await keyboard.boundingBox();
+    return Boolean(viewer && bar && viewer.height > 100 && viewer.y + viewer.height <= bar.y);
+  }).toBe(true);
 
   await input.press("Backspace");
   await input.press("Enter");
@@ -328,6 +340,8 @@ test("uses one real Chromium action per mobile keyboard control key", async ({ p
   expect(messages.filter((message) => message.type === "text")).toEqual([
     { type: "text", text: "a" },
   ]);
+  await page.getByTestId("shared-browser-mobile-keyboard-close").click();
+  await expect.poll(async () => (await page.getByTestId("keyboard-layout-viewer").boundingBox())?.height).toBe(240);
 });
 
 test("keeps Unicode remote input out of a previously focused local editor", async ({ page }) => {

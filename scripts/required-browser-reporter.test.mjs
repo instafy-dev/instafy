@@ -134,7 +134,7 @@ test("minimum count cannot hide a replaced Shared full-modal safe-area case", as
 
 test("browser UI requires both portrait and short-landscape session/status cases", async (t) => {
   const contract = REQUIRED_BROWSER_LANES["browser-ui"];
-  assert.equal(contract.minimumTests, 26);
+  assert.equal(contract.minimumTests, 27);
   assert.ok(contract.files.includes("shared-browser-sessions-responsive.spec.ts"));
   const sessionTitles = contract.titles.filter((title) => title.startsWith("Shared sessions and saved status "));
   assert.deepEqual(sessionTitles, [
@@ -158,6 +158,22 @@ test("browser UI cannot omit the retained-editor Unicode input regression", asyn
     ? { ...item, title: "unrelated passing keyboard test" } : item);
   run.begin(tests); run.pass(tests);
   assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" });
+});
+
+test("browser UI cannot omit the focused-editable reveal regression", async (t) => {
+  const requiredTitle = "reveals only a clipped focused editable without changing focus or values";
+  const requiredFile = "shared-browser-focused-editable.spec.ts";
+  assert.ok(REQUIRED_BROWSER_LANES["browser-ui"].titles.includes(requiredTitle));
+  assert.ok(REQUIRED_BROWSER_LANES["browser-ui"].files.includes(requiredFile));
+  for (const replace of ["file", "title"]) {
+    const run = setup(t, "browser-ui");
+    const tests = browserUiInventory(run).map((item) => replace === "title" && item.title === requiredTitle
+      ? { ...item, title: "unrelated passing focus test" }
+      : replace === "file" && item.location.file.endsWith(requiredFile)
+        ? { ...item, location: { file: "/fixture/browser-live-proof.spec.ts" } } : item);
+    run.begin(tests); run.pass(tests);
+    assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" });
+  }
 });
 
 test("receipt write errors cannot be swallowed into a green Playwright result", async (t) => {

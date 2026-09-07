@@ -35,6 +35,7 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "mobile-sidebar-safe-area.spec.ts",
   "shared-browser-approval-responsive.spec.ts",
   "shared-browser-expanded-safe-area.spec.ts",
+  "shared-browser-focused-editable.spec.ts",
   "shared-browser-sessions-responsive.spec.ts",
 ];
 

@@ -335,6 +335,8 @@ describe("PersonalBrowserSurface", () => {
     const go = container.querySelector<HTMLButtonElement>(
       '[data-testid="personal-browser-go"]',
     )!;
+    expect(go.classList.contains("pointer-coarse:min-h-11")).toBe(true);
+    expect(go.classList.contains("pointer-coarse:min-w-11")).toBe(true);
 
     await act(async () => {
       address.focus();
