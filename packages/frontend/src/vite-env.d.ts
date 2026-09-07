@@ -335,6 +335,10 @@ type InstafyDesktopPersonalBrowserStatus = {
   canGoBack: boolean;
   canGoForward: boolean;
   agentControlEnabled: boolean;
+  approvalMode?: "ask" | "routine";
+  approvalModes?: Array<"ask" | "routine">;
+  humanInputRequest?: import("./screens/studio/components/useBrowserHumanInput").BrowserHumanInputRequest;
+  humanControlReady?: boolean;
   ownerId?: string;
   projectId?: string;
   runtimeId?: string;
@@ -444,6 +448,7 @@ interface Window {
     personalBrowserSetAgentControlEnabled?: (options: {
       enabled: boolean;
       ownerId: string;
+      approvalMode?: "ask" | "routine";
     }) => Promise<InstafyDesktopPersonalBrowserStatus>;
     personalBrowserClearData?: (options: {
       ownerId: string;

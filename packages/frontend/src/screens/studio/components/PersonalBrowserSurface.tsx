@@ -19,6 +19,11 @@ import {
   Trash,
 } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
+import { StudioDialogModal } from "../../../components/aria/StudioModal";
+import { BrowserExpandButton } from "./BrowserExpandButton";
+import { BrowserHumanInputStatus } from "./BrowserHumanInputControls";
+import { useBrowserHumanInput } from "./useBrowserHumanInput";
+import { browserPageOrigin } from "./browserHandoffRouting";
 import {
   BrowserChromeShell,
   BrowserStatusPill,
@@ -136,6 +141,9 @@ function personalBrowserStatus(model: PersonalBrowserModel): {
       detail: model.agentError,
     };
   }
+  if (!model.status.agentControlEnabled && model.status.humanControlReady === false) {
+    return { state: "starting", detail: "Waiting for agent operations to stop…" };
+  }
   if (!model.status.agentControlEnabled) {
     return { state: "paused", detail: "Agent control is paused." };
   }
@@ -156,11 +164,15 @@ export function PersonalBrowserSurface({
   compactChrome = false,
   model,
   transportSelector,
+  humanInputIdentityKey,
+  onContinueAfterHumanInput,
 }: {
   active: boolean;
   compactChrome?: boolean;
   model: PersonalBrowserModel;
   transportSelector: ReactNode;
+  humanInputIdentityKey?: string;
+  onContinueAfterHumanInput?: (message: string, approvalMode: "ask" | "routine") => Promise<boolean>;
 }) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const lastValidBoundsRef = useRef<InstafyDesktopPersonalBrowserBounds>({
@@ -171,11 +183,23 @@ export function PersonalBrowserSurface({
   });
   const addressInputRef = useRef<HTMLInputElement | null>(null);
   const [address, setAddress] = useState("");
+  const [fullscreen, setFullscreen] = useState(false);
+  const expanded = active && fullscreen;
+  const [selectedApprovalMode, setSelectedApprovalMode] = useState<"ask" | "routine">("ask");
   const [dismissedClearDataFeedbackKey, setDismissedClearDataFeedbackKey] =
     useState<string | null>(null);
   const ready = model.status?.state === "ready";
   const visible = active && model.available && ready;
   const ownerId = model.ownerId;
+  const routineApprovalAvailable = model.status?.approvalModes?.includes("routine") === true;
+
+  useEffect(() => {
+    setSelectedApprovalMode("ask");
+  }, [ownerId]);
+
+  useEffect(() => {
+    if (!active) setFullscreen(false);
+  }, [active]);
 
   useEffect(() => {
     if (model.clearDataState === "clearing") {
@@ -252,7 +276,7 @@ export function PersonalBrowserSurface({
         ownerId,
       }).catch(() => undefined);
     };
-  }, [ownerId, visible]);
+  }, [expanded, ownerId, visible]);
 
   const handleNavigate = useCallback(
     (event: FormEvent<HTMLFormElement>) => {
@@ -276,7 +300,24 @@ export function PersonalBrowserSurface({
   }, [model]);
 
   const browserStatus = personalBrowserStatus(model);
-  const humanInputLocked = model.status?.agentControlEnabled === true;
+  const humanInputLocked = model.status?.agentControlEnabled === true || model.status?.humanControlReady === false;
+  const personalHumanInputRequest = model.status?.humanInputRequest;
+  const ownsNativeStatus = Boolean(ownerId) && model.status?.ownerId === ownerId;
+  const humanInputOptions = {
+    identityKey: `${humanInputIdentityKey ?? ""}:${ownerId}`,
+    request: ownsNativeStatus && personalHumanInputRequest && personalHumanInputRequest.origin === browserPageOrigin(model.status?.url) ? personalHumanInputRequest : null,
+    canTakeOver: active && ownsNativeStatus && model.status?.agentControlEnabled === true && typeof model.status?.humanControlReady === "boolean",
+    humanControlConfirmed: ownsNativeStatus && ready && model.status?.humanControlReady === true,
+    canContinue: active && ownsNativeStatus && Boolean(onContinueAfterHumanInput),
+    onTakeOver: async () => {
+      const status = await model.setAgentControlEnabled(false);
+      return status?.agentControlEnabled === false;
+    },
+    onContinue: async (message: string) => onContinueAfterHumanInput
+      ? onContinueAfterHumanInput(message, routineApprovalAvailable ? selectedApprovalMode : "ask")
+      : false,
+  };
+  const humanInputState = useBrowserHumanInput(humanInputOptions);
   const clearDataMessage =
     model.clearDataState === "clearing"
       ? "Clearing Personal Browser data…"
@@ -300,9 +341,9 @@ export function PersonalBrowserSurface({
     model.navigationError || model.agentError || model.clearDataState === "failed",
   );
 
-  return (
+  const content = (
     <div
-      className={active ? "flex min-h-0 flex-1 flex-col" : "hidden"}
+      className={active ? "flex h-full min-h-0 flex-1 flex-col" : "hidden"}
       data-testid="personal-browser-surface"
     >
       <BrowserChromeShell
@@ -421,8 +462,12 @@ export function PersonalBrowserSurface({
           ) : ready ? (
             <IconButton
               aria-label={model.status?.agentControlEnabled ? "Pause agent control" : "Resume agent control"}
+              isDisabled={!model.status?.agentControlEnabled && model.status?.humanControlReady === false}
               className="max-[540px]:h-10 max-[540px]:w-10"
-              onPress={() => void model.setAgentControlEnabled(!model.status?.agentControlEnabled)}
+              onPress={() => void model.setAgentControlEnabled(
+                !model.status?.agentControlEnabled,
+                routineApprovalAvailable ? selectedApprovalMode : undefined,
+              )}
               radius="full"
               size="sm"
               title={model.status?.agentControlEnabled ? "Pause agent control" : "Resume agent control"}
@@ -455,6 +500,11 @@ export function PersonalBrowserSurface({
               <Trash className="h-3.5 w-3.5" aria-hidden="true" />
             )}
           </IconButton>
+          <BrowserExpandButton
+            expanded={expanded}
+            onPress={() => setFullscreen((value) => !value)}
+            testId="personal-browser-fullscreen-toggle"
+          />
           </>
         }
         feedback={feedbackMessage}
@@ -470,6 +520,29 @@ export function PersonalBrowserSurface({
         }
         testId="personal-browser-chrome"
       />
+      {routineApprovalAvailable ? (
+        <div className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-slate-200 px-3 py-2 text-xs dark:border-slate-800" data-browser-session-safe-zone="true">
+          <label className="flex min-h-8 cursor-pointer items-center gap-2">
+            <input
+              checked={humanInputLocked ? model.status?.approvalMode === "routine" : selectedApprovalMode === "routine"}
+              className="h-4 w-4"
+              data-testid="personal-browser-routine-approval"
+              disabled={humanInputLocked}
+              onChange={(event) => setSelectedApprovalMode(event.target.checked ? "routine" : "ask")}
+              type="checkbox"
+            />
+            Always allow routine browsing until paused
+          </label>
+          <span className="text-slate-500 dark:text-slate-400">
+            {humanInputLocked
+              ? "Take over to change approvals."
+              : "Choose before Resume. High-impact actions still ask; secrets stay manual."}
+          </span>
+        </div>
+      ) : null}
+      {ready && humanInputIdentityKey && onContinueAfterHumanInput ? (
+        <BrowserHumanInputStatus {...humanInputOptions} state={humanInputState} />
+      ) : null}
       <div
         ref={viewportRef}
         aria-label="Personal browser content"
@@ -504,4 +577,21 @@ export function PersonalBrowserSurface({
       </div>
     </div>
   );
+
+  if (expanded) {
+    return (
+      <StudioDialogModal
+        isOpen
+        onOpenChange={setFullscreen}
+        dialogAriaLabel="Personal Browser"
+        className="!items-stretch !justify-stretch !p-0"
+        modalClassName="!h-dvh !w-screen !max-w-none !overflow-hidden !rounded-none !border-0"
+        dialogClassName="h-full pt-[var(--instafy-safe-area-inset-top)] pb-[var(--instafy-safe-area-inset-bottom)] pl-[var(--instafy-safe-area-inset-left)] pr-[var(--instafy-safe-area-inset-right)]"
+        data-testid="personal-browser-expanded"
+      >
+        {content}
+      </StudioDialogModal>
+    );
+  }
+  return content;
 }

@@ -159,7 +159,8 @@ under `packages/frontend/test-results/browser-ci/<lane>`.
 | Lane | What it proves | Local requirements |
 | --- | --- | --- |
 | `personal` | Real Electron profile/cookie persistence across restarts and projects, per-user isolation, clear, kill switch, and renderer ownership revocation (4 tests) | Installed workspace dependencies and compiled Desktop fixture; no Docker or database |
-| `browser-ui` | Real Chromium rendering of browser chrome, cursor overlay, approval layouts, rendered-frame checks, and mobile drawer safe-area geometry (13 tests) | Installed workspace dependencies and Playwright Chromium; no Docker, database, or controller |
+| `browser-ui` | Real Chromium rendering of browser chrome, cursor overlay, routine approval, expansion/takeover sequencing, rendered-frame checks, and mobile drawer safe-area geometry (17 tests) | Installed workspace dependencies and Playwright Chromium; no Docker, database, or controller |
+| Shared co-browsing tool fixture | Production browser tools in real Chromium: one routine grant across two sites, highlighted manual fields, fresh continuation observation, and local action timings | Installed workspace dependencies and locked Playwright Chromium; no Docker, database, controller, model or real accounts |
 | Shared profile fixture | Real Chromium HttpOnly/JS cookies, localStorage and server cookie echo; production runtime save/restore; controller authorization, encrypted database storage, stale-writer rejection, and clear/no-resurrection | Disposable Linux, Xvfb, Chromium, Go, Rust, and fully migrated loopback Postgres |
 | Shared Studio fixture | Real signed-in application, authorized project creation, Shared launch, CDP pixels/input, periodic snapshot, acknowledged provider stop, replacement login restoration, and UI clear | Disposable Linux, Xvfb, Chromium, Go, Rust, `x11-utils`, `sqlite3`, `psql`, and fresh local Supabase including GoTrue |
 
@@ -185,6 +186,35 @@ be used explicitly with
 `PLAYWRIGHT_BROWSER_UI_CHANNEL=chrome pnpm test:browser:ci browser-ui`.
 That verifies the installed channel, not the lockfile's Chromium revision;
 CI always installs and uses the locked Playwright browser.
+
+The required **Browser UI rendering** job also runs the real co-browsing tool
+fixture before the UI lane. Run it locally with:
+
+```bash
+node --test scripts/shared-browser-cobrowsing-e2e.test.mjs
+node scripts/shared-browser-cobrowsing-e2e.mjs
+```
+
+The fixture creates two loopback websites and a disposable browser profile. It
+executes the production approval/tool scripts, grants routine browsing once,
+checks real field outlines at desktop and phone widths, waits for tool exit,
+enters inert values manually and starts a fresh observation. It checks that the
+password-style fixture value does not enter tool output or action telemetry.
+Only fixed-schema results, timing summaries and inert-page screenshots are kept
+under `packages/frontend/test-results/browser-ci/shared-cobrowsing`; the profile
+and raw session files are removed.
+
+The accompanying UI tests use production React controls with a synthetic native
+host to prove Take over waits for confirmed quiescence, keeps manual state across
+Expand/Collapse, and sends an explicit Done continuation. Rust/native/hook tests
+separately cover shutdown, stale ownership and exact dispatch. These are layered
+proofs, not a complete live-model, signed-in Studio handoff or deployment proof.
+
+The tool fixture reports five-sample min/median/max wall times for snapshot and
+click at two page sizes. These include process startup, CDP attachment and
+settling; they are local responsiveness observations, not pixel-transport latency
+or a release performance threshold. Hidden Shared action polling and overlapping
+requests have separate regression coverage.
 
 The Shared fixture command on a disposable Linux machine is:
 

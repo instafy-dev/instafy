@@ -258,6 +258,50 @@ export async function snapshotPersonalBrowserPage(
   return { ...result, capturedAt: new Date().toISOString() };
 }
 
+// Only trusted, fixed styling runs here. No input values, page text or supplied
+// JavaScript enter the guidance contract. Styling the actual element keeps the
+// highlight aligned through scrolling/reflow and disappears if it is replaced.
+export async function highlightPersonalBrowserHumanInput(
+  webContents: WebContents,
+  targets: Array<{ index: number; expectation: PersonalBrowserTargetExpectation }>,
+): Promise<boolean> {
+  return executeIsolated<boolean>(webContents, buildPageScript({ targets }, `
+    const elements = candidates();
+    const selected = args.targets.map((target) => {
+      const element = elements[target.index];
+      const item = element ? descriptor(element) : null;
+      if (!item || !item.found || item.disabled ||
+          item.identity !== target.expectation.identity ||
+          securityFingerprint(item) !== target.expectation.securityFingerprint || candidates()[target.index] !== element ||
+          !element.matches("input:not([type='hidden']), textarea, select, [contenteditable='true'], [role='textbox']")) return null;
+      return element;
+    });
+    if (selected.some((element) => !element)) return false;
+    for (const previous of registry.humanInputHighlights || []) {
+      if (previous.element.style.outline === previous.appliedOutline) previous.element.style.outline = previous.outline;
+      if (previous.element.style.outlineOffset === "3px") previous.element.style.outlineOffset = previous.offset;
+    }
+    registry.humanInputHighlights = selected.map((element) => {
+      const previous = { element, outline: element.style.outline, offset: element.style.outlineOffset };
+      element.style.outline = "3px solid #f59e0b";
+      element.style.outlineOffset = "3px";
+      previous.appliedOutline = element.style.outline;
+      return previous;
+    });
+    return true;
+  `));
+}
+
+export async function clearPersonalBrowserHumanInput(webContents: WebContents): Promise<void> {
+  await executeIsolated(webContents, buildPageScript({}, `
+    for (const previous of registry.humanInputHighlights || []) {
+      if (previous.element.style.outline === previous.appliedOutline) previous.element.style.outline = previous.outline;
+      if (previous.element.style.outlineOffset === "3px") previous.element.style.outlineOffset = previous.offset;
+    }
+    registry.humanInputHighlights = [];
+  `));
+}
+
 export async function inspectPersonalBrowserTarget(
   webContents: WebContents,
   target: PersonalBrowserTarget,

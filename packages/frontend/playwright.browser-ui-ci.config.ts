@@ -29,6 +29,7 @@ const BROWSER_CHANNEL = resolveBrowserChannel();
  */
 const REQUIRED_BROWSER_UI_SPECS = [
   "browser-chrome-mobile-layout.spec.ts",
+  "browser-cobrowsing-ui.spec.ts",
   "browser-cursor-overlay.spec.ts",
   "browser-live-proof.spec.ts",
   "mobile-sidebar-safe-area.spec.ts",

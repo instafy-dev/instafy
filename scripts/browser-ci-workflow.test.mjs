@@ -53,3 +53,18 @@ test("standalone configs do not import the authenticated development harness", (
   const resolver = read("packages/frontend/tests/playwright/component/viteComponentDependencies.ts");
   assert.ok(resolver.includes("\\.vite(?:-browser-ui-ci)?"));
 });
+
+test("the required browser UI job includes the real co-browsing protocol fixture", () => {
+  const workflow = read(".github/workflows/browser-e2e.yml");
+  const job = workflow.split("\n  browser-ui:\n")[1].split("\n  shared-profile:\n")[0];
+  assert.match(job, /name: Browser UI rendering/);
+  const install = job.indexOf("playwright install --with-deps chromium");
+  const guards = job.indexOf("node --test scripts/shared-browser-cobrowsing-e2e.test.mjs");
+  const fixture = job.indexOf("run: node scripts/shared-browser-cobrowsing-e2e.mjs");
+  const components = job.indexOf("run: pnpm test:browser:ci browser-ui");
+  assert.ok(install >= 0 && guards > install && fixture > guards && components > fixture);
+  assert.match(job, /packages\/frontend\/test-results\/browser-ci\/shared-cobrowsing/);
+  assert.doesNotMatch(job.slice(0, components), /if:|continue-on-error:|secrets:|secrets\./);
+  assert.ok(fs.existsSync(path.join(root, "scripts/shared-browser-cobrowsing-e2e.mjs")));
+  assert.ok(fs.existsSync(path.join(root, "scripts/shared-browser-cobrowsing-e2e.test.mjs")));
+});

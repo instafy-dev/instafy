@@ -26,6 +26,7 @@ function createPageHarness() {
       this.isContentEditable = false;
       this.clickCount = 0;
       this.events = [];
+      this.style = { outline: "", outlineOffset: "" };
       this.rect = { x: nextX, y: 10, width: 80, height: 30 };
       nextX += 100;
       this.onFocus = null;
@@ -46,6 +47,7 @@ function createPageHarness() {
     }
 
     matches(selector) {
+      if (selector === "input:not([type='hidden']), textarea, select, [contenteditable='true'], [role='textbox']") return ["INPUT", "TEXTAREA", "SELECT"].includes(this.tagName);
       if (selector === "iframe, frame, object, embed") return false;
       if (selector === "button, input[type='button'], input[type='submit']") {
         return this.tagName === "BUTTON" ||
@@ -215,6 +217,39 @@ function expectationFor(descriptor) {
     securityFingerprint: security.personalBrowserTargetSecurityFingerprint(descriptor),
   };
 }
+
+test("manual guidance outlines fresh fields without reading or changing values and clears on resume", async () => {
+  const harness = createPageHarness();
+  const input = new harness.HTMLInputElement({ type: "password" });
+  input.value = "private-user-entry";
+  harness.document.elements = [input];
+  const snapshot = await harness.bridge.snapshotPersonalBrowserPage(harness.webContents);
+  const highlighted = await harness.bridge.highlightPersonalBrowserHumanInput(harness.webContents, [
+    { index: 0, expectation: expectationFor(snapshot.interactive[0].descriptor) },
+  ]);
+  assert.equal(highlighted, true);
+  assert.equal(input.value, "private-user-entry");
+  assert.equal(input.style.outline, "3px solid #f59e0b");
+  input.rect.x += 50;
+  assert.equal(input.style.outline, "3px solid #f59e0b");
+  await harness.bridge.clearPersonalBrowserHumanInput(harness.webContents);
+  assert.equal(input.style.outline, "");
+  assert.equal(input.style.outlineOffset, "");
+  assert.equal(input.value, "private-user-entry");
+});
+
+test("manual guidance rejects a field replaced since the observed snapshot", async () => {
+  const harness = createPageHarness();
+  const input = new harness.HTMLInputElement({ type: "password" });
+  harness.document.elements = [input];
+  const snapshot = await harness.bridge.snapshotPersonalBrowserPage(harness.webContents);
+  const replacement = new harness.HTMLInputElement({ type: "password" });
+  harness.document.elements = [replacement];
+  assert.equal(await harness.bridge.highlightPersonalBrowserHumanInput(harness.webContents, [
+    { index: 0, expectation: expectationFor(snapshot.interactive[0].descriptor) },
+  ]), false);
+  assert.equal(replacement.style.outline, "");
+});
 
 test("isolated click rejects an adversarial index reorder before dispatching click", async () => {
   const harness = createPageHarness();

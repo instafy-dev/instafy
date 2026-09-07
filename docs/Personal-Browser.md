@@ -101,19 +101,39 @@ Personal Browser is gated at several layers.
 - The desktop feature is enabled by default. `INSTAFY_DESKTOP_PERSONAL_BROWSER=0` (or `false`, `no`, or `off`) is an emergency installation-level kill switch.
 - Opening the browser does not authorize the agent. `agentControlEnabled` starts false, and the local runtime does not start until the user resumes control.
 - The user must explicitly choose **Resume** before agent work can start.
-- While control is resumed, Electron places a transparent native `WebContentsView` input shield above the Personal page. Pointer, wheel, drag, context-menu, and keyboard input cannot race agent mutations, and the browser bar's human navigation controls are disabled in both Studio and Electron main. The shield shows **Agent control · Esc to pause**; Escape synchronously revokes the broker and then suspends the Personal runtime. Pause removes the shield and returns focus to the page.
+- While control is resumed, Electron places a transparent native `WebContentsView` input shield above the Personal page. Pointer, wheel, drag, context-menu, and keyboard input cannot race agent mutations, and the browser bar's human navigation controls are disabled in both Studio and Electron main. The shield shows **Agent control · Esc to pause**; Escape synchronously revokes the broker and then suspends the Personal runtime. Pause removes the shield and returns focus to the page only after already-dispatched native operations settle.
 - Pause synchronously revokes the broker binding before waiting on navigation or runtime shutdown, then stops the Personal Browser runtime and invalidates in-flight work. Resume creates a fresh broker token; every restarted/started Personal runtime receives a fresh runtime ID. A request that races revocation fails with `401 stale_token`; a paused but still-current operation is rejected with `423 agent_control_paused`.
 - Closing the Personal Browser, changing project/account/renderer identity, clearing its binding, or stopping the app invalidates the live capability.
+- The frontend owner lease is also conversation-scoped. Changing conversations
+  revokes control and clears manual-input guidance before the next owner can
+  reclaim the same page/profile. This does not erase cookies or copy them into a
+  conversation; it prevents a previous conversation's handoff from continuing in
+  the new one.
 
 ### Origin approval
 
-The first agent navigation to, or interaction with, an HTTP(S) origin shows a native Electron confirmation. The only positive choice is **Allow for this session**. Approval is held in memory for the current project/browser session and is cleared when the browser closes, its identity changes, or browser data is cleared.
+In the default Ask mode, the first agent navigation to, or interaction with, an HTTP(S) origin shows a native Electron confirmation. The positive choice is **Allow for this session**. Approval is held in memory for the current project/browser session and is cleared when the browser closes, its identity changes, or browser data is cleared.
 
-The user can navigate manually without granting agent access. Cross-origin agent navigation and link activation require approval for the destination origin.
+The user can navigate manually without granting agent access. Cross-origin agent navigation and link activation require approval for the destination origin, unless routine browsing was explicitly granted as described below.
 
 ### One-shot activation confirmation
 
-Every agent activation of a button, link, submit-like input, or form submission shows a native **Allow once** confirmation, independent of its label. Explicit same-origin URL navigation is also confirmed after that origin has already been approved. Password, OTP, and payment entry remains hard-blocked rather than confirmable.
+In the default **Ask** mode, every agent activation of a button, link, submit-like input, or form submission shows a native **Allow once** confirmation, independent of its label. Explicit same-origin URL navigation is also confirmed after that origin has already been approved. Password, OTP, and payment entry remains hard-blocked rather than confirmable.
+
+At Resume, the user may explicitly choose **Always allow routine browsing**.
+Electron requires a native confirmation before enabling this mode. It permits
+ordinary navigation, clicks and non-sensitive field filling across sites in the
+current project/browser control session without repeated site/action prompts.
+Recognized consequential controls and URLs, form submissions, and Enter/Space
+activation still ask; secret-entry blocks and fresh-target validation remain.
+Pause, Escape, closing, clearing data, or changing the user/project/renderer
+revokes this grant. The visible checkbox may retain its selection while this
+browser surface stays open, but a later Resume requires a fresh native
+confirmation; no permission is saved to the browser profile or shared with teammates.
+
+Routine mode uses a conservative text/descriptor classifier, not a proof that
+ordinary controls are harmless. A website can attach unexpected side effects to
+an ordinary click. Keep Ask mode when every activation needs human review.
 
 The text-based high-impact classifier remains defense in depth for custom controls and activation keys, not a proof that every consequential control is detected. Keep adversarial coverage against real applications and conservative classifier updates in the release loop.
 
@@ -152,7 +172,7 @@ The desktop launcher strips ambient values for these names, then passes the acti
 - `INSTAFY_PERSONAL_BROWSER_PROJECT_ID`
 - `INSTAFY_RUNTIME_AGENT_BIN`
 
-Every job, including a Personal job, strips these values from the Codex shell environment. Runtime startup captures the capability in a trusted process-local store and removes it from the parent environment before worker threads start. A Personal turn uses a fresh, non-persisted Codex thread and registers one required `instafy_personal_browser` Streamable HTTP MCP server. The trusted runtime places the bearer only in that turn's ephemeral in-memory transport header, adds the project header, and exposes only the seven allowlisted tools. Personal MCP configuration is never serialized through the thread-refresh operation. The shell tool is disabled for the turn; the token never enters command arguments, subprocess environments, rollout events, learned memory, or files, and current logging paths do not emit it.
+Every job, including a Personal job, strips these values from the Codex shell environment. Runtime startup captures the capability in a trusted process-local store and removes it from the parent environment before worker threads start. A Personal turn uses a fresh, non-persisted Codex thread and registers one required `instafy_personal_browser` Streamable HTTP MCP server. The trusted runtime places the bearer only in that turn's ephemeral in-memory transport header, adds the project header, and exposes only the eight allowlisted tools, including manual-input handoff. Personal MCP configuration is never serialized through the thread-refresh operation. The shell tool is disabled for the turn; the token never enters command arguments, subprocess environments, rollout events, learned memory, or files, and current logging paths do not emit it.
 
 The model sees these dedicated tools, not Node, Playwright, a shell helper, or an exposed CDP port:
 
@@ -160,6 +180,7 @@ The model sees these dedicated tools, not Node, Playwright, a shell helper, or a
 instafy_personal_browser.status
 instafy_personal_browser.snapshot
 instafy_personal_browser.navigate / click / type / press / scroll
+instafy_personal_browser.request_human_input
 ```
 
 | MCP tool | Purpose |
@@ -171,6 +192,31 @@ instafy_personal_browser.navigate / click / type / press / scroll
 | `type` | Type bounded text into a non-sensitive editable target, optionally submitting with Enter |
 | `press` | Apply one allowlisted key to a fresh observed target inside the same guarded renderer turn |
 | `scroll` | Scroll the visible page by bounded CSS-pixel deltas |
+| `request_human_input` | Highlight one to eight fresh observed fields, revoke agent control, and ask the user to fill them directly |
+
+### Manual steps and continuation
+
+**Take over** pauses agent control for a manual step, even when the AI has not
+requested one. The agent can also call `request_human_input` with fresh snapshot
+indices. The native host applies fixed amber outlines to the actual editable
+elements, so they move with scrolling and reflow; replaced elements do not inherit
+old highlights. Guidance contains only generic field labels and an expiring
+request identity, never field values or DOM-derived text. The broker is revoked
+before input returns to the user and the current runtime is suspended. The native
+`humanControlReady` status additionally requires every active host operation to
+finish; revocation alone is not sufficient. Until then, manual input and Resume
+remain blocked. A 15-second drain timeout reports an error but keeps the shield
+locked rather than falsely claiming control has returned.
+
+**Done, continue** is an explicit new browser turn, not resumption of a suspended
+tool call. Resume clears highlights and creates fresh control authority; the new
+turn observes the page again instead of replaying old indices. Changing the
+account/project/page binding or an expired request cannot silently continue work.
+Passwords, codes and payment values stay in the page and must not be entered in
+chat. The continuation message contains none of those values, but a later page
+observation can include visible website content; manual entry is not a promise
+that the website will never expose it. Ordinary site behavior and the existing
+profile policy still apply.
 
 The MCP endpoint rejects unauthenticated callers, arbitrary tools, unknown argument fields, oversized request bodies, and stale capability generations. The host applies the same target, URL, key, sensitive-input, origin-approval, and one-shot activation confirmation checks to MCP calls as it does to visible browser operations. The legacy Rust request client remains available for low-level diagnostics, but it is not exposed to the model or its shell.
 
@@ -281,7 +327,7 @@ Packaged release verification should prove all of the following:
    `--version` self-invocation, and a secret-free
    `personal-browser capabilities` self-query from the packaged resources
    directory. That compiled contract must expose exactly one required
-   `instafy_personal_browser` MCP server, only the seven browser tools, no
+   `instafy_personal_browser` MCP server, only the eight browser tools, no
    project MCP servers, and zero local execution environments.
 2. A real packaged Personal Browser turn completes through
    `instafy_personal_browser` MCP tools without a command-execution event, while
