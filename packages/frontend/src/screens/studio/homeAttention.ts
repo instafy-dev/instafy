@@ -3,6 +3,32 @@ import type { ConversationState } from "../../conversations/ConversationsProvide
 import type { NotificationInboxItem } from "../../sdk/instafy";
 
 export type HomeAttentionKind = "running" | "queued" | "reply";
+export type HomeFailureStatusLabel = "Run failed" | "Runtime unavailable" | "Automation failed" | "Credits exhausted";
+
+/** Only structured types/codes identify a failure; preview text is user content. */
+export function homeFailureStatusLabel(
+  messageType: string | null | undefined,
+  data?: Record<string, unknown> | null,
+): HomeFailureStatusLabel | undefined {
+  const details = data?.details && typeof data.details === "object" && !Array.isArray(data.details)
+    ? data.details as Record<string, unknown>
+    : null;
+  const code = data?.failureCode ?? details?.failureCode ?? data?.reason ?? details?.reason;
+  switch (messageType?.trim().toLowerCase()) {
+    case "error":
+    case "run.failed":
+    case "automation.failed":
+      if (code === "runtime_unavailable" || code === "self_hosted_runtime_offline") return "Runtime unavailable";
+      if (code === "insufficient_credits") return "Credits exhausted";
+      return messageType?.trim().toLowerCase() === "automation.failed" ? "Automation failed" : "Run failed";
+    case "credit.exhausted":
+      return "Credits exhausted";
+    case "runtime_alert":
+      return code === "runtime_unavailable" ? "Runtime unavailable" : undefined;
+    default:
+      return undefined;
+  }
+}
 
 interface HomeAttentionEntryBase {
   key: string;
@@ -11,6 +37,7 @@ interface HomeAttentionEntryBase {
   meta: string | null;
   preview: string | null;
   kind: HomeAttentionKind;
+  statusLabel?: HomeFailureStatusLabel;
   testId: string;
 }
 
@@ -108,6 +135,7 @@ export function buildHomeAttentionEntries({
   const seenConversationIds = new Set<string>();
   const visibleLocalId = normalizeConversationIdentity(visibleConversationLocalId);
   const visibleControllerId = normalizeConversationIdentity(visibleConversationControllerId);
+  const inboxByConversationId = new Map(inboxItems.map((item) => [normalizeConversationIdentity(item.conversationId), item]));
 
   const registerConversation = (
     conversation: ConversationState,
@@ -129,6 +157,17 @@ export function buildHomeAttentionEntries({
       return;
     }
     seenConversationIds.add(dedupeKey);
+    const lastMessage = conversation.messages.at(-1);
+    const metadataType = lastMessage?.metadata?.messageType;
+    const matchingInbox = inboxByConversationId.get(controllerId);
+    const statusLabel = kind === "reply" && lastMessage?.role === "assistant"
+      ? homeFailureStatusLabel(
+          lastMessage?.messageType ?? (typeof metadataType === "string" ? metadataType : null),
+          lastMessage?.metadata,
+        ) ?? (matchingInbox?.lastMessageId === lastMessage?.id
+          ? homeFailureStatusLabel(matchingInbox?.lastMessageType)
+          : undefined)
+      : undefined;
     items.push({
       key: `${kind}-${conversation.localId}`,
       title: conversation.title || "Conversation",
@@ -136,6 +175,7 @@ export function buildHomeAttentionEntries({
       meta,
       preview,
       kind,
+      statusLabel,
       source: "conversation",
       localConversationId: conversation.localId,
       testId: `home-attention-conversation-${dedupeKey}`,
@@ -225,6 +265,7 @@ export function buildHomeAttentionEntries({
       meta: formatRelativeTimestamp(item.lastMessageAt),
       preview: item.lastMessagePreview?.trim() || null,
       kind: "reply",
+      statusLabel: homeFailureStatusLabel(item.lastMessageType),
       source: "inbox",
       inboxItem: item,
       testId: `home-attention-conversation-${conversationId}`,
