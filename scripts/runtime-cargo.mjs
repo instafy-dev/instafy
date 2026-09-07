@@ -7,6 +7,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -145,17 +146,55 @@ async function hasChecksum(filename, expected) {
   }
 }
 
-async function responseFor(url, fetchImpl) {
-  const response = await fetchImpl(url, { signal: AbortSignal.timeout(120_000) });
-  if (!response.ok || !response.body) throw new Error(`V8 artifact download failed: HTTP ${response.status} (${url}).`);
-  return response;
+async function responseFor(url, fetchImpl, sleepImpl) {
+  // One deadline covers request retries, backoff, and the returned response body.
+  // Body-stream, manifest, and checksum failures remain fatal; only setup retries.
+  const signal = AbortSignal.timeout(120_000);
+  const transientCodes = new Set([
+    "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN", "ENOTFOUND",
+    "ENETUNREACH", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_SOCKET",
+  ]);
+  const terminalCodes = new Set([
+    "CERT_HAS_EXPIRED", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN",
+    "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "ERR_TLS_CERT_ALTNAME_INVALID", "ERR_INVALID_URL",
+  ]);
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    let response;
+    let failure;
+    let retryable;
+    try {
+      response = await fetchImpl(url, { signal });
+    } catch (error) {
+      // Native fetch's nested message can contain arbitrary connection details.
+      // Report only recognized transport codes and the fixed public artifact URL.
+      const code = [error?.cause?.code, error?.code].find((value) =>
+        transientCodes.has(value) || terminalCodes.has(value)) || "FETCH_FAILED";
+      const aborted = ["AbortError", "TimeoutError"].includes(error?.name);
+      failure = aborted ? "request aborted or timed out" : `transport ${code}`;
+      retryable = !aborted && !terminalCodes.has(code);
+    }
+    if (response) {
+      if (response.ok && response.body) return response;
+      failure = `HTTP ${response.status}`;
+      retryable = [408, 429].includes(response.status) || (response.status >= 500 && response.status <= 599);
+      await response.body?.cancel().catch(() => {});
+    }
+    if (!retryable || attempt === 3 || signal.aborted) {
+      throw new Error(`V8 artifact download failed: ${signal.aborted ? "request timed out" : failure} (${url}; attempt ${attempt}/3).`);
+    }
+    try {
+      await sleepImpl(250 * attempt, undefined, { signal });
+    } catch {
+      throw new Error(`V8 artifact download timed out during retry backoff (${url}).`);
+    }
+  }
 }
 
-async function downloadVerified(url, destination, digest, fetchImpl) {
+async function downloadVerified(url, destination, digest, fetchImpl, sleepImpl) {
   if (await hasChecksum(destination, digest)) return;
   const temporary = `${destination}.${randomUUID()}.tmp`;
   try {
-    const response = await responseFor(url, fetchImpl);
+    const response = await responseFor(url, fetchImpl, sleepImpl);
     // writeFile accepts an async iterable, so large archives are streamed to disk.
     await writeFile(temporary, response.body, { flag: "wx" });
     if (!await hasChecksum(temporary, digest)) throw new Error(`V8 artifact failed SHA-256 verification: ${path.basename(destination)}.`);
@@ -169,7 +208,7 @@ export async function resolveV8Environment({
   args = [], env = process.env, root = repoRoot,
   cwd = process.cwd(),
   cacheRoot = env.INSTAFY_RUSTY_V8_CACHE || path.join(os.tmpdir(), "instafy-rusty-v8"),
-  fetchImpl = fetch, run = spawnSync,
+  fetchImpl = fetch, sleepImpl = sleep, run = spawnSync,
 } = {}) {
   if (["true", "1", "yes"].includes(env.V8_FROM_SOURCE)) return {};
   if (env.RUSTY_V8_ARCHIVE && env.RUSTY_V8_SRC_BINDING_PATH) return {};
@@ -184,7 +223,7 @@ export async function resolveV8Environment({
   const directory = path.resolve(cacheRoot, `rusty-v8-${version}-${target}`);
   await mkdir(directory, { recursive: true });
   // Refresh the small manifest each invocation and verify cached files against it.
-  const response = await responseFor(`${baseUrl}/${names.checksums}`, fetchImpl);
+  const response = await responseFor(`${baseUrl}/${names.checksums}`, fetchImpl, sleepImpl);
   let manifest = "";
   for await (const chunk of response.body) {
     manifest += Buffer.from(chunk).toString("utf8");
@@ -192,7 +231,7 @@ export async function resolveV8Environment({
   }
   const checksums = parseChecksums(manifest, [names.archive, names.binding]);
   for (const filename of [names.archive, names.binding]) {
-    await downloadVerified(`${baseUrl}/${filename}`, path.join(directory, filename), checksums.get(filename), fetchImpl);
+    await downloadVerified(`${baseUrl}/${filename}`, path.join(directory, filename), checksums.get(filename), fetchImpl, sleepImpl);
   }
   return {
     RUSTY_V8_ARCHIVE: path.join(directory, names.archive),

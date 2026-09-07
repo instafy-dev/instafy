@@ -187,6 +187,113 @@ test("HTTP failures abort before Cargo is run", async (t) => {
   }), /HTTP 404/);
 });
 
+test("transient transport and HTTP failures recover within three attempts and one deadline", async (t) => {
+  for (const status of [408, 429, 500, 503]) {
+    const options = await fixture(t);
+    const attempts = [];
+    const signals = [];
+    const backoff = [];
+    const result = await resolveV8Environment({
+      ...options,
+      fetchImpl: async (url, { signal }) => {
+        attempts.push(url);
+        signals.push(signal);
+        if (attempts.length === 1) throw new TypeError("fetch failed", { cause: { code: "ECONNRESET" } });
+        if (attempts.length === 2) return new Response("retry later", { status });
+        return options.fetchImpl(url);
+      },
+      sleepImpl: async (delay, _value, { signal }) => {
+        backoff.push(delay);
+        assert.equal(signal, signals[0]);
+      },
+    });
+    assert.deepEqual(backoff, [250, 500]);
+    assert.equal(attempts.length, 5, "three manifest attempts plus the verified pair");
+    assert.deepEqual(attempts.slice(0, 3), Array(3).fill(attempts[0]));
+    assert.ok(signals.slice(0, 3).every((signal) => signal === signals[0]), "retry must not reset the deadline");
+    assert.equal(await readFile(result.RUSTY_V8_ARCHIVE, "utf8"), contents[names.archive]);
+  }
+});
+
+test("permanent HTTP and certificate errors fail without retry", async (t) => {
+  for (const failure of [404, 403, "CERT_HAS_EXPIRED"]) {
+    const options = await fixture(t);
+    let attempts = 0;
+    await assert.rejects(runRuntimeCargo(["check"], {
+      ...options,
+      fetchImpl: async () => {
+        attempts++;
+        if (typeof failure === "number") return new Response("permanent failure", { status: failure });
+        throw new TypeError("fetch failed", { cause: { code: failure } });
+      },
+      sleepImpl: () => assert.fail("permanent failures must not retry"),
+      run: () => assert.fail("Cargo must not run"),
+    }), new RegExp(`(?:HTTP ${failure}|transport ${failure}).*github.com/openai/codex/`));
+    assert.equal(attempts, 1);
+  }
+});
+
+test("exhausted transport retries identify the public artifact and only a sanitized code", async (t) => {
+  for (const code of ["UND_ERR_SOCKET", "private connection detail"]) {
+    const options = await fixture(t);
+    const backoff = [];
+    let attempts = 0;
+    await assert.rejects(runRuntimeCargo(["check"], {
+      ...options,
+      fetchImpl: async () => {
+        attempts++;
+        throw new TypeError("private top-level detail", { cause: { code, message: "private nested detail" } });
+      },
+      sleepImpl: async (delay) => { backoff.push(delay); },
+      run: () => assert.fail("Cargo must not run"),
+    }), (error) => {
+      assert.match(error.message, new RegExp(`transport ${code === "UND_ERR_SOCKET" ? code : "FETCH_FAILED"}`));
+      assert.ok(error.message.includes(`https://github.com/openai/codex/releases/download/rusty-v8-v150.4.0/${names.checksums}`));
+      assert.match(error.message, /attempt 3\/3/);
+      assert.doesNotMatch(error.message, /private/);
+      return true;
+    });
+    assert.equal(attempts, 3);
+    assert.deepEqual(backoff, [250, 500]);
+  }
+});
+
+test("timeout failures do not restart the deadline", async (t) => {
+  const options = await fixture(t);
+  let attempts = 0;
+  await assert.rejects(resolveV8Environment({
+    ...options,
+    fetchImpl: async () => {
+      attempts++;
+      throw new DOMException("private timeout detail", "TimeoutError");
+    },
+    sleepImpl: () => assert.fail("timeout must not retry"),
+  }), /request aborted or timed out.*github.com\/openai\/codex\//);
+  assert.equal(attempts, 1);
+});
+
+test("partial response-body failures are fatal and remove the temporary artifact", async (t) => {
+  const options = await fixture(t);
+  let archiveAttempts = 0;
+  await assert.rejects(resolveV8Environment({
+    ...options,
+    fetchImpl: async (url) => {
+      if (!url.endsWith(names.archive)) return options.fetchImpl(url);
+      archiveAttempts++;
+      let pulled = false;
+      return new Response(new ReadableStream({
+        pull(controller) {
+          if (pulled) controller.error(new Error("fixture response stream disconnected"));
+          else { pulled = true; controller.enqueue(new TextEncoder().encode("partial fixture bytes")); }
+        },
+      }));
+    },
+    sleepImpl: () => assert.fail("body failures must not retry"),
+  }), /fixture response stream disconnected/);
+  assert.equal(archiveAttempts, 1);
+  assert.deepEqual(await readdir(path.join(options.cacheRoot, `rusty-v8-150.4.0-${target}`)), []);
+});
+
 test("Cargo receives exact arguments, inherited environment, verified pair, and exit status", async (t) => {
   const options = await fixture(t);
   options.env.INERT_BUILD_FIXTURE = "preserved";
