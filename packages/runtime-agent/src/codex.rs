@@ -4739,7 +4739,8 @@ mod tests {
         assert_eq!(metadata["multi_agent_version"], "v2");
         assert_eq!(metadata["shell_type"], "unified_exec");
         assert_eq!(metadata["apply_patch_tool_type"], "freeform");
-        assert_eq!(metadata["supports_parallel_tool_calls"], true);
+        // ModelInfo no longer exposes the catalog's legacy parallel-support
+        // marker. The proxy fixture checks actual Responses Lite wire controls.
         assert_eq!(metadata["use_responses_lite"], true);
         assert_eq!(metadata["context_window"], 272000);
         assert_eq!(metadata["max_context_window"], 872000);
