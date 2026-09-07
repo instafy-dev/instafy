@@ -40,6 +40,7 @@ This document explains how the Instafy runtime controller is structured and how 
 ## HTTP Surface (selected)
 | Method | Route | Notes |
 | --- | --- | --- |
+| POST | `/agent/jobs/:job_id/proxy-token` | Empty body; current runtime agent bearer with `agent.lease` scope. Returns `{ url, token, expires_at }` only for its currently leased, unexpired job. Preserves stored run, credential and agent identity without extending the lease. Inactive job: 409; invalid machine authority: 401; unavailable proxy configuration: 503. |
 | POST | `/dispatch-prompt` | Main entrypoint for conversations and module runs on an authorized existing project. Only service-role callers may bootstrap a missing project. Returns `{ runId, promptId, ... }`. |
 | POST | `/projects/:id/conversations/blank` | Creates a conversation. Private chats accept `initialParticipantUserIds` and return the IDs committed atomically with the conversation. |
 | POST | `/conversations/:id/messages/record` | Records a user or assistant message; human metadata may include canonical `mentionedUserIds`. |

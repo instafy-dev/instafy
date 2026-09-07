@@ -157,6 +157,23 @@ Runtimes can be provisioned with different runtime-agent container images (for e
 ## AI Proxy
 All automation must route through the proxy. Do not call OpenAI/Anthropic directly.
 
+Leased Codex jobs receive a short-lived proxy envelope scoped to their project,
+runtime, run and selected credential. The runtime keeps that grant in memory and
+renews it before expiry through `POST /agent/jobs/:job_id/proxy-token`, using its
+current machine agent token. The controller checks the current runtime generation
+and the job's unexpired lease, then issues the same scope with the configured TTL.
+Renewal does not extend the job lease; normal heartbeats remain required.
+
+The embedded Codex parent and native helpers share the renewing auth source.
+Cancellation, parent completion or a rejected renewal disables that source; it
+does not fall back to an older grant or credentials on disk. Provider credentials
+and OAuth refresh remain controller-owned. Deploy the controller endpoint before
+updating runtimes: a new runtime fails a renewal if an older controller lacks it.
+Managed jobs require their own `job.proxy`; a registration-only envelope cannot
+substitute for the job's run and credential scope. Separate direct HTTP worker
+paths retain their existing fixed-token behavior; this renewal path covers the
+embedded Codex execution and its native helpers.
+
 Required envs:
 - `PROXY_BASE_URL`
 - `PROXY_SIGNING_SECRET`

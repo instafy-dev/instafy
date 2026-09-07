@@ -201,6 +201,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/agent/login", post(agent_login))
         .route("/agent/lease", post(agent_lease))
         .route("/agent/heartbeat", post(agent_heartbeat))
+        .route(
+            "/agent/jobs/:job_id/proxy-token",
+            post(agent_job_proxy_token),
+        )
         .route("/agent/message", post(agent_message))
         .route("/agent/complete", post(agent_complete))
         .route(
@@ -1641,6 +1645,100 @@ pub(crate) async fn agent_heartbeat(
     };
 
     Ok(Json(response))
+}
+
+/// Renew only the proxy capability already granted to this runtime's live job.
+/// Machine lease authority stays outside the model-facing proxy envelope; an
+/// expired envelope cannot authenticate this route or choose another identity.
+#[instrument(skip(state, headers))]
+pub(crate) async fn agent_job_proxy_token(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
+    AxumPath(job_id): AxumPath<String>,
+) -> Result<Json<runtime_contracts::ProxyEnvelopePayload>, (StatusCode, Json<ApiError>)> {
+    let token = extract_agent_token(&headers)?;
+    let claims = verify_agent_token_with_scopes(&state.config, token, &["agent.lease"])?;
+    let runtime_id = claims
+        .runtime_id
+        .ok_or_else(|| unauthorized("agent token missing runtime scope"))?;
+    let job_id = Uuid::from_str(&job_id).map_err(|_| bad_request("job_id must be a valid UUID"))?;
+
+    let mut connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+
+    // Match heartbeat's runtime-before-job lock order and generation checks.
+    // A draining runtime may finish its existing job but cannot start new work.
+    ensure_runtime_can_heartbeat(
+        &state,
+        &transaction,
+        &claims.project_id,
+        &runtime_id,
+        claims.lease_id,
+        claims.runtime_generation,
+    )
+    .await?;
+    let row = transaction
+        .query_opt(
+            "select project_id, run_id, credential_id, payload, lease_expires_at
+             from agent_jobs
+             where id = $1
+               and project_id = $2
+               and status = 'leased'
+               and leased_by_runtime_id = $3
+             for share",
+            &[&job_id, &claims.project_id, &runtime_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to validate proxy job lease: {error}")))?
+        .ok_or_else(inactive_proxy_job_lease)?;
+    // Check after acquiring the row lock: a waiter must not use the transaction
+    // start time to renew a lease that expired while another operation held it.
+    let lease_expires_at: Option<DateTime<Utc>> = row.get("lease_expires_at");
+    if lease_expires_at.is_none_or(|expires_at| expires_at <= Utc::now()) {
+        return Err(inactive_proxy_job_lease());
+    }
+
+    let project_id: Uuid = row.get("project_id");
+    let run_id: Option<Uuid> = row.get("run_id");
+    let credential_id: Option<Uuid> = row.get("credential_id");
+    let payload: JsonValue = row.get("payload");
+    let (agent_handle, agent_display_name, agent_description) =
+        extract_agent_prompt_identity_from_job_payload(&payload);
+    let proxy = issue_proxy_envelope(
+        &state.config,
+        &project_id,
+        &runtime_id,
+        run_id.as_ref(),
+        credential_id.as_ref(),
+        agent_handle.as_deref(),
+        agent_display_name.as_deref(),
+        agent_description.as_deref(),
+    )
+    .ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiError::new("job proxy token is unavailable")),
+        )
+    })?;
+
+    transaction.commit().await.map_err(|error| {
+        internal_error(format!("failed to commit proxy token renewal: {error}"))
+    })?;
+    Ok(Json(proxy))
+}
+
+fn inactive_proxy_job_lease() -> (StatusCode, Json<ApiError>) {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiError::new("agent job lease is no longer active")),
+    )
 }
 
 /// Hold the exact leased job row through the assistant-message insert and
@@ -4598,6 +4696,10 @@ fn extract_multi_agent_plan_details(value: &JsonValue) -> Option<&JsonValue> {
     }
     None
 }
+
+#[cfg(test)]
+#[path = "agent_proxy_token_tests.rs"]
+mod proxy_token_tests;
 
 #[cfg(test)]
 mod tests {

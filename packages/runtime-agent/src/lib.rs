@@ -11,6 +11,7 @@ pub mod config;
 pub mod controller;
 pub mod controller_tokens;
 pub mod job_cancel;
+pub mod job_proxy_auth;
 pub mod jobs;
 pub mod local_browser;
 mod model_environment;
