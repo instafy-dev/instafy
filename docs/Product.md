@@ -132,6 +132,26 @@ changes the tab: the conversation remains available in Chats. Previously open ta
 and the preview state is remembered per space alongside them. Mobile chat selection uses the
 same preview behavior without adding another step to the two-tap switching flow.
 
+## Settings and skills
+
+Settings categories use a side list when the settings pane has enough room. Opening a
+workspace side panel can switch this to a compact picker without changing the selected
+category or resetting the form. Form fields and member controls respond to the available
+content width as well. Space settings categories follow the URL; returning to Overview
+clears the category parameter, so browser Back and reload retain the expected destination.
+
+Settings cards use the shared Studio surfaces and control styling. Lists own one internal
+gutter, invitation counts stay beside their heading, and narrow profile forms place Save
+below the helper text. Secrets has a labeled **Create secret** action.
+
+On mobile, installed skill titles open the skill file directly, the enable toggle remains
+visible, and other actions live in the row menu. Skill discovery keeps search on one row
+and folds source, category and sort controls into **Filters**; closing the controls keeps
+their selections. Wider layouts retain direct row actions and visible discovery filters.
+
+Automations uses a flat empty state on the shared panel surface, with a labeled
+**New automation** action and a short explanation of scheduling.
+
 ## Composer
 
 The composer uses one compact, rounded writing row on phones and wider screens. It grows
