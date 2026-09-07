@@ -29,6 +29,10 @@ Chat and Home remain immediately available with the workspace. Panel downloads k
 and drawer Close controls available, show a local loading status, and offer Retry or Reload app on failure.
 Subsequent visits reuse the loaded panel code.
 
+The shared-browser viewer also downloads when activated. Its loading and retry notice keeps
+Close, Back to chat, and the browser selector available. Returning to a loaded viewer reuses
+its code, and switching to chat or the personal browser keeps an active shared viewer mounted.
+
 An optional timing observer measures Studio startup and chat, space, and team switches; the
 public app sends no timing data by default. Its memory buffer holds at most 32 anonymous samples
 containing only the operation, outcome, duration, message-count bucket, narrow/wide viewport, and

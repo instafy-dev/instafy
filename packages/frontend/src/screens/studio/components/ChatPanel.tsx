@@ -309,7 +309,7 @@ import {
   resolveMessageStashRestoreBlock,
   shouldDeleteRestoredMessageStashAfterAction,
 } from "./messageStashLifecycle";
-import { BrowserSessionModal } from "./BrowserSessionModal";
+import { LazyBrowserSessionModal } from "./LazyBrowserSessionModal";
 import type { SharedBrowserChromeProps } from "./SharedBrowserChrome";
 import { resolveSharedBrowserViewerKind } from "./sharedBrowserViewer";
 import { ChatBrowserSubtabs, type ChatBrowserSubtab } from "./ChatBrowserSubtabs";
@@ -5338,7 +5338,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               />
               {sharedBrowserActivated ? (
                 <div className={browserTransport === "shared" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
-                  <BrowserSessionModal
+                  <LazyBrowserSessionModal
                     isOpen={browserSessionOpen}
                     onOpenChange={handleBrowserSessionOpenChange}
                     projectId={activeProjectId ?? null}
