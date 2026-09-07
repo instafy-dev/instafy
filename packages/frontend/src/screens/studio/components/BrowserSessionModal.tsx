@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Collapse, Expand, Safari, Xmark } from "iconoir-react";
+import { Expand, Safari, Xmark } from "iconoir-react";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { Button, IconButton } from "../../../components/Button";
 import { Spinner } from "../../../components/Spinner";
@@ -31,6 +31,10 @@ import { generateUUID } from "../../../utils/uuid";
 import type { StatusIntent } from "../../../status/useStatus";
 import { useBrowserSessionActions } from "./useBrowserSessionActions";
 import { BrowserCursorOverlay } from "./BrowserCursorOverlay";
+import { BrowserExpandButton } from "./BrowserExpandButton";
+import { BrowserHumanInputStatus } from "./BrowserHumanInputControls";
+import { useBrowserHumanInput } from "./useBrowserHumanInput";
+import { browserPageOrigin, selectSharedBrowserHumanInput } from "./browserHandoffRouting";
 import { ActionTicker } from "./ActionTicker";
 import { SharedBrowserCollaborationControls } from "./SharedBrowserCollaborationControls";
 import { SharedBrowserDataClearAction } from "./SharedBrowserDataClearAction";
@@ -410,6 +414,13 @@ export function BrowserSessionModal({
   sharedBrowserCapabilitiesResolved = true,
   sharedBrowserCapabilitiesAvailable = true,
   sharedBrowserAvailableViewerKinds = DEFAULT_SHARED_BROWSER_VIEWER_KINDS,
+  sharedBrowserRoutineApprovalAvailable = false,
+  humanInputIdentityKey,
+  humanInputRunIds = null,
+  currentUserId = null,
+  activeBrowserRunId = null,
+  onTakeOverAgent,
+  onContinueAfterHumanInput,
   sharedBrowserRfbCapabilities = null,
   sharedBrowserWebRtcCapabilities = null,
 }: {
@@ -440,6 +451,13 @@ export function BrowserSessionModal({
   sharedBrowserCapabilitiesResolved?: boolean;
   sharedBrowserCapabilitiesAvailable?: boolean;
   sharedBrowserAvailableViewerKinds?: SupportedSharedBrowserViewerKind[];
+  sharedBrowserRoutineApprovalAvailable?: boolean;
+  humanInputIdentityKey?: string;
+  humanInputRunIds?: ReadonlySet<string> | null;
+  currentUserId?: string | null;
+  activeBrowserRunId?: string | null;
+  onTakeOverAgent?: (() => Promise<boolean>) | null;
+  onContinueAfterHumanInput?: ((message: string) => Promise<boolean>) | null;
   sharedBrowserRfbCapabilities?: RuntimeBrowserSessionCapabilities["rfb"] | null;
   sharedBrowserWebRtcCapabilities?: RuntimeBrowserSessionCapabilities["webrtc"] | null;
 }) {
@@ -692,7 +710,23 @@ export function BrowserSessionModal({
     browserSessionId,
     projectId,
     preferRuntimeId: forcedRuntimeId ?? preferRuntimeId,
+    pageId: sharedBrowserPageId,
+    transportActive,
   });
+  const browserHumanInputOptions = {
+    identityKey: `${humanInputIdentityKey ?? ""}:${browserSessionId}:${forcedRuntimeId ?? preferRuntimeId}:${sharedBrowserPageId}`,
+    request: selectSharedBrowserHumanInput(
+      browserActions, currentUserId, sharedBrowserPageId,
+      browserPageOrigin(sharedBrowserChrome?.pages.find((page) => page.id === sharedBrowserPageId)?.url),
+      humanInputRunIds,
+    ),
+    canTakeOver: transportActive && canControlBrowser && Boolean(effectiveAgentControlOwner && onTakeOverAgent),
+    humanControlConfirmed: humanInputEnabled,
+    canContinue: transportActive && Boolean(onContinueAfterHumanInput),
+    onTakeOver: async () => onTakeOverAgent ? onTakeOverAgent() : false,
+    onContinue: async (message: string) => onContinueAfterHumanInput ? onContinueAfterHumanInput(message) : false,
+  };
+  const browserHumanInputState = useBrowserHumanInput(browserHumanInputOptions);
   const collapsedCardMode = shouldCollapseDocked
     ? error
       ? limitReached
@@ -2420,17 +2454,10 @@ export function BrowserSessionModal({
               showStatus={onStatus}
             />
             {!forceViewportFullscreenDocked ? (
-              <IconButton
-                variant="ghost"
-                size="xs"
-                radius="full"
+              <BrowserExpandButton
+                expanded={fullscreen}
                 onPress={toggleFullscreen}
-                className="text-slate-500 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 dark:data-[hovered]:text-slate-200"
-                data-testid="browser-session-fullscreen-toggle"
-                aria-label={fullscreen ? "Minimize browser session" : "Fullscreen browser session"}
-              >
-                {fullscreen ? <Collapse className="h-4 w-4" aria-hidden="true" /> : <Expand className="h-4 w-4" aria-hidden="true" />}
-              </IconButton>
+              />
             ) : null}
             <IconButton
               variant="ghost"
@@ -2478,19 +2505,11 @@ export function BrowserSessionModal({
                 projectId={projectId}
                 showStatus={onStatus}
               />
-              {!forceViewportFullscreenDocked && !sharedBrowserChrome.compact ? (
-                <IconButton
-                  variant="ghost"
-                  size="sm"
-                  radius="full"
+              {!forceViewportFullscreenDocked ? (
+                <BrowserExpandButton
+                  expanded={fullscreen}
                   onPress={toggleFullscreen}
-                  className="max-[540px]:hidden text-slate-500 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 dark:data-[hovered]:text-slate-200"
-                  data-testid="browser-session-fullscreen-toggle"
-                  aria-label={fullscreen ? "Minimize browser session" : "Fullscreen browser session"}
-                  title={fullscreen ? "Minimize browser session" : "Fullscreen browser session"}
-                >
-                  {fullscreen ? <Collapse className="h-4 w-4" aria-hidden="true" /> : <Expand className="h-4 w-4" aria-hidden="true" />}
-                </IconButton>
+                />
               ) : null}
             </>
           }
@@ -2504,6 +2523,14 @@ export function BrowserSessionModal({
         />
       ) : null}
 
+      {sharedBrowserApproval.routineApprovedRunId && sharedBrowserApproval.routineApprovedRunId === activeBrowserRunId ? (
+        <div className="shrink-0 border-b border-slate-200 px-3 py-1 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400" role="status" data-testid="shared-browser-routine-status">
+          Routine browsing allowed for this turn · Take over or stop the turn to revoke.
+        </div>
+      ) : null}
+      {!shouldCollapseDocked && humanInputIdentityKey ? (
+        <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState} />
+      ) : null}
       <div
         key="shared-browser-viewport"
         data-testid="browser-session-viewport"
@@ -2777,6 +2804,7 @@ export function BrowserSessionModal({
           {!shouldCollapseDocked && sharedBrowserApproval.pending ? (
             <SharedBrowserApprovalPrompt
               active={transportActive}
+              routineApprovalAvailable={sharedBrowserRoutineApprovalAvailable}
               error={sharedBrowserApproval.error}
               onDecision={(decision) => {
                 void sharedBrowserApproval.decide(decision);
@@ -2799,7 +2827,10 @@ export function BrowserSessionModal({
       return (
         <StudioDialogModal
           isOpen={isOpen}
-          onOpenChange={onOpenChange}
+          onOpenChange={(open) => {
+            if (!open && !forceViewportFullscreenDocked) setFullscreen(false);
+            else onOpenChange(open);
+          }}
           isDismissable
           dialogAriaLabel="Browser session"
           className={fullscreenOverlayClassName}

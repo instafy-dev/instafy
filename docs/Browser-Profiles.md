@@ -25,7 +25,8 @@ cannot import either profile.
 ## What survives a change?
 
 - **Personal, another project on the same device:** the same user's profile is
-  reused, but the new project must receive fresh agent control and origin approval.
+  reused, but the new project must receive fresh agent control and browsing
+  approval. A previous project's routine-browsing grant is not inherited.
 - **Personal, close/reopen or app restart:** persistent cookies and site data can
   survive. Signing out of Instafy revokes browser control; it does not erase that
   user's disk profile. Another account gets a different profile.
@@ -44,6 +45,25 @@ Site expiration, session-cookie behavior, and server-side logout still apply.
 Persistent profile storage cannot guarantee that every site's login survives a
 restart. Cookies follow domain/path rules, while localStorage and IndexedDB are
 origin-scoped; sessionStorage also depends on the browser's page session.
+
+## Viewing and sharing control
+
+Both interactive modes have an **Expand** control, including compact layouts.
+It fills the app viewport; it does not create a different browser, profile or
+OS window. Collapse returns to the docked browser with the same page.
+
+**Always allow routine browsing** is an early, explicit choice: at the first
+Shared site prompt for that turn, or before Personal Resume until paused.
+It avoids repeated routine site/action prompts without changing cookie sharing.
+Recognized high-impact actions still ask and secret entry remains manual; a
+website can attach unexpected side effects to an otherwise ordinary control.
+See each mode's policy for scope and revocation.
+
+**Take over → fill highlighted fields → Done, continue** is a sequential handoff.
+The browser must confirm that agent operations have stopped before manual input
+is enabled. Done sends a fixed continuation, not entered values, and starts a
+fresh browser turn on that page. Shared page contents are still visible to
+project members; expansion and manual input do not make a Shared page private.
 
 ## Clearing data
 

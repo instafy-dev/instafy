@@ -326,6 +326,8 @@ import {
 import { ChatSpeakerStickyOverlay, ChatTranscriptViewport } from "./ChatTranscriptViewport";
 import { resolveSharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import { useSharedBrowserApprovalTransport } from "./useSharedBrowserApprovalTransport";
+import { useChatBrowserHandoff } from "./useChatBrowserHandoff";
+import { sharedBrowserConversationRunIds } from "./browserHandoffRouting";
 
 const { enabled: runtimeControllerEnabled } = controllerClient.core;
 const {
@@ -819,6 +821,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       browserTransport === "personal",
     profileUserId: currentUserId,
     projectId: activeProjectId ?? null,
+    conversationBindingKey: activeConversationId ?? null,
   });
   useEffect(() => {
     browserTransportInitializedUserRef.current = null;
@@ -4106,6 +4109,28 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   });
   submitMessageRef.current = submitMessage;
 
+  const browserHandoffPage = sharedBrowserChrome?.pages.find((page) => page.isActive) ?? sharedBrowserChrome?.pages[0] ?? null;
+  const browserHumanInputRunIds = useMemo(() => sharedBrowserConversationRunIds(Object.values(runs ?? {}), {
+    projectId: activeProjectId ?? null,
+    conversationId: activeConversationEntry?.controllerId ?? null,
+    runtimeId: resolvedBrowserRuntimeId,
+    pageId: browserHandoffPage?.id ?? null,
+  }), [runs, activeProjectId, activeConversationEntry?.controllerId, resolvedBrowserRuntimeId, browserHandoffPage?.id]);
+  const browserHandoff = useChatBrowserHandoff({
+    userId: currentUserId,
+    projectId: activeProjectId ?? null,
+    conversationId: activeConversationId,
+    transport: browserTransport,
+    open: browserSessionOpen,
+    canWrite: canWriteProject,
+    runtimeId: resolvedBrowserRuntimeId,
+    page: browserHandoffPage,
+    runs: activeConversationRuns,
+    personal: personalBrowser,
+    agentHandle: typingAgentHandle,
+    onSubmit,
+  });
+
   const handleStashDraft = useCallback(async (): Promise<boolean> => {
     if (!ensureProjectWriteAccess()) {
       return false;
@@ -5299,6 +5324,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 active={browserTransport === "personal" && browserSubtab === "browser"}
                 compactChrome={compactBrowserBar}
                 model={personalBrowser}
+                humanInputIdentityKey={browserHandoff.identityKey}
+                onContinueAfterHumanInput={browserHandoff.continuePersonal}
                 transportSelector={browserTransport === "personal" ? browserTransportSelector : null}
               />
               {sharedBrowserActivated ? (
@@ -5321,10 +5348,19 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     canControlBrowser={canWriteProject}
                     canClearBrowserData={canWriteProject}
                     controlOwner={sharedBrowserControlOwner}
+                    currentUserId={currentUserId}
+                    humanInputIdentityKey={browserHandoff.identityKey}
+                    humanInputRunIds={browserHumanInputRunIds}
+                    activeBrowserRunId={browserHandoff.sharedJob?.runId ?? null}
+                    onTakeOverAgent={browserHandoff.sharedJob ? browserHandoff.takeOverShared : null}
+                    onContinueAfterHumanInput={browserHandoff.continueShared}
                     sharedBrowserChrome={sharedBrowserChrome}
                     sharedBrowserViewerKind={sharedBrowserViewerKind}
                     sharedBrowserCapabilitiesResolved={sharedBrowserCapabilitiesResolved}
                     sharedBrowserCapabilitiesAvailable={Boolean(sharedBrowserCapabilities)}
+                    sharedBrowserRoutineApprovalAvailable={
+                      sharedBrowserCapabilities?.approvalModes?.includes("routine") === true
+                    }
                     sharedBrowserAvailableViewerKinds={
                       sharedBrowserCapabilities?.viewerKinds
                     }

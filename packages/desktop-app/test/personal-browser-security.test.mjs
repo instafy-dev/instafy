@@ -16,6 +16,7 @@ const {
   isPersonalBrowserFeatureEnabled,
   isSensitivePersonalBrowserEditable,
   normalizePersonalBrowserBounds,
+  normalizePersonalBrowserApprovalMode,
   normalizePersonalBrowserPressKey,
   normalizePersonalBrowserProfileUserId,
   normalizePersonalBrowserScroll,
@@ -29,6 +30,32 @@ const {
   requirePersonalBrowserTarget,
   sanitizePersonalBrowserBrokerStatus,
 } = await import(modulePath);
+
+test("routine browsing is an explicit mode and cannot disable consequential or secret safeguards", () => {
+  assert.equal(normalizePersonalBrowserApprovalMode(undefined), "ask");
+  assert.equal(normalizePersonalBrowserApprovalMode("routine"), "routine");
+  for (const invalid of [null, true, "always", "all", "ROUTINE", {}, 1]) {
+    assert.throws(() => normalizePersonalBrowserApprovalMode(invalid), /approval mode/);
+  }
+  const ordinary = { tag: "a", text: "Documentation", href: "https://example.test/docs" };
+  assert.equal(personalBrowserActivationRequiresConfirmation(ordinary), true);
+  assert.equal(personalBrowserActivationRequiresConfirmation(ordinary, "routine"), false);
+  for (const target of [
+    { tag: "button", type: "button", ariaLabel: "Delete account" },
+    { tag: "a", text: "Continue", href: "https://example.test/purchase" },
+    { tag: "input", type: "submit" },
+    { tag: "button", type: "submit", formActionText: "this form" },
+    { tag: "button", formActionText: "Search" },
+  ]) {
+    assert.equal(personalBrowserActivationRequiresConfirmation(target, "routine"), true);
+  }
+  assert.equal(personalBrowserKeyRequiresConfirmation("Enter", { tag: "input", type: "text" }, "routine"), true);
+  assert.equal(personalBrowserKeyRequiresConfirmation(" ", ordinary, "routine"), true);
+  assert.equal(personalBrowserKeyRequiresConfirmation("Tab", ordinary, "routine"), false);
+  assert.equal(isSensitivePersonalBrowserEditable({ type: "password" }), true);
+  assert.equal(isSensitivePersonalBrowserEditable({ autocomplete: "one-time-code" }), true);
+  assert.equal(isSensitivePersonalBrowserEditable({ autocomplete: "cc-number" }), true);
+});
 
 test("Personal Browser is enabled by default with an explicit emergency kill switch", () => {
   assert.equal(isPersonalBrowserFeatureEnabled(undefined), true);

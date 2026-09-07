@@ -210,6 +210,41 @@ describe("PersonalBrowserSurface", () => {
     expect(onModeChange).toHaveBeenCalledWith("shared");
   });
 
+  it("expands compact Personal browsing without closing or pausing its native page", async () => {
+    const model = createModel();
+    await act(async () => root.render(
+      <PersonalBrowserSurface active compactChrome model={model} transportSelector={null} />,
+    ));
+    const toggle = container.querySelector<HTMLButtonElement>('[data-testid="personal-browser-fullscreen-toggle"]');
+    expect(toggle?.getAttribute("aria-label")).toBe("Expand browser");
+    await act(async () => toggle?.click());
+    expect(document.querySelector('[data-testid="personal-browser-expanded"]')).not.toBeNull();
+    expect(document.querySelector('[data-testid="personal-browser-viewport"]')).not.toBeNull();
+    expect(model.close).not.toHaveBeenCalled();
+    expect(model.setAgentControlEnabled).not.toHaveBeenCalled();
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="personal-browser-fullscreen-toggle"]')?.click());
+    expect(container.querySelector('[data-testid="personal-browser-viewport"]')).not.toBeNull();
+    expect(model.close).not.toHaveBeenCalled();
+  });
+
+  it("offers routine permission before Resume only on a supporting native host", async () => {
+    const model = createModel();
+    model.status = { ...model.status!, agentControlEnabled: false, approvalMode: "ask", approvalModes: ["ask", "routine"] };
+    await act(async () => root.render(
+      <PersonalBrowserSurface active model={model} transportSelector={null} />,
+    ));
+    const checkbox = container.querySelector<HTMLInputElement>('[data-testid="personal-browser-routine-approval"]');
+    expect(checkbox?.checked).toBe(false);
+    await act(async () => checkbox?.click());
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="Resume agent control"]')?.click());
+    expect(model.setAgentControlEnabled).toHaveBeenCalledWith(true, "routine");
+    const legacyModel = createModel();
+    await act(async () => root.render(
+      <PersonalBrowserSurface active model={legacyModel} transportSelector={null} />,
+    ));
+    expect(container.querySelector('[data-testid="personal-browser-routine-approval"]')).toBeNull();
+  });
+
   it("keeps profile ownership accessible when compact controls hide their text", async () => {
     await act(async () => {
       root.render(
@@ -467,5 +502,24 @@ describe("PersonalBrowserSurface", () => {
       );
     });
     expect(container.textContent).toContain("Personal Browser data cleared.");
+  });
+
+  it("never latches another native owner's handoff while reclaim is pending", async () => {
+    const model = createModel();
+    model.ownerId = null;
+    model.status = { ...model.status!, agentControlEnabled: false, humanControlReady: true,
+      humanInputRequest: { version: 1, handoffId: "previous-conversation", origin: "https://example.com", createdAtMs: Date.now(), expiresAtMs: Date.now() + 600_000, fields: [{ label: "Highlighted field 1" }] } };
+    const onContinue = vi.fn(async () => true);
+    const render = async () => act(async () => root.render(
+      <PersonalBrowserSurface active model={model} transportSelector={null} humanInputIdentityKey="conversation-b" onContinueAfterHumanInput={onContinue} />,
+    ));
+    await render();
+    expect(container.textContent).not.toContain("Done, continue");
+    expect(container.textContent).not.toContain("highlighted field");
+    model.ownerId = "replacement-owner";
+    model.status = { ...model.status!, ownerId: "replacement-owner", humanInputRequest: undefined };
+    await render();
+    expect(container.textContent).not.toContain("Done, continue");
+    expect(onContinue).not.toHaveBeenCalled();
   });
 });

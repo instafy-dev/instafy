@@ -71,6 +71,7 @@ struct BrowserPagesResponse {
 #[serde(rename_all = "camelCase")]
 struct BrowserCapabilitiesResponse {
     version: u8,
+    approval_modes: [&'static str; 2],
     viewer_kinds: Vec<&'static str>,
     preferred_viewer: &'static str,
     viewport_only: bool,
@@ -142,6 +143,9 @@ struct BrowserActionsQuery {
 struct BrowserActionResponse {
     seq: u64,
     ts: i64,
+    /// Exact CDP target that produced the action. Older logs may be unscoped;
+    /// viewers must not attribute those events to their selected page.
+    page_id: Option<String>,
     #[serde(rename = "type")]
     action_type: String,
     label: String,
@@ -150,6 +154,28 @@ struct BrowserActionResponse {
     y: Option<f64>,
     viewport_w: Option<f64>,
     viewport_h: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    human_input_request: Option<BrowserHumanInputRequest>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BrowserHumanInputRequest {
+    version: u8,
+    handoff_id: String,
+    run_id: String,
+    initiator_user_id: String,
+    browser_page_id: String,
+    origin: String,
+    created_at_ms: u64,
+    expires_at_ms: u64,
+    fields: Vec<BrowserHumanInputField>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct BrowserHumanInputField {
+    label: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -165,6 +191,7 @@ const BROWSER_ACTIONS_MAX_RETURNED: usize = 200;
 const BROWSER_ACTIONS_READ_WINDOW_BYTES: usize = 256 * 1024;
 const BROWSER_ACTION_LABEL_MAX_BYTES: usize = 1024;
 const BROWSER_ACTION_URL_MAX_BYTES: usize = 16 * 1024;
+const BROWSER_ACTION_PAGE_ID_MAX_BYTES: usize = 256;
 /// Browser CDP lives on loopback, so a command taking longer than this is a
 /// broken browser/session. Keep every websocket operation bounded instead of
 /// tying up an origin request indefinitely.
@@ -272,9 +299,31 @@ fn parse_browser_action_line(line: &str) -> Option<BrowserActionResponse> {
     if action_type.is_empty() {
         return None;
     }
+    // Reject invalid IDs instead of truncating/normalizing them into the
+    // identity of a different target. Unscoped legacy events remain readable.
+    let page_id = value
+        .get("pageId")
+        .and_then(JsonValue::as_str)
+        .filter(|id| valid_browser_action_page_id(id))
+        .map(str::to_string);
+    let human_input_request = if action_type == "human_input" {
+        let request = serde_json::from_value::<BrowserHumanInputRequest>(
+            value.get("humanInputRequest")?.clone(),
+        )
+        .ok()?;
+        if !valid_browser_human_input_request(&request)
+            || page_id.as_deref() != Some(request.browser_page_id.as_str())
+        {
+            return None;
+        }
+        Some(request)
+    } else {
+        None
+    };
     Some(BrowserActionResponse {
         seq: value.get("seq").and_then(JsonValue::as_u64).unwrap_or(0),
         ts: value.get("ts").and_then(JsonValue::as_i64).unwrap_or(0),
+        page_id,
         action_type,
         label: value
             .get("label")
@@ -289,7 +338,50 @@ fn parse_browser_action_line(line: &str) -> Option<BrowserActionResponse> {
         y: value.get("y").and_then(JsonValue::as_f64),
         viewport_w: value.get("viewportW").and_then(JsonValue::as_f64),
         viewport_h: value.get("viewportH").and_then(JsonValue::as_f64),
+        human_input_request,
     })
+}
+
+fn valid_browser_action_page_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= BROWSER_ACTION_PAGE_ID_MAX_BYTES
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn valid_browser_human_input_request(request: &BrowserHumanInputRequest) -> bool {
+    let canonical_uuid = |value: &str| {
+        uuid::Uuid::parse_str(value)
+            .map(|id| id.to_string() == value)
+            .unwrap_or(false)
+    };
+    let valid_origin = reqwest::Url::parse(&request.origin)
+        .map(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.origin().ascii_serialization() == request.origin
+        })
+        .unwrap_or(false);
+    request.version == 1
+        && canonical_uuid(&request.handoff_id)
+        && canonical_uuid(&request.run_id)
+        && canonical_uuid(&request.initiator_user_id)
+        && valid_browser_action_page_id(&request.browser_page_id)
+        && request.origin.len() <= 512
+        && valid_origin
+        && request.created_at_ms > 0
+        && request.expires_at_ms <= 9_007_199_254_740_991
+        && request.expires_at_ms > request.created_at_ms
+        && request.expires_at_ms - request.created_at_ms <= 600_000
+        && !request.fields.is_empty()
+        && request.fields.len() <= 8
+        && request.fields.iter().all(|field| {
+            !field.label.trim().is_empty()
+                && field.label.len() <= 80
+                && !field.label.chars().any(char::is_control)
+        })
 }
 
 fn browser_actions_read_plan(file_len: u64, since: u64) -> BrowserActionsReadPlan {
@@ -480,6 +572,7 @@ fn browser_capabilities(
         .unwrap_or(viewer_kinds[0]);
     BrowserCapabilitiesResponse {
         version: 2,
+        approval_modes: ["ask", "routine"],
         viewer_kinds,
         preferred_viewer,
         viewport_only,
@@ -1362,6 +1455,124 @@ mod tests {
     }
 
     #[test]
+    fn browser_actions_preserve_exact_page_identity_in_the_response() {
+        let action = parse_browser_action_line(
+            r#"{"seq":1,"type":"click","pageId":"target_A-1","x":40,"y":12}"#,
+        )
+        .expect("parse scoped action");
+        assert_eq!(action.page_id.as_deref(), Some("target_A-1"));
+        let response = serde_json::to_value(action).expect("serialize action");
+        assert_eq!(response["pageId"], "target_A-1");
+    }
+
+    #[test]
+    fn browser_actions_leave_legacy_and_invalid_page_ids_unscoped() {
+        for page_id in [
+            JsonValue::Null,
+            serde_json::json!(false),
+            serde_json::json!(""),
+            serde_json::json!(" target_A-1 "),
+            serde_json::json!("target/A-1"),
+            serde_json::json!("x".repeat(BROWSER_ACTION_PAGE_ID_MAX_BYTES + 1)),
+        ] {
+            let line = serde_json::json!({"seq": 1, "type": "click", "pageId": page_id});
+            let action = parse_browser_action_line(&line.to_string()).expect("parse action");
+            assert!(action.page_id.is_none());
+        }
+        let legacy =
+            parse_browser_action_line(r#"{"seq":1,"type":"click"}"#).expect("parse legacy action");
+        assert!(legacy.page_id.is_none());
+        assert!(serde_json::to_value(legacy).unwrap()["pageId"].is_null());
+    }
+
+    fn human_input_action_fixture() -> JsonValue {
+        serde_json::json!({
+            "seq": 1,
+            "type": "human_input",
+            "pageId": "page-1",
+            "humanInputRequest": {
+                "version": 1,
+                "handoffId": "00000000-0000-4000-8000-000000000001",
+                "runId": "00000000-0000-4000-8000-000000000002",
+                "initiatorUserId": "00000000-0000-4000-8000-000000000003",
+                "browserPageId": "page-1",
+                "origin": "https://example.test",
+                "createdAtMs": 1000,
+                "expiresAtMs": 601000,
+                "fields": [{"label": "Highlighted field 1"}]
+            }
+        })
+    }
+
+    #[test]
+    fn browser_actions_preserve_only_page_bound_human_input_guidance() {
+        let mut value = human_input_action_fixture();
+        let action = parse_browser_action_line(&value.to_string()).expect("valid handoff");
+        let response = serde_json::to_value(action).expect("serialize handoff");
+        assert_eq!(response["humanInputRequest"], value["humanInputRequest"]);
+
+        value["pageId"] = serde_json::json!("other-page");
+        assert!(parse_browser_action_line(&value.to_string()).is_none());
+        value["pageId"] = JsonValue::Null;
+        assert!(parse_browser_action_line(&value.to_string()).is_none());
+
+        value["type"] = serde_json::json!("click");
+        let action = parse_browser_action_line(&value.to_string()).expect("ordinary action");
+        assert!(action.human_input_request.is_none());
+        let response = serde_json::to_value(action).expect("serialize ordinary action");
+        assert!(response.get("humanInputRequest").is_none());
+    }
+
+    #[test]
+    fn browser_actions_reject_malformed_or_unbounded_human_input_guidance() {
+        for (key, invalid) in [
+            ("version", serde_json::json!(2)),
+            ("handoffId", serde_json::json!("not-a-uuid")),
+            (
+                "runId",
+                serde_json::json!("00000000-0000-4000-8000-00000000000A"),
+            ),
+            ("initiatorUserId", serde_json::json!("")),
+            ("browserPageId", serde_json::json!(" page-1")),
+            ("origin", serde_json::json!("https://example.test/path")),
+            (
+                "origin",
+                serde_json::json!("https://user:password@example.test"),
+            ),
+            ("origin", serde_json::json!("file:///tmp/example")),
+            ("origin", serde_json::json!("https://example.test/")),
+            ("createdAtMs", serde_json::json!(0)),
+            ("createdAtMs", serde_json::json!(1.5)),
+            ("expiresAtMs", serde_json::json!(1000)),
+            ("expiresAtMs", serde_json::json!(601001)),
+            ("expiresAtMs", serde_json::json!(9_007_199_254_740_992_u64)),
+            ("fields", serde_json::json!([])),
+            ("fields", serde_json::json!([{"label": ""}])),
+            ("fields", serde_json::json!([{"label": "ü".repeat(41)}])),
+            ("fields", serde_json::json!([{"label": "\n"}])),
+            (
+                "fields",
+                serde_json::json!([{"label": "Field", "value": "must not be forwarded"}]),
+            ),
+            ("instructions", serde_json::json!("must not be forwarded")),
+        ] {
+            let mut value = human_input_action_fixture();
+            value["humanInputRequest"][key] = invalid;
+            assert!(
+                parse_browser_action_line(&value.to_string()).is_none(),
+                "accepted {key}"
+            );
+        }
+        let mut value = human_input_action_fixture();
+        value["humanInputRequest"]["fields"] = serde_json::json!((0..9)
+            .map(|_| serde_json::json!({"label": "Field"}))
+            .collect::<Vec<_>>());
+        assert!(parse_browser_action_line(&value.to_string()).is_none());
+        value.as_object_mut().unwrap().remove("humanInputRequest");
+        assert!(parse_browser_action_line(&value.to_string()).is_none());
+    }
+
+    #[test]
     fn tail_browser_actions_leaves_a_torn_trailing_line_for_the_next_poll() {
         // The agent appended a complete line, then a second line the server read
         // mid-write (no trailing newline yet).
@@ -1567,6 +1778,7 @@ mod tests {
             capabilities,
             serde_json::json!({
                 "version": 2,
+                "approvalModes": ["ask", "routine"],
                 "viewerKinds": ["rfb"],
                 "preferredViewer": "rfb",
                 "viewportOnly": true,

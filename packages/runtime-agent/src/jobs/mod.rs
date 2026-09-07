@@ -10555,9 +10555,28 @@ fn apply_terminal_shared_browser_summary(
     let Some(code) = terminal_consent_failure else {
         return;
     };
-    *summary =
-        format!("Shared Browser consent ended this run ({code}). No browser action was retried.");
+    *summary = if code == "human_input_required" {
+        "Your input is needed in Browser. After control returns to you, fill the highlighted fields directly and choose Done, continue. Your field values are not requested in chat.".to_string()
+    } else {
+        format!("Shared Browser consent ended this run ({code}). No browser action was retried.")
+    };
     *fallback_kind = None;
+}
+
+#[cfg(test)]
+#[test]
+fn manual_browser_handoff_is_not_retried_or_reported_as_a_generic_failure() {
+    let mut summary = String::new();
+    let mut fallback = Some(CodexFallbackSummaryKind::MissingFinalAssistantMessage);
+    apply_terminal_shared_browser_summary(
+        &mut summary,
+        &mut fallback,
+        Some("human_input_required"),
+    );
+    assert!(summary.contains("Done, continue"));
+    assert!(!summary.contains("consent ended"));
+    assert!(fallback.is_none());
+    assert!(!should_retry_codex_once(Some("human_input_required"), true));
 }
 
 fn has_successful_patch_apply_event(events: &[JsonValue]) -> bool {

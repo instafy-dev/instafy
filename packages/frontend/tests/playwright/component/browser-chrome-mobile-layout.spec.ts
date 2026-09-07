@@ -11,6 +11,7 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
     import ReactNS from "${deps.react}";
     import ReactDomClientNS from "${deps.reactDomClient}";
     import { BrowserStatusPill } from "/src/screens/studio/components/BrowserChromeShell.tsx";
+    import { BrowserExpandButton } from "/src/screens/studio/components/BrowserExpandButton.tsx";
     import { ChatBrowserSubtabs } from "/src/screens/studio/components/ChatBrowserSubtabs.tsx";
     import { BrowserTransportSelector } from "/src/screens/studio/components/PersonalBrowserSurface.tsx";
     import { RemoteBrowserMobileKeyboard } from "/src/screens/studio/components/RemoteBrowserMobileKeyboard.tsx";
@@ -45,6 +46,7 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
 
     function Fixture() {
       const [agentControls, setAgentControls] = React.useState(false);
+      const [expanded, setExpanded] = React.useState(false);
       const compact = shouldUseCompactBrowserChrome({
         containerWidth: window.innerWidth,
         compactViewport: window.innerWidth < 640,
@@ -100,7 +102,7 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
             state: "ready",
             testId: "browser-session-status",
           }),
-          toolbarActions: collaboration,
+          toolbarActions: h(React.Fragment, null, collaboration, h(BrowserExpandButton, { expanded, onPress: () => setExpanded(!expanded) })),
           interactionEnabled: false,
         }),
         h(RemoteBrowserMobileKeyboard, {
@@ -188,6 +190,9 @@ test("keeps compact browser identity, control, and tabs usable at 360px", async 
   await expect(pageSelect).toBeVisible();
   await expect(pageSelect.locator("option")).toHaveCount(3);
   await expect(address).toBeVisible();
+  await expect(page.getByTestId("browser-session-fullscreen-toggle")).toBeVisible();
+  await page.getByTestId("browser-session-fullscreen-toggle").click();
+  await expect(page.getByTestId("browser-session-fullscreen-toggle")).toHaveAttribute("aria-expanded", "true");
   await expect(page.getByTestId("conversation-subtab-browser")).toHaveAccessibleName(
     "Browser, approval needed",
   );

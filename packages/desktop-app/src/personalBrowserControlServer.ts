@@ -18,6 +18,7 @@ export type PersonalBrowserControlOperation =
   | "click"
   | "type"
   | "press"
+  | "request_human_input"
   | "scroll";
 
 export type PersonalBrowserControlCredentials = {
@@ -83,6 +84,14 @@ type McpToolDefinition = {
 };
 
 const PERSONAL_BROWSER_MCP_TOOLS: McpToolDefinition[] = [
+  {
+    name: "request_human_input",
+    description: "Stop agent control and ask the user to fill one to eight highlighted fields from the latest snapshot. Never supply, request or repeat field values. This ends the current turn; the user explicitly continues in a fresh turn.",
+    inputSchema: {
+      type: "object", additionalProperties: false, required: ["indices"],
+      properties: { indices: { type: "array", minItems: 1, maxItems: 8, uniqueItems: true, items: { type: "integer", minimum: 0, maximum: 499 } } },
+    },
+  },
   {
     name: "status",
     description: "Read Personal Browser readiness and the approved current page status.",
@@ -202,6 +211,7 @@ const PERSONAL_BROWSER_MCP_ARGUMENT_KEYS: Record<
   type: new Set(["index", "text", "submit"]),
   press: new Set(["index", "key"]),
   scroll: new Set(["x", "y"]),
+  request_human_input: new Set(["indices"]),
 };
 
 function rejectUnknownMcpToolArguments(
@@ -249,6 +259,7 @@ function resolveOperation(method: string | undefined, pathname: string): Persona
   if (method === "GET" && pathname === "/v1/snapshot") return "snapshot";
   if (method !== "POST") return null;
   if (pathname === "/v1/navigate") return "navigate";
+  if (pathname === "/v1/request-human-input") return "request_human_input";
   if (pathname === "/v1/click") return "click";
   if (pathname === "/v1/type") return "type";
   if (pathname === "/v1/press") return "press";
@@ -398,7 +409,9 @@ export class PersonalBrowserControlServer {
         throw new PersonalBrowserControlError(401, "stale_token", "Control token has been rotated.");
       }
       const result = await this.dispatchAuthenticated(authenticatedBinding, operation, payload);
-      if (!this.bindingIsCurrent(authenticatedBinding)) {
+      // This terminal operation deliberately revokes its own binding. Its
+      // response contains a fixed acknowledgment, never stale page contents.
+      if (!this.bindingIsCurrent(authenticatedBinding) && !(operation === "request_human_input" && (result as { humanInputRequired?: boolean })?.humanInputRequired === true)) {
         throw new PersonalBrowserControlError(401, "stale_token", "Control token has been rotated.");
       }
       writeJson(response, 200, { ok: true, ...((result ?? {}) as object) });
@@ -481,7 +494,7 @@ export class PersonalBrowserControlServer {
 
     try {
       const result = await this.dispatchAuthenticated(authenticated, tool.name, args);
-      if (!this.bindingIsCurrent(authenticated)) {
+      if (!this.bindingIsCurrent(authenticated) && !(tool.name === "request_human_input" && (result as { humanInputRequired?: boolean })?.humanInputRequired === true)) {
         throw new PersonalBrowserControlError(401, "stale_token", "Control token has been rotated.");
       }
       const structured = (result ?? {}) as Record<string, unknown>;
