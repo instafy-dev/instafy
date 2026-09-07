@@ -57,6 +57,15 @@ is offscreen, the browser tab is hidden, or reduced motion is enabled. Header ma
 - **Files**: Monaco editor + file explorer backed by the controller workspace.
 - **Credits**: team-scoped credits, plan selection, and Stripe-backed subscription management.
 
+## Chat readability
+
+Chat messages separate paragraphs with 16px of space and use a soft background for inline code.
+Code snippets longer than 80 characters or containing a newline appear in a bounded, wrapping
+block; short snippets stay inline. This presentation preserves the original message and code
+text, including punctuation. Existing fonts, line height, heading structure, list indentation,
+and interactive file references retain their behavior. Explicit fenced code blocks preserve
+their source whitespace and scroll horizontally when needed.
+
 ## Header
 The Studio header is owner-first: `Team/Personal > Space`, followed by runtime status and the user menu.
 
