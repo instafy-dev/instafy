@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getOrgDisplayName } from "../org/orgNaming";
 import { useAuth } from "../providers/AuthProvider";
 import {
@@ -9,6 +9,7 @@ import type { ProjectListItem } from "./useProjects";
 import { PROJECT_ACCESS_REFRESH_EVENT } from "./projectAccessEvents";
 
 const runtimeControllerEnabled = controllerClient.core.enabled;
+const DISCOVERY_RETRY_DELAYS_MS = [1_000, 2_000, 4_000] as const;
 
 export interface MergedProjectListItem {
   id: string;
@@ -86,11 +87,11 @@ export function filterAccessibleProjectsByOrg(
   return projects.filter((project) => project.orgId === orgId);
 }
 
-async function listLegacyControllerProjects(): Promise<ControllerProjectSummary[]> {
-  const orgs = await controllerClient.organizations.list({ throwOnError: true });
+async function listLegacyControllerProjects(signal: AbortSignal): Promise<ControllerProjectSummary[]> {
+  const orgs = await controllerClient.organizations.list({ throwOnError: true, signal });
   const results = await Promise.all(
     orgs.map(async (org) => {
-      const result = await controllerClient.projects.listResult({ orgId: org.id });
+      const result = await controllerClient.projects.listResult({ orgId: org.id, signal });
       if (result.status !== "success") {
         throw new Error("Unable to discover all organization spaces.");
       }
@@ -113,6 +114,11 @@ export function useMergedControllerProjects({
     projects: ControllerProjectSummary[];
   } | null>(null);
   const [settledDiscoveryUserId, setSettledDiscoveryUserId] = useState<string | null>(null);
+  const [discoveryStatus, setDiscoveryStatus] = useState<{
+    userId: string; error: boolean; refreshing: boolean;
+  } | null>(null);
+  const retryDiscoveryRef = useRef<() => void>(() => {});
+  const retryRemoteProjects = useCallback(() => retryDiscoveryRef.current(), []);
   const [requestedSnapshot, setRequestedSnapshot] = useState<{
     userId: string;
     projectId: string;
@@ -125,6 +131,7 @@ export function useMergedControllerProjects({
     if (!runtimeControllerEnabled || !userId) {
       setDiscovery(null);
       setSettledDiscoveryUserId(null);
+      setDiscoveryStatus(null);
       return;
     }
     if (authLoading) {
@@ -137,17 +144,28 @@ export function useMergedControllerProjects({
     // foreground visits in the background while retaining the current list.
     let inFlight = false;
     let accessRefreshRequested = false;
+    let retryAttempt = 0;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let requestController: AbortController | null = null;
     const refresh = async () => {
       if (inFlight || cancelled) {
         return;
       }
+      clearTimeout(retryTimer);
+      retryTimer = undefined;
       inFlight = true;
+      requestController = new AbortController();
+      setDiscoveryStatus((current) => ({
+        userId, error: current?.userId === userId && current.error, refreshing: true,
+      }));
+      let failed = false;
       try {
-        const result = await controllerClient.projects.listResult();
+        const result = await controllerClient.projects.listResult({ signal: requestController.signal });
         if (cancelled) {
           return;
         }
         if (result.status === "error") {
+          failed = true;
           return;
         }
         // Older controllers expose only org-scoped discovery. Gather all
@@ -155,28 +173,40 @@ export function useMergedControllerProjects({
         // A successful empty list is authoritative; an unavailable controller
         // must not replace a warm snapshot with an apparent loss of access.
         const projects = result.status === "unsupported"
-          ? await listLegacyControllerProjects()
+          ? await listLegacyControllerProjects(requestController.signal)
           : result.projects;
         if (!cancelled) {
           setDiscovery({ userId, projects });
+          retryAttempt = 0;
         }
       } catch (error) {
         if (!cancelled) {
+          failed = true;
           console.warn("[projects] failed to refresh accessible spaces:", error);
         }
       } finally {
         inFlight = false;
         if (!cancelled) {
           setSettledDiscoveryUserId(userId);
+          setDiscoveryStatus({ userId, error: failed, refreshing: false });
         }
         if (accessRefreshRequested && !cancelled) {
           accessRefreshRequested = false;
           void refresh();
+        } else if (failed && !cancelled && retryAttempt < DISCOVERY_RETRY_DELAYS_MS.length) {
+          retryTimer = setTimeout(() => {
+            retryTimer = undefined;
+            void refresh();
+          }, DISCOVERY_RETRY_DELAYS_MS[retryAttempt++]);
         }
       }
     };
     const handleRefresh = () => {
       void refresh();
+    };
+    retryDiscoveryRef.current = () => {
+      retryAttempt = 0;
+      handleRefresh();
     };
     const handleAccessChanged = () => {
       if (inFlight) {
@@ -197,6 +227,9 @@ export function useMergedControllerProjects({
 
     return () => {
       cancelled = true;
+      retryDiscoveryRef.current = () => {};
+      clearTimeout(retryTimer);
+      requestController?.abort();
       window.removeEventListener("focus", handleRefresh);
       window.removeEventListener(PROJECT_ACCESS_REFRESH_EVENT, handleAccessChanged);
       document.removeEventListener("visibilitychange", handleVisibility);
@@ -230,15 +263,19 @@ export function useMergedControllerProjects({
     let inFlight = false;
     let accessRefreshRequested = false;
     let accessVersion = 0;
+    let requestController: AbortController | null = null;
     const refresh = async () => {
       if (inFlight || cancelled) {
         return;
       }
       inFlight = true;
+      requestController = new AbortController();
       const requestedAccessVersion = accessVersion;
       setRequestedProjectLoading(true);
       try {
-        const result = await controllerClient.projects.getSummaryResult(requestedProjectId);
+        const result = await controllerClient.projects.getSummaryResult(requestedProjectId, {
+          signal: requestController.signal,
+        });
         if (cancelled || requestedAccessVersion !== accessVersion) {
           return;
         }
@@ -289,6 +326,7 @@ export function useMergedControllerProjects({
 
     return () => {
       cancelled = true;
+      requestController?.abort();
       window.removeEventListener("focus", handleRefresh);
       window.removeEventListener(PROJECT_ACCESS_REFRESH_EVENT, handleAccessChanged);
       document.removeEventListener("visibilitychange", handleVisibility);
@@ -298,6 +336,12 @@ export function useMergedControllerProjects({
   // Scope the data during render, rather than clearing it in a later effect:
   // neither an account change nor an org click may expose the old scope.
   const accessibleProjects = userId && discovery?.userId === userId ? discovery.projects : null;
+  const remoteRefreshing = discoveryStatus?.userId === userId && discoveryStatus.refreshing;
+  const remoteError = discoveryStatus?.userId === userId && discoveryStatus.error
+    ? accessibleProjects
+      ? "Couldn't refresh spaces. Your saved list is still shown."
+      : "Couldn't load spaces."
+    : null;
   const remoteProjects = useMemo(
     () => filterAccessibleProjectsByOrg(accessibleProjects ?? [], orgId),
     [accessibleProjects, orgId],
@@ -305,6 +349,9 @@ export function useMergedControllerProjects({
   const remoteLoadedScope = accessibleProjects
     ? orgId ?? (includeAllOrgs ? "__all__" : null)
     : null;
+  // A null loaded scope also names personal spaces. Keep discovery readiness
+  // separate so a failed read cannot resolve a pending personal-team switch.
+  const remoteDiscoveryResolved = !runtimeControllerEnabled || accessibleProjects !== null;
   const remoteLoading = !accessibleProjects && (
     authLoading || (runtimeControllerEnabled && Boolean(userId) && settledDiscoveryUserId !== userId)
   );
@@ -327,6 +374,10 @@ export function useMergedControllerProjects({
     mergedProjects,
     remoteLoading: remoteLoading || (Boolean(requestedProjectId) && requestedProjectLoading && !requestedProjectResolved),
     remoteLoadedScope,
+    remoteDiscoveryResolved,
     remoteProjects: effectiveRemoteProjects,
+    remoteError,
+    remoteRefreshing,
+    retryRemoteProjects,
   };
 }

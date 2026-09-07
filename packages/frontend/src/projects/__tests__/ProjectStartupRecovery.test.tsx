@@ -88,11 +88,11 @@ describe("remembered project startup recovery", () => {
     expect(container.querySelector("output")?.getAttribute("data-resolved")).toBe("false");
     expect(container.querySelector("button")?.textContent).toBe("Retry");
     expect(mocks.getSummaryResult).toHaveBeenCalledTimes(1);
-    expect(mocks.getSummaryResult).toHaveBeenLastCalledWith(REMEMBERED_PROJECT_ID);
+    expect(mocks.getSummaryResult).toHaveBeenLastCalledWith(REMEMBERED_PROJECT_ID, { signal: expect.any(AbortSignal) });
 
     await act(async () => vi.advanceTimersByTimeAsync(5_000));
     expect(mocks.getSummaryResult).toHaveBeenCalledTimes(2);
-    expect(mocks.getSummaryResult).toHaveBeenLastCalledWith(REMEMBERED_PROJECT_ID);
+    expect(mocks.getSummaryResult).toHaveBeenLastCalledWith(REMEMBERED_PROJECT_ID, { signal: expect.any(AbortSignal) });
     expect(container.querySelector("output")?.getAttribute("data-resolved")).toBe("true");
     expect(container.querySelector("output")?.getAttribute("data-write")).toBe("false");
     expect(container.querySelector("button")).toBeNull();

@@ -6,6 +6,7 @@ import {
   safeJson,
 } from "./core";
 import { logControllerRequestError } from "./logging";
+import { createControllerReadBudget } from "./readBudget";
 
 export interface DispatchControllerPromptParams {
   projectId: string;
@@ -238,6 +239,7 @@ export interface FetchProjectConversationsParams {
   rootConversationId?: string | null;
   threadKind?: string | null;
   accessToken?: string | null;
+  signal?: AbortSignal;
 }
 
 export interface FetchConversationMessagesParams {
@@ -245,6 +247,7 @@ export interface FetchConversationMessagesParams {
   cursor?: string | null;
   limit?: number;
   accessToken?: string | null;
+  signal?: AbortSignal;
 }
 
 const inFlightBlankConversationRequests = new Map<
@@ -1126,35 +1129,34 @@ export async function fetchConversationMessagesFromController(
     return null;
   }
 
-  const requestContext = await resolveControllerRequestContext(
-    params.accessToken ?? null,
-  );
-  const sessionToken = requestContext.accessToken;
-
-  if (!sessionToken) {
-    console.warn(
-      "[runtime-controller] No access token available; skipping conversation history fetch.",
-    );
-    return null;
-  }
-
-  const search = new URLSearchParams();
-  if (params.limit) {
-    search.set("limit", String(params.limit));
-  }
-  if (params.cursor) {
-    search.set("cursor", params.cursor);
-  }
-
+  const budget = createControllerReadBudget(params.signal);
   try {
-    const response = await fetch(
+    const requestContext = await budget.wait(() =>
+      resolveControllerRequestContext(params.accessToken ?? null),
+    );
+    budget.signal.throwIfAborted();
+    const sessionToken = requestContext.accessToken;
+    if (!sessionToken) {
+      console.warn(
+        "[runtime-controller] No access token available; skipping conversation history fetch.",
+      );
+      return null;
+    }
+
+    const search = new URLSearchParams();
+    if (params.limit) search.set("limit", String(params.limit));
+    if (params.cursor) search.set("cursor", params.cursor);
+
+    const response = await budget.wait(() => fetch(
       `${requestContext.baseUrl}/conversations/${params.conversationId}/messages?${search.toString()}`,
       {
         headers: {
           authorization: `Bearer ${sessionToken}`,
         },
+        signal: budget.signal,
       },
-    );
+    ));
+    budget.signal.throwIfAborted();
 
     if (response.status === 404) {
       return "not_found";
@@ -1163,21 +1165,25 @@ export async function fetchConversationMessagesFromController(
     if (response.status === 403) {
       // Revoked permission is terminal. A 401 still uses the auth-recovery
       // path below, which can discard an expired override and retry the live session.
-      await readControllerError(response, "fetch messages denied", requestContext);
+      // Do not wait for an error body to clear cached, now-inaccessible history.
+      void response.body?.cancel().catch(() => undefined);
       return "access_denied";
     }
 
     if (!response.ok) {
       throw new Error(
-        await readControllerError(
+        await budget.wait(() => readControllerError(
           response,
           "fetch messages failed",
           requestContext,
-        ),
+        )),
       );
     }
 
-    const data = (await response.json()) as ControllerConversationMessagesPage;
+    const data = await budget.wait<ControllerConversationMessagesPage>(
+      () => response.json(),
+    );
+    budget.signal.throwIfAborted();
     const normalized: ControllerConversationMessagesPage = {
       messages: (data.messages ?? []).map((message) => ({
         ...message,
@@ -1191,12 +1197,17 @@ export async function fetchConversationMessagesFromController(
     };
     return normalized;
   } catch (error) {
+    // Let query cancellation stop the entire page chain. Returning null here
+    // would turn an obsolete read into a retryable history failure.
+    budget.signal.throwIfAborted();
     const message = error instanceof Error ? error.message : String(error);
     console.warn(
       "[runtime-controller] fetch conversation messages error:",
       message,
     );
     return null;
+  } finally {
+    budget.dispose();
   }
 }
 
@@ -1207,55 +1218,55 @@ export async function fetchProjectConversationsFromController(
     return null;
   }
 
-  const requestContext = await resolveControllerRequestContext(
-    params.accessToken ?? null,
-  );
-  const sessionToken = requestContext.accessToken;
-
-  if (!sessionToken) {
-    console.warn(
-      "[runtime-controller] No access token available; skipping project conversations fetch.",
-    );
-    return null;
-  }
-
-  const search = new URLSearchParams();
-  if (params.limit) {
-    search.set("limit", String(params.limit));
-  }
-  if (params.rootsOnly) {
-    search.set("rootsOnly", "true");
-  }
-  if (params.parentConversationId) {
-    search.set("parentConversationId", params.parentConversationId);
-  }
-  if (params.rootConversationId) {
-    search.set("rootConversationId", params.rootConversationId);
-  }
-  if (params.threadKind) {
-    search.set("threadKind", params.threadKind);
-  }
-
+  const budget = createControllerReadBudget(params.signal);
   try {
-    const response = await fetch(
+    const requestContext = await budget.wait(() => resolveControllerRequestContext(params.accessToken ?? null));
+    const sessionToken = requestContext.accessToken;
+
+    if (!sessionToken) {
+      console.warn(
+        "[runtime-controller] No access token available; skipping project conversations fetch.",
+      );
+      return null;
+    }
+
+    const search = new URLSearchParams();
+    if (params.limit) {
+      search.set("limit", String(params.limit));
+    }
+    if (params.rootsOnly) {
+      search.set("rootsOnly", "true");
+    }
+    if (params.parentConversationId) {
+      search.set("parentConversationId", params.parentConversationId);
+    }
+    if (params.rootConversationId) {
+      search.set("rootConversationId", params.rootConversationId);
+    }
+    if (params.threadKind) {
+      search.set("threadKind", params.threadKind);
+    }
+
+    const response = await budget.wait(() => fetch(
       `${requestContext.baseUrl}/projects/${params.projectId}/conversations?${search.toString()}`,
       {
+        signal: budget.signal,
         headers: {
           authorization: `Bearer ${sessionToken}`,
         },
       },
-    );
+    ));
 
     if (!response.ok) {
-      const errorMessage = await readControllerError(
+      const errorMessage = await budget.wait(() => readControllerError(
         response,
         "fetch project conversations failed",
         requestContext,
-      );
+      ));
       throw new Error(errorMessage);
     }
 
-    const data = (await response.json()) as ControllerProjectConversation[];
+    const data = (await budget.wait(() => response.json())) as ControllerProjectConversation[];
     return (data ?? []).map((conversation) => ({
       ...conversation,
       metadata:
@@ -1264,6 +1275,7 @@ export async function fetchProjectConversationsFromController(
           : {},
     }));
   } catch (error) {
+    params.signal?.throwIfAborted();
     logControllerRequestError(
       "[runtime-controller] fetch project conversations error:",
       error,
@@ -1272,5 +1284,7 @@ export async function fetchProjectConversationsFromController(
       },
     );
     return null;
+  } finally {
+    budget.dispose();
   }
 }

@@ -49,11 +49,41 @@ The team switcher opens the most recently visited space in the selected team, fa
 alphabetical order. Accessible spaces are cached for the signed-in user during the app session,
 so changing teams can use the existing list immediately. Authentication, access changes and
 returning to the app refresh discovery in the background. First-time discovery still needs the
-controller.
+controller. Failed discovery preserves the saved list, retries three times with backoff, and
+offers Retry. The current-team indicator changes only when the destination space becomes active.
+Space discovery, organization lists, access summaries and conversation lists have a 10-second
+deadline covering authentication and response reads; navigation cancels superseded reads.
+Failed conversation-list reads show an error and Retry after the first failed attempt while
+automatic recovery continues. Cached chats stay visible during refresh failures.
 
 Open conversation tabs are remembered per space in the current browser. Previously loaded chat
 history stays visible while refreshing, including when a refresh fails; transient failures retry
-without replacing saved messages with an empty conversation. This does not restore an entire
+without replacing saved messages with an empty conversation. Recent history is cached in memory
+for up to 30 inactive minutes. Inactive chats share a budget of 10 conversations and 8 MiB of
+estimated serialized payload, with at most 20 pages (about 1,000 messages) retained per chat.
+The least recently visited entries are released first. The active transcript can load additional
+pages while being read; leaving it applies the inactive budget. This is a payload budget, not a
+cap on total browser memory, and histories are not persisted to disk by this cache.
+
+Rapid revisits reuse cached data immediately. While visible, the selected chat refreshes its
+newest page every 10 seconds; older pages are fetched on demand. If the newest response no longer
+overlaps cached history, pagination restarts from that response so intervening messages cannot
+be skipped. Superseded reads are canceled, each read has a 10-second deadline, and sign-out,
+account changes or explicit access denial release the affected protected history.
+
+Long transcripts reuse measured row heights and defer offscreen plain-message bodies near the
+visible window. Interactive cards remain mounted, and message shells keep scrolling stable.
+Geometry is weakly associated with cached messages rather than retaining another history copy.
+Draft edits do not retokenize unchanged message content. Browser Find, text selection, and the
+keyboard/screen-reader action to read all loaded messages expand the full loaded transcript;
+browsers without searchable hidden-content support keep the full renderer.
+
+Reading position follows the first visible message and its offset, including after older cached
+pages are trimmed. If that message is no longer loaded, the view starts at the oldest available
+message, where earlier history can be requested. Conversations left at the bottom keep following
+new messages.
+
+This does not restore an entire
 editor session: file and panel tabs currently carry across space switches, while file selection
 and explorer state reset for the destination space.
 

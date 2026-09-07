@@ -52,6 +52,7 @@ describe("listControllerProjects accessible discovery", () => {
 
     expect(fetchMock).toHaveBeenCalledWith("http://controller.test/projects", {
       headers: { authorization: "Bearer token-123" },
+      signal: expect.any(AbortSignal),
     });
   });
 
@@ -66,7 +67,7 @@ describe("listControllerProjects accessible discovery", () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       "http://controller.test/orgs/org-1/projects",
-      { headers: { authorization: "Bearer token-123" } },
+      { headers: { authorization: "Bearer token-123" }, signal: expect.any(AbortSignal) },
     );
   });
 });

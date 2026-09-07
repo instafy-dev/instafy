@@ -1,6 +1,8 @@
 import {
+  memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -11,8 +13,7 @@ import {
 } from "react";
 import { ChatBubble, GitBranch, QuoteMessage } from "iconoir-react";
 import { requestAgentProfile } from "./agentProfileOpen";
-import { useConversations } from "../../../conversations/ConversationsProvider";
-import { useConversation } from "../../../conversations/useConversation";
+import { useConversationMessageMetadata } from "../../../conversations/ConversationMessageMetadata";
 import {
   getDefaultAssistantMentionToken,
   listBuiltInAssistantHandles,
@@ -1321,13 +1322,36 @@ export type MessageContentProps = {
   mentionableAgentHandles?: string[] | null;
 };
 
-export function MessageContent({
+type MessageNavigationActions = Pick<ReturnType<typeof useWorkspaceTabs>, "openConversationTab" | "openPanelTab" | "requestUrlPush"> &
+  Pick<ReturnType<typeof useStatus>, "showStatus">;
+
+export const MessageContent = memo(function MessageContent(props: MessageContentProps) {
+  const metadata = useConversationMessageMetadata();
+  const { openConversationTab, openPanelTab, requestUrlPush } = useWorkspaceTabs();
+  const { showStatus } = useStatus();
+  const navigationRef = useRef({ openConversationTab, openPanelTab, requestUrlPush, showStatus });
+  useLayoutEffect(() => {
+    navigationRef.current = { openConversationTab, openPanelTab, requestUrlPush, showStatus };
+  }, [openConversationTab, openPanelTab, requestUrlPush, showStatus]);
+  const navigation = useMemo<MessageNavigationActions>(() => ({
+    openConversationTab: (...args) => navigationRef.current.openConversationTab(...args),
+    openPanelTab: (...args) => navigationRef.current.openPanelTab(...args),
+    requestUrlPush: (...args) => navigationRef.current.requestUrlPush(...args),
+    showStatus: (...args) => navigationRef.current.showStatus(...args),
+  }), []);
+  return <MessageContentBody {...props} {...metadata} navigation={navigation} />;
+});
+
+const MessageContentBody = memo(function MessageContentBody({
   content,
   className,
   metadata,
   projectId,
   mentionableAgentHandles,
-}: MessageContentProps) {
+  extraAgentHandles,
+  resolveConversationLocalId,
+  navigation,
+}: MessageContentProps & ReturnType<typeof useConversationMessageMetadata> & { navigation: MessageNavigationActions }) {
   const upstreamGuidance = resolveProxyUpstreamErrorGuidance(content);
   const upstreamSummary = upstreamGuidance?.summary ?? null;
   const displayContent = upstreamSummary ?? content;
@@ -1337,10 +1361,10 @@ export function MessageContent({
     [contentBlocks],
   );
   const quoteSourceReference = useMemo(() => extractReplyContextSourceReference(metadata), [metadata]);
-  const { agentHandles } = useConversation();
+  // Message rows only need metadata, not useConversation's history polling and run effects.
   const agentMentionHandles = useMemo(() => {
     const handles = new Set<string>(listBuiltInAssistantHandles());
-    const mergedHandles = [...(agentHandles ?? []), ...(mentionableAgentHandles ?? [])];
+    const mergedHandles = [...(extraAgentHandles ?? []), ...(mentionableAgentHandles ?? [])];
     for (const handle of mergedHandles) {
       const trimmed = handle.trim();
       if (!trimmed) {
@@ -1354,11 +1378,9 @@ export function MessageContent({
       handles.add(normalized);
     }
     return handles;
-  }, [agentHandles, mentionableAgentHandles]);
+  }, [extraAgentHandles, mentionableAgentHandles]);
   const agentMentionClass = getAssistantMentionClass(resolveAssistantMentionToken(getDefaultAssistantMentionToken()));
-  const { resolveConversationByController } = useConversations();
-  const { openConversationTab, openPanelTab, requestUrlPush } = useWorkspaceTabs();
-  const { showStatus } = useStatus();
+  const { openConversationTab, openPanelTab, requestUrlPush, showStatus } = navigation;
   const workspaceFilePreviewCacheRef = useRef<Map<string, WorkspaceFilePreviewCacheEntry>>(new Map());
 
   const handleProxyErrorAction = useCallback(() => {
@@ -1408,7 +1430,7 @@ export function MessageContent({
       if (!conversationId) {
         return;
       }
-      const localConversationId = resolveConversationByController(conversationId)?.localId?.trim() ?? "";
+      const localConversationId = resolveConversationLocalId(conversationId)?.trim() ?? "";
       if (!localConversationId) {
         const referenceKindLabel =
           reference.kind === "conversation" ? "conversation" : reference.kind === "thread" ? "thread" : "message";
@@ -1430,7 +1452,7 @@ export function MessageContent({
       requestUrlPush();
       openConversationTab(localConversationId);
     },
-    [openConversationTab, requestUrlPush, resolveConversationByController, showStatus],
+    [openConversationTab, requestUrlPush, resolveConversationLocalId, showStatus],
   );
 
   const renderConversationReferenceButton = (
@@ -1447,7 +1469,7 @@ export function MessageContent({
           : "Referenced message");
     const referenceKindLabel =
       reference.kind === "conversation" ? "conversation" : reference.kind === "thread" ? "thread" : "message";
-    const canNavigate = Boolean(resolveConversationByController(reference.conversationId)?.localId?.trim());
+    const canNavigate = Boolean(resolveConversationLocalId(reference.conversationId)?.trim());
     const stableTargetLabel =
       reference.kind === "message" && reference.messageId
         ? `${reference.conversationId}/${reference.messageId}`
@@ -1497,7 +1519,7 @@ export function MessageContent({
       );
     }
 
-    const canNavigate = Boolean(resolveConversationByController(reference.conversationId)?.localId?.trim());
+    const canNavigate = Boolean(resolveConversationLocalId(reference.conversationId)?.trim());
     const actionLabel = canNavigate
       ? "Open quoted source"
       : "Quoted source is unavailable here";
@@ -1869,4 +1891,4 @@ export function MessageContent({
       ) : null}
     </div>
   );
-}
+});

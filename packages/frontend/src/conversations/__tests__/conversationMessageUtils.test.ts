@@ -22,6 +22,84 @@ function createMessage(overrides: Partial<ChatMessage>): ChatMessage {
 }
 
 describe("mergeAndSortMessages", () => {
+  it("updates identity indexes when a controller copy changes role, client id, and server id", () => {
+    const serverId = (value: number) => `10000000-0000-4000-8000-${String(value).padStart(12, "0")}`;
+    const messages = [
+      createMessage({ id: serverId(1), role: "user", content: "Original", timestamp: 1, metadata: { clientMessageId: "old" } }),
+      createMessage({ id: serverId(2), content: "Separate answer", timestamp: 2, metadata: { clientMessageId: "shared" } }),
+      createMessage({ id: serverId(1), content: "Reclassified answer", timestamp: 3, metadata: { client_message_id: "shared", clientMessageId: null } }),
+      createMessage({ id: serverId(3), content: "Hydrated answer", timestamp: 4, metadata: { clientMessageId: "shared" } }),
+      createMessage({ id: serverId(1), content: "Reused former id", timestamp: 5, metadata: { clientMessageId: "fresh" } }),
+      createMessage({ id: serverId(4), role: "user", content: "Another turn", timestamp: 6, metadata: { clientMessageId: "old" } }),
+      createMessage({ id: serverId(5), content: "Final answer", timestamp: 7, metadata: { clientMessageId: "shared" } }),
+    ];
+
+    const merged = mergeAndSortMessages(messages);
+
+    expect(merged.map(({ id, content }) => ({ id, content }))).toEqual([
+      { id: serverId(2), content: "Separate answer" },
+      { id: serverId(1), content: "Reused former id" },
+      { id: serverId(4), content: "Another turn" },
+      { id: serverId(5), content: "Final answer" },
+    ]);
+  });
+
+  it("preserves first-match precedence after content changes and terminal copies move to the end", () => {
+    const serverId = (value: number) => `20000000-0000-4000-8000-${String(value).padStart(12, "0")}`;
+    const message = (id: number, timestamp: number, jobId: string, content = "Repeated") =>
+      createMessage({ id: serverId(id), timestamp, content, metadata: { jobId } });
+
+    const merged = mergeAndSortMessages([
+      message(1, 1, "job-1", "Original"),
+      message(2, 2, "job-2"),
+      message(1, 3, "job-1"),
+      message(3, 4, "job-2"),
+      message(4, 5, "job-1"),
+      message(5, 6, "job-2"),
+    ]);
+
+    expect(merged.map(({ id }) => id)).toEqual([serverId(3), serverId(4), serverId(5)]);
+  });
+
+  it("matches file changes as part of content identity after a same-id refresh", () => {
+    const files = (path: string): NonNullable<ChatMessage["files"]> => [
+      { path, workspacePath: path, label: path, changeType: "changed", lineRanges: [{ from: 1, to: 2 }] },
+    ];
+    const merged = mergeAndSortMessages([
+      createMessage({ id: "local-1", content: "Updated", timestamp: 1, files: files("before.ts") }),
+      createMessage({ id: "local-1", content: "Updated", timestamp: 2, files: files("after.ts") }),
+      createMessage({ id: "30000000-0000-4000-8000-000000000001", content: "Updated", timestamp: 3, files: files("before.ts") }),
+      createMessage({ id: "30000000-0000-4000-8000-000000000002", content: "Updated", timestamp: 4, files: files("after.ts") }),
+    ]);
+
+    expect(merged.map(({ id, files }) => ({ id, path: files?.[0]?.path }))).toEqual([
+      { id: "30000000-0000-4000-8000-000000000001", path: "before.ts" },
+      { id: "30000000-0000-4000-8000-000000000002", path: "after.ts" },
+    ]);
+  });
+
+  it("hydrates a large history without repeatedly inspecting every earlier message", () => {
+    let identityReads = 0;
+    const history = Array.from({ length: 2_000 }, (_, index) => {
+      const message = createMessage({
+        content: `Saved message ${index}`,
+        timestamp: index,
+        metadata: { clientMessageId: `client-${index}` },
+      });
+      Object.defineProperty(message, "id", {
+        get: () => {
+          identityReads += 1;
+          return `40000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+        },
+        enumerable: true,
+      });
+      return message;
+    });
+
+    expect(mergeAndSortMessages(history)).toHaveLength(history.length);
+    expect(identityReads).toBeLessThan(history.length * 10);
+  });
+
   it("keeps repeated identical server messages from different jobs", () => {
     const first = createMessage({
       id: "11111111-1111-1111-1111-111111111111",

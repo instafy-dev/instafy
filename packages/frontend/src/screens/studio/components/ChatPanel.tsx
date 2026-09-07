@@ -137,6 +137,7 @@ import {
   ChatMessageMenuOverlay,
 } from "./ChatPanelOverlays";
 import { ConversationMessageRows } from "./ConversationMessageRows";
+import { useConversationPreviewThreads } from "./useConversationPreviewThreads";
 import { buildHumanLabelByUserId } from "./chatHumanLabels";
 import {
   createChatSendQueueKey,
@@ -467,6 +468,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const {
     projectKey: conversationsProjectKey,
     remoteConversationHistoryResolved = true,
+    remoteConversationHistoryError = null,
+    retryRemoteConversationHistory,
     conversations,
     appendMessages,
     createConversation,
@@ -1855,6 +1858,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     activeConversationId,
     hasMoreHistory,
     isHistoryLoading,
+    isInitialHistoryLoading,
     loadOlderMessages,
     messages,
   });
@@ -2562,6 +2566,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   }, [messages]);
 
   const collapsedConversationMessages = useMemo(() => collapseLifecycleMessages(messages), [messages]);
+  const previewThreads = useConversationPreviewThreads(conversations, activeConversation?.controllerId ?? null);
 
   const displayedMessages = useMemo(() => {
     const collapsedVisible = collapsedConversationMessages.filter((message) => shouldDisplayChatMessage(message));
@@ -2572,15 +2577,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       return jobThreads;
     }
 
-    const threads = (conversations ?? [])
-      .filter((conversation) => conversation.parentConversationId === parentControllerId)
-      .filter((conversation) => conversation.lifecycleStatus !== "deleted");
+    const threads = previewThreads;
 
     if (threads.length === 0) {
       return jobThreads;
     }
-
-    threads.sort((a, b) => a.createdAt - b.createdAt);
 
     const referencedThreadTargets = collectReferencedThreadTargets(jobThreads);
     const threadMessages: ChatMessage[] = [];
@@ -2603,7 +2604,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     });
 
     return [...jobThreads, ...threadMessages];
-  }, [activeConversation?.controllerId, collapsedConversationMessages, conversations, messages]);
+  }, [activeConversation?.controllerId, collapsedConversationMessages, previewThreads, messages]);
 
   useEffect(() => {
     if (autoRevealHistoryConversationRef.current !== activeConversationId) {
@@ -5444,7 +5445,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 />
               </ChatBubbleRow>
             ) : null}
-            {!shouldShowGettingStarted && isInitialHistoryLoading ? (
+            {!shouldShowGettingStarted && isInitialHistoryLoading && !initialHistoryError && !remoteConversationHistoryError ? (
               <div className="flex justify-center px-2 py-1">
                 <div className="inline-flex items-center gap-3 rounded-2xl border border-slate-200/70 bg-white/85 px-4 py-3 text-sm font-medium text-slate-600 shadow-sm dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)] dark:text-slate-300">
                   <Spinner aria-hidden="true" tone="slate" size="sm" />
@@ -5452,12 +5453,15 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 </div>
               </div>
             ) : null}
-            {initialHistoryError ? (
+            {initialHistoryError || remoteConversationHistoryError ? (
               <div className="flex justify-center px-2 py-1" data-testid="chat-history-error">
                 <div className="flex flex-wrap items-center justify-center gap-3 text-sm text-slate-600 dark:text-slate-300">
-                  <span>{initialHistoryError}</span>
+                  <span>{initialHistoryError ?? remoteConversationHistoryError}</span>
                   <Button
-                    onPress={() => void retryInitialHistory()}
+                    onPress={() => {
+                      if (initialHistoryError) void retryInitialHistory();
+                      else retryRemoteConversationHistory();
+                    }}
                     variant="outline"
                     size="xs"
                     radius="full"

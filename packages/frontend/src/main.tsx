@@ -7,6 +7,7 @@ import { RouterProvider } from "react-router-dom";
 import "./styles/tailwind.css";
 import { router } from "./applicationRouter";
 import { AuthProvider } from "./providers/AuthProvider";
+import { ConversationHistoryCacheLifecycle } from "./conversations/ConversationHistoryCacheLifecycle";
 import { ProfileProvider } from "./profile/ProfileProvider";
 import { ThemeProvider } from "./theme/ThemeProvider";
 import { installDesktopUpdateBootstrap } from "./desktop/updates/bootstrap";
@@ -80,6 +81,7 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <QueryClientProvider client={queryClient}>
       <ThemeProvider>
         <AuthProvider>
+          <ConversationHistoryCacheLifecycle />
           <ProfileProvider>
             <RouterProvider router={router} />
           </ProfileProvider>
