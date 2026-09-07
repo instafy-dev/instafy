@@ -323,6 +323,87 @@ describe("AgentJobThreadPreviewLayout", () => {
     expect(container.textContent).toContain("Running command…");
   });
 
+  it.each<{
+    name: string;
+    overrides: Partial<AgentJobThreadPreviewLayoutProps>;
+    expectedOwner: string | null;
+    narrowOnlyAuthor?: boolean;
+  }>([
+    {
+      name: "omits a command owner already named by the inner header",
+      overrides: { showHeaderIdentity: true },
+      expectedOwner: null,
+    },
+    {
+      name: "omits a command owner already named by the outer header",
+      overrides: { visibleAuthorHandle: "  @@OcTo  " },
+      expectedOwner: null,
+    },
+    {
+      name: "keeps a different command actor beside the outer author",
+      overrides: { visibleAuthorHandle: "octo", latestCommandAgentHandle: "@reviewer" },
+      expectedOwner: "@reviewer",
+    },
+    {
+      name: "keeps a different command actor beside the inner author",
+      overrides: { showHeaderIdentity: true, latestCommandAgentHandle: "@reviewer" },
+      expectedOwner: "@reviewer",
+    },
+    {
+      name: "keeps command attribution when no current author header is visible",
+      overrides: {},
+      expectedOwner: "@octo",
+    },
+    {
+      name: "keeps desktop attribution when the matching outer author is mobile-only",
+      overrides: { visibleAuthorHandle: "octo", visibleAuthorVisibility: "narrow" },
+      expectedOwner: "@octo",
+      narrowOnlyAuthor: true,
+    },
+    {
+      name: "keeps a different command actor at every width beside a mobile-only author",
+      overrides: {
+        visibleAuthorHandle: "octo",
+        visibleAuthorVisibility: "narrow",
+        latestCommandAgentHandle: "@reviewer",
+      },
+      expectedOwner: "@reviewer",
+    },
+  ])("$name", async ({ overrides, expectedOwner, narrowOnlyAuthor = false }) => {
+    // Both the collapsed status and expanded placeholder use this attribution.
+    for (const expanded of [false, true]) {
+      await act(async () => {
+        root.render(
+          <AgentJobThreadPreviewLayout
+            {...createProps({
+              showHeaderIdentity: false,
+              isCompleted: false,
+              isRunning: true,
+              isThreadUnresolved: true,
+              latestCommandAgentHandle: "@octo",
+              showCollapsedCompactRailStatus: !expanded,
+              compactRailStatusText: "Running command…",
+              showLiveCommandPlaceholder: expanded,
+              finalSummaryMessage: null,
+              showSummaryBody: false,
+              ...overrides,
+            })}
+          />,
+        );
+      });
+
+      expect(container.textContent).toContain("Running command…");
+      const owner = container.querySelector('[data-testid="agent-thread-command-owner"]');
+      if (expectedOwner === null) {
+        expect(owner).toBeNull();
+      } else {
+        expect(owner?.textContent).toBe(expectedOwner);
+        expect(owner?.classList.contains("hidden")).toBe(narrowOnlyAuthor);
+        expect(owner?.classList.contains("sm:inline-flex")).toBe(narrowOnlyAuthor);
+      }
+    }
+  });
+
   const COMMAND_LABEL = "whoami; git -C ~/work/core rev-parse --short HEAD";
   const RAW_COMMAND = `/bin/bash -lc ${COMMAND_LABEL}`;
 

@@ -346,6 +346,9 @@ export type AgentJobThreadPreviewLayoutProps = {
   showHeaderAvatar: boolean;
   assistantAvatarMotion: AssistantAvatarMotion;
   showHeaderIdentity?: boolean;
+  /** Agent already named by the surrounding message's visible speaker header. */
+  visibleAuthorHandle?: string | null;
+  visibleAuthorVisibility?: "all" | "narrow";
   hiddenUpdateCount: number;
   /**
    * True when the surrounding row's speaker header already shows the terminal
@@ -429,6 +432,8 @@ export function AgentJobThreadPreviewLayout({
   showHeaderAvatar,
   assistantAvatarMotion,
   showHeaderIdentity = true,
+  visibleAuthorHandle = null,
+  visibleAuthorVisibility = "all",
   hiddenUpdateCount,
   runStatusShownInEntryHeader = false,
   isHybridCompactionActive,
@@ -683,10 +688,19 @@ export function AgentJobThreadPreviewLayout({
     top: showThreadPreviewHeader ? threadPreviewRailStyle.top : "0px",
   } as CSSProperties;
 
-  const commandOwnerBadgeElement = latestCommandOwnerBadge ? (
+  const commandOwnerMatchesOuterAuthor =
+    latestCommandOwnerBadge === normalizeAgentHandle(visibleAuthorHandle);
+  const commandOwnerAlreadyVisible =
+    (showThreadPreviewHeader && latestCommandOwnerBadge === ownerBadge) ||
+    (commandOwnerMatchesOuterAuthor && visibleAuthorVisibility === "all");
+  const commandOwnerDisplayClass =
+    commandOwnerMatchesOuterAuthor && visibleAuthorVisibility === "narrow"
+      ? "hidden sm:inline-flex"
+      : "inline-flex";
+  const commandOwnerBadgeElement = latestCommandOwnerBadge && !commandOwnerAlreadyVisible ? (
     <span
       data-testid="agent-thread-command-owner"
-      className="inline-flex max-w-28 flex-none items-center rounded-full border border-slate-200/70 bg-white/70 px-1.5 py-0.5 text-xxs font-semibold leading-none text-slate-600 dark:border-slate-700/80 dark:bg-slate-900/70 dark:text-slate-300"
+      className={`${commandOwnerDisplayClass} max-w-28 flex-none items-center rounded-full border border-slate-200/70 bg-white/70 px-1.5 py-0.5 text-xxs font-semibold leading-none text-slate-600 dark:border-slate-700/80 dark:bg-slate-900/70 dark:text-slate-300`}
       title={latestCommandOwnerBadge}
     >
       {latestCommandOwnerBadge}
