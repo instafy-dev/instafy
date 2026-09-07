@@ -70,6 +70,24 @@ This does not restore an entire
 editor session: file and panel tabs currently carry across space switches, while file selection
 and explorer state reset for the destination space.
 
+## Home activity
+
+Home separates **Unread** conversations from **Recent activity**, using flat rows on the
+shared panel surface. Failed runs retain a warning icon and a concise failure label while
+remaining markable as read. A completion or failure retires the matching running entry.
+
+Narrow panels initially show four unread rows with **View all**; wide panels show up to
+eight. Previews can wrap to two lines in narrow panels. When team filters are available,
+**All** consistently labels rows **Organization · Space**, even when the loaded page contains
+only one organization's activity. Selecting an organization omits its repeated name and keeps
+space labels when the feed spans multiple spaces. **Earlier activity** marks the previous
+visit boundary; it does not imply that every unread conversation has been read.
+
+Team filters apply to loaded history. When older pages remain, an empty filtered view offers
+**Load older activity** rather than implying the team has no activity. Loading failures keep
+existing rows visible and offer **Retry**. New chats use the top-bar action, with **Start a
+chat** also available in the first-use empty state.
+
 ## Composer delivery actions
 
 The composer exposes three one-shot actions instead of a persistent delivery mode:
