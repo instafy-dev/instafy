@@ -4,7 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CredentialsSettingsCard } from "../CredentialsSettingsCard";
-import { clearPendingAgentProfileTarget, setPendingAgentProfileTarget } from "../agentProfileDeepLink";
+import { clearPendingAgentProfileTarget, readPendingAgentProfileTarget, setPendingAgentProfileTarget } from "../agentProfileDeepLink";
 
 vi.mock("../../useStudioDesktopLayout", () => ({
   useStudioDesktopLayout: () => mocks.isDesktop,
@@ -85,15 +85,8 @@ const oldCredential = {
   updatedAt: "2026-01-01T00:00:00.000Z",
 };
 
-const TOKEN_EXPIRED_ERROR = `unexpected status 502 Bad Gateway: upstream request failed (credential_source=claim, endpoint=chatgpt.com/backend-api/codex/responses, requested_model=gpt-5.1-codex-max, resolved_model=gpt-5.1-codex-max): backend responded with 401 Unauthorized: {
-  "error": {
-    "message": "Provided authentication token is expired. Please try signing in again.",
-    "type": null,
-    "code": "token_expired",
-    "param": null
-  },
-  "status": 401
-}, url: http://proxy:8789/v1/responses`;
+// Synthetic input for proxyError's structured-code contract, not provider wire-format evidence.
+const TOKEN_EXPIRED_ERROR = 'unexpected status 502 Bad Gateway: {"error":{"code":"token_expired"},"status":401}';
 
 async function flush(): Promise<void> {
   await Promise.resolve();
@@ -187,6 +180,56 @@ describe("CredentialsSettingsCard", () => {
     expect(container.textContent).toContain("No bots yet");
     expect(container.querySelector('[data-testid="credentials-add-connection"]')).toBeNull();
     expect(container.querySelector('[data-testid="settings-category-providers"]')).not.toBeNull();
+    expect(readPendingAgentProfileTarget()).toBe("missing-bot");
+    expect(document.querySelector('[data-testid="agent-profile-modal"]')).toBeNull();
+  });
+
+  it.each(["octo", "test-bot"])("opens and consumes a pending %s profile after agents load", async (handle) => {
+    let resolveAgents!: (value: unknown) => void;
+    mocks.listAgents.mockReturnValue(new Promise((resolve) => { resolveAgents = resolve; }));
+    setPendingAgentProfileTarget(`@${handle.toUpperCase()}`);
+
+    await act(async () => {
+      root.render(<CredentialsSettingsCard />);
+      await flush();
+    });
+    expect(container.querySelector('[data-testid="settings-category-agents"]')?.getAttribute("aria-current"))
+      .toBe("page");
+    expect(container.querySelector('[data-testid="credentials-add-connection"]')).toBeNull();
+    expect(document.querySelector('[data-testid="agent-profile-modal"]')).toBeNull();
+    expect(readPendingAgentProfileTarget()).toBe(handle);
+
+    await act(async () => {
+      resolveAgents({ success: true, agents: [{
+        id: `agent-${handle}`,
+        handle,
+        displayName: "Test agent",
+        description: "Synthetic profile",
+        avatarSeed: "test-avatar",
+        provider: "openai",
+        model: null,
+        reasoningEffort: null,
+        credentialId: null,
+        runtimeId: null,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      }] });
+      await flush();
+    });
+    const modal = document.querySelector('[data-testid="agent-profile-modal"]');
+    expect(modal).not.toBeNull();
+    expect(modal?.querySelector<HTMLInputElement>('[data-testid="agent-profile-display-name-input"]')?.value)
+      .toBe("Test agent");
+    expect(readPendingAgentProfileTarget()).toBeNull();
+
+    const close = modal?.querySelector<HTMLButtonElement>('[aria-label="Close"]');
+    expect(close).not.toBeNull();
+    await act(async () => { close!.click(); await flush(); });
+    expect(document.querySelector('[data-testid="agent-profile-modal"]')).toBeNull();
+    await act(async () => { root.render(<CredentialsSettingsCard />); await flush(); });
+    expect(document.querySelector('[data-testid="agent-profile-modal"]')).toBeNull();
+    expect(readPendingAgentProfileTarget()).toBeNull();
+    expect(mocks.listAgents).toHaveBeenCalledTimes(1);
   });
 
   it.each([false, true])("offers the shared category picker in a narrow pane (desktop: %s)", async (isDesktop) => {
