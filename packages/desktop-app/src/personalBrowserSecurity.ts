@@ -40,6 +40,8 @@ export type PersonalBrowserActionDescriptor = {
   title?: string | null;
   value?: string | null;
   href?: string | null;
+  /** Empty means no native form owner; absent means ownership was not observed. */
+  formOwnerIdentity?: string | null;
   formActionText?: string | null;
 };
 
@@ -64,6 +66,7 @@ export const PERSONAL_BROWSER_SECURITY_FINGERPRINT_FIELDS = [
   "title",
   "value",
   "href",
+  "formOwnerIdentity",
   "formActionText",
   "disabled",
 ] as const;
@@ -306,7 +309,9 @@ export function personalBrowserActivationRequiresConfirmation(
       isHighImpactPersonalBrowserAction(value) ||
       (tag === "input" && ["submit", "image"].includes(type ?? "")) ||
       (tag === "button" && !["button", "reset"].includes(type ?? "") &&
-        Boolean(value.formActionText?.trim()))
+        // Submit semantics come from the native type and form owner, not a
+        // human-readable label. Older/incomplete descriptors fail closed.
+        value.formOwnerIdentity !== "")
     );
   }
   return (
@@ -334,7 +339,7 @@ export function personalBrowserKeyRequiresConfirmation(
   return (
     isPersonalBrowserActivationKey(key) &&
     (personalBrowserActivationRequiresConfirmation(value) ||
-      (key === "Enter" && Boolean(value.formActionText?.trim())))
+      (key === "Enter" && Boolean(value.formOwnerIdentity?.trim() || value.formActionText?.trim())))
   );
 }
 

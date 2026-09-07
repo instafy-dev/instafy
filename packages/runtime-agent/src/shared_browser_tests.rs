@@ -16,6 +16,10 @@ fn strings(values: &[&str]) -> Vec<String> {
 const FAKE_PLAYWRIGHT: &str = r#"
 const fs = require("fs");
 const mode = process.env.INSTAFY_SHARED_BROWSER_FAKE_MODE || "safe";
+const formButtonTypes = { "form-button": "button", "form-reset": "reset", "form-submit-button": "submit" };
+const formInputTypes = { "form-submit-input": "submit", "form-image-input": "image" };
+const isFormButton = Object.hasOwn(formButtonTypes, mode);
+const hasForm = mode === "form-input" || isFormButton || Object.hasOwn(formInputTypes, mode);
 const decoyLooksIdentical = mode === "identical-targets";
 const approvalWasConsumed = () => {
   try {
@@ -29,7 +33,7 @@ const approvalWasConsumed = () => {
   }
 };
 const descriptionFor = (targetId) => ({
-  tag: mode === "localized-button" || mode === "icon-button" ? "button" : "input",
+  tag: isFormButton || mode === "localized-button" || mode === "icon-button" ? "button" : "input",
   role: mode === "icon-button" ? "button" : null,
   idAttribute:
     mode === "reordered" || (mode === "stale-after-allow" && approvalWasConsumed())
@@ -48,12 +52,12 @@ const descriptionFor = (targetId) => ({
   titleAttribute: null,
   valueAttribute: mode === "delete-value" ? "Delete account" : null,
   href: null,
-  inputType: "text",
+  inputType: formButtonTypes[mode] || formInputTypes[mode] || "text",
   autocomplete: mode === "credit-card" ? "section-checkout shipping cc-private-token" : "off",
   inputMode: "text",
-  formAction: mode === "form-input" ? "https://example.test/search" : "",
-  formMethod: mode === "form-input" ? "get" : "",
-  formActionText: mode === "form-input" ? "Search form" : "",
+  formAction: hasForm ? "https://example.test/search" : "",
+  formMethod: hasForm ? "get" : "",
+  formActionText: hasForm ? "Search form" : "",
   labels: mode === "localized-button" || mode === "icon-button" ? "" : "Search",
   text: mode === "localized-button" ? "Eliminar" : "",
 });
@@ -1287,6 +1291,45 @@ fn explicit_routine_origin_grant_covers_new_sites_and_ordinary_actions_for_only_
         .expect("run changed authority");
     assert!(!changed.status.success());
     assert!(String::from_utf8_lossy(&changed.stderr).contains("another run"));
+}
+
+#[test]
+fn routine_form_buttons_preserve_one_shot_confirmation_for_submission_controls() {
+    for (mode, needs_confirmation) in [
+        ("form-button", false),
+        ("form-reset", false),
+        ("form-submit-button", true),
+        ("form-submit-input", true),
+        ("form-image-input", true),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        let body = json!({"index": 0, "snapshotId": snapshot_id});
+        let (output, requests) = fixture.run_with_decisions(
+            mode,
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&body.to_string()),
+            &[],
+            &["allow_routine", "allow_once"],
+        );
+        assert!(
+            output.status.success(),
+            "approved {mode} click failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(requests[0]["kind"], "origin");
+        assert_eq!(
+            requests.len(),
+            if needs_confirmation { 2 } else { 1 },
+            "{mode}"
+        );
+        if needs_confirmation {
+            assert_eq!(requests[1]["kind"], "action");
+            assert_eq!(requests[1]["operation"], "click");
+        }
+    }
 }
 
 #[test]

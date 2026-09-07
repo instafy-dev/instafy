@@ -230,7 +230,9 @@ async function describeElement(locator, index) {
         valueAttribute: bounded(element.getAttribute("value")),
         href: element instanceof HTMLAnchorElement ? bounded(element.href, 4_096) : "",
         inputType:
-          element instanceof HTMLInputElement ? bounded(element.type || "text", 64) : "",
+          element instanceof HTMLInputElement || element instanceof HTMLButtonElement
+            ? bounded(element.type, 64)
+            : "",
         autocomplete: bounded(element.getAttribute("autocomplete"), 512),
         inputMode: bounded(element.getAttribute("inputmode"), 64),
         formAction,

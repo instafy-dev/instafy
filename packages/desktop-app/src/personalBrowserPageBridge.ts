@@ -127,8 +127,16 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
         !(hit === element || element.contains(hit) || hit.contains(element))
       ) return { found: false };
       const link = element.closest("a[href]");
-      const form = element.closest("form");
-      const submit = form?.querySelector("button[type='submit'], input[type='submit'], button:not([type])");
+      // Native controls can belong to a non-ancestor form, or explicitly have
+      // no owner despite being inside one. Use the browser's resolved owner.
+      const formCandidate = "form" in element ? element.form : element.closest("form");
+      const form = formCandidate instanceof HTMLFormElement ? formCandidate : null;
+      const submit = form ? Array.from(form.elements).find((control) =>
+        control.form === form && (
+          (control instanceof HTMLButtonElement && control.type === "submit") ||
+          (control instanceof HTMLInputElement && ["submit", "image"].includes(control.type))
+        ),
+      ) : null;
       const formLabelledBy = clean(form?.getAttribute("aria-labelledby"))
         .split(/\\s+/)
         .map((id) => document.getElementById(id))
@@ -178,8 +186,9 @@ function buildPageScript(argumentsValue: unknown, body: string): string {
           : "",
         text: clean(element.innerText || element.textContent),
         href: link instanceof HTMLAnchorElement ? clean(link.href, 4096) : "",
-        // A non-empty marker is deliberately retained for every enclosing
-        // form, including forms that submit implicitly and have no button.
+        // Bind approvals to the actual form owner independently of its label.
+        formOwnerIdentity: form ? targetIdentity(form) : "",
+        // Keep a non-empty description even for an unlabeled implicit form.
         formActionText,
         disabled: Boolean("disabled" in element && element.disabled) || read("aria-disabled") === "true",
         rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
