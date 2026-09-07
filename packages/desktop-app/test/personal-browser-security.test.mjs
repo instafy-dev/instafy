@@ -57,6 +57,27 @@ test("routine browsing is an explicit mode and cannot disable consequential or s
   assert.equal(isSensitivePersonalBrowserEditable({ autocomplete: "cc-number" }), true);
 });
 
+test("routine submission confirmation uses native semantics rather than form wording", () => {
+  for (const descriptor of [
+    { tag: "button", type: "submit", formOwnerIdentity: "form-owner" },
+    { tag: "button", type: "submit", formOwnerIdentity: "form-owner", formActionText: "" },
+    { tag: "button", formOwnerIdentity: "form-owner" },
+    { tag: "button", type: "submit" },
+    { tag: "button" },
+    { tag: "input", type: "image", formOwnerIdentity: "form-owner" },
+  ]) {
+    assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "routine"), true);
+  }
+  for (const descriptor of [
+    { tag: "button", type: "button", formOwnerIdentity: "form-owner", formActionText: "Details" },
+    { tag: "button", type: "reset", formOwnerIdentity: "form-owner", formActionText: "Details" },
+    { tag: "button", type: "submit", formOwnerIdentity: "" },
+  ]) {
+    assert.equal(personalBrowserActivationRequiresConfirmation(descriptor, "routine"), false);
+  }
+  assert.equal(personalBrowserKeyRequiresConfirmation("Enter", { tag: "input", type: "text", formOwnerIdentity: "form-owner", formActionText: "" }), true);
+});
+
 test("Personal Browser is enabled by default with an explicit emergency kill switch", () => {
   assert.equal(isPersonalBrowserFeatureEnabled(undefined), true);
   assert.equal(isPersonalBrowserFeatureEnabled(""), true);

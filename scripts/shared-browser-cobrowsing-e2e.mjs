@@ -48,7 +48,7 @@ const fixtureHtml = `<!doctype html><html lang="en"><meta charset="utf-8">
 <label>Search<input id="query" aria-label="Search" autocomplete="off"></label>
 <label>Display name<input id="display-name" aria-label="Display name" autocomplete="off" style="outline:1px solid rgb(100, 116, 139);outline-offset:1px"></label>
 <label>Verification code<input id="verification-code" aria-label="Verification code" type="password" autocomplete="one-time-code"></label>
-<button id="details" type="button">Show details</button> <output id="count">0</output><section id="extra"></section>
+<form id="details-form"><button id="details" type="button">Show details</button> <output id="count">0</output></form><section id="extra"></section>
 <script>document.getElementById('details').onclick=()=>{const output=document.getElementById('count');output.textContent=String(Number(output.textContent)+1)};</script>
 </html>`;
 
@@ -159,7 +159,7 @@ export async function runSharedBrowserCobrowsingFixture() {
     }
     freshTurn();
     const observedApprovals = [];
-    async function runTool(method, requestPath, body, decision = null) {
+    async function runTool(method, requestPath, body, decision = null, beforeDecision = null) {
       assert.equal(interrupted, false, "Fixture interrupted");
       const started = performance.now();
       const child = spawn(process.execPath, ["-e", scriptSource, "--", method, requestPath, ...(body ? [JSON.stringify(body)] : [])], {
@@ -191,14 +191,16 @@ export async function runSharedBrowserCobrowsingFixture() {
       }
       child.stdout.on("data", (chunk) => collect(chunk.toString(), "stdout"));
       child.stderr.on("data", (chunk) => collect(chunk.toString(), "stderr"));
-      const approvalTimer = setInterval(() => {
+      const approvalTimer = setInterval(async () => {
         try {
           const request = JSON.parse(fs.readFileSync(path.join(approvalDirectory, "request.json"), "utf8"));
           if (seen.has(request.approvalId)) return;
           seen.add(request.approvalId);
           observedApprovals.push({ kind: request.kind, operation: request.operation });
           assert.ok(decision, `Unexpected ${request.kind} approval during ${requestPath}`);
-          assert.equal(request.kind, "origin", "Routine grant must be offered as an origin approval");
+          assert.equal(request.kind, decision === "allow_once" ? "action" : "origin",
+            "Routine grants require an origin prompt; one-shot decisions require an action prompt");
+          if (beforeDecision) await beforeDecision(request);
           writeProtectedJson(path.join(approvalDirectory, "decision.json"), {
             version: 1, approvalId: request.approvalId, requestFingerprint: request.requestFingerprint,
             decision, decidedByUserId: authority.initiatorUserId,
@@ -323,6 +325,47 @@ export async function runSharedBrowserCobrowsingFixture() {
       measurements.push({ name, interactiveElements, snapshot: timingSummary(snapshots), click: timingSummary(clicks) });
     }
     assert.equal(observedApprovals.length, 2, "Routine benchmark calls unexpectedly prompted");
+    // Native button.type distinguishes inert form buttons from true submission
+    // controls, including the browser's default for missing/invalid type values.
+    // Every submission below is explicitly approved before its local handler runs.
+    await page.locator("#details-form").evaluate((form) => {
+      form.dataset.submissions = "0";
+      form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        form.dataset.submissions = String(Number(form.dataset.submissions) + 1);
+      });
+      const reset = document.createElement("button");
+      reset.type = "reset";
+      reset.textContent = "Clear filters";
+      form.append(reset);
+    });
+    const resetSnapshot = (await successfulTool("GET", "/v1/snapshot")).payload;
+    assert.equal(resetSnapshot.interactiveElements.find((entry) => entry.label === "Show details").inputType, "button");
+    assert.equal(resetSnapshot.interactiveElements.find((entry) => entry.label === "Clear filters").inputType, "reset");
+    await successfulTool("POST", "/v1/click", target(resetSnapshot, "Clear filters"));
+    assert.equal(observedApprovals.length, 2, "A non-submitting form button repeated approval");
+    let expectedSubmissions = 0;
+    for (const type of ["submit", null, "unrecognized-type"]) {
+      await page.locator("#details-form").evaluate((form, requestedType) => {
+        form.querySelector("#apply-filter")?.remove();
+        const button = document.createElement("button");
+        button.id = "apply-filter";
+        if (requestedType !== null) button.setAttribute("type", requestedType);
+        button.textContent = "Apply filter";
+        form.append(button);
+      }, type);
+      const observed = (await successfulTool("GET", "/v1/snapshot")).payload;
+      assert.equal(observed.interactiveElements.find((entry) => entry.label === "Apply filter").inputType, "submit");
+      const approved = await runTool("POST", "/v1/click", target(observed, "Apply filter"), "allow_once", async (request) => {
+        assert.equal(request.operation, "click");
+        assert.equal(await page.locator("#details-form").getAttribute("data-submissions"), String(expectedSubmissions),
+          "The form must remain unchanged while its action confirmation is pending");
+      });
+      assert.equal(approved.code, 0, `Approved form button failed: ${approved.stderr}`);
+      expectedSubmissions += 1;
+      assert.equal(await page.locator("#details-form").getAttribute("data-submissions"), String(expectedSubmissions));
+      assert.equal(observedApprovals.length, 2 + expectedSubmissions, "Each form submission needs its own action confirmation");
+    }
     const result = {
       status: "passed", fixtureVersion: 1, browserVersion: context.browser()?.version() ?? "unknown",
       platform: process.platform, architecture: process.arch, nodeVersion: process.version,
@@ -332,6 +375,7 @@ export async function runSharedBrowserCobrowsingFixture() {
         fieldHighlights: true, fieldHighlightsSurviveReflow: true, handoffTerminatesTool: true, inertHumanFill: true,
         freshTurnClearsHighlights: true, previousRunSnapshotRejected: true,
         secretValueAbsentFromToolOutputAndTelemetry: true,
+        routineNonSubmittingFormButtons: true, formSubmissionControlsRequireConfirmation: true,
       },
       measurements,
       limitations: [

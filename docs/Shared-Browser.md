@@ -227,6 +227,11 @@ and Enter/Space activation still require one-shot confirmation. Secret entry,
 fresh-target checks, exact authority, denial and cancellation boundaries are
 unchanged. Stopping or completing the turn ends the grant.
 
+Button descriptors retain the browser's normalized type. An ordinary
+non-submitting button inside a form can therefore use the routine grant, while
+submission controls still ask. Consequential-action checks remain in force for
+both kinds of controls.
+
 Routine mode deliberately relaxes universal confirmation. Its consequence
 classifier uses page descriptors and URL text; it cannot prove that arbitrary
 website JavaScript has no side effects or recognize every language/custom control.

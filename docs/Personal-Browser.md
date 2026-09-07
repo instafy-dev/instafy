@@ -131,6 +131,11 @@ revokes this grant. The visible checkbox may retain its selection while this
 browser surface stays open, but a later Resume requires a fresh native
 confirmation; no permission is saved to the browser profile or shared with teammates.
 
+Submission checks use the browser's actual form association and normalized button
+type, not a button's label. Genuine submission controls still ask; ordinary
+non-submitting buttons may use the routine grant. Form ownership is part of the
+fresh-target check, so a changed association requires a new observation.
+
 Routine mode uses a conservative text/descriptor classifier, not a proof that
 ordinary controls are harmless. A website can attach unexpected side effects to
 an ordinary click. Keep Ask mode when every activation needs human review.
