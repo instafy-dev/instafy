@@ -463,7 +463,12 @@ test("trusted boundary checkouts are separate, pinned, and non-persistent", () =
   assert.match(candidateCheckout, /submodules: false/u);
   assert.match(candidateCheckout, /lfs: false/u);
   assert.match(candidateCheckout, /allow-unsafe-pr-checkout: true/u);
-  assert.doesNotMatch(source, /pull_request\.head\.repo|github\.head_ref/iu);
+  // Head repository identity may only select a disposable runner for the
+  // temporary private-PR exception; it must never choose checkout authority.
+  const runnerSelection = source.match(/^    runs-on: >-\n(?:      .*\n)+/mu)?.[0];
+  assert.ok(runnerSelection);
+  assert.match(runnerSelection, /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/u);
+  assert.doesNotMatch(source.replace(runnerSelection, ""), /pull_request\.head\.repo|github\.head_ref/iu);
 });
 
 test("trusted boundary binds the server merge ref to both event parents", () => {
