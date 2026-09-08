@@ -250,6 +250,7 @@ export function BugReportDialog({
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unable to save screenshot markup.";
         showStatus(message, "error", 3500);
+        throw error;
       }
     },
     [screenshots, selectedScreenshotId, showStatus],

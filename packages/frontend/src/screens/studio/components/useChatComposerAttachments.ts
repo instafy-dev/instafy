@@ -14,10 +14,12 @@ export type PendingChatImageAttachment = {
   id: string;
   file: File;
   previewUrl: string;
+  originalFile?: File;
 };
 
 type ShowStatus = (message: string, intent?: StatusIntent, durationMs?: number) => void;
 const EMPTY_ATTACHMENTS: PendingChatImageAttachment[] = [];
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
 function revokePreviewUrl(previewUrl: string) {
   try {
@@ -43,19 +45,26 @@ export function useChatComposerAttachments({
   const imageAttachments = attachmentDrafts.get(draftKey) ?? EMPTY_ATTACHMENTS;
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const activeDraftKeyRef = useRef(draftKey);
+  const isInputLockedRef = useRef(isInputLocked);
 
   useLayoutEffect(() => {
     activeDraftKeyRef.current = draftKey;
     if (imageInputRef.current) imageInputRef.current.value = "";
   }, [draftKey]);
 
+  useLayoutEffect(() => {
+    isInputLockedRef.current = isInputLocked;
+  }, [isInputLocked]);
+
   // Keep callbacks bound to their originating chat, including an upload/send
   // that completes after the user has already selected another conversation.
   const setImageAttachments = useCallback((update: (
     previous: PendingChatImageAttachment[],
   ) => PendingChatImageAttachment[]) => {
+    const previous = attachmentDraftsRef.current.get(draftKey) ?? EMPTY_ATTACHMENTS;
+    const next = update(previous);
+    if (next === previous) return;
     const drafts = new Map(attachmentDraftsRef.current);
-    const next = update(drafts.get(draftKey) ?? EMPTY_ATTACHMENTS);
     if (next.length > 0) drafts.set(draftKey, next);
     else drafts.delete(draftKey);
     attachmentDraftsRef.current = drafts;
@@ -89,6 +98,48 @@ export function useChatComposerAttachments({
     });
   }, [setImageAttachments]);
 
+  // A null replacement restores the first original. Keep only its File; it
+  // does not need a second live preview URL while the edited image is shown.
+  const updateImageAttachment = useCallback((
+    attachmentId: string,
+    expectedFile: File,
+    nextFile: File | null,
+  ): boolean => {
+    if (activeDraftKeyRef.current !== draftKey || isInputLockedRef.current()) return false;
+    let updated = false;
+    setImageAttachments((previous) => {
+      const index = previous.findIndex((attachment) => attachment.id === attachmentId && attachment.file === expectedFile);
+      if (index < 0) return previous;
+      const current = previous[index]!;
+      const file = nextFile ?? current.originalFile;
+      if (!file) return previous;
+      if (!(file instanceof File) || !file.type.startsWith("image/")) {
+        throw new Error("Choose an image file to replace this attachment.");
+      }
+      if (file.size > MAX_IMAGE_BYTES) {
+        throw new Error("The edited image must be 5MB or smaller.");
+      }
+      // Allocate before changing state or revoking the visible preview. If
+      // allocation fails, the existing image and its original remain usable.
+      const previewUrl = URL.createObjectURL(file);
+      const replacement: PendingChatImageAttachment = { ...current, file, previewUrl };
+      if (nextFile === null) delete replacement.originalFile;
+      else replacement.originalFile = current.originalFile ?? current.file;
+      const next = previous.slice();
+      next[index] = replacement;
+      revokePreviewUrl(current.previewUrl);
+      updated = true;
+      return next;
+    });
+    return updated;
+  }, [draftKey, setImageAttachments]);
+
+  const replaceImageAttachment = useCallback((attachmentId: string, expectedFile: File, nextFile: File): boolean =>
+    updateImageAttachment(attachmentId, expectedFile, nextFile), [updateImageAttachment]);
+
+  const restoreImageAttachment = useCallback((attachmentId: string, expectedFile: File): boolean =>
+    updateImageAttachment(attachmentId, expectedFile, null), [updateImageAttachment]);
+
   const clearSubmittedImageAttachments = useCallback((files: File[]) => {
     const submitted = new Set(files);
     setImageAttachments((previous) => previous.filter((attachment) => {
@@ -100,7 +151,6 @@ export function useChatComposerAttachments({
 
   const attachImageFiles = useCallback(
     (files: File[]) => {
-      const maxBytes = 5 * 1024 * 1024;
       const nextAttachments: PendingChatImageAttachment[] = [];
       let hasNonImage = false;
       let hasTooLarge = false;
@@ -110,7 +160,7 @@ export function useChatComposerAttachments({
           hasNonImage = true;
           continue;
         }
-        if (file.size > maxBytes) {
+        if (file.size > MAX_IMAGE_BYTES) {
           hasTooLarge = true;
           continue;
         }
@@ -249,5 +299,7 @@ export function useChatComposerAttachments({
     imageInputRef,
     openImagePicker,
     removeImageAttachment,
+    replaceImageAttachment,
+    restoreImageAttachment,
   };
 }

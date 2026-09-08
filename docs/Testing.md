@@ -17,6 +17,22 @@ then the remaining images; preserve the draft and keyboard focus. Preview an ima
 the keyboard: Tab stays in the dialog, and Escape returns to the same thumbnail. During
 an upload, previews remain available but removal is disabled until the send settles.
 
+Open a pending attachment and choose **Mark up**. Draw with the pen and arrow tools,
+undo a stroke, clear the current drawing, and cancel without changing the file. Save
+markup and verify that the preview and uploaded PNG contain the same marks while the
+other attachments and text remain unchanged. **Restore original** must recover the
+first selected file, including its exact bytes, after repeated edits. Undo and Clear
+apply to the current editing session; Restore original also removes previously saved
+markup. Switching conversations or removing an image during an asynchronous save
+must not modify another attachment or draft. Uploading images cannot be edited.
+
+Repeat on a phone with a reduced keyboard viewport. Controls must remain reachable,
+finger or stylus strokes must not scroll the page, and Android Back must first cancel
+the editor, then close the preview, before navigating away. Markup uses a frozen image
+frame, exports PNG at up to 2048 pixels on the longest edge, and reduces export size
+further when needed to stay within the 5 MB attachment limit. The original remains
+available in the draft. Verify the shared editor in bug-report screenshots too.
+
 For partial-batch recovery, let the first image upload and reject the second at the
 origin. Verify that both attempted upload paths are absent after cleanup and that an
 unrelated workspace file is unchanged. Retry the retained draft: only the successful

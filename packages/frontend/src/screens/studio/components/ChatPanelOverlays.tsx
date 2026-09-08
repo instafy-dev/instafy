@@ -1,4 +1,5 @@
 import { Xmark } from "iconoir-react";
+import { useEffect, useRef, useState } from "react";
 import { Dialog, Modal, ModalOverlay } from "react-aria-components";
 import { Badge } from "../../../components/Badge";
 import { Button, IconButton } from "../../../components/Button";
@@ -7,6 +8,7 @@ import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import { formatPromptContextModeLabel, formatTokenCountLabel, resolveTokenUsageForMessage } from "./chatMessageDetailHelpers";
+import { ImageMarkupEditor } from "./ImageMarkupEditor";
 
 type MessageMenuLike = {
   kind: "message" | "conversation";
@@ -284,11 +286,33 @@ export function ChatMessageMenuOverlay({
 export function ChatImageLightboxOverlay({
   imageLightbox,
   onClose,
+  onSaveMarkup,
+  onRestoreOriginal,
+  editDisabled = false,
 }: {
   imageLightbox: ImageLightboxLike | null;
   onClose: () => void;
+  onSaveMarkup?: (blob: Blob) => void | Promise<void>;
+  onRestoreOriginal?: () => void;
+  editDisabled?: boolean;
 }) {
-  useNativeBackButtonAction(Boolean(imageLightbox), onClose);
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const markupButtonRef = useRef<HTMLButtonElement | null>(null);
+  const wasEditingRef = useRef(false);
+  useEffect(() => {
+    setEditing(false);
+  }, [imageLightbox?.src]);
+  useEffect(() => {
+    if (!editing && wasEditingRef.current) markupButtonRef.current?.focus();
+    wasEditingRef.current = editing;
+  }, [editing]);
+  const dismiss = () => {
+    if (saving) return;
+    if (editing) setEditing(false);
+    else onClose();
+  };
+  useNativeBackButtonAction(Boolean(imageLightbox), dismiss);
   if (!imageLightbox) {
     return null;
   }
@@ -296,8 +320,9 @@ export function ChatImageLightboxOverlay({
   return (
     <ModalOverlay
       isOpen
-      isDismissable
-      onOpenChange={(open) => { if (!open) onClose(); }}
+      isDismissable={!saving}
+      isKeyboardDismissDisabled={saving}
+      onOpenChange={(open) => { if (!open) dismiss(); }}
       className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/70 p-4"
       data-testid="chat-image-lightbox"
       style={{
@@ -307,15 +332,48 @@ export function ChatImageLightboxOverlay({
         paddingTop: "max(var(--instafy-safe-area-inset-top), 1rem)",
       }}
     >
-      <Modal className="relative max-h-full max-w-full outline-none">
-        <Dialog aria-label="Image preview" className="outline-none">
+      <Modal className={`relative max-h-full max-w-full outline-none ${editing ? "flex w-full max-w-4xl flex-col overflow-hidden rounded-2xl bg-slate-950 text-white" : ""}`}>
+        <Dialog aria-label={editing ? "Mark up image" : "Image preview"} className={`min-h-0 outline-none ${editing ? "flex flex-col p-3" : ""}`}>
+          {editing && onSaveMarkup ? (
+            <ImageMarkupEditor
+              key={imageLightbox.src}
+              src={imageLightbox.src}
+              alt={imageLightbox.alt}
+              onCancel={() => setEditing(false)}
+              onSavingChange={setSaving}
+              onSave={async (blob) => {
+                if (editDisabled) throw new Error("Wait for the image upload to finish before editing.");
+                await onSaveMarkup(blob);
+                setEditing(false);
+              }}
+            />
+          ) : <>
+          {onSaveMarkup ? (
+            <div className="mb-2 flex flex-wrap items-center justify-center gap-2 pr-10">
+              <Button
+                ref={markupButtonRef}
+                variant="secondary"
+                size="sm"
+                onPress={() => setEditing(true)}
+                isDisabled={editDisabled}
+                data-testid="chat-image-markup-open"
+              >
+                Mark up
+              </Button>
+              {onRestoreOriginal ? (
+                <Button variant="secondary" size="sm" onPress={onRestoreOriginal} isDisabled={editDisabled} data-testid="chat-image-restore-original">
+                  Restore original
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
           <IconButton
             type="button"
             variant="secondary"
             size="sm"
             radius="full"
             autoFocus
-            onPress={onClose}
+            onPress={dismiss}
             aria-label="Close image preview"
             data-testid="chat-image-lightbox-close"
             className="absolute right-2 top-2 z-10"
@@ -328,6 +386,7 @@ export function ChatImageLightboxOverlay({
             className="max-h-[80vh] max-w-[90vw] rounded-2xl border border-slate-200 bg-white shadow-lg dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel)]"
             data-testid="chat-image-lightbox-image"
           />
+          </>}
         </Dialog>
       </Modal>
     </ModalOverlay>

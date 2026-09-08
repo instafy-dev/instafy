@@ -1059,6 +1059,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const [workspaceFileStaleError, setWorkspaceFileStaleError] = useState<string | null>(null);
   const [imageLightbox, setImageLightbox] = useState<ImageLightboxState | null>(null);
   const [sendingAttachment, setSendingAttachment] = useState(false);
+  const imageEditingLockedRef = useRef(false);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1835,6 +1836,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     showStatus,
   });
 
+  const attachmentDraftKey = JSON.stringify([currentUserId, activeProjectId, activeConversationId]);
   const {
     clearSubmittedImageAttachments,
     handleComposerDragOver,
@@ -1845,8 +1847,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     imageInputRef,
     openImagePicker,
     removeImageAttachment,
+    replaceImageAttachment,
+    restoreImageAttachment,
   } = useChatComposerAttachments({
-    draftKey: JSON.stringify([currentUserId, activeProjectId, activeConversationId]),
+    draftKey: attachmentDraftKey,
     onAttachmentsAdded: keepComposerTabOpen,
     isInputLocked: () => onboardingInputLocked,
     showStatus,
@@ -1855,6 +1859,39 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const openImageLightbox = useCallback((src: string, alt: string) => {
     setImageLightbox({ src, alt });
   }, []);
+  const openAttachmentImageLightbox = useCallback((src: string, alt: string) => {
+    const attachment = imageAttachments.find((image) => image.previewUrl === src);
+    if (!attachment) return;
+    setImageLightbox({ src, alt, attachmentId: attachment.id, draftKey: attachmentDraftKey });
+  }, [attachmentDraftKey, imageAttachments]);
+  const lightboxAttachment = imageLightbox?.draftKey === attachmentDraftKey
+    ? imageAttachments.find((image) => image.id === imageLightbox.attachmentId) ?? null
+    : null;
+  const visibleImageLightbox = imageLightbox?.attachmentId
+    ? lightboxAttachment ? { src: lightboxAttachment.previewUrl, alt: lightboxAttachment.file.name } : null
+    : imageLightbox;
+  useEffect(() => {
+    if (imageLightbox?.attachmentId && !lightboxAttachment) setImageLightbox(null);
+  }, [imageLightbox, lightboxAttachment]);
+  const saveAttachmentMarkup = lightboxAttachment ? (blob: Blob) => {
+    if (imageEditingLockedRef.current) throw new Error("Wait for the image upload to finish before editing.");
+    const originalFile = lightboxAttachment.originalFile ?? lightboxAttachment.file;
+    const baseName = originalFile.name.replace(/\.[^.]+$/, "") || "image";
+    const file = new File([blob], `${baseName}-marked.png`, { type: "image/png" });
+    if (!replaceImageAttachment(lightboxAttachment.id, lightboxAttachment.file, file)) {
+      throw new Error("This image or conversation changed. Open the image again to edit it.");
+    }
+  } : undefined;
+  const restoreLightboxOriginal = lightboxAttachment?.originalFile ? () => {
+    if (imageEditingLockedRef.current) return;
+    try {
+      if (!restoreImageAttachment(lightboxAttachment.id, lightboxAttachment.file)) {
+        showStatus("This image or conversation changed. Open the image again to restore it.", "info", 4000);
+      }
+    } catch (error) {
+      showStatus(error instanceof Error ? error.message : "Unable to restore the original image.", "error", 4000);
+    }
+  } : undefined;
 
   const activeConversation = useMemo(
     () => conversations.find((conversation) => conversation.localId === activeConversationId) ?? null,
@@ -3298,21 +3335,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     };
   }, [closeMessageMenu, messageMenu]);
 
-  useEffect(() => {
-    if (!imageLightbox) {
-      return;
-    }
-    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setImageLightbox(null);
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [imageLightbox]);
-
   const openMessageMenuAt = useCallback((messageId: string, clientX: number, clientY: number) => {
     const { x, y, maxHeight } = clampMessageMenuPosition(clientX, clientY);
     const liveSelectedText = getCurrentSelectedTextForMessage(messageId);
@@ -3726,6 +3748,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     onInputChange,
     runtimeControllerEnabled,
   });
+  imageEditingLockedRef.current = sendingAttachment || onboardingInputLocked;
   const {
     managedAiOffer: gettingStartedManagedAiOffer,
     selectedAi: gettingStartedSelectedAi,
@@ -5637,8 +5660,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       />
 
       <ChatImageLightboxOverlay
-        imageLightbox={imageLightbox}
+        key={imageLightbox?.attachmentId ?? imageLightbox?.src ?? "closed"}
+        imageLightbox={visibleImageLightbox}
         onClose={() => setImageLightbox(null)}
+        onSaveMarkup={saveAttachmentMarkup}
+        onRestoreOriginal={restoreLightboxOriginal}
+        editDisabled={sendingAttachment || onboardingInputLocked}
       />
 
       <ChatInvitePromptOverlay
@@ -5751,7 +5778,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         imageInputRef={imageInputRef}
         onImageInputChange={handleImageInputChange}
         imageAttachments={imageAttachments}
-        onOpenImage={openImageLightbox}
+        onOpenImage={openAttachmentImageLightbox}
         onRemoveImageAttachment={removeImageAttachment}
         showVoiceStatus={showVoiceStatus}
         voiceStatusMessage={voiceStatusMessage}
@@ -5895,6 +5922,8 @@ type MessageMenuState = {
 type ImageLightboxState = {
   src: string;
   alt: string;
+  attachmentId?: string;
+  draftKey?: string;
 };
 
 const MESSAGE_MENU_PADDING = 12;

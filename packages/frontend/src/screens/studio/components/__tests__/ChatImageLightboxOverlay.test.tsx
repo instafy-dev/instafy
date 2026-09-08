@@ -5,7 +5,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatImageLightboxOverlay } from "../ChatPanelOverlays";
 
-function Harness() {
+const saveMarkup = vi.fn();
+function Harness({ editDisabled = false }: { editDisabled?: boolean }) {
   const [image, setImage] = useState<{ src: string; alt: string } | null>(null);
   return <>
     {["first.png", "second.png"].map((name) => (
@@ -14,7 +15,7 @@ function Harness() {
       </button>
     ))}
     <button data-testid="background-remove">Remove image</button>
-    <ChatImageLightboxOverlay imageLightbox={image} onClose={() => setImage(null)} />
+    <ChatImageLightboxOverlay imageLightbox={image} onClose={() => setImage(null)} onSaveMarkup={saveMarkup} editDisabled={editDisabled} />
   </>;
 }
 
@@ -34,6 +35,7 @@ describe("image preview keyboard focus", () => {
   }
 
   beforeEach(async () => {
+    saveMarkup.mockReset();
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -75,5 +77,30 @@ describe("image preview keyboard focus", () => {
     await open("first.png");
     await act(async () => get("chat-image-lightbox-image").click());
     expect(get("chat-image-lightbox")).not.toBeNull();
+  });
+
+  it("Escape cancels markup first and returns focus to its preview action without saving", async () => {
+    await open("first.png");
+    await act(async () => get("chat-image-markup-open").click());
+    expect(document.querySelector('[role="dialog"]')?.getAttribute("aria-label")).toBe("Mark up image");
+    const cancel = [...document.querySelectorAll("button")].find(button => button.textContent === "Cancel")!;
+    await act(async () => {
+      cancel.focus();
+      cancel.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+    await settleFocus();
+    expect(get("image-markup-editor")).toBeNull();
+    expect(get("chat-image-lightbox-image")?.getAttribute("alt")).toBe("first.png");
+    expect(document.activeElement).toBe(get("chat-image-markup-open"));
+    expect(saveMarkup).not.toHaveBeenCalled();
+  });
+
+  it("keeps previews available but blocks markup during upload", async () => {
+    await act(async () => root.render(<Harness editDisabled />));
+    await open("first.png");
+    expect((get("chat-image-markup-open") as HTMLButtonElement).disabled).toBe(true);
+    expect(get("chat-image-lightbox-image")).not.toBeNull();
+    await act(async () => get("chat-image-markup-open").click());
+    expect(get("image-markup-editor")).toBeNull();
   });
 });

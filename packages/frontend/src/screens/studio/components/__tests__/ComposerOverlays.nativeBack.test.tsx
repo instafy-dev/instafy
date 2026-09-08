@@ -27,7 +27,7 @@ function Harness({ onUnderlyingBack }: { onUnderlyingBack: () => void }) {
       triggerIconClassName="h-4 w-4" touchLikeInput />
     <button data-testid="open-image" onClick={() => setImageOpen(true)}>Image</button>
     <ChatImageLightboxOverlay imageLightbox={imageOpen ? { src: "data:image/png;base64,AA==", alt: "Fixture" } : null}
-      onClose={() => setImageOpen(false)} />
+      onClose={() => setImageOpen(false)} onSaveMarkup={() => undefined} />
   </>;
 }
 
@@ -86,5 +86,22 @@ describe("composer native Back layers", () => {
     await back();
     expect(document.querySelector('[data-testid="composer-action-menu"]')).toBeNull();
     expect(underlying).not.toHaveBeenCalled();
+  });
+
+  it("cancels drawing before closing its preview or navigating away", async () => {
+    const underlying = vi.fn();
+    await act(async () => root.render(<Harness onUnderlyingBack={underlying} />));
+    await click('[data-testid="open-image"]');
+    await click('[data-testid="chat-image-markup-open"]');
+    expect(document.querySelector('[data-testid="image-markup-editor"]')).not.toBeNull();
+    await back();
+    expect(document.querySelector('[data-testid="image-markup-editor"]')).toBeNull();
+    expect(document.querySelector('[data-testid="chat-image-lightbox"]')).not.toBeNull();
+    expect(underlying).not.toHaveBeenCalled();
+    await back();
+    expect(document.querySelector('[data-testid="chat-image-lightbox"]')).toBeNull();
+    expect(underlying).not.toHaveBeenCalled();
+    await back();
+    expect(underlying).toHaveBeenCalledOnce();
   });
 });
