@@ -321,7 +321,9 @@ export function useChatScrollController({
       node.scrollTop = targetTop;
       lastScrollHeightRef.current = node.scrollHeight;
       autoScrollPendingRef.current = false;
-      syncLatestIndicator();
+      // Browser clamping may already have reached this target without a
+      // scroll event. Preserve the new geometry before the next resize.
+      saveCurrentConversationScrollSnapshot();
       return;
     }
 
@@ -381,7 +383,7 @@ export function useChatScrollController({
     };
 
     scrollAnimationFrameRef.current = window.requestAnimationFrame(animate);
-  }, [cancelScrollAnimation, saveCurrentConversationScrollSnapshot, syncLatestIndicator]);
+  }, [cancelScrollAnimation, saveCurrentConversationScrollSnapshot]);
 
   const jumpToLatest = useCallback(() => {
     clearHistoryScrollAnchor();
@@ -564,7 +566,6 @@ export function useChatScrollController({
         // Keep an existing bottom-follow through that geometry change, while
         // an actual upward move still gives control to the reader below.
         scrollToBottom({ behavior: "auto" });
-        saveCurrentConversationScrollSnapshot();
         return;
       }
       shouldAutoScrollRef.current = !autoScrollSuspendedRef.current &&

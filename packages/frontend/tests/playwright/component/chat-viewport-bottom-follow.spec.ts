@@ -32,6 +32,19 @@ async function mount(page: Page) {
       useChatAutoScrollSync({...controller,displayedMessages:messages,aiOnboardingOpen:false,composerAutoHidden:false,
         composerOverlayHeight:0,credentialGateStateForBubble:null,isAssistantTyping:false,
         notificationsNudgeAnchorTimestamp:null,notificationsNudgeOpen:false,peerTypingLabel:null});
+      React.useEffect(() => {
+        window.__scrollSamples = [];
+        const node = controller.scrollContainerRef.current;
+        const sample = reason => {
+          const entries = window.__scrollSamples;
+          entries.push({reason,at:performance.now(),top:node.scrollTop,client:node.clientHeight,height:node.scrollHeight,following:controller.shouldAutoScrollRef.current});
+          if(entries.length>200)entries.shift();
+        };
+        const scroll=()=>sample("scroll"); const resize=()=>sample("resize");
+        node.addEventListener("scroll",scroll);window.addEventListener("resize",resize);
+        const observer=new ResizeObserver(()=>sample("observed"));observer.observe(node);
+        return ()=>{node.removeEventListener("scroll",scroll);window.removeEventListener("resize",resize);observer.disconnect();};
+      },[]);
       return h(React.Fragment,null,
         h("p", {style:{height:32,margin:0}},"Production scroll hooks; synthetic transcript"),
         h("div", {ref:controller.scrollContainerRef,onScroll:layout.handleScroll,"data-testid":"scroll",style:{height:"calc(100dvh - 132px)",overflowY:"auto"}},
@@ -95,12 +108,16 @@ test("retains bottom-follow when layout scroll is delivered before resize and re
   await expect(page.getByTestId("scroll")).toHaveJSProperty("scrollTop", top);
 });
 
-test("follows repeated real viewport resizing at the bottom", async ({page}) => {
+test("follows repeated real viewport resizing at the bottom", async ({page}, testInfo) => {
   await page.setViewportSize({width:360,height:780});
   await mount(page);
-  for (const height of [438,780,500,438]) {
-    await page.setViewportSize({width:360,height});
-    await expect.poll(() => bottomDistance(page)).toBeLessThan(1);
-    await expect(page.getByTestId("jump")).toBeHidden();
+  try {
+    for (const height of [438,780,500,438]) {
+      await page.setViewportSize({width:360,height});
+      await expect.poll(() => bottomDistance(page)).toBeLessThan(1);
+      await expect(page.getByTestId("jump")).toBeHidden();
+    }
+  } finally {
+    await testInfo.attach("scroll-samples", {contentType:"application/json",body:JSON.stringify(await page.evaluate(()=>(window as unknown as {__scrollSamples:unknown}).__scrollSamples))});
   }
 });

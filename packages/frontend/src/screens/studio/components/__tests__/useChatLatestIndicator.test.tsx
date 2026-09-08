@@ -111,6 +111,7 @@ function Harness({
         </button>
       ) : null}
       <button data-testid="older" onClick={controller.requestOlderMessages}>Older</button>
+      <button data-testid="follow" onClick={() => controller.scrollToBottom()}>Follow</button>
     </>
   );
 }
@@ -275,6 +276,21 @@ describe("chat latest-message indicator", () => {
     await scroll(scroller().scrollTop);
     await flushResize();
     expect(scroller().scrollTop).toBe(592);
+    expect(indicator()).toBeNull();
+  });
+
+  it("records a no-movement bottom sync before the next rapid keyboard resize", async () => {
+    const conversationId = scope();
+    const messages = history(conversationId);
+    await render({ conversationId, messages, clientHeight: 306 });
+    expect(scroller().scrollTop).toBe(894);
+    await act(async () => root.render(<Harness conversationId={conversationId} messages={messages} clientHeight={648} />));
+    scroller().scrollTop = 552; // Browser clamp; its scroll event has not arrived yet.
+    await click("follow"); // The viewport callback finds us already at the bottom.
+    await act(async () => root.render(<Harness conversationId={conversationId} messages={messages} clientHeight={368} />));
+    await scroll(scroller().scrollTop);
+    await flushResize();
+    expect(scroller().scrollTop).toBe(832);
     expect(indicator()).toBeNull();
   });
 
