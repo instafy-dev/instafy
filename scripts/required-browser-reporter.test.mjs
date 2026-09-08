@@ -134,7 +134,7 @@ test("minimum count cannot hide a replaced Shared full-modal safe-area case", as
 
 test("browser UI requires both portrait and short-landscape session/status cases", async (t) => {
   const contract = REQUIRED_BROWSER_LANES["browser-ui"];
-  assert.equal(contract.minimumTests, 27);
+  assert.equal(contract.minimumTests, 38);
   assert.ok(contract.files.includes("shared-browser-sessions-responsive.spec.ts"));
   const sessionTitles = contract.titles.filter((title) => title.startsWith("Shared sessions and saved status "));
   assert.deepEqual(sessionTitles, [
@@ -176,9 +176,64 @@ test("browser UI cannot omit the focused-editable reveal regression", async (t) 
   }
 });
 
+test("browser UI cannot omit the focused sidebar keyboard geometry regression", async (t) => {
+  const requiredTitle = "keeps focused sidebar search centered through visual keyboard resize and restores the drawer";
+  const requiredFile = "mobile-sidebar-keyboard.spec.ts";
+  assert.ok(REQUIRED_BROWSER_LANES["browser-ui"].titles.includes(requiredTitle));
+  assert.ok(REQUIRED_BROWSER_LANES["browser-ui"].files.includes(requiredFile));
+  for (const replace of ["file", "title"]) {
+    const run = setup(t, "browser-ui");
+    const tests = browserUiInventory(run).map((item) => replace === "title" && item.title === requiredTitle
+      ? { ...item, title: "unrelated passing sidebar test" }
+      : replace === "file" && item.location.file.endsWith(requiredFile)
+        ? { ...item, location: { file: "/fixture/browser-live-proof.spec.ts" } } : item);
+    run.begin(tests); run.pass(tests);
+    assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" });
+  }
+});
+
 test("receipt write errors cannot be swallowed into a green Playwright result", async (t) => {
   const run = setup(t); run.begin(); run.pass();
   const notADirectory = path.join(run.outputDir, "file"); fs.writeFileSync(notADirectory, "fixture");
   run.reporter.config.projects[0].outputDir = notADirectory;
   assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" });
+});
+
+test("browser UI cannot omit a thumb navigation viewport or replace its spec", async (t) => {
+  const contract = REQUIRED_BROWSER_LANES["browser-ui"];
+  const file = "mobile-thumb-navigation.spec.ts";
+  const titles = [375, 390, 844].map((width) => `thumb navigation preserves history, selection and input at ${width}px`);
+  assert.equal(contract.minimumTests, 38);
+  assert.ok(contract.files.includes(file));
+  for (const title of titles) assert.ok(contract.titles.includes(title));
+  for (const target of [file, ...titles]) {
+    const run = setup(t, "browser-ui");
+    const selected = browserUiInventory(run).map((item) => item.title === target
+      ? { ...item, title: "unrelated passing navigation case" }
+      : target === file && item.location.file.endsWith(file)
+        ? { ...item, location: { file: "/fixture/browser-live-proof.spec.ts" } } : item);
+    run.begin(selected); run.pass(selected);
+    assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" }, target);
+  }
+});
+
+test("browser UI requires every Studio navigation, scroll and cross-space race proof", async (t) => {
+  const contract = REQUIRED_BROWSER_LANES["browser-ui"];
+  const titles = [
+    "restores exact visits and transcript positions through Back and Forward at 1280px",
+    "restores exact visits and transcript positions through Back and Forward at 390px",
+    "collapses mobile sidebar drill-ins before navigating without stale Back loops",
+    "preserves rapid destinations, legacy tab clicks, jobs and unloaded deep links",
+    "abandons pending old-space conversations while a new space is loading",
+    "restores URL-driven settings categories and per-visit scroll with browser Back and Forward",
+    "native history controls traverse Router entries with 44px targets and bounded forward state",
+  ];
+  for (const requiredTitle of titles) {
+    assert.ok(contract.titles.includes(requiredTitle), requiredTitle);
+    const run = setup(t, "browser-ui");
+    const selected = browserUiInventory(run).map((item) => item.title === requiredTitle
+      ? { ...item, title: "unrelated passing navigation test" } : item);
+    run.begin(selected); run.pass(selected);
+    assert.deepEqual(await run.reporter.onEnd({ status: "passed" }), { status: "failed" }, requiredTitle);
+  }
 });

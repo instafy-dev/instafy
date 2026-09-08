@@ -45,6 +45,8 @@ interface WorkspaceTabsContextValue {
   tabs: WorkspaceTabState[];
   activeTab: WorkspaceTabState | null;
   activeTabId: string | null;
+  /** The tab owner can materialize this space's conversation tabs. */
+  conversationTabsReady: boolean;
   openPanelTab: (panel: StudioPanel, options?: { activate?: boolean }) => void;
   openConversationTab: (
     conversationId: string,
@@ -207,6 +209,7 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
   // in the strip and writes its ids into the new space's saved tab list.
   const conversationsMatchProject =
     workspaceProjectId === null || conversationsProjectKey === workspaceProjectId;
+  const conversationTabsReady = conversationsMatchProject && !conversationHistoryPending;
 
   useEffect(() => {
     seenConversationIdsRef.current = new Set();
@@ -748,6 +751,7 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
       tabs,
       activeTab,
       activeTabId,
+      conversationTabsReady,
       openPanelTab,
       openConversationTab,
       openJobThreadTab,
@@ -771,6 +775,7 @@ export function WorkspaceTabsProvider({ children }: { children: ReactNode }) {
     [
       activeTab,
       activeTabId,
+      conversationTabsReady,
       closeTab,
       peekUrlNavigation,
       consumeUrlNavigation,

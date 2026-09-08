@@ -8,10 +8,11 @@ import {
   type MutableRefObject,
 } from "react";
 import { getChatScrollObstructionPaddingPx } from "./browserSessionLayout";
+import { isNativeKeyboardViewportOpen } from "../../../utils/keyboardViewport";
+export { isNativeKeyboardViewportOpen } from "../../../utils/keyboardViewport";
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 24;
 const BROWSER_SURFACE_GAP_PX = 8;
-const NATIVE_KEYBOARD_MIN_OCCLUSION_PX = 96;
 const HISTORY_PREFETCH_MIN_THRESHOLD_PX = 48;
 
 // Ask for the next history page half a viewport before the top instead of at
@@ -24,26 +25,6 @@ export function getHistoryPrefetchThresholdPx(clientHeight: number): number {
     return HISTORY_PREFETCH_MIN_THRESHOLD_PX;
   }
   return Math.max(HISTORY_PREFETCH_MIN_THRESHOLD_PX, clientHeight / 2);
-}
-
-export function isNativeKeyboardViewportOpen({
-  closedViewportHeight,
-  layoutViewportHeight,
-  visualViewportHeight,
-  visualViewportOffsetTop,
-}: {
-  closedViewportHeight: number;
-  layoutViewportHeight: number;
-  visualViewportHeight: number;
-  visualViewportOffsetTop: number;
-}): boolean {
-  const baselineHeight = Math.max(closedViewportHeight, layoutViewportHeight);
-  if (!Number.isFinite(baselineHeight) || baselineHeight <= 0) {
-    return false;
-  }
-  const visibleBottom = Math.max(0, visualViewportHeight) + Math.max(0, visualViewportOffsetTop);
-  const occludedHeight = Math.max(0, baselineHeight - visibleBottom);
-  return occludedHeight >= Math.max(NATIVE_KEYBOARD_MIN_OCCLUSION_PX, baselineHeight * 0.18);
 }
 
 type UseChatComposerLayoutStateOptions = {

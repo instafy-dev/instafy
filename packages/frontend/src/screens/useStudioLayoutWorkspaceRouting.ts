@@ -13,8 +13,24 @@ import { resolveStudioUrlProjectId } from "./studioProjectUrlSync";
 import { readPendingProjectSwitch } from "./pendingProjectSwitch";
 import type { LeftDrawerPanel } from "./useStudioLayoutChromeState";
 import { clearStaleSharedBrowserResumeTarget } from "./studio/components/sharedBrowserResume";
+import { buildStudioDestinationSearch } from "../navigation/studioNavigation";
+import { getStudioVisitKey } from "../navigation/studioVisit";
 
 type UrlNavigationMode = "push" | "replace" | null;
+
+function routeUuid(params: URLSearchParams, key: string): string | null {
+  const value = params.get(key)?.trim();
+  return value && isUUID(value) ? value : null;
+}
+
+export function workspaceRouteScopeReady({
+  search, projectReady, activeProjectId, conversationsProjectKey,
+}: { search: string; projectReady: boolean; activeProjectId: string | null; conversationsProjectKey: string }): boolean {
+  if (!projectReady) return false;
+  const requestedProject = routeUuid(new URLSearchParams(search), "projectId");
+  return (!requestedProject || requestedProject === activeProjectId) &&
+    (!activeProjectId || conversationsProjectKey === activeProjectId);
+}
 
 interface PendingUrlSearchSyncResolution {
   nextPendingSearch: string | null;
@@ -172,6 +188,7 @@ interface UseStudioLayoutWorkspaceRoutingParams {
   activeWorkspaceTabJobId: string | null;
   activeWorkspaceTabKind: string | null;
   activeWorkspaceTabPanel: StudioPanel | null;
+  conversationTabsReady: boolean;
   consumeUrlNavigation: () => UrlNavigationMode;
   conversations: ConversationState[];
   conversationsProjectKey: string;
@@ -180,7 +197,9 @@ interface UseStudioLayoutWorkspaceRoutingParams {
   leftDrawer: LeftDrawerPanel | null;
   locationPathname: string;
   locationSearch: string;
-  navigate: (to: { pathname: string; search: string }, options: { replace: boolean }) => void;
+  locationKey?: string;
+  locationState?: unknown;
+  navigate: (to: { pathname: string; search: string }, options: { replace: boolean; state?: unknown }) => void;
   openConversationTab: (conversationId: string) => void;
   openJobThreadTab: (
     params: { conversationId: string; jobId: string; title?: string },
@@ -211,6 +230,7 @@ export function useStudioLayoutWorkspaceRouting({
   activeWorkspaceTabJobId,
   activeWorkspaceTabKind,
   activeWorkspaceTabPanel,
+  conversationTabsReady,
   consumeUrlNavigation,
   conversations,
   conversationsProjectKey,
@@ -219,6 +239,8 @@ export function useStudioLayoutWorkspaceRouting({
   leftDrawer,
   locationPathname,
   locationSearch,
+  locationKey,
+  locationState,
   navigate,
   openConversationTab,
   openJobThreadTab,
@@ -241,19 +263,41 @@ export function useStudioLayoutWorkspaceRouting({
   const lastHydratedSearchRef = useRef<string | null>(null);
   const pendingUrlSearchSyncRef = useRef<string | null>(null);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("org");
+  const [queryApplicationRevision, setQueryApplicationRevision] = useState(0);
+  const cancelQueryReleaseRef = useRef<(() => void) | null>(null);
 
   const clearApplyingQueryParamsSoon = useCallback(() => {
+    cancelQueryReleaseRef.current?.();
+    let cancelled = false;
+    const release = () => {
+      if (cancelled) return;
+      cancelQueryReleaseRef.current = null;
+      if (!applyingQueryParamsRef.current) return;
+      applyingQueryParamsRef.current = false;
+      // The settled tab may be the last render after history arrives. Notify
+      // the URL writer instead of leaving canonical IDs waiting for unrelated
+      // UI activity. This releases query application, not history readiness.
+      setQueryApplicationRevision(value => value + 1);
+    };
     if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
-      window.requestAnimationFrame(() => {
-        window.requestAnimationFrame(() => {
-          applyingQueryParamsRef.current = false;
-        });
+      let secondFrame: number | null = null;
+      const firstFrame = window.requestAnimationFrame(() => {
+        if (!cancelled) secondFrame = window.requestAnimationFrame(release);
       });
+      cancelQueryReleaseRef.current = () => {
+        cancelled = true;
+        window.cancelAnimationFrame(firstFrame);
+        if (secondFrame !== null) window.cancelAnimationFrame(secondFrame);
+      };
       return;
     }
-    setTimeout(() => {
-      applyingQueryParamsRef.current = false;
-    }, 0);
+    const timer = setTimeout(release, 0);
+    cancelQueryReleaseRef.current = () => { cancelled = true; clearTimeout(timer); };
+  }, []);
+
+  useEffect(() => () => {
+    cancelQueryReleaseRef.current?.();
+    cancelQueryReleaseRef.current = null;
   }, []);
 
   const suppressNextQuerySync = useCallback(() => {
@@ -279,6 +323,14 @@ export function useStudioLayoutWorkspaceRouting({
   const handlePanelSelect = useCallback(
     (panel: StudioPanel, options?: { source?: "query" | "user"; history?: "push" | "replace" }) => {
       const historyMode = options?.history ?? (options?.source === "query" ? "replace" : "push");
+      if (options?.source !== "query" && panel !== "code" && panel !== "sourceControl") {
+        const search = buildStudioDestinationSearch(window.location.search, { kind: "panel", panel });
+        if (search !== window.location.search) {
+          consumeUrlNavigation();
+          navigate({ pathname: locationPathname, search }, { replace: historyMode === "replace", state: null });
+        }
+        return;
+      }
       const shouldRequestUrlNavigation = (() => {
         if (options?.source === "query") {
           return false;
@@ -325,8 +377,11 @@ export function useStudioLayoutWorkspaceRouting({
     },
     [
       activePanel,
+      consumeUrlNavigation,
       isLargeScreen,
       leftDrawer,
+      locationPathname,
+      navigate,
       openPanelTab,
       requestUrlNavigation,
       setLeftDrawer,
@@ -339,7 +394,12 @@ export function useStudioLayoutWorkspaceRouting({
   // can otherwise leave the last-hydrated marker updated without another
   // render, dropping controller IDs that arrive while a navigation settles.
   useLayoutEffect(() => {
-    if (!projectReadyForWorkspace) {
+    if (!workspaceRouteScopeReady({ search: locationSearch, projectReady: projectReadyForWorkspace, activeProjectId, conversationsProjectKey })) {
+      pendingConversationIdRef.current = null;
+      pendingConversationControllerIdRef.current = null;
+      return;
+    }
+    if (window.location.search !== locationSearch) {
       return;
     }
     const pendingSearchResolution = resolvePendingUrlSearchSync({
@@ -358,21 +418,51 @@ export function useStudioLayoutWorkspaceRouting({
       suppressQueryEffectRef.current = false;
     }
     const params = new URLSearchParams(locationSearch);
+    const requestedProject = routeUuid(params, "projectId");
+    if (requestedProject && (requestedProject !== activeProjectId || conversationsProjectKey !== activeProjectId)) {
+      // The project provider resolves a cross-space URL first. The old space's
+      // conversations must never satisfy or rewrite the new space's route.
+      pendingConversationIdRef.current = null;
+      pendingConversationControllerIdRef.current = null;
+      return;
+    }
     const panelParam = params.get("panel");
     const panelRouteNeedsReconciliation =
       isStudioPanel(panelParam) &&
+      (panelParam !== "chat" || conversationTabsReady) &&
       !doesWorkspaceTabMatchPanelRoute({
         panel: panelParam,
         tabKind: activeWorkspaceTabKind,
         tabPanel: activeWorkspaceTabPanel,
       });
+    // An omitted panel is still a Chat destination. A new space's passive
+    // tab restoration can retain an overview after this URL was hydrated,
+    // even while activePanel and the selected conversation already say Chat.
+    // Respect the tab owner's history readiness: reopening a placeholder while
+    // it is being suppressed causes an open/mark-read/strip render loop.
+    // A null ready tab needs no repair when Chat is already active. Git review
+    // has its own reconciliation below.
+    const implicitChatTabNeedsReconciliation =
+      !panelParam && conversationTabsReady && activeWorkspaceTabKind !== "gitReview" &&
+      (activePanel !== "chat" || (activeWorkspaceTabKind !== null && !doesWorkspaceTabMatchPanelRoute({
+        panel: "chat",
+        tabKind: activeWorkspaceTabKind,
+        tabPanel: activeWorkspaceTabPanel,
+      })));
     const sameSearchAsLastHydration = lastHydratedSearchRef.current === locationSearch;
     const hasPendingConversationHydration =
       pendingConversationIdRef.current !== null || pendingConversationControllerIdRef.current !== null;
+    const requestedController = routeUuid(params, "conversationControllerId");
+    const requestedLocal = params.get("conversationId")?.trim();
+    const conversationRouteNeedsReconciliation = requestedController
+      ? requestedController !== activeConversationControllerId
+      : Boolean(requestedLocal && requestedLocal !== activeConversationId);
     if (
       sameSearchAsLastHydration &&
       !hasPendingConversationHydration &&
-      !panelRouteNeedsReconciliation
+      !panelRouteNeedsReconciliation &&
+      !implicitChatTabNeedsReconciliation &&
+      !conversationRouteNeedsReconciliation
     ) {
       return;
     }
@@ -393,7 +483,7 @@ export function useStudioLayoutWorkspaceRouting({
       typeof conversationControllerParamRaw === "string" && isUUID(conversationControllerParamRaw.trim())
         ? conversationControllerParamRaw.trim()
         : null;
-    if (conversationControllerParam) {
+    if (conversationTabsReady && conversationControllerParam) {
       const existingByController = conversations.find(
         (conversation) => conversation.controllerId === conversationControllerParam,
       );
@@ -426,10 +516,11 @@ export function useStudioLayoutWorkspaceRouting({
           pendingConversationControllerIdRef.current = conversationControllerParam;
         }
       } else {
+        resolvedConversationLocalId = null;
         pendingConversationIdRef.current = null;
         pendingConversationControllerIdRef.current = conversationControllerParam;
       }
-    } else if (conversationParam) {
+    } else if (conversationTabsReady && conversationParam) {
       const existingConversation = conversations.find((conversation) => conversation.localId === conversationParam);
       if (existingConversation) {
         resolvedConversationLocalId = existingConversation.localId;
@@ -459,12 +550,13 @@ export function useStudioLayoutWorkspaceRouting({
       });
     if (
       isStudioPanel(resolvedPanelParam) &&
+      (resolvedPanelParam !== "chat" || conversationTabsReady) &&
       (resolvedPanelParam !== activePanel || isPanelTabMismatch)
     ) {
       applyingQueryParamsRef.current = true;
       handlePanelSelect(resolvedPanelParam, { source: "query" });
       applied = true;
-    } else if (!resolvedPanelParam && activePanel !== "chat") {
+    } else if (!resolvedPanelParam && conversationTabsReady && (activePanel !== "chat" || implicitChatTabNeedsReconciliation)) {
       applyingQueryParamsRef.current = true;
       handlePanelSelect("chat", { source: "query" });
       applied = true;
@@ -516,7 +608,7 @@ export function useStudioLayoutWorkspaceRouting({
         }
       } else if (activePanel === "chat") {
         const targetConversationId = (resolvedConversationLocalId ?? activeConversationId ?? "").trim();
-        if (targetConversationId) {
+        if (targetConversationId && conversationTabsReady) {
           applyingQueryParamsRef.current = true;
           openConversationTab(targetConversationId);
           applied = true;
@@ -530,7 +622,7 @@ export function useStudioLayoutWorkspaceRouting({
 
     const jobIdParam = params.get("jobId");
     const normalizedJobId = typeof jobIdParam === "string" ? jobIdParam.trim() : "";
-    if (normalizedJobId) {
+    if (normalizedJobId && conversationTabsReady) {
       const targetConversationId = (resolvedConversationLocalId ?? "").trim();
       if (targetConversationId) {
         const shouldOpen =
@@ -543,7 +635,7 @@ export function useStudioLayoutWorkspaceRouting({
           applied = true;
         }
       }
-    } else if (activeWorkspaceTabKind === "jobThread") {
+    } else if (!normalizedJobId && conversationTabsReady && activeWorkspaceTabKind === "jobThread") {
       const targetConversationId = (resolvedConversationLocalId ?? activeWorkspaceTabConversationId ?? "").trim();
       if (targetConversationId) {
         applyingQueryParamsRef.current = true;
@@ -556,15 +648,19 @@ export function useStudioLayoutWorkspaceRouting({
       clearApplyingQueryParamsSoon();
     }
   }, [
+    activeConversationControllerId,
     activeConversationId,
     activePanel,
+    activeProjectId,
     activeWorkspaceGitReviewReturnTabId,
     activeWorkspaceTabConversationId,
     activeWorkspaceTabId,
     activeWorkspaceTabJobId,
     activeWorkspaceTabKind,
     activeWorkspaceTabPanel,
+    conversationTabsReady,
     conversations,
+    conversationsProjectKey,
     focusWorkspaceTab,
     handlePanelSelect,
     leftDrawer,
@@ -608,6 +704,7 @@ export function useStudioLayoutWorkspaceRouting({
 
     const params = new URLSearchParams(locationSearch);
     const panelParam = params.get("panel");
+    if (panelParam === "chat" && !conversationTabsReady) return;
     if (!isStudioPanel(panelParam)) {
       return;
     }
@@ -628,6 +725,7 @@ export function useStudioLayoutWorkspaceRouting({
     activeWorkspaceTabId,
     activeWorkspaceTabKind,
     activeWorkspaceTabPanel,
+    conversationTabsReady,
     clearApplyingQueryParamsSoon,
     locationSearch,
     openPanelTab,
@@ -636,8 +734,11 @@ export function useStudioLayoutWorkspaceRouting({
   ]);
 
   useEffect(() => {
+    if (!conversationTabsReady) return;
+    if (!workspaceRouteScopeReady({ search: locationSearch, projectReady: projectReadyForWorkspace, activeProjectId, conversationsProjectKey }) ||
+        window.location.search !== locationSearch) return;
     const pendingConversationControllerId = pendingConversationControllerIdRef.current;
-    if (!pendingConversationControllerId) {
+    if (!pendingConversationControllerId || routeUuid(new URLSearchParams(locationSearch), "conversationControllerId") !== pendingConversationControllerId) {
       return;
     }
     const controllerMatch =
@@ -672,11 +773,14 @@ export function useStudioLayoutWorkspaceRouting({
     applyingQueryParamsRef.current = true;
     selectConversation(localMatch.localId);
     clearApplyingQueryParamsSoon();
-  }, [activeConversationId, clearApplyingQueryParamsSoon, conversations, selectConversation, setConversationControllerId]);
+  }, [activeConversationId, activeProjectId, clearApplyingQueryParamsSoon, conversationTabsReady, conversations, conversationsProjectKey, locationSearch, projectReadyForWorkspace, selectConversation, setConversationControllerId]);
 
   useEffect(() => {
+    if (!conversationTabsReady) return;
+    if (!workspaceRouteScopeReady({ search: locationSearch, projectReady: projectReadyForWorkspace, activeProjectId, conversationsProjectKey }) ||
+        window.location.search !== locationSearch) return;
     const pendingConversationId = pendingConversationIdRef.current;
-    if (!pendingConversationId) {
+    if (!pendingConversationId || new URLSearchParams(locationSearch).get("conversationId")?.trim() !== pendingConversationId) {
       return;
     }
     const match = conversations.find((conversation) => conversation.localId === pendingConversationId);
@@ -692,7 +796,7 @@ export function useStudioLayoutWorkspaceRouting({
     pendingConversationIdRef.current = null;
     pendingConversationControllerIdRef.current = null;
     clearApplyingQueryParamsSoon();
-  }, [clearApplyingQueryParamsSoon, conversations, selectConversation, setConversationControllerId]);
+  }, [activeProjectId, clearApplyingQueryParamsSoon, conversationTabsReady, conversations, conversationsProjectKey, locationSearch, projectReadyForWorkspace, selectConversation, setConversationControllerId]);
 
   useEffect(() => {
     if (!projectReadyForWorkspace) {
@@ -727,9 +831,24 @@ export function useStudioLayoutWorkspaceRouting({
     }
 
     const params = new URLSearchParams(urlSyncBaseSearch);
+    // A retained overview/placeholder is not an implicit Chat destination.
+    // Do not canonicalize it while the tab owner is waiting for real history;
+    // explicit navigation to independent panels remains available.
+    if (!conversationTabsReady && (
+      activePanel === "chat" ||
+      (pendingNavigationMode === null && (!params.get("panel") || params.get("panel") === "chat"))
+    )) return;
     if (pendingNavigationMode === null) {
+      // A deep link may arrive before its space or conversation list. Never
+      // replace that destination with the previously rendered conversation.
+      const routeProject = routeUuid(params, "projectId");
+      if (routeProject && (routeProject !== activeProjectId || conversationsProjectKey !== activeProjectId)) return;
+      const routeController = routeUuid(params, "conversationControllerId");
+      const routeConversation = params.get("conversationId")?.trim();
+      if (routeController && routeController !== activeConversationControllerId) return;
+      if (!routeController && routeConversation && routeConversation !== activeConversationId) return;
       const urlPanel = params.get("panel");
-      if (isStudioPanel(urlPanel) && urlPanel !== "chat" && urlPanel !== activePanel) {
+      if ((isStudioPanel(urlPanel) ? urlPanel : "chat") !== activePanel) {
         return;
       }
       const urlSettingsTab = params.get("settingsTab");
@@ -796,8 +915,12 @@ export function useStudioLayoutWorkspaceRouting({
         "settingsCategory",
         activePanel === "settings" ? params.get("settingsCategory") : null,
       ) || changed;
+    changed = syncParam("settingsItem", activePanel === "settings" ? params.get("settingsItem") : null) || changed;
 
     if (!changed) {
+      // A same-tab/no-op click must not leave a push armed for an unrelated
+      // later data refresh or link.
+      consumeUrlNavigation();
       if (suppressQueryEffectRef.current) {
         suppressQueryEffectRef.current = false;
       }
@@ -814,7 +937,13 @@ export function useStudioLayoutWorkspaceRouting({
         pathname: locationPathname,
         search: searchString.length > 0 ? `?${searchString}` : "",
       },
-      { replace: shouldReplace },
+      {
+        replace: shouldReplace,
+        state: shouldReplace ? {
+          ...(locationState && typeof locationState === "object" ? locationState : {}),
+          instafyVisitKey: getStudioVisitKey({ key: locationKey ?? "default", state: locationState }),
+        } : null,
+      },
     );
     if (suppressQueryEffectRef.current) {
       suppressQueryEffectRef.current = false;
@@ -826,14 +955,18 @@ export function useStudioLayoutWorkspaceRouting({
     activeProjectId,
     activeWorkspaceReviewTabId,
     activeWorkspaceTabJobId,
+    conversationTabsReady,
     conversationsProjectKey,
     consumeUrlNavigation,
     leftDrawer,
     locationPathname,
     locationSearch,
+    locationKey,
+    locationState,
     navigate,
     peekUrlNavigation,
     projectReadyForWorkspace,
+    queryApplicationRevision,
     settingsTab,
   ]);
 

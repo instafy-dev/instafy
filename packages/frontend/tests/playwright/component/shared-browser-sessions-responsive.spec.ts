@@ -114,12 +114,16 @@ for (const layout of [
     expect(locator.searchParams.get("projectId")).toBe(PROJECT_ID);
     expect(locator.searchParams.get("browserRuntimeId")).toBe(RUNTIME_IDS[0]);
 
+    // Check the emulated input capability again after the modal transition;
+    // a lost coarse-pointer emulation must not look like a product sizing bug.
+    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches), "touch capability after expansion").toBe(true);
     const controlSizes = await page.getByTestId("shared-browser-session-control").locator("button,input").evaluateAll((controls) => controls.map((control) => {
       const rect = control.getBoundingClientRect();
-      return { name: control.getAttribute("aria-label") ?? control.textContent, width: rect.width, height: rect.height };
+      return { name: control.getAttribute("aria-label") ?? control.textContent, width: rect.width, height: rect.height,
+        minHeight: getComputedStyle(control).minHeight };
     }));
     for (const control of controlSizes) {
-      expect(control.height, `${control.name} touch target height`).toBeGreaterThanOrEqual(44);
+      expect(control.height, `${control.name} touch target height (computed min-height ${control.minHeight})`).toBeGreaterThanOrEqual(44);
       expect(control.width, `${control.name} touch target width`).toBeGreaterThanOrEqual(44);
     }
     await link.tap();

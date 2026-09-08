@@ -114,6 +114,22 @@ describe("StudioSidebarWorkspaceSwitcher team rows", () => {
     expect(rows[0].textContent).toBe("PPersonalCurrent");
   });
 
+  it("distinguishes an unmatched space search from an empty space list", async () => {
+    await render(root, {
+      canSearchSpaces: true,
+      showProjectSearch: true,
+      workspaceProjectQuery: "missing-space",
+    });
+    expect(container.textContent).toContain("No matching spaces.");
+    expect(container.textContent).not.toContain("No spaces yet.");
+
+    for (const workspaceProjectQuery of ["", "   "]) {
+      await render(root, { workspaceProjectQuery });
+      expect(container.textContent).toContain("No spaces yet.");
+      expect(container.textContent).not.toContain("No matching spaces.");
+    }
+  });
+
   it("keeps Current on the active team while a requested team is waiting or failed", async () => {
     const onRetryProjects = vi.fn();
     await render(root, {
