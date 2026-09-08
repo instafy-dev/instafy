@@ -47,7 +47,7 @@ const workspaceSearch = `${chatSearch}&workspaceTab=workspaces`;
 const noop = () => {};
 const Icon = () => null;
 const items: ComponentProps<typeof StudioSidebar>["items"] = [];
-const moreItems: ComponentProps<typeof StudioSidebar>["moreItems"] = [{ id: "settings", label: "Settings", icon: Icon }];
+const moreItems: ComponentProps<typeof StudioSidebar>["moreItems"] = [{ id: "settings", label: "Settings", icon: Icon, accent: "" }];
 
 // Actual Sidebar callback composition and Router history; external data and row
 // discovery are synthetic. No controller, native plugin, or model is contacted.
