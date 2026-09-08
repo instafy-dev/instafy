@@ -80,18 +80,18 @@ async function mount(page: Page) {
   return failures;
 }
 
-async function selectImages(page: Page) {
-  const buffers = await page.evaluate(() => ["#e2e8f0", "#bae6fd"].map(color => {
+async function selectImages(page: Page, size = { width: 320, height: 200 }) {
+  const buffers = await page.evaluate(({ width, height }) => ["#e2e8f0", "#bae6fd"].map(color => {
     const canvas = document.createElement("canvas");
-    canvas.width = 320;
-    canvas.height = 200;
+    canvas.width = width;
+    canvas.height = height;
     const context = canvas.getContext("2d")!;
     context.fillStyle = color;
     context.fillRect(0, 0, canvas.width, canvas.height);
     context.fillStyle = "#334155";
     context.fillRect(25, 25, 65, 25);
     return canvas.toDataURL("image/png").split(",")[1];
-  }));
+  }), size);
   await page.getByTestId("fixture-image-input").setInputFiles(buffers.map((buffer, index) => ({
     name: `screenshot-${index + 1}.png`, mimeType: "image/png", buffer: Buffer.from(buffer, "base64"),
   })));
@@ -296,4 +296,61 @@ test("upload lock preserves preview access while preventing markup and restorati
   await expect(page.getByTestId("chat-image-markup-open")).toBeEnabled();
   await expect(page.getByTestId("chat-image-restore-original")).toBeEnabled();
   expect(failures).toEqual([]);
+});
+
+
+test.describe("small-image preview actions", () => {
+  test.use({ hasTouch: true, isMobile: true, viewport: { width: 360, height: 438 } });
+
+  for (const imageHeight of [192, 1200]) {
+    test(`Mark up, Restore original and Close stay separate around a 192×${imageHeight} image`, async ({ page }, testInfo) => {
+      const failures = await mount(page);
+      await selectImages(page, { width: 192, height: imageHeight });
+      const original = await files(page);
+      await openMarkup(page);
+      await draw(page, "Arrow");
+      await page.getByRole("button", { name: "Save markup", exact: true }).click();
+      await expect(page.getByTestId("chat-image-restore-original")).toBeVisible();
+      await expect.poll(async () => (await files(page))[0]?.hasOriginal).toBe(true);
+      const ids = ["chat-image-markup-open", "chat-image-restore-original", "chat-image-lightbox-close"];
+      const boxes = await Promise.all(ids.map(async id => {
+        const button = page.getByTestId(id);
+        await expect(button).toBeInViewport();
+        expect(await button.evaluate(node => {
+          const bounds = node.getBoundingClientRect();
+          return node.contains(document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2));
+        }), `${id} has an obstructed touch target`).toBe(true);
+        return (await button.boundingBox())!;
+      }));
+      for (let index = 0; index < boxes.length; index += 1) {
+        const box = boxes[index];
+        for (const other of boxes.slice(index + 1)) {
+          const overlapWidth = Math.min(box.x + box.width, other.x + other.width) - Math.max(box.x, other.x);
+          const overlapHeight = Math.min(box.y + box.height, other.y + other.height) - Math.max(box.y, other.y);
+          expect(Math.max(0, overlapWidth) * Math.max(0, overlapHeight), "preview actions overlap").toBe(0);
+        }
+        expect(box.width).toBeGreaterThanOrEqual(44);
+        expect(box.height).toBeGreaterThanOrEqual(44);
+        expect(box.x).toBeGreaterThanOrEqual(0);
+        expect(box.x + box.width).toBeLessThanOrEqual(360);
+        expect(box.y + box.height).toBeLessThanOrEqual(438);
+      }
+      const screenshot = testInfo.outputPath("small-marked-image-preview.png");
+      await page.screenshot({ path: screenshot });
+      await testInfo.attach("small marked image preview", { contentType: "image/png", path: screenshot });
+      await page.setViewportSize({ width: 360, height: 260 });
+      const previewBounds = await page.getByRole("dialog").boundingBox();
+      expect(previewBounds!.y).toBeGreaterThanOrEqual(16);
+      expect(previewBounds!.y + previewBounds!.height).toBeLessThanOrEqual(244);
+      for (const id of [...ids, "chat-image-lightbox-image"]) await expect(page.getByTestId(id)).toBeInViewport({ ratio: 1 });
+      await page.setViewportSize({ width: 360, height: 438 });
+      await page.getByTestId("chat-image-restore-original").click();
+      await expect.poll(async () => (await files(page))[0]?.sha256).toBe(original[0].sha256);
+      await expect(page.getByTestId("chat-image-markup-open")).toBeEnabled();
+      await page.getByTestId("chat-image-lightbox-close").click();
+      await expect(page.getByTestId("fixture-preview-0")).toBeFocused();
+      await expect(page.getByTestId("fixture-draft")).toHaveValue(DRAFT);
+      expect(failures).toEqual([]);
+    });
+  }
 });

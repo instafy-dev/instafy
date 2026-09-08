@@ -317,6 +317,22 @@ export function ChatImageLightboxOverlay({
     return null;
   }
 
+  const closeButton = (
+    <IconButton
+      type="button"
+      variant="secondary"
+      size="sm"
+      radius="full"
+      autoFocus
+      onPress={dismiss}
+      aria-label="Close image preview"
+      data-testid="chat-image-lightbox-close"
+      className={onSaveMarkup ? "min-h-11 min-w-11 shrink-0" : "absolute right-2 top-2 z-10"}
+    >
+      <Xmark className="h-4 w-4" aria-hidden="true" />
+    </IconButton>
+  );
+
   return (
     <ModalOverlay
       isOpen
@@ -332,8 +348,8 @@ export function ChatImageLightboxOverlay({
         paddingTop: "max(var(--instafy-safe-area-inset-top), 1rem)",
       }}
     >
-      <Modal className={`relative max-h-full max-w-full outline-none ${editing ? "flex w-full max-w-4xl flex-col overflow-hidden rounded-2xl bg-slate-950 text-white" : ""}`}>
-        <Dialog aria-label={editing ? "Mark up image" : "Image preview"} className={`min-h-0 outline-none ${editing ? "flex flex-col p-3" : ""}`}>
+      <Modal className={`relative max-h-full max-w-full outline-none ${editing ? "flex w-full max-w-4xl flex-col overflow-hidden rounded-2xl bg-slate-950 text-white" : onSaveMarkup ? "flex flex-col" : ""}`}>
+        <Dialog aria-label={editing ? "Mark up image" : "Image preview"} className={`min-h-0 outline-none ${editing ? "flex flex-col p-3" : onSaveMarkup ? "flex flex-col" : ""}`}>
           {editing && onSaveMarkup ? (
             <ImageMarkupEditor
               key={imageLightbox.src}
@@ -349,41 +365,33 @@ export function ChatImageLightboxOverlay({
             />
           ) : <>
           {onSaveMarkup ? (
-            <div className="mb-2 flex flex-wrap items-center justify-center gap-2 pr-10">
-              <Button
-                ref={markupButtonRef}
-                variant="secondary"
-                size="sm"
-                onPress={() => setEditing(true)}
-                isDisabled={editDisabled}
-                data-testid="chat-image-markup-open"
-              >
-                Mark up
-              </Button>
-              {onRestoreOriginal ? (
-                <Button variant="secondary" size="sm" onPress={onRestoreOriginal} isDisabled={editDisabled} data-testid="chat-image-restore-original">
-                  Restore original
+            <div className="mb-2 flex shrink-0 items-start justify-between gap-2">
+              <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+                <Button
+                  ref={markupButtonRef}
+                  variant="secondary"
+                  size="sm"
+                  onPress={() => setEditing(true)}
+                  isDisabled={editDisabled}
+                  className="min-h-11 min-w-11"
+                  data-testid="chat-image-markup-open"
+                >
+                  Mark up
                 </Button>
-              ) : null}
+                {onRestoreOriginal ? (
+                  <Button variant="secondary" size="sm" onPress={onRestoreOriginal} isDisabled={editDisabled} className="min-h-11 min-w-11" data-testid="chat-image-restore-original">
+                    Restore original
+                  </Button>
+                ) : null}
+              </div>
+              {closeButton}
             </div>
           ) : null}
-          <IconButton
-            type="button"
-            variant="secondary"
-            size="sm"
-            radius="full"
-            autoFocus
-            onPress={dismiss}
-            aria-label="Close image preview"
-            data-testid="chat-image-lightbox-close"
-            className="absolute right-2 top-2 z-10"
-          >
-            <Xmark className="h-4 w-4" aria-hidden="true" />
-          </IconButton>
+          {onSaveMarkup ? null : closeButton}
           <img
             src={imageLightbox.src}
             alt={imageLightbox.alt}
-            className="max-h-[80vh] max-w-[90vw] rounded-2xl border border-slate-200 bg-white shadow-lg dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel)]"
+            className={`rounded-2xl border border-slate-200 bg-white shadow-lg dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel)] ${onSaveMarkup ? "min-h-0 max-h-[80dvh] max-w-full self-center object-contain" : "max-h-[80vh] max-w-[90vw]"}`}
             data-testid="chat-image-lightbox-image"
           />
           </>}
