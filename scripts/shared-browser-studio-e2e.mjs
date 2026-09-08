@@ -319,7 +319,7 @@ async function lifecycle() {
     stage = "build-egress-helper";
     await run("go", ["build", "-o", path.join(bin, "browser-egress-proxy"), "."], { cwd: path.join(root, "packages/browser-egress-proxy") });
     stage = "build-runtime";
-    const agentBinary = cargoBinaryArtifact(await run("cargo", ["build", "--locked", "--manifest-path", "packages/runtime-agent/Cargo.toml", "--bin", "runtime-agent", "--message-format=json"]), "runtime-agent");
+    const agentBinary = cargoBinaryArtifact(await run(process.execPath, ["scripts/runtime-cargo.mjs", "build", "--locked", "--manifest-path", "packages/runtime-agent/Cargo.toml", "--bins", "--message-format=json"]), "runtime-agent");
     stage = "build-controller";
     const controllerBinary = cargoBinaryArtifact(await run("cargo", ["build", "--locked", "--manifest-path", "packages/runtime-controller/Cargo.toml", "--bin", "runtime-controller", "--message-format=json"]), "runtime-controller");
     stage = "display-preflight";

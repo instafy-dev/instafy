@@ -5,15 +5,28 @@ import path from "node:path";
 export const BUNDLED_RUNTIME_AGENT_DIRECTORY = "runtime-agent";
 export const BUNDLED_RUNTIME_AGENT_MANIFEST = "runtime-agent-manifest.json";
 
-type RuntimeAgentManifest = {
-  schemaVersion: 2;
+type RuntimeExecutable = {
   filename: string;
-  platform: NodeJS.Platform;
-  arch: string;
   sizeBytes: number;
   sha256: string;
-  sourceSha: string;
 };
+
+type RuntimeAgentManifest = RuntimeExecutable & {
+  schemaVersion: 3;
+  platform: NodeJS.Platform;
+  arch: string;
+  sourceSha: string;
+  codeModeHost: RuntimeExecutable;
+};
+
+function validExecutable(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const executable = value as Partial<RuntimeExecutable>;
+  return typeof executable.filename === "string" &&
+    /^[a-zA-Z0-9._-]+$/.test(executable.filename) &&
+    Number.isSafeInteger(executable.sizeBytes) && (executable.sizeBytes ?? 0) > 0 &&
+    typeof executable.sha256 === "string" && /^[a-f0-9]{64}$/.test(executable.sha256);
+}
 
 function requireManifest(value: unknown): RuntimeAgentManifest {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -21,15 +34,11 @@ function requireManifest(value: unknown): RuntimeAgentManifest {
   }
   const manifest = value as Partial<RuntimeAgentManifest>;
   if (
-    manifest.schemaVersion !== 2 ||
-    typeof manifest.filename !== "string" ||
-    !/^[a-zA-Z0-9._-]+$/.test(manifest.filename) ||
+    manifest.schemaVersion !== 3 ||
+    !validExecutable(manifest) ||
+    !validExecutable(manifest.codeModeHost) ||
     typeof manifest.platform !== "string" ||
     typeof manifest.arch !== "string" ||
-    !Number.isSafeInteger(manifest.sizeBytes) ||
-    (manifest.sizeBytes ?? 0) <= 0 ||
-    typeof manifest.sha256 !== "string" ||
-    !/^[a-f0-9]{64}$/.test(manifest.sha256) ||
     typeof manifest.sourceSha !== "string" ||
     !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(manifest.sourceSha)
   ) {
@@ -80,29 +89,40 @@ export async function resolveVerifiedBundledRuntimeAgent(options: {
   }
   const manifest = requireManifest(parsed);
   const expectedFilename = platform === "win32" ? "runtime-agent.exe" : "runtime-agent";
+  const expectedHostFilename = platform === "win32" ? "codex-code-mode-host.exe" : "codex-code-mode-host";
   if (
     manifest.platform !== platform ||
     manifest.arch !== arch ||
-    manifest.filename !== expectedFilename
+    manifest.filename !== expectedFilename ||
+    manifest.codeModeHost.filename !== expectedHostFilename
   ) {
     throw new Error(
       `Packaged Personal Browser runtime targets ${manifest.platform}/${manifest.arch}, not ${platform}/${arch}.`,
     );
   }
 
-  const executablePath = path.join(bundleDir, manifest.filename);
+  for (const executable of [manifest, manifest.codeModeHost]) {
+    await verifyExecutable(path.join(bundleDir, executable.filename), executable, platform);
+  }
+  return path.join(bundleDir, manifest.filename);
+}
+
+async function verifyExecutable(
+  executablePath: string,
+  executable: RuntimeExecutable,
+  platform: NodeJS.Platform,
+): Promise<void> {
   const executableStats = await fs.promises.lstat(executablePath).catch(() => null);
   if (!executableStats?.isFile() || executableStats.isSymbolicLink()) {
     throw new Error("Packaged Personal Browser runtime executable is missing or unsafe.");
   }
-  if (executableStats.size !== manifest.sizeBytes) {
+  if (executableStats.size !== executable.sizeBytes) {
     throw new Error("Packaged Personal Browser runtime executable size does not match its manifest.");
   }
   if (platform !== "win32" && (executableStats.mode & 0o111) === 0) {
     throw new Error("Packaged Personal Browser runtime executable is not executable.");
   }
-  if ((await sha256File(executablePath)) !== manifest.sha256) {
+  if ((await sha256File(executablePath)) !== executable.sha256) {
     throw new Error("Packaged Personal Browser runtime executable failed checksum verification.");
   }
-  return executablePath;
 }

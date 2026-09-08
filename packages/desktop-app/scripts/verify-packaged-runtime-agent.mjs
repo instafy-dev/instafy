@@ -59,6 +59,15 @@ for (const manifestPath of manifests) {
   }
   const resourcesPath = path.dirname(path.dirname(manifestPath));
   const executablePath = await resolveVerifiedBundledRuntimeAgent({ resourcesPath });
+  const hostPath = path.join(path.dirname(executablePath),
+    process.platform === "win32" ? "codex-code-mode-host.exe" : "codex-code-mode-host");
+  const hostProbe = spawnSync(hostPath, ["--version"], {
+    encoding: "utf8", timeout: 20_000, windowsHide: true,
+  });
+  if (hostProbe.error || hostProbe.status !== 0 ||
+      !hostProbe.stdout.trim().startsWith("codex-code-mode-host ")) {
+    throw new Error("Packaged code-mode host failed its self-invocation probe.");
+  }
   const probe = spawnSync(executablePath, ["--version"], {
     encoding: "utf8",
     timeout: 20_000,

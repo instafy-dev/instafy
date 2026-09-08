@@ -8,6 +8,7 @@ These docs reflect the current product scope: a chat-first filesystem workspace 
 - Scheduled automations and quiet runs: `docs/Automations.md`
 - Durable notification center, push delivery, and verification: [Notifications](Notifications.md)
 - Runtime architecture: `docs/Architecture.md`
+- Embedded Codex upgrades and native reviewer migration: [Codex engine](Codex-Engine-Upgrades.md)
 - Runtime pooling plan (shared vs dedicated): `docs/runtime-plan-shared-vs-dedicated.md`
 - Git-canonical storage: `docs/Git-Service.md`
 - Sharing, invitations, roles, and device handoff: `docs/Sharing-Permissions.md`

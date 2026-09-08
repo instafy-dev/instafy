@@ -103,7 +103,7 @@ INSTAFY_APP_URL=https://prod.instafy.dev pnpm --filter @instafy/desktop-app star
 The desktop runtime launcher expects a locally-built `runtime-agent` binary:
 
 ```bash
-cargo build --manifest-path packages/runtime-agent/Cargo.toml
+node scripts/runtime-cargo.mjs build --locked --manifest-path packages/runtime-agent/Cargo.toml --bins
 ```
 
-If the desktop app can’t find it automatically, set `INSTAFY_RUNTIME_AGENT_BIN` or select it when prompted.
+Keep the matching `codex-code-mode-host` beside `runtime-agent`. If the desktop app can’t find the runtime automatically, set `INSTAFY_RUNTIME_AGENT_BIN` or select it when prompted.

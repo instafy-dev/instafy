@@ -12,7 +12,8 @@ packages/frontend/test-results
 target
 dist
 docs
-scripts
+scripts/*
+!scripts/runtime-cargo.mjs
 supabase
 packages/frontend
 !packages/frontend/scripts/

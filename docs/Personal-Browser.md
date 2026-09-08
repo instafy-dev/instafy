@@ -268,7 +268,7 @@ An explicit Personal/Shared choice is remembered per signed-in user on that devi
 Build the local runtime executable first:
 
 ```bash
-cargo build --manifest-path packages/runtime-agent/Cargo.toml --bin runtime-agent
+node scripts/runtime-cargo.mjs build --manifest-path packages/runtime-agent/Cargo.toml --bins
 ```
 
 With the local controller/proxy prerequisites running, launch the developer desktop app. A development build can still select an explicit local runtime executable:
@@ -298,8 +298,8 @@ pnpm --filter @instafy/desktop-runtime-agent exec vitest run
 pnpm --filter @instafy/desktop-runtime-agent lint
 pnpm --filter @instafy/desktop-runtime-agent build
 
-cargo test --manifest-path packages/runtime-agent/Cargo.toml --lib
-cargo check --manifest-path packages/runtime-agent/Cargo.toml --bin runtime-agent
+node scripts/runtime-cargo.mjs test --manifest-path packages/runtime-agent/Cargo.toml --lib
+node scripts/runtime-cargo.mjs check --manifest-path packages/runtime-agent/Cargo.toml --bins
 
 cargo test --manifest-path packages/runtime-controller/Cargo.toml \
   personal_browser_jobs_require_and_preserve_the_explicit_desktop_runtime

@@ -363,7 +363,7 @@ async function lifecycle() {
     }
     assert.ok(found, "existing production launch helper requires /usr/bin/chromium or /usr/bin/google-chrome (runner-only symlink to Playwright Chromium is supported)");
     stage = "build-runtime-fixture";
-    const agent = cargoTestArtifact(await run("cargo", ["test", "--locked", "--manifest-path", "packages/runtime-agent/Cargo.toml", "--test", "browser_profile_e2e", "--no-run", "--message-format=json"]), "browser_profile_e2e", "test");
+    const agent = cargoTestArtifact(await run(process.execPath, ["scripts/runtime-cargo.mjs", "test", "--locked", "--manifest-path", "packages/runtime-agent/Cargo.toml", "--test", "browser_profile_e2e", "--no-run", "--message-format=json"]), "browser_profile_e2e", "test");
     stage = "build-controller-fixture";
     const controller = cargoTestArtifact(await run("cargo", ["test", "--locked", "--manifest-path", "packages/runtime-controller/Cargo.toml", "--bin", "runtime-controller", "--no-run", "--message-format=json"]), "runtime-controller", "bin");
     const runEnv = { ...env,

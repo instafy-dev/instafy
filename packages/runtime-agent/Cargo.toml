@@ -1,5 +1,6 @@
 [package]
 name = "runtime-agent"
+default-run = "runtime-agent"
 version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-only"
@@ -16,6 +17,8 @@ anyhow = "1"
 uuid = { version = "1", features = ["serde", "v4"] }
 thiserror = "1"
 codex-core = { path = "../../codex/codex-rs/core" }
+codex-code-mode = { path = "../../codex/codex-rs/code-mode" }
+codex-code-mode-host = { path = "../../codex/codex-rs/code-mode-host" }
 codex-config = { path = "../../codex/codex-rs/config" }
 codex-extension-api = { path = "../../codex/codex-rs/ext/extension-api" }
 codex-exec-server = { path = "../../codex/codex-rs/exec-server" }
@@ -40,7 +43,7 @@ jsonwebtoken = { version = "9", default-features = false, features = ["use_pem"]
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 sysinfo = "0.30"
 zip = { version = "1", default-features = false, features = ["deflate"] }
-rmcp = { version = "1.7.0", default-features = false, features = ["server", "transport-async-rw"] }
+rmcp = { version = "3.2.0", default-features = false, features = ["server", "transport-async-rw"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
@@ -51,6 +54,10 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 [lib]
 name = "runtime_agent"
 path = "src/lib.rs"
+
+[[bin]]
+name = "codex-code-mode-host"
+path = "src/bin/codex-code-mode-host.rs"
 
 [dev-dependencies]
 axum = { version = "0.7", default-features = false, features = ["json", "tokio", "http1"] }
