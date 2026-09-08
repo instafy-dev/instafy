@@ -23,6 +23,10 @@ strings without regard to case; capitalization is not an additional trust or dis
 | `instafy-ci-coordinator` | Ubuntu 24.04 Linux ARM64 | Image coordinator waiting for CI and child publishers |
 
 Every selector also requires `self-hosted`, `Linux` and the actual `ARM64` or `X64` label.
+Linux selection is a `runs-on` object with both a fixed organization group and labels:
+protected-main jobs use `org/instafy-ci-main` plus `instafy-ci-trust-main`; eligible PR
+events use `org/instafy-ci-pr` plus `instafy-ci-trust-pr`, even when the event has a main ref.
+The existing role labels remain mandatory, and no worker may advertise both trust classes.
 Do not apply Linux labels to a native macOS runner, or advertise X64 based on an unqualified
 emulation layer. AMD64 image jobs additionally require `CI_LINUX_X64_SELF_HOSTED=true`; until an
 actual X64 pool passes native build-and-scan qualification they retain their AMD64 hosted runners.
@@ -53,9 +57,22 @@ Use one-job disposable guests with no local developer credentials, host-mounted 
 production network access, signing material, or reused privileged process/Docker state. Destroy
 the whole guest after the job; an ephemeral runner registration alone does not clean a persistent
 host. PR guests must be isolated from protected-main/publishing guests even when they use the same
-role label. Restrict runner-group repository access and accepted workflows independently: mutable
-PR workflow YAML is not a security boundary against a malicious contributor requesting a label.
-Do not activate the temporary exception where those infrastructure restrictions are unavailable.
+role label. Before enrollment, an organization administrator must restrict both groups to the
+selected private repositories and deny public repositories. The main group must additionally
+set `restricted_to_workflows=true` and allow only each reviewed defining workflow at
+`OWNER/REPOSITORY/.github/workflows/FILE.yml@refs/heads/main`. Include `browser-e2e.yml` as a
+defining reusable workflow; its caller-event trust checks must remain intact. GitHub's group
+admission policy, not labels or mutable PR YAML, prevents a PR requesting a main worker.
+Creating/configuring groups and issuing group-bound JIT registrations requires organization
+`Self-hosted runners: write` access (or the corresponding organization runner administration
+permission); a repository-only registration token is insufficient. Keep that management authority
+outside worker guests. A JIT registration is not bound to the queued job the supervisor observed,
+so treat queue observations as capacity hints and verify the actual assigned job. Never fall back
+to the default group or give a worker both trust labels. Do not activate the mode or temporary
+exception before group policy readback, guest isolation and cleanup have been qualified.
+
+See GitHub's [group and label selection](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job#choosing-runners-in-a-group)
+and [organization runner-group controls](https://docs.github.com/en/rest/actions/self-hosted-runner-groups).
 
 Checkout credentials are non-persistent. Native caches include OS and architecture; this prevents
 an AMD64 Docker tarball or Rust target cache being reused as ARM64 evidence. Hosted-only SDK disk
