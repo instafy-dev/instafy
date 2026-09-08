@@ -471,6 +471,26 @@ export function ChatComposerSurface({
   const composerInlineControlsInTextRow = !browserComposerCondensed && !showVoiceActiveStrip;
   const foldSuggestionIntoMenu = showMobileGhostSuggestionAcceptButton;
   const imageUploadDisabled = mutationDisabled || sendingAttachment || onboardingInputLocked;
+  const imageRemoveButtonsRef = useRef(new Map<string, HTMLButtonElement>());
+
+  const handleRemoveImageAttachment = (attachmentId: string) => {
+    // A submitted File is already captured by the upload transaction. Removing
+    // its preview cannot cancel that send, so keep it visible until it settles.
+    if (sendingAttachment) return;
+    const removeButton = imageRemoveButtonsRef.current.get(attachmentId);
+    if (removeButton && document.activeElement === removeButton) {
+      const index = imageAttachments.findIndex((attachment) => attachment.id === attachmentId);
+      const neighbor = imageAttachments[index + 1] ?? imageAttachments[index - 1];
+      const nextButton = neighbor ? imageRemoveButtonsRef.current.get(neighbor.id) : null;
+      if (nextButton) {
+        nextButton.focus({ preventScroll: true });
+        nextButton.scrollIntoView({ block: "nearest", inline: "nearest" });
+      } else {
+        chatInputRef.current?.focus();
+      }
+    }
+    onRemoveImageAttachment(attachmentId);
+  };
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -1335,6 +1355,8 @@ export function ChatComposerSurface({
               }
               data-testid="chat-composer-surface"
               data-browser-composer-condensed={browserComposerCondensed ? "true" : undefined}
+              onDragOver={onDragOver}
+              onDrop={onDrop}
             >
               <span
                 role="status"
@@ -1349,6 +1371,64 @@ export function ChatComposerSurface({
                     : "Voice input is available. Type a message to send."
                   : primaryActionStatus}
               </span>
+              {imageAttachments.length > 0 ? (
+                <div className="mb-1 min-w-0" data-testid="chat-image-upload-preview">
+                  <ul
+                    aria-label="Selected images"
+                    className="flex min-w-0 max-w-full gap-2 overflow-x-auto overscroll-x-contain p-1"
+                    data-testid="chat-image-upload-strip"
+                  >
+                    {imageAttachments.map((attachment, index) => (
+                      <li key={attachment.id} className="relative w-20 flex-none">
+                        <button
+                          type="button"
+                          onClick={() => onOpenImage(attachment.previewUrl, attachment.file.name)}
+                          className={`flex h-20 w-20 items-center justify-center overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 ${DARK_RAISED_CONTROL_CLASS} ${DARK_PANEL_SHADOW_CLASS}`}
+                          aria-label={`Preview image ${index + 1}: ${attachment.file.name}`}
+                          data-testid={`chat-image-upload-preview-item-${index}`}
+                        >
+                          <img
+                            src={attachment.previewUrl}
+                            alt=""
+                            loading="lazy"
+                            decoding="async"
+                            className="h-full w-full object-cover"
+                          />
+                        </button>
+                        <IconButton
+                          ref={(node) => {
+                            if (node) imageRemoveButtonsRef.current.set(attachment.id, node);
+                            else imageRemoveButtonsRef.current.delete(attachment.id);
+                          }}
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          radius="full"
+                          className="absolute right-0 top-0 border border-white/70 shadow-sm dark:border-slate-700"
+                          onPress={() => handleRemoveImageAttachment(attachment.id)}
+                          isDisabled={sendingAttachment}
+                          aria-label={`Remove image ${index + 1}: ${attachment.file.name}`}
+                          data-testid="chat-image-upload-remove"
+                        >
+                          <Xmark className="h-4 w-4" aria-hidden="true" />
+                        </IconButton>
+                        <Text as="div" variant="caption" tone="secondary" className="truncate px-1 pt-1 text-xs" title={attachment.file.name}>
+                          {attachment.file.name}
+                        </Text>
+                      </li>
+                    ))}
+                  </ul>
+                  {sendingAttachment ? (
+                    <p role="status" className="px-1 text-xs text-slate-600 dark:text-slate-300" data-testid="chat-image-upload-status">
+                      Uploading images…
+                    </p>
+                  ) : imageOnlyDraft ? (
+                    <p id={imageMessageHintId} className="px-1 text-xs text-slate-600 dark:text-slate-300" data-testid="chat-image-message-required">
+                      Add a message to send with your images.
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
               {/* The editor stays mounted while the primary slot switches from
                   mic to Send. Controls stay bottom-aligned as the text grows. */}
               <div
@@ -1358,8 +1438,6 @@ export function ChatComposerSurface({
                     : "relative flex items-end gap-2"
                 }
                 data-testid="chat-composer-text-row"
-                onDragOver={onDragOver}
-                onDrop={onDrop}
               >
                 {composerInlineControlsInTextRow ? (
                   <div
@@ -1405,54 +1483,6 @@ export function ChatComposerSurface({
                 className="hidden"
                 data-testid="chat-image-upload-input"
               />
-              {imageAttachments.length > 0 ? (
-                <div
-                  className={`mb-2 space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-2 ${DARK_PANEL_SOFT_BG_CLASS} dark:border-[color:var(--color-studio-dark-raised-control-border)]`}
-                  data-testid="chat-image-upload-preview"
-                >
-                  {imageOnlyDraft ? (
-                    <p id={imageMessageHintId} className="px-1 text-xs text-slate-600 dark:text-slate-300" data-testid="chat-image-message-required">
-                      Add a message to send with your images.
-                    </p>
-                  ) : null}
-                  {imageAttachments.map((attachment, index) => (
-                    <div key={attachment.id} className="flex items-center gap-3">
-                      <button
-                        type="button"
-                        onClick={() => onOpenImage(attachment.previewUrl, attachment.file.name)}
-                        className={`flex h-12 w-12 flex-none items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm ${DARK_RAISED_CONTROL_CLASS} ${DARK_PANEL_SHADOW_CLASS}`}
-                        aria-label={`Preview uploaded image ${index + 1}`}
-                        data-testid={`chat-image-upload-preview-item-${index}`}
-                      >
-                        <img
-                          src={attachment.previewUrl}
-                          alt={attachment.file.name}
-                          className="h-full w-full object-cover"
-                        />
-                      </button>
-                      <div className="min-w-0 flex-1">
-                        <Text as="div" variant="caption" tone="secondary" className="truncate text-xs font-medium">
-                          {attachment.file.name}
-                        </Text>
-                        <Text as="div" variant="caption" tone="muted" className="text-xxs">
-                          {Math.max(1, Math.round(attachment.file.size / 1024))} KB
-                        </Text>
-                      </div>
-                      <IconButton
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        radius="full"
-                        onPress={() => onRemoveImageAttachment(attachment.id)}
-                        aria-label="Remove image"
-                        data-testid="chat-image-upload-remove"
-                      >
-                        <Xmark className="h-4 w-4" aria-hidden="true" />
-                      </IconButton>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
               {showVoiceStatus ? (
                 <div
                   data-testid="chat-voice-input-status"

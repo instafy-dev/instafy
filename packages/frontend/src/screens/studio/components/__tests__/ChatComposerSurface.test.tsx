@@ -90,6 +90,7 @@ vi.mock("../chat-input/ChatInput", () => ({
         data-compact={String(_props.compact === true)}
         data-compact-viewport={String(_props.compactViewport === true)}
         data-read-only={String(_props.readOnly === true)}
+        data-value={String(_props.value ?? "")}
         data-testid="chat-input"
       >
         Ask for something…
@@ -502,6 +503,76 @@ describe("ChatComposerSurface", () => {
     expect(layoutNodes().send).toBeNull();
     expect(layoutNodes().voice).not.toBeNull();
     expect(container.querySelector('[data-testid="chat-input"]')).toBe(input);
+  });
+
+  it("keeps selected images above the stable editor and hands removal focus to a neighbor, then the editor", async () => {
+    const files = ["same.png", "middle.png", "same.png"].map((name, index) => ({
+      id: `image-${index}`,
+      file: new File(["image"], name, { type: "image/png" }),
+      previewUrl: `blob:image-${index}`,
+    }));
+    const onOpenImage = vi.fn();
+    const onRemove = vi.fn();
+    const focusEditor = vi.fn();
+    function AttachmentsHarness() {
+      const [images, setImages] = useState(files);
+      return <ChatComposerSurface {...createProps({
+        imageAttachments: images,
+        chatInputProps: { value: "Keep this draft" } as never,
+        chatInputRef: { current: { focus: focusEditor } as never },
+        onOpenImage,
+        onRemoveImageAttachment: (id) => {
+          onRemove(id);
+          setImages((previous) => previous.filter((image) => image.id !== id));
+        },
+      })} />;
+    }
+    await act(async () => root.render(<AttachmentsHarness />));
+    const input = container.querySelector('[data-testid="chat-input"]');
+    const strip = container.querySelector('[data-testid="chat-image-upload-strip"]')!;
+    expect(strip.compareDocumentPosition(layoutNodes().textRow!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="chat-image-upload-preview-item-1"]')!.click());
+    expect(onOpenImage).toHaveBeenCalledExactlyOnceWith("blob:image-1", "middle.png");
+    const removeButtons = () => [...container.querySelectorAll<HTMLButtonElement>('[data-testid="chat-image-upload-remove"]')];
+    expect(removeButtons().map((button) => button.getAttribute("aria-label"))).toEqual([
+      "Remove image 1: same.png", "Remove image 2: middle.png", "Remove image 3: same.png",
+    ]);
+    const [first, middle, last] = removeButtons();
+    first.scrollIntoView = vi.fn();
+    last.scrollIntoView = vi.fn();
+    await act(async () => { middle.focus(); middle.click(); });
+    expect(onRemove).toHaveBeenLastCalledWith("image-1");
+    expect(removeButtons()).toEqual([first, last]);
+    expect(document.activeElement).toBe(last);
+    await act(async () => last.click());
+    expect(document.activeElement).toBe(first);
+    await act(async () => first.click());
+    expect(focusEditor).toHaveBeenCalledOnce();
+    expect(container.querySelector('[data-testid="chat-image-upload-preview"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-input"]')).toBe(input);
+    expect(input?.getAttribute("data-value")).toBe("Keep this draft");
+  });
+
+  it("keeps previews visible and prevents removal during upload, then allows removal after failure", async () => {
+    const images = ["one.png", "two.png"].map((name) => ({
+      id: name, file: new File(["image"], name, { type: "image/png" }), previewUrl: `blob:${name}`,
+    }));
+    const onRemoveImageAttachment = vi.fn();
+    const onOpenImage = vi.fn();
+    const props = { imageAttachments: images, onRemoveImageAttachment, onOpenImage, chatInputProps: { value: "Keep this draft" } as never };
+    await act(async () => renderLayout({ ...props, sendingAttachment: true }));
+    const buttons = [...container.querySelectorAll<HTMLButtonElement>('[data-testid="chat-image-upload-remove"]')];
+    expect(buttons.every((button) => button.disabled)).toBe(true);
+    expect(container.querySelector('[data-testid="chat-image-upload-status"]')?.textContent).toBe("Uploading images…");
+    await act(async () => buttons.forEach((button) => button.click()));
+    expect(onRemoveImageAttachment).not.toHaveBeenCalled();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="chat-image-upload-preview-item-0"]')!.click());
+    expect(onOpenImage).toHaveBeenCalledExactlyOnceWith("blob:one.png", "one.png");
+    await act(async () => renderLayout({ ...props, sendingAttachment: false }));
+    expect(buttons.every((button) => !button.disabled)).toBe(true);
+    expect(container.querySelector('[data-testid="chat-image-upload-status"]')).toBeNull();
+    await act(async () => buttons[0].click());
+    expect(onRemoveImageAttachment).toHaveBeenCalledExactlyOnceWith("one.png");
   });
 
   it.each(["queue", "stash"])("dismisses the %s popover with native Back without changing the draft", async (panel) => {
