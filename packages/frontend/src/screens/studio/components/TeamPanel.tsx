@@ -20,7 +20,9 @@ import { SettingsShell } from "./SettingsShell";
 
 const SECTION = "space-y-3 border-t border-slate-200/70 pt-5 dark:border-[color:var(--color-studio-dark-divider)]";
 
-export function TeamPanel() {
+export interface TeamPanelProps { organizationId?: string | null; }
+
+export function TeamPanel({ organizationId: requestedOrganizationId }: TeamPanelProps) {
   const { user } = useAuth();
   const { activeProjectId, projectList } = useProjects();
   const { onOpenOrgSettings, onStartNewProject } = useWorkspaceControls();
@@ -30,7 +32,7 @@ export function TeamPanel() {
   const [selection, setSelection] = useState<{ userId: string; id: string } | null>(null);
   const orgs = useQuery({
     queryKey: ["team-overview-organizations", user?.id ?? null],
-    enabled: Boolean(user?.id),
+    enabled: Boolean(user?.id) && requestedOrganizationId !== null,
     queryFn: async ({ signal }) => {
       const result = await controllerClient.organizations.list({ throwOnError: true, signal });
       if (!result) throw new Error("Unable to load your teams.");
@@ -39,8 +41,10 @@ export function TeamPanel() {
   });
   const organizations = user && !orgs.isError ? orgs.data ?? [] : [];
   const selectedId = selection?.userId === user?.id ? selection?.id : null;
-  const organization = organizations.find((org) => org.id === selectedId)
-    ?? organizations.find((org) => org.id === activeProject?.orgId) ?? organizations[0];
+  const organization = requestedOrganizationId !== undefined
+    ? organizations.find((org) => org.id === requestedOrganizationId)
+    : organizations.find((org) => org.id === selectedId)
+      ?? organizations.find((org) => org.id === activeProject?.orgId) ?? organizations[0];
   const organizationId = organization?.id ?? null;
   const members = useOrgMembers(organizationId, user?.id ?? null);
   const [peopleExpanded, setPeopleExpanded] = useState(false);
@@ -65,6 +69,25 @@ export function TeamPanel() {
     openPanelTab("machines");
   };
 
+  if (requestedOrganizationId === null) {
+    const personalSpaces = projectList.filter((project) => !project.orgId);
+    return <SettingsShell title="Personal" testId="team-panel" actions={onStartNewProject ? (
+      <Button variant="outline" size="sm" onPress={() => onStartNewProject(null)}>New space</Button>
+    ) : undefined}>
+      <section className="space-y-4" aria-label="Personal spaces">
+        <p className="text-sm text-slate-500 dark:text-slate-400">Your personal spaces. Shared team work remains in its team.</p>
+        {personalSpaces.length === 0 ? <p>No personal spaces are loaded yet.</p> : (
+          <ul className="space-y-2">{personalSpaces.map((space) => <li key={space.id}>
+            <Button variant="ghost" size="sm" className="max-w-full justify-start text-left" onPress={() => navigate(`/studio?${new URLSearchParams({ projectId: space.id })}`)}>
+              <SpaceIdentity name={space.name} icon={space.projectIcon} color={space.projectColor} className="h-7 w-7 shrink-0" />
+              <span className="truncate">{space.name || "Untitled space"}</span>
+            </Button>
+          </li>)}</ul>
+        )}
+      </section>
+    </SettingsShell>;
+  }
+
   return (
     <SettingsShell title="Team" testId="team-panel" actions={organization ? (
       <Button variant="outline" size="sm" onPress={() => onOpenOrgSettings?.(organization.id)} isDisabled={!onOpenOrgSettings}>Team settings</Button>
@@ -72,15 +95,15 @@ export function TeamPanel() {
       <div className="space-y-6">
         {orgs.isLoading ? <p role="status">Loading teams…</p> : orgs.isError ? (
           <div role="alert">Unable to load your teams. <Button variant="outline" size="sm" onPress={() => void orgs.refetch()}>Retry</Button></div>
-        ) : !organization ? <p>You don’t belong to a team yet. Create a team from Team &amp; spaces to bring people and agents together.</p> : (
+        ) : !organization ? <p>{requestedOrganizationId ? "This team is not available to your account. Choose another team or refresh your access." : "You don’t belong to a team yet. Choose New team to bring people and agents together."}</p> : (
           <>
             <div className="flex flex-wrap items-center gap-3">
               {organization.avatarUrl ? <img src={organization.avatarUrl} alt="" className="h-12 w-12 rounded-xl object-cover" />
                 : <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-slate-200 text-lg font-semibold dark:bg-slate-700">{organization.name.slice(0, 1).toUpperCase()}</span>}
               <div className="min-w-0 flex-1">
-                <Select aria-label="Team" value={organization.id} onChange={(event) => setSelection({ userId: user?.id ?? "", id: event.target.value })}>
+                {requestedOrganizationId !== undefined ? <h2 className="break-words text-base font-semibold">{organization.name}</h2> : <Select aria-label="Team" value={organization.id} onChange={(event) => setSelection({ userId: user?.id ?? "", id: event.target.value })}>
                   {organizations.map((org) => <option key={org.id} value={org.id}>{org.name}</option>)}
-                </Select>
+                </Select>}
                 <Text variant="caption" tone="muted">Your role: {organization.role ?? "member"}. Only work you have access to is shown.</Text>
               </div>
             </div>
@@ -143,7 +166,7 @@ export function TeamPanel() {
                 <h2 className="text-sm font-semibold">Available spaces</h2>
                 {canCreateSpace && onStartNewProject ? <Button variant="outline" size="sm" onPress={() => onStartNewProject(organization.id)}>New space</Button> : null}
               </div>
-              <p className="text-xs text-slate-500 dark:text-slate-400">Spaces loaded in this workspace. Open Team &amp; spaces to find more.</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400">Spaces loaded in this workspace. Open the space picker to find more.</p>
               {spaces.length === 0 ? <p className="text-sm text-slate-500 dark:text-slate-400">No spaces for this team are loaded in this workspace.</p> : (
                 <ul className="space-y-2">{spaces.map((space) => <li key={space.id}>
                   <button type="button" className="flex items-center gap-2 text-sm text-primary-600 dark:text-primary-400" onClick={() => navigate(`/studio?${new URLSearchParams({ projectId: space.id, panel: "automations" })}`)}>

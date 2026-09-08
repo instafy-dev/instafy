@@ -801,6 +801,7 @@ export function useStudioLayoutWorkspaceRouting({
     changed = syncParam("panel", activePanel === "chat" ? null : activePanel) || changed;
     changed = syncParam("settingsTab", activePanel === "settings" ? settingsTab : null) || changed;
     changed = syncParam("settingsOrgId", activePanel === "settings" && settingsTab === "org" ? settingsOrgId : null) || changed;
+    changed = syncParam("teamId", activePanel === "home" || activePanel === "team" || (activePanel === "settings" && settingsTab === "profile") ? params.get("teamId") : null) || changed;
     changed =
       syncParam(
         "settingsCategory",

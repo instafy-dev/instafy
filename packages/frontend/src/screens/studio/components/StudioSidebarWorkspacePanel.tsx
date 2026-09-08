@@ -8,6 +8,7 @@ import { DARK_DIVIDER_BORDER_CLASS } from "../../../theme/darkSurfaces";
 import { StudioSidebarMobileDrillIn } from "./StudioSidebarMobileDrillIn";
 
 interface StudioSidebarWorkspacePanelProps {
+  mode?: "teams-and-spaces" | "spaces";
   open: boolean;
   desktop: boolean;
   portalTarget: HTMLDivElement | null;
@@ -18,6 +19,7 @@ interface StudioSidebarWorkspacePanelProps {
 
 /** Keeps scope selection in the layout's drawer, or inside mobile navigation. */
 export function StudioSidebarWorkspacePanel({
+  mode = "teams-and-spaces",
   open,
   desktop,
   portalTarget,
@@ -26,6 +28,7 @@ export function StudioSidebarWorkspacePanel({
   children,
 }: StudioSidebarWorkspacePanelProps) {
   const titleId = useId();
+  const title = mode === "spaces" ? "Spaces" : "Browse teams";
   const panelRef = useRef<HTMLDivElement | null>(null);
 
   useLayoutEffect(() => {
@@ -59,7 +62,7 @@ export function StudioSidebarWorkspacePanel({
         <StudioSidebarMobileDrillIn
           open
           testId="sidebar-project-switcher-menu"
-          title="Team & spaces"
+          title={title}
           backLabel="Back"
           backTestId="sidebar-project-switcher-back"
           onBack={dismiss}
@@ -84,7 +87,7 @@ export function StudioSidebarWorkspacePanel({
     >
       <div className={`shrink-0 border-b border-slate-200/70 px-4 pb-3 pt-4 ${DARK_DIVIDER_BORDER_CLASS}`}>
         <DrawerHeader
-          title={<span id={titleId}>Team & spaces</span>}
+            title={<span id={titleId}>{title}</span>}
           titleAs="h2"
           titleClassName="!text-base !font-semibold"
           actions={
@@ -92,7 +95,7 @@ export function StudioSidebarWorkspacePanel({
               variant="ghost"
               size="sm"
               radius="full"
-              aria-label="Close team and spaces"
+              aria-label={mode === "spaces" ? "Close spaces" : "Close team and spaces"}
               data-testid="sidebar-project-switcher-close"
               className={DRAWER_ICON_BUTTON_TONE_CLASS}
               onPress={dismiss}

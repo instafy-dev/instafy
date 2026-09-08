@@ -8,8 +8,8 @@ import { describe, expect, it } from "vitest";
  * The sidebar used to render teams as a chip strip that flipped from a
  * vertical column (collapsed) to a horizontal wrap (expanded). The strip's
  * height changed with the flip, so every nav row below it jumped on expand.
- * StudioSidebar is too provider-heavy to mount in jsdom, so — like the
- * safe-area and roster placement guards — these assertions read the source.
+ * The permanent rail now has its own rendered regression suite. These
+ * legacy guards cover the remaining mobile deck and prevent axis flips.
  */
 const componentsDir = path.dirname(fileURLToPath(import.meta.url)) + "/..";
 const sidebar = fs.readFileSync(path.resolve(componentsDir, "StudioSidebar.tsx"), "utf8");
@@ -23,10 +23,11 @@ describe("sidebar org anchor", () => {
     expect(sidebar).not.toMatch(/showLabels\s*\?\s*"flex-row flex-wrap[^"]*"\s*:\s*"flex-col/);
   });
 
-  it("shows teams exactly once, as the deck inside the team & spaces row", () => {
+  it("retains one mobile deck alongside the dedicated desktop rail", () => {
     const deckRenders = sidebar.match(/<SidebarOrgDeck\b/g) ?? [];
-    // Desktop and mobile share one trigger; only the panel presentation changes.
+    // The mobile drawer keeps its deck; desktop renders the permanent rail.
     expect(deckRenders.length).toBe(1);
+    expect(sidebar).toContain("<StudioOrganizationRail");
     expect(sidebar).not.toContain("sidebar-team-chip-");
   });
 

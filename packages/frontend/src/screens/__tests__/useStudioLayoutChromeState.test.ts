@@ -43,14 +43,14 @@ describe("sidebar collapse persistence", () => {
     },
   };
 
-  it("defaults to collapsed until the user chooses, then remembers the choice", async () => {
+  it("shows context on a first visit, then remembers the user's collapse choice", async () => {
     storage.clear();
     (globalThis as { window?: unknown }).window = stubWindow;
     try {
       const { readStoredSidebarCollapsed, writeStoredSidebarCollapsed } = await import(
         "../useStudioLayoutChromeState"
       );
-      expect(readStoredSidebarCollapsed()).toBe(true);
+      expect(readStoredSidebarCollapsed()).toBe(false);
       writeStoredSidebarCollapsed(false);
       expect(readStoredSidebarCollapsed()).toBe(false);
       writeStoredSidebarCollapsed(true);
@@ -60,7 +60,7 @@ describe("sidebar collapse persistence", () => {
     }
   });
 
-  it("stays collapsed when storage throws", async () => {
+  it("shows context when storage is unavailable", async () => {
     (globalThis as { window?: unknown }).window = {
       localStorage: {
         getItem: () => {
@@ -76,7 +76,7 @@ describe("sidebar collapse persistence", () => {
         "../useStudioLayoutChromeState"
       );
       expect(() => writeStoredSidebarCollapsed(false)).not.toThrow();
-      expect(readStoredSidebarCollapsed()).toBe(true);
+      expect(readStoredSidebarCollapsed()).toBe(false);
     } finally {
       delete (globalThis as { window?: unknown }).window;
     }

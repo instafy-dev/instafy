@@ -114,6 +114,8 @@ import { useAutoDesktopSpeechTunnel } from "../desktop/voiceTunnel/useAutoDeskto
 import { useStudioLayoutChromeState } from "./useStudioLayoutChromeState";
 import { useStudioLayoutWorkspaceRouting } from "./useStudioLayoutWorkspaceRouting";
 import { buildOrganizationSettingsCategorySearch } from "./studio/settingsRoute";
+import { buildTeamNavigationSearch, canRememberTeamWorkspace, navigateStudioExplicitly, resolveTeamNavigationScope } from "./studio/teamNavigation";
+import { readCachedControllerOrgs } from "./studio/components/sidebarOrgSnapshot";
 import { StudioPanelPerformance } from "../telemetry/StudioPanelPerformance";
 
 
@@ -305,6 +307,28 @@ function StudioLayoutInner() {
     [activeProjectId, projectList],
   );
   const orgSettingsTitle = isPersonalOrgName(activeProjectSummary?.orgName) ? "Personal settings" : "Team settings";
+  const currentUserId = user?.id ?? null;
+  const activeProjectOrgKey = activeProjectSummary?.orgId ?? "personal";
+  const navigationScope = resolveTeamNavigationScope(location.search, activeProjectOrgKey);
+  const [navigationTeam, setNavigationTeam] = useState<{ userId: string | null; key: string; name: string } | null>(null);
+  const handleActiveTeamChange = useCallback((team: { key: string; name: string }) => {
+    setNavigationTeam((current) => current?.userId === currentUserId && current.key === team.key && current.name === team.name
+      ? current : { userId: currentUserId, ...team });
+  }, [currentUserId]);
+  const activeTeamName = navigationTeam?.userId === currentUserId && navigationTeam.key === navigationScope.orgKey
+    ? navigationTeam.name : navigationScope.orgKey === "personal" ? "Personal"
+      : readCachedControllerOrgs(user?.email).find((org) => org.id === navigationScope.orgKey)?.name
+        ?? (navigationScope.orgKey === activeProjectOrgKey ? activeProjectSummary?.orgName : null) ?? "Team";
+  const teamReturnRoutes = useRef<{ userId: string | null; routes: Map<string, string> }>({ userId: currentUserId, routes: new Map() });
+  if (teamReturnRoutes.current.userId !== currentUserId) {
+    teamReturnRoutes.current = { userId: currentUserId, routes: new Map() };
+  }
+  useEffect(() => {
+    if (!canRememberTeamWorkspace(location.search, activeProjectId, activeProjectOrgKey)) return;
+    const params = new URLSearchParams(location.search);
+    if (params.get("workspaceTab") === "workspaces") params.delete("workspaceTab");
+    teamReturnRoutes.current.routes.set(activeProjectOrgKey, `${location.pathname}?${params}`);
+  }, [activeProjectId, activeProjectOrgKey, currentUserId, location.pathname, location.search]);
   const {
     projectKey: conversationsProjectKey,
     conversations,
@@ -337,8 +361,6 @@ function StudioLayoutInner() {
     }
     return conversations.find((conversation) => conversation.localId === activeConversationId) ?? null;
   }, [activeConversationId, conversations]);
-  const currentUserId = user?.id ?? null;
-
   // Controller notices ("Workspace unavailable", "Scheduled run couldn't
   // start") used to be text-only cards naming a composer Runtime button that no
   // longer exists. They get their action here, where both the Machines route
@@ -1330,6 +1352,10 @@ function StudioLayoutInner() {
 
   const handleToggleSidebar = useCallback(() => {
     if (isLargeScreen) {
+      // Keep keyboard focus on the surviving control before the context unmounts.
+      if (document.activeElement?.closest('[data-testid="sidebar-context-navigation"]')) {
+        document.querySelector<HTMLButtonElement>('[data-testid="topbar-sidebar-toggle"]')?.focus({ preventScroll: true });
+      }
       setSidebarCollapsed((previous) => !previous);
       return;
     }
@@ -1374,6 +1400,43 @@ function StudioLayoutInner() {
       setLeftDrawer(null);
     }
   }, [leftDrawer, requestHistoryPush, setLeftDrawer, setMobileSidebarOpen]);
+
+  const handleOpenTeam = useCallback((orgKey: string) => {
+    setLeftDrawer(null);
+    setMobileSidebarOpen(false);
+    navigateStudioExplicitly(consumeUrlNavigation, navigate, { pathname: location.pathname, search: buildTeamNavigationSearch(location.search, orgKey, "team") });
+  }, [consumeUrlNavigation, location.pathname, location.search, navigate, setLeftDrawer, setMobileSidebarOpen]);
+  const handleReturnToTeam = useCallback((orgKey: string) => {
+    setLeftDrawer(null);
+    setMobileSidebarOpen(false);
+    const target = teamReturnRoutes.current.routes.get(orgKey);
+    if (target) navigateStudioExplicitly(consumeUrlNavigation, navigate, target);
+    else if (orgKey === activeProjectOrgKey && activeProjectId) {
+      consumeUrlNavigation();
+      handlePanelSelect("chat");
+    } else handleOpenTeam(orgKey);
+  }, [activeProjectId, activeProjectOrgKey, consumeUrlNavigation, handleOpenTeam, handlePanelSelect, navigate, setLeftDrawer, setMobileSidebarOpen]);
+  const handleActivateProject = useCallback((projectId: string, orgKey: string) => {
+    setLeftDrawer(null);
+    setMobileSidebarOpen(false);
+    const previous = teamReturnRoutes.current.routes.get(orgKey);
+    const previousProject = previous ? new URL(previous, "https://instafy.invalid").searchParams.get("projectId") : null;
+    navigateStudioExplicitly(consumeUrlNavigation, navigate, previous && previousProject === projectId ? previous : `${location.pathname}?${new URLSearchParams({ projectId })}`);
+  }, [consumeUrlNavigation, location.pathname, navigate, setLeftDrawer, setMobileSidebarOpen]);
+  const handleOpenHome = useCallback(() => {
+    setLeftDrawer(null);
+    setMobileSidebarOpen(false);
+    navigateStudioExplicitly(consumeUrlNavigation, navigate, { pathname: location.pathname, search: buildTeamNavigationSearch(location.search, navigationScope.orgKey, "home") });
+  }, [consumeUrlNavigation, location.pathname, location.search, navigate, navigationScope.orgKey, setLeftDrawer, setMobileSidebarOpen]);
+  const handleNavigationPanelSelect = useCallback((panel: StudioPanel) => {
+    if (panel === "home") handleOpenHome();
+    else if (panel === "team") handleOpenTeam(navigationScope.orgKey);
+    else handlePanelSelect(panel);
+  }, [handleOpenHome, handleOpenTeam, handlePanelSelect, navigationScope.orgKey]);
+  const handleNavigateBack = useCallback(() => {
+    if (typeof window.history.state?.idx === "number" && window.history.state.idx > 0) navigateStudioExplicitly(consumeUrlNavigation, navigate, -1);
+    else handleOpenTeam(navigationScope.orgKey);
+  }, [consumeUrlNavigation, handleOpenTeam, navigate, navigationScope.orgKey]);
 
   const handleOpenChatNavigation = useCallback(() => {
     if (isLargeScreen) {
@@ -1647,8 +1710,8 @@ function StudioLayoutInner() {
       icon: <Group className="text-[16px]" aria-hidden="true" />,
     });
     const search = buildOrganizationSettingsCategorySearch(location.search, category, orgId);
-    navigate({ pathname: location.pathname, search: `?${search}` });
-  }, [activeProjectSummary?.orgId, location.pathname, location.search, navigate, orgSettingsTitle, setPanelTabMeta]);
+    navigateStudioExplicitly(consumeUrlNavigation, navigate, { pathname: location.pathname, search: `?${search}` });
+  }, [activeProjectSummary?.orgId, consumeUrlNavigation, location.pathname, location.search, navigate, orgSettingsTitle, setPanelTabMeta]);
 
   // ChatPanel's read-only notice cannot open a workspace tab itself —
   // WorkspaceTabsProvider is mounted below the providers that panel runs in — so
@@ -1674,11 +1737,21 @@ function StudioLayoutInner() {
   }, [handleOpenSettingsTab]);
 
   const handleOpenProfileSettings = useCallback(() => {
-    handleOpenSettingsTab("profile", {
+    setPanelTabMeta("settings", {
       title: "Profile settings",
       icon: <User className="text-[16px]" aria-hidden="true" />
     });
-  }, [handleOpenSettingsTab]);
+    const params = new URLSearchParams(location.search);
+    params.set("panel", "settings");
+    params.set("settingsTab", "profile");
+    params.set("teamId", navigationScope.orgKey);
+    params.delete("settingsOrgId");
+    params.delete("settingsCategory");
+    params.delete("workspaceTab");
+    setLeftDrawer(null);
+    setMobileSidebarOpen(false);
+    navigateStudioExplicitly(consumeUrlNavigation, navigate, { pathname: location.pathname, search: `?${params}` });
+  }, [consumeUrlNavigation, location.pathname, location.search, navigate, navigationScope.orgKey, setLeftDrawer, setMobileSidebarOpen, setPanelTabMeta]);
 
   const handleNewProject = (preferredOrgId?: string | null) => {
     setProjectLauncherPreferredOrgId(preferredOrgId ?? null);
@@ -1984,7 +2057,7 @@ function StudioLayoutInner() {
           {activeWorkspaceTab.panel === "home" ? (
             <HomePanel inboxItems={homeAttentionInboxItems} refreshInbox={refreshHomeAttentionCount} />
           ) : activeWorkspaceTab.panel === "team" ? (
-            <TeamPanel />
+            <TeamPanel organizationId={navigationScope.orgKey === "personal" ? null : navigationScope.orgKey} />
           ) : activeWorkspaceTab.panel === "credits" ? (
             <CreditsPanel />
           ) : activeWorkspaceTab.panel === "extensions" ? (
@@ -2105,7 +2178,12 @@ function StudioLayoutInner() {
             hasLogs: hasBuildLogs,
             buildLogs,
             sidebarCollapsed,
-            sidebarOpen: isLargeScreen ? !sidebarCollapsed : mobileSidebarOpen,
+            sidebarOpen: isLargeScreen ? !sidebarCollapsed && navigationScope.page !== "home" && navigationScope.page !== "account" : mobileSidebarOpen,
+            navigationPage: navigationScope.page,
+            activeTeamName,
+            onOpenHome: handleOpenHome,
+            onOpenTeamSwitcher: () => handleWorkspaceSwitcherOpenChange(true),
+            onNavigateBack: handleNavigateBack,
             onToggleSidebar: handleToggleSidebar,
             onOpenChatNavigation: handleOpenChatNavigation,
             onStartNewProject: handleNewProject,
@@ -2134,7 +2212,13 @@ function StudioLayoutInner() {
                 moreItems={sidebarMoreItems}
                 activePanel={sidebarActivePanel}
                 pinnedPanel={null}
-                onSelect={handlePanelSelect}
+                onSelect={handleNavigationPanelSelect}
+                selectedOrgKey={navigationScope.orgKey}
+                onOpenTeam={handleOpenTeam}
+                onReturnToTeam={handleReturnToTeam}
+                onActivateProject={handleActivateProject}
+                onActiveTeamChange={handleActiveTeamChange}
+                hideContext={navigationScope.page === "account"}
                 onOpenConversationHistory={handleOpenConversationHistory}
                 recentConversations={recentConversations}
                 activeConversationId={visibleChatId}
@@ -2252,13 +2336,14 @@ function StudioLayoutInner() {
             <StudioMobileSidebarOverlay onClose={() => handleMobileSidebarOpenChange(false)}>
               <StudioSidebar
                 mobileOverlay
+                hideContext={navigationScope.page === "account"}
                 items={sidebarItems}
                 moreItems={sidebarMoreItems}
                 activePanel={sidebarActivePanel}
                 pinnedPanel={null}
                 onRequestClose={() => handleMobileSidebarOpenChange(false)}
                 onSelect={(panel) => {
-                  handlePanelSelect(panel);
+                  handleNavigationPanelSelect(panel);
                   setMobileSidebarOpen(false);
                 }}
                 onOpenConversationHistory={() => {
@@ -2266,6 +2351,11 @@ function StudioLayoutInner() {
                   setMobileSidebarOpen(false);
                 }}
                 isConversationHistoryActive={isConversationHistoryActive}
+                selectedOrgKey={navigationScope.orgKey}
+                onOpenTeam={handleOpenTeam}
+                onReturnToTeam={handleReturnToTeam}
+                onActivateProject={handleActivateProject}
+                onActiveTeamChange={handleActiveTeamChange}
                 workspaceSwitcherOpen={leftDrawer === "workspaces"}
                 onWorkspaceSwitcherOpenChange={handleWorkspaceSwitcherOpenChange}
                 workspaceSwitcherPortalTarget={workspaceSwitcherPortalTarget}

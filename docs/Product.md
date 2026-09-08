@@ -71,10 +71,21 @@ and interactive file references retain their behavior. Explicit fenced code bloc
 their source whitespace and scroll horizontally when needed.
 
 ## Header
-The Studio header is owner-first: `Team/Personal > Space`, followed by runtime status and the user menu.
+On wide screens, a slim global rail selects Home or a team. The adjacent sidebar
+navigates that team and its selected space. Both remain visible inside a project;
+the space navigation can be collapsed while the global rail stays available.
+The workspace header provides the control to reopen it. New users start with the
+context sidebar expanded; existing saved collapse preferences are preserved.
 
-In wide desktop browsers, **Get desktop app** sits above the sidebar profile and becomes
-an icon with a tooltip when the sidebar is collapsed. Compact desktop browser windows keep
+On narrow Home, team and account pages, the header keeps Home immediately left of
+the team selector, with the profile action at the right. Home is selected without
+removing access to the last team. Inside a working area, Back and the current
+space replace those global controls; the space title opens navigation, and the
+tab menu keeps other work reachable. Team selection and space navigation share
+the existing navigation drawer rather than stacking modal drawers.
+
+In wide desktop browsers, **Get desktop app** sits above the rail profile as
+an icon with a tooltip. Compact desktop browser windows keep
 the action in the profile menu. It appears only when a verified desktop release is available.
 Mobile browsers show **Get the app · Soon** in the profile menu, linking to the mobile
 availability section; iOS and Android downloads are marked coming soon. Native apps hide
@@ -82,9 +93,25 @@ these acquisition actions and retain their existing update controls.
 
 ## Team experience
 
-The expanded sidebar names the team first, followed by Home and Team. The space selector
-then groups Chats, Automations, Files and Changes. Less frequent tools, personal AI connections
-and Credits remain available through More; Team settings has its own entry.
+The global rail keeps Home fixed above a scrollable team list, with New team,
+Browse teams and the account controls below it. Browse teams shows the signed-in
+account's accessible teams and spaces; it is not a public team directory.
+Invitation links continue to use the existing invitation acceptance flow.
+
+The context sidebar names the selected team and opens its overview from that
+heading. Team overview and Team settings precede the space selector, which groups
+Chats, Automations, Files and Changes. Less frequent tools, personal AI connections
+and Credits remain available through More. The desktop space picker shows only
+the selected team's spaces; Browse teams retains the full team-and-space picker.
+Home and account pages hide the team-specific desktop sidebar.
+
+An empty team's overview and settings can be selected independently of the
+current project. They do not display the previous team's space tools or activity.
+An unavailable team does not silently fall back to a different team. Personal
+spaces have their own overview. Team/Home context is represented by `teamId` in
+the URL, while workspace tools remain scoped to the active project's team.
+Returning from Home restores the team's last visited work in the current window;
+browser Back retains its normal chronological history.
 
 **Team** connects the selected team's people, accessible spaces and recent work. Agent profiles
 appear only when observed in activity visible to the signed-in account. This is a recent activity
@@ -112,13 +139,14 @@ alphabetical order. Accessible spaces are cached for the signed-in user during t
 so changing teams can use the existing list immediately. Authentication, access changes and
 returning to the app refresh discovery in the background. First-time discovery still needs the
 controller. Failed discovery preserves the saved list, retries three times with backoff, and
-offers Retry. The current-team indicator changes only when the destination space becomes active.
+offers Retry. The current-team indicator changes when the destination space becomes active
+or the selected empty team's overview opens.
 Space discovery, organization lists, access summaries and conversation lists have a 10-second
 deadline covering authentication and response reads; navigation cancels superseded reads.
 Failed conversation-list reads show an error and Retry after the first failed attempt while
 automatic recovery continues. Cached chats stay visible during refresh failures.
 
-On desktop and wide browser layouts, **Team & spaces** opens in the same resizable side
+On desktop and wide browser layouts, **Browse teams** and the space picker open in the same resizable side
 panel as **All chats**, Files and Changes. These panels share one slot, so opening one
 replaces the other while the current conversation stays visible. Team and space selection
 keeps its existing grouped list; choosing a space closes the picker. The close control or

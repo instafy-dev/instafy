@@ -15,14 +15,14 @@ const LEFT_DRAWER_DEFAULT_WIDTH = 352;
 
 export function readStoredSidebarCollapsed(): boolean {
   if (typeof window === "undefined") {
-    return true;
+    return false;
   }
   try {
     const stored = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_NAME);
-    // Collapsed stays the default for anyone who never chose.
-    return stored === null ? true : stored === "1";
+    // Show team/space navigation on a first wide-screen visit. A saved choice wins.
+    return stored === null ? false : stored === "1";
   } catch {
-    return true;
+    return false;
   }
 }
 

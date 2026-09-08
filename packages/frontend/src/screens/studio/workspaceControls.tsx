@@ -27,6 +27,11 @@ export interface WorkspaceControlsContextValue {
   onStartPrivateConversation?: (target: PrivateChatTarget) => void;
   showChatActions?: boolean;
   onOpenProjectPicker?: () => void;
+  navigationPage?: "home" | "team" | "account" | "workspace";
+  activeTeamName?: string;
+  onOpenHome?: () => void;
+  onOpenTeamSwitcher?: () => void;
+  onNavigateBack?: () => void;
   onOpenOrgSettings?: (organizationId?: string | null, category?: "profile" | "members") => void;
   onOpenProjectSettings?: () => void;
   onOpenProfileSettings?: () => void;

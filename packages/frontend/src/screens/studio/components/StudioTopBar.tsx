@@ -13,7 +13,10 @@ import {
 import { Button, IconButton } from "../../../components/Button";
 import { Badge } from "../../../components/Badge";
 import { Text } from "../../../components/Text";
+import { HomeIcon } from "../../../components/AppIcons";
+import { ControlChevron } from "../../../components/ControlChevron";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
+import { useProfile } from "../../../profile/ProfileProvider";
 import { useProject } from "../../../projects/useProject";
 import { useProjects } from "../../../projects/useProjects";
 import { useRuntime } from "../../../runtime/useRuntime";
@@ -52,12 +55,21 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
     onStartNewConversation,
     showChatActions = false,
     onToggleSidebar,
+    sidebarCollapsed,
     sidebarOpen,
     onOpenProjectSettings,
+    onOpenProfileSettings,
+    onOpenHome,
+    onOpenTeamSwitcher,
+    onNavigateBack,
+    navigationPage = "workspace",
+    activeTeamName,
+    userEmail,
     topbarLocationOverride,
   } = useWorkspaceControls();
   const { activeProjectId } = useProjects();
   const { projectAccessBlocked } = useProject();
+  const { profile } = useProfile();
 
   const [tabMenuOpen, setTabMenuOpen] = useState(false);
   const [desktopVoiceHostStatus, setDesktopVoiceHostStatus] = useState<DesktopVoiceHostBridgeStatus | null>(null);
@@ -70,6 +82,7 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
   const controllerProjectMissing = runtime.controllerProjectMissing || projectAccessBlocked;
   const shouldShowNewChat = showChatActions && Boolean(onStartNewConversation);
   const { isLargeScreen } = useStudioNavigationPosture();
+  const isGlobalPage = navigationPage !== "workspace";
 
   const activeWorkspaceTab = useMemo(() => {
     if (!activeTabId) {
@@ -90,9 +103,6 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
     }
     return conversations.find((conversation) => conversation.controllerId === parentId || conversation.localId === parentId) ?? null;
   }, [activeConversation?.parentConversationId, conversations]);
-  const topbarLocationIcon = topbarLocationOverride?.icon ?? activeWorkspaceTab?.icon ?? (
-    <Cube className="text-[16px]" aria-hidden="true" />
-  );
   const topbarLocationTitle = topbarLocationOverride?.title ?? activeWorkspaceTab?.title ?? "Space";
   const handleOpenParentConversation = useCallback(() => {
     if (!parentConversation) {
@@ -253,6 +263,9 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
   const titleBarFree = useDesktopTabChrome && desktopTitleBarFree();
   const hasDesktopTabs = useDesktopTabChrome && workspaceTabs.length > 0;
   const resolvedProjectName = activeProjectName || "Untitled Space";
+  const resolvedTeamName = activeTeamName?.trim() || "Team & spaces";
+  const profileInitials = (profile?.fullName?.trim() || userEmail?.trim() || "Account")
+    .split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
   const projectNameText = (
     <Text as="span" variant="bodyStrong" tone="primary" className="truncate">
       {resolvedProjectName}
@@ -320,10 +333,39 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
       <NavArrowLeft className="h-5 w-5" aria-hidden="true" />
     </IconButton>
   ) : null;
+  const desktopSidebarButton = onToggleSidebar && navigationPage !== "home" && navigationPage !== "account" ? (
+    <IconButton
+      onPress={onToggleSidebar}
+      variant="ghost"
+      radius="none"
+      size="sm"
+      aria-label={sidebarCollapsed ? "Expand space navigation" : "Collapse space navigation"}
+      aria-expanded={!sidebarCollapsed}
+      data-testid="topbar-sidebar-toggle"
+      className={desktopTabActionButtonClassName}
+    >
+      {sidebarCollapsed ? <SidebarExpand className="h-5 w-5" aria-hidden="true" />
+        : <SidebarCollapse className="h-5 w-5" aria-hidden="true" />}
+    </IconButton>
+  ) : null;
+  const mobileBackButton = parentConversationButton ?? (
+    <IconButton
+      onPress={onNavigateBack}
+      isDisabled={!onNavigateBack}
+      variant="ghost"
+      radius="full"
+      size="md"
+      aria-label="Back"
+      data-testid="topbar-back-button"
+      className={`h-10 w-10 shrink-0 text-slate-600 max-[375px]:h-11 max-[375px]:w-11 dark:text-slate-200 ${DARK_RAIL_HOVER_CLASS}`}
+    >
+      <NavArrowLeft className="h-5 w-5" aria-hidden="true" />
+    </IconButton>
+  );
 
   return (
       <header
-        aria-label={`${resolvedProjectName} workspace navigation`}
+        aria-label={isGlobalPage ? "Team navigation" : `${resolvedProjectName} workspace navigation`}
         className={[
           "sticky top-0 z-40",
           // On a shell that has vacated the title bar the tab strip IS the
@@ -369,7 +411,7 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
       </Text>
       {useDesktopTabChrome ? (
         <WorkspaceTabs
-          leading={desktopParentConversationButton}
+          leading={<>{desktopSidebarButton}{desktopParentConversationButton}</>}
           className="bg-transparent pr-0 pt-0 dark:bg-transparent"
           emptyStateContent={!hasDesktopTabs ? desktopEmptyStateTab : undefined}
           tabStripActions={
@@ -407,123 +449,102 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
           }
         />
       ) : isLargeScreen ? (
-        <div className="flex flex-wrap items-center gap-2 px-4 py-2 sm:flex-nowrap sm:px-5">
-          <div className="flex min-w-0 flex-none items-center gap-2">
-            {!isLargeScreen && onToggleSidebar ? (
-              <IconButton
-                onPress={onToggleSidebar}
-                variant="ghost"
-                radius="full"
-                size="md"
-                aria-label="Toggle sidebar"
-                aria-expanded={sidebarOpen ?? false}
-                data-testid="topbar-sidebar-toggle"
-                className="h-10 w-10"
-              >
-                {sidebarOpen ? (
-                  <SidebarCollapse className="h-5 w-5" aria-hidden="true" />
-                ) : (
-                  <SidebarExpand className="h-5 w-5" aria-hidden="true" />
-                )}
-              </IconButton>
-            ) : null}
-            {parentConversationButton}
-            {isLargeScreen ? projectNameLabel : null}
-          </div>
-
-          <div className="flex min-w-0 flex-1 flex-wrap items-center justify-end gap-2 sm:flex-nowrap">
-            {!isLargeScreen && workspaceTabs.length > 0 && !controllerProjectMissing ? (
-              <DialogTrigger
-                isOpen={tabMenuOpen}
-                onOpenChange={(open) => setTabMenuOpen((current) => (open && current ? false : open))}
-              >
-                <Button
-                  variant="ghost"
-                  size="xs"
-                  radius="full"
-                  data-testid="topbar-tab-selector"
-                  className={`${COMPACT_TAB_SELECTOR_CLASS} flex-1 sm:max-w-[min(11rem,55vw)]`}
-                  aria-haspopup="dialog"
-                  aria-label="Open tab switcher"
-                >
-                  <span className="flex min-w-0 items-center gap-2">
-                    <span aria-hidden="true" className="shrink-0">
-                      {topbarLocationIcon}
-                    </span>
-                    <span className="truncate text-xs font-semibold">
-                      {topbarLocationTitle}
-                    </span>
-                  </span>
-                </Button>
-                {tabsMenu}
-              </DialogTrigger>
-            ) : null}
-
-            {shouldShowNewChat ? (
-              <StudioNewChatButton />
-            ) : null}
+        <div className="flex items-center gap-2 px-4 py-2 sm:px-5">
+          {desktopSidebarButton}
+          {parentConversationButton}
+          <div className="min-w-0 flex-1">{projectNameLabel}</div>
+          {shouldShowNewChat ? <StudioNewChatButton /> : null}
+          {notificationBell}
+        </div>
+      ) : isGlobalPage ? (
+        <div className="flex items-center gap-2 px-4 py-2 max-[375px]:gap-1 max-[375px]:px-3" data-testid="topbar-global-navigation">
+          <IconButton
+            onPress={onOpenHome}
+            isDisabled={!onOpenHome}
+            variant="ghost"
+            radius="full"
+            size="md"
+            aria-label="Home"
+            aria-current={navigationPage === "home" ? "page" : undefined}
+            data-testid="topbar-home-button"
+            className={`h-10 w-10 shrink-0 text-slate-600 dark:text-slate-200 ${DARK_RAIL_HOVER_CLASS} aria-[current=page]:bg-primary-50 aria-[current=page]:text-primary-600 dark:aria-[current=page]:bg-primary-500/15 dark:aria-[current=page]:text-primary-400`}
+          >
+            <HomeIcon className="h-5 w-5" aria-hidden="true" />
+          </IconButton>
+          <Button
+            onPress={onOpenTeamSwitcher ?? onToggleSidebar}
+            isDisabled={!onOpenTeamSwitcher && !onToggleSidebar}
+            variant="ghost"
+            size="sm"
+            radius="xl"
+            aria-label={`Choose team: ${resolvedTeamName}`}
+            aria-expanded={sidebarOpen ?? false}
+            data-testid="topbar-team-selector"
+            className={`${COMPACT_TAB_SELECTOR_CLASS} flex-1 text-left`}
+          >
+            <span className="min-w-0 flex-1 truncate text-sm font-semibold">{resolvedTeamName}</span>
+            <ControlChevron direction="down" />
+          </Button>
+          <div className="flex shrink-0 items-center gap-1">
             {notificationBell}
+            <IconButton
+              onPress={onOpenProfileSettings}
+              isDisabled={!onOpenProfileSettings}
+              variant="ghost"
+              radius="full"
+              size="md"
+              aria-label="Open profile settings"
+              aria-current={navigationPage === "account" ? "page" : undefined}
+              data-testid="topbar-profile-button"
+              className="h-10 w-10 shrink-0 p-1"
+            >
+              <span className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full bg-slate-200 text-xs font-semibold text-slate-700 dark:bg-white/10 dark:text-slate-200" aria-hidden="true">
+                {profile?.avatarUrl ? <img src={profile.avatarUrl} alt="" className="h-full w-full object-cover" /> : profileInitials}
+              </span>
+            </IconButton>
           </div>
         </div>
       ) : (
-        <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-4 py-2 max-[375px]:px-3 max-[375px]:py-1">
-          <div className="flex min-w-0 items-center gap-2">
-            {/* Keep navigation reachable while the chat composer hides during scrolling. */}
-            {onToggleSidebar ? (
-              <IconButton
-                onPress={onToggleSidebar}
-                variant="ghost"
-                radius="full"
-                size="md"
-                aria-label="Toggle sidebar"
-                aria-expanded={sidebarOpen ?? false}
-                data-testid="topbar-sidebar-toggle"
-                className="h-10 w-10"
-              >
-                {sidebarOpen ? (
-                  <SidebarCollapse className="h-5 w-5" aria-hidden="true" />
-                ) : (
-                  <SidebarExpand className="h-5 w-5" aria-hidden="true" />
-                )}
-              </IconButton>
-            ) : null}
-            {parentConversationButton}
-          </div>
-
-          <div className="flex min-w-0 flex-1 justify-start">
+        <div className="flex min-w-0 items-center gap-1 px-3 py-2 max-[375px]:px-2" data-testid="topbar-workspace-navigation">
+          {mobileBackButton}
+          <Button
+            onPress={onToggleSidebar ?? onOpenTeamSwitcher}
+            isDisabled={!onToggleSidebar && !onOpenTeamSwitcher}
+            variant="ghost"
+            size="sm"
+            radius="xl"
+            aria-label={`Open space navigation: ${resolvedProjectName}`}
+            aria-expanded={sidebarOpen ?? false}
+            data-testid="topbar-sidebar-toggle"
+            className={`${COMPACT_TAB_SELECTOR_CLASS} flex-1 text-left`}
+          >
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-2xs font-normal text-slate-500 dark:text-slate-400">{resolvedProjectName}</span>
+              <span className="block truncate text-xs font-semibold">{topbarLocationTitle}</span>
+            </span>
+            <ControlChevron direction="down" />
+          </Button>
+          <div className="flex shrink-0 items-center">
             {workspaceTabs.length > 0 && !controllerProjectMissing ? (
               <DialogTrigger
                 isOpen={tabMenuOpen}
                 onOpenChange={(open) => setTabMenuOpen((current) => (open && current ? false : open))}
               >
-                <Button
+                <IconButton
                   variant="ghost"
-                  size="xs"
+                  size="md"
                   radius="full"
                   data-testid="topbar-tab-selector"
-                  className={`${COMPACT_TAB_SELECTOR_CLASS} max-w-full text-left`}
-                  aria-haspopup="dialog"
-                  aria-label="Open tab switcher"
+                  className="h-10 w-10"
+                  aria-label="Browse tabs"
                 >
-                  <span className="flex min-w-0 items-center gap-2">
-                    <span aria-hidden="true" className="shrink-0">
-                      {topbarLocationIcon}
-                    </span>
-                    <span className="truncate text-xs font-semibold">
-                      {topbarLocationTitle}
-                    </span>
-                  </span>
-                </Button>
+                  <MoreHoriz className="h-5 w-5" aria-hidden="true" />
+                </IconButton>
                 {tabsMenu}
               </DialogTrigger>
             ) : null}
-          </div>
-
-          <div className="flex items-center justify-end">
+            {shouldShowNewChat ? <StudioNewChatButton /> : null}
             {notificationBell}
-            {shouldShowNewChat ? (
-              <StudioNewChatButton />
-            ) : null}
           </div>
         </div>
       )}

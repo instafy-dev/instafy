@@ -10,6 +10,7 @@ import { AutomationsPanel } from "../studio/components/AutomationsPanel";
 import { useStudioLayoutWorkspaceRouting } from "../useStudioLayoutWorkspaceRouting";
 import { buildOrganizationSettingsCategorySearch } from "../studio/settingsRoute";
 import { useSettingsOrganization } from "../studio/components/useSettingsOrganization";
+import { buildTeamNavigationSearch, navigateStudioExplicitly, resolveTeamNavigationScope } from "../studio/teamNavigation";
 import type { StudioPanel } from "../studio/types";
 import type { LeftDrawerPanel } from "../useStudioLayoutChromeState";
 
@@ -117,12 +118,34 @@ function RoutedWorkspace() {
     enabled: true, userId: "test-user", projectOrganizationId: fixture.projectTeamId,
     organizationId: route.settingsOrgId, selectOrganization: tab?.kind === "panel" && tab.panel === "settings",
   });
+  const navigationScope = resolveTeamNavigationScope(location.search, fixture.projectTeamId);
   return <>
+    <button data-testid="open-empty-team-overview" onClick={() => {
+      void navigateStudioExplicitly(tabs.consumeUrlNavigation, navigate, { pathname: location.pathname, search: buildTeamNavigationSearch(location.search, fixture.emptyTeamId, "team") });
+    }}>Open empty team</button>
+    <button data-testid="open-home" onClick={() => {
+      void navigateStudioExplicitly(tabs.consumeUrlNavigation, navigate, { pathname: location.pathname, search: buildTeamNavigationSearch(location.search, navigationScope.orgKey, "home") });
+    }}>Home</button>
+    <button data-testid="open-workspace-automations" onClick={() => route.handlePanelSelect("automations")}>Open workspace automations</button>
+    <button data-testid="navigate-back" onClick={() => {
+      void navigateStudioExplicitly(tabs.consumeUrlNavigation, navigate, -1);
+    }}>Back</button>
+    <button data-testid="activate-retained-workspace" onClick={() => {
+      // Closing the real team/space drawer requests a tab URL push before
+      // StudioLayout navigates to the selected space's remembered URL.
+      tabs.requestUrlNavigation("push");
+      setLeftDrawer(null);
+      void navigateStudioExplicitly(tabs.consumeUrlNavigation, navigate, { pathname: location.pathname, search: `?projectId=${fixture.projectId}` });
+    }}>Activate retained workspace</button>
     <button data-testid="open-empty-team-profile" onClick={() => {
       const search = buildOrganizationSettingsCategorySearch(location.search, "profile", fixture.emptyTeamId);
-      void navigate({ pathname: location.pathname, search: `?${search}` });
+      void navigateStudioExplicitly(tabs.consumeUrlNavigation, navigate, { pathname: location.pathname, search: `?${search}` });
     }}>Open empty team profile</button>
     <output data-testid="selected-workspace-tab">{tab?.kind}:{tab?.id}</output>
+    <output data-testid="active-panel">{data.workspace.activePanel}</output>
+    <output data-testid="navigation-scope" data-page={navigationScope.page}>{navigationScope.orgKey}</output>
+    {tab?.kind === "panel" && tab.panel === "team" ? <main data-testid="visible-team-overview">{navigationScope.orgKey}</main> : null}
+    {tab?.kind === "panel" && tab.panel === "home" ? <main data-testid="visible-home">{navigationScope.orgKey}</main> : null}
     {tab?.kind === "panel" && tab.panel === "automations" ? <AutomationsPanel /> : null}
     {tab?.kind === "conversation" ? <main data-testid="visible-chat" data-conversation-id={tab.conversationId}>
       {data.conversations.conversations.find((item) => item.localId === tab.conversationId)?.title}
@@ -134,7 +157,7 @@ function RoutedWorkspace() {
       <button data-testid="select-empty-team" onClick={() => {
         organization.select(fixture.emptyTeamId);
         const search = buildOrganizationSettingsCategorySearch(location.search, "profile", fixture.emptyTeamId);
-        void navigate({ pathname: location.pathname, search: `?${search}` });
+        void navigateStudioExplicitly(tabs.consumeUrlNavigation, navigate, { pathname: location.pathname, search: `?${search}` });
       }}>Select empty team</button>
     </> : null}
   </>;
@@ -176,6 +199,12 @@ describe("automation workspace navigation", () => {
       await popped;
     });
     await settle();
+  }
+  function expectRoute(panel: StudioPanel, scope: string, expectedParams: Record<string, string>) {
+    expect(Object.fromEntries(new URLSearchParams(window.location.search))).toEqual(expectedParams);
+    expect(container.querySelector('[data-testid="active-panel"]')?.textContent).toBe(panel);
+    expect(container.querySelector('[data-testid="selected-workspace-tab"]')?.textContent).toBe(`panel:workspace-tab-${panel}`);
+    expect(container.querySelector('[data-testid="navigation-scope"]')?.textContent).toBe(scope);
   }
   it("opens View thread as a visible selected chat and Back restores Automations", async () => {
     await render();
@@ -226,5 +255,85 @@ describe("automation workspace navigation", () => {
     expect(new URLSearchParams(window.location.search).get("settingsOrgId")).toBe(fixture.projectTeamId);
     expect(container.querySelector('[data-testid="visible-team-settings"]')?.textContent).toBe(fixture.projectTeamId);
     expect(container.querySelector('[data-testid="visible-team-settings"]')?.getAttribute("data-role")).toBe("builder");
+  });
+
+  it("keeps an empty team's scope on Home and restores Team then workspace through browser Back", async () => {
+    await render();
+    const workParams = { projectId: fixture.projectId, panel: "automations" };
+    expectRoute("automations", fixture.projectTeamId, workParams);
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="open-empty-team-overview"]')!.click());
+    await settle();
+    const teamParams = { ...workParams, panel: "team", teamId: fixture.emptyTeamId };
+    expectRoute("team", fixture.emptyTeamId, teamParams);
+    expect(container.querySelector('[data-testid="visible-team-overview"]')?.textContent).toBe(fixture.emptyTeamId);
+    expect(container.querySelector('[data-testid="automations-panel"]')).toBeNull();
+
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="open-home"]')!.click());
+    await settle();
+    expectRoute("home", fixture.emptyTeamId, { ...teamParams, panel: "home" });
+    expect(container.querySelector('[data-testid="visible-home"]')?.textContent).toBe(fixture.emptyTeamId);
+    expect(container.querySelector('[data-testid="visible-team-overview"]')).toBeNull();
+
+    await back();
+    expectRoute("team", fixture.emptyTeamId, teamParams);
+    expect(container.querySelector('[data-testid="visible-team-overview"]')).not.toBeNull();
+    await back();
+    expectRoute("automations", fixture.projectTeamId, workParams);
+    expect(container.querySelector('[data-testid="automations-panel"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="visible-home"]')).toBeNull();
+    expect(container.querySelector('[data-testid="visible-team-overview"]')).toBeNull();
+  });
+
+  it("hydrates a direct empty-team overview without replacing its retained workspace project", async () => {
+    window.history.replaceState(null, "", `/studio?projectId=${fixture.projectId}&panel=team&teamId=${fixture.emptyTeamId}`);
+    await render();
+    expectRoute("team", fixture.emptyTeamId, {
+      projectId: fixture.projectId, panel: "team", teamId: fixture.emptyTeamId,
+    });
+    expect(container.querySelector('[data-testid="visible-team-overview"]')?.textContent).toBe(fixture.emptyTeamId);
+  });
+
+  it("uses settingsOrgId for team settings and restores the Home team before workspace navigation removes teamId", async () => {
+    window.history.replaceState(null, "", `/studio?projectId=${fixture.projectId}&panel=home&teamId=${fixture.projectTeamId}`);
+    await render();
+    const homeParams = { projectId: fixture.projectId, panel: "home", teamId: fixture.projectTeamId };
+    expectRoute("home", fixture.projectTeamId, homeParams);
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="open-empty-team-profile"]')!.click());
+    await settle();
+    expectRoute("settings", fixture.emptyTeamId, {
+      projectId: fixture.projectId, panel: "settings", teamId: fixture.projectTeamId, settingsTab: "org", settingsOrgId: fixture.emptyTeamId,
+    });
+    expect(container.querySelector('[data-testid="visible-team-settings"]')?.getAttribute("data-role")).toBe("owner");
+    await back();
+    expectRoute("home", fixture.projectTeamId, homeParams);
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="open-workspace-automations"]')!.click());
+    await settle();
+    expectRoute("automations", fixture.projectTeamId, {
+      projectId: fixture.projectId, panel: "automations", conversationId: "previous-chat",
+    });
+    expect(container.querySelector('[data-testid="navigation-scope"]')?.getAttribute("data-page")).toBe("workspace");
+    await back();
+    expectRoute("home", fixture.projectTeamId, homeParams);
+  });
+
+  it("honors an explicit workspace target after the team drawer queued a URL push on Home", async () => {
+    window.history.replaceState(null, "", `/studio?projectId=${fixture.projectId}&panel=home&teamId=${fixture.projectTeamId}&workspaceTab=workspaces`);
+    await render();
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="activate-retained-workspace"]')!.click());
+    await settle();
+    expect(Object.fromEntries(new URLSearchParams(window.location.search))).toEqual({
+      projectId: fixture.projectId,
+    });
+    expect(container.querySelector('[data-testid="active-panel"]')?.textContent).toBe("chat");
+    expect(container.querySelector('[data-testid="visible-chat"]')?.getAttribute("data-conversation-id")).toBe("previous-chat");
+    await act(async () => {
+      const popped = new Promise<void>((resolve) => window.addEventListener("popstate", () => resolve(), { once: true }));
+      container.querySelector<HTMLButtonElement>('[data-testid="navigate-back"]')!.click();
+      await popped;
+    });
+    await settle();
+    expectRoute("home", fixture.projectTeamId, {
+      projectId: fixture.projectId, panel: "home", teamId: fixture.projectTeamId, workspaceTab: "workspaces",
+    });
   });
 });

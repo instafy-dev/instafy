@@ -68,7 +68,7 @@ describe("StudioSidebarWorkspacePanel", () => {
     await render();
     const panel = portalTarget.querySelector('[data-testid="sidebar-project-switcher-menu"]');
     expect(panel?.getAttribute("role")).toBe("region");
-    expect(panel?.textContent).toContain("Team & spaces");
+    expect(panel?.textContent).toContain("Browse teams");
     expect(container.querySelector('[data-testid="space"]')).toBeNull();
     expect(portalTarget.querySelector('[data-testid="space"]')).not.toBeNull();
     expect(document.activeElement).toBe(panel);

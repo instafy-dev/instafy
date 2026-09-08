@@ -4,6 +4,7 @@ import { Xmark } from "iconoir-react";
 import { IconButton } from "../../components/Button";
 import { DrawerHeader } from "../../components/DrawerHeader";
 import { lazyStudioPanel } from "../../workspace/lazyStudioPanel";
+import type { TeamPanelProps } from "./components/TeamPanel";
 
 function PanelFallback({ children, title, onClose, tabs }: {
   children: ReactNode;
@@ -70,7 +71,7 @@ export const AiPanel = lazyStudioPanel(
 export const AutomationsPanel = lazyStudioPanel(
   "Automations", async () => ({ default: (await import("./components/AutomationsPanel")).AutomationsPanel }),
 );
-export const TeamPanel = lazyStudioPanel(
+export const TeamPanel = lazyStudioPanel<TeamPanelProps>(
   "Team", async () => ({ default: (await import("./components/TeamPanel")).TeamPanel }),
 );
 export const MachinesPanel = lazyStudioPanel(

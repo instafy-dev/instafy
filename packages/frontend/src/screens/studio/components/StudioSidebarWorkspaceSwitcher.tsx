@@ -49,6 +49,7 @@ export type SidebarWorkspaceOrgOption = {
 };
 
 type StudioSidebarWorkspaceSwitcherProps = {
+  mode?: "teams-and-spaces" | "spaces";
   orgOptions: SidebarWorkspaceOrgOption[];
   workspaceOrgKey: string;
   activeOrgKey?: string;
@@ -82,6 +83,7 @@ type StudioSidebarWorkspaceSwitcherProps = {
  * list with the active space as its first, selected row.
  */
 export function StudioSidebarWorkspaceSwitcher({
+  mode = "teams-and-spaces",
   orgOptions,
   workspaceOrgKey,
   activeOrgKey = workspaceOrgKey,
@@ -246,7 +248,7 @@ export function StudioSidebarWorkspaceSwitcher({
 
   return (
     <>
-      <SidebarMenuSection
+      {mode === "teams-and-spaces" ? <SidebarMenuSection
         label="Team"
         headerClassName="pr-0"
         actions={
@@ -284,7 +286,7 @@ export function StudioSidebarWorkspaceSwitcher({
         <div className="mt-2 space-y-1" data-testid="sidebar-org-selector">
           {orgOptions.map(renderTeamRow)}
         </div>
-      </SidebarMenuSection>
+      </SidebarMenuSection> : null}
 
       {projectsError ? (
         <div className="mx-3.5 mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-600 dark:text-slate-300"

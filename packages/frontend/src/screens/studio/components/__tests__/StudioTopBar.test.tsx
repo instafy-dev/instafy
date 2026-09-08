@@ -10,6 +10,20 @@ const mocks = vi.hoisted(() => ({
   toggleSidebar: vi.fn(),
   keepTabOpen: vi.fn(),
   startNewConversation: vi.fn(),
+  openHome: vi.fn(),
+  openTeamSwitcher: vi.fn(),
+  navigateBack: vi.fn(),
+  openProfileSettings: vi.fn(),
+  openConversationTab: vi.fn(),
+  requestUrlPush: vi.fn(),
+  focusTab: vi.fn(),
+  closeTab: vi.fn(),
+  navigationPage: "workspace" as "home" | "team" | "account" | "workspace",
+  activeTeamName: "My team",
+  sidebarCollapsed: false,
+  titleBarFree: false,
+  profile: { fullName: "Alex Morgan", avatarUrl: null as string | null },
+  conversations: [{ localId: "conversation-1", title: "Draft chat" }] as { localId: string; title: string; controllerId?: string; parentConversationId?: string }[],
   isLargeScreen: false,
   showChatActions: false,
   hasTabs: true,
@@ -22,10 +36,20 @@ vi.mock("../../workspaceControls", () => ({
     activeProjectName: "My space",
     onToggleSidebar: mocks.toggleSidebar,
     sidebarOpen: false,
+    sidebarCollapsed: mocks.sidebarCollapsed,
     onStartNewConversation: mocks.startNewConversation,
     showChatActions: mocks.showChatActions,
+    navigationPage: mocks.navigationPage,
+    activeTeamName: mocks.activeTeamName,
+    onOpenHome: mocks.openHome,
+    onOpenTeamSwitcher: mocks.openTeamSwitcher,
+    onNavigateBack: mocks.navigateBack,
+    onOpenProfileSettings: mocks.openProfileSettings,
+    userEmail: "alex@example.test",
   }),
 }));
+vi.mock("../../../../profile/ProfileProvider", () => ({ useProfile: () => ({ profile: mocks.profile }) }));
+vi.mock("../../../../lib/desktopShell", () => ({ desktopTitleBarFree: () => mocks.titleBarFree }));
 vi.mock("../../useStudioNavigationPosture", () => ({
   useStudioNavigationPosture: () => ({ isLargeScreen: mocks.isLargeScreen, showComposerNavigationButton: !mocks.isLargeScreen }),
 }));
@@ -36,15 +60,15 @@ vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
   useWorkspaceTabs: () => ({
     tabs: mocks.hasTabs ? [mocks.tab] : [],
     activeTabId: mocks.hasTabs ? mocks.tab.id : null,
-    focusTab: vi.fn(),
-    closeTab: vi.fn(),
+    focusTab: mocks.focusTab,
+    closeTab: mocks.closeTab,
     keepTabOpen: mocks.keepTabOpen,
-    requestUrlPush: vi.fn(),
-    openConversationTab: vi.fn(),
+    requestUrlPush: mocks.requestUrlPush,
+    openConversationTab: mocks.openConversationTab,
   }),
 }));
 vi.mock("../../../../conversations/ConversationsProvider", () => ({
-  useConversations: () => ({ conversations: [{ localId: "conversation-1", title: "Draft chat" }] }),
+  useConversations: () => ({ conversations: mocks.conversations }),
 }));
 vi.mock("../StudioNewChatButton", () => ({
   StudioNewChatButton: ({ testId }: { testId?: string }) => <button data-testid={testId} aria-label="New chat" />,
@@ -69,6 +93,13 @@ describe("StudioTopBar navigation", () => {
     mocks.hasTabs = true;
     mocks.controllerProjectMissing = false;
     mocks.projectAccessBlocked = false;
+    mocks.navigationPage = "workspace";
+    mocks.sidebarCollapsed = false;
+    mocks.titleBarFree = false;
+    mocks.activeTeamName = "My team";
+    mocks.profile = { fullName: "Alex Morgan", avatarUrl: null };
+    mocks.tab = { id: "conversation-1", kind: "conversation", conversationId: "conversation-1", title: "Draft chat" };
+    mocks.conversations = [{ localId: "conversation-1", title: "Draft chat" }];
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -91,6 +122,8 @@ describe("StudioTopBar navigation", () => {
     await act(async () => root.render(<StudioTopBar />));
     const toggle = container.querySelector<HTMLButtonElement>('[data-testid="topbar-sidebar-toggle"]');
     expect(toggle).not.toBeNull();
+    expect(toggle?.textContent).toBe(`My space${tab.title}`);
+    expect(toggle?.getAttribute("aria-label")).toBe("Open space navigation: My space");
     await act(async () => toggle?.click());
     expect(mocks.toggleSidebar).toHaveBeenCalledTimes(1);
     expect(container.querySelector('[data-testid="topbar-home-button"]')).toBeNull();
@@ -100,8 +133,10 @@ describe("StudioTopBar navigation", () => {
     mocks.tab = { id: "conversation-1", kind: "conversation", conversationId: "conversation-1", title: "Preview chat", preview: true };
     await act(async () => root.render(<StudioTopBar />));
     const trigger = container.querySelector<HTMLButtonElement>('[data-testid="topbar-tab-selector"]');
-    expect(trigger?.textContent).toBe("Preview chat");
-    expect(trigger?.querySelector(".italic")).toBeNull();
+    const navigation = container.querySelector('[data-testid="topbar-sidebar-toggle"]');
+    expect(trigger?.getAttribute("aria-label")).toBe("Browse tabs");
+    expect(navigation?.textContent).toBe("My spacePreview chat");
+    expect(navigation?.querySelector(".italic")).toBeNull();
     await act(async () => trigger?.click());
     const keepOpen = document.querySelector<HTMLButtonElement>('[data-testid="topbar-tab-keep-open-conversation-1"]');
     expect(keepOpen?.getAttribute("aria-label")).toBe("Keep Preview chat open");
@@ -112,6 +147,98 @@ describe("StudioTopBar navigation", () => {
     mocks.tab = { ...mocks.tab, preview: false };
     await act(async () => root.render(<StudioTopBar />));
     expect(document.querySelector('[data-testid="topbar-tab-keep-open-conversation-1"]')).toBeNull();
+  });
+
+  it.each(["home", "team", "account"] as const)("uses Home, the remembered team and profile for mobile %s navigation", async (navigationPage) => {
+    mocks.navigationPage = navigationPage;
+    // Global navigation must not derive the team selector from the current tab.
+    mocks.tab = { id: "home", kind: "panel", panel: "home", title: "Home" };
+    mocks.showChatActions = true;
+    await act(async () => root.render(<StudioTopBar />));
+    const row = container.querySelector('[data-testid="topbar-global-navigation"]');
+    const home = row?.querySelector<HTMLButtonElement>('[data-testid="topbar-home-button"]');
+    const team = row?.querySelector<HTMLButtonElement>('[data-testid="topbar-team-selector"]');
+    const profile = row?.querySelector<HTMLButtonElement>('[data-testid="topbar-profile-button"]');
+    expect(home?.nextElementSibling).toBe(team);
+    expect(home?.getAttribute("aria-current")).toBe(navigationPage === "home" ? "page" : null);
+    expect(team?.textContent).toBe("My team");
+    expect(profile?.getAttribute("aria-current")).toBe(navigationPage === "account" ? "page" : null);
+    expect(profile?.textContent).toBe("AM");
+    expect(container.querySelector('[data-testid="topbar-workspace-navigation"]')).toBeNull();
+    expect(container.querySelector('[aria-label="New chat"]')).toBeNull();
+    await act(async () => { home?.click(); team?.click(); profile?.click(); });
+    expect(mocks.openHome).toHaveBeenCalledOnce();
+    expect(mocks.openTeamSwitcher).toHaveBeenCalledOnce();
+    expect(mocks.openProfileSettings).toHaveBeenCalledOnce();
+    expect(mocks.toggleSidebar).not.toHaveBeenCalled();
+  });
+
+  it("shows the profile avatar in global navigation with a labeled button", async () => {
+    mocks.navigationPage = "account";
+    mocks.profile.avatarUrl = "https://example.test/avatar.png";
+    await act(async () => root.render(<StudioTopBar />));
+    const button = container.querySelector('[data-testid="topbar-profile-button"]');
+    expect(button?.getAttribute("aria-label")).toBe("Open profile settings");
+    expect(button?.querySelector("img")?.getAttribute("src")).toBe(mocks.profile.avatarUrl);
+    expect(button?.querySelector("img")?.alt).toBe("");
+  });
+
+  it("goes back through the supplied navigation callback in a workspace", async () => {
+    await act(async () => root.render(<StudioTopBar />));
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="topbar-back-button"]')?.click());
+    expect(mocks.navigateBack).toHaveBeenCalledOnce();
+    expect(mocks.openConversationTab).not.toHaveBeenCalled();
+  });
+
+  it("opens a parent conversation before considering the workspace back callback", async () => {
+    mocks.conversations = [
+      { localId: "conversation-1", title: "Child chat", parentConversationId: "parent-controller" },
+      { localId: "parent-local", controllerId: "parent-controller", title: "Parent chat" },
+    ];
+    await act(async () => root.render(<StudioTopBar />));
+    const back = container.querySelector<HTMLButtonElement>('[data-testid="topbar-parent-conversation-button"]');
+    expect(back?.getAttribute("aria-label")).toBe("Back to parent conversation: Parent chat");
+    expect(container.querySelector('[data-testid="topbar-back-button"]')).toBeNull();
+    await act(async () => back?.click());
+    expect(mocks.requestUrlPush).toHaveBeenCalledOnce();
+    expect(mocks.openConversationTab).toHaveBeenCalledWith("parent-local");
+    expect(mocks.navigateBack).not.toHaveBeenCalled();
+  });
+
+  it("keeps space navigation and Back reachable when project access is blocked", async () => {
+    mocks.projectAccessBlocked = true;
+    await act(async () => root.render(<StudioTopBar />));
+    expect(container.querySelector('[data-testid="topbar-sidebar-toggle"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="topbar-back-button"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="topbar-tab-selector"]')).toBeNull();
+  });
+
+  it.each([true, false])("can reopen or collapse the desktop context sidebar (collapsed=%s)", async (collapsed) => {
+    mocks.isLargeScreen = true;
+    mocks.sidebarCollapsed = collapsed;
+    mocks.hasTabs = false;
+    await act(async () => root.render(<StudioTopBar />));
+    const toggle = container.querySelector<HTMLButtonElement>('[data-testid="workspace-tabs"] [data-testid="topbar-sidebar-toggle"]');
+    expect(toggle?.getAttribute("aria-expanded")).toBe(String(!collapsed));
+    expect(toggle?.getAttribute("aria-label")).toBe(collapsed ? "Expand space navigation" : "Collapse space navigation");
+    await act(async () => toggle?.click());
+    expect(mocks.toggleSidebar).toHaveBeenCalledOnce();
+  });
+
+  it.each(["home", "account"] as const)("omits the inactive desktop context toggle on %s", async (navigationPage) => {
+    mocks.isLargeScreen = true;
+    mocks.navigationPage = navigationPage;
+    await act(async () => root.render(<StudioTopBar />));
+    expect(container.querySelector('[data-testid="topbar-sidebar-toggle"]')).toBeNull();
+  });
+
+  it.each([true, false])("preserves safe area and macOS title-bar ownership (integrated=%s)", async (integrated) => {
+    mocks.isLargeScreen = true;
+    mocks.titleBarFree = integrated;
+    await act(async () => root.render(<StudioTopBar />));
+    const header = container.querySelector("header")!;
+    expect(header.classList.contains("instafy-titlebar-drag")).toBe(integrated);
+    expect(header.classList.contains("pt-[var(--instafy-safe-area-inset-top)]")).toBe(!integrated);
   });
 
   it("keeps wide tab actions focused on New chat and Browse tabs without an install link", async () => {
@@ -139,8 +266,11 @@ describe("StudioTopBar navigation", () => {
     { posture: "wide with a missing project", isLargeScreen: true, hasTabs: true, controllerProjectMissing: true, projectAccessBlocked: false },
     { posture: "wide with blocked project access", isLargeScreen: true, hasTabs: true, controllerProjectMissing: false, projectAccessBlocked: true },
     { posture: "mobile", isLargeScreen: false, hasTabs: true, controllerProjectMissing: false, projectAccessBlocked: false },
-  ])("preserves the notification bell exactly once in $posture", async ({ isLargeScreen, hasTabs, controllerProjectMissing, projectAccessBlocked }) => {
-    Object.assign(mocks, { isLargeScreen, hasTabs, controllerProjectMissing, projectAccessBlocked });
+    { posture: "mobile Home", isLargeScreen: false, hasTabs: true, controllerProjectMissing: false, projectAccessBlocked: false, navigationPage: "home" },
+    { posture: "mobile team", isLargeScreen: false, hasTabs: true, controllerProjectMissing: false, projectAccessBlocked: false, navigationPage: "team" },
+    { posture: "mobile account", isLargeScreen: false, hasTabs: true, controllerProjectMissing: false, projectAccessBlocked: false, navigationPage: "account" },
+  ])("preserves the notification bell exactly once in $posture", async (posture) => {
+    Object.assign(mocks, posture);
     const onOpenNotifications = vi.fn();
     await act(async () => root.render(
       <StudioTopBar notificationBell={<button type="button" aria-label="Notifications" onClick={onOpenNotifications}>Notifications</button>} />,

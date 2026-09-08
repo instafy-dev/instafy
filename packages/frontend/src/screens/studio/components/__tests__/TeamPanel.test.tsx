@@ -60,11 +60,11 @@ describe("TeamPanel authorized work and navigation", () => {
     return <output data-testid="location">{location.pathname}{location.search}</output>;
   }
   async function settle() { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); }); }
-  async function render() {
+  async function render(organizationId?: string | null) {
     await act(async () => root.render(
       <QueryClientProvider client={queryClient}>
         <MemoryRouter initialEntries={["/studio?projectId=old-space&conversationId=old-local&conversationControllerId=old-controller&panel=team"]}>
-          <TeamPanel /><Location />
+          <TeamPanel organizationId={organizationId} /><Location />
         </MemoryRouter>
       </QueryClientProvider>,
     ));
@@ -126,6 +126,36 @@ describe("TeamPanel authorized work and navigation", () => {
     expect(section("Team spaces").textContent).not.toContain("Personal space");
     expect(mocks.activity).toHaveBeenCalledExactlyOnceWith({ limit: 100 });
     expect(mocks.markSeen).not.toHaveBeenCalled();
+  });
+
+  it("opens the explicitly selected empty team without showing the old team's work or tools", async () => {
+    mocks.organizations.mockResolvedValue([teamA, { ...teamB, role: "owner" }]);
+    await render("team-b");
+    expect(container.querySelector('select[aria-label="Team"]')).toBeNull();
+    expect(section("Team work").textContent).not.toContain("Work 1");
+    expect(button("Machines for Space A")).toBeUndefined();
+    await act(async () => button("Team settings")!.click());
+    expect(mocks.openSettings).toHaveBeenCalledWith("team-b");
+    await act(async () => button("New space", section("Team spaces"))!.click());
+    expect(mocks.newSpace).toHaveBeenCalledWith("team-b");
+  });
+
+  it("does not silently replace a revoked or unknown team with another accessible team", async () => {
+    await render("revoked-team");
+    expect(container.textContent).toContain("This team is not available to your account");
+    expect(container.textContent).not.toContain("Work 1");
+    expect(button("Team settings")).toBeUndefined();
+    expect(mocks.members).not.toHaveBeenCalled();
+  });
+
+  it("keeps personal spaces separate from teams", async () => {
+    await render(null);
+    expect(section("Personal spaces").textContent).toContain("Personal space");
+    expect(section("Personal spaces").textContent).not.toContain("Space A");
+    expect(mocks.organizations).not.toHaveBeenCalled();
+    expect(mocks.members).not.toHaveBeenCalled();
+    await act(async () => button("New space")!.click());
+    expect(mocks.newSpace).toHaveBeenCalledWith(null);
   });
 
   it("navigates to the exact work and space without retaining a previous chat route", async () => {
