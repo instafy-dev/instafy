@@ -24,7 +24,7 @@ jobs:
           (github.ref == 'refs/heads/main' &&
            (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))
         ) &&
-        '["self-hosted","Linux","ARM64","instafy-ci-control"]' || '["ubuntu-latest"]') }}
+        '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-control","instafy-ci-trust-main"]}' || '["ubuntu-latest"]') }}
     permissions:
       actions: read
       contents: read
@@ -108,7 +108,7 @@ jobs:
           (github.ref == 'refs/heads/main' &&
            (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))
         ) &&
-        '["self-hosted","Linux","ARM64","instafy-ci-control"]' || '["ubuntu-latest"]') }}
+        '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-control","instafy-ci-trust-main"]}' || '["ubuntu-latest"]') }}
     environment: ghcr-release
     permissions: {}
     steps:
@@ -140,7 +140,7 @@ jobs:
           (github.ref == 'refs/heads/main' &&
            (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))
         ) && vars.CI_LINUX_X64_SELF_HOSTED == 'true' &&
-        '["self-hosted","Linux","X64","instafy-ci-linux-x64"]' || '["ubuntu-latest"]') }}
+        '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","X64","instafy-ci-linux-x64","instafy-ci-trust-main"]}' || '["ubuntu-latest"]') }}
     # Normal service cells finish in under 15 minutes. Bound a wedged BuildKit
     # worker before it can consume the hosted-runner allowance for six hours.
     timeout-minutes: 30
@@ -356,7 +356,7 @@ jobs:
           (github.ref == 'refs/heads/main' &&
            (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))
         ) &&
-        '["self-hosted","Linux","ARM64","instafy-ci-control"]' || '["ubuntu-latest"]') }}
+        '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-control","instafy-ci-trust-main"]}' || '["ubuntu-latest"]') }}
     permissions:
       contents: read
     steps:

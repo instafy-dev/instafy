@@ -94,7 +94,8 @@ function route(source, { variables = {}, event = "push", ref = "refs/heads/main"
 }
 
 const enabled = { CI_RUNNER_MODE: "self-hosted", CI_LINUX_X64_SELF_HOSTED: "true" };
-const expected = (role) => ["self-hosted", "Linux", role === "linux-x64" ? "X64" : "ARM64", `instafy-ci-${role}`];
+const expected = (role, trust = "main") => ({ group: `org/instafy-ci-${trust}`,
+  labels: ["self-hosted", "Linux", role === "linux-x64" ? "X64" : "ARM64", `instafy-ci-${role}`, `instafy-ci-trust-${trust}`] });
 
 test("every runnable public Linux job is inventoried, with only the two npm hosted exceptions", () => {
   assert.deepEqual(fs.readdirSync(directory).filter((name) => /\.ya?ml$/.test(name)).sort(), Object.keys(inventory).sort());
@@ -137,7 +138,7 @@ test("temporary PR selection requires all of mode, opt-in, private visibility, s
       const source = job(file, name);
       for (const event of ["pull_request", "pull_request_target"]) {
         const context = { variables, event, ref: "refs/pull/42/merge" };
-        assert.deepEqual(route(source, context), event === prEvent ? expected(role) : [fallback]);
+        assert.deepEqual(route(source, context), event === prEvent ? expected(role, "pr") : [fallback]);
         for (const denied of [
           { privateRepository: false },
           { headRepository: "contributor/fork" },
@@ -161,7 +162,7 @@ test("routing comparisons reproduce GitHub's case-insensitive strings", () => {
   assert.deepEqual(route(source, {
     variables: { CI_RUNNER_MODE: "SELF-HOSTED", CI_TRUSTED_PR_SELF_HOSTED: "TRUE" },
     event: "pull_request", ref: "refs/pull/42/merge", headRepository: "EXAMPLE/Project",
-  }), expected("linux-arm64"));
+  }), expected("linux-arm64", "pr"));
   assert.deepEqual(route(job("publish-production-services.yml", "publish"), {
     variables: { CI_RUNNER_MODE: "SELF-HOSTED", CI_LINUX_X64_SELF_HOSTED: "TRUE" },
   }), expected("linux-x64"));
@@ -184,6 +185,34 @@ test("native image architecture is never inferred from ARM capacity or reduced m
   assert.match(services, /--platform linux\/amd64/);
   assert.equal((services.match(/^          - key:/gm) ?? []).length, 7);
   assert.doesNotMatch(runtime + services, /setup-qemu|binfmt/);
+});
+
+test("PR and protected-main workers use distinct enforced groups and trust labels", () => {
+  const variables = { ...enabled, CI_TRUSTED_PR_SELF_HOSTED: "true" };
+  for (const [file, lanes] of Object.entries(inventory)) {
+    for (const [name, fallback, role, prEvent] of lanes) {
+      if (!role) continue;
+      const source = job(file, name);
+      const selectedMain = route(source, { variables });
+      assert.equal(selectedMain.group, "org/instafy-ci-main");
+      assert.ok(selectedMain.labels.includes("instafy-ci-trust-main"));
+      assert.ok(!selectedMain.labels.includes("instafy-ci-trust-pr"));
+      // pull_request_target commonly has a main ref: event identity, not that
+      // ref or the broker's queue observation, determines the worker class.
+      for (const event of ["pull_request", "pull_request_target", "PULL_REQUEST_TARGET"]) {
+        const selectedPr = route(source, { variables, event, ref: "refs/heads/main" });
+        if (event.toLowerCase() === prEvent) {
+          assert.deepEqual(selectedPr, expected(role, "pr"));
+          assert.ok(!selectedPr.labels.includes("instafy-ci-trust-main"));
+        } else assert.deepEqual(selectedPr, [fallback]);
+      }
+      assert.doesNotMatch(source.match(/^    runs-on: >-\n(?:      .*\n)+/m)[0], /vars\.[A-Z_]*(?:GROUP|LABEL)/);
+    }
+  }
+  const policy = fs.readFileSync(path.join(root, "docs/CI-Runners.md"), "utf8");
+  assert.match(policy, /restricted_to_workflows=true/);
+  assert.match(policy, /@refs\/heads\/main/);
+  assert.match(policy, /Self-hosted runners: write/);
 });
 
 test("waiting coordinator has a separate role from short authorizers, manifests and build workers", () => {

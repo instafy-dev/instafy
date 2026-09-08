@@ -18,7 +18,7 @@ jobs:
           (vars.CI_TRUSTED_PR_SELF_HOSTED == 'true' && github.event.repository.private == true &&
            github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
         ) &&
-        '["self-hosted","Linux","ARM64","instafy-ci-linux-arm64"]' || '["ubuntu-24.04"]') }}
+        (github.event_name == 'pull_request' && '{"group":"org/instafy-ci-pr","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-pr"]}' || '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-main"]}') || '["ubuntu-24.04"]') }}
     timeout-minutes: 20
     steps:
       - name: Checkout the tested revision
@@ -67,7 +67,7 @@ jobs:
           (vars.CI_TRUSTED_PR_SELF_HOSTED == 'true' && github.event.repository.private == true &&
            github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
         ) &&
-        '["self-hosted","Linux","ARM64","instafy-ci-linux-arm64"]' || '["ubuntu-24.04"]') }}
+        (github.event_name == 'pull_request' && '{"group":"org/instafy-ci-pr","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-pr"]}' || '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-main"]}') || '["ubuntu-24.04"]') }}
     timeout-minutes: 15
     steps:
       - name: Checkout the tested revision
@@ -115,7 +115,7 @@ jobs:
           (vars.CI_TRUSTED_PR_SELF_HOSTED == 'true' && github.event.repository.private == true &&
            github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
         ) &&
-        '["self-hosted","Linux","ARM64","instafy-ci-linux-arm64"]' || '["ubuntu-24.04"]') }}
+        (github.event_name == 'pull_request' && '{"group":"org/instafy-ci-pr","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-pr"]}' || '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-main"]}') || '["ubuntu-24.04"]') }}
     timeout-minutes: 60
     env:
       CARGO_BUILD_JOBS: "2"
