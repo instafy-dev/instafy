@@ -208,9 +208,12 @@ Automations uses a flat empty state on the shared panel surface, with a labeled
 
 ## Composer
 
-The composer uses one compact, rounded writing row on phones and wider screens. It grows
-with the draft, then scrolls within the editor. Image upload and other message tools live
-in the `+` menu.
+The composer uses one compact, rounded writing row for short drafts on phones and wider
+screens. When text wraps or contains a newline, the editor takes the full width above a
+separate row of navigation, message tools, and Send controls. Shortening the draft to fit
+beside the controls restores the compact row without replacing the editor or losing focus.
+Long drafts grow to the existing line limit, then scroll within the editor. Image upload
+and other message tools live in the `+` menu.
 The action menu scrolls within the available screen height. On Android, Back dismisses
 the current composer menu, saved-message popover, or image preview before leaving the chat.
 Selected images appear in one horizontally scrolling thumbnail strip above the text field.

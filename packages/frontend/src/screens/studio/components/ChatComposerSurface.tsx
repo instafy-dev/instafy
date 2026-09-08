@@ -66,6 +66,7 @@ import type { PendingChatImageAttachment } from "./useChatComposerAttachments";
 import { CHAT_COMPOSER_COLUMN_CLASS_NAME } from "./ChatColumn";
 import { useTouchSendModePicker } from "./useTouchSendModePicker";
 import type { TouchSendModePickerOutcome } from "./touchSendModePicker";
+import { useComposerMultilineLayout } from "./useComposerMultilineLayout";
 
 type ChatComposerSurfaceProps = {
   browserDockProps: ComponentProps<typeof ChatBrowserDock>;
@@ -468,6 +469,11 @@ export function ChatComposerSurface({
   // Keep Lexical in the same tree position while its primary action changes.
   // The editor grows line by line, capped per viewport in chatInputGrowth.ts.
   const composerInlineControlsInTextRow = !browserComposerCondensed && !showVoiceActiveStrip;
+  const composerTextRowRef = useRef<HTMLDivElement | null>(null);
+  const composerMultiline = useComposerMultilineLayout(
+    composerTextRowRef,
+    composerInlineControlsInTextRow,
+  );
   const foldSuggestionIntoMenu = showMobileGhostSuggestionAcceptButton;
   const imageUploadDisabled = mutationDisabled || sendingAttachment || onboardingInputLocked;
   const imageRemoveButtonsRef = useRef(new Map<string, HTMLButtonElement>());
@@ -1430,19 +1436,23 @@ export function ChatComposerSurface({
                   ) : null}
                 </div>
               ) : null}
-              {/* The editor stays mounted while the primary slot switches from
-                  mic to Send. Controls stay bottom-aligned as the text grows. */}
+              {/* Grid placement gives multiline text the full width without
+                  moving the editor or controls to different React parents. */}
               <div
+                ref={composerTextRowRef}
                 className={
                   browserComposerCondensed
                     ? "relative pb-0"
-                    : "relative flex items-end gap-2"
+                    : composerInlineControlsInTextRow
+                      ? "relative grid grid-cols-[auto_minmax(0,1fr)_auto] items-end gap-x-2"
+                      : "relative flex items-end gap-2"
                 }
                 data-testid="chat-composer-text-row"
+                data-multiline={composerMultiline ? "true" : undefined}
               >
                 {composerInlineControlsInTextRow ? (
                   <div
-                    className="flex flex-none items-center gap-0.5"
+                    className={`flex flex-none items-center gap-0.5 justify-self-start ${composerMultiline ? "col-start-1 row-start-2" : ""}`}
                     data-testid="chat-composer-leading-controls"
                   >
                     {navigationButtonNode}
@@ -1452,9 +1462,10 @@ export function ChatComposerSurface({
                 <div
                   className={
                     composerInlineControlsInTextRow
-                      ? COMPOSER_EDITOR_WRAPPER_CLASS
+                      ? `${COMPOSER_EDITOR_WRAPPER_CLASS} ${composerMultiline ? "col-span-3 col-start-1 row-start-1 px-2" : ""}`
                       : "min-w-0 flex-1"
                   }
+                  data-testid="chat-composer-editor"
                 >
                   <ChatInput
                     ref={chatInputRef}
@@ -1467,7 +1478,7 @@ export function ChatComposerSurface({
                 </div>
                 {composerInlineControlsInTextRow ? (
                   <div
-                    className="flex flex-none items-center justify-end gap-0.5"
+                    className={`flex flex-none items-center justify-end gap-0.5 justify-self-end ${composerMultiline ? "col-start-3 row-start-2" : ""}`}
                     data-testid="chat-composer-trailing-controls"
                   >
                     {voiceStripNode}
