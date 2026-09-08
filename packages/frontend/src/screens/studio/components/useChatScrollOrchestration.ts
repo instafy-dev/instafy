@@ -553,15 +553,30 @@ export function useChatScrollController({
       if (autoScrollPendingRef.current) {
         return;
       }
+      const previous = activeConversationIdRef.current
+        ? conversationScrollSnapshots.get(activeConversationIdRef.current)
+        : null;
+      const maximumScrollTop = Math.max(0, node.scrollHeight - node.clientHeight);
+      if (!autoScrollSuspendedRef.current && shouldAutoScrollRef.current && previous?.wasAtBottom &&
+        (previous.clientHeight !== node.clientHeight || previous.scrollHeight !== node.scrollHeight) &&
+        node.scrollTop >= Math.min(previous.scrollTop, maximumScrollTop) - HISTORY_SCROLL_USER_MOVE_THRESHOLD_PX) {
+        // Keyboard/image layout can emit scroll before a resize callback.
+        // Keep an existing bottom-follow through that geometry change, while
+        // an actual upward move still gives control to the reader below.
+        scrollToBottom({ behavior: "auto" });
+        saveCurrentConversationScrollSnapshot();
+        return;
+      }
       shouldAutoScrollRef.current = !autoScrollSuspendedRef.current &&
         node.scrollHeight - node.scrollTop - node.clientHeight <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
+      if (shouldAutoScrollRef.current) lastScrollHeightRef.current = node.scrollHeight;
       saveCurrentConversationScrollSnapshot();
     };
     node.addEventListener("scroll", handleScroll, { passive: true });
     return () => {
       node.removeEventListener("scroll", handleScroll);
     };
-  }, [saveCurrentConversationScrollSnapshot]);
+  }, [saveCurrentConversationScrollSnapshot, scrollContentNode, scrollToBottom]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -640,6 +655,11 @@ export function useChatScrollController({
       scheduleSync();
     });
     observer.observe(scrollContentNode);
+    // A keyboard can resize only the viewport after its window event fired;
+    // content height alone does not notify us of that final layout change.
+    if (scrollContainerRef.current && scrollContainerRef.current !== scrollContentNode) {
+      observer.observe(scrollContainerRef.current);
+    }
 
     return () => {
       observer.disconnect();

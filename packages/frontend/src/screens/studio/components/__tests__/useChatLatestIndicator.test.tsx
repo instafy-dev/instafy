@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatMessage } from "../../types";
 import { useChatAutoScrollSync, useChatScrollController } from "../useChatScrollOrchestration";
+import { useChatComposerLayoutState } from "../useChatComposerLayoutState";
 import { collapseLifecycleMessages, shouldDisplayChatMessage } from "../chatMessagePresentation";
 
 const ROW_HEIGHT = 100;
@@ -25,6 +26,8 @@ type HarnessProps = {
   historyLoading?: boolean;
   loadOlderMessages?: () => Promise<unknown>;
   clientHeight?: number;
+  scrollHeight?: number;
+  scrollerKey?: string;
   trailingPreview?: ChatMessage;
 };
 
@@ -37,6 +40,8 @@ function Harness({
   historyLoading = false,
   loadOlderMessages,
   clientHeight = VIEWPORT_HEIGHT,
+  scrollHeight,
+  scrollerKey,
   trailingPreview,
 }: HarnessProps) {
   const displayedMessages = useMemo(
@@ -44,7 +49,7 @@ function Harness({
     [messages, trailingPreview],
   );
   const metrics = useRef({ scrollHeight: displayedMessages.length * ROW_HEIGHT, clientHeight });
-  metrics.current = { scrollHeight: displayedMessages.length * ROW_HEIGHT, clientHeight };
+  metrics.current = { scrollHeight: scrollHeight ?? displayedMessages.length * ROW_HEIGHT, clientHeight };
   const controller = useChatScrollController({
     activeConversationId: conversationId,
     messages,
@@ -53,6 +58,18 @@ function Harness({
     isHistoryLoading: historyLoading,
     hasMoreHistory: Boolean(loadOlderMessages),
     loadOlderMessages: loadOlderMessages ?? (() => undefined),
+  });
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const composerOverlayRef = useRef<HTMLDivElement | null>(null);
+  const layout = useChatComposerLayoutState({
+    ...controller, activeConversationId: conversationId, rootRef, composerOverlayRef,
+    browserModeActive: false, browserSessionOpen: false, chatSendQueueExpanded: false,
+    compactBrowserViewport: false, composerGhostSuggestionRemainder: null,
+    editingQueuedItemActive: false, hasMoreHistory: Boolean(loadOlderMessages),
+    imageAttachmentCount: 0, inputValue: "", isChatInputFocused: () => false,
+    isHistoryLoading: historyLoading, queuedSummaryItemCount: 0, sendingAttachment: false,
+    showBrowserSessionPageStrip: false, totalQueuedCount: 0, touchLikeInput: false,
+    voiceHoldActive: false, voiceInputListening: false,
   });
   useChatAutoScrollSync({
     ...controller,
@@ -69,7 +86,7 @@ function Harness({
 
   return (
     <>
-      <div data-testid="scroll" ref={(node) => {
+      <div key={scrollerKey} data-testid="scroll" onScroll={layout.handleScroll} ref={(node) => {
         controller.scrollContainerRef.current = node;
         if (!node) return;
         Object.defineProperty(node, "scrollHeight", { configurable: true, get: () => metrics.current.scrollHeight });
@@ -208,6 +225,70 @@ describe("chat latest-message indicator", () => {
     expect(indicator()).toBeNull();
     await scroll(430);
     expect(indicator()).toBe("Jump to latest");
+  });
+
+  it("keeps following when a layout scroll arrives before the keyboard resize notification", async () => {
+    const conversationId = scope();
+    const messages = history(conversationId);
+    await render({ conversationId, messages, clientHeight: 648 });
+    expect(scroller().scrollTop).toBe(552);
+    // Browser layout shrinks the scroll viewport before its resize/observer
+    // notification. A geometry-generated scroll is not a reader moving up.
+    await act(async () => root.render(<Harness conversationId={conversationId} messages={messages} clientHeight={306} />));
+    await scroll(scroller().scrollTop);
+    await flushResize();
+    expect(scroller().scrollTop).toBe(894);
+    expect(indicator()).toBeNull();
+  });
+
+  it("respects an upward reader scroll even when it arrives with a smaller viewport", async () => {
+    const conversationId = scope();
+    const messages = history(conversationId);
+    await render({ conversationId, messages, clientHeight: 648 });
+    await act(async () => root.render(<Harness conversationId={conversationId} messages={messages} clientHeight={306} />));
+    await scroll(430);
+    const anchor = visibleAnchor();
+    await flushResize();
+    expect(scroller().scrollTop).toBe(430);
+    expect(visibleAnchor()).toEqual(anchor);
+    expect(indicator()).toBe("Jump to latest");
+  });
+
+  it("keeps following through late content growth after a keyboard transition", async () => {
+    const conversationId = scope();
+    const messages = history(conversationId);
+    await render({ conversationId, messages, clientHeight: 648 });
+    await act(async () => root.render(<Harness conversationId={conversationId} messages={messages} clientHeight={648} scrollHeight={1240} />));
+    await scroll(scroller().scrollTop);
+    await flushResize();
+    expect(scroller().scrollTop).toBe(592);
+    expect(indicator()).toBeNull();
+  });
+
+  it("remembers browser-clamped bottom geometry before a later padding expansion", async () => {
+    const conversationId = scope();
+    const messages = history(conversationId);
+    await render({ conversationId, messages, clientHeight: 200 });
+    await act(async () => root.render(<Harness conversationId={conversationId} messages={messages} clientHeight={648} />));
+    await scroll(552); // Browser clamps scrollTop when the keyboard closes.
+    await act(async () => root.render(<Harness conversationId={conversationId} messages={messages} clientHeight={648} scrollHeight={1240} />));
+    await scroll(scroller().scrollTop);
+    await flushResize();
+    expect(scroller().scrollTop).toBe(592);
+    expect(indicator()).toBeNull();
+  });
+
+  it("rebinds scroll ownership when the transcript container is replaced", async () => {
+    const conversationId = scope();
+    const messages = history(conversationId);
+    await render({ conversationId, messages, scrollerKey: "conversation" });
+    const original = scroller();
+    await render({ conversationId, messages, scrollerKey: "job-thread" });
+    expect(scroller()).not.toBe(original);
+    await scroll(430);
+    await render({ conversationId, messages: [...messages, message("new-row")], scrollerKey: "job-thread" });
+    expect(scroller().scrollTop).toBe(430);
+    expect(indicator()).toBe("New messages");
   });
 
   it("notices streaming text even with a newer activity row, and ignores activity alone", async () => {
