@@ -216,6 +216,11 @@ the current composer menu, saved-message popover, or image preview before leavin
 Selected images appear in one horizontally scrolling thumbnail strip above the text field.
 Each image has its own remove control and a larger preview; adding more images does not
 grow the strip vertically. Removing an image keeps the remaining attachments and text.
+Selected images and markup originals remain available when switching Studio panels, chats,
+or spaces within the same signed-in session. They are kept in memory, scoped to the user,
+space, and chat, and are released on sign-out or Studio session teardown. Across drafts,
+at most 32 selected images and 50 MiB of File data (including markup originals) are retained;
+new additions or edits that exceed this limit show an error and preserve existing drafts.
 Keyboard focus moves to the next remove control (or back to the editor when none remain),
 and image previews contain focus until closed, then return it to the originating thumbnail.
 

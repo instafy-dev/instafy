@@ -1,33 +1,19 @@
 import {
   useCallback,
-  useEffect,
   useLayoutEffect,
   useRef,
-  useState,
+  useSyncExternalStore,
   type ChangeEvent,
   type ClipboardEvent,
   type DragEvent,
 } from "react";
 import type { StatusIntent } from "../../../status/useStatus";
-
-export type PendingChatImageAttachment = {
-  id: string;
-  file: File;
-  previewUrl: string;
-  originalFile?: File;
-};
+import { useChatAttachmentDraftStore } from "../../../conversations/ChatAttachmentDraftsProvider";
+import { revokeChatAttachmentPreview, type PendingChatImageAttachment } from "../../../conversations/chatAttachmentDrafts";
+export type { PendingChatImageAttachment } from "../../../conversations/chatAttachmentDrafts";
 
 type ShowStatus = (message: string, intent?: StatusIntent, durationMs?: number) => void;
-const EMPTY_ATTACHMENTS: PendingChatImageAttachment[] = [];
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
-
-function revokePreviewUrl(previewUrl: string) {
-  try {
-    URL.revokeObjectURL(previewUrl);
-  } catch (_error) {
-    // ignore cleanup failure
-  }
-}
 
 export function useChatComposerAttachments({
   draftKey,
@@ -40,9 +26,9 @@ export function useChatComposerAttachments({
   showStatus: ShowStatus;
   onAttachmentsAdded?: () => void;
 }) {
-  const attachmentDraftsRef = useRef(new Map<string, PendingChatImageAttachment[]>());
-  const [attachmentDrafts, setAttachmentDrafts] = useState(attachmentDraftsRef.current);
-  const imageAttachments = attachmentDrafts.get(draftKey) ?? EMPTY_ATTACHMENTS;
+  const store = useChatAttachmentDraftStore();
+  const getSnapshot = useCallback(() => store.get(draftKey), [draftKey, store]);
+  const imageAttachments = useSyncExternalStore(store.subscribe, getSnapshot, getSnapshot);
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const activeDraftKeyRef = useRef(draftKey);
   const isInputLockedRef = useRef(isInputLocked);
@@ -50,6 +36,7 @@ export function useChatComposerAttachments({
   useLayoutEffect(() => {
     activeDraftKeyRef.current = draftKey;
     if (imageInputRef.current) imageInputRef.current.value = "";
+    return () => { activeDraftKeyRef.current = ""; };
   }, [draftKey]);
 
   useLayoutEffect(() => {
@@ -61,27 +48,15 @@ export function useChatComposerAttachments({
   const setImageAttachments = useCallback((update: (
     previous: PendingChatImageAttachment[],
   ) => PendingChatImageAttachment[]) => {
-    const previous = attachmentDraftsRef.current.get(draftKey) ?? EMPTY_ATTACHMENTS;
-    const next = update(previous);
-    if (next === previous) return;
-    const drafts = new Map(attachmentDraftsRef.current);
-    if (next.length > 0) drafts.set(draftKey, next);
-    else drafts.delete(draftKey);
-    attachmentDraftsRef.current = drafts;
-    setAttachmentDrafts(drafts);
-  }, [draftKey]);
+    return store.update(draftKey, update);
+  }, [draftKey, store]);
 
   const openImagePicker = useCallback(() => {
     imageInputRef.current?.click();
   }, []);
 
   const clearImageAttachments = useCallback(() => {
-    setImageAttachments((previous) => {
-      for (const attachment of previous) {
-        revokePreviewUrl(attachment.previewUrl);
-      }
-      return [];
-    });
+    setImageAttachments(() => []);
     const input = imageInputRef.current;
     if (input && activeDraftKeyRef.current === draftKey) {
       input.value = "";
@@ -90,10 +65,6 @@ export function useChatComposerAttachments({
 
   const removeImageAttachment = useCallback((attachmentId: string) => {
     setImageAttachments((previous) => {
-      const match = previous.find((attachment) => attachment.id === attachmentId) ?? null;
-      if (match) {
-        revokePreviewUrl(match.previewUrl);
-      }
       return previous.filter((attachment) => attachment.id !== attachmentId);
     });
   }, [setImageAttachments]);
@@ -127,7 +98,6 @@ export function useChatComposerAttachments({
       else replacement.originalFile = current.originalFile ?? current.file;
       const next = previous.slice();
       next[index] = replacement;
-      revokePreviewUrl(current.previewUrl);
       updated = true;
       return next;
     });
@@ -142,16 +112,12 @@ export function useChatComposerAttachments({
 
   const clearSubmittedImageAttachments = useCallback((files: File[]) => {
     const submitted = new Set(files);
-    setImageAttachments((previous) => previous.filter((attachment) => {
-      if (!submitted.has(attachment.file)) return true;
-      revokePreviewUrl(attachment.previewUrl);
-      return false;
-    }));
+    setImageAttachments((previous) => previous.filter((attachment) => !submitted.has(attachment.file)));
   }, [setImageAttachments]);
 
   const attachImageFiles = useCallback(
     (files: File[]) => {
-      const nextAttachments: PendingChatImageAttachment[] = [];
+      const acceptedFiles: File[] = [];
       let hasNonImage = false;
       let hasTooLarge = false;
 
@@ -164,15 +130,7 @@ export function useChatComposerAttachments({
           hasTooLarge = true;
           continue;
         }
-        const id =
-          typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-            ? crypto.randomUUID()
-            : `chat-image-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-        nextAttachments.push({
-          id,
-          file,
-          previewUrl: URL.createObjectURL(file),
-        });
+        acceptedFiles.push(file);
       }
 
       if (hasNonImage) {
@@ -181,12 +139,30 @@ export function useChatComposerAttachments({
       if (hasTooLarge) {
         showStatus("Skipped image(s) larger than 5MB.", "error", 4000);
       }
-      if (nextAttachments.length === 0) {
+      if (acceptedFiles.length === 0) {
         return;
       }
 
-      onAttachmentsAdded?.();
-      setImageAttachments((previous) => [...previous, ...nextAttachments]);
+      try {
+        const added = setImageAttachments((previous) => {
+          const nextAttachments: PendingChatImageAttachment[] = [];
+          try {
+            for (const file of acceptedFiles) {
+              const id = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+                ? crypto.randomUUID()
+                : `chat-image-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+              nextAttachments.push({ id, file, previewUrl: URL.createObjectURL(file) });
+            }
+          } catch (error) {
+            for (const attachment of nextAttachments) revokeChatAttachmentPreview(attachment.previewUrl);
+            throw error;
+          }
+          return [...previous, ...nextAttachments];
+        });
+        if (added) onAttachmentsAdded?.();
+      } catch (error) {
+        showStatus(error instanceof Error ? error.message : "Unable to add these images.", "error", 5000);
+      }
     },
     [onAttachmentsAdded, setImageAttachments, showStatus],
   );
@@ -277,15 +253,6 @@ export function useChatComposerAttachments({
     },
     [attachImageFiles, isInputLocked, showStatus],
   );
-
-  useEffect(() => {
-    return () => {
-      for (const attachments of attachmentDraftsRef.current.values()) {
-        for (const attachment of attachments) revokePreviewUrl(attachment.previewUrl);
-      }
-      attachmentDraftsRef.current.clear();
-    };
-  }, []);
 
   return {
     attachImageFiles,

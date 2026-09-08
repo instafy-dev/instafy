@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useChatComposerAttachments } from "../useChatComposerAttachments";
+import { ChatAttachmentDraftsProvider } from "../../../../conversations/ChatAttachmentDraftsProvider";
 
 type Attachments = ReturnType<typeof useChatComposerAttachments>;
 let latest: Attachments;
@@ -25,10 +26,19 @@ describe("useChatComposerAttachments", () => {
   const createObjectURL = vi.fn();
   const names = () => [...container.querySelectorAll("img")].map((image) => image.alt);
   async function select(draftKey: string, locked = false) {
-    await act(async () => root.render(<Probe draftKey={draftKey} locked={locked} />));
+    await act(async () => root.render(<StrictMode><Probe draftKey={draftKey} locked={locked} /></StrictMode>));
   }
   async function attach(name: string) {
     await act(async () => latest.attachImageFiles([new File(["image"], name, { type: "image/png" })]));
+  }
+  async function navigateSession(userId: string | null, projectId: string, conversationId: string, panel: "chat" | "machines" = "chat") {
+    await act(async () => root.render(
+      <StrictMode>
+        <ChatAttachmentDraftsProvider sessionKey={userId}>
+          {panel === "chat" ? <Probe draftKey={JSON.stringify([userId, projectId, conversationId])} /> : <div>Machines</div>}
+        </ChatAttachmentDraftsProvider>
+      </StrictMode>,
+    ));
   }
 
   beforeEach(() => {
@@ -66,6 +76,106 @@ describe("useChatComposerAttachments", () => {
     expect(names()).toEqual(["a.png"]);
     expect(latest.imageAttachments[0]).toBe(original);
     expect(revokeObjectURL).not.toHaveBeenCalled();
+  });
+
+  it("preserves selected Files, markup originals, and preview URLs when Chat unmounts for Machines", async () => {
+    await navigateSession("user-1", "space-1", "chat-a");
+    await attach("first.png");
+    await attach("second.png");
+    const first = latest.imageAttachments[0];
+    const edited = new File(["marked"], "first-marked.png", { type: "image/png" });
+    await act(async () => { latest.replaceImageAttachment(first.id, first.file, edited); });
+    const selected = latest.imageAttachments;
+    revokeObjectURL.mockClear();
+
+    await navigateSession("user-1", "space-1", "chat-a", "machines");
+    expect(names()).toEqual([]);
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+    await navigateSession("user-1", "space-1", "chat-a");
+    expect(latest.imageAttachments).toBe(selected);
+    expect(names()).toEqual(["first-marked.png", "second.png"]);
+    expect(latest.imageAttachments[0].originalFile).toBe(first.file);
+    expect(createObjectURL).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps the remounted draft isolated across projects and accepts original send cleanup while Chat is absent", async () => {
+    await navigateSession("user-1", "space-1", "chat-a");
+    await attach("sent.png");
+    const submitted = latest.imageAttachments.map((image) => image.file);
+    const finishSend = latest.clearSubmittedImageAttachments;
+    await attach("newer.png");
+    await navigateSession("user-1", "space-2", "chat-a");
+    expect(names()).toEqual([]);
+    await attach("other-space.png");
+    await navigateSession("user-1", "space-2", "chat-a", "machines");
+    await act(async () => finishSend(submitted));
+    await navigateSession("user-1", "space-2", "chat-a");
+    expect(names()).toEqual(["other-space.png"]);
+    await navigateSession("user-1", "space-1", "chat-a");
+    expect(names()).toEqual(["newer.png"]);
+    expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith("blob:attachment-1");
+  });
+
+  it("releases every retained draft on sign-out while Chat is absent and rejects old session callbacks", async () => {
+    await navigateSession("user-1", "space-1", "chat-a");
+    await attach("private-a.png");
+    const attachOldSession = latest.attachImageFiles;
+    await navigateSession("user-1", "space-2", "chat-b");
+    await attach("private-b.png");
+    await navigateSession("user-1", "space-2", "chat-b", "machines");
+    await navigateSession(null, "space-2", "chat-b", "machines");
+    expect(revokeObjectURL.mock.calls.map(([url]) => url)).toEqual(["blob:attachment-1", "blob:attachment-2"]);
+    await act(async () => attachOldSession([new File(["late"], "late.png", { type: "image/png" })]));
+    expect(createObjectURL).toHaveBeenCalledTimes(2);
+    await navigateSession("user-2", "space-1", "chat-a");
+    expect(names()).toEqual([]);
+    await navigateSession("user-1", "space-1", "chat-a");
+    expect(names()).toEqual([]);
+  });
+
+  it("releases retained previews when the Studio session itself unmounts", async () => {
+    await navigateSession("user-1", "space-1", "chat-a");
+    await attach("selected.png");
+    await navigateSession("user-1", "space-1", "chat-a", "machines");
+    await act(async () => root.render(<div>Outside Studio</div>));
+    expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith("blob:attachment-1");
+    await navigateSession("user-1", "space-1", "chat-a");
+    expect(names()).toEqual([]);
+  });
+
+  it("rejects additions at the session image limit without evicting an inactive chat's draft", async () => {
+    await navigateSession("user-1", "space-1", "chat-a");
+    await act(async () => latest.attachImageFiles(Array.from({ length: 32 }, (_, index) =>
+      new File(["image"], `${index}.png`, { type: "image/png" }),
+    )));
+    const retained = latest.imageAttachments;
+    await navigateSession("user-1", "space-2", "chat-b");
+    await attach("overflow.png");
+    expect(names()).toEqual([]);
+    expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("32 images and 50MB"), "error", 5000);
+    expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith("blob:attachment-33");
+    await navigateSession("user-1", "space-1", "chat-a");
+    expect(latest.imageAttachments).toBe(retained);
+  });
+
+  it("counts markup originals against the byte budget and keeps the original preview when an edit exceeds it", async () => {
+    await navigateSession("user-1", "space-1", "chat-a");
+    const largeImages = Array.from({ length: 10 }, (_, index) => {
+      const file = new File(["image"], `${index}.png`, { type: "image/png" });
+      Object.defineProperty(file, "size", { value: 5 * 1024 * 1024 });
+      return file;
+    });
+    await act(async () => latest.attachImageFiles(largeImages));
+    const retained = latest.imageAttachments;
+    const first = retained[0];
+    const marked = new File(["marked"], "marked.png", { type: "image/png" });
+    await act(async () => expect(() => latest.replaceImageAttachment(first.id, first.file, marked))
+      .toThrow("32 images and 50MB"));
+    expect(latest.imageAttachments).toBe(retained);
+    expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith("blob:attachment-11");
+    await act(async () => latest.removeImageAttachment(retained[1].id));
+    await act(async () => expect(latest.replaceImageAttachment(first.id, first.file, marked)).toBe(true));
+    expect(latest.imageAttachments[0].originalFile).toBe(first.file);
   });
 
   it("keeps asynchronous send cleanup bound to the originating chat", async () => {

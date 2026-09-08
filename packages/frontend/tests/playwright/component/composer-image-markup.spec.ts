@@ -6,7 +6,7 @@ const DRAFT = "Keep this draft while I mark up the screenshot.";
 
 type FileSnapshot = { id: string; name: string; type: string; size: number; sha256: string; hasOriginal: boolean };
 
-async function mount(page: Page) {
+async function mount(page: Page, retainSession = false) {
   const deps = await resolveViteReactDependencies(page);
   const failures: string[] = [];
   page.on("pageerror", error => failures.push(error.message));
@@ -27,6 +27,7 @@ async function mount(page: Page) {
     import ReactNS from "${deps.react}";
     import ReactDOMNS from "${deps.reactDomClient}";
     import { useChatComposerAttachments } from "/src/screens/studio/components/useChatComposerAttachments.ts";
+    import { ChatAttachmentDraftsProvider } from "/src/conversations/ChatAttachmentDraftsProvider.tsx";
     import { ChatImageLightboxOverlay } from "/src/screens/studio/components/ChatPanelOverlays.tsx";
     const React=ReactNS.default??ReactNS, {createRoot}=ReactDOMNS.default??ReactDOMNS, h=React.createElement;
     function Fixture(){
@@ -66,7 +67,15 @@ async function mount(page: Page) {
           onRestoreOriginal:selected?.originalFile?()=>attachments.restoreImageAttachment(selected.id,selected.file):undefined,
         }));
     }
-    createRoot(document.getElementById("root")).render(h(Fixture));`;
+    function SessionFixture(){
+      const [chat,setChat]=React.useState(true);
+      const [user,setUser]=React.useState("first-user");
+      return h(ChatAttachmentDraftsProvider,{sessionKey:user},
+        h("button",{"data-testid":"fixture-panel-switch",onClick:()=>setChat(value=>!value)},chat?"Open Machines":"Return to Chat"),
+        h("button",{"data-testid":"fixture-user-switch",onClick:()=>setUser("second-user")},"Change test user"),
+        chat?h(Fixture):h("h1",null,"Machines"));
+    }
+    createRoot(document.getElementById("root")).render(h(React.StrictMode,null,h(${retainSession ? "SessionFixture" : "Fixture"})));`;
   await page.route(`**${FIXTURE}/main.js`, route => route.fulfill({ contentType: "application/javascript", body: main }));
   await page.route(`**${FIXTURE}`, route => route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head>
     <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
@@ -129,6 +138,28 @@ const canvasPixels = (page: Page) => page.getByTestId("image-markup-canvas").eva
   const pixels = canvas.getContext("2d")!.getImageData(0, 0, canvas.width, canvas.height).data;
   const hash = await crypto.subtle.digest("SHA-256", pixels);
   return Array.from(new Uint8Array(hash)).map(value => value.toString(16).padStart(2, "0")).join("");
+});
+
+test("Studio panel navigation retains actual image Files and previews until the user session changes", async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 438 });
+  const failures = await mount(page, true);
+  await selectImages(page);
+  const selected = await files(page);
+  const urls = await page.locator("section img").evaluateAll(nodes => nodes.map(node => (node as HTMLImageElement).src));
+  await page.getByTestId("fixture-panel-switch").click();
+  await expect(page.getByRole("heading", { name: "Machines", exact: true })).toBeVisible();
+  await expect(page.getByTestId("fixture-image-input")).toHaveCount(0);
+  await page.getByTestId("fixture-panel-switch").click();
+  await expect.poll(() => files(page)).toEqual(selected);
+  expect(await page.locator("section img").evaluateAll(nodes => nodes.map(node => (node as HTMLImageElement).src))).toEqual(urls);
+  await page.locator("section img").evaluateAll(nodes => Promise.all(nodes.map(node => (node as HTMLImageElement).decode())));
+  await page.getByTestId("fixture-preview-1").click();
+  await expect(page.getByTestId("chat-image-lightbox-image")).toHaveAttribute("src", urls[1]);
+  await page.keyboard.press("Escape");
+  await page.getByTestId("fixture-user-switch").click();
+  await expect.poll(() => files(page)).toEqual([]);
+  expect(await page.evaluate(async previous => Promise.all(previous.map(url => fetch(url).then(() => false, () => true))), urls)).toEqual([true, true]);
+  expect(failures).toEqual([]);
 });
 
 test("saving pen and arrow markup changes actual PNG bytes for only the selected attachment and preserves the draft", async ({ page }, testInfo) => {
