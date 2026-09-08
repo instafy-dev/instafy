@@ -37,4 +37,15 @@ describe("Studio destination construction", () => {
     expect(new URLSearchParams(buildStudioDestinationSearch("?projectId=A&jobId=old", { kind: "panel", panel: "home" })).get("panel")).toBe("home");
     expect(new URLSearchParams(buildStudioDestinationSearch("?projectId=A", { kind: "conversation", projectId: "A", conversationId: "local", jobId: "job" })).get("jobId")).toBe("job");
   });
+
+  it("opens the URL-owned workspace drawer without retaining a different drawer or job", () => {
+    const search = buildStudioDestinationSearch(
+      "?projectId=A&conversationId=local&conversationControllerId=remote&workspaceTab=history&jobId=old",
+      { kind: "panel", panel: "chat", workspaceTab: "workspaces" },
+    );
+    expect(Object.fromEntries(new URLSearchParams(search))).toEqual({
+      projectId: "A", conversationId: "local", conversationControllerId: "remote", workspaceTab: "workspaces",
+    });
+    expect(new URLSearchParams(buildStudioDestinationSearch(search, { kind: "panel", panel: "chat" })).has("workspaceTab")).toBe(false);
+  });
 });

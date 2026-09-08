@@ -10,6 +10,7 @@
 - Focused smoke subset: `pnpm test:e2e:smoke`
 - Controller-focused subset: `pnpm test:e2e:controller`
 - Benchmarks only: `pnpm test:e2e:bench`
+- Large-chat navigation/cache benchmark: `pnpm --filter @instafy/frontend test:e2e:conversation-perf`
 - Headed: `pnpm test:e2e:headed`
 - Target a failing spec: `pnpm -C packages/frontend test:e2e -- tests/playwright/app.spec.ts -g "renders landing hero content"`
 
@@ -17,6 +18,16 @@ The default `pnpm test:e2e` loop is intentionally product-focused:
 - it covers the regular Playwright regression surface
 - it does not load the opt-in benchmark specs under `tests/playwright/bench`
 - benchmark coverage stays available through `pnpm test:e2e:bench`, which sets `PLAYWRIGHT_RUN_BENCH=1`
+
+The separate [conversation performance lane](../packages/frontend/tests/playwright/conversation-perf/README.md)
+builds the production history/transcript components against synthetic HTTP. It needs no live
+account, controller, database or compute. It measures repeated warm switches, cancellation and
+failure recovery, cache eviction and post-GC Chromium heap across a navigation soak. Its fixture
+org/space/tab controls exercise conversation scopes; full Studio navigation and access checks
+remain the responsibility of the application suites. Install Playwright Chromium first, or set
+`PLAYWRIGHT_BROWSER_UI_CHANNEL=chrome` to select an installed Chrome explicitly. Measurements are
+written under `packages/frontend/test-results/conversation-perf/`; serialized cache payload and
+actual V8 heap are reported separately.
 
 Public Build keeps its existing job names:
 
@@ -159,7 +170,7 @@ under `packages/frontend/test-results/browser-ci/<lane>`.
 | Lane | What it proves | Local requirements |
 | --- | --- | --- |
 | `personal` | Real Electron profile/cookie persistence across restarts and projects, per-user isolation, clear, kill switch, renderer ownership revocation, and native form-owner/type descriptors (4 tests) | Installed workspace dependencies and compiled Desktop fixture; no Docker or database |
-| `browser-ui` | Real Chromium rendering of browser chrome, cursor overlay, routine approval, expansion/takeover sequencing, rendered-frame checks, full Shared modal safe-area/keyboard geometry, focused-editable reveal, phone session/resume/save-status controls, retained-editor Unicode input isolation, mobile drawer safe-area/focused-search geometry, Studio history/scroll navigation, and focused-chat header/overview dock/picker navigation with simulated keyboard geometry and a synthetic retained input (at least 38 tests) | Installed workspace dependencies and Playwright Chromium; no Docker, database, or controller |
+| `browser-ui` | Real Chromium rendering of browser chrome, cursor overlay, routine approval, expansion/takeover sequencing, rendered-frame checks, full Shared modal safe-area/keyboard geometry, focused-editable reveal, phone session/resume/save-status controls, retained-editor Unicode input isolation, mobile drawer safe-area/focused-search geometry and Escape drill-in dismissal, Studio history/scroll navigation, and focused-chat header/overview dock/picker navigation with simulated keyboard geometry and a synthetic retained input (at least 39 tests) | Installed workspace dependencies and Playwright Chromium; no Docker, database, or controller |
 | Shared co-browsing tool fixture | Production browser tools in real Chromium: one routine grant across two sites, highlighted manual fields, fresh continuation observation, and local action timings | Installed workspace dependencies and locked Playwright Chromium; no Docker, database, controller, model or real accounts |
 | Shared profile fixture | Real Chromium HttpOnly/JS cookies, localStorage and server cookie echo; production runtime save/restore; controller authorization, encrypted database storage, stale-writer rejection, and clear/no-resurrection | Disposable Linux, Xvfb, Chromium, Go, Rust, and fully migrated loopback Postgres |
 | Shared Studio fixture | Real signed-in application, authorized project creation, Shared launch, CDP pixels/input, periodic snapshot, acknowledged provider stop, replacement login restoration, and UI clear | Disposable Linux, Xvfb, Chromium, Go, Rust, `x11-utils`, `sqlite3`, `psql`, and fresh local Supabase including GoTrue |

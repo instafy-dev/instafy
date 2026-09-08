@@ -10,19 +10,27 @@ async function mountSidebar(page: Page) {
     import ReactNS from "${deps.react}";
     import ReactDomClientNS from "${deps.reactDomClient}";
     import { StudioMobileSidebarOverlay } from "/src/screens/studio/components/StudioMobileSidebarOverlay.tsx";
+    import { StudioSidebarWorkspacePanel } from "/src/screens/studio/components/StudioSidebarWorkspacePanel.tsx";
     const React = ReactNS.default ?? ReactNS;
     const { createRoot } = ReactDomClientNS.default ?? ReactDomClientNS;
     const h = React.createElement;
     function Fixture() {
       const [open, setOpen] = React.useState(true);
+      const [workspaceOpen, setWorkspaceOpen] = React.useState(false);
+      const workspaceTrigger = React.useRef(null);
       return open ? h(StudioMobileSidebarOverlay, { onClose: () => setOpen(false) },
         h("nav", { "data-testid": "sidebar-controls", style: {
           width: "256px", height: "100%", display: "flex", flexDirection: "column",
         } },
           h("button", { style: { height: "44px" } }, "Collapse"),
+          h("button", { ref: workspaceTrigger, onClick: () => setWorkspaceOpen(true), "data-testid": "workspace-trigger" }, "Team & spaces"),
           h("div", { style: { flex: 1, minHeight: 0, overflowY: "auto" } },
             h("div", { style: { height: "1000px" } }, "Scrollable navigation")),
           h("button", { style: { height: "44px", flexShrink: 0 } }, "Profile"),
+          h(StudioSidebarWorkspacePanel, {
+            open: workspaceOpen, desktop: false, portalTarget: null, triggerRef: workspaceTrigger,
+            onClose: () => setWorkspaceOpen(false),
+          }, h("button", null, "Test space")),
         )) : h("p", null, "Closed");
     }
     createRoot(document.getElementById("root")).render(h(Fixture));`;
@@ -44,6 +52,19 @@ async function mountSidebar(page: Page) {
   await page.goto(FIXTURE_PATH);
   await expect(page.getByTestId("mobile-sidebar-surface")).toBeVisible();
 }
+
+test("Escape returns from the mobile workspace drill-in before dismissing navigation", async ({ page }) => {
+  await page.setViewportSize({ width: 393, height: 852 });
+  await mountSidebar(page);
+  await page.getByTestId("workspace-trigger").click();
+  // Do not wait for a frame or for focus: Escape must work as soon as it opens.
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("sidebar-project-switcher-menu")).toHaveCount(0);
+  await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
+  await expect(page.getByTestId("workspace-trigger")).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
+});
 
 for (const dark of [false, true]) {
   test(`paints mobile drawer to every edge while controls clear safe areas (${dark ? "dark" : "light"})`, async ({ page }) => {
@@ -99,7 +120,7 @@ for (const dark of [false, true]) {
       expect(geometry.scrollHeight).toBe(layout.height);
     }
 
-    await page.getByRole("button", { name: "Close sidebar", exact: true }).click({ position: { x: 380, y: 400 } });
+    await page.getByTestId("mobile-sidebar-overlay").click({ position: { x: 380, y: 400 } });
     await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
     expect(errors).toEqual([]);
   });

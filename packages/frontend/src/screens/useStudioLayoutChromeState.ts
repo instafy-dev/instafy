@@ -3,7 +3,7 @@ import type { WorkspaceGitReviewSource } from "../workspace/gitReviewTypes";
 import { useMobileSidebarHistory } from "./useMobileSidebarHistory";
 import { useNativeBackButtonAction } from "../native/useNativeBackButtonAction";
 
-export type LeftDrawerPanel = "history" | "files" | "sourceControl";
+export type LeftDrawerPanel = "history" | "files" | "sourceControl" | "workspaces";
 
 export type SourceControlOpenRequest = {
   key: number;
@@ -108,9 +108,14 @@ export function useStudioLayoutChromeState({
     startWidth: number;
   } | null>(null);
   const [filesExplorerPortalTarget, setFilesExplorerPortalTarget] = useState<HTMLDivElement | null>(null);
+  const [workspaceSwitcherPortalTarget, setWorkspaceSwitcherPortalTarget] = useState<HTMLDivElement | null>(null);
 
   const handleFilesExplorerPortalRef = useCallback((node: HTMLDivElement | null) => {
     setFilesExplorerPortalTarget((current) => (current === node ? current : node));
+  }, []);
+
+  const handleWorkspaceSwitcherPortalRef = useCallback((node: HTMLDivElement | null) => {
+    setWorkspaceSwitcherPortalTarget((current) => (current === node ? current : node));
   }, []);
 
   useEffect(() => {
@@ -204,7 +209,7 @@ export function useStudioLayoutChromeState({
       return;
     }
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !event.defaultPrevented) {
+      if (shouldDismissLeftDrawerForKeydown(event)) {
         backMobileSidebar();
       }
     };
@@ -215,7 +220,9 @@ export function useStudioLayoutChromeState({
   }, [backMobileSidebar, mobileSidebarOpen]);
 
   useEffect(() => {
-    if (!leftDrawer) {
+    // A mobile workspace URL has its own route-aware dismissal owner. Let it
+    // pop/replace the visit rather than clearing UI state beneath the route.
+    if (!leftDrawer || (!isLargeScreen && leftDrawer === "workspaces")) {
       return;
     }
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -227,11 +234,13 @@ export function useStudioLayoutChromeState({
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [leftDrawer]);
+  }, [isLargeScreen, leftDrawer]);
 
   return {
     filesExplorerPortalTarget,
     handleFilesExplorerPortalRef,
+    workspaceSwitcherPortalTarget,
+    handleWorkspaceSwitcherPortalRef,
     leftDrawer,
     leftDrawerResizing,
     leftDrawerWidth,

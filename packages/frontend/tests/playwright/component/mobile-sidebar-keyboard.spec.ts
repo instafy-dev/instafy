@@ -135,7 +135,7 @@ test("keeps focused sidebar search centered through visual keyboard resize and r
   await expect.poll(() => page.getByTestId("mobile-sidebar-controls").evaluate((element) => element.getBoundingClientRect().bottom)).toBe(778);
   await page.getByRole("button", { name: "Back", exact: true }).click();
   await expect(page.getByTestId("sidebar-project-switcher-menu")).toHaveCount(0);
-  await page.getByRole("button", { name: "Close sidebar", exact: true }).click({ position: { x: 350, y: 400 } });
+  await page.getByTestId("mobile-sidebar-overlay").click({ position: { x: 350, y: 400 } });
   await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
   expect(errors).toEqual([]);
 });

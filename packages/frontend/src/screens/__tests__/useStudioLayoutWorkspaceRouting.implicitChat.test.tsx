@@ -5,6 +5,7 @@ import { BrowserRouter, useLocation, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useStudioLayoutWorkspaceRouting } from "../useStudioLayoutWorkspaceRouting";
 import type { StudioPanel } from "../studio/types";
+import type { LeftDrawerPanel } from "../useStudioLayoutChromeState";
 import type { ConversationState } from "../../conversations/ConversationsProvider";
 
 const PROJECT = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -41,7 +42,7 @@ describe("implicit chat route rendered-tab reconciliation", () => {
     const navigate = useNavigate();
     const [tab, setTab] = useState(initialTab);
     const [panel, setPanel] = useState(initialPanel);
-    const [leftDrawer, setLeftDrawer] = useState<"history" | "files" | "sourceControl" | null>(null);
+    const [leftDrawer, setLeftDrawer] = useState<LeftDrawerPanel | null>(null);
     restoreTab = (next, nextPanel) => { setTab(next); if (nextPanel) setPanel(nextPanel); };
     const openPanelTab = useCallback((next: StudioPanel) => {
       openedPanels(next); setPanel(next);

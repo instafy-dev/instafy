@@ -15,7 +15,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
     ],
   },
   "browser-ui": {
-    minimumTests: 38,
+    minimumTests: 39,
     files: [
       "browser-chrome-mobile-layout.spec.ts",
       "browser-cobrowsing-ui.spec.ts",
@@ -44,6 +44,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "keeps Unicode remote input out of a previously focused local editor",
       "reveals only a clipped focused editable without changing focus or values",
       "keeps focused sidebar search centered through visual keyboard resize and restores the drawer",
+      "Escape returns from the mobile workspace drill-in before dismissing navigation",
       "restores exact visits and transcript positions through Back and Forward at 1280px",
       "restores exact visits and transcript positions through Back and Forward at 390px",
       "collapses mobile sidebar drill-ins before navigating without stale Back loops",

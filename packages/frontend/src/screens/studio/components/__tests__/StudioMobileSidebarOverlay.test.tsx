@@ -174,8 +174,10 @@ describe("mobile sidebar status-bar coverage", () => {
     await act(async () => {
       root.render(<StudioMobileSidebarOverlay onClose={onClose}>Sidebar</StudioMobileSidebarOverlay>);
     });
-    container.querySelector("button")?.click();
+    await act(async () => {
+      document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
     expect(onClose).toHaveBeenCalledOnce();
-    expect(container.querySelector('[data-testid="mobile-sidebar-surface"]')?.textContent).toBe("Sidebar");
+    expect(document.querySelector('[data-testid="mobile-sidebar-surface"]')?.textContent).toBe("Sidebar");
   });
 });

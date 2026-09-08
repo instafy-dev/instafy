@@ -168,7 +168,7 @@ export function doesWorkspaceTabMatchPanelRoute({
 }
 
 function isLeftDrawerPanel(value: string | null): value is LeftDrawerPanel {
-  return value === "history" || value === "files" || value === "sourceControl";
+  return value === "history" || value === "files" || value === "sourceControl" || value === "workspaces";
 }
 
 export function resolveLeftDrawerFromSearch(search: string): LeftDrawerPanel | null {
@@ -200,7 +200,7 @@ interface UseStudioLayoutWorkspaceRoutingParams {
   locationKey?: string;
   locationState?: unknown;
   navigate: (to: { pathname: string; search: string }, options: { replace: boolean; state?: unknown }) => void;
-  openConversationTab: (conversationId: string) => void;
+  openConversationTab: (conversationId: string, options?: { preview?: boolean }) => void;
   openJobThreadTab: (
     params: { conversationId: string; jobId: string; title?: string },
     options?: { activate?: boolean },
@@ -369,10 +369,13 @@ export function useStudioLayoutWorkspaceRouting({
         }
         return;
       }
-      setLeftDrawer(null);
       if (options?.source !== "query") {
+        setLeftDrawer(null);
         suppressQueryEffectRef.current = true;
       }
+      // URL hydration owns the drawer independently of the active panel.
+      // Clearing it here can erase a history/workspace overview when delayed
+      // tab restoration finally makes the underlying Chat panel ready.
       openPanelTab(panel);
     },
     [
@@ -610,7 +613,7 @@ export function useStudioLayoutWorkspaceRouting({
         const targetConversationId = (resolvedConversationLocalId ?? activeConversationId ?? "").trim();
         if (targetConversationId && conversationTabsReady) {
           applyingQueryParamsRef.current = true;
-          openConversationTab(targetConversationId);
+          openConversationTab(targetConversationId, { preview: true });
           applied = true;
         }
       } else {
@@ -639,7 +642,7 @@ export function useStudioLayoutWorkspaceRouting({
       const targetConversationId = (resolvedConversationLocalId ?? activeWorkspaceTabConversationId ?? "").trim();
       if (targetConversationId) {
         applyingQueryParamsRef.current = true;
-        openConversationTab(targetConversationId);
+        openConversationTab(targetConversationId, { preview: true });
         applied = true;
       }
     }

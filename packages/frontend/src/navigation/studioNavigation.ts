@@ -13,7 +13,7 @@ export type StudioDestination =
       panel: StudioPanel;
       settingsTab?: SettingsTab;
       settingsCategory?: string | null;
-      workspaceTab?: "history" | "files" | "sourceControl" | null;
+      workspaceTab?: "history" | "files" | "sourceControl" | "workspaces" | null;
     };
 
 /** A destination is written once; route hydration selects the corresponding UI. */

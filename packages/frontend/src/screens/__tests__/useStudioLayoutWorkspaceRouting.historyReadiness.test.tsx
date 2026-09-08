@@ -7,6 +7,7 @@ import { WorkspaceTabsProvider, useWorkspaceTabs } from "../../workspace/Workspa
 import { conversationsReducer, createInitialConversation, type ConversationState } from "../../conversations/conversationState";
 import { useStudioLayoutWorkspaceRouting } from "../useStudioLayoutWorkspaceRouting";
 import type { StudioPanel } from "../studio/types";
+import type { LeftDrawerPanel } from "../useStudioLayoutChromeState";
 
 const A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
@@ -50,7 +51,7 @@ describe("routing with the real tab owner's history readiness", () => {
   function Workspace() {
     const tabs = useWorkspaceTabs(), state = useFixtureState(), location = useLocation(), navigate = useNavigate();
     navigateTo = navigate;
-    const [drawer, setDrawer] = useState<"history" | "files" | "sourceControl" | null>(null);
+    const [drawer, setDrawer] = useState<LeftDrawerPanel | null>(null);
     const tab = tabs.activeTab;
     useStudioLayoutWorkspaceRouting({
       activeConversationControllerId: state.conversations.find(c => c.localId === state.selected)?.controllerId ?? null,
@@ -169,18 +170,22 @@ describe("routing with the real tab owner's history readiness", () => {
     expect(new URLSearchParams(window.location.search).get("conversationControllerId")).not.toBe(REMOTE);
   });
 
-  it("lets other panels and the history overview open while chat tabs await history", async () => {
+  it.each(["history", "workspaces", "files", "sourceControl"] as const)("keeps the URL-owned %s drawer open as pending chat history resolves", async (drawer) => {
     await enterPendingSpace("&panel=settings");
     expect(read("tab")).toBe("settings");
     await act(async () => navigateTo(`/studio?projectId=${B}&panel=projects`));
     expect(read("tab")).toBe("projects");
-    await act(async () => navigateTo(`/studio?projectId=${B}&workspaceTab=history`));
+    await act(async () => navigateTo(`/studio?projectId=${B}&workspaceTab=${drawer}`));
     expect(read("routing-error")).toBeUndefined();
-    expect(read("drawer")).toBe("history");
+    expect(read("drawer")).toBe(drawer);
     const before = visit();
     await act(async () => updateScope(scope => ({ ...scope, resolved: true })));
     expect(read("tab")).toBe("conversation");
-    expect(read("drawer")).toBe("history");
+    expect(read("drawer")).toBe(drawer);
+    expect(visit()).toEqual(before);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 60)); });
+    expect(new URLSearchParams(window.location.search).get("workspaceTab")).toBe(drawer);
+    expect(read("drawer")).toBe(drawer);
     expect(visit()).toEqual(before);
   });
 
