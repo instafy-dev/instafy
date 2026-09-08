@@ -12,6 +12,9 @@ value retains each job's existing Ubuntu fallback. Non-main dispatches, tags and
 event shapes (including merge queues) stay hosted. A queued self-hosted job does not automatically
 fall back if its pool is offline: revert the mode and start a new authorized run if needed.
 
+Use the documented lowercase variable values. GitHub's runner-selection expressions compare
+strings without regard to case; capitalization is not an additional trust or disable switch.
+
 | Role label | Actual worker | Work |
 | --- | --- | --- |
 | `instafy-ci-linux-arm64` | Ubuntu 24.04 Linux ARM64 | Native package, database and browser checks; ARM64 runtime images |
