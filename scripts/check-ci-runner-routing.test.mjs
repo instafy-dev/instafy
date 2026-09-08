@@ -65,11 +65,22 @@ function route(source, { variables = {}, event = "push", ref = "refs/heads/main"
   if (!folded) return [source.match(/^    runs-on: ([a-z0-9.-]+)$/m)?.[1]];
   const expression = folded[1].trim().match(/^\$\{\{([\s\S]+)\}\}$/)?.[1];
   assert.ok(expression, "runner selection is a bounded folded Actions expression");
-  // These expressions intentionally use only the common boolean/comparison subset
-  // of Actions expressions, plus fromJSON/format. Evaluate the actual workflow bytes,
-  // not a duplicate hand-maintained implementation of the routing decision.
+  // Evaluate the actual workflow bytes, translating this deliberately bounded
+  // comparison subset: Actions string equality is case-insensitive, unlike JS.
+  // https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#operators
   assert.doesNotMatch(expression, /[;`]|\b(?:inputs|needs|secrets|env)\./);
-  const value = vm.runInNewContext(expression, {
+  const operand = "(?:[A-Za-z_][A-Za-z0-9_.]*|'[^']*')";
+  const translated = expression.replace(new RegExp(`(${operand})\\s*==\\s*(${operand})`, "g"), "actionsEqual($1, $2)");
+  assert.doesNotMatch(translated, /==|!=/, "new comparison forms need explicit Actions semantics");
+  const numeric = (value) => {
+    if (value == null || value === "") return 0;
+    if (typeof value === "boolean" || typeof value === "number") return Number(value);
+    try { const parsed = JSON.parse(value); return typeof parsed === "number" ? parsed : NaN; } catch { return NaN; }
+  };
+  const value = vm.runInNewContext(translated, {
+    actionsEqual: (left, right) => typeof left === "string" && typeof right === "string"
+      ? left.toLowerCase() === right.toLowerCase()
+      : typeof left === typeof right ? left === right : numeric(left) === numeric(right),
     fromJSON: JSON.parse,
     format: (template, value) => template.replace("{0}", value),
     vars: { CI_RUNNER_MODE: "", CI_TRUSTED_PR_SELF_HOSTED: "", CI_LINUX_X64_SELF_HOSTED: "", ...variables },
@@ -142,6 +153,19 @@ test("temporary PR selection requires all of mode, opt-in, private visibility, s
       }
     }
   }
+});
+
+test("routing comparisons reproduce GitHub's case-insensitive strings", () => {
+  const source = job("build.yml", "javascript");
+  assert.deepEqual(route(source, { variables: { CI_RUNNER_MODE: "Self-Hosted" }, event: "PUSH", ref: "refs/heads/MAIN" }), expected("linux-arm64"));
+  assert.deepEqual(route(source, {
+    variables: { CI_RUNNER_MODE: "SELF-HOSTED", CI_TRUSTED_PR_SELF_HOSTED: "TRUE" },
+    event: "pull_request", ref: "refs/pull/42/merge", headRepository: "EXAMPLE/Project",
+  }), expected("linux-arm64"));
+  assert.deepEqual(route(job("publish-production-services.yml", "publish"), {
+    variables: { CI_RUNNER_MODE: "SELF-HOSTED", CI_LINUX_X64_SELF_HOSTED: "TRUE" },
+  }), expected("linux-x64"));
+  assert.deepEqual(route(source, { variables: { CI_RUNNER_MODE: "self-hosted " } }), ["ubuntu-latest"]);
 });
 
 test("native image architecture is never inferred from ARM capacity or reduced matrix coverage", () => {
