@@ -10,6 +10,12 @@ message text. A rejected upload must retain the draft and attachments without ad
 an unsent message bubble; retrying successfully must create only one message.
 Restore a stash, attach an image, and send: the restored text and new image must arrive
 together, and the stash should disappear only after the send succeeds.
+Select several images together and verify that the thumbnail strip stays one row high
+above the text field, scrolls horizontally without widening the page, and keeps all
+remove controls reachable with a reduced keyboard viewport. Remove a middle image and
+then the remaining images; preserve the draft and keyboard focus. Preview an image with
+the keyboard: Tab stays in the dialog, and Escape returns to the same thumbnail. During
+an upload, previews remain available but removal is disabled until the send settles.
 
 For an actual upload, use a local controller and runtime-bound filesystem origin;
 mocked picker or queue callbacks do not prove storage or agent dispatch. Verify the

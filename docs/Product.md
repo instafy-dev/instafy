@@ -213,11 +213,18 @@ with the draft, then scrolls within the editor. Image upload and other message t
 in the `+` menu.
 The action menu scrolls within the available screen height. On Android, Back dismisses
 the current composer menu, saved-message popover, or image preview before leaving the chat.
+Selected images appear in one horizontally scrolling thumbnail strip above the text field.
+Each image has its own remove control and a larger preview; adding more images does not
+grow the strip vertically. Removing an image keeps the remaining attachments and text.
+Keyboard focus moves to the next remove control (or back to the editor when none remain),
+and image previews contain focus until closed, then return it to the originating thumbnail.
 
 Image submissions keep their draft and previews while uploading. A failed upload leaves
 them available to retry and does not add an unsent message to the transcript. Successful
 uploads clear only the submitted images and unchanged source draft, including when the
 user has switched to another conversation or space in the meantime.
+While the send is pending, the strip shows **Uploading images…** and disables removal;
+removing a local preview cannot cancel an upload already included in the send.
 
 On clients with voice input, the trailing action is the microphone for an empty draft and
 Send or Steer for a text or image draft. Recording and transcription keep the microphone
