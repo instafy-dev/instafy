@@ -52,7 +52,9 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   timeout: 30_000,
-  globalTimeout: 180_000,
+  // The 39-case required inventory runs serially on hosted runners. Bound the
+  // complete lane to six minutes without extending any individual test.
+  globalTimeout: 360_000,
   outputDir: "test-results/browser-ci/browser-ui",
   reporter: [
     ["list"],

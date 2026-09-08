@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { REQUIRED_BROWSER_LANES } from "../packages/frontend/scripts/required-browser-reporter.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");
@@ -69,4 +70,21 @@ test("the required browser UI job includes the real co-browsing protocol fixture
   assert.doesNotMatch(job.slice(0, components), /if:|continue-on-error:|secrets:|secrets\./);
   assert.ok(fs.existsSync(path.join(root, "scripts/shared-browser-cobrowsing-e2e.mjs")));
   assert.ok(fs.existsSync(path.join(root, "scripts/shared-browser-cobrowsing-e2e.test.mjs")));
+});
+
+test("the expanded browser UI inventory has a bounded suite budget without relaxing test gates", () => {
+  const config = read("packages/frontend/playwright.browser-ui-ci.config.ts");
+  assert.match(config, /^\s+globalTimeout: 360_000,$/m);
+  assert.match(config, /^\s+timeout: 30_000,$/m);
+  assert.match(config, /^\s+workers: 1,$/m);
+  assert.match(config, /^\s+retries: 0,$/m);
+  assert.match(config, /^\s+fullyParallel: false,$/m);
+  assert.match(config, /^\s+forbidOnly: true,$/m);
+  assert.match(config, /^\s+testMatch: REQUIRED_BROWSER_UI_SPECS,$/m);
+  assert.match(config, /required-browser-reporter\.mjs", \{ lane: "browser-ui" \}/);
+  assert.equal(REQUIRED_BROWSER_LANES["browser-ui"].minimumTests, 39);
+  const workflow = read(".github/workflows/browser-e2e.yml");
+  const job = workflow.split("\n  browser-ui:\n")[1].split("\n  shared-profile:\n")[0];
+  assert.match(job, /^\s+runs-on: ubuntu-24\.04$/m);
+  assert.match(job, /^\s+timeout-minutes: 15$/m);
 });

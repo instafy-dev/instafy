@@ -167,6 +167,9 @@ attempt per test: skips, expected failures, retries, filtered subsets, and zero
 tests fail the lane. Failure traces and a machine-readable result are retained
 under `packages/frontend/test-results/browser-ci/<lane>`.
 
+The 39-case serial `browser-ui` lane has a six-minute total budget for hosted
+runners; each test still has a 30-second limit, with no retries or skips allowed.
+
 | Lane | What it proves | Local requirements |
 | --- | --- | --- |
 | `personal` | Real Electron profile/cookie persistence across restarts and projects, per-user isolation, clear, kill switch, renderer ownership revocation, and native form-owner/type descriptors (4 tests) | Installed workspace dependencies and compiled Desktop fixture; no Docker or database |
