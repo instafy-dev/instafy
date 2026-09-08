@@ -121,7 +121,7 @@ export interface StudioSidebarProps {
   selectedOrgKey?: string;
   onOpenTeam?: (orgKey: string) => void;
   onReturnToTeam?: (orgKey: string) => void;
-  onActiveTeamChange?: (team: { key: string; name: string }) => void;
+  onActiveTeamChange?: (team: { key: string; name: string; avatarUrl: string | null }) => void;
   onActivateProject?: (projectId: string, orgKey: string) => void;
   hideContext?: boolean;
 }
@@ -865,13 +865,20 @@ export function StudioSidebar({
     }
     return activeOrgKey === activeProjectOrgKey ? getOrgDisplayName(activeProject?.orgName) : "Team";
   }, [activeOrgKey, activeProjectOrgKey, activeProject?.orgName, orgOptions]);
-  const publishedActiveTeamRef = useRef<{ key: string; name: string } | null>(null);
+  const activeOrgAvatarUrl = orgOptions.find((org) => org.key === activeOrgKey)?.avatarUrl ?? null;
+  const activeTeamUserKey = normalizeSidebarOrgUser(userEmail);
+  const activeTeamMetadataReady = hydratedOrgUserRef.current === activeTeamUserKey;
+  const publishedActiveTeamRef = useRef<{ user: string | null; key: string; name: string; avatarUrl: string | null } | null>(null);
   useEffect(() => {
+    // Account changes hydrate their own org snapshot in the effect above. Do
+    // not publish this render's previous-account metadata as the new user.
+    if (!activeTeamMetadataReady) return;
     const previous = publishedActiveTeamRef.current;
-    if (previous?.key === activeOrgKey && previous.name === activeOrgName) return;
-    publishedActiveTeamRef.current = { key: activeOrgKey, name: activeOrgName };
-    onActiveTeamChange?.({ key: activeOrgKey, name: activeOrgName });
-  }, [activeOrgKey, activeOrgName, onActiveTeamChange]);
+    if (previous?.user === activeTeamUserKey && previous.key === activeOrgKey && previous.name === activeOrgName && previous.avatarUrl === activeOrgAvatarUrl) return;
+    const team = { key: activeOrgKey, name: activeOrgName, avatarUrl: activeOrgAvatarUrl };
+    publishedActiveTeamRef.current = { user: activeTeamUserKey, ...team };
+    onActiveTeamChange?.(team);
+  }, [activeOrgKey, activeOrgName, activeOrgAvatarUrl, activeTeamMetadataReady, activeTeamUserKey, onActiveTeamChange]);
   // The org deck (the team & spaces row's icon) shows the selected team on top
   // and reads as a stack when there is more than one; switching happens in the
   // panel it opens. Selection follows the user's CHOICE instantly; the active

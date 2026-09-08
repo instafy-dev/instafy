@@ -310,15 +310,17 @@ function StudioLayoutInner() {
   const currentUserId = user?.id ?? null;
   const activeProjectOrgKey = activeProjectSummary?.orgId ?? "personal";
   const navigationScope = resolveTeamNavigationScope(location.search, activeProjectOrgKey);
-  const [navigationTeam, setNavigationTeam] = useState<{ userId: string | null; key: string; name: string } | null>(null);
-  const handleActiveTeamChange = useCallback((team: { key: string; name: string }) => {
-    setNavigationTeam((current) => current?.userId === currentUserId && current.key === team.key && current.name === team.name
+  const [navigationTeam, setNavigationTeam] = useState<{ userId: string | null; key: string; name: string; avatarUrl: string | null } | null>(null);
+  const handleActiveTeamChange = useCallback((team: { key: string; name: string; avatarUrl: string | null }) => {
+    setNavigationTeam((current) => current?.userId === currentUserId && current.key === team.key && current.name === team.name && current.avatarUrl === team.avatarUrl
       ? current : { userId: currentUserId, ...team });
   }, [currentUserId]);
-  const activeTeamName = navigationTeam?.userId === currentUserId && navigationTeam.key === navigationScope.orgKey
-    ? navigationTeam.name : navigationScope.orgKey === "personal" ? "Personal"
-      : readCachedControllerOrgs(user?.email).find((org) => org.id === navigationScope.orgKey)?.name
-        ?? (navigationScope.orgKey === activeProjectOrgKey ? activeProjectSummary?.orgName : null) ?? "Team";
+  const selectedTeamMetadata = navigationTeam?.userId === currentUserId && navigationTeam.key === navigationScope.orgKey
+    ? navigationTeam : readCachedControllerOrgs(user?.email).find((org) => org.id === navigationScope.orgKey);
+  const activeTeamName = navigationScope.orgKey === "personal" ? "Personal"
+    : selectedTeamMetadata?.name
+      ?? (navigationScope.orgKey === activeProjectOrgKey ? activeProjectSummary?.orgName : null) ?? "Team";
+  const activeTeamAvatarUrl = navigationScope.orgKey === "personal" ? null : selectedTeamMetadata?.avatarUrl ?? null;
   const teamReturnRoutes = useRef<{ userId: string | null; routes: Map<string, string> }>({ userId: currentUserId, routes: new Map() });
   if (teamReturnRoutes.current.userId !== currentUserId) {
     teamReturnRoutes.current = { userId: currentUserId, routes: new Map() };
@@ -2181,6 +2183,7 @@ function StudioLayoutInner() {
             sidebarOpen: isLargeScreen ? !sidebarCollapsed && navigationScope.page !== "home" && navigationScope.page !== "account" : mobileSidebarOpen,
             navigationPage: navigationScope.page,
             activeTeamName,
+            activeTeamAvatarUrl,
             onOpenHome: handleOpenHome,
             onOpenTeamSwitcher: () => handleWorkspaceSwitcherOpenChange(true),
             onNavigateBack: handleNavigateBack,

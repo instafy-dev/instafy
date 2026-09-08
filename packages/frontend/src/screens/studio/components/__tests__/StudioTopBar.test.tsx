@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   closeTab: vi.fn(),
   navigationPage: "workspace" as "home" | "team" | "account" | "workspace",
   activeTeamName: "My team",
+  activeTeamAvatarUrl: null as string | null,
   sidebarCollapsed: false,
   titleBarFree: false,
   profile: { fullName: "Alex Morgan", avatarUrl: null as string | null },
@@ -41,6 +42,7 @@ vi.mock("../../workspaceControls", () => ({
     showChatActions: mocks.showChatActions,
     navigationPage: mocks.navigationPage,
     activeTeamName: mocks.activeTeamName,
+    activeTeamAvatarUrl: mocks.activeTeamAvatarUrl,
     onOpenHome: mocks.openHome,
     onOpenTeamSwitcher: mocks.openTeamSwitcher,
     onNavigateBack: mocks.navigateBack,
@@ -97,6 +99,7 @@ describe("StudioTopBar navigation", () => {
     mocks.sidebarCollapsed = false;
     mocks.titleBarFree = false;
     mocks.activeTeamName = "My team";
+    mocks.activeTeamAvatarUrl = null;
     mocks.profile = { fullName: "Alex Morgan", avatarUrl: null };
     mocks.tab = { id: "conversation-1", kind: "conversation", conversationId: "conversation-1", title: "Draft chat" };
     mocks.conversations = [{ localId: "conversation-1", title: "Draft chat" }];
@@ -161,7 +164,8 @@ describe("StudioTopBar navigation", () => {
     const profile = row?.querySelector<HTMLButtonElement>('[data-testid="topbar-profile-button"]');
     expect(home?.nextElementSibling).toBe(team);
     expect(home?.getAttribute("aria-current")).toBe(navigationPage === "home" ? "page" : null);
-    expect(team?.textContent).toBe("My team");
+    expect(team?.querySelector('[data-testid="topbar-team-name"]')?.textContent).toBe("My team");
+    expect(team?.querySelector('[data-testid="topbar-team-avatar"]')?.textContent).toBe("MT");
     expect(profile?.getAttribute("aria-current")).toBe(navigationPage === "account" ? "page" : null);
     expect(profile?.textContent).toBe("AM");
     expect(container.querySelector('[data-testid="topbar-workspace-navigation"]')).toBeNull();
@@ -181,6 +185,26 @@ describe("StudioTopBar navigation", () => {
     expect(button?.getAttribute("aria-label")).toBe("Open profile settings");
     expect(button?.querySelector("img")?.getAttribute("src")).toBe(mocks.profile.avatarUrl);
     expect(button?.querySelector("img")?.alt).toBe("");
+  });
+
+  it("uses the selected team's picture independently of the account picture and clears it when switching teams", async () => {
+    mocks.navigationPage = "home";
+    mocks.activeTeamAvatarUrl = "https://example.test/team.png";
+    mocks.profile.avatarUrl = "https://example.test/account.png";
+    await act(async () => root.render(<StudioTopBar />));
+    const team = container.querySelector('[data-testid="topbar-team-selector"]');
+    const avatar = team?.querySelector("img");
+    expect(avatar?.getAttribute("src")).toBe(mocks.activeTeamAvatarUrl);
+    expect(avatar?.alt).toBe("");
+    expect(team?.getAttribute("aria-label")).toBe("Choose team: My team");
+    expect(container.querySelector('[data-testid="topbar-profile-button"] img')?.getAttribute("src")).toBe(mocks.profile.avatarUrl);
+
+    mocks.activeTeamName = "Research team";
+    mocks.activeTeamAvatarUrl = null;
+    await act(async () => root.render(<StudioTopBar />));
+    expect(team?.querySelector("img")).toBeNull();
+    expect(team?.querySelector('[data-testid="topbar-team-avatar"]')?.textContent).toBe("RT");
+    expect(team?.getAttribute("aria-label")).toBe("Choose team: Research team");
   });
 
   it("goes back through the supplied navigation callback in a workspace", async () => {

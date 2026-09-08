@@ -29,6 +29,7 @@ export interface WorkspaceControlsContextValue {
   onOpenProjectPicker?: () => void;
   navigationPage?: "home" | "team" | "account" | "workspace";
   activeTeamName?: string;
+  activeTeamAvatarUrl?: string | null;
   onOpenHome?: () => void;
   onOpenTeamSwitcher?: () => void;
   onNavigateBack?: () => void;

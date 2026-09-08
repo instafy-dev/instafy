@@ -78,7 +78,8 @@ The workspace header provides the control to reopen it. New users start with the
 context sidebar expanded; existing saved collapse preferences are preserved.
 
 On narrow Home, team and account pages, the header keeps Home immediately left of
-the team selector, with the profile action at the right. Home is selected without
+the compact team avatar and name, with the profile action at the right. The team's
+navigation icon opens the shared left drawer. Home is selected without
 removing access to the last team. Inside a working area, Back and the current
 space replace those global controls; the space title opens navigation, and the
 tab menu keeps other work reachable. Team selection and space navigation share

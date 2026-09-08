@@ -9,10 +9,11 @@ const fixture = vi.hoisted(() => ({
     { id: "space-c", name: "Design", orgId: "org-c", orgName: "Charlie", state: null, isRemoteOnly: false },
   ],
   orgs: [
-    { id: "org-a", name: "Alpha", slug: "alpha", role: "builder" },
-    { id: "org-b", name: "Empty team", slug: "empty", role: "owner" },
-    { id: "org-c", name: "Charlie", slug: "charlie", role: "builder" },
+    { id: "org-a", name: "Alpha", slug: "alpha", role: "builder", avatarUrl: null as string | null },
+    { id: "org-b", name: "Empty team", slug: "empty", role: "owner", avatarUrl: null as string | null },
+    { id: "org-c", name: "Charlie", slug: "charlie", role: "builder", avatarUrl: null as string | null },
   ],
+  userEmail: "member@example.test",
   switchProject: vi.fn(), createProject: vi.fn(), onSettings: vi.fn(), onNewSpace: vi.fn(),
   copyTunnelDetails: vi.fn(), showStatus: vi.fn(), refresh: vi.fn(), retry: vi.fn(),
   discoveryError: null as string | null, discoveryResolved: true, discoveryRefreshing: false,
@@ -32,7 +33,7 @@ vi.mock("../../../../sdk/instafy", async () => {
   } };
 });
 vi.mock("../../workspaceControls", () => ({ useWorkspaceControls: () => ({
-  userEmail: "member@example.test", hasLogs: false, sidebarOpen: true,
+  userEmail: fixture.userEmail, hasLogs: false, sidebarOpen: true,
   onOpenOrgSettings: fixture.onSettings, onStartNewProject: fixture.onNewSpace,
 }) }));
 vi.mock("../../useStudioDesktopLayout", () => ({ useStudioDesktopLayout: () => true }));
@@ -72,6 +73,8 @@ describe("StudioSidebar organization navigation", () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     localStorage.clear();
     vi.clearAllMocks();
+    fixture.userEmail = "member@example.test";
+    fixture.orgs = fixture.orgs.map((org) => ({ ...org, avatarUrl: null }));
     fixture.discoveryError = null;
     fixture.discoveryResolved = true;
     fixture.discoveryRefreshing = false;
@@ -163,13 +166,50 @@ describe("StudioSidebar organization navigation", () => {
   it("publishes resolved selected-team metadata only when its identity changes", async () => {
     const onActiveTeamChange = vi.fn();
     await render({ onActiveTeamChange });
-    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-a", name: "Alpha" });
+    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-a", name: "Alpha", avatarUrl: null });
     const initialCalls = onActiveTeamChange.mock.calls.length;
     await render({ collapsed: true, onActiveTeamChange });
     expect(onActiveTeamChange).toHaveBeenCalledTimes(initialCalls);
     await render({ selectedOrgKey: "org-b", onActiveTeamChange });
-    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-b", name: "Empty team" });
+    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-b", name: "Empty team", avatarUrl: null });
     expect(onActiveTeamChange).toHaveBeenCalledTimes(initialCalls + 1);
+  });
+
+  it("publishes selected-team avatar changes and clears images for other scopes", async () => {
+    const onActiveTeamChange = vi.fn();
+    fixture.orgs = fixture.orgs.map((org) => ({ ...org, avatarUrl: `https://images.example.test/${org.id}.png` }));
+    await render({ onActiveTeamChange });
+    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-a", name: "Alpha", avatarUrl: "https://images.example.test/org-a.png" });
+    const initialCalls = onActiveTeamChange.mock.calls.length;
+    await render({ collapsed: true, onActiveTeamChange });
+    expect(onActiveTeamChange).toHaveBeenCalledTimes(initialCalls);
+    fixture.orgs = fixture.orgs.map((org) => ({ ...org, avatarUrl: org.id === "org-a" ? "https://images.example.test/updated.png" : org.avatarUrl }));
+    await act(async () => { window.dispatchEvent(new Event("instafy:orgs-updated")); });
+    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-a", name: "Alpha", avatarUrl: "https://images.example.test/updated.png" });
+    expect(onActiveTeamChange).toHaveBeenCalledTimes(initialCalls + 1);
+    fixture.orgs = fixture.orgs.map((org) => ({ ...org, avatarUrl: org.id === "org-a" ? null : org.avatarUrl }));
+    await act(async () => { window.dispatchEvent(new Event("instafy:orgs-updated")); });
+    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-a", name: "Alpha", avatarUrl: null });
+    await render({ selectedOrgKey: "org-b", onActiveTeamChange });
+    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-b", name: "Empty team", avatarUrl: "https://images.example.test/org-b.png" });
+    await render({ selectedOrgKey: "org-unknown", onActiveTeamChange });
+    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-unknown", name: "Team", avatarUrl: null });
+    await render({ selectedOrgKey: "personal", onActiveTeamChange });
+    expect(onActiveTeamChange).toHaveBeenLastCalledWith(expect.objectContaining({ key: "personal", avatarUrl: null }));
+  });
+
+  it("does not republish the previous account's avatar while the new account hydrates", async () => {
+    const onActiveTeamChange = vi.fn();
+    fixture.orgs = fixture.orgs.map((org) => ({ ...org, avatarUrl: "https://images.example.test/previous-account.png" }));
+    await render({ onActiveTeamChange });
+    const previousCalls = onActiveTeamChange.mock.calls.length;
+    fixture.userEmail = "other@example.test";
+    fixture.orgs = fixture.orgs.map((org) => ({ ...org, avatarUrl: null }));
+    await render({ onActiveTeamChange });
+    const nextAccountCalls = onActiveTeamChange.mock.calls.slice(previousCalls);
+    expect(nextAccountCalls.length).toBeGreaterThan(0);
+    expect(nextAccountCalls.every(([team]) => team.avatarUrl === null)).toBe(true);
+    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-a", name: "Alpha", avatarUrl: null });
   });
 
   it("reveals a failed rail switch with Retry, preserves its scope, and respects dismissal", async () => {
