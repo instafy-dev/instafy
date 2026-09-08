@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { useNavigate } from "react-router-dom";
+import { useStudioNavigation } from "../../../navigation/useStudioNavigation";
 import { ChatLines, Check, Clock, Group, Plus, User, WarningTriangle } from "iconoir-react";
 import { AttentionBadge } from "../../../components/AttentionBadge";
 import { Button, IconButton } from "../../../components/Button";
@@ -59,27 +59,6 @@ function usablePreview(value: string | null | undefined): string | null {
     return null;
   }
   return /^\d{1,3}$/.test(trimmed) ? null : trimmed;
-}
-
-function buildRouteToConversation(projectId: string, conversationControllerId: string | null): string {
-  try {
-    const url = new URL(window.location.href);
-    url.pathname = "/studio";
-    url.searchParams.set("projectId", projectId);
-    if (conversationControllerId) {
-      url.searchParams.set("conversationControllerId", conversationControllerId);
-    } else {
-      url.searchParams.delete("conversationControllerId");
-    }
-    url.searchParams.delete("conversationId");
-    url.searchParams.set("panel", "chat");
-    const search = url.searchParams.toString();
-    return `${url.pathname}${search ? `?${search}` : ""}`;
-  } catch {
-    return `/studio?projectId=${encodeURIComponent(projectId)}${
-      conversationControllerId ? `&conversationControllerId=${encodeURIComponent(conversationControllerId)}` : ""
-    }&panel=chat`;
-  }
 }
 
 function initialsFor(name: string | null | undefined): string {
@@ -248,11 +227,11 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
     setConversationControllerId,
   } = useConversations();
   const { showStatus } = useStatus();
-  const { requestUrlPush, openConversationTab } = useWorkspaceTabs();
+  const { openConversationTab } = useWorkspaceTabs();
   const { userEmail, onStartNewProject, onStartNewConversation, onOpenOrgSettings } = useWorkspaceControls();
   const { user: authUser } = useAuth();
   const viewerUserId = authUser?.id ?? null;
-  const navigate = useNavigate();
+  const navigateTo = useStudioNavigation();
   const [locallyDismissedKeys, setLocallyDismissedKeys] = useState<string[]>([]);
   const [teamFilter, setTeamFilter] = useState(HOME_TEAM_FILTER_ALL);
   const [needsExpanded, setNeedsExpanded] = useState(false);
@@ -373,23 +352,23 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
 
   const openConversationById = useCallback(
     (projectId: string, conversationId: string | null) => {
-      if (conversationId && projectId === activeProjectId) {
-        const local = conversations.find((conversation) => (conversation.controllerId ?? "").trim() === conversationId);
-        if (local) {
-          openConversationTab(local.localId);
-          return;
-        }
-      }
-      navigate(buildRouteToConversation(projectId, conversationId));
+      const local = projectId === activeProjectId && conversationId
+        ? conversations.find((conversation) => conversation.controllerId === conversationId) : null;
+      navigateTo({ kind: "conversation", projectId, conversationId: local?.localId, conversationControllerId: conversationId });
     },
-    [activeProjectId, conversations, navigate, openConversationTab],
+    [activeProjectId, conversations, navigateTo],
   );
+
+  const openLocalConversation = useCallback((conversationId: string) => {
+    if (!activeProjectId) return;
+    navigateTo({ kind: "conversation", projectId: activeProjectId, conversationId,
+      conversationControllerId: conversations.find((conversation) => conversation.localId === conversationId)?.controllerId });
+  }, [activeProjectId, conversations, navigateTo]);
 
   const openEvent = useCallback(
     (event: HomeFeedEvent) => {
-      requestUrlPush();
       if (event.source.type === "conversation") {
-        openConversationTab(event.source.localConversationId);
+        openLocalConversation(event.source.localConversationId);
         return;
       }
       if (event.source.type === "inbox" && event.source.entry.source === "inbox") {
@@ -417,13 +396,13 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
           entry: event.source.recent,
         });
         if (target.kind === "local") {
-          openConversationTab(target.localConversationId);
+          openLocalConversation(target.localConversationId);
           return;
         }
-        navigate(buildRouteToConversation(target.projectId, target.conversationControllerId));
+        openConversationById(target.projectId, target.conversationControllerId);
       }
     },
-    [acknowledgeInbox, activeProjectId, conversations, navigate, openConversationById, openConversationTab, refreshInbox, requestUrlPush],
+    [acknowledgeInbox, activeProjectId, conversations, openConversationById, openLocalConversation, refreshInbox],
   );
 
   const dismissEvent = useCallback(
@@ -459,10 +438,11 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
   // A fresh, empty chat — for a new user this lands on the guided
   // getting-started card, which is where starter prompts live.
   const handleStartChat = useCallback(() => {
-    const conversation = createConversation({ title: "New chat", select: true });
+    if (!activeProjectId) return;
+    const conversation = createConversation({ title: "New chat", select: false });
     markConversationRead(conversation.localId);
-    requestUrlPush();
-    openConversationTab(conversation.localId, { fallbackConversation: conversation });
+    openConversationTab(conversation.localId, { activate: false, fallbackConversation: conversation });
+    navigateTo({ kind: "conversation", projectId: activeProjectId, conversationId: conversation.localId });
     if (activeProjectId && isUUID(activeProjectId)) {
       void controllerClient.conversations
         .createBlank({ projectId: activeProjectId, metadata: { title: "New chat", localId: conversation.localId } })
@@ -472,7 +452,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
           }
         });
     }
-  }, [activeProjectId, createConversation, markConversationRead, openConversationTab, requestUrlPush, setConversationControllerId]);
+  }, [activeProjectId, createConversation, markConversationRead, navigateTo, openConversationTab, setConversationControllerId]);
   // Empty-state creation uses the same conversation action as the top bar.
   const startChat = onStartNewConversation ?? handleStartChat;
 

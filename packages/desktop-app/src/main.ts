@@ -2102,7 +2102,7 @@ app.whenReady().then(() => {
         if (!personalBrowserHost!.isOwnedBy(ownerId)) {
           return personalBrowserHost!.getStatus();
         }
-        const preparedEpoch = await personalBrowserHost!.prepareAgentControl();
+        const preparedEpoch = await personalBrowserHost!.prepareAgentControl(payload?.approvalMode);
         try {
           await resumePersonalBrowserRuntime(projectId);
         } catch (error) {

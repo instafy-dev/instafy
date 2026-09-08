@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ComponentProps } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import { DialogTrigger } from "react-aria-components";
 import { ChatLines, Lock, NavArrowRight, Plus } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
@@ -14,6 +14,7 @@ import { useAuth } from "../../../providers/AuthProvider";
 import { controllerClient, type ControllerProjectMember } from "../../../sdk/instafy";
 import { DARK_RAIL_HOVER_CLASS } from "../../../theme/darkSurfaces";
 import { useWorkspaceControls } from "../workspaceControls";
+import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 
 const { listMembers: listControllerOrgMembers } = controllerClient.organizations;
 const { listMembers: listControllerProjectMembers } = controllerClient.projects;
@@ -45,6 +46,11 @@ type StudioNewChatButtonProps = {
   size?: ComponentProps<typeof IconButton>["size"];
   radius?: ComponentProps<typeof IconButton>["radius"];
   onStarted?: () => void;
+  dismissalKey?: string;
+  renderTrigger?: (actions: {
+    onNewChat?: () => void;
+    onNewPrivateChat?: () => void;
+  }) => ReactNode;
 };
 
 /** Shared public/private chat creation for the tab bar and recent-chat navigation. */
@@ -54,6 +60,8 @@ export function StudioNewChatButton({
   size = "md",
   radius = "full",
   onStarted,
+  dismissalKey,
+  renderTrigger,
 }: StudioNewChatButtonProps) {
   const {
     onStartNewConversation,
@@ -76,6 +84,20 @@ export function StudioNewChatButton({
   const privateChatTargetsEpochRef = useRef(0);
   const newChatTriggerRef = useRef<HTMLButtonElement | null>(null);
   const newChatInteractionModalityRef = useRef<"pointer" | "keyboard" | null>(null);
+
+  useNativeBackButtonAction(privateChatPickerOpen || newChatMenuOpen, () => {
+    setPrivateChatPickerOpen(false);
+    setPrivateChatQuery("");
+    setNewChatMenuOpen(false);
+  });
+
+  useEffect(() => {
+    // The custom trigger can live inside More while this dialog owner remains
+    // mounted. Its secondary surfaces still belong to one exact visit.
+    setPrivateChatPickerOpen(false);
+    setPrivateChatQuery("");
+    setNewChatMenuOpen(false);
+  }, [dismissalKey]);
 
   useEffect(() => {
     privateChatTargetsEpochRef.current += 1;
@@ -244,13 +266,25 @@ export function StudioNewChatButton({
     </StudioDialogPopover>
   ) : null;
 
-  if (!shouldShowNewChat) {
+  if (!shouldShowNewChat && !renderTrigger) {
     return null;
   }
 
   return (
     <>
-      <DialogTrigger isOpen={newChatMenuOpen} onOpenChange={handleNewChatMenuOpenChange}>
+      {renderTrigger ? renderTrigger({
+        onNewChat: shouldShowNewChat ? () => {
+          setNewChatMenuOpen(false);
+          onStartNewConversation?.();
+          onStarted?.();
+        } : undefined,
+        onNewPrivateChat: shouldShowNewChat && onStartPrivateConversation ? () => {
+          setNewChatMenuOpen(false);
+          setPrivateChatPickerOpen(true);
+          setPrivateChatQuery("");
+          void loadPrivateChatTargets();
+        } : undefined,
+      }) : <DialogTrigger isOpen={newChatMenuOpen} onOpenChange={handleNewChatMenuOpenChange}>
         <IconButton
           ref={newChatTriggerRef}
           type="button"
@@ -271,7 +305,7 @@ export function StudioNewChatButton({
           <Plus className="h-[18px] w-[18px]" aria-hidden="true" />
         </IconButton>
         {newChatMenu}
-      </DialogTrigger>
+      </DialogTrigger>}
       <StudioDialogModal
         isOpen={privateChatPickerOpen}
         onOpenChange={(open) => {

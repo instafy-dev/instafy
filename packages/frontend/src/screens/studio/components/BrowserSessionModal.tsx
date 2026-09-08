@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Collapse, Expand, Safari, Xmark } from "iconoir-react";
+import { Expand, Safari, Xmark } from "iconoir-react";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { Button, IconButton } from "../../../components/Button";
 import { Spinner } from "../../../components/Spinner";
@@ -30,10 +30,19 @@ import { runtimeDebugLog } from "../../../runtime/utils/runtimeDebug";
 import { generateUUID } from "../../../utils/uuid";
 import type { StatusIntent } from "../../../status/useStatus";
 import { useBrowserSessionActions } from "./useBrowserSessionActions";
+import { useExpandedBrowserViewport } from "./useExpandedBrowserViewport";
 import { BrowserCursorOverlay } from "./BrowserCursorOverlay";
+import { BrowserExpandButton } from "./BrowserExpandButton";
+import { BrowserHumanInputStatus } from "./BrowserHumanInputControls";
+import { useBrowserHumanInput } from "./useBrowserHumanInput";
+import { browserPageOrigin, selectSharedBrowserHumanInput } from "./browserHandoffRouting";
 import { ActionTicker } from "./ActionTicker";
 import { SharedBrowserCollaborationControls } from "./SharedBrowserCollaborationControls";
 import { SharedBrowserDataClearAction } from "./SharedBrowserDataClearAction";
+import { SharedBrowserSessionControl } from "./SharedBrowserSessionControl";
+import { SharedBrowserProfileStatus } from "./SharedBrowserProfileStatus";
+import { buildSharedBrowserResumeUrl } from "./sharedBrowserResume";
+import { resolvePublicAppUrl } from "../../../utils/publicAppUrl";
 import { SharedBrowserParticipantPointers } from "./SharedBrowserParticipantPointers";
 import { collaborationSelfOwnsControl } from "./sharedBrowserCollaboration";
 import { useSharedBrowserCollaboration } from "./useSharedBrowserCollaboration";
@@ -45,7 +54,9 @@ import {
 import { browserSessionWsDebugFields } from "./browserSessionDebug";
 import {
   coalesceBrowserRuntimeEnsure,
-  resolveBrowserRuntimeCandidate,
+  listBrowserRuntimeCandidates,
+  resolveBrowserRuntimeSelection,
+  type BrowserRuntimeCandidate,
   resolveAutoRecyclableBrowserRuntimeIdentity,
   waitForBrowserRuntimeOrigin,
 } from "./browserSessionRuntimeEnsure";
@@ -91,7 +102,7 @@ import {
   type SharedBrowserControlOwner,
 } from "./sharedBrowserControlOwner";
 
-type BrowserSessionStatus = "idle" | "connecting" | "connected" | "error";
+type BrowserSessionStatus = "idle" | "selecting" | "connecting" | "connected" | "error";
 type BrowserSessionPresentation = "modal" | "docked";
 type BrowserViewportMode = "fit" | "native";
 type DockedBrowserLayoutMetrics = {
@@ -270,6 +281,10 @@ function BrowserSessionStatusPill({
   status: BrowserSessionStatus;
   compact?: boolean;
 }) {
+  if (status === "selecting") {
+    return <span className={`inline-flex h-7 shrink-0 items-center rounded-full border border-slate-300/80 bg-slate-100/80 text-xxs font-medium text-slate-600 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300 ${compact ? "px-1.5" : "px-2"}`}
+      data-testid="browser-session-status" role="status" aria-live="polite">Choose session</span>;
+  }
   const state: BrowserChromeState =
     status === "connected" ? "ready" : status === "error" ? "unavailable" : "starting";
   const detail =
@@ -392,6 +407,7 @@ export function BrowserSessionModal({
   projectId,
   browserSessionId: suppliedBrowserSessionId,
   preferRuntimeId,
+  resumeRuntimeId = null,
   onRuntimeIdResolved,
   presentation = "modal",
   hideCollapsedConnectedCard = false,
@@ -410,6 +426,13 @@ export function BrowserSessionModal({
   sharedBrowserCapabilitiesResolved = true,
   sharedBrowserCapabilitiesAvailable = true,
   sharedBrowserAvailableViewerKinds = DEFAULT_SHARED_BROWSER_VIEWER_KINDS,
+  sharedBrowserRoutineApprovalAvailable = false,
+  humanInputIdentityKey,
+  humanInputRunIds = null,
+  currentUserId = null,
+  activeBrowserRunId = null,
+  onTakeOverAgent,
+  onContinueAfterHumanInput,
   sharedBrowserRfbCapabilities = null,
   sharedBrowserWebRtcCapabilities = null,
 }: {
@@ -418,6 +441,7 @@ export function BrowserSessionModal({
   projectId: string | null;
   browserSessionId?: string | null;
   preferRuntimeId: string | null;
+  resumeRuntimeId?: string | null;
   onRuntimeIdResolved?: ((runtimeId: string) => void) | null;
   presentation?: BrowserSessionPresentation;
   hideCollapsedConnectedCard?: boolean;
@@ -440,11 +464,19 @@ export function BrowserSessionModal({
   sharedBrowserCapabilitiesResolved?: boolean;
   sharedBrowserCapabilitiesAvailable?: boolean;
   sharedBrowserAvailableViewerKinds?: SupportedSharedBrowserViewerKind[];
+  sharedBrowserRoutineApprovalAvailable?: boolean;
+  humanInputIdentityKey?: string;
+  humanInputRunIds?: ReadonlySet<string> | null;
+  currentUserId?: string | null;
+  activeBrowserRunId?: string | null;
+  onTakeOverAgent?: (() => Promise<boolean>) | null;
+  onContinueAfterHumanInput?: ((message: string) => Promise<boolean>) | null;
   sharedBrowserRfbCapabilities?: RuntimeBrowserSessionCapabilities["rfb"] | null;
   sharedBrowserWebRtcCapabilities?: RuntimeBrowserSessionCapabilities["webrtc"] | null;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [containerNode, setContainerNode] = useState<HTMLDivElement | null>(null);
+  const [mobileKeyboardOccupiedHeight, setMobileKeyboardOccupiedHeight] = useState(0);
   const dockedRootRef = useRef<HTMLElement | null>(null);
   const rfbRef = useRef<BrowserSessionRfbLike | null>(null);
   const generatedBrowserSessionId = useMemo(() => generateUUID(), []);
@@ -576,6 +608,63 @@ export function BrowserSessionModal({
   );
   const [runtimeLimitActionBusy, setRuntimeLimitActionBusy] = useState(false);
   const [forcedRuntimeId, setForcedRuntimeId] = useState<string | null>(null);
+  const selectionScope = `${currentUserId ?? ""}:${projectId ?? ""}:${resumeRuntimeId ?? ""}`;
+  const selectionScopeRef = useRef(selectionScope);
+  selectionScopeRef.current = selectionScope;
+  const pinnedSessionRef = useRef<{ scope: string; runtimeId: string } | null>(null);
+  const [runtimeChoice, setRuntimeChoice] = useState<{ scope: string; runtimeId: string } | null>(null);
+  const [sessionIdentity, setSessionIdentity] = useState<{ scope: string; runtimeId: string } | null>(null);
+  const [sessionChooserOpen, setSessionChooserOpen] = useState(false);
+  const [sessionChoices, setSessionChoices] = useState<{
+    scope: string; candidates: BrowserRuntimeCandidate[]; loading: boolean; error: string | null;
+  }>({ scope: selectionScope, candidates: [], loading: false, error: null });
+  useLayoutEffect(() => {
+    // A previous account/project/link cannot carry its explicit creation or
+    // selection request into the new authenticated surface.
+    setForcedRuntimeId(null);
+    setRuntimeChoice(null);
+    setSessionIdentity(null);
+    setSessionChooserOpen(false);
+    pinnedSessionRef.current = null;
+  }, [selectionScope]);
+  const chosenRuntimeId = runtimeChoice?.scope === selectionScope ? runtimeChoice.runtimeId : null;
+  const selectedSessionRuntimeId = sessionIdentity?.scope === selectionScope ? sessionIdentity.runtimeId : null;
+  const sessionResumeUrl = useMemo(() => projectId && selectedSessionRuntimeId
+    ? buildSharedBrowserResumeUrl(resolvePublicAppUrl("/studio"), { projectId, runtimeId: selectedSessionRuntimeId })
+    : null, [projectId, selectedSessionRuntimeId]);
+  const refreshSessionChoices = useCallback(async () => {
+    if (!projectId) return;
+    const scope = selectionScope;
+    setSessionChoices((current) => ({ scope, candidates: current.scope === scope ? current.candidates : [], loading: true, error: null }));
+    try {
+      const snapshot = await controllerClient.runtimes.fetchStatus({ projectId });
+      if (selectionScopeRef.current !== scope) return;
+      if (!snapshot || !Array.isArray(snapshot.runtimes)) throw new Error("Session discovery is unavailable.");
+      setSessionChoices({ scope, candidates: listBrowserRuntimeCandidates(snapshot.runtimes), loading: false, error: null });
+    } catch {
+      if (selectionScopeRef.current === scope) {
+        setSessionChoices({ scope, candidates: [], loading: false, error: "Could not load Shared sessions. Try refreshing." });
+      }
+    }
+  }, [projectId, selectionScope]);
+  const chooseSession = useCallback((runtimeId: string) => {
+    // Only a currently discovered project session can be selected here. The
+    // controller independently reauthorizes the exact runtime at connection.
+    if (sessionChoices.scope !== selectionScope || !sessionChoices.candidates.some((item) => item.runtimeId === runtimeId)) return;
+    setRuntimeChoice({ scope: selectionScope, runtimeId });
+    pinnedSessionRef.current = { scope: selectionScope, runtimeId };
+    setSessionIdentity({ scope: selectionScope, runtimeId });
+    setForcedRuntimeId(null);
+    setSessionChooserOpen(false);
+    setConnectAttempt((value) => value + 1);
+  }, [selectionScope, sessionChoices]);
+  const startNewSession = useCallback(() => {
+    if (!canControlBrowser || !projectId || !window.confirm("Start a separate Shared Browser session? This does not close another running session. Saved logins are restored only when this space has persistence enabled.")) return;
+    setSessionChooserOpen(false);
+    setSessionChoices({ scope: selectionScope, candidates: [], loading: false, error: null });
+    setForcedRuntimeId(generateUUID());
+    setConnectAttempt((value) => value + 1);
+  }, [canControlBrowser, projectId, selectionScope]);
   const permittedSharedBrowserViewerKinds = useMemo(
     () =>
       humanInputEnabled
@@ -648,11 +737,13 @@ export function BrowserSessionModal({
   );
   const fullscreenModalClassName = useMemo(
     () =>
-      "!h-screen !w-screen !max-w-none !rounded-none !border-0 !bg-transparent !shadow-none !overflow-hidden",
+      "!h-full !w-screen !max-w-none !rounded-none !border-0 !shadow-none !overflow-hidden",
     [],
   );
   const fullscreenDialogClassName = useMemo(
-    () => "!m-0 !h-full !w-full !border-0 !p-0 !outline-none",
+    // The overlay is edge-to-edge, but controls must clear native window
+    // chrome and mobile cutouts. Keep the insets inside the painted modal.
+    () => "!m-0 !h-full !w-full !border-0 !outline-none pt-[var(--instafy-safe-area-inset-top)] pb-[var(--instafy-safe-area-inset-bottom)] pl-[var(--instafy-safe-area-inset-left)] pr-[var(--instafy-safe-area-inset-right)]",
     [],
   );
   const forceViewportFullscreenDocked = shouldForceDockedBrowserFullscreen({
@@ -667,6 +758,7 @@ export function BrowserSessionModal({
     fullscreen,
     transportActive,
   });
+  const expandedViewportStyle = useExpandedBrowserViewport(isOpen && renderFullscreen);
   const isInlineDocked = presentation === "docked" && !renderFullscreen;
   const shouldViewportCollapseDocked =
     isInlineDocked && !fillContainer && (viewportHeight < 760 || smallViewport);
@@ -678,7 +770,8 @@ export function BrowserSessionModal({
     (connectedScopeKey ? connectedBrowserSessionScopes.has(connectedScopeKey) : false);
   const displayStatus = !error && status === "connecting" && hasConnectedHint ? "connected" : status;
   const shouldCollapseDocked =
-    shouldUseDesktopDockedCard || (shouldViewportCollapseDocked && displayStatus !== "connected");
+    displayStatus !== "selecting" &&
+    (shouldUseDesktopDockedCard || (shouldViewportCollapseDocked && displayStatus !== "connected"));
   // Tail the agent's browser actions while the live view is shown, so we can draw
   // the AI cursor and caption what it's doing. Gated to match where the overlay
   // renders (connected and not collapsed) so a hidden/collapsed session doesn't
@@ -692,7 +785,23 @@ export function BrowserSessionModal({
     browserSessionId,
     projectId,
     preferRuntimeId: forcedRuntimeId ?? preferRuntimeId,
+    pageId: sharedBrowserPageId,
+    transportActive,
   });
+  const browserHumanInputOptions = {
+    identityKey: `${humanInputIdentityKey ?? ""}:${browserSessionId}:${forcedRuntimeId ?? preferRuntimeId}:${sharedBrowserPageId}`,
+    request: selectSharedBrowserHumanInput(
+      browserActions, currentUserId, sharedBrowserPageId,
+      browserPageOrigin(sharedBrowserChrome?.pages.find((page) => page.id === sharedBrowserPageId)?.url),
+      humanInputRunIds,
+    ),
+    canTakeOver: transportActive && canControlBrowser && Boolean(effectiveAgentControlOwner && onTakeOverAgent),
+    humanControlConfirmed: humanInputEnabled,
+    canContinue: transportActive && Boolean(onContinueAfterHumanInput),
+    onTakeOver: async () => onTakeOverAgent ? onTakeOverAgent() : false,
+    onContinue: async (message: string) => onContinueAfterHumanInput ? onContinueAfterHumanInput(message) : false,
+  };
+  const browserHumanInputState = useBrowserHumanInput(browserHumanInputOptions);
   const collapsedCardMode = shouldCollapseDocked
     ? error
       ? limitReached
@@ -848,23 +957,8 @@ export function BrowserSessionModal({
         });
         return true;
       }
-      if (!forcedRuntimeId) {
-        autoRetryCountRef.current = 0;
-        setStatus("connecting");
-        setError(null);
-        setWsUrl(null);
-        setBrowserInputWsUrl(null);
-        setWebRtcConnection(null);
-        setForcedRuntimeId(generateUUID());
-        setConnectAttempt((value) => value + 1);
-        runtimeDebugLog("browser-session:fresh-runtime-retry", {
-          ...browserSessionWsDebugFields(debugWsUrl),
-          reason,
-          forcedRuntimeId,
-          viewer: activeSharedBrowserViewerKind,
-        });
-        return true;
-      }
+      // A failed reconnect must never silently become a different browser.
+      // Starting a replacement is an explicit action in Sessions & resume.
       return false;
     },
     [
@@ -1077,8 +1171,11 @@ export function BrowserSessionModal({
       connectionGeneration !== browserConnectionGenerationRef.current;
     const startupAbortController = new AbortController();
     const existingConnection = browserOriginConnectionRef.current;
+    const exactRuntimeId = chosenRuntimeId ?? resumeRuntimeId ??
+      (pinnedSessionRef.current?.scope === selectionScope ? pinnedSessionRef.current.runtimeId : null);
     const preservingConnection =
       existingConnection?.projectId === projectId &&
+      (!exactRuntimeId || existingConnection.runtimeId === exactRuntimeId) &&
       (!forcedRuntimeId || existingConnection.runtimeId === forcedRuntimeId);
     if (!preservingConnection) {
       setStatus("connecting");
@@ -1110,12 +1207,37 @@ export function BrowserSessionModal({
         return;
       }
       const statusEntries = Array.isArray(statusSnapshot?.runtimes) ? statusSnapshot.runtimes : [];
+      if (!statusSnapshot) {
+        setStatus("error");
+        setError("Could not discover Shared sessions. Refresh sessions to retry.");
+        setSessionChooserOpen(true);
+        setSessionChoices({ scope: selectionScope, candidates: [], loading: false, error: "Session discovery is unavailable; no new browser was started." });
+        return;
+      }
+      const candidates = listBrowserRuntimeCandidates(statusEntries);
+      setSessionChoices({ scope: selectionScope, candidates, loading: false, error: null });
       if (!forcedRuntimeId) {
-        const existingBrowserRuntime = resolveBrowserRuntimeCandidate(
-          statusEntries,
-          requestedPreferRuntimeId,
-        );
-        if (existingBrowserRuntime) {
+        const selection = resolveBrowserRuntimeSelection(statusEntries, exactRuntimeId);
+        if (selection.kind === "choose" || selection.kind === "missing" || (selection.kind === "new" && !canControlBrowser)) {
+          const message = selection.kind === "missing"
+            ? "The requested Shared session is not available. Refresh or explicitly choose another session."
+            : selection.kind === "new"
+              ? "No Shared session is available. Ask a space builder to start one."
+              : "Several Shared sessions are running. Choose the session to resume.";
+          setStatus(selection.kind === "choose" ? "selecting" : "error");
+          setError(selection.kind === "choose" ? null : message);
+          setBrowserOriginConnection(null);
+          setCollaborationWsUrl(null);
+          setCollaborationConnectionKey(null);
+          setWsUrl(null);
+          setBrowserInputWsUrl(null);
+          setWebRtcConnection(null);
+          setSessionChoices({ scope: selectionScope, candidates, loading: false, error: message });
+          setSessionChooserOpen(true);
+          return;
+        }
+        if (selection.kind === "selected") {
+          const existingBrowserRuntime = selection.candidate;
           runtimeId = existingBrowserRuntime.runtimeId;
           originId = existingBrowserRuntime.originId;
           originEndpoint = existingBrowserRuntime.endpoint;
@@ -1339,6 +1461,8 @@ export function BrowserSessionModal({
       }
 
       onRuntimeIdResolved?.(runtimeId);
+      pinnedSessionRef.current = { scope: selectionScope, runtimeId };
+      setSessionIdentity({ scope: selectionScope, runtimeId });
 
       // Runtime discovery is also what unlocks the versioned capability
       // request in the parent. Do not briefly connect the legacy RFB lane and
@@ -1407,9 +1531,12 @@ export function BrowserSessionModal({
     canControlBrowser,
     connectAttempt,
     forcedRuntimeId,
+    chosenRuntimeId,
     isOpen,
     onRuntimeIdResolved,
     projectId,
+    resumeRuntimeId,
+    selectionScope,
     sharedBrowserCapabilitiesAvailable,
     sharedBrowserCapabilitiesResolved,
   ]);
@@ -2420,17 +2547,10 @@ export function BrowserSessionModal({
               showStatus={onStatus}
             />
             {!forceViewportFullscreenDocked ? (
-              <IconButton
-                variant="ghost"
-                size="xs"
-                radius="full"
+              <BrowserExpandButton
+                expanded={fullscreen}
                 onPress={toggleFullscreen}
-                className="text-slate-500 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 dark:data-[hovered]:text-slate-200"
-                data-testid="browser-session-fullscreen-toggle"
-                aria-label={fullscreen ? "Minimize browser session" : "Fullscreen browser session"}
-              >
-                {fullscreen ? <Collapse className="h-4 w-4" aria-hidden="true" /> : <Expand className="h-4 w-4" aria-hidden="true" />}
-              </IconButton>
+              />
             ) : null}
             <IconButton
               variant="ghost"
@@ -2478,19 +2598,11 @@ export function BrowserSessionModal({
                 projectId={projectId}
                 showStatus={onStatus}
               />
-              {!forceViewportFullscreenDocked && !sharedBrowserChrome.compact ? (
-                <IconButton
-                  variant="ghost"
-                  size="sm"
-                  radius="full"
+              {!forceViewportFullscreenDocked ? (
+                <BrowserExpandButton
+                  expanded={fullscreen}
                   onPress={toggleFullscreen}
-                  className="max-[540px]:hidden text-slate-500 hover:text-slate-700 data-[hovered]:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 dark:data-[hovered]:text-slate-200"
-                  data-testid="browser-session-fullscreen-toggle"
-                  aria-label={fullscreen ? "Minimize browser session" : "Fullscreen browser session"}
-                  title={fullscreen ? "Minimize browser session" : "Fullscreen browser session"}
-                >
-                  {fullscreen ? <Collapse className="h-4 w-4" aria-hidden="true" /> : <Expand className="h-4 w-4" aria-hidden="true" />}
-                </IconButton>
+                />
               ) : null}
             </>
           }
@@ -2504,6 +2616,30 @@ export function BrowserSessionModal({
         />
       ) : null}
 
+      {sharedBrowserApproval.routineApprovedRunId && sharedBrowserApproval.routineApprovedRunId === activeBrowserRunId ? (
+        <div className="shrink-0 border-b border-slate-200 px-3 py-1 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400" role="status" data-testid="shared-browser-routine-status">
+          Routine browsing allowed for this turn · Take over or stop the turn to revoke.
+        </div>
+      ) : null}
+      {!shouldCollapseDocked && projectId ? <SharedBrowserSessionControl
+        runtimeId={selectedSessionRuntimeId ?? chosenRuntimeId ?? resumeRuntimeId}
+        resumeUrl={sessionResumeUrl}
+        open={sessionChooserOpen}
+        busy={sessionChoices.scope === selectionScope && sessionChoices.loading}
+        candidates={sessionChoices.scope === selectionScope ? sessionChoices.candidates : []}
+        error={sessionChoices.scope === selectionScope ? sessionChoices.error : null}
+        selectionRequired={status === "selecting"}
+        canStart={canControlBrowser}
+        onOpenChange={(open) => { setSessionChooserOpen(open); if (open) void refreshSessionChoices(); }}
+        onChoose={chooseSession}
+        onStart={startNewSession}
+        onRefresh={() => { void refreshSessionChoices(); setConnectAttempt((value) => value + 1); }}
+      >
+        {sessionChooserOpen ? <SharedBrowserProfileStatus projectId={projectId} runtimeId={selectedSessionRuntimeId} currentUserId={currentUserId} active /> : null}
+      </SharedBrowserSessionControl> : null}
+      {!shouldCollapseDocked && humanInputIdentityKey ? (
+        <BrowserHumanInputStatus {...browserHumanInputOptions} state={browserHumanInputState} />
+      ) : null}
       <div
         key="shared-browser-viewport"
         data-testid="browser-session-viewport"
@@ -2569,6 +2705,7 @@ export function BrowserSessionModal({
           ) : null}
           <div
             ref={setContainerElement}
+            style={mobileKeyboardOccupiedHeight > 0 ? { bottom: mobileKeyboardOccupiedHeight } : undefined}
             className={[
               shouldCollapseDocked
                 ? "absolute inset-0 overflow-hidden opacity-0 pointer-events-none"
@@ -2648,6 +2785,7 @@ export function BrowserSessionModal({
                   humanInputEnabled && activeSharedBrowserViewerKind !== "rfb"
                 }
                 onMessage={dispatchMobileBrowserInput}
+                onOccupiedHeightChange={setMobileKeyboardOccupiedHeight}
               />
             </>
           ) : null}
@@ -2661,7 +2799,7 @@ export function BrowserSessionModal({
             </div>
           ) : null}
           {compactCardBody}
-          {!shouldCollapseDocked && (displayStatus !== "connected" || error) ? (
+          {!shouldCollapseDocked && displayStatus !== "selecting" && (displayStatus !== "connected" || error) ? (
             <div
               className={[
                 "pointer-events-none absolute inset-0 flex items-center justify-center p-6",
@@ -2777,6 +2915,7 @@ export function BrowserSessionModal({
           {!shouldCollapseDocked && sharedBrowserApproval.pending ? (
             <SharedBrowserApprovalPrompt
               active={transportActive}
+              routineApprovalAvailable={sharedBrowserRoutineApprovalAvailable}
               error={sharedBrowserApproval.error}
               onDecision={(decision) => {
                 void sharedBrowserApproval.decide(decision);
@@ -2799,10 +2938,14 @@ export function BrowserSessionModal({
       return (
         <StudioDialogModal
           isOpen={isOpen}
-          onOpenChange={onOpenChange}
+          onOpenChange={(open) => {
+            if (!open && !forceViewportFullscreenDocked) setFullscreen(false);
+            else onOpenChange(open);
+          }}
           isDismissable
           dialogAriaLabel="Browser session"
           className={fullscreenOverlayClassName}
+          style={expandedViewportStyle}
           modalClassName={fullscreenModalClassName}
           dialogClassName={fullscreenDialogClassName}
           data-testid="browser-session-modal"
@@ -2844,6 +2987,7 @@ export function BrowserSessionModal({
       isDismissable
       dialogAriaLabel="Browser session"
       className={fullscreen ? fullscreenOverlayClassName : undefined}
+      style={fullscreen ? expandedViewportStyle : undefined}
       modalClassName={fullscreen ? fullscreenModalClassName : modalClassName}
       dialogClassName={fullscreen ? fullscreenDialogClassName : "h-full"}
       data-testid="browser-session-modal"

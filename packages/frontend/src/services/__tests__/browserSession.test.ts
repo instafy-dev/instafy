@@ -150,6 +150,13 @@ describe("runtime browser session capabilities", () => {
     expect(mapRuntimeBrowserSessionCapabilitiesPayload({ version: 1 })).toBeNull();
   });
 
+  it("enables routine approval only with the negotiated capability", () => {
+    expect(mapRuntimeBrowserSessionCapabilitiesPayload({ ...capabilitiesPayload, approvalModes: ["ask", "routine"] })?.approvalModes).toEqual(["ask", "routine"]);
+    for (const approvalModes of [undefined, null, "routine", ["routine"], ["ask", "unknown"], ["ask", "routine", "unknown"]]) {
+      expect(mapRuntimeBrowserSessionCapabilitiesPayload({ ...capabilitiesPayload, approvalModes })?.approvalModes).toBeUndefined();
+    }
+  });
+
   it("maps bounded WebRTC ICE configuration and requires its contract when advertised", () => {
     expect(
       mapRuntimeBrowserSessionCapabilitiesPayload({
@@ -349,6 +356,21 @@ describe("runtime browser session page controls", () => {
 });
 
 describe("mapRuntimeBrowserSessionActionsPayload", () => {
+  function humanInputRequest(overrides: Record<string, unknown> = {}) {
+    return {
+      version: 1,
+      handoffId: "00000000-0000-4000-8000-000000000001",
+      runId: "00000000-0000-4000-8000-000000000002",
+      initiatorUserId: "00000000-0000-4000-8000-000000000003",
+      browserPageId: "page-1",
+      origin: "https://example.test",
+      createdAtMs: 1000,
+      expiresAtMs: 601000,
+      fields: [{ label: "Highlighted field 1" }],
+      ...overrides,
+    };
+  }
+
   it("maps valid actions with the cursor and drops malformed/unknown entries", () => {
     const result = mapRuntimeBrowserSessionActionsPayload({
       cursor: 512,
@@ -357,6 +379,7 @@ describe("mapRuntimeBrowserSessionActionsPayload", () => {
         {
           seq: 2,
           ts: 20,
+          pageId: "target_A-1",
           type: "click",
           label: 'Click "Apply"',
           x: 40,
@@ -375,6 +398,7 @@ describe("mapRuntimeBrowserSessionActionsPayload", () => {
       {
         seq: 1,
         ts: 10,
+        pageId: null,
         type: "navigate",
         label: "Go to x",
         url: "https://x.test",
@@ -386,6 +410,7 @@ describe("mapRuntimeBrowserSessionActionsPayload", () => {
       {
         seq: 2,
         ts: 20,
+        pageId: "target_A-1",
         type: "click",
         label: 'Click "Apply"',
         url: null,
@@ -395,6 +420,65 @@ describe("mapRuntimeBrowserSessionActionsPayload", () => {
         viewportH: 640,
       },
     ]);
+  });
+
+  it("does not normalize malformed page IDs into another target identity", () => {
+    const pageIds = [undefined, null, false, "", " target_A-1 ", "target/A-1", "target_A-1\n", "x".repeat(257)];
+    const result = mapRuntimeBrowserSessionActionsPayload({
+      actions: pageIds.map((pageId, seq) => ({ seq, type: "click", pageId })),
+      cursor: 100,
+    });
+    expect(result.actions).toHaveLength(pageIds.length);
+    expect(result.actions.every((action) => action.pageId === null)).toBe(true);
+  });
+
+  it("preserves only a valid page-bound human-input request", () => {
+    const request = humanInputRequest();
+    const result = mapRuntimeBrowserSessionActionsPayload({
+      actions: [
+        { seq: 1, type: "human_input", pageId: "page-1", humanInputRequest: request },
+        { seq: 2, type: "click", pageId: "page-1", humanInputRequest: request },
+        { seq: 3, type: "human_input", pageId: "page-2", humanInputRequest: request },
+        { seq: 4, type: "human_input", humanInputRequest: request },
+        { seq: 5, type: "human_input", pageId: "page-1" },
+      ],
+      cursor: 500,
+    });
+    expect(result.actions.map((action) => action.seq)).toEqual([1, 2]);
+    expect(result.actions[0].humanInputRequest).toEqual(request);
+    expect(result.actions[1].humanInputRequest).toBeUndefined();
+  });
+
+  it.each([
+    { version: 2 },
+    { handoffId: "not-a-uuid" },
+    { handoffId: "00000000-0000-4000-8000-000000000001\n" },
+    { runId: "00000000-0000-4000-8000-00000000000A" },
+    { initiatorUserId: "" },
+    { browserPageId: " page-1" },
+    { origin: "https://example.test/path" },
+    { origin: "https://user:password@example.test" },
+    { origin: "file:///tmp/example" },
+    { origin: "https://example.test/" },
+    { createdAtMs: 0 },
+    { createdAtMs: 1.5 },
+    { expiresAtMs: 1000 },
+    { expiresAtMs: 601001 },
+    { expiresAtMs: Number.MAX_SAFE_INTEGER + 1 },
+    { fields: [] },
+    { fields: Array.from({ length: 9 }, () => ({ label: "Highlighted field" })) },
+    { fields: [{ label: "" }] },
+    { fields: [{ label: "ü".repeat(41) }] },
+    { fields: [{ label: "\n" }] },
+    { fields: [{ label: "Highlighted field 1", value: "must not be forwarded" }] },
+    { instructions: "must not be forwarded" },
+  ])("drops malformed human-input guidance: %j", (overrides) => {
+    const result = mapRuntimeBrowserSessionActionsPayload({
+      actions: [{ seq: 1, type: "human_input", pageId: "page-1", humanInputRequest: humanInputRequest(overrides) }],
+      cursor: 100,
+    });
+    expect(result.actions).toEqual([]);
+    expect(result.cursor).toBe(100);
   });
 
   it("defaults cursor and actions for empty or malformed payloads", () => {

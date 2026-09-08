@@ -4,16 +4,20 @@ import { DialogTrigger } from "react-aria-components";
 import {
   Cube,
   MoreHoriz,
-  NavArrowLeft,
+  NavArrowUp,
   Pin,
   SidebarCollapse,
   SidebarExpand,
   Xmark
 } from "iconoir-react";
+import { StudioHistoryControls, studioHistoryControlsAvailable } from "../../../navigation/StudioHistoryControls";
 import { Button, IconButton } from "../../../components/Button";
 import { Badge } from "../../../components/Badge";
 import { Text } from "../../../components/Text";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
+import { useAuth } from "../../../providers/AuthProvider";
+import { MobileStudioNavigationHeader } from "./MobileStudioNavigationHeader";
+import type { StudioHistory } from "../../../navigation/useStudioHistory";
 import { useProject } from "../../../projects/useProject";
 import { useProjects } from "../../../projects/useProjects";
 import { useRuntime } from "../../../runtime/useRuntime";
@@ -46,7 +50,17 @@ import { StudioNewChatButton } from "./StudioNewChatButton";
 const COMPACT_TAB_SELECTOR_CLASS =
   "h-10 min-w-0 justify-between gap-2 rounded-xl !border-transparent !bg-slate-100 px-2.5 !text-slate-950 !shadow-none hover:!bg-slate-100 data-[hovered]:!bg-slate-100 focus-visible:ring-white/16 focus-visible:ring-offset-white max-[375px]:min-h-11 dark:!bg-white/[0.06] dark:!text-slate-50 dark:hover:!bg-white/[0.09] dark:data-[hovered]:!bg-white/[0.09] dark:focus-visible:ring-white/16 dark:focus-visible:ring-offset-[var(--color-studio-dark-rail)]";
 
-export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNode } = {}) {
+export interface StudioTopBarProps {
+  notificationBell?: ReactNode;
+  mobileNavigation?: {
+    history: StudioHistory;
+    visitKey: string;
+    onOpenPicker: () => void;
+    onOpenChats: () => void;
+  };
+}
+
+export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBarProps = {}) {
   const {
     activeProjectName,
     onStartNewConversation,
@@ -57,6 +71,8 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
     topbarLocationOverride,
   } = useWorkspaceControls();
   const { activeProjectId } = useProjects();
+  const { user } = useAuth();
+  const currentUserId = user?.id ?? null;
   const { projectAccessBlocked } = useProject();
 
   const [tabMenuOpen, setTabMenuOpen] = useState(false);
@@ -69,7 +85,11 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
   const { runtime } = useRuntime();
   const controllerProjectMissing = runtime.controllerProjectMissing || projectAccessBlocked;
   const shouldShowNewChat = showChatActions && Boolean(onStartNewConversation);
-  const { isLargeScreen } = useStudioNavigationPosture();
+  const { isLargeScreen, showTouchBottomDock } = useStudioNavigationPosture();
+
+  useEffect(() => {
+    if (showTouchBottomDock) setTabMenuOpen(false);
+  }, [activeProjectId, currentUserId, mobileNavigation?.visitKey, showTouchBottomDock]);
 
   const activeWorkspaceTab = useMemo(() => {
     if (!activeTabId) {
@@ -295,12 +315,12 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
       variant="ghost"
       radius="full"
       size="md"
-      aria-label={`Back to parent conversation: ${parentConversation.title || "Conversation"}`}
-      title={`Back to ${parentConversation.title || "parent conversation"}`}
+      aria-label={`Open parent conversation: ${parentConversation.title || "Conversation"}`}
+      title={`Open parent: ${parentConversation.title || "Conversation"}`}
       data-testid="topbar-parent-conversation-button"
       className={`h-10 w-10 bg-transparent text-slate-600 shadow-none max-[375px]:h-11 max-[375px]:w-11 dark:text-slate-200 ${DARK_RAIL_HOVER_CLASS}`}
     >
-      <NavArrowLeft className="h-5 w-5" aria-hidden="true" />
+      <NavArrowUp className="h-5 w-5" aria-hidden="true" />
     </IconButton>
   ) : null;
 
@@ -312,12 +332,12 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
       variant="ghost"
       radius="none"
       size="sm"
-      aria-label={`Back to parent conversation: ${parentConversation.title || "Conversation"}`}
-      title={`Back to ${parentConversation.title || "parent conversation"}`}
+      aria-label={`Open parent conversation: ${parentConversation.title || "Conversation"}`}
+      title={`Open parent: ${parentConversation.title || "Conversation"}`}
       data-testid="topbar-parent-conversation-button"
       className={desktopTabActionButtonClassName}
     >
-      <NavArrowLeft className="h-5 w-5" aria-hidden="true" />
+      <NavArrowUp className="h-5 w-5" aria-hidden="true" />
     </IconButton>
   ) : null;
 
@@ -369,7 +389,7 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
       </Text>
       {useDesktopTabChrome ? (
         <WorkspaceTabs
-          leading={desktopParentConversationButton}
+          leading={<><StudioHistoryControls />{desktopParentConversationButton}</>}
           className="bg-transparent pr-0 pt-0 dark:bg-transparent"
           emptyStateContent={!hasDesktopTabs ? desktopEmptyStateTab : undefined}
           tabStripActions={
@@ -409,6 +429,7 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
       ) : isLargeScreen ? (
         <div className="flex flex-wrap items-center gap-2 px-4 py-2 sm:flex-nowrap sm:px-5">
           <div className="flex min-w-0 flex-none items-center gap-2">
+            <StudioHistoryControls />
             {!isLargeScreen && onToggleSidebar ? (
               <IconButton
                 onPress={onToggleSidebar}
@@ -465,6 +486,37 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
             {notificationBell}
           </div>
         </div>
+      ) : showTouchBottomDock && mobileNavigation ? (
+        <StudioNewChatButton
+          dismissalKey={mobileNavigation.visitKey}
+          renderTrigger={({ onNewChat, onNewPrivateChat }) => (
+            <MobileStudioNavigationHeader
+              key={JSON.stringify([currentUserId, activeProjectId, mobileNavigation.visitKey])}
+              {...mobileNavigation}
+              title={topbarLocationTitle}
+              spaceName={resolvedProjectName}
+              onOpenSidebar={onToggleSidebar}
+              sidebarOpen={sidebarOpen}
+              onOpenSettings={onOpenProjectSettings}
+              onNewChat={onNewChat}
+              onNewPrivateChat={onNewPrivateChat}
+              parentConversation={parentConversation ? {
+                title: parentConversation.title || "Conversation",
+                onOpen: handleOpenParentConversation,
+              } : undefined}
+              notificationBell={notificationBell}
+              onMoreOpenChange={(open) => { if (!open) setTabMenuOpen(false); }}
+              tabsAction={workspaceTabs.length > 0 && !controllerProjectMissing ? (
+                <DialogTrigger isOpen={tabMenuOpen} onOpenChange={setTabMenuOpen}>
+                  <Button variant="ghost" className="!min-h-12 !min-w-12 justify-start px-3" aria-label="Browse tabs" data-testid="topbar-tab-overflow">
+                    Browse tabs
+                  </Button>
+                  {tabsMenu}
+                </DialogTrigger>
+              ) : undefined}
+            />
+          )}
+        />
       ) : (
         <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-4 py-2 max-[375px]:px-3 max-[375px]:py-1">
           <div className="flex min-w-0 items-center gap-2">
@@ -527,6 +579,11 @@ export function StudioTopBar({ notificationBell }: { notificationBell?: ReactNod
           </div>
         </div>
       )}
+      {!isLargeScreen && !showTouchBottomDock && studioHistoryControlsAvailable() ? (
+        <div className={`flex items-center border-t border-slate-200/70 px-3 ${DARK_DIVIDER_BORDER_CLASS}`} data-testid="studio-mobile-history-bar">
+          <StudioHistoryControls />
+        </div>
+      ) : null}
     </header>
   );
 }

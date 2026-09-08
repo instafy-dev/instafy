@@ -295,6 +295,7 @@ export function useConversationControllerDispatch({
       conversationOverride?: ConversationState | null,
       intent?: string,
       expectedLaneIdle = false,
+      requirements?: { requireRun?: boolean; assertCurrent?: () => void },
     ) => {
       const projectId = resolveProjectId();
       if (!projectId) {
@@ -382,6 +383,7 @@ export function useConversationControllerDispatch({
             ? metadata
             : withDefaultInteractiveWorkspaceExpectations(metadata);
 
+        requirements?.assertCurrent?.();
         const response = await sendControllerConversationMessage({
           conversationId: controllerId,
           projectId,
@@ -396,6 +398,9 @@ export function useConversationControllerDispatch({
         });
         if (!response) {
           throw new Error("Controller unavailable. Try again shortly.");
+        }
+        if (requirements?.requireRun && resolveRunIds(response).length === 0) {
+          throw new Error("The controller did not start a browser turn. Your manual input remains on the page; try again when ready.");
         }
         const isAgentEvaluationDispatch = isSkillModeAmbientDispatchMetadata(metadata);
         resolveRunIds(response).forEach((runId) => {

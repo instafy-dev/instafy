@@ -47,25 +47,36 @@ const pending = {
 function Harness({
   active = true,
   browserSessionId = "browser-surface-1",
+  runtimeId = pending.runtimeId,
+  browserPageId = pending.request.browserPageId,
+  originAccessToken = "origin-token",
 }: {
   active?: boolean;
   browserSessionId?: string;
+  runtimeId?: string;
+  browserPageId?: string;
+  originAccessToken?: string;
 }) {
   const approval = useSharedBrowserApproval({
     active,
     projectId: "project-1",
     browserSessionId,
-    runtimeId: pending.runtimeId,
-    browserPageId: pending.request.browserPageId,
+    runtimeId,
+    browserPageId,
     originEndpoint: "https://origin.example.test",
-    originAccessToken: "origin-token",
+    originAccessToken,
   });
   return (
     <div>
       <span data-testid="pending">{approval.pending?.request.approvalId ?? "none"}</span>
       <span data-testid="error">{approval.error ?? "none"}</span>
+      <span data-testid="routine-run">{approval.routineApprovedRunId ?? "none"}</span>
+      <span data-testid="submitting">{String(approval.submitting)}</span>
       <button type="button" onClick={() => void approval.decide("allow_once")}>
         Decide
+      </button>
+      <button data-testid="allow-routine" type="button" onClick={() => void approval.decide("allow_routine")}>
+        Allow routine browsing
       </button>
     </div>
   );
@@ -216,5 +227,81 @@ describe("useSharedBrowserApproval", () => {
 
     expect(container.querySelector('[data-testid="pending"]')?.textContent).toBe("none");
     expect(fetchPendingApprovalMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows the routine grant only after an accepted origin decision for its exact run", async () => {
+    const originPending = { ...pending, request: { ...pending.request, kind: "origin" as const } };
+    fetchPendingApprovalMock.mockResolvedValue(originPending);
+    decideApprovalMock.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    await act(async () => { root.render(<Harness />); });
+    const routineButton = container.querySelector('[data-testid="allow-routine"]') as HTMLButtonElement;
+    await act(async () => { routineButton.click(); });
+    expect(container.querySelector('[data-testid="routine-run"]')?.textContent).toBe("none");
+    await act(async () => { routineButton.click(); });
+    expect(container.querySelector('[data-testid="routine-run"]')?.textContent).toBe(pending.request.runId);
+    expect(container.querySelector('[data-testid="pending"]')?.textContent).toBe("none");
+    await act(async () => { root.render(<Harness browserPageId="page-2" />); });
+    expect(container.querySelector('[data-testid="routine-run"]')?.textContent).toBe("none");
+  });
+
+  it.each([
+    { browserSessionId: "browser-surface-2" },
+    { runtimeId: "runtime-2" },
+    { browserPageId: "page-2" },
+    { originAccessToken: "rotated-token" },
+    { active: false },
+  ])("ignores late accepted decisions after the scope changes: %j", async (changedScope) => {
+    const originPending = { ...pending, request: { ...pending.request, kind: "origin" as const } };
+    const nextPending = { ...pending, request: { ...pending.request, approvalId: "new-approval", runId: "new-run" } };
+    fetchPendingApprovalMock.mockResolvedValueOnce(originPending).mockResolvedValue(nextPending);
+    let resolveDecision!: (accepted: boolean) => void;
+    decideApprovalMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolveDecision = resolve; }));
+    await act(async () => { root.render(<Harness />); });
+    await act(async () => { (container.querySelector('[data-testid="allow-routine"]') as HTMLButtonElement).click(); });
+    const signal = decideApprovalMock.mock.calls[0][0].signal as AbortSignal;
+    await act(async () => { root.render(<Harness {...changedScope} />); });
+    expect(signal.aborted).toBe(true);
+    await act(async () => { resolveDecision(true); });
+    expect(container.querySelector('[data-testid="routine-run"]')?.textContent).toBe("none");
+    expect(container.querySelector('[data-testid="pending"]')?.textContent).toBe(
+      changedScope.active === false ? "none" : "new-approval",
+    );
+    expect(container.querySelector('[data-testid="submitting"]')?.textContent).toBe("false");
+    expect(container.querySelector('[data-testid="error"]')?.textContent).toBe("none");
+  });
+
+  it("does not clear a newly polled approval when an earlier decision completes", async () => {
+    const nextPending = { ...pending, request: { ...pending.request, approvalId: "next-approval" } };
+    fetchPendingApprovalMock.mockResolvedValueOnce(pending).mockResolvedValue(nextPending);
+    let resolveDecision!: (accepted: boolean) => void;
+    decideApprovalMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolveDecision = resolve; }));
+    await act(async () => { root.render(<Harness />); });
+    await act(async () => { container.querySelector("button")?.click(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(400); });
+    await act(async () => { resolveDecision(true); });
+    expect(container.querySelector('[data-testid="pending"]')?.textContent).toBe("next-approval");
+    expect(container.querySelector('[data-testid="routine-run"]')?.textContent).toBe("none");
+  });
+
+  it("does not let a stale failure clear the new scope's submission or grant", async () => {
+    const originPending = { ...pending, request: { ...pending.request, kind: "origin" as const } };
+    const nextPending = { ...originPending, request: { ...originPending.request, approvalId: "next-approval", runId: "next-run" } };
+    fetchPendingApprovalMock.mockResolvedValueOnce(originPending).mockResolvedValue(nextPending);
+    let rejectOld!: (error: Error) => void;
+    let resolveNew!: (accepted: boolean) => void;
+    decideApprovalMock
+      .mockImplementationOnce(() => new Promise<boolean>((_resolve, reject) => { rejectOld = reject; }))
+      .mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolveNew = resolve; }));
+    await act(async () => { root.render(<Harness />); });
+    await act(async () => { (container.querySelector('[data-testid="allow-routine"]') as HTMLButtonElement).click(); });
+    await act(async () => { root.render(<Harness browserSessionId="browser-surface-2" />); });
+    await act(async () => { (container.querySelector('[data-testid="allow-routine"]') as HTMLButtonElement).click(); });
+    await act(async () => { rejectOld(new Error("old request failed")); });
+    expect(container.querySelector('[data-testid="pending"]')?.textContent).toBe("next-approval");
+    expect(container.querySelector('[data-testid="submitting"]')?.textContent).toBe("true");
+    expect(container.querySelector('[data-testid="error"]')?.textContent).toBe("none");
+    await act(async () => { resolveNew(true); });
+    expect(container.querySelector('[data-testid="routine-run"]')?.textContent).toBe("next-run");
+    expect(container.querySelector('[data-testid="submitting"]')?.textContent).toBe("false");
   });
 });
