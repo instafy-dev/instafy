@@ -1,4 +1,4 @@
-import { BrowserSessionModal } from "./BrowserSessionModal";
+import { LazyBrowserSessionModal } from "./LazyBrowserSessionModal";
 import { BrowserSessionPageStrip } from "./BrowserSessionPageStrip";
 import type { BrowserSessionPage } from "./browserSessionPages";
 
@@ -44,7 +44,7 @@ export function ChatBrowserDock({
           className="relative z-30"
           style={browserSessionOpen && browserModalBottomInset ? { marginBottom: browserModalBottomInset } : undefined}
         >
-          <BrowserSessionModal
+          <LazyBrowserSessionModal
             isOpen={browserSessionOpen}
             onOpenChange={onBrowserSessionOpenChange}
             projectId={projectId}
