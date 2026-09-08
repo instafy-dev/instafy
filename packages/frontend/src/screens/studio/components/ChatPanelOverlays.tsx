@@ -4,6 +4,7 @@ import { Button, IconButton } from "../../../components/Button";
 import { Spinner } from "../../../components/Spinner";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
+import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import { formatPromptContextModeLabel, formatTokenCountLabel, resolveTokenUsageForMessage } from "./chatMessageDetailHelpers";
 
 type MessageMenuLike = {
@@ -286,6 +287,7 @@ export function ChatImageLightboxOverlay({
   imageLightbox: ImageLightboxLike | null;
   onClose: () => void;
 }) {
+  useNativeBackButtonAction(Boolean(imageLightbox), onClose);
   if (!imageLightbox) {
     return null;
   }

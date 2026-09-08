@@ -13,6 +13,16 @@ import {
   type TouchSendMode,
 } from "../touchSendModePicker";
 
+const native = vi.hoisted(() => ({ platform: "web", back: null as (() => void) | null }));
+vi.mock("@capacitor/core", async (original) => ({
+  ...await original<typeof import("@capacitor/core")>(),
+  Capacitor: { getPlatform: () => native.platform, isNativePlatform: () => native.platform !== "web" },
+}));
+vi.mock("@capacitor/app", () => ({ App: { addListener: vi.fn(async (_name: string, callback: () => void) => {
+  native.back = callback;
+  return { remove: vi.fn(async () => undefined) };
+}) } }));
+
 vi.mock("../ChatBrowserDock", () => ({
   ChatBrowserDock: () => null,
 }));
@@ -329,6 +339,8 @@ describe("ChatComposerSurface", () => {
   let root: Root;
 
   beforeEach(() => {
+    native.platform = "web";
+    native.back = null;
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -464,19 +476,55 @@ describe("ChatComposerSurface", () => {
     });
   });
 
-  it("offers Send for an image-only draft and returns to the microphone after removal", async () => {
+  it("requires text for an image draft and returns to the microphone after removal", async () => {
+    const onSendButtonPress = vi.fn();
     const attachment = { id: "image-1", file: new File(["image"], "mock.png", { type: "image/png" }), previewUrl: "blob:mock-image" };
     await act(async () => renderLayout());
     const input = container.querySelector('[data-testid="chat-input"]');
-    await act(async () => renderLayout({ imageAttachments: [attachment], sendButtonVariant: "primary" }));
+    await act(async () => renderLayout({ imageAttachments: [attachment], sendButtonVariant: "primary", onSendButtonPress }));
     expect(layoutNodes().send).not.toBeNull();
+    expect(layoutNodes().send?.getAttribute("disabled")).not.toBeNull();
+    expect(layoutNodes().send?.getAttribute("aria-label")).toBe("Add a message to send images");
+    const hint = container.querySelector('[data-testid="chat-image-message-required"]');
+    expect(hint?.textContent).toBe("Add a message to send with your images.");
+    expect(layoutNodes().send?.getAttribute("aria-describedby")).toBe(hint?.id);
+    await act(async () => (layoutNodes().send as HTMLButtonElement).click());
+    expect(onSendButtonPress).not.toHaveBeenCalled();
     expect(layoutNodes().voice).toBeNull();
     expect(container.querySelector('[data-testid="chat-image-upload-preview"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="chat-input"]')).toBe(input);
+    await act(async () => renderLayout({ chatInputProps: { value: "Describe this image" } as never, imageAttachments: [attachment], sendButtonVariant: "primary", onSendButtonPress }));
+    expect(layoutNodes().send?.getAttribute("disabled")).toBeNull();
+    expect(container.querySelector('[data-testid="chat-image-message-required"]')).toBeNull();
+    await act(async () => (layoutNodes().send as HTMLButtonElement).click());
+    expect(onSendButtonPress).toHaveBeenCalledOnce();
     await act(async () => renderLayout());
     expect(layoutNodes().send).toBeNull();
     expect(layoutNodes().voice).not.toBeNull();
     expect(container.querySelector('[data-testid="chat-input"]')).toBe(input);
+  });
+
+  it.each(["queue", "stash"])("dismisses the %s popover with native Back without changing the draft", async (panel) => {
+    native.platform = "android";
+    await act(async () => root.render(<SavedMessagesHarness />));
+    const selector = panel === "queue" ? '[data-testid="chat-send-queue-agent-summary"]' : '[data-testid="chat-message-stashes-summary"]';
+    const trigger = container.querySelector<HTMLButtonElement>(selector);
+    expect(trigger).not.toBeNull();
+    await act(async () => trigger!.click());
+    expect(document.querySelector('[data-testid="chat-saved-message-popover"]')).not.toBeNull();
+    expect(native.back).not.toBeNull();
+    await act(async () => native.back?.());
+    expect(document.querySelector('[data-testid="chat-saved-message-popover"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-input"]')).not.toBeNull();
+    await vi.waitFor(() => expect(document.activeElement).toBe(trigger));
+  });
+
+  it("announces mobile Enter as a newline and updates when input posture changes", async () => {
+    await act(async () => root.render(<ChatComposerSurface {...createProps({ touchLikeInput: true, primaryActionMode: "steer", showVoicePrimaryAction: false, chatInputProps: { value: "Draft" } as never })} />));
+    expect(container.querySelector('[data-testid="chat-send-button"]')?.getAttribute("aria-label")).toBe("Steer current reply");
+    expect(container.querySelector('[data-testid="chat-primary-action-status"]')?.textContent).toContain("Enter adds a line");
+    await act(async () => root.render(<ChatComposerSurface {...createProps({ touchLikeInput: false, primaryActionMode: "steer", showVoicePrimaryAction: false, chatInputProps: { value: "Draft" } as never })} />));
+    expect(container.querySelector('[data-testid="chat-primary-action-status"]')?.textContent).toBe("Enter steers the current reply.");
   });
 
   it.each([false, true])("keeps image upload and suggestion acceptance in the menu (compact=%s)", async (compactBrowserViewport) => {
@@ -1334,7 +1382,8 @@ describe("ChatComposerSurface", () => {
     expect(document.activeElement).toBe(stashTrigger);
   });
 
-  it("uses the first Escape to cancel keyboard reordering and the second to close", async () => {
+  it.each(["Escape", "native Back"])("uses the first %s to cancel keyboard reordering and the second to close", async (dismissal) => {
+    if (dismissal === "native Back") native.platform = "android";
     const onQueueReorder = vi.fn();
     vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
       this: HTMLElement,
@@ -1385,13 +1434,21 @@ describe("ChatComposerSurface", () => {
     });
     await press("Enter", "Enter");
     await press("ArrowUp", "ArrowUp");
-    await press("Escape", "Escape");
+    const dismiss = async () => {
+      if (dismissal === "Escape") await press("Escape", "Escape");
+      else await act(async () => {
+        expect(native.back).not.toBeNull();
+        native.back?.();
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
+      });
+    };
+    await dismiss();
 
     expect(onQueueReorder).not.toHaveBeenCalled();
     expect(document.body.querySelector('[data-testid="chat-saved-message-popover"]')).not.toBeNull();
     expect(queueTrigger?.getAttribute("aria-expanded")).toBe("true");
 
-    await press("Escape", "Escape");
+    await dismiss();
     expect(document.body.querySelector('[data-testid="chat-saved-message-popover"]')).toBeNull();
     expect(queueTrigger?.getAttribute("aria-expanded")).toBe("false");
     expect(document.activeElement).toBe(queueTrigger);

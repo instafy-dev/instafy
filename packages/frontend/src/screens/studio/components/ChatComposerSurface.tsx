@@ -6,7 +6,8 @@ import type {
   KeyboardEventHandler,
   RefObject,
 } from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import {
   Archery,
   Bookmark,
@@ -73,6 +74,7 @@ type ChatComposerSurfaceProps = {
   composerAutoHidden: boolean;
   browserModeActive?: boolean;
   compactBrowserViewport: boolean;
+  touchLikeInput?: boolean;
   onSubmit: FormEventHandler<HTMLFormElement>;
   queueSurfaceProps: ComponentProps<typeof ChatSendQueueSurface>;
   stashTrayProps?: ComponentProps<typeof ChatMessageStashTray> | null;
@@ -208,6 +210,7 @@ export function ChatComposerSurface({
   composerAutoHidden,
   browserModeActive = false,
   compactBrowserViewport,
+  touchLikeInput = false,
   onSubmit,
   queueSurfaceProps,
   stashTrayProps = null,
@@ -289,6 +292,9 @@ export function ChatComposerSurface({
   const showVoiceSecondaryStatus = showVoicePrimaryAction && showVoiceStatus;
   const composerHasUsablePayload =
     chatInputProps.value.trim().length > 0 || imageAttachments.length > 0;
+  const imageOnlyDraft = imageAttachments.length > 0 && chatInputProps.value.trim().length === 0;
+  const imageMessageHintId = useId();
+  const primarySendDisabled = sendButtonDisabled || imageOnlyDraft;
   const voiceInputAvailable = showVoicePrimaryAction || showVoiceSecondaryAction;
   const voiceCaptureInProgress =
     voiceConversationActionStripProps.voiceActionActive ||
@@ -386,19 +392,25 @@ export function ChatComposerSurface({
         : null;
   const visiblePrimaryActionMode = visibleDesktopSendModifierMode ?? primaryActionMode;
   const primaryActionLabel =
-    visibleDesktopSendModifierMode === "queue"
+    imageOnlyDraft
+      ? "Add a message to send images"
+      : visibleDesktopSendModifierMode === "queue"
       ? "Queue message (Command or Ctrl plus Enter)"
       : visibleDesktopSendModifierMode === "stash"
         ? "Stash draft (Command or Ctrl plus Shift plus Enter)"
         : primaryActionMode === "steer"
-          ? "Steer current reply (Enter)"
+          ? touchLikeInput ? "Steer current reply" : "Steer current reply (Enter)"
           : "Send message";
   const primaryActionStatus =
-    visibleDesktopSendModifierMode === "queue"
+    imageOnlyDraft
+      ? "Add a message to send with your images."
+      : visibleDesktopSendModifierMode === "queue"
       ? "Queue selected. Press Enter or click to queue the message."
       : visibleDesktopSendModifierMode === "stash"
         ? "Stash selected. Press Enter or click to stash the draft."
-        : primaryActionMode === "steer"
+        : touchLikeInput
+          ? "Enter adds a line. Use the send button to send or steer."
+          : primaryActionMode === "steer"
           ? "Enter steers the current reply."
           : "Enter sends the message.";
   // Hold-to-talk must keep the same microphone DOM node from press through
@@ -648,6 +660,15 @@ export function ChatComposerSurface({
     [queueSurfaceProps, setExternalQueueExpanded],
   );
 
+  useNativeBackButtonAction(openSavedMessagePanel !== null && !queueEditingItem, () => {
+    // Use the same path as Escape, including cancelling an active keyboard
+    // reorder before dismissing the queue, and restoring its trigger focus.
+    const content = savedMessagePopoverContentRef.current;
+    const focused = document.activeElement;
+    const target = content?.contains(focused) ? focused : content;
+    target?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", bubbles: true, cancelable: true }));
+  });
+
   const savedMessagePopoverTriggerRef =
     openSavedMessagePanel === "stash" ? stashTrayTriggerRef : queueTriggerRef;
 
@@ -739,7 +760,7 @@ export function ChatComposerSurface({
 
   const touchSendModePicker = useTouchSendModePicker({
     primaryMode: primaryActionMode,
-    primaryDisabled: mutationDisabled || sendButtonDisabled,
+    primaryDisabled: mutationDisabled || primarySendDisabled,
     queueDisabled:
       mutationDisabled ||
       queueMessageDisabled === true ||
@@ -803,7 +824,7 @@ export function ChatComposerSurface({
         onStashDraftFromComposer?.();
         return;
       }
-      if (sendButtonDisabled) {
+      if (primarySendDisabled) {
         return;
       }
       onSendButtonPress?.({ pointerType: "mouse" } as never);
@@ -813,7 +834,7 @@ export function ChatComposerSurface({
       onSendButtonPress,
       onStashDraftFromComposer,
       resolveAvailableDesktopSendModifierMode,
-      sendButtonDisabled,
+      primarySendDisabled,
       visibleDesktopSendModifierMode,
     ],
   );
@@ -843,6 +864,7 @@ export function ChatComposerSurface({
   const actionMenuNode = (
     <ComposerActionMenu
       {...composerActionMenuProps}
+      touchLikeInput={touchLikeInput}
       mutationDisabled={mutationDisabled}
       onUploadImage={onOpenImagePicker}
       uploadImageDisabled={imageUploadDisabled}
@@ -920,9 +942,10 @@ export function ChatComposerSurface({
           onClick={handleSendClick}
           isDisabled={
             mutationDisabled ||
-            (visibleDesktopSendModifierMode === null && sendButtonDisabled)
+            (visibleDesktopSendModifierMode === null && primarySendDisabled)
           }
           aria-label={primaryActionLabel}
+          aria-describedby={imageOnlyDraft ? imageMessageHintId : undefined}
           title={primaryActionLabel}
           style={{ touchAction: "none" }}
           variant={sendButtonVariant === "primary" ? "primary" : "ghost"}
@@ -1387,6 +1410,11 @@ export function ChatComposerSurface({
                   className={`mb-2 space-y-2 rounded-xl border border-slate-200 bg-slate-50 p-2 ${DARK_PANEL_SOFT_BG_CLASS} dark:border-[color:var(--color-studio-dark-raised-control-border)]`}
                   data-testid="chat-image-upload-preview"
                 >
+                  {imageOnlyDraft ? (
+                    <p id={imageMessageHintId} className="px-1 text-xs text-slate-600 dark:text-slate-300" data-testid="chat-image-message-required">
+                      Add a message to send with your images.
+                    </p>
+                  ) : null}
                   {imageAttachments.map((attachment, index) => (
                     <div key={attachment.id} className="flex items-center gap-3">
                       <button

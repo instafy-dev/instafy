@@ -62,6 +62,7 @@ export function resolveChatComposerAffordances({
   const synchronouslyGateAiIntent =
     inputRequiresAi && !deferAiGatesForAmbientParticipation;
   const sendButtonDisabled =
+    (imageAttachmentCount > 0 && inputValue.trim().length === 0) ||
     submissionPending ||
     sendingAttachment ||
     voiceInputStarting ||

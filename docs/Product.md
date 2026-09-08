@@ -211,6 +211,8 @@ Automations uses a flat empty state on the shared panel surface, with a labeled
 The composer uses one compact, rounded writing row on phones and wider screens. It grows
 with the draft, then scrolls within the editor. Image upload and other message tools live
 in the `+` menu.
+The action menu scrolls within the available screen height. On Android, Back dismisses
+the current composer menu, saved-message popover, or image preview before leaving the chat.
 
 Image submissions keep their draft and previews while uploading. A failed upload leaves
 them available to retry and does not add an unsent message to the transcript. Successful
@@ -221,13 +223,15 @@ On clients with voice input, the trailing action is the microphone for an empty 
 Send or Steer for a text or image draft. Recording and transcription keep the microphone
 available until capture finishes. Use **Dictate message** in `+` to start voice input with
 an existing draft. Clients without voice input retain the Send control.
+Image attachments require an accompanying text message: an image-only draft shows this
+requirement and disables Send until text is added. Images cannot be queued or used to steer.
 
 ### Delivery actions
 
 The composer exposes three one-shot actions instead of a persistent delivery mode:
 
 - **Steer** adds the message to the matching agent's active turn. While that turn is active,
-  `Enter` and the primary send control steer it.
+  the primary send control steers it, as does `Enter` with a desktop keyboard.
 - **Queue** saves the message for the matching agent's next turn. Use `Cmd+Enter` on macOS or
   `Ctrl+Enter` elsewhere. If there is no matching active turn, the controller may dispatch it
   immediately rather than leave an idle queue entry behind.
@@ -236,8 +240,9 @@ The composer exposes three one-shot actions instead of a persistent delivery mod
   composer actions. Stashes never auto-send, remain private to their author, and are capped per
   author and conversation at 50 drafts and 5 MiB of serialized draft data.
 
-`Shift+Enter` always inserts a newline. When no matching agent is active, ordinary `Enter` sends a
-new turn. A queued message's edit action is named **Edit**, reserving **Steer** for genuine active-
+On touch-oriented devices, ordinary `Enter` adds a line; use the send control to send or steer.
+`Shift+Enter` always inserts a newline. With a desktop keyboard and no matching active agent,
+ordinary `Enter` sends a new turn. A queued message's edit action is named **Edit**, reserving **Steer** for genuine active-
 turn input.
 
 ## Scope Guardrails

@@ -5691,6 +5691,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         composerAutoHidden={composerAutoHidden}
         browserModeActive={browserModeActive}
         compactBrowserViewport={compactBrowserViewport}
+        touchLikeInput={touchLikeInput}
         onSubmit={handleSubmit}
         queueSurfaceProps={{
           totalQueuedCount,
