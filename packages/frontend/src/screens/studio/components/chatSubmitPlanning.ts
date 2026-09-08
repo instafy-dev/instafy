@@ -18,6 +18,8 @@ import { resolveChatLocalCapabilityHandle } from "./chatLocalCapabilityIntent";
 export type ChatSubmitOverride = {
   message: string;
   editorState: string | null;
+  /** Explicit files for a restored composer draft; other overrides carry no images. */
+  imageFiles?: File[];
   targetAgentHandles?: string[];
   browserPageTarget?: BrowserSessionPageTarget | null;
   browserLaunchMode?: "new_page" | null;

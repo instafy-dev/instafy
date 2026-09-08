@@ -203,6 +203,71 @@ describe("useChatSubmitFlow queued composer draft", () => {
     expect(options.clearComposerAfterQueue).not.toHaveBeenCalled();
   });
 
+  it.each([true, false])("sends restored-stash images with the draft and preserves the upload outcome (%s)", async (accepted) => {
+    const image = new File(["image"], "restored-photo.png", { type: "image/png" });
+    const options = createOptions({
+      isAssistantTyping: false,
+      inputValue: "QA stash draft",
+      imageFiles: [image],
+      performSubmit: vi.fn(async () => accepted),
+    });
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => root.render(<Harness options={options} resultRef={resultRef} />));
+    await act(async () => {
+      await expect(resultRef.current!.submitMessage({
+        message: options.inputValue,
+        editorState: null,
+        targetAgentHandles: ["octo"],
+        metadata: { restoredContext: "stash" },
+        imageFiles: [image],
+      })).resolves.toBe(accepted);
+    });
+    expect(options.performSubmit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      message: "QA stash draft",
+      composerMessage: "QA stash draft",
+      imageFiles: [image],
+      metadata: expect.objectContaining({ restoredContext: "stash" }),
+    }));
+    expect(options.enqueueServerSendQueueItem).not.toHaveBeenCalled();
+    expect(options.clearComposerAfterQueue).not.toHaveBeenCalled();
+  });
+
+  it.each(["queue", "steer"] as const)("rejects %s for a restored draft with explicitly attached images", async (intent) => {
+    const image = new File(["image"], "restored-photo.png", { type: "image/png" });
+    // The snapshot remains authoritative even if the current composer has changed.
+    const options = createOptions({ imageFiles: [] });
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => root.render(<Harness options={options} resultRef={resultRef} />));
+    await act(async () => {
+      await expect(resultRef.current!.submitMessage({
+        message: "QA stash draft", editorState: null, imageFiles: [image],
+      }, { intent })).resolves.toBe(false);
+    });
+    expect(options.submitSendIntent).not.toHaveBeenCalled();
+    expect(options.performSubmit).not.toHaveBeenCalled();
+    expect(options.clearComposerAfterQueue).not.toHaveBeenCalled();
+  });
+
+  it.each(["send", "queue"] as const)("keeps ambient composer images out of programmatic %s overrides", async (intent) => {
+    const image = new File(["image"], "unsent-photo.png", { type: "image/png" });
+    const options = createOptions({ isAssistantTyping: false, imageFiles: [image] });
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => root.render(<Harness options={options} resultRef={resultRef} />));
+    await act(async () => {
+      await expect(resultRef.current!.submitMessage({
+        message: UNDO_REQUEST, editorState: null,
+      }, { intent })).resolves.toBe(true);
+    });
+    if (intent === "send") {
+      expect(options.performSubmit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        message: UNDO_REQUEST, imageFiles: [],
+      }));
+    } else {
+      expect(options.submitSendIntent).toHaveBeenCalledOnce();
+      expect(options.performSubmit).not.toHaveBeenCalled();
+    }
+  });
+
   it("still clears the composer when the queued message is the user's own draft", async () => {
     const { composer, clearComposerAfterQueue, clearComposerIfUnchanged } =
       createComposer(TYPED_DRAFT);

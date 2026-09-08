@@ -1992,6 +1992,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         ? {
             message: latestInputValueRef.current ?? restoredStash.text,
             editorState: latestInputEditorStateRef.current,
+            imageFiles: imageAttachments.map((attachment) => attachment.file),
             targetAgentHandles: restoredEnvelope.targetAgentHandles,
             browserPageTarget: restoredEnvelope.browserPageTarget,
             browserLaunchMode: restoredEnvelope.browserLaunchMode,
@@ -2058,7 +2059,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       }
     }
     return submitted;
-  }, [ensureProjectWriteAccess, imageAttachments.length, keepComposerTabOpen, removeServerMessageStash, restoredMessageStash]);
+  }, [ensureProjectWriteAccess, imageAttachments, keepComposerTabOpen, removeServerMessageStash, restoredMessageStash]);
 
   // Conversational undo (#165): the Undo chip on an agent message dispatches a
   // window event; this panel owns the composer, so it turns the request into a

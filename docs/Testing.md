@@ -8,6 +8,8 @@ removal, Stash/Restore/Delete, and Android Back. Menus must stay within their su
 and scroll when the keyboard reduces the available height. Image attachments require
 message text. A rejected upload must retain the draft and attachments without adding
 an unsent message bubble; retrying successfully must create only one message.
+Restore a stash, attach an image, and send: the restored text and new image must arrive
+together, and the stash should disappear only after the send succeeds.
 
 For an actual upload, use a local controller and runtime-bound filesystem origin;
 mocked picker or queue callbacks do not prove storage or agent dispatch. Verify the
