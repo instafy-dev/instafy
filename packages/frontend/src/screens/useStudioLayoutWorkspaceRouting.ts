@@ -113,6 +113,7 @@ type WorkspaceTabSummary = {
 function isStudioPanel(value: string | null): value is StudioPanel {
   return (
     value === "home" ||
+    value === "team" ||
     value === "chat" ||
     value === "credits" ||
     value === "code" ||
@@ -240,6 +241,7 @@ export function useStudioLayoutWorkspaceRouting({
   const lastHydratedSearchRef = useRef<string | null>(null);
   const pendingUrlSearchSyncRef = useRef<string | null>(null);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("org");
+  const [settingsOrgId, setSettingsOrgId] = useState<string | null>(null);
 
   const clearApplyingQueryParamsSoon = useCallback(() => {
     if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
@@ -484,6 +486,14 @@ export function useStudioLayoutWorkspaceRouting({
       applied = true;
     }
 
+    const requestedOrgId = params.get("settingsOrgId");
+    const resolvedOrgId = requestedOrgId && isUUID(requestedOrgId) ? requestedOrgId : null;
+    if (resolvedPanelParam === "settings" && resolvedOrgId !== settingsOrgId) {
+      applyingQueryParamsRef.current = true;
+      setSettingsOrgId(resolvedOrgId);
+      applied = true;
+    }
+
     const resolvedLeftDrawer = resolveLeftDrawerFromSearch(locationSearch);
     if (resolvedLeftDrawer !== leftDrawer) {
       applyingQueryParamsRef.current = true;
@@ -579,6 +589,7 @@ export function useStudioLayoutWorkspaceRouting({
     workspaceTabs,
     clearApplyingQueryParamsSoon,
     settingsTab,
+    settingsOrgId,
     setLeftDrawer,
   ]);
 
@@ -789,6 +800,7 @@ export function useStudioLayoutWorkspaceRouting({
     changed = syncParam("reviewTab", projectScopedRouteValues.reviewTabId) || changed;
     changed = syncParam("panel", activePanel === "chat" ? null : activePanel) || changed;
     changed = syncParam("settingsTab", activePanel === "settings" ? settingsTab : null) || changed;
+    changed = syncParam("settingsOrgId", activePanel === "settings" && settingsTab === "org" ? settingsOrgId : null) || changed;
     changed =
       syncParam(
         "settingsCategory",
@@ -833,11 +845,14 @@ export function useStudioLayoutWorkspaceRouting({
     peekUrlNavigation,
     projectReadyForWorkspace,
     settingsTab,
+    settingsOrgId,
   ]);
 
   return {
     settingsTab,
+    settingsOrgId,
     setSettingsTab,
+    setSettingsOrgId,
     handlePanelSelect,
     suppressNextQuerySync,
   };

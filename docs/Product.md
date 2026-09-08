@@ -80,6 +80,31 @@ Mobile browsers show **Get the app · Soon** in the profile menu, linking to the
 availability section; iOS and Android downloads are marked coming soon. Native apps hide
 these acquisition actions and retain their existing update controls.
 
+## Team experience
+
+The expanded sidebar names the team first, followed by Home and Team. The space selector
+then groups Chats, Automations, Files and Changes. Less frequent tools, personal AI connections
+and Credits remain available through More; Team settings has its own entry.
+
+**Team** connects the selected team's people, accessible spaces and recent work. Agent profiles
+appear only when observed in activity visible to the signed-in account. This is a recent activity
+view, not an inventory or health check of every worker. Private conversations keep their existing
+access rules. A completed turn does not certify that its task was fixed or released. Opening Team
+does not advance the Home activity visit marker.
+
+**Team settings → Team profile** exposes the name and picture together. Owners and admins can
+edit them; other roles can see why editing is unavailable. Team selection is independent of the
+active space, so a new team can have its profile set before it has any spaces. Both New team
+entry points offer an optional picture; an upload failure can be retried without creating another
+team, or the user can continue without the picture.
+
+Space settings offers **Space appearance**, with an optional emoji and color. These persist with
+the space and appear in navigation and the space picker. Existing spaces keep an initials fallback;
+editing uses the existing permission to write to the space.
+
+**Your AI** identifies account-owned connections and agent profiles. The Team view shows their
+visible work; it does not expose or transfer another person's provider credentials.
+
 ## Switching teams and chats
 
 The team switcher opens the most recently visited space in the selected team, falling back to
@@ -132,15 +157,14 @@ This does not restore an entire
 editor session: file and panel tabs currently carry across space switches, while file selection
 and explorer state reset for the destination space.
 
-The sidebar's **Chats** section starts expanded and shows up to six recently visited active
+The sidebar's **Chats** section starts expanded and shows up to three recently visited active
 conversations in the current space. Selecting a row opens a preview or focuses its existing tab;
 closing a tab does not remove the conversation from recent chats. **Browse all chats** opens
 the existing searchable history. New chat creation lives in the top bar and full chat history;
 the sidebar Chats row only expands or collapses its recent list. Visit order is stored locally
-per account and space. Quick-list rows stay in place while switching among listed chats,
-including when reopening mobile navigation. Opening a chat outside the list adds it at the
-top, replacing the least recently visited row if the list is full. History refreshes and
-title or status updates preserve the remaining row order. The full history has an always-visible search field with its status
+per account and space. Running or queued chats and the selected chat take priority in the
+bounded list; the remaining rows keep visit order. Other chats remain available through
+Browse all chats. The full history has an always-visible search field with its status
 filter inside, and New chat and Close actions beside the title. A non-default filter changes
 the heading and marks the filter icon; counts live in the filter menu. Starting a chat clears
 the search and returns to active chats. Per-chat actions, including closing an open tab,

@@ -14,15 +14,18 @@ import {
   SidebarCollapse,
   SidebarExpand,
   Xmark,
+  Group,
+  Settings,
 } from "iconoir-react";
 import { ChatsIcon, HomeIcon } from "../../../components/AppIcons";
 import { AttentionBadge } from "../../../components/AttentionBadge";
-import { Button } from "../../../components/Button";
+import { Button, IconButton } from "../../../components/Button";
 import { ControlChevron } from "../../../components/ControlChevron";
 import { Text } from "../../../components/Text";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
-import { StudioDialogBody, StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
-import { Input } from "../../../components/Input";
+
+import { SpaceIdentity } from "../../../components/SpaceIdentity";
+import { NewTeamDialog } from "./NewTeamDialog";
 import { useStatus } from "../../../status/useStatus";
 import { studioPerformance } from "../../../telemetry/studioPerformance";
 import { useProfile } from "../../../profile/ProfileProvider";
@@ -250,7 +253,9 @@ export function StudioSidebar({
   );
   const alwaysCollapsedMoreItemIds = useMemo(() => new Set<StudioPanel>(["secrets"]), []);
   const hasRecentChats = Boolean(onSelectConversation);
-  const fixedEntryCount = 3 + items.length + (onOpenConversationHistory && !hasRecentChats ? 1 : 0);
+  // Team header, Home, Team, space selector and Settings; a collapsed rail
+  // also keeps an independent expand control.
+  const fixedEntryCount = (showLabels ? 5 : 6) + items.length + (onOpenConversationHistory && !hasRecentChats ? 1 : 0);
   const recentChatsReservePx = hasRecentChats && showLabels && recentChatsExpanded
     ? Math.max(1, Math.min(recentConversations.length, SIDEBAR_RECENT_CHAT_LIMIT)) * 40 + 56
     : 0;
@@ -1135,55 +1140,13 @@ export function StudioSidebar({
   }, [showProjectSearch]);
 
   const moreSwitcherOpen = moreMenuOpen || moreMobileViewOpen;
-  // "New team" lives with the sidebar because the sidebar already owns the
-  // org list and the switch: create, refresh that list, then select the new
-  // team so the panel lands on its (empty) spaces with the New-space action
-  // right there.
   const [newTeamOpen, setNewTeamOpen] = useState(false);
-  const [newTeamName, setNewTeamName] = useState("");
-  const [newTeamPending, setNewTeamPending] = useState(false);
-  const closeNewTeam = useCallback(() => {
-    setNewTeamOpen(false);
-    setNewTeamName("");
-  }, []);
-  const handleCreateTeam = useCallback(async () => {
-    const orgName = newTeamName.trim();
-    if (!orgName || newTeamPending) {
-      return;
-    }
-    setNewTeamPending(true);
-    try {
-      const created = await controllerClient.organizations.create({ orgName });
-      if (!created) {
-        showStatus("Couldn't create the team. Nothing was changed — try again in a moment.", "error", 4500);
-        return;
-      }
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(new CustomEvent("instafy:orgs-updated"));
-      }
-      closeNewTeam();
-      showStatus(`Team ${created.name} created.`, "success", 2500, { presentation: "confirmation" });
-      // A new team has no spaces, so selecting it would only bounce back with
-      // a "no spaces yet" notice. Go straight to making its first space; fall
-      // back to plain selection where the new-space flow isn't available.
-      if (onStartNewProject) {
-        onStartNewProject(created.id);
-        onRequestClose?.();
-      } else {
-        handleWorkspaceOrgChange(created.id);
-      }
-    } finally {
-      setNewTeamPending(false);
-    }
-  }, [
-    closeNewTeam,
-    handleWorkspaceOrgChange,
-    newTeamName,
-    newTeamPending,
-    onRequestClose,
-    onStartNewProject,
-    showStatus,
-  ]);
+  const handleTeamCreated = useCallback((created: ControllerOrgSummary) => {
+    setControllerOrgs((current) => [...current.filter((org) => org.id !== created.id), created]);
+    setWorkspaceOrgKey(created.id);
+    onOpenOrgSettings?.(created.id);
+    onRequestClose?.();
+  }, [onOpenOrgSettings, onRequestClose]);
 
   const workspaceSwitcherSections = (
     <StudioSidebarWorkspaceSwitcher
@@ -1209,7 +1172,7 @@ export function StudioSidebar({
         onOpenOrgSettings
           ? () => {
               closeWorkspaceSwitcher();
-              onOpenOrgSettings();
+              onOpenOrgSettings(workspaceOrgFilterId ?? activeProject?.orgId ?? null);
               onRequestClose?.();
             }
           : undefined
@@ -1290,43 +1253,65 @@ export function StudioSidebar({
           />
         ) : null}
         <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto overflow-x-hidden pb-2">
-          <li className={showLabels ? "" : "flex justify-center"}>
+          <li className="flex items-center gap-1" data-testid="sidebar-team-header">
             <Button
+              ref={workspaceTriggerRef}
               variant="ghost"
               size="sm"
               radius="lg"
-              fullWidth
-              onPress={onRequestClose ?? onToggleSidebar}
-              aria-label={onRequestClose ? "Close navigation" : sidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
-              data-testid="sidebar-drawer-toggle"
+              data-testid="sidebar-project-button"
+              aria-expanded={workspaceSwitcherOpen}
+              onPress={() => {
+                if (workspaceSwitcherOpen) {
+                  closeWorkspaceSwitcher();
+                  return;
+                }
+                openWorkspaceSwitcher();
+              }}
               className={[
-                "group/item relative py-1.5 transition focus-visible:ring-offset-0",
+                "group/item relative min-w-0 flex-1 py-1.5 transition focus-visible:ring-offset-0 data-[pressed]:translate-y-0 data-[pressed]:scale-100",
                 sidebarRowLayoutClass,
-                getSidebarRowToneClass(false),
+                getSidebarRowToneClass(workspaceSwitcherOpen),
               ].join(" ")}
-              isDisabled={!onRequestClose && !onToggleSidebar}
+              aria-label="Team and spaces"
             >
               <span
-                className={
-                  `relative flex ${sidebarIconShellSizeClass} items-center justify-center rounded-lg border border-transparent text-slate-400 transition-colors group-hover/item:text-primary-600 dark:text-slate-500 dark:group-hover/item:text-primary-500`
-                }
+                className={[
+                  `relative flex ${sidebarIconShellSizeClass} shrink-0 items-center justify-center rounded-lg transition-transform active:scale-95`,
+                  workspaceSwitcherOpen ? "ring-2 ring-primary-400/60 ring-offset-1 ring-offset-slate-50 dark:ring-offset-[color:var(--color-studio-dark-rail)]" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
               >
-                {onRequestClose ? (
-                  <Xmark className="text-base" aria-hidden="true" />
-                ) : sidebarOpen ? (
-                  <SidebarCollapse className="text-base" aria-hidden="true" />
-                ) : (
-                  <SidebarExpand className="text-base" aria-hidden="true" />
-                )}
+                <SidebarOrgDeck
+                  team={orgDeckTeam}
+                  teamCount={orgDeckTeams.length}
+                  otherAttentionCount={orgDeckOtherAttention}
+                  pending={pendingOrgSwitchKey !== null && !mergedProjectsError}
+                />
               </span>
               {showLabels ? (
-                <span className="flex flex-1 items-center justify-between gap-2 text-sm font-medium text-slate-700 dark:text-slate-200">
-                  <span>{onRequestClose ? "Close" : sidebarOpen ? "Collapse" : "Expand"}</span>
+                <span className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left">
+                  <span className="min-w-0 flex-1">
+                    <Text as="span" variant="bodyStrong" tone="primary" className="block truncate text-sm">
+                      {activeOrgName}
+                    </Text>
+
+                  </span>
+                  <ControlChevron direction={workspaceSwitcherOpen ? "left" : "right"} />
                 </span>
               ) : null}
             </Button>
+            {showLabels ? <IconButton variant="ghost" size="sm" aria-label={onRequestClose ? "Close navigation" : "Collapse sidebar"}
+              data-testid="sidebar-drawer-toggle" onPress={onRequestClose ?? onToggleSidebar}
+              isDisabled={!onRequestClose && !onToggleSidebar} className="mr-1 shrink-0">
+              {onRequestClose ? <Xmark className="h-4 w-4" /> : <SidebarCollapse className="h-4 w-4" />}
+            </IconButton> : null}
           </li>
 
+          {!showLabels ? <li className="flex justify-center"><IconButton variant="ghost" size="sm"
+            aria-label="Expand sidebar" data-testid="sidebar-drawer-toggle" onPress={onToggleSidebar}
+            isDisabled={!onToggleSidebar}><SidebarExpand className="h-4 w-4" /></IconButton></li> : null}
           <li>
             <Button
               onPress={() => {
@@ -1366,56 +1351,21 @@ export function StudioSidebar({
           </li>
 
           <li>
-            <Button
-              ref={workspaceTriggerRef}
-              variant="ghost"
-              size="sm"
-              radius="lg"
-              fullWidth
-              data-testid="sidebar-project-button"
-              aria-expanded={workspaceSwitcherOpen}
-              onPress={() => {
-                if (workspaceSwitcherOpen) {
-                  closeWorkspaceSwitcher();
-                  return;
-                }
-                openWorkspaceSwitcher();
-              }}
-              className={[
-                "group/item relative py-1.5 transition focus-visible:ring-offset-0 data-[pressed]:translate-y-0 data-[pressed]:scale-100",
-                sidebarRowLayoutClass,
-                getSidebarRowToneClass(workspaceSwitcherOpen),
-              ].join(" ")}
-              aria-label="Team and spaces"
-            >
-              <span
-                className={[
-                  `relative flex ${sidebarIconShellSizeClass} shrink-0 items-center justify-center rounded-lg transition-transform active:scale-95`,
-                  workspaceSwitcherOpen ? "ring-2 ring-primary-400/60 ring-offset-1 ring-offset-slate-50 dark:ring-offset-[color:var(--color-studio-dark-rail)]" : "",
-                ]
-                  .filter(Boolean)
-                  .join(" ")}
-              >
-                <SidebarOrgDeck
-                  team={orgDeckTeam}
-                  teamCount={orgDeckTeams.length}
-                  otherAttentionCount={orgDeckOtherAttention}
-                  pending={pendingOrgSwitchKey !== null && !mergedProjectsError}
-                />
-              </span>
-              {showLabels ? (
-                <span className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left">
-                  <span className="min-w-0 flex-1">
-                    <Text as="span" variant="bodyStrong" tone="primary" className="block truncate text-sm">
-                      {activeProjectName}
-                    </Text>
-                    <Text as="span" variant="caption" tone="muted" className="block truncate">
-                      {activeOrgName}
-                    </Text>
-                  </span>
-                  <ControlChevron direction={workspaceSwitcherOpen ? "left" : "right"} />
-                </span>
-              ) : null}
+            <Button variant="ghost" size="sm" radius="lg" fullWidth data-testid="sidebar-nav-team"
+              aria-label="Open team" aria-current={activePanel === "team" ? "page" : undefined}
+              className={`${sidebarRowLayoutClass} ${getSidebarRowToneClass(activePanel === "team")}`}
+              onPress={() => { closeWorkspaceSwitcher(); closeMoreMenu(); onSelect("team"); onRequestClose?.(); }}>
+              <span className={getSidebarNavIconClass(activePanel === "team")}><Group className="h-5 w-5" aria-hidden="true" /></span>
+              {showLabels ? <span className="text-sm font-medium">Team</span> : null}
+            </Button>
+          </li>
+          <li className="mt-3 border-t border-slate-200/70 pt-2 dark:border-[color:var(--color-studio-dark-divider)]">
+            <Button variant="ghost" size="sm" radius="lg" fullWidth data-testid="sidebar-space-button"
+              aria-label={`Choose space: ${activeProjectName}`} onPress={openWorkspaceSwitcher}
+              className={`${sidebarRowLayoutClass} ${getSidebarRowToneClass(workspaceSwitcherOpen)}`}>
+              <span className={getSidebarNavIconClass(false)}><SpaceIdentity name={activeProjectName}
+                icon={activeProject?.projectIcon} color={activeProject?.projectColor} className="h-7 w-7" /></span>
+              {showLabels ? <span className="flex min-w-0 flex-1 items-center justify-between gap-2 text-sm"><span className="truncate">{activeProjectName}</span><ControlChevron direction="right" /></span> : null}
             </Button>
           </li>
 
@@ -1571,6 +1521,15 @@ export function StudioSidebar({
             moreIndicator={moreIndicator}
             selectedMoreKeys={selectedMoreKeys}
           />
+          <li>
+            <Button variant="ghost" size="sm" radius="lg" fullWidth aria-label="Team settings" data-testid="sidebar-settings"
+              className={`${sidebarRowLayoutClass} ${getSidebarRowToneClass(activePanel === "settings")}`}
+              onPress={() => { closeWorkspaceSwitcher(); closeMoreMenu(); onOpenOrgSettings?.(activeProject?.orgId); onRequestClose?.(); }}
+              isDisabled={!onOpenOrgSettings}>
+              <span className={getSidebarNavIconClass(false)}><Settings className="h-5 w-5" aria-hidden="true" /></span>
+              {showLabels ? <span className="text-sm font-medium">Settings</span> : null}
+            </Button>
+          </li>
       </ul>
 
       <StudioSidebarAccountSection
@@ -1729,61 +1688,7 @@ export function StudioSidebar({
             onCopyTunnel={handleCopyTunnel}
           />
       </StudioDialogModal>
-      <StudioDialogModal
-        isOpen={newTeamOpen}
-        onOpenChange={(open) => {
-          if (!open) {
-            closeNewTeam();
-          }
-        }}
-        isDismissable
-        dialogAriaLabel="New team"
-        data-testid="sidebar-new-team-modal"
-        modalClassName="max-w-sm p-0"
-      >
-        <StudioDialogHeader
-          title="New team"
-          description="A team has its own spaces, members and credits."
-          onClose={closeNewTeam}
-          closeLabel="Close new team"
-        />
-        <StudioDialogBody>
-          <form
-            className="space-y-4"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void handleCreateTeam();
-            }}
-          >
-            <Input
-              id="sidebar-new-team-name"
-              aria-label="Team name"
-              placeholder="Team name"
-              value={newTeamName}
-              onChange={(event) => setNewTeamName(event.target.value)}
-              autoFocus
-              autoComplete="off"
-              maxLength={80}
-              data-testid="sidebar-new-team-name"
-            />
-            <div className="flex items-center justify-end gap-2">
-              <Button variant="ghost" size="sm" radius="full" onPress={closeNewTeam}>
-                Cancel
-              </Button>
-              <Button
-                type="submit"
-                variant="primary"
-                size="sm"
-                radius="full"
-                isDisabled={newTeamName.trim().length === 0 || newTeamPending}
-                data-testid="sidebar-new-team-create"
-              >
-                {newTeamPending ? "Creating…" : "Create team"}
-              </Button>
-            </div>
-          </form>
-        </StudioDialogBody>
-      </StudioDialogModal>
+      <NewTeamDialog open={newTeamOpen} onClose={() => setNewTeamOpen(false)} onCreated={handleTeamCreated} />
       {appLogsOverlayOpen ? (
         <BuildLogOverlay
           logs={appLogs}

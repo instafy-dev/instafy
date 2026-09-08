@@ -10,7 +10,7 @@ interface OrgMemberMutationResult {
   error?: string;
 }
 
-export function useOrgMembers(orgId: string | null) {
+export function useOrgMembers(orgId: string | null, viewerUserId?: string | null) {
   const {
     addMember: addControllerOrgMember,
     listMembersPage: listControllerOrgMembersPage,
@@ -24,7 +24,7 @@ export function useOrgMembers(orgId: string | null) {
   useEffect(() => {
     setQuery("");
     setDebouncedQuery("");
-  }, [orgId]);
+  }, [orgId, viewerUserId]);
 
   useEffect(() => {
     const handle = setTimeout(() => {
@@ -35,25 +35,30 @@ export function useOrgMembers(orgId: string | null) {
     };
   }, [query]);
 
-  const enabled = Boolean(orgId);
+  const enabled = Boolean(orgId) && viewerUserId !== null;
   const queryKey = useMemo(
-    () => ["org-members", orgId ?? null, debouncedQuery] as const,
-    [debouncedQuery, orgId],
+    // Keep the org prefix so existing member mutations invalidate all viewers.
+    // Team supplies a viewer scope; legacy settings callers retain their key.
+    () => ["org-members", orgId ?? null, debouncedQuery, ...(viewerUserId === undefined ? [] : [viewerUserId])] as const,
+    [debouncedQuery, orgId, viewerUserId],
   );
 
   const orgMembersQuery = useInfiniteQuery({
     queryKey,
     enabled,
     initialPageParam: null as string | null,
-    queryFn: async ({ pageParam }) => {
+    queryFn: async ({ pageParam, signal }) => {
       if (!orgId) {
         return { members: [], nextCursor: null, hasMore: false, total: null };
       }
-      return await listControllerOrgMembersPage(orgId, {
+      const result = await listControllerOrgMembersPage(orgId, {
         limit: 50,
         cursor: pageParam,
         query: debouncedQuery || null,
+        ...(viewerUserId === undefined ? {} : { throwOnError: true }),
       });
+      signal.throwIfAborted();
+      return result;
     },
     getNextPageParam: (lastPage) => {
       if (lastPage?.hasMore && lastPage?.nextCursor) {
@@ -63,7 +68,11 @@ export function useOrgMembers(orgId: string | null) {
     },
   });
 
+  // A failed access check must not leave a scoped viewer's cached roster on screen.
+  const hideMembers = !enabled || (viewerUserId !== undefined && orgMembersQuery.isError);
+
   const members = useMemo(() => {
+    if (hideMembers) return [];
     const pages = orgMembersQuery.data?.pages ?? [];
     if (pages.length === 0) {
       return [];
@@ -81,16 +90,17 @@ export function useOrgMembers(orgId: string | null) {
       }
     }
     return merged;
-  }, [orgMembersQuery.data?.pages]);
+  }, [hideMembers, orgMembersQuery.data?.pages]);
 
   const total = useMemo(() => {
+    if (hideMembers) return null;
     const pages = orgMembersQuery.data?.pages ?? [];
     if (pages.length === 0) {
       return null;
     }
     const first = pages[0];
     return typeof first?.total === "number" && Number.isFinite(first.total) ? first.total : null;
-  }, [orgMembersQuery.data?.pages]);
+  }, [hideMembers, orgMembersQuery.data?.pages]);
 
   const refresh = useCallback(
     async (options?: { force?: boolean }) => {
@@ -206,7 +216,7 @@ export function useOrgMembers(orgId: string | null) {
     error: orgMembersQuery.error instanceof Error ? orgMembersQuery.error.message : null,
     query,
     setQuery,
-    hasMore: orgMembersQuery.hasNextPage ?? false,
+    hasMore: !hideMembers && (orgMembersQuery.hasNextPage ?? false),
     total,
     refresh,
     loadMore,

@@ -120,6 +120,7 @@ import {
   updateControllerOrgMemberRole,
   updateControllerProjectMemberRole,
   updateControllerProjectName,
+  updateControllerProjectIdentity,
   updateProjectSecret,
   updateRuntimeActivity,
   updateMyAgent,
@@ -202,6 +203,7 @@ export const controllerClient = createControllerClient({
   projects: Object.freeze({
     create: createControllerProject,
     rename: updateControllerProjectName,
+    updateIdentity: updateControllerProjectIdentity,
     delete: deleteControllerProject,
     list: listControllerProjects,
     listResult: listControllerProjectsResult,

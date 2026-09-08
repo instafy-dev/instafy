@@ -29,7 +29,9 @@ import { getOrgDisplayName, isPersonalOrgName } from "../../../org/orgNaming";
 import { useStatus } from "../../../status/useStatus";
 import { ProfileEditor } from "../../../profile/ProfileEditor";
 import { SettingsSection } from "./SettingsSection";
-import { OrgAvatarEditor } from "./OrgAvatarEditor";
+import { TeamProfileSettings } from "./TeamProfileSettings";
+import { useSettingsOrganization } from "./useSettingsOrganization";
+import { useWorkspaceControls } from "../workspaceControls";
 import { OrgMembersSettingsSections } from "./OrgMembersSettingsSections";
 import {
   ProjectAiOverridesSettings,
@@ -67,6 +69,8 @@ import { listProviderSettingsSurfaceEntries } from "../../../providers/providerS
 import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
 import {
   buildProjectSettingsCategorySearch,
+  buildOrganizationSettingsCategorySearch,
+  resolveOrganizationSettingsCategory,
   resolveProjectSettingsCategory,
   type ProjectSettingsCategory,
 } from "../settingsRoute";
@@ -77,9 +81,12 @@ const runtimeControllerEnabled = controllerClient.core.enabled;
 
 interface SettingsPanelProps {
   activeTab: SettingsTab;
+  organizationId?: string | null;
+  onOrganizationChange?: (organizationId: string) => void;
 }
 
-export function SettingsPanel({ activeTab }: SettingsPanelProps) {
+export function SettingsPanel({ activeTab, organizationId, onOrganizationChange }: SettingsPanelProps) {
+  const { onStartNewProject } = useWorkspaceControls();
   const isLargeScreen = useStudioDesktopLayout();
   const { user } = useAuth();
   const {
@@ -137,7 +144,7 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
   const [projectNameSaving, setProjectNameSaving] = useState(false);
   const [projectDefaultsRefreshPending, setProjectDefaultsRefreshPending] = useState(false);
   const [settingsProviders, setSettingsProviders] = useState<LocalProviderSummary[]>([]);
-  const [orgCategory, setOrgCategory] = useState<"members" | "ai" | "billing" | "danger">("members");
+  const orgCategory = resolveOrganizationSettingsCategory(location.search) ?? "profile";
   // The URL owns the selected category. A local optimistic copy can be reset
   // from the previous URL while navigation is pending, especially for Overview
   // whose canonical URL intentionally omits settingsCategory.
@@ -230,43 +237,28 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
     () => projectList.find((project) => project.id === activeProjectId) ?? null,
     [activeProjectId, projectList]
   );
-  const activeOrgId = activeProject?.orgId ?? null;
-  const activeOrgName = getOrgDisplayName(activeProject?.orgName);
-  const activeOrgIsPersonal = isPersonalOrgName(activeProject?.orgName);
+  const orgScope = useSettingsOrganization({
+    enabled: runtimeControllerEnabled,
+    userId: user?.id ?? null,
+    projectOrganizationId: activeProject?.orgId ?? null,
+    organizationId,
+    selectOrganization: activeTab === "org",
+  });
+  const activeOrgId = orgScope.selectedId;
+  const activeOrgName = getOrgDisplayName(orgScope.organization?.name ?? (activeOrgId === activeProject?.orgId ? activeProject?.orgName : null));
+  const activeOrgIsPersonal = isPersonalOrgName(orgScope.organization?.name ?? (activeOrgId === activeProject?.orgId ? activeProject?.orgName : null));
   const orgContainerLabel = activeOrgIsPersonal ? "personal space" : "team";
   const orgDeleteLabel = activeOrgIsPersonal ? "Delete personal space" : "Delete team";
   const orgSelectOptions = useMemo(() => {
-    const seen = new Map<string, { id: string; name: string }>();
-    for (const project of projectList) {
-      if (!project.orgId) {
-        continue;
-      }
-      if (!seen.has(project.orgId)) {
-        seen.set(project.orgId, {
-          id: project.orgId,
-          name: getOrgDisplayName(project.orgName),
-        });
-      }
-    }
-    const list = Array.from(seen.values()).sort((a, b) => a.name.localeCompare(b.name));
+    const list = orgScope.organizations.map((org) => ({ id: org.id, name: getOrgDisplayName(org.name) }))
+      .sort((a, b) => a.name.localeCompare(b.name));
     const nameCounts = new Map<string, number>();
-    list.forEach((org) => {
-      nameCounts.set(org.name, (nameCounts.get(org.name) ?? 0) + 1);
-    });
-    return list.map((org) => {
-      if ((nameCounts.get(org.name) ?? 0) <= 1) {
-        return { ...org, label: org.name };
-      }
-      return { ...org, label: `${org.name} • ${org.id.slice(0, 8)}` };
-    });
-  }, [projectList]);
-  const selectedOrgOption = useMemo(
-    () => orgSelectOptions.find((org) => org.id === activeOrgId) ?? null,
-    [activeOrgId, orgSelectOptions],
-  );
-  const [orgRole, setOrgRole] = useState<string | null>(null);
-  const [, setOrgRoleLoading] = useState(false);
-  const [orgRoleChecked, setOrgRoleChecked] = useState(false);
+    list.forEach((org) => nameCounts.set(org.name, (nameCounts.get(org.name) ?? 0) + 1));
+    return list.map((org) => ({ ...org, label: (nameCounts.get(org.name) ?? 0) > 1 ? `${org.name} • ${org.id.slice(0, 8)}` : org.name }));
+  }, [orgScope.organizations]);
+  const selectedOrgOption = orgSelectOptions.find((org) => org.id === activeOrgId) ?? null;
+  const orgRole = orgScope.role;
+  const orgRoleChecked = orgScope.checked;
 
   useEffect(() => {
     setProjectNameDraft(activeProject?.name ?? "");
@@ -318,40 +310,6 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
       cancelled = true;
     };
   }, [activeTab, localProviderHostUnavailableOnThisClient, projectCategory]);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!runtimeControllerEnabled || !activeOrgId) {
-      setOrgRole(null);
-      setOrgRoleLoading(false);
-      setOrgRoleChecked(false);
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    setOrgRoleLoading(true);
-    setOrgRoleChecked(false);
-    controllerClient.organizations.list()
-      .then((orgs) => {
-        if (cancelled) {
-          return;
-        }
-        const match = orgs.find((org) => org.id === activeOrgId) ?? null;
-        const role = match?.role;
-        setOrgRole(typeof role === "string" && role.trim().length > 0 ? role.trim() : null);
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setOrgRoleLoading(false);
-          setOrgRoleChecked(true);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeOrgId]);
 
   const isOrgMember = Boolean(activeOrgId && orgRole);
   const canManageOrgMembers = orgRole === "owner" || orgRole === "admin";
@@ -441,7 +399,7 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
     loadMore: loadMoreMembers,
     updateMemberRole,
     removeMember
-  } = useOrgMembers(orgMembersOrgId);
+  } = useOrgMembers(orgMembersOrgId, user?.id ?? null);
   const {
     invitations,
     loading: invitationsLoading,
@@ -536,19 +494,12 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
     showProjectAccess,
   ]);
 
-  const handleSelectOrg = useCallback(
-    (nextOrgId: string) => {
-      const trimmed = nextOrgId.trim();
-      if (!trimmed || trimmed === activeOrgId) {
-        return;
-      }
-      const nextProject = projectList.find((project) => project.orgId === trimmed) ?? null;
-      if (nextProject) {
-        switchProject(nextProject.id);
-      }
-    },
-    [activeOrgId, projectList, switchProject],
-  );
+  const handleSelectOrg = (nextOrgId: string) => {
+    const trimmed = nextOrgId.trim();
+    if (!trimmed || trimmed === activeOrgId || !orgSelectOptions.some((org) => org.id === trimmed)) return;
+    orgScope.select(trimmed);
+    onOrganizationChange?.(trimmed);
+  };
 
   const handleCancelProjectName = useCallback(() => {
     setProjectNameDraft(activeProject?.name ?? "");
@@ -993,7 +944,9 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
 
       const settingsSubtitle =
         activeTab === "org"
-      ? orgCategory === "members"
+      ? orgCategory === "profile"
+        ? "Team profile"
+        : orgCategory === "members"
         ? "Members"
         : orgCategory === "ai"
           ? "AI & Providers"
@@ -1021,13 +974,6 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
       </Text>
     ) : activeTab === "org" ? (
       <div className="flex flex-wrap items-end gap-3">
-        {activeOrgId ? (
-          <OrgAvatarEditor
-            orgId={activeOrgId}
-            orgName={activeOrgName}
-            canEdit={canManageOrgMembers}
-          />
-        ) : null}
         {runtimeControllerEnabled && orgSelectOptions.length > 0 ? (
           <div className="min-w-[240px]">
             <Text variant="caption" tone="muted">
@@ -1344,6 +1290,7 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
   const categories = useMemo<SettingsCategory[]>(() => {
     if (activeTab === "org") {
       return [
+        { id: "profile", label: "Team profile", testId: "settings-category-org-profile" },
         { id: "members", label: "Members", icon: Group, testId: "settings-category-org-members" },
         { id: "ai", label: "AI & Providers", icon: Cpu, testId: "settings-category-org-ai" },
         { id: "billing", label: "Billing", icon: Coins, testId: "settings-category-org-billing" },
@@ -1412,8 +1359,9 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
   const handleCategoryChange = useCallback(
     (next: string) => {
       if (activeTab === "org") {
-        if (next === "members" || next === "ai" || next === "billing" || next === "danger") {
-          setOrgCategory(next);
+        if (next === "profile" || next === "members" || next === "ai" || next === "billing" || next === "danger") {
+          const search = buildOrganizationSettingsCategorySearch(location.search, next, activeOrgId);
+          navigate({ pathname: location.pathname, search: `?${search}` }, { replace: true });
         }
         return;
       }
@@ -1427,7 +1375,7 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
         setProfileCategory(next);
       }
     },
-    [activeTab, syncSettingsCategoryParam],
+    [activeOrgId, activeTab, location.pathname, location.search, navigate, syncSettingsCategoryParam],
   );
 
   const handleProjectAiItemChange = useCallback((nextItemId: string) => {
@@ -1902,14 +1850,29 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
         </div>
       ) : (
           <div className="space-y-4" data-testid="org-settings-section">
-              {orgCategory === "ai" ? (
+              {orgScope.error ? (
+                <SettingsSurface tone="danger">
+                  <Text as="p" role="alert" variant="body" tone="danger">{orgScope.error}</Text>
+                  <Button variant="outline" size="sm" onPress={orgScope.refresh}>Retry</Button>
+                </SettingsSurface>
+              ) : null}
+              {orgCategory === "profile" ? (
+                !runtimeControllerEnabled ? (
+                  <SettingsSurface><Text variant="body" tone="secondary">Connect the runtime controller to manage your team profile.</Text></SettingsSurface>
+                ) : orgScope.organization ? (
+                  <TeamProfileSettings key={orgScope.organization.id} organization={orgScope.organization} role={orgRole} onCreateSpace={onStartNewProject} />
+                ) : (
+                  <SettingsSurface><Text variant="body" tone="secondary">
+                    {orgScope.loading ? "Loading team profile…" : "Select a team to view its profile."}
+                  </Text></SettingsSurface>
+                )
+              ) : orgCategory === "ai" ? (
                 <SettingsSection
                   title="AI & Providers"
                   description={
                     <>
-                      Configure default providers, models, and fallbacks for {activeOrgIsPersonal ? "your personal space" : "this team"}. Spaces can optionally apply
-                      overrides for specific runs.
-                      <span className="mt-1 block">Secrets are managed per space.</span>
+                      Your AI connections belong to your account. Manage the providers and agent profiles you use across teams.
+                      <span className="mt-1 block">Team members manage their own connections. Secrets are managed per space.</span>
                     </>
                   }
                   data-testid="org-settings-ai"
@@ -1922,7 +1885,7 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
                       radius="xl"
                       data-testid="settings-open-org-ai-manager"
                     >
-                      Open AI manager
+                      Open your AI
                     </Button>
                   </div>
                 </SettingsSection>
@@ -1932,9 +1895,13 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
                   description={`Credits are tracked for ${activeOrgIsPersonal ? "your personal space" : "this team"}. Use this section to review balances and manage billing.`}
                   data-testid="org-settings-billing"
                 >
-                  <div className="flex flex-wrap gap-2">
+                  <div className="space-y-3">
+                    {activeOrgId !== activeProject?.orgId ? <Text as="p" variant="body" tone="muted">
+                      Open a space in this team to view its credits and billing.
+                    </Text> : null}
                     <Button
-                      onPress={() => handleOpenPanel("credits")}
+                      onPress={() => { if (activeOrgId && activeOrgId === activeProject?.orgId) handleOpenPanel("credits"); }}
+                      isDisabled={!activeOrgId || activeOrgId !== activeProject?.orgId}
                       variant="outline"
                       size="sm"
                       radius="xl"
@@ -2008,7 +1975,7 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
                 </SettingsSurface>
               ) : null}
 
-              {runtimeControllerEnabled && activeOrgId && !orgRoleChecked ? (
+              {runtimeControllerEnabled && activeOrgId && !orgRoleChecked && !orgScope.error ? (
                 <SettingsSurface>
                   <Text variant="body" tone="secondary">
                     Loading access…

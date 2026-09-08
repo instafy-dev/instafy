@@ -1,3 +1,4 @@
+import { SpaceIdentity } from "../../../components/SpaceIdentity";
 import { Plus, Search, Settings } from "iconoir-react";
 import { Button, IconButton } from "../../../components/Button";
 import { MenuItemContent } from "../../../components/MenuItemContent";
@@ -225,7 +226,7 @@ export function StudioSidebarWorkspaceSwitcher({
     >
       <MenuItemContent>
         <span className="flex w-full items-center justify-between gap-2">
-          <span className="min-w-0 truncate">{project.name || "Untitled space"}</span>
+          <span className="flex min-w-0 items-center gap-2"><SpaceIdentity name={project.name} icon={project.projectIcon} color={project.projectColor} className="h-6 w-6 shrink-0" /><span className="truncate">{project.name || "Untitled space"}</span></span>
           <span className="flex shrink-0 items-center gap-1.5">
             {options.current ? (
               <span className="text-3xs font-medium uppercase tracking-[0.08em] text-slate-400 dark:text-slate-500">

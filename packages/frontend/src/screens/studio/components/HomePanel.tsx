@@ -653,7 +653,7 @@ export function HomePanel({ inboxItems: sharedInboxItems = [], refreshInbox }: H
                 </Button>
               ) : null}
               {onOpenOrgSettings ? (
-                <Button variant="outline" size="sm" radius="xl" className="gap-2" onPress={onOpenOrgSettings}>
+                <Button variant="outline" size="sm" radius="xl" className="gap-2" data-testid="home-invite-people" onPress={() => onOpenOrgSettings(newSpaceOrgId, "members")}>
                   <Group className="h-4 w-4" aria-hidden="true" />
                   Invite people
                 </Button>

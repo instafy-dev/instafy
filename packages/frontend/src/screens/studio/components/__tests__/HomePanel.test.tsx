@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   acknowledgeInbox: vi.fn(),
   startChat: vi.fn(),
   startProject: vi.fn(),
+  openOrgSettings: vi.fn(),
   markConversationRead: vi.fn(),
   openConversationTab: vi.fn(),
   navigate: vi.fn(),
@@ -59,6 +60,7 @@ vi.mock("../../workspaceControls", () => ({
     userEmail: "home-review@example.test",
     onStartNewConversation: mocks.startChat,
     onStartNewProject: mocks.startProject,
+    onOpenOrgSettings: mocks.openOrgSettings,
   }),
 }));
 vi.mock("../../../../sdk/instafy", () => ({
@@ -252,6 +254,19 @@ describe("HomePanel activity states", () => {
     expect(query("home-create")).toBeNull();
     await click("home-start-first-chat");
     expect(mocks.startChat).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens Invite people in Members using the current team fallback from All", async () => {
+    await render();
+    await click("home-invite-people");
+    expect(mocks.openOrgSettings).toHaveBeenCalledExactlyOnceWith(null, "members");
+  });
+
+  it("opens Invite people in the filtered team's Members section", async () => {
+    await render();
+    await click("home-team-chip-team-design");
+    await click("home-invite-people");
+    expect(mocks.openOrgSettings).toHaveBeenCalledExactlyOnceWith("team-design", "members");
   });
 
   it("identifies team before space in All even when another membership has no loaded activity", async () => {

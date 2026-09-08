@@ -677,6 +677,8 @@ struct ProjectSummary {
     org_slug: Option<String>,
     org_name: Option<String>,
     project_name: Option<String>,
+    project_icon: Option<String>,
+    project_color: Option<String>,
     owner_user_id: Option<Uuid>,
     project_type: Option<String>,
     status: Option<String>,
@@ -1771,7 +1773,7 @@ async fn get_project_summary(
 
     let row = transaction
         .query_opt(
-            "select p.id, p.org_id, p.name, p.owner_user_id, p.project_type, p.status,
+            "select p.id, p.org_id, p.name, p.icon, p.color, p.owner_user_id, p.project_type, p.status,
                     o.slug as org_slug, o.name as org_name
              from projects p
              left join organizations o on o.id = p.org_id
@@ -1797,24 +1799,73 @@ async fn get_project_summary(
 struct ProjectUpdateRequest {
     #[serde(default, rename = "projectName", alias = "project_name")]
     project_name: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_identity_patch")]
+    project_icon: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_identity_patch")]
+    project_color: Option<Option<String>>,
+}
+
+fn deserialize_identity_patch<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+impl ProjectUpdateRequest {
+    fn validate(&mut self) -> Result<(), (StatusCode, Json<ApiError>)> {
+        if self.project_name.is_none()
+            && self.project_icon.is_none()
+            && self.project_color.is_none()
+        {
+            return Err(bad_request(
+                "Provide a projectName, projectIcon or projectColor",
+            ));
+        }
+        if let Some(name) = &mut self.project_name {
+            *name = name.trim().to_string();
+            if name.is_empty() || name.chars().count() > 120 {
+                return Err(bad_request(
+                    "projectName must be between 1 and 120 characters",
+                ));
+            }
+        }
+        if let Some(Some(icon)) = &self.project_icon {
+            if ![
+                "🚀", "🛠️", "💡", "🌱", "🎨", "📚", "🔬", "🎯", "🌍", "⚡", "🏡", "🧩",
+            ]
+            .contains(&icon.as_str())
+            {
+                return Err(bad_request(
+                    "projectIcon must be one of the supported space icons",
+                ));
+            }
+        }
+        if let Some(Some(color)) = &self.project_color {
+            if ![
+                "slate", "blue", "violet", "pink", "red", "orange", "green", "teal",
+            ]
+            .contains(&color.as_str())
+            {
+                return Err(bad_request(
+                    "projectColor must be one of the supported space colors",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 async fn update_project(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(project_id_raw): Path<String>,
-    Json(body): Json<ProjectUpdateRequest>,
+    Json(mut body): Json<ProjectUpdateRequest>,
 ) -> Result<Json<ProjectSummary>, (StatusCode, Json<ApiError>)> {
     let context = authenticate_request(&state.config, &headers).await?;
     let project_id = parse_uuid_param(project_id_raw, "project_id")?;
 
-    let project_name = body.project_name.unwrap_or_default().trim().to_string();
-    if project_name.is_empty() {
-        return Err(bad_request("projectName is required"));
-    }
-    if project_name.len() > 120 {
-        return Err(bad_request("projectName must be 120 characters or fewer"));
-    }
+    body.validate()?;
 
     let mut connection = state
         .pool
@@ -1832,15 +1883,25 @@ async fn update_project(
 
     transaction
         .execute(
-            "update projects set name = $2, updated_at = now() where id = $1",
-            &[&project_id, &project_name],
+            "update projects set name = coalesce($2, name),
+                 icon = case when $3 then $4 else icon end,
+                 color = case when $5 then $6 else color end,
+                 updated_at = now() where id = $1",
+            &[
+                &project_id,
+                &body.project_name,
+                &body.project_icon.is_some(),
+                &body.project_icon.clone().flatten(),
+                &body.project_color.is_some(),
+                &body.project_color.clone().flatten(),
+            ],
         )
         .await
         .map_err(|error| internal_error(format!("failed to update project: {error}")))?;
 
     let row = transaction
         .query_one(
-            "select p.id, p.org_id, p.name, p.owner_user_id, p.project_type, p.status,
+            "select p.id, p.org_id, p.name, p.icon, p.color, p.owner_user_id, p.project_type, p.status,
                     o.slug as org_slug, o.name as org_name
              from projects p
              left join organizations o on o.id = p.org_id
@@ -2072,7 +2133,7 @@ async fn list_org_projects(
     let request_user_id = context.user_id;
     let rows = transaction
         .query(
-            "select p.id, p.org_id, p.name, p.owner_user_id, p.project_type, p.status,
+            "select p.id, p.org_id, p.name, p.icon, p.color, p.owner_user_id, p.project_type, p.status,
                     o.slug as org_slug, o.name as org_name,
                     access_pm.role as project_member_role,
                     access_om.role as org_member_role
@@ -2130,7 +2191,7 @@ async fn list_accessible_projects(
     let rows = if context.is_service_role {
         transaction
             .query(
-                "select p.id, p.org_id, p.name, p.owner_user_id, p.project_type, p.status,
+                "select p.id, p.org_id, p.name, p.icon, p.color, p.owner_user_id, p.project_type, p.status,
                         o.slug as org_slug, o.name as org_name,
                         null::text as project_member_role,
                         null::text as org_member_role
@@ -2162,7 +2223,7 @@ async fn list_accessible_projects(
                    join projects p on p.org_id = om.org_id
                    where om.user_id = $1
                  )
-                 select p.id, p.org_id, p.name, p.owner_user_id, p.project_type, p.status,
+                 select p.id, p.org_id, p.name, p.icon, p.color, p.owner_user_id, p.project_type, p.status,
                         o.slug as org_slug, o.name as org_name,
                         access_pm.role as project_member_role,
                         access_om.role as org_member_role
@@ -5189,6 +5250,8 @@ fn map_project_summary(row: tokio_postgres::Row) -> ProjectSummary {
         org_slug: row.get("org_slug"),
         org_name: row.get("org_name"),
         project_name: row.get("name"),
+        project_icon: row.get("icon"),
+        project_color: row.get("color"),
         owner_user_id: row.get("owner_user_id"),
         project_type: row.get("project_type"),
         status: row.get("status"),
@@ -5907,6 +5970,7 @@ pub(crate) async fn upsert_org(
 
 #[cfg(test)]
 mod project_access_tests {
+    use super::ProjectUpdateRequest;
     use super::{
         invitation_accept_urls, OrgInvitationResponse, OrgInvitationSummary, ProjectAccess,
         ProjectRole, CLAUDE_DOC_TEMPLATE, DIAGNOSTICS_OPENAI_TEMPLATE, DIAGNOSTICS_TEMPLATE,
@@ -5914,6 +5978,29 @@ mod project_access_tests {
     };
     use serde_json::json;
     use uuid::Uuid;
+
+    #[test]
+    fn project_identity_patch_distinguishes_omitted_from_null_and_rejects_unknown_values() {
+        let mut rename: ProjectUpdateRequest =
+            serde_json::from_value(json!({"projectName": " New name "})).unwrap();
+        rename.validate().unwrap();
+        assert_eq!(rename.project_name.as_deref(), Some("New name"));
+        assert!(rename.project_icon.is_none());
+        let mut clear: ProjectUpdateRequest =
+            serde_json::from_value(json!({"projectIcon": null})).unwrap();
+        clear.validate().unwrap();
+        assert_eq!(clear.project_icon, Some(None));
+        assert!(clear.project_color.is_none());
+        for invalid in [
+            json!({}),
+            json!({"projectIcon": "<img>"}),
+            json!({"projectColor": "url(bad)"}),
+            json!({"projectName": " "}),
+        ] {
+            let mut request: ProjectUpdateRequest = serde_json::from_value(invalid).unwrap();
+            assert!(request.validate().is_err());
+        }
+    }
 
     #[test]
     fn project_capabilities_distinguish_direct_and_organization_builders() {

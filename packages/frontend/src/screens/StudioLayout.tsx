@@ -49,6 +49,7 @@ import {
   GitDiffView,
   GitReviewView,
   MachinesPanel,
+  TeamPanel,
   SecretsPanel,
   SettingsPanel,
   SkillsPanel,
@@ -112,6 +113,7 @@ import { controllerBaseUrl } from "../services/runtimeController/core";
 import { useAutoDesktopSpeechTunnel } from "../desktop/voiceTunnel/useAutoDesktopSpeechTunnel";
 import { useStudioLayoutChromeState } from "./useStudioLayoutChromeState";
 import { useStudioLayoutWorkspaceRouting } from "./useStudioLayoutWorkspaceRouting";
+import { buildOrganizationSettingsCategorySearch } from "./studio/settingsRoute";
 import { StudioPanelPerformance } from "../telemetry/StudioPanelPerformance";
 
 
@@ -119,18 +121,18 @@ const sidebarPrimaryAccentClass = "text-primary-600 dark:text-primary-500";
 
 const navItems: StudioNavItem[] = [
   { id: "chat", label: "Assistant", icon: ChatLines, accent: sidebarPrimaryAccentClass },
+  { id: "automations", label: "Automations", icon: Clock, accent: sidebarPrimaryAccentClass },
   { id: "code", label: "Files", icon: Page, accent: sidebarPrimaryAccentClass },
   { id: "sourceControl", label: "Changes", icon: GitBranch, accent: sidebarPrimaryAccentClass },
-  { id: "credits", label: "Credits", icon: Coins, accent: sidebarPrimaryAccentClass },
 ];
 
 const navMoreItems: StudioNavItem[] = [
   { id: "extensions", label: "Extensions", icon: Globe, accent: sidebarPrimaryAccentClass },
   { id: "secrets", label: "Secrets", icon: Lock, accent: sidebarPrimaryAccentClass },
   { id: "skills", label: "Skills", icon: Puzzle, accent: sidebarPrimaryAccentClass },
-  { id: "ai", label: "AI Manager", icon: Cpu, accent: sidebarPrimaryAccentClass },
+  { id: "ai", label: "Your AI", icon: Cpu, accent: sidebarPrimaryAccentClass },
   { id: "machines", label: "Machines", icon: Cube, accent: sidebarPrimaryAccentClass },
-  { id: "automations", label: "Automations", icon: Clock, accent: sidebarPrimaryAccentClass }
+  { id: "credits", label: "Credits", icon: Coins, accent: sidebarPrimaryAccentClass }
 ];
 
 const GIT_STATUS_POLL_INTERVAL_MS = 15_000;
@@ -804,6 +806,7 @@ function StudioLayoutInner() {
   ), [workspaceTabs]);
   const {
     settingsTab,
+    settingsOrgId,
     setSettingsTab,
     handlePanelSelect,
     suppressNextQuerySync,
@@ -1294,16 +1297,13 @@ function StudioLayoutInner() {
         if (item.id === "sourceControl") {
           return { ...item, badge: sourceControlBadge };
         }
-        if (item.id === "credits") {
-          return { ...item, indicator: creditsIndicator ?? null };
-        }
         return item;
       });
-    }, [creditsIndicator, sourceControlBadge]);
+    }, [sourceControlBadge]);
 
     const sidebarMoreItems = useMemo(() => {
-      return navMoreItems;
-    }, []);
+      return navMoreItems.map((item) => item.id === "credits" ? { ...item, indicator: creditsIndicator ?? null } : item);
+    }, [creditsIndicator]);
 
   useEffect(() => {
     if (!isLargeScreen || !mobileGitReviewSheet) {
@@ -1640,12 +1640,15 @@ function StudioLayoutInner() {
     [openPanelTab, requestUrlNavigation, setPanelTabMeta, setSettingsTab]
   );
 
-  const handleOpenOrgSettings = useCallback(() => {
-    handleOpenSettingsTab("org", {
-      title: orgSettingsTitle,
-      icon: <Group className="text-[16px]" aria-hidden="true" />
+  const handleOpenOrgSettings = useCallback((organizationId?: string | null, category: "profile" | "members" = "profile") => {
+    const orgId = organizationId ?? activeProjectSummary?.orgId ?? null;
+    setPanelTabMeta("settings", {
+      title: orgId === activeProjectSummary?.orgId ? orgSettingsTitle : "Team settings",
+      icon: <Group className="text-[16px]" aria-hidden="true" />,
     });
-  }, [handleOpenSettingsTab, orgSettingsTitle]);
+    const search = buildOrganizationSettingsCategorySearch(location.search, category, orgId);
+    navigate({ pathname: location.pathname, search: `?${search}` });
+  }, [activeProjectSummary?.orgId, location.pathname, location.search, navigate, orgSettingsTitle, setPanelTabMeta]);
 
   // ChatPanel's read-only notice cannot open a workspace tab itself —
   // WorkspaceTabsProvider is mounted below the providers that panel runs in — so
@@ -1655,7 +1658,7 @@ function StudioLayoutInner() {
       return undefined;
     }
     const handler = () => {
-      handleOpenOrgSettings();
+      handleOpenOrgSettings(undefined, "members");
     };
     window.addEventListener("instafy:open-org-members", handler);
     return () => {
@@ -1980,12 +1983,18 @@ function StudioLayoutInner() {
         <div className={`flex-1 overflow-y-auto ${scrollPaddingClass}`}>
           {activeWorkspaceTab.panel === "home" ? (
             <HomePanel inboxItems={homeAttentionInboxItems} refreshInbox={refreshHomeAttentionCount} />
+          ) : activeWorkspaceTab.panel === "team" ? (
+            <TeamPanel />
           ) : activeWorkspaceTab.panel === "credits" ? (
             <CreditsPanel />
           ) : activeWorkspaceTab.panel === "extensions" ? (
             <ExtensionsPanel />
           ) : activeWorkspaceTab.panel === "settings" ? (
-            <SettingsPanel activeTab={settingsTab} />
+            <SettingsPanel activeTab={settingsTab} organizationId={settingsOrgId} onOrganizationChange={(id) => {
+              const params = new URLSearchParams(location.search);
+              params.set("settingsOrgId", id);
+              navigate({ pathname: location.pathname, search: `?${params.toString()}` });
+            }} />
           ) : activeWorkspaceTab.panel === "skills" ? (
             <SkillsPanel />
           ) : activeWorkspaceTab.panel === "secrets" ? (

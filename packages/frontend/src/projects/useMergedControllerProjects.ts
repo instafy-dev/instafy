@@ -1,3 +1,4 @@
+import { normalizeSpaceIcon, normalizeSpaceColor, type ProjectIdentity } from "@instafy/sdk/project-identity";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getOrgDisplayName } from "../org/orgNaming";
 import { useAuth } from "../providers/AuthProvider";
@@ -11,7 +12,7 @@ import { PROJECT_ACCESS_REFRESH_EVENT } from "./projectAccessEvents";
 const runtimeControllerEnabled = controllerClient.core.enabled;
 const DISCOVERY_RETRY_DELAYS_MS = [1_000, 2_000, 4_000] as const;
 
-export interface MergedProjectListItem {
+export interface MergedProjectListItem extends ProjectIdentity {
   id: string;
   name: string;
   orgId: string | null;
@@ -50,6 +51,8 @@ export function mergeControllerProjects(
     byId.set(project.projectId, {
       id: project.projectId,
       name,
+      projectIcon: project.projectIcon === undefined ? local?.projectIcon : normalizeSpaceIcon(project.projectIcon),
+      projectColor: project.projectColor === undefined ? local?.projectColor : normalizeSpaceColor(project.projectColor),
       orgId,
       orgName,
       state: local?.state ?? existing?.state ?? null,

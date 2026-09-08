@@ -10,6 +10,7 @@ import { PreparedEmailInviteNotice } from "./PreparedEmailInviteNotice";
 import { ProjectProviderBindingsCard } from "./ProjectProviderBindingsCard";
 import { SettingsSection } from "./SettingsSection";
 import { SettingsSurface } from "./SettingsSurface";
+import { SpaceIdentityEditor } from "./SpaceIdentityEditor";
 
 function resolveInitials(value: string) {
   const base = value.trim();
@@ -214,6 +215,8 @@ export function ProjectSettingsSections({
               </div>
             </SettingsSurface>
           </SettingsSection>
+
+          {activeProjectId ? <SpaceIdentityEditor key={activeProjectId} projectId={activeProjectId} name={activeProjectName} canWrite={canWriteProject} enabled={runtimeControllerEnabled} /> : null}
 
           <SettingsSection
             title="Managed defaults"

@@ -1,3 +1,4 @@
+import { normalizeSpaceIcon, normalizeSpaceColor, type ProjectIdentity } from "@instafy/sdk/project-identity";
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
 import { DEFAULT_PROJECT_AI_MODEL } from "./ai/modelDefaults";
@@ -145,6 +146,7 @@ export interface SessionStore {
   switchProject: (projectId: string) => void;
   setProjectOrg: (projectId: string, org: ProjectOrgInfo) => void;
   setProjectName: (projectId: string, name: string) => void;
+  setProjectIdentity: (projectId: string, identity: ProjectIdentity) => void;
   removeProject: (projectId: string) => void;
   removeProjectsByOrgId: (orgId: string) => void;
   undo: () => void;
@@ -540,6 +542,19 @@ export const useWorkspaceStore = create<SessionStore>()(
     set({
       projects: nextProjects,
       state: nextState
+    });
+  },
+  setProjectIdentity: (projectId, identity) => {
+    const store = get();
+    const project = store.projects[projectId];
+    if (!project) return;
+    const projectIcon = identity.projectIcon === undefined ? project.metadata.projectIcon : normalizeSpaceIcon(identity.projectIcon);
+    const projectColor = identity.projectColor === undefined ? project.metadata.projectColor : normalizeSpaceColor(identity.projectColor);
+    if (project.metadata.projectIcon === projectIcon && project.metadata.projectColor === projectColor) return;
+    const nextProject = { ...project, metadata: { ...project.metadata, projectIcon, projectColor } };
+    set({
+      projects: { ...store.projects, [projectId]: clone(nextProject) },
+      state: projectId === store.activeProjectId ? clone(nextProject) : store.state,
     });
   },
   removeProject: (projectId) => {

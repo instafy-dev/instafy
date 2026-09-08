@@ -1180,7 +1180,7 @@ export function CredentialsSettingsCard() {
       <div className="space-y-8" data-testid="credentials-settings-card">
         <StudioListSection
           title="AI connections"
-          description="Connect providers and choose what new prompts use."
+          description="Connect your providers and choose the default for your new prompts."
           tone="activity"
           icon={<Cpu className="h-5 w-5" aria-hidden={true} />}
           actions={
@@ -1644,7 +1644,7 @@ export function CredentialsSettingsCard() {
 
         <StudioListSection
           title="Agents"
-          description="Customize @octo and create bots for quick styles."
+          description="Your agent profiles. Customize how your agents work; team activity is shown in Team."
           tone="suggestion"
           icon={<Brain className="h-5 w-5" aria-hidden={true} />}
           actions={

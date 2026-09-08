@@ -24,6 +24,21 @@ controller recomputes `nextRunAt` only when the effective schedule or the status
 the prompt or runtime settings does not move a pending run. A request without any field is
 rejected.
 
+## Reviewing scheduled work in Studio
+
+Automations is a primary space navigation item. Each row separates its schedule state, next run,
+last launch attempt and launch error from the latest attributable turn. **View thread** opens
+and activates the result chat, updating browser history so Back returns to Automations.
+
+The panel loads one shared page of up to 100 recent runs per account and space. Live updates
+only enrich runs returned by that authorized query. If access is denied, history is unavailable,
+or the relevant turn is outside that page, the UI says details are unavailable and offers the
+thread. Missing history does not prove that an automation never ran.
+
+**Turn completed** describes execution status, not whether a bug was fixed or a change deployed.
+The latest update remains visible for context, including when it reports a blocker. Existing
+private result conversations remain private.
+
 ## Share results with your team
 
 By default an automation's result conversation is private to its owner. Other members can see the

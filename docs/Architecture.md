@@ -37,7 +37,21 @@ plugin seam, not a runtime marketplace or arbitrary remote-code loader.
 - Desktop runtimes participate in git-canonical sync only when the controller advertises a reachable remote: set `GIT_REMOTE_PUBLIC_BASE_URL` and the runtime-token response (`POST /projects/:id/runtime/token`) includes `gitRemoteUrl`, which the supervisor wires through as `ORIGIN_GIT_REMOTE_URL`. `GIT_REMOTE_BASE_URL` alone is treated as cluster-internal and is not advertised to external runtimes.
 - The `instafy` CLI runtime does not register presence or receive the advertised remote yet (follow-up; it accepts explicit `--origin-*` flags).
 
+## Space appearance
+
+Spaces may store a small optional emoji and color in `projects.icon` and `projects.color`.
+Project summaries and discovery lists expose them as `projectIcon` and `projectColor`.
+`PATCH /projects/:project_id` accepts either field alongside the optional `projectName`:
+omitted fields stay unchanged, and explicit `null` restores the default icon or color.
+The SDK's `project-identity` contract lists the supported emoji and palette names; both
+the controller and database reject other values. The existing project write permission
+applies. Settings → Space → Overview saves this metadata for every client; the fallback
+is the space's initial on a neutral background. No image upload or workspace-file change
+is involved. Apply the additive `20260908120000_project_identity.sql` migration before
+deploying the controller that reads these columns.
+
 ## Provider Project Binding
+
 - Provider-owned persistence should reuse the same project filesystem boundary instead of introducing a separate provider state service.
 - A provider may declare project access needs up front with a descriptor such as:
   - `required`

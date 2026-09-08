@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   buildProjectSettingsCategorySearch,
   resolveProjectSettingsCategory,
+  buildOrganizationSettingsCategorySearch,
+  resolveOrganizationSettingsCategory,
 } from "../studio/settingsRoute";
 
 describe("project settings routing", () => {
@@ -34,5 +36,31 @@ describe("project settings routing", () => {
   it("resolves only supported project settings categories", () => {
     expect(resolveProjectSettingsCategory("?settingsCategory=providers")).toBe("providers");
     expect(resolveProjectSettingsCategory("?settingsCategory=unknown")).toBeNull();
+  });
+});
+
+describe("team settings routing", () => {
+  it("keeps the selected empty team independent of the active project", () => {
+    const search = buildOrganizationSettingsCategorySearch("?projectId=other-project&panel=chat", "members", "empty-team");
+    const params = new URLSearchParams(search);
+    expect(params.get("projectId")).toBe("other-project");
+    expect(params.get("panel")).toBe("settings");
+    expect(params.get("settingsTab")).toBe("org");
+    expect(params.get("settingsOrgId")).toBe("empty-team");
+    expect(resolveOrganizationSettingsCategory(search)).toBe("members");
+  });
+
+  it("returns to profile without carrying a previous team's category or ID", () => {
+    const search = buildOrganizationSettingsCategorySearch("?settingsCategory=danger&settingsOrgId=old-team", "profile", null);
+    const params = new URLSearchParams(search);
+    expect(params.has("settingsCategory")).toBe(false);
+    expect(params.has("settingsOrgId")).toBe(false);
+    expect(params.get("settingsTab")).toBe("org");
+  });
+
+  it("accepts team categories on reload and rejects unrelated space categories", () => {
+    expect(resolveOrganizationSettingsCategory("?settingsCategory=billing")).toBe("billing");
+    expect(resolveOrganizationSettingsCategory("?settingsCategory=profile")).toBe("profile");
+    expect(resolveOrganizationSettingsCategory("?settingsCategory=providers")).toBeNull();
   });
 });

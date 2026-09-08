@@ -70,6 +70,9 @@ export const AiPanel = lazyStudioPanel(
 export const AutomationsPanel = lazyStudioPanel(
   "Automations", async () => ({ default: (await import("./components/AutomationsPanel")).AutomationsPanel }),
 );
+export const TeamPanel = lazyStudioPanel(
+  "Team", async () => ({ default: (await import("./components/TeamPanel")).TeamPanel }),
+);
 export const MachinesPanel = lazyStudioPanel(
   "Machines", async () => ({ default: (await import("./components/MachinesPanel")).MachinesPanel }),
 );
