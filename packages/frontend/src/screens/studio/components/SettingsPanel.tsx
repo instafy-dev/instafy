@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { useStudioNavigation } from "../../../navigation/useStudioNavigation";
 import { Coins, Cpu, Group, NavArrowDown, Settings, Xmark } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
 import { Button } from "../../../components/Button";
@@ -65,11 +66,7 @@ import {
 import { desktopVoiceHostBridgeAvailable } from "../../../desktop/voiceHost/client";
 import { listProviderSettingsSurfaceEntries } from "../../../providers/providerSettingsSurfaces";
 import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
-import {
-  buildProjectSettingsCategorySearch,
-  resolveProjectSettingsCategory,
-  type ProjectSettingsCategory,
-} from "../settingsRoute";
+import { useSettingsRoute } from "../settingsRoute";
 import type { PreparedEmailInvite } from "../../../sharing/preparedEmailInvite";
 import { isLikelyInviteEmail } from "../../../conversations/inviteCommand";
 
@@ -79,7 +76,7 @@ interface SettingsPanelProps {
   activeTab: SettingsTab;
 }
 
-export function SettingsPanel({ activeTab }: SettingsPanelProps) {
+export function SettingsPanel({ activeTab: fallbackTab }: SettingsPanelProps) {
   const isLargeScreen = useStudioDesktopLayout();
   const { user } = useAuth();
   const {
@@ -98,7 +95,10 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
   } = useProject();
   const { showStatus } = useStatus();
   const navigate = useNavigate();
+  const goToStudio = useStudioNavigation();
   const location = useLocation();
+  const settingsRoute = useSettingsRoute(fallbackTab);
+  const activeTab = settingsRoute.tab;
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState<OrganizationInviteRole>("builder");
   const [invitePending, setInvitePending] = useState(false);
@@ -137,13 +137,11 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
   const [projectNameSaving, setProjectNameSaving] = useState(false);
   const [projectDefaultsRefreshPending, setProjectDefaultsRefreshPending] = useState(false);
   const [settingsProviders, setSettingsProviders] = useState<LocalProviderSummary[]>([]);
-  const [orgCategory, setOrgCategory] = useState<"members" | "ai" | "billing" | "danger">("members");
-  // The URL owns the selected category. A local optimistic copy can be reset
-  // from the previous URL while navigation is pending, especially for Overview
-  // whose canonical URL intentionally omits settingsCategory.
-  const projectCategory = resolveProjectSettingsCategory(location.search) ?? "overview";
-  const [projectAiItemId, setProjectAiItemId] = useState<string | null>(null);
-  const [profileCategory, setProfileCategory] = useState<"account" | "preferences">("account");
+  // All scopes are URL-driven, including Back/Forward and direct links. There
+  // is no optimistic local category that can overwrite an incoming location.
+  const orgCategory = activeTab === "org" ? settingsRoute.category : "members";
+  const projectCategory = activeTab === "project" ? settingsRoute.category : "overview";
+  const profileCategory = activeTab === "profile" ? settingsRoute.category : "account";
   const [gitAutoSyncAfterApply, setGitAutoSyncAfterApply] = useState<boolean>(() =>
     getGitAutoSyncAfterApplyPreference()
   );
@@ -1122,22 +1120,9 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
 
   const handleOpenPanel = useCallback(
     (panel: StudioPanel) => {
-      try {
-        const params = new URLSearchParams(location.search);
-        params.set("panel", panel);
-        const search = params.toString();
-        navigate(
-          {
-            pathname: location.pathname,
-            search: search.length > 0 ? `?${search}` : "",
-          },
-          { replace: true },
-        );
-      } catch {
-        // ignore malformed URLs
-      }
+      goToStudio({ kind: "panel", panel });
     },
-    [location.pathname, location.search, navigate],
+    [goToStudio],
   );
 
   const handleGitAutoSyncChange = useCallback(
@@ -1325,21 +1310,9 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
     ],
   );
 
-  useEffect(() => {
-    if (activeTab !== "project" || projectCategory !== "ai") {
-      return;
-    }
-    if (projectAiItems.length === 0) {
-      if (projectAiItemId !== null) {
-        setProjectAiItemId(null);
-      }
-      return;
-    }
-    const currentItemStillExists = projectAiItems.some((item) => item.id === projectAiItemId);
-    if (!currentItemStillExists) {
-      setProjectAiItemId(projectAiItems[0]?.id ?? null);
-    }
-  }, [activeTab, projectAiItemId, projectAiItems, projectCategory]);
+  const projectAiItemId = projectAiItems.some((item) => item.id === settingsRoute.itemId)
+    ? settingsRoute.itemId
+    : projectAiItems[0]?.id ?? null;
 
   const categories = useMemo<SettingsCategory[]>(() => {
     if (activeTab === "org") {
@@ -1382,57 +1355,11 @@ export function SettingsPanel({ activeTab }: SettingsPanelProps) {
     ];
   }, [activeTab, projectAiItems]);
 
-  const syncSettingsCategoryParam = useCallback(
-    (category: ProjectSettingsCategory) => {
-      try {
-        const search = buildProjectSettingsCategorySearch(location.search, category);
-        if (search === location.search.replace(/^\?/, "")) {
-          return;
-        }
-        navigate(
-          {
-            pathname: location.pathname,
-            search: search.length > 0 ? `?${search}` : "",
-          },
-          { replace: true },
-        );
-      } catch {
-        // ignore malformed URLs
-      }
-    },
-    [location.pathname, location.search, navigate],
-  );
-
-  useEffect(() => {
-    if (projectCategory !== "ai") {
-      setProjectAiItemId(null);
-    }
-  }, [projectCategory]);
-
-  const handleCategoryChange = useCallback(
-    (next: string) => {
-      if (activeTab === "org") {
-        if (next === "members" || next === "ai" || next === "billing" || next === "danger") {
-          setOrgCategory(next);
-        }
-        return;
-      }
-      if (activeTab === "project") {
-        if (next === "overview" || next === "access" || next === "providers" || next === "ai" || next === "danger") {
-          syncSettingsCategoryParam(next);
-        }
-        return;
-      }
-      if (next === "account" || next === "preferences") {
-        setProfileCategory(next);
-      }
-    },
-    [activeTab, syncSettingsCategoryParam],
-  );
-
-  const handleProjectAiItemChange = useCallback((nextItemId: string) => {
-    setProjectAiItemId(nextItemId);
-  }, []);
+  const handleCategoryChange = settingsRoute.selectSection;
+  const handleProjectAiItemChange = (nextItemId: string) => {
+    if (nextItemId === projectAiItemId || !projectAiItems.some((item) => item.id === nextItemId)) return;
+    settingsRoute.selectSection("ai", nextItemId);
+  };
 
   const handleRefreshProjectDefaults = useCallback(async () => {
     const projectId = activeProjectId?.trim() ?? "";

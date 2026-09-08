@@ -2361,7 +2361,7 @@ async function ensureWorkspaceConversationTab(page: Page): Promise<void> {
     .getByTestId("workspace-tabs")
     .locator('[data-tab-kind="conversation"]');
   const countConversationTabs = async () => await conversationTabs.count().catch(() => 0);
-  const topbarTabSelector = page.getByTestId("topbar-tab-selector");
+  const topbarTabSelector = page.locator('[data-testid="topbar-tab-selector"], [data-testid="mobile-header-title"]');
   const hasConversationWorkspace = async (): Promise<boolean> => {
     if ((await countConversationTabs()) > 0) {
       return true;

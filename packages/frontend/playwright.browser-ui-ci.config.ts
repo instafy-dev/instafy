@@ -32,11 +32,16 @@ const REQUIRED_BROWSER_UI_SPECS = [
   "browser-cobrowsing-ui.spec.ts",
   "browser-cursor-overlay.spec.ts",
   "browser-live-proof.spec.ts",
+  "mobile-sidebar-keyboard.spec.ts",
   "mobile-sidebar-safe-area.spec.ts",
+  "mobile-thumb-navigation.spec.ts",
   "shared-browser-approval-responsive.spec.ts",
   "shared-browser-expanded-safe-area.spec.ts",
   "shared-browser-focused-editable.spec.ts",
   "shared-browser-sessions-responsive.spec.ts",
+  "studio-history-navigation.spec.ts",
+  "settings-history-scroll.spec.ts",
+  "studio-history-controls.spec.ts",
 ];
 
 export default defineConfig({

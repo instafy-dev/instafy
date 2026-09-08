@@ -15,7 +15,7 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
     ],
   },
   "browser-ui": {
-    minimumTests: 27,
+    minimumTests: 38,
     files: [
       "browser-chrome-mobile-layout.spec.ts",
       "browser-cobrowsing-ui.spec.ts",
@@ -26,6 +26,11 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "shared-browser-sessions-responsive.spec.ts",
       "browser-live-proof.spec.ts",
       "mobile-sidebar-safe-area.spec.ts",
+      "mobile-sidebar-keyboard.spec.ts",
+      "mobile-thumb-navigation.spec.ts",
+      "studio-history-navigation.spec.ts",
+      "settings-history-scroll.spec.ts",
+      "studio-history-controls.spec.ts",
     ],
     titles: [
       "expanded Shared docked respects web safe areas",
@@ -38,6 +43,17 @@ export const REQUIRED_BROWSER_LANES = Object.freeze({
       "Shared sessions and saved status stay usable in short landscape",
       "keeps Unicode remote input out of a previously focused local editor",
       "reveals only a clipped focused editable without changing focus or values",
+      "keeps focused sidebar search centered through visual keyboard resize and restores the drawer",
+      "restores exact visits and transcript positions through Back and Forward at 1280px",
+      "restores exact visits and transcript positions through Back and Forward at 390px",
+      "collapses mobile sidebar drill-ins before navigating without stale Back loops",
+      "preserves rapid destinations, legacy tab clicks, jobs and unloaded deep links",
+      "abandons pending old-space conversations while a new space is loading",
+      "restores URL-driven settings categories and per-visit scroll with browser Back and Forward",
+      "native history controls traverse Router entries with 44px targets and bounded forward state",
+      "thumb navigation preserves history, selection and input at 375px",
+      "thumb navigation preserves history, selection and input at 390px",
+      "thumb navigation preserves history, selection and input at 844px",
     ],
   },
   "shared-studio": {

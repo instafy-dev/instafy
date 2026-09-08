@@ -1,5 +1,6 @@
 import { Capacitor } from "@capacitor/core";
 import { useEffect, type ReactNode } from "react";
+import { useMobileSidebarViewport } from "./useMobileSidebarViewport";
 
 interface SidebarStatusBarSession {
   users: number;
@@ -99,6 +100,7 @@ export function StudioMobileSidebarOverlay({
   onClose: () => void;
 }) {
   useSidebarStatusBarOverlay();
+  const { controlsRef, style } = useMobileSidebarViewport();
 
   return (
     <div className="fixed inset-0 z-50" data-testid="mobile-sidebar-overlay">
@@ -118,7 +120,9 @@ export function StudioMobileSidebarOverlay({
           paddingLeft: "var(--instafy-safe-area-inset-left)",
         }}
       >
-        {children}
+        <div ref={controlsRef} className="relative h-full min-h-0" style={style} data-testid="mobile-sidebar-controls">
+          {children}
+        </div>
       </div>
     </div>
   );

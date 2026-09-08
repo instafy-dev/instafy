@@ -159,7 +159,7 @@ under `packages/frontend/test-results/browser-ci/<lane>`.
 | Lane | What it proves | Local requirements |
 | --- | --- | --- |
 | `personal` | Real Electron profile/cookie persistence across restarts and projects, per-user isolation, clear, kill switch, renderer ownership revocation, and native form-owner/type descriptors (4 tests) | Installed workspace dependencies and compiled Desktop fixture; no Docker or database |
-| `browser-ui` | Real Chromium rendering of browser chrome, cursor overlay, routine approval, expansion/takeover sequencing, rendered-frame checks, full Shared modal safe-area/keyboard geometry, focused-editable reveal, phone session/resume/save-status controls, retained-editor Unicode input isolation, and mobile drawer safe-area geometry (at least 27 tests) | Installed workspace dependencies and Playwright Chromium; no Docker, database, or controller |
+| `browser-ui` | Real Chromium rendering of browser chrome, cursor overlay, routine approval, expansion/takeover sequencing, rendered-frame checks, full Shared modal safe-area/keyboard geometry, focused-editable reveal, phone session/resume/save-status controls, retained-editor Unicode input isolation, mobile drawer safe-area/focused-search geometry, Studio history/scroll navigation, and focused-chat header/overview dock/picker navigation with simulated keyboard geometry and a synthetic retained input (at least 38 tests) | Installed workspace dependencies and Playwright Chromium; no Docker, database, or controller |
 | Shared co-browsing tool fixture | Production browser tools in real Chromium: one routine grant across two sites, highlighted manual fields, fresh continuation observation, and local action timings | Installed workspace dependencies and locked Playwright Chromium; no Docker, database, controller, model or real accounts |
 | Shared profile fixture | Real Chromium HttpOnly/JS cookies, localStorage and server cookie echo; production runtime save/restore; controller authorization, encrypted database storage, stale-writer rejection, and clear/no-resurrection | Disposable Linux, Xvfb, Chromium, Go, Rust, and fully migrated loopback Postgres |
 | Shared Studio fixture | Real signed-in application, authorized project creation, Shared launch, CDP pixels/input, periodic snapshot, acknowledged provider stop, replacement login restoration, and UI clear | Disposable Linux, Xvfb, Chromium, Go, Rust, `x11-utils`, `sqlite3`, `psql`, and fresh local Supabase including GoTrue |
@@ -211,6 +211,31 @@ origin and executes it after a real Chromium viewport shrink. It verifies
 clipped editable fields, open shadow roots, nested scrollers, and non-editable
 or already-visible no-ops without reading field values. This script-level case
 does not substitute for the origin's resize-acknowledgement and control checks.
+
+The mobile-sidebar keyboard case mounts the production drawer, drill-in and
+workspace switcher with inert teams/spaces. It simulates visual-only keyboard
+shrink and panning, including a search that filters away every following row,
+and checks centered focus, retained text, restoration and unchanged backdrop
+safe areas. Native iOS accessory controls are not part of Chromium's viewport:
+physical verification must compare the field with both the keyboard and any
+separate accessory toolbar, then verify normal clear/Back/close cleanup.
+
+Studio navigation cases combine the production tab provider, routing hook, destination API,
+chat scroll orchestration and mobile sidebar history with real Router/browser entries. They
+check exact chat and job IDs, repeated visits with different reading positions, rapid navigation,
+Home-style direct links, unloaded conversations and abandoned cross-space hydration. Separate
+cases exercise URL-driven Settings sections and delayed panel scroll restoration, plus the
+native-shell Back/Forward controls with 44px targets. Authentication, conversation/project data
+and transcript rows are synthetic. These are not signed-in controller or physical-device proofs;
+Android system Back, native keyboard ordering, iPhone Safari/WKWebView and the packaged Electron
+shell still need explicit smoke checks against the candidate assets.
+
+The three mobile navigation viewport cases use the production header, overview-only dock policy,
+destination bar and compact picker. They verify no extra bottom row in a conversation, stable
+Home/Chats/Spaces overview destinations, direct-entry Chats fallback, exact Back/Forward visits,
+remote-only space selection without legacy store mutation, and retained input/picker geometry
+across simulated keyboard transitions. Project access/data and the retained draft are inert
+fixture boundaries; these cases do not replace full Studio/native keyboard verification.
 
 Origin protocol unit tests also preserve fractional pointer coordinates, wheel
 deltas, and device pixel ratios with the runtime's actual JSON parser features.

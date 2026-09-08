@@ -1,8 +1,13 @@
 import { processNotificationClickDestination } from "../notifications/notificationClickDestination";
 import { useNotificationCenter } from "../notifications/useNotificationCenter";
 import { UUID_PATTERN, parseNotificationClickUrl } from "../notifications/notificationContract";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { StudioNavigationProvider, useStudioNavigation } from "../navigation/useStudioNavigation";
+import { StudioPanelScrollContainer, buildStudioPanelScrollIdentity } from "../navigation/StudioPanelScrollContainer";
+import { resolveSettingsRoute } from "./studio/settingsRoute";
+import { getStudioVisitKey } from "../navigation/studioVisit";
+import { useStudioHistory } from "../navigation/useStudioHistory";
 import { ChatLines, Clock, Coins, Cpu, Cube, GitBranch, Globe, Group, Lock, Page, Puzzle, User, Xmark } from "iconoir-react";
 import { ResizablePanels } from "../components/ResizablePanels";
 import { CreditsPanel } from "./studio/components/CreditsPanel";
@@ -37,6 +42,7 @@ import { StudioSidebar } from "./studio/components/StudioSidebar";
 import { StudioMobileSidebarOverlay } from "./studio/components/StudioMobileSidebarOverlay";
 import { StudioTopBar } from "./studio/components/StudioTopBar";
 import { MobileBottomDock } from "./studio/components/MobileBottomDock";
+import { MobileNavigationSheet, type MobileNavigationSection } from "./studio/components/MobileNavigationSheet";
 import { ProjectLauncher } from "./studio/components/ProjectLauncher";
 import { ChatPanel } from "./studio/components/ChatPanel";
 import {
@@ -55,7 +61,7 @@ import { SkillsPanel } from "./studio/components/SkillsPanel";
 import { HomePanel } from "./studio/components/HomePanel";
 import { useStudioBugReportController } from "./studio/components/useStudioBugReportController";
 import { Status } from "../status/Status";
-import type { SettingsTab, StudioNavItem, StudioPanel } from "./studio/types";
+import type { SettingsTab, StudioNavItem } from "./studio/types";
 import { useAuth } from "../providers/AuthProvider";
 import { useWorkspaceUi } from "../workspace/useWorkspace";
 import { useStatus } from "../status/useStatus";
@@ -81,7 +87,7 @@ import { isUUID } from "../utils/uuid";
 import { writeClipboardText } from "../runtime/runtimeMenuShared";
 import { INSTAFY_CLI_URL } from "../config/externalLinks";
 import { SidePaneProvider, useSidePane } from "../workspace/SidePaneProvider";
-import { useStudioNavigationPosture } from "./studio/useStudioNavigationPosture";
+import { resolveMobileOverviewSection, useStudioNavigationPosture } from "./studio/useStudioNavigationPosture";
 import { SidePaneTabs } from "../workspace/SidePaneTabs";
 import { WorkspaceTabsProvider, useWorkspaceTabs } from "../workspace/WorkspaceTabsProvider";
 import type { WorkspaceGitReviewSource } from "../workspace/gitReviewTypes";
@@ -99,11 +105,8 @@ import {
 } from "./studio/components/githubImport";
 import { applyPageMeta } from "../utils/seo";
 import { isPersonalOrgName } from "../org/orgNaming";
-import {
-  buildStudioViewportStyle,
-  resolveStudioViewportHeightPx,
-  shouldResetStudioDocumentScroll,
-} from "./studioViewport";
+import { buildStudioViewportStyle } from "./studioViewport";
+import { useStudioViewportState } from "./useStudioViewportState";
 import { writePendingProjectSwitch } from "./pendingProjectSwitch";
 import { controllerBaseUrl } from "../services/runtimeController/core";
 import { useAutoDesktopSpeechTunnel } from "../desktop/voiceTunnel/useAutoDesktopSpeechTunnel";
@@ -160,61 +163,13 @@ function StudioLayoutInner() {
   const { isLargeScreen, showTouchBottomDock } = useStudioNavigationPosture();
   const location = useLocation();
   const navigate = useNavigate();
-  const [viewportHeightPx, setViewportHeightPx] = useState<number | null>(null);
+  const { viewportHeightPx, keyboardOpen } = useStudioViewportState({ trackKeyboard: showTouchBottomDock });
+  // Keep the forward head alive when its secondary sheet UI is closed.
+  const mobileHistory = useStudioHistory();
+  const [mobileNavigation, setMobileNavigation] = useState<{
+    section: MobileNavigationSection; locationKey: string; userId: string | null; projectId: string | null;
+  } | null>(null);
   const viewportHeightStyle = useMemo(() => buildStudioViewportStyle(viewportHeightPx), [viewportHeightPx]);
-
-  useLayoutEffect(() => {
-    if (typeof window === "undefined") {
-      return;
-    }
-
-    let frameId: number | null = null;
-    const applyViewportHeight = () => {
-      frameId = null;
-      // WKWebView can pan the layout viewport to a focused input even though
-      // Studio owns all scrolling and the document itself is overflow-locked.
-      // Undo that native page pan so the resized visual viewport continues to
-      // contain the top bar, transcript, and composer instead of blank space.
-      if (shouldResetStudioDocumentScroll(window.scrollX, window.scrollY)) {
-        window.scrollTo(0, 0);
-      }
-      const viewportHeight = resolveStudioViewportHeightPx(window.visualViewport?.height ?? window.innerHeight);
-      setViewportHeightPx((current) => (current === viewportHeight ? current : viewportHeight));
-    };
-
-    const schedule = () => {
-      if (frameId !== null) {
-        return;
-      }
-      frameId =
-        typeof window.requestAnimationFrame === "function"
-          ? window.requestAnimationFrame(applyViewportHeight)
-          : (applyViewportHeight(), null);
-    };
-
-    schedule();
-
-    window.addEventListener("resize", schedule);
-    window.addEventListener("orientationchange", schedule);
-    window.addEventListener("focusin", schedule);
-    window.addEventListener("focusout", schedule);
-    window.addEventListener("scroll", schedule, { passive: true });
-    window.visualViewport?.addEventListener("resize", schedule);
-    window.visualViewport?.addEventListener("scroll", schedule);
-
-    return () => {
-      window.removeEventListener("resize", schedule);
-      window.removeEventListener("orientationchange", schedule);
-      window.removeEventListener("focusin", schedule);
-      window.removeEventListener("focusout", schedule);
-      window.removeEventListener("scroll", schedule);
-      window.visualViewport?.removeEventListener("resize", schedule);
-      window.visualViewport?.removeEventListener("scroll", schedule);
-      if (frameId !== null && typeof window.cancelAnimationFrame === "function") {
-        window.cancelAnimationFrame(frameId);
-      }
-    };
-  }, []);
 
   useEffect(() => {
     if (typeof document === "undefined") {
@@ -222,13 +177,16 @@ function StudioLayoutInner() {
     }
     const originalHtmlOverflow = document.documentElement.style.overflow;
     const originalBodyOverflow = document.body.style.overflow;
+    const originalScrollRestoration = window.history.scrollRestoration;
 
     document.documentElement.style.overflow = "hidden";
     document.body.style.overflow = "hidden";
+    window.history.scrollRestoration = "manual";
 
     return () => {
       document.documentElement.style.overflow = originalHtmlOverflow;
       document.body.style.overflow = originalBodyOverflow;
+      window.history.scrollRestoration = originalScrollRestoration;
     };
   }, []);
 
@@ -252,6 +210,7 @@ function StudioLayoutInner() {
   } = useSidePane();
   const {
     tabs: workspaceTabs,
+    conversationTabsReady,
     openPanelTab,
     openConversationTab,
     openJobThreadTab,
@@ -263,7 +222,6 @@ function StudioLayoutInner() {
     consumeUrlNavigation,
     resetTabs,
     activeTab: activeWorkspaceTab,
-    focusTab,
     setPanelTabMeta
   } =
     useWorkspaceTabs();
@@ -368,10 +326,6 @@ function StudioLayoutInner() {
     }),
     [currentUserId, openPanelTab, requestHistoryPush, showDesktopRuntimeHelp, showStatus],
   );
-  const [mobileHomeReturnTarget, setMobileHomeReturnTarget] = useState<{
-    tabId: string;
-    fallbackPanel: StudioPanel;
-  } | null>(null);
   const [homeAttentionInboxItems, setHomeAttentionInboxItems] = useState<NotificationInboxItem[]>([]);
   const homeAttentionRequestRef = useRef<Promise<NotificationInboxItem[]> | null>(null);
   const homeAttentionEpochRef = useRef(0);
@@ -600,29 +554,6 @@ function StudioLayoutInner() {
   }, [visibleHomeAttentionInboxItems]);
 
   useEffect(() => {
-    if (isLargeScreen || !activeWorkspaceTab) {
-      return;
-    }
-    if (activeWorkspaceTab.kind === "panel" && activeWorkspaceTab.panel === "home") {
-      return;
-    }
-    let fallbackPanel: StudioPanel = "chat";
-    if (activeWorkspaceTab.kind === "panel") {
-      fallbackPanel = activeWorkspaceTab.panel;
-    } else if (
-      activeWorkspaceTab.kind === "file" ||
-      activeWorkspaceTab.kind === "explorer" ||
-      activeWorkspaceTab.kind === "gitDiff"
-    ) {
-      fallbackPanel = "code";
-    }
-    setMobileHomeReturnTarget({
-      tabId: activeWorkspaceTab.id,
-      fallbackPanel,
-    });
-  }, [activeWorkspaceTab, isLargeScreen]);
-
-  useEffect(() => {
     if (typeof window === "undefined" || !currentUserId) {
       return;
     }
@@ -769,6 +700,8 @@ function StudioLayoutInner() {
     leftDrawerWidth,
     mobileGitReviewSheet,
     mobileSidebarOpen,
+    mobileSidebarNavigation,
+    runAfterSidebarClose,
     setLeftDrawer,
     setMobileGitReviewSheet,
     setMobileSidebarOpen,
@@ -776,10 +709,13 @@ function StudioLayoutInner() {
     sidebarCollapsed,
     sourceControlOpenRequest,
     setSourceControlOpenRequest,
-  } = useStudioLayoutChromeState({ isLargeScreen });
+  } = useStudioLayoutChromeState({ isLargeScreen, scopeKey: currentUserId ? `${currentUserId}:${activeProjectId ?? "no-project"}` : null });
+  useEffect(() => {
+    if (mobileSidebarNavigation.error) showStatus(mobileSidebarNavigation.error, "error", 5000);
+  }, [mobileSidebarNavigation.error, showStatus]);
+  const navigateToDestination = useStudioNavigation();
   const {
     settingsTab,
-    setSettingsTab,
     handlePanelSelect,
     suppressNextQuerySync,
   } = useStudioLayoutWorkspaceRouting({
@@ -794,6 +730,7 @@ function StudioLayoutInner() {
     activeWorkspaceTabJobId,
     activeWorkspaceTabKind,
     activeWorkspaceTabPanel,
+    conversationTabsReady,
     consumeUrlNavigation,
     conversations,
     conversationsProjectKey,
@@ -802,6 +739,8 @@ function StudioLayoutInner() {
     leftDrawer,
     locationPathname: location.pathname,
     locationSearch: location.search,
+    locationKey: location.key,
+    locationState: location.state,
     navigate,
     openConversationTab,
     openJobThreadTab,
@@ -1565,12 +1504,12 @@ function StudioLayoutInner() {
 
   const handleOpenSettingsTab = useCallback(
     (tab: SettingsTab, meta: { title: string; icon: ReactNode }) => {
-      requestUrlNavigation("push");
-      setSettingsTab(tab);
-      openPanelTab("settings");
-      setPanelTabMeta("settings", meta);
+      runAfterSidebarClose(() => {
+        setPanelTabMeta("settings", meta);
+        navigateToDestination({ kind: "panel", panel: "settings", settingsTab: tab });
+      });
     },
-    [openPanelTab, requestUrlNavigation, setPanelTabMeta, setSettingsTab]
+    [navigateToDestination, runAfterSidebarClose, setPanelTabMeta]
   );
 
   const handleOpenOrgSettings = useCallback(() => {
@@ -1640,83 +1579,33 @@ function StudioLayoutInner() {
       showStatus(message, "error");
     }
   }, [navigate, showStatus, signOut]);
-  const mobileDockActiveSlot = useMemo((): "home" | "chat" | "files" | "projects" | null => {
-    if (!activeWorkspaceTab) {
-      return null;
-    }
-    if (activeWorkspaceTab.kind === "panel") {
-      if (activeWorkspaceTab.panel === "home") {
-        return "home";
-      }
-      if (activeWorkspaceTab.panel === "chat") {
-        return "chat";
-      }
-      if (activeWorkspaceTab.panel === "code") {
-        return "files";
-      }
-      if (activeWorkspaceTab.panel === "projects") {
-        return "projects";
-      }
-      return null;
-    }
-    if (activeWorkspaceTab.kind === "conversation" || activeWorkspaceTab.kind === "jobThread") {
-      return "chat";
-    }
-    if (
-      activeWorkspaceTab.kind === "file" ||
-      activeWorkspaceTab.kind === "explorer" ||
-      activeWorkspaceTab.kind === "gitDiff"
-    ) {
-      return "files";
-    }
-    return null;
-  }, [activeWorkspaceTab]);
-  const mobileUsesComposerDock = showTouchBottomDock && mobileDockActiveSlot === "chat";
-  const showMobileBottomDock = showTouchBottomDock && !mobileUsesComposerDock;
-  const mobileDockPrimaryMode =
-    mobileDockActiveSlot === "home" && mobileHomeReturnTarget ? "return" : "home";
+  const mobileOverviewSection = resolveMobileOverviewSection(activeWorkspaceTab, leftDrawer);
+  const showMobileBottomDock = showTouchBottomDock && mobileOverviewSection !== null && !keyboardOpen;
+  const visibleMobileNavigation = showTouchBottomDock && mobileNavigation?.locationKey === location.key &&
+    mobileNavigation.userId === (user?.id ?? null) && mobileNavigation.projectId === activeProjectId
+    ? mobileNavigation : null;
+  const openMobileNavigation = useCallback((section: MobileNavigationSection) => {
+    setMobileNavigation({ section, locationKey: location.key, userId: user?.id ?? null, projectId: activeProjectId });
+  }, [activeProjectId, location.key, user?.id]);
+  const closeMobileNavigation = useCallback(() => setMobileNavigation(null), []);
+  // A browser gesture, account/space change or desktop resize dismisses this
+  // transient picker. It never inserts synthetic destinations into history.
+  useEffect(() => {
+    if (mobileNavigation && !visibleMobileNavigation) setMobileNavigation(null);
+  }, [mobileNavigation, visibleMobileNavigation]);
   const handleMobileDockPrimaryPress = useCallback(() => {
-    requestHistoryPush();
-    setLeftDrawer(null);
-    if (mobileDockPrimaryMode === "return") {
-      const targetTabId = mobileHomeReturnTarget?.tabId ?? null;
-      if (targetTabId && workspaceTabs.some((tab) => tab.id === targetTabId)) {
-        focusTab(targetTabId);
-        return;
-      }
-      openPanelTab(mobileHomeReturnTarget?.fallbackPanel ?? "chat");
-      return;
-    }
-    openPanelTab("home");
-  }, [
-    focusTab,
-    mobileDockPrimaryMode,
-    mobileHomeReturnTarget,
-    openPanelTab,
-    requestHistoryPush,
-    setLeftDrawer,
-    workspaceTabs,
-  ]);
+    runAfterSidebarClose(() => navigateToDestination({ kind: "panel", panel: "home" }));
+  }, [navigateToDestination, runAfterSidebarClose]);
   const handleMobileDockOpenChat = useCallback(() => {
-    requestHistoryPush();
-    setLeftDrawer(null);
-    if (activeConversationId) {
-      openConversationTab(activeConversationId);
-      return;
-    }
-    openPanelTab("chat");
-  }, [activeConversationId, openConversationTab, openPanelTab, requestHistoryPush, setLeftDrawer]);
+    runAfterSidebarClose(() => navigateToDestination({ kind: "panel", panel: "chat", workspaceTab: "history" }));
+  }, [navigateToDestination, runAfterSidebarClose]);
   const handleMobileDockOpenFiles = useCallback(() => {
-    requestHistoryPush();
     setPreferredFilesMobileView("tree");
-    setLeftDrawer("files");
-    openPanelTab("code");
-  }, [openPanelTab, requestHistoryPush, setLeftDrawer]);
+    runAfterSidebarClose(() => navigateToDestination({ kind: "panel", panel: "code", workspaceTab: "files" }));
+  }, [navigateToDestination, runAfterSidebarClose]);
   const handleMobileDockOpenProjects = useCallback(() => {
-    requestHistoryPush();
-    setLeftDrawer(null);
-    openPanelTab("projects");
-  }, [openPanelTab, requestHistoryPush, setLeftDrawer]);
+    runAfterSidebarClose(() => navigateToDestination({ kind: "panel", panel: "projects" }));
+  }, [navigateToDestination, runAfterSidebarClose]);
   const handleFilesMobileViewChange = useCallback(
     (nextView: FilesPanelMobileView) => {
       const change = resolveStudioFilesMobileViewChange({
@@ -1814,6 +1703,18 @@ function StudioLayoutInner() {
   const showChatActions = !projectAccessBlocked;
 
   const workspaceTabsElement = null;
+  const routeParams = new URLSearchParams(location.search);
+  const routedPanel = routeParams.get("panel") ?? "chat";
+  const panelScrollReady = projectReadyForWorkspace &&
+    (!routeParams.get("projectId") || routeParams.get("projectId") === activeProjectId) &&
+    routedPanel === activeWorkspaceTabPanel;
+  const panelScrollIdentity = buildStudioPanelScrollIdentity({
+    userId: currentUserId, projectId: activeProjectId,
+    visitKey: getStudioVisitKey(location), panel: activeWorkspaceTabPanel ?? "projects",
+    section: routedPanel === "settings"
+      ? JSON.stringify(resolveSettingsRoute(location.search, settingsTab))
+      : null,
+  });
 
   let workspaceContent: ReactNode;
   if (projectAccessBlocked) {
@@ -1889,13 +1790,13 @@ function StudioLayoutInner() {
       );
     } else if (activeWorkspaceTab.panel === "projects") {
       const scroller = (
-        <div className={`flex-1 overflow-y-auto ${scrollPaddingClass}`}>
+        <StudioPanelScrollContainer identity={panelScrollIdentity} ready={panelScrollReady} className={`flex-1 overflow-y-auto ${scrollPaddingClass}`}>
           <ProjectPickerPanel
             onCreateProject={handleCreateBlankProject}
             searchTerm={projectPickerSearchTerm}
             onSearchTermChange={setProjectPickerSearchTerm}
           />
-        </div>
+        </StudioPanelScrollContainer>
       );
       workspaceContent = (
         <div className="flex h-full flex-col overflow-hidden">
@@ -1904,7 +1805,7 @@ function StudioLayoutInner() {
       );
     } else {
       const scroller = (
-        <div className={`flex-1 overflow-y-auto ${scrollPaddingClass}`}>
+        <StudioPanelScrollContainer identity={panelScrollIdentity} ready={panelScrollReady} className={`flex-1 overflow-y-auto ${scrollPaddingClass}`} data-testid="studio-panel-scroll">
           {activeWorkspaceTab.panel === "home" ? (
             <HomePanel inboxItems={homeAttentionInboxItems} refreshInbox={refreshHomeAttentionCount} />
           ) : activeWorkspaceTab.panel === "credits" ? (
@@ -1924,7 +1825,7 @@ function StudioLayoutInner() {
           ) : activeWorkspaceTab.panel === "machines" ? (
             <MachinesPanel />
           ) : null}
-        </div>
+        </StudioPanelScrollContainer>
       );
       workspaceContent = (
         <div className="flex h-full flex-col overflow-hidden">
@@ -1933,23 +1834,27 @@ function StudioLayoutInner() {
       );
     }
   }
+  const mobileOverviewDock = showMobileBottomDock && mobileOverviewSection ? (
+    <MobileBottomDock
+      activeSlot={mobileOverviewSection}
+      homeAttentionCount={homeAttentionCount}
+      onHomePress={handleMobileDockPrimaryPress}
+      onChatPress={handleMobileDockOpenChat}
+      onProjectsPress={handleMobileDockOpenProjects}
+    />
+  ) : null;
+  const mobileTopbarNavigation = showTouchBottomDock ? {
+    visitKey: location.key,
+    history: mobileHistory,
+    onOpenPicker: () => openMobileNavigation("chats"),
+    onOpenChats: handleMobileDockOpenChat,
+  } : undefined;
   const workspaceSurface = shouldShowFilesWorkspace ? (
     <div className="flex h-full min-w-0 flex-col overflow-hidden bg-white text-slate-700 shadow-sm dark:bg-[var(--color-studio-dark-panel)] dark:text-slate-200">
       <div key={activeProjectId ?? "files-workspace"} className="min-h-0 flex-1">
         {workspaceContent}
       </div>
-      {showMobileBottomDock ? (
-        <MobileBottomDock
-          primaryMode={mobileDockPrimaryMode}
-          activeSlot={mobileDockActiveSlot}
-          homeAttentionCount={homeAttentionCount}
-          onPrimaryPress={handleMobileDockPrimaryPress}
-          onChatPress={handleMobileDockOpenChat}
-          onNewChatPress={handleCreateConversation}
-          onFilesPress={handleMobileDockOpenFiles}
-          onProjectsPress={handleMobileDockOpenProjects}
-        />
-      ) : null}
+      {!showMobileLeftDrawerOverlay ? mobileOverviewDock : null}
     </div>
   ) : (
     <div className="flex h-full min-w-0 flex-col overflow-hidden bg-white text-slate-700 shadow-sm dark:bg-[var(--color-studio-dark-panel)] dark:text-slate-200">
@@ -1959,22 +1864,25 @@ function StudioLayoutInner() {
           {workspaceContent}
         </div>
       </div>
-      {showMobileBottomDock ? (
-        <MobileBottomDock
-          primaryMode={mobileDockPrimaryMode}
-          activeSlot={mobileDockActiveSlot}
-          homeAttentionCount={homeAttentionCount}
-          onPrimaryPress={handleMobileDockPrimaryPress}
-          onChatPress={handleMobileDockOpenChat}
-          onNewChatPress={handleCreateConversation}
-          onFilesPress={handleMobileDockOpenFiles}
-          onProjectsPress={handleMobileDockOpenProjects}
-        />
-      ) : null}
+      {!showMobileLeftDrawerOverlay ? mobileOverviewDock : null}
     </div>
   );
 
   return (
+    <StudioNavigationProvider value={runAfterSidebarClose}>
+    {visibleMobileNavigation ? (
+      <MobileNavigationSheet
+        section={visibleMobileNavigation.section}
+        keyboardOpen={keyboardOpen}
+        onSectionChange={openMobileNavigation}
+        onClose={closeMobileNavigation}
+        history={mobileHistory}
+        onNewChat={handleCreateConversation}
+        onOpenFiles={handleMobileDockOpenFiles}
+        onOpenAllChats={handleMobileDockOpenChat}
+        onOpenAllSpaces={handleMobileDockOpenProjects}
+      />
+    ) : null}
     <ControllerNoticeActionsProvider value={controllerNoticeActionsValue}>
       {shouldRenderFilesExplorerPortal ? (
         <FilesPanel
@@ -2096,7 +2004,7 @@ function StudioLayoutInner() {
             aria-hidden={showMobileLeftDrawerOverlay || undefined}
             inert={showMobileLeftDrawerOverlay || undefined}
           >
-            <StudioTopBar notificationBell={notificationCenter.bell} />
+            <StudioTopBar notificationBell={notificationCenter.bell} mobileNavigation={mobileTopbarNavigation} />
             <ProjectAccessRecoveryBanner />
             {/* relative: the participants drawer overlays the right edge of the
                 workspace content rather than pushing it, so it never competes
@@ -2141,6 +2049,8 @@ function StudioLayoutInner() {
             <StudioMobileSidebarOverlay onClose={() => setMobileSidebarOpen(false)}>
               <StudioSidebar
                 mobileOverlay
+                mobileNavigation={mobileSidebarNavigation}
+                runSidebarAction={runAfterSidebarClose}
                 items={sidebarItems}
                 moreItems={sidebarMoreItems}
                 activePanel={sidebarActivePanel}
@@ -2165,12 +2075,13 @@ function StudioLayoutInner() {
               className="fixed inset-0 z-[60] flex h-full flex-col bg-white dark:bg-[var(--color-studio-dark-panel)]"
               data-testid="mobile-left-drawer-overlay"
               style={{
-                paddingBottom: "var(--instafy-safe-area-inset-bottom)",
+                ...viewportHeightStyle,
+                paddingBottom: showMobileBottomDock || keyboardOpen ? "0px" : "var(--instafy-safe-area-inset-bottom)",
                 paddingLeft: "var(--instafy-safe-area-inset-left)",
                 paddingRight: "var(--instafy-safe-area-inset-right)",
               }}
             >
-              <StudioTopBar notificationBell={notificationCenter.bell} />
+              <StudioTopBar notificationBell={notificationCenter.bell} mobileNavigation={mobileTopbarNavigation} />
               <div className="flex-1 min-h-0 overflow-hidden">
                   {leftDrawer === "history" ? (
                     <ConversationHistoryTab
@@ -2196,6 +2107,7 @@ function StudioLayoutInner() {
                   />
                 ) : null}
               </div>
+              {mobileOverviewDock}
             </div>
           ) : null}
 
@@ -2255,6 +2167,7 @@ function StudioLayoutInner() {
       <Status />
       <DesktopRuntimeHelpDialog />
     </ControllerNoticeActionsProvider>
+    </StudioNavigationProvider>
   );
 }
 

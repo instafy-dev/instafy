@@ -23,6 +23,7 @@ interface UseWorkspaceTabMutationControllerArgs {
   activeConversationIdRef: MutableRefObject<string | null>;
   suppressPanelSyncRef: MutableRefObject<StudioPanel | null>;
   urlNavigationModeRef: MutableRefObject<"push" | "replace" | null>;
+  requestUrlNavigation?: (mode: "push" | "replace") => void;
   persistedStateRef: MutableRefObject<PersistedWorkspaceTabsState | null>;
   commitTabs: (tabs: WorkspaceTabState[]) => void;
   setActiveTabId: (tabId: string | null) => void;
@@ -40,6 +41,7 @@ export function useWorkspaceTabMutationController({
   activeConversationIdRef,
   suppressPanelSyncRef,
   urlNavigationModeRef,
+  requestUrlNavigation,
   persistedStateRef,
   commitTabs,
   setActiveTabId,
@@ -137,7 +139,8 @@ export function useWorkspaceTabMutationController({
       }
       const isClosingActiveTab = activeTabIdRef.current === tabId;
       if (isClosingActiveTab && target.kind === "panel") {
-        urlNavigationModeRef.current = "replace";
+        if (requestUrlNavigation) requestUrlNavigation("replace");
+        else urlNavigationModeRef.current = "replace";
       }
       if (target.kind === "conversation") {
         const closeIndex = currentTabs.findIndex((tab) => tab.id === tabId);
@@ -203,6 +206,7 @@ export function useWorkspaceTabMutationController({
       activeTabIdRef,
       commitTabs,
       persistedStateRef,
+      requestUrlNavigation,
       setActiveTabId,
       setActiveTabInternal,
       tabsRef,

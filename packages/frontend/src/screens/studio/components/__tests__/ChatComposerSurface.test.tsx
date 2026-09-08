@@ -614,6 +614,21 @@ describe("ChatComposerSurface", () => {
     expect(container.querySelector('[data-browser-composer-condensed="true"]')).toBeNull();
   });
 
+  it("owns the chat safe area and retains composer controls across keyboard transitions", async () => {
+    await act(async () => renderLayout({ compactBrowserViewport: true }));
+    const before = controlGeometry();
+    const surface = layoutNodes().textRow!.parentElement!;
+    expect(surface.style.paddingBottom).toContain("--instafy-safe-area-inset-bottom");
+    await act(async () => renderLayout({ compactBrowserViewport: true, nativeKeyboardOpen: true }));
+    expect(layoutNodes().textRow!.parentElement).toBe(surface);
+    expect(surface.style.paddingBottom).toBe("0px");
+    expect(controlGeometry().controls).toEqual(before.controls);
+    expect(controlGeometry().editorWrapper).toBe(before.editorWrapper);
+    await act(async () => renderLayout({ compactBrowserViewport: true, nativeKeyboardOpen: false }));
+    expect(surface.style.paddingBottom).toContain("--instafy-safe-area-inset-bottom");
+    expect(controlGeometry().controls).toEqual(before.controls);
+  });
+
   it("rests as one row below sm with only mic and send inline, folding image upload into the + menu", async () => {
     await act(async () =>
       renderLayout({ compactBrowserViewport: true, sendButtonVariant: "ghost" }),

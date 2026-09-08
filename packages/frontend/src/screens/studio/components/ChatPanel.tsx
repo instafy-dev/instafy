@@ -255,6 +255,8 @@ import {
 } from "../../../utils/aiProviderModels";
 import { useChatComposerLayoutState } from "./useChatComposerLayoutState";
 import { useChatAutoScrollSync, useChatScrollController } from "./useChatScrollOrchestration";
+import { ChatScrollSnapshotBoundary } from "./ChatScrollSnapshotBoundary";
+import { resolveChatScrollHistoryVisit } from "./chatScrollHistory";
 import {
   buildMessageSelectionReplyContext,
   formatSelectionReplyComposerText,
@@ -1869,6 +1871,19 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const openImageLightbox = useCallback((src: string, alt: string) => {
     setImageLightbox({ src, alt });
   }, []);
+  const chatScrollHistoryVisit = resolveChatScrollHistoryVisit({
+    location,
+    userId: currentUserId,
+    projectId: activeProjectId ?? null,
+    conversationsProjectKey,
+    conversationId: activeConversationId,
+    conversationControllerId: activeConversationEntry?.controllerId ?? null,
+    jobThread,
+  });
+  const chatScrollMutationIdentity = JSON.stringify([
+    location.key, currentUserId, activeProjectId, conversationsProjectKey,
+    activeConversationId, jobThread?.jobId ?? null, browserSubtab,
+  ]);
   const {
     autoScrollSuspendedRef,
     autoScrollPendingRef,
@@ -1876,6 +1891,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     lastComposerScrollTopRef,
     lastScrollHeightRef,
     recordScrollPosition,
+    scrollSnapshotKey,
     requestOlderMessages,
     scrollContainerRef,
     scrollToBottom,
@@ -1884,6 +1900,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     showHistoryLoadButton,
   } = useChatScrollController({
     activeConversationId,
+    historyVisit: chatScrollHistoryVisit,
     hasMoreHistory,
     isHistoryLoading,
     isInitialHistoryLoading,
@@ -5075,6 +5092,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           ];
 
         return (
+          <ChatScrollSnapshotBoundary identity={chatScrollMutationIdentity} messages={messages} capture={recordScrollPosition}>
           <div ref={rootRef} className="flex h-full min-h-0 flex-col overflow-hidden">
             <div
               className="flex-1 min-h-0 overflow-x-hidden overflow-y-auto px-3 pb-4 pt-2 sm:px-4 sm:pb-2"
@@ -5292,6 +5310,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           </Button>
         </div>
       </div>
+      </ChatScrollSnapshotBoundary>
     );
   }
 
@@ -5436,6 +5455,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           />
         </ChatColumn>
       </div>
+      <ChatScrollSnapshotBoundary identity={chatScrollMutationIdentity} messages={messages} capture={recordScrollPosition}>
       <ChatTranscriptViewport
         ariaLabel={conversationLabel}
         onScroll={handleScroll}
@@ -5553,6 +5573,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
               rows.push(
                 <ConversationMessageRows
+                  scrollSnapshotKey={scrollSnapshotKey}
                   key="conversation-message-rows"
                   messages={displayedMessages}
                   allConversationMessages={collapsedConversationMessages}
@@ -5632,6 +5653,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           </div>
         </OctoScrollMotionScope>
       </ChatTranscriptViewport>
+      </ChatScrollSnapshotBoundary>
       </div>
 
       <ChatMessageMenuOverlay

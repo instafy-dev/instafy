@@ -45,6 +45,7 @@ import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
 import { getOrgDisambiguator, getOrgDisplayName } from "../../../org/orgNaming";
 import { SidebarOrgDeck } from "./SidebarOrgDeck";
 import { useAppLogs } from "../../../debug/useAppLogs";
+import type { MobileSidebarNavigation } from "../../useMobileSidebarHistory";
 import {
   controllerClient,
   runtimeControllerEnabled,
@@ -104,6 +105,8 @@ export interface StudioSidebarProps {
   isConversationHistoryActive?: boolean;
   onRequestClose?: () => void;
   mobileOverlay?: boolean;
+  mobileNavigation?: MobileSidebarNavigation;
+  runSidebarAction?: (action: () => void) => void;
 }
 
 export function StudioSidebar({
@@ -117,6 +120,8 @@ export function StudioSidebar({
   isConversationHistoryActive = false,
   onRequestClose,
   mobileOverlay = false,
+  mobileNavigation,
+  runSidebarAction,
 }: StudioSidebarProps) {
   const {
     onShowLogs,
@@ -158,7 +163,8 @@ export function StudioSidebar({
   const [updateDialogShowDetails, setUpdateDialogShowDetails] = useState(false);
   const [updateActionPending, setUpdateActionPending] = useState(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
-  const [workspaceMobileViewOpen, setWorkspaceMobileViewOpen] = useState(false);
+  const [localWorkspaceMobileViewOpen, setWorkspaceMobileViewOpen] = useState(false);
+  const workspaceMobileViewOpen = mobileNavigation ? mobileNavigation.view === "workspace" : localWorkspaceMobileViewOpen;
   const [workspaceOrgKey, setWorkspaceOrgKey] = useState("personal");
   const [workspaceProjectQuery, setWorkspaceProjectQuery] = useState("");
   const [workspaceProjectSearchOpen, setWorkspaceProjectSearchOpen] = useState(false);
@@ -174,7 +180,16 @@ export function StudioSidebar({
   const [pendingOrgSwitchKey, setPendingOrgSwitchKey] = useState<string | null>(null);
   const [orgsRefreshEpoch, setOrgsRefreshEpoch] = useState(0);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
-  const [moreMobileViewOpen, setMoreMobileViewOpen] = useState(false);
+  const [localMoreMobileViewOpen, setMoreMobileViewOpen] = useState(false);
+  const moreMobileViewOpen = mobileNavigation ? mobileNavigation.view === "more" : localMoreMobileViewOpen;
+  const runDestination = useCallback((action: () => void) => {
+    if (runSidebarAction) {
+      runSidebarAction(action);
+    } else {
+      action();
+      onRequestClose?.();
+    }
+  }, [onRequestClose, runSidebarAction]);
   const [appLogsOverlayOpen, setAppLogsOverlayOpen] = useState(false);
   const navRef = useRef<HTMLElement | null>(null);
   const footerRef = useRef<HTMLDivElement | null>(null);
@@ -917,8 +932,9 @@ export function StudioSidebar({
       setWorkspaceMenuOpen(true);
       return;
     }
-    setWorkspaceMobileViewOpen(true);
-  }, [activeOrgKey, canBrowseAllWorkspaceOrgs, isLargeScreen]);
+    if (mobileNavigation) mobileNavigation.openView("workspace");
+    else setWorkspaceMobileViewOpen(true);
+  }, [activeOrgKey, canBrowseAllWorkspaceOrgs, isLargeScreen, mobileNavigation]);
 
   const pendingOrgContextSwitchRef = useRef<string | null>(null);
 
@@ -990,16 +1006,15 @@ export function StudioSidebar({
       [...orgProjects].sort((a, b) =>
         (a.name || "Untitled space").localeCompare(b.name || "Untitled space"),
       )[0].id;
-    performProjectSwitch(targetId);
-  }, [activeProject?.orgId, mergedProjects, mergedProjectsLoading, performProjectSwitch, remoteDiscoveryResolved, remoteLoadedScope, showStatus, workspaceOrgKey]);
+    runDestination(() => performProjectSwitch(targetId));
+  }, [activeProject?.orgId, mergedProjects, mergedProjectsLoading, performProjectSwitch, remoteDiscoveryResolved, remoteLoadedScope, runDestination, showStatus, workspaceOrgKey]);
 
   const handleProjectSwitch = useCallback(
     (projectId: string) => {
       closeWorkspaceSwitcher();
-      performProjectSwitch(projectId);
-      onRequestClose?.();
+      runDestination(() => performProjectSwitch(projectId));
     },
-    [closeWorkspaceSwitcher, onRequestClose, performProjectSwitch],
+    [closeWorkspaceSwitcher, performProjectSwitch, runDestination],
   );
 
   const handleProjectMenuAction = useCallback(
@@ -1007,14 +1022,12 @@ export function StudioSidebar({
       const action = String(key);
       if (action === "project:settings") {
         closeWorkspaceSwitcher();
-        onOpenProjectSettings?.();
-        onRequestClose?.();
+        runDestination(() => onOpenProjectSettings?.());
         return;
       }
       if (action === "project:new") {
         closeWorkspaceSwitcher();
-        onStartNewProject?.();
-        onRequestClose?.();
+        runDestination(() => onStartNewProject?.());
         return;
       }
       if (action.startsWith("project:")) {
@@ -1025,7 +1038,7 @@ export function StudioSidebar({
       closeWorkspaceSwitcher,
       handleProjectSwitch,
       onOpenProjectSettings,
-      onRequestClose,
+      runDestination,
       onStartNewProject,
     ],
   );
@@ -1038,10 +1051,9 @@ export function StudioSidebar({
       }
       setMoreMenuOpen(false);
       setMoreMobileViewOpen(false);
-      onSelect(action.slice("panel:".length) as StudioPanel);
-      onRequestClose?.();
+      runDestination(() => onSelect(action.slice("panel:".length) as StudioPanel));
     },
-    [onRequestClose, onSelect],
+    [onSelect, runDestination],
   );
 
   const closeMoreMenu = useCallback(() => {
@@ -1055,8 +1067,9 @@ export function StudioSidebar({
       setMoreMenuOpen(true);
       return;
     }
-    setMoreMobileViewOpen(true);
-  }, [closeWorkspaceSwitcher, isLargeScreen]);
+    if (mobileNavigation) mobileNavigation.openView("more");
+    else setMoreMobileViewOpen(true);
+  }, [closeWorkspaceSwitcher, isLargeScreen, mobileNavigation]);
 
   useEffect(() => {
     closeWorkspaceSwitcher();
@@ -1167,8 +1180,7 @@ export function StudioSidebar({
       // a "no spaces yet" notice. Go straight to making its first space; fall
       // back to plain selection where the new-space flow isn't available.
       if (onStartNewProject) {
-        onStartNewProject(created.id);
-        onRequestClose?.();
+        runDestination(() => onStartNewProject(created.id));
       } else {
         handleWorkspaceOrgChange(created.id);
       }
@@ -1180,7 +1192,7 @@ export function StudioSidebar({
     handleWorkspaceOrgChange,
     newTeamName,
     newTeamPending,
-    onRequestClose,
+    runDestination,
     onStartNewProject,
     showStatus,
   ]);
@@ -1209,8 +1221,7 @@ export function StudioSidebar({
         onOpenOrgSettings
           ? () => {
               closeWorkspaceSwitcher();
-              onOpenOrgSettings();
-              onRequestClose?.();
+              runDestination(onOpenOrgSettings);
             }
           : undefined
       }
@@ -1224,12 +1235,11 @@ export function StudioSidebar({
         onStartNewProject
           ? () => {
               closeWorkspaceSwitcher();
-              onStartNewProject(
+              runDestination(() => onStartNewProject(
                 selectedWorkspaceOrg?.key && selectedWorkspaceOrg.key !== "personal"
                   ? selectedWorkspaceOrg.key
                   : null,
-              );
-              onRequestClose?.();
+              ));
             }
           : undefined
       }
@@ -1239,8 +1249,7 @@ export function StudioSidebar({
         onOpenProjectSettings
           ? () => {
               closeWorkspaceSwitcher();
-              onOpenProjectSettings();
-              onRequestClose?.();
+              runDestination(onOpenProjectSettings);
             }
           : undefined
       }
@@ -1330,8 +1339,7 @@ export function StudioSidebar({
               onPress={() => {
                 closeWorkspaceSwitcher();
                 closeMoreMenu();
-                onSelect("home");
-                onRequestClose?.();
+                runDestination(() => onSelect("home"));
               }}
               variant="ghost"
               size="sm"
@@ -1432,6 +1440,7 @@ export function StudioSidebar({
                 onPress={() => {
                   if (workspaceMobileViewOpen) {
                     closeWorkspaceSwitcher();
+                    mobileNavigation?.back();
                     return;
                   }
                   openWorkspaceSwitcher();
@@ -1487,7 +1496,7 @@ export function StudioSidebar({
             <Fragment key={item.id}>
               <li>
                 <Button
-                  onPress={() => onSelect(item.id)}
+                  onPress={() => runDestination(() => onSelect(item.id))}
                   variant="ghost"
                   size="sm"
                   radius="lg"
@@ -1546,7 +1555,7 @@ export function StudioSidebar({
               {item.id === "chat" && onOpenConversationHistory ? (
                 <li>
                   <Button
-                    onPress={onOpenConversationHistory}
+                    onPress={() => runDestination(onOpenConversationHistory)}
                     variant="ghost"
                     size="sm"
                     radius="lg"
@@ -1595,6 +1604,7 @@ export function StudioSidebar({
             onMobileMoreToggle={() => {
               if (moreMobileViewOpen) {
                 closeMoreMenu();
+                mobileNavigation?.back();
                 return;
               }
               openMoreMenu();
@@ -1630,8 +1640,8 @@ export function StudioSidebar({
         onUpdateEntryContextMenu={handleUpdateEntryContextMenu}
         onUpdateEntryPointerDown={handleUpdateEntryPointerDown}
         clearUpdateLongPress={clearUpdateLongPress}
-        onOpenProfileSettings={onOpenProfileSettings}
-        onOpenSupport={onOpenBugReportInbox}
+        onOpenProfileSettings={onOpenProfileSettings ? () => runDestination(onOpenProfileSettings) : undefined}
+        onOpenSupport={onOpenBugReportInbox ? () => runDestination(onOpenBugReportInbox) : undefined}
         supportUnreadCount={supportUnreadCount}
         notificationsPending={notificationsPending}
         notificationsEnabled={notificationsEnabled}
@@ -1653,7 +1663,7 @@ export function StudioSidebar({
         title="Team & spaces"
         backLabel="Back"
         backTestId="sidebar-project-switcher-back"
-        onBack={closeWorkspaceSwitcher}
+        onBack={() => { closeWorkspaceSwitcher(); mobileNavigation?.back(); }}
       >
         {workspaceSwitcherSections}
       </StudioSidebarMobileDrillIn>
@@ -1663,7 +1673,7 @@ export function StudioSidebar({
         title="More"
         backLabel="Back"
         backTestId="sidebar-more-back"
-        onBack={closeMoreMenu}
+        onBack={() => { closeMoreMenu(); mobileNavigation?.back(); }}
       >
         <ul className="space-y-1" aria-label="More panels">
           {collapsedMoreItems.map((item) => {
