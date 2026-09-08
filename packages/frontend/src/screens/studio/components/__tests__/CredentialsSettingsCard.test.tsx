@@ -85,8 +85,9 @@ const oldCredential = {
   updatedAt: "2026-01-01T00:00:00.000Z",
 };
 
-// Synthetic input for proxyError's structured-code contract, not provider wire-format evidence.
-const TOKEN_EXPIRED_ERROR = 'unexpected status 502 Bad Gateway: {"error":{"code":"token_expired"},"status":401}';
+// Mirrors the proxy's terminal 424 response and Codex's extracted error.message.
+// The nested body follows openai-proxy-server/src/auth.rs's expired-token contract.
+const TOKEN_EXPIRED_ERROR = 'unexpected status 424 Failed Dependency: upstream request failed (credential_source=static, requested_model=test-model): upstream request failed (endpoint=example.invalid/v1/responses, requested_model=test-model, resolved_model=test-model): backend responded with 401 Unauthorized for https://example.invalid/v1/responses: {"error":{"code":"token_expired","message":"Provided authentication token is expired."}}';
 
 async function flush(): Promise<void> {
   await Promise.resolve();
