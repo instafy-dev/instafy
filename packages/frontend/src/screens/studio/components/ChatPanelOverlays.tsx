@@ -1,4 +1,5 @@
 import { Xmark } from "iconoir-react";
+import { Dialog, Modal, ModalOverlay } from "react-aria-components";
 import { Badge } from "../../../components/Badge";
 import { Button, IconButton } from "../../../components/Button";
 import { Spinner } from "../../../components/Spinner";
@@ -293,12 +294,11 @@ export function ChatImageLightboxOverlay({
   }
 
   return (
-    <div
+    <ModalOverlay
+      isOpen
+      isDismissable
+      onOpenChange={(open) => { if (!open) onClose(); }}
       className="fixed inset-0 z-[60] flex items-center justify-center bg-slate-900/70 p-4"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-label="Image preview"
       data-testid="chat-image-lightbox"
       style={{
         paddingBottom: "max(var(--instafy-safe-area-inset-bottom), 1rem)",
@@ -307,30 +307,30 @@ export function ChatImageLightboxOverlay({
         paddingTop: "max(var(--instafy-safe-area-inset-top), 1rem)",
       }}
     >
-      <div
-        className="relative max-h-full max-w-full"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <IconButton
-          type="button"
-          variant="secondary"
-          size="sm"
-          radius="full"
-          onPress={onClose}
-          aria-label="Close image preview"
-          data-testid="chat-image-lightbox-close"
-          className="absolute right-2 top-2 z-10"
-        >
-          <Xmark className="h-4 w-4" aria-hidden="true" />
-        </IconButton>
-        <img
-          src={imageLightbox.src}
-          alt={imageLightbox.alt}
-          className="max-h-[80vh] max-w-[90vw] rounded-2xl border border-slate-200 bg-white shadow-lg dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel)]"
-          data-testid="chat-image-lightbox-image"
-        />
-      </div>
-    </div>
+      <Modal className="relative max-h-full max-w-full outline-none">
+        <Dialog aria-label="Image preview" className="outline-none">
+          <IconButton
+            type="button"
+            variant="secondary"
+            size="sm"
+            radius="full"
+            autoFocus
+            onPress={onClose}
+            aria-label="Close image preview"
+            data-testid="chat-image-lightbox-close"
+            className="absolute right-2 top-2 z-10"
+          >
+            <Xmark className="h-4 w-4" aria-hidden="true" />
+          </IconButton>
+          <img
+            src={imageLightbox.src}
+            alt={imageLightbox.alt}
+            className="max-h-[80vh] max-w-[90vw] rounded-2xl border border-slate-200 bg-white shadow-lg dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel)]"
+            data-testid="chat-image-lightbox-image"
+          />
+        </Dialog>
+      </Modal>
+    </ModalOverlay>
   );
 }
 
