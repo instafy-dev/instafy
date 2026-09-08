@@ -18,6 +18,7 @@ import { Button } from "../../../components/Button";
 import { OctoScrollMotionScope } from "../../../components/OctoMark";
 import { Spinner } from "../../../components/Spinner";
 import { useBreakpoint } from "../../../hooks/useBreakpoint";
+import { useStudioChatPerformance } from "../../../telemetry/useStudioChatPerformance";
 import { useConversationNotificationRead } from "../../../notifications/useConversationNotificationRead";
 import {
   addFloatingSurfaceViewportChangeListener,
@@ -44,7 +45,7 @@ import { parseInviteCommandRequest } from "../../../conversations/inviteCommand"
 import { resolveGroupParticipationReplyTargets } from "../../../conversations/groupParticipation";
 import { getChatClientSessionId } from "../../../conversations/chatClientIdentity";
 import { generateUUID } from "../../../utils/uuid";
-import { useSharedBrowserResume } from "./useSharedBrowserResume";
+import { useSharedBrowserResume, useSharedBrowserResumeSearchReplacement } from "./useSharedBrowserResume";
 import { useConversations } from "../../../conversations/ConversationsProvider";
 import { useConversationParticipants } from "../../../conversations/useConversationParticipants";
 import {
@@ -215,6 +216,7 @@ import { truncate } from "./chatContentHelpers";
 import { resolveChatComposerAffordances } from "./chatComposerAffordances";
 import { useChatInvitePromptHandlers } from "./useChatInvitePromptHandlers";
 import { useChatComposerAttachments } from "./useChatComposerAttachments";
+import { useChatComposerPreviewTab } from "./useChatComposerPreviewTab";
 import { useChatSendQueueActions } from "./useChatSendQueueActions";
 import { useChatSendQueuePresentation } from "./useChatSendQueuePresentation";
 import {
@@ -310,7 +312,7 @@ import {
   resolveMessageStashRestoreBlock,
   shouldDeleteRestoredMessageStashAfterAction,
 } from "./messageStashLifecycle";
-import { BrowserSessionModal } from "./BrowserSessionModal";
+import { LazyBrowserSessionModal } from "./LazyBrowserSessionModal";
 import type { SharedBrowserChromeProps } from "./SharedBrowserChrome";
 import { resolveSharedBrowserViewerKind } from "./sharedBrowserViewer";
 import { ChatBrowserSubtabs, type ChatBrowserSubtab } from "./ChatBrowserSubtabs";
@@ -543,6 +545,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const { showStatus } = useStatus();
   const {
     activeProjectId,
+    projectInitialized,
+    projectAccessPending,
     projectCapabilitiesResolved,
     effectiveProjectRole,
     canWriteProject,
@@ -669,7 +673,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const handleBackToChat = useCallback(() => {
     setBrowserSubtab("chat");
   }, []);
-  const { onOpenProjectSettings, homeAttentionCount = 0 } = useWorkspaceControls();
+  const { onOpenProjectSettings, onOpenChatNavigation, homeAttentionCount = 0 } = useWorkspaceControls();
   const activeConversationEntry = useMemo(() => {
     if (!activeConversationId) {
       return null;
@@ -677,7 +681,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     return conversations.find((conversation) => conversation.localId === activeConversationId) ?? null;
   }, [activeConversationId, conversations]);
   const isAtLeastSmallViewport = useBreakpoint("sm");
-  const { showComposerHomeButton, touchLikeInput } = useStudioNavigationPosture();
+  const { showComposerNavigationButton, touchLikeInput } = useStudioNavigationPosture();
   const compactBrowserViewport = !isAtLeastSmallViewport;
   const [browserPanelSize, setBrowserPanelSize] = useState<{
     width: number;
@@ -903,9 +907,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     revealSharedBrowserApproval();
     resumeBrowserSession(runtimeId);
   }, [resumeBrowserSession, revealSharedBrowserApproval]);
-  const replaceSharedBrowserResumeSearch = useCallback((search: string) => {
-    navigate({ pathname: location.pathname, search, hash: location.hash }, { replace: true });
-  }, [location.hash, location.pathname, navigate]);
+  const replaceSharedBrowserResumeSearch = useSharedBrowserResumeSearchReplacement();
   const { runtimeId: requestedSharedBrowserRuntimeId, acknowledgeRuntimeResolved } = useSharedBrowserResume({
     search: location.search,
     projectId: activeProjectId ?? null,
@@ -1039,7 +1041,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const handlePreparedEmailInviteConsumed = useCallback(() => {
     setPreparedEmailInviteFromCommand(null);
   }, []);
-  const { openPanelTab, openConversationTab, openJobThreadTab, requestUrlPush } = useWorkspaceTabs();
+  const { tabs: workspaceTabs, keepTabOpen, openPanelTab, openConversationTab, openJobThreadTab, requestUrlPush } = useWorkspaceTabs();
+  const { keepComposerTabOpen, keepComposerTabOpenForEdit } = useChatComposerPreviewTab({
+    conversationId: activeConversationId,
+    inputValue,
+    inputEditorState,
+    tabs: workspaceTabs,
+    keepTabOpen,
+  });
   const { pendingConversationInviteId, clearConversationInvite } = useWorkspaceUi();
   const canUseDesktopConnect = canUseDesktopCodexAuthJson();
   const [notificationsNudgeOpen, setNotificationsNudgeOpen] = useState(false);
@@ -1864,6 +1873,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     openImagePicker,
     removeImageAttachment,
   } = useChatComposerAttachments({
+    draftKey: JSON.stringify([currentUserId, activeProjectId, activeConversationId]),
+    onAttachmentsAdded: keepComposerTabOpen,
     isInputLocked: () => onboardingInputLocked,
     showStatus,
   });
@@ -1948,6 +1959,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   const handleChatInputChange = useCallback(
     (nextValue: string, nextEditorState: string) => {
+      keepComposerTabOpenForEdit(nextValue, nextEditorState);
       latestInputValueRef.current = nextValue;
       if (!nextValue.trim()) {
         pendingReplyContextRef.current = null;
@@ -2014,6 +2026,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       activeConversationId,
       broadcastTyping,
       chatClientSessionId,
+      keepComposerTabOpenForEdit,
       onInputChange,
       typingRealtimeEnabled,
     ]
@@ -2069,6 +2082,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         : undefined;
     const pendingReplyContext = pendingReplyContextRef.current;
     const candidateMessage = baseOverride?.message ?? latestInputValueRef.current ?? "";
+    if (candidateMessage.length > 0 || imageAttachments.length > 0) {
+      keepComposerTabOpen();
+    }
     const metadata =
       explicitMetadata !== undefined
         ? explicitMetadata
@@ -2112,7 +2128,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       }
     }
     return submitted;
-  }, [ensureProjectWriteAccess, removeServerMessageStash, restoredMessageStash]);
+  }, [ensureProjectWriteAccess, imageAttachments.length, keepComposerTabOpen, removeServerMessageStash, restoredMessageStash]);
 
   // Conversational undo (#165): the Undo chip on an agent message dispatches a
   // window event; this panel owns the composer, so it turns the request into a
@@ -4203,6 +4219,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       return false;
     }
 
+    keepComposerTabOpen();
     const restoredEnvelope = restoredMessageStash
       ? normalizeChatMessageStashEnvelope(restoredMessageStash.composerEnvelope)
       : null;
@@ -4271,6 +4288,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     ensureProjectWriteAccess,
     focusInput,
     imageAttachments.length,
+    keepComposerTabOpen,
     onInputChange,
     pendingBrowserLaunchMode,
     personalBrowser.runtimeOverride,
@@ -5058,6 +5076,20 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     return visibleJobMessages;
   }, [activeConversationId, messages, normalizedJobThread]);
 
+  const beginHistoryRetry = useStudioChatPerformance({
+    projectId: activeProjectId,
+    organizationId: activeOrgId,
+    conversationId: normalizedJobThread?.conversationId ?? activeConversationId,
+    selectedConversationId: activeConversationId,
+    messageCount: normalizedJobThread ? jobThreadMessages.length : messages.length,
+    projectInitialized,
+    projectAccessPending,
+    conversationListResolved: remoteConversationHistoryResolved,
+    initialHistoryLoading: isInitialHistoryLoading,
+    error: Boolean(initialHistoryError || remoteConversationHistoryError),
+    enabled: conversationsProjectKey === activeProjectId,
+  });
+
   const handleContinueFromJobThread = useCallback(() => {
     if (!normalizedJobThread) {
       return;
@@ -5375,7 +5407,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               />
               {sharedBrowserActivated ? (
                 <div className={browserTransport === "shared" ? "flex min-h-0 flex-1 flex-col" : "hidden"}>
-                  <BrowserSessionModal
+                  <LazyBrowserSessionModal
                     isOpen={browserSessionOpen}
                     onOpenChange={handleBrowserSessionOpenChange}
                     projectId={activeProjectId ?? null}
@@ -5541,6 +5573,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                   <span>{initialHistoryError ?? remoteConversationHistoryError}</span>
                   <Button
                     onPress={() => {
+                      beginHistoryRetry();
                       if (initialHistoryError) void retryInitialHistory();
                       else retryRemoteConversationHistory();
                     }}
@@ -5796,11 +5829,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         showVoiceStatus={showVoiceStatus}
         voiceStatusMessage={voiceStatusMessage}
         providerTriggerNoticeProps={providerTriggerNoticeProps}
-        showComposerHomeButton={showComposerHomeButton}
-        onOpenHome={() => {
-          requestUrlPush();
-          openPanelTab("home");
-        }}
+        showComposerNavigationButton={showComposerNavigationButton && Boolean(onOpenChatNavigation)}
+        onOpenNavigation={() => onOpenChatNavigation?.()}
         homeAttentionCount={homeAttentionCount}
         homeAttentionBadge={homeAttentionBadge}
         composerActionMenuProps={{
@@ -5859,9 +5889,15 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           voiceError: voiceDebugState.lastError,
           voiceInteractionMode: "hold",
           disabled: projectWriteDisabled || sendingAttachment,
-          onVoicePressStart: handleStartVoiceInputHold,
+          onVoicePressStart: () => {
+            keepComposerTabOpen();
+            return handleStartVoiceInputHold();
+          },
           onVoicePressEnd: handleStopVoiceInputHold,
-          onVoiceTap: handleChatVoiceTap,
+          onVoiceTap: () => {
+            keepComposerTabOpen();
+            handleChatVoiceTap();
+          },
         }}
         sendButtonDisabled={projectWriteDisabled || sendButtonDisabled}
         sendButtonVariant={sendButtonVariant}

@@ -22,7 +22,6 @@ vi.mock("../../../../native/useNativeBackButtonAction", () => ({ useNativeBackBu
 vi.mock("../../../../lib/desktopShell", () => ({ desktopTitleBarFree: () => false }));
 vi.mock("../../../../desktop/voiceTunnel/client", () => ({ desktopSpeechTunnelBridgeAvailable: () => false, readDesktopSpeechTunnelStatus: vi.fn() }));
 vi.mock("../../../../desktop/voiceHost/client", () => ({ desktopVoiceHostBridgeAvailable: () => false, readDesktopVoiceHostStatus: vi.fn() }));
-vi.mock("../DesktopInstallTopBarAction", () => ({ DesktopInstallTopBarAction: () => null }));
 vi.mock("../../../../sdk/instafy", () => ({ controllerClient: { organizations: { listMembers: mocks.orgMembers }, projects: { listMembers: mocks.projectMembers } } }));
 
 describe("StudioTopBar mobile navigation integration", () => {
@@ -146,11 +145,12 @@ describe("StudioTopBar mobile navigation integration", () => {
   });
 
   it("retains the existing non-touch compact header when the posture is not touch", async () => {
-    mocks.posture.mockReturnValue({ isLargeScreen: false, showTopbarHomeButton: true, showTouchBottomDock: false });
+    mocks.posture.mockReturnValue({ isLargeScreen: false, showTopbarHomeButton: false, showTouchBottomDock: false });
     await render();
     expect(query("mobile-studio-navigation-header")).toBeNull();
     expect(query("topbar-tab-selector")).not.toBeNull();
     expect(query("topbar-sidebar-toggle")).not.toBeNull();
     expect(query("studio-mobile-history-bar")).not.toBeNull();
+    expect(query("topbar-home-button")).toBeNull();
   });
 });

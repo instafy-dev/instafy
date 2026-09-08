@@ -20,17 +20,21 @@ export function useStudioNavigationPosture() {
   const isLargeScreen = useStudioDesktopLayout();
   const touchLikeInput = useTouchLikeInput();
 
+  // Preserve the existing compact mouse-window control. Touch layouts use
+  // the focused header and keep navigation out of the composer.
+  const showComposerNavigationButton = !isLargeScreen && !touchLikeInput;
   const showTouchBottomDock = touchLikeInput && !isLargeScreen;
   // This is layout eligibility, not dock visibility: only overview surfaces
   // render it. Conversations use their header and keep the composer unchanged.
   const showComposerHomeButton = false;
-  const showTopbarHomeButton = !isLargeScreen && !showTouchBottomDock;
+  const showTopbarHomeButton = false;
 
   return {
     isLargeScreen,
     touchLikeInput,
-    showComposerHomeButton,
+    showComposerNavigationButton,
     showTouchBottomDock,
+    showComposerHomeButton,
     showTopbarHomeButton,
   };
 }

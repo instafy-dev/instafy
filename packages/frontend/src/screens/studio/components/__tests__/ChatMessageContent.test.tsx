@@ -339,7 +339,7 @@ describe("ChatMessageContent", () => {
 
     const paragraphs = container.querySelectorAll("p");
     expect(paragraphs).toHaveLength(1);
-    expect(paragraphs[0]?.className).not.toContain("mt-2");
+    expect(paragraphs[0]?.className).not.toContain("mt-4");
     expect(paragraphs[0]?.className).toContain("whitespace-pre-wrap");
     // whitespace-pre-wrap renders the embedded "\n" as a line break while
     // keeping it a single <p> — textContent preserves the raw newlines.
@@ -354,9 +354,9 @@ describe("ChatMessageContent", () => {
     const paragraphs = container.querySelectorAll("p");
     expect(paragraphs).toHaveLength(2);
     expect(paragraphs[0]?.textContent).toBe("para one line a\npara one line b");
-    expect(paragraphs[0]?.className).not.toContain("mt-2");
+    expect(paragraphs[0]?.className).not.toContain("mt-4");
     expect(paragraphs[1]?.textContent).toBe("para two");
-    expect(paragraphs[1]?.className).toContain("mt-2");
+    expect(paragraphs[1]?.className).toContain("mt-4");
   });
 
   it("offers AI settings from upstream quota failures", async () => {
@@ -455,13 +455,13 @@ describe("ChatMessageContent", () => {
     expect(codeRefs.map((entry) => entry.textContent?.trim())).toEqual(["pnpm test", "@octo"]);
     codeRefs.forEach((entry) => {
       expect(entry.className).not.toContain("my-0.5");
-      expect(entry.className).toContain("py-[0.08em]");
+      expect(entry.className).toContain("py-[0.04em]");
       expect(entry.className).toContain("leading-[1.18]");
-      expect(entry.className).toContain("inline-flex");
-      expect(entry.className).toContain("items-center");
+      expect(entry.getAttribute("data-code-layout")).toBe("inline");
       expect(entry.className).toContain("align-baseline");
-      expect(entry.className).toContain("bg-slate-950/[0.035]");
-      expect(entry.className).toContain("shadow-[inset_0_-1px_0_rgba(15,23,42,0.07)]");
+      expect(entry.className).toContain("bg-slate-950/[0.025]");
+      expect(entry.className).not.toContain("shadow-");
+      expect(entry.className).not.toContain("ring-");
       expect(entry.className).not.toContain("bg-slate-100");
       expect(entry.className).not.toContain("text-primary-700");
     });
@@ -476,6 +476,47 @@ describe("ChatMessageContent", () => {
       projectId: "project-1",
       returnTarget: "assistant",
     });
+  });
+
+  it("contains a long inline command without adding punctuation to its copyable text", async () => {
+    const command = 'node ./tools/check.mjs --workspace "./demo project" --filter "reader layout" --report ./artifacts/result.json';
+    await act(async () => {
+      root.render(<MessageContent content={`Run \`${command}\`, then read the result.`} />);
+    });
+
+    const code = container.querySelector('[data-testid="chat-message-inline-code"]');
+    expect(code?.getAttribute("data-code-layout")).toBe("block");
+    expect(code?.textContent).toBe(command);
+    expect(code?.closest('[data-testid="chat-message-chip-glue"]')).toBeNull();
+    expect(container.textContent).toBe(`Run ${command}, then read the result.`);
+    // Keep valid phrasing content inside the original paragraph.
+    expect(code?.parentElement?.getAttribute("data-testid")).toBe("chat-message-long-code");
+    expect(code?.parentElement?.textContent).toBe(`${command},`);
+    expect(code?.parentElement?.parentElement?.tagName).toBe("P");
+    expect(container.querySelector("p pre, p div")).toBeNull();
+  });
+
+  it("preserves newlines and spaces in a multiline inline snippet", async () => {
+    const snippet = 'echo "first"\n  echo "second"';
+    await act(async () => {
+      root.render(<MessageContent content={`Inspect \`${snippet}\`.`} />);
+    });
+    const code = container.querySelector('[data-testid="chat-message-inline-code"]');
+    expect(code?.getAttribute("data-code-layout")).toBe("block");
+    expect(code?.textContent).toBe(snippet);
+    expect(container.textContent).toBe(`Inspect ${snippet}.`);
+  });
+
+  it("keeps headings and list structure when long snippets appear inside emphasis or a list", async () => {
+    const snippet = "value_".repeat(15);
+    await act(async () => {
+      root.render(<MessageContent content={`**Check \`${snippet}\` first.**\n\n- Inspect \`${snippet}\`.\n- Continue.`} />);
+    });
+    expect(container.querySelectorAll("h1, h2, h3")).toHaveLength(0);
+    expect(container.querySelectorAll("li")).toHaveLength(2);
+    expect(container.querySelector("strong code")?.textContent).toBe(snippet);
+    expect(container.querySelector("li code")?.getAttribute("data-code-layout")).toBe("block");
+    expect(container.querySelectorAll("pre")).toHaveLength(0);
   });
 
   it("renders a fenced code block after a paren-delimited ordered-list item", async () => {
@@ -681,9 +722,9 @@ describe("ChatMessageContent", () => {
 
     const glued = Array.from(container.querySelectorAll('[data-testid="chat-message-chip-glue"]'));
     expect(glued).toHaveLength(2);
-    glued.forEach((entry) => {
-      expect(entry.className).toContain("whitespace-nowrap");
-    });
+    expect(glued[0]?.className).toContain("whitespace-nowrap");
+    expect(glued[1]?.className).toContain("max-w-full");
+    expect(glued[1]?.className).toContain("whitespace-pre-wrap");
     // The workspace-file chip carries its trailing colon inside the no-break span.
     expect(glued[0]?.querySelector('[data-testid="chat-message-file-reference-inline"]')?.textContent?.trim()).toBe(
       "AGENTS.md",

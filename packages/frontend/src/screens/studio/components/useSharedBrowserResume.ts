@@ -1,5 +1,32 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
+import { getStudioVisitKey } from "../../../navigation/studioVisit";
 import { parseSharedBrowserResumeTarget, replaceSharedBrowserResumeRuntime } from "./sharedBrowserResume";
+
+export function useSharedBrowserResumeSearchReplacement() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const index = window.history.state?.idx;
+  const mounted = useRef(false);
+  useLayoutEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+  return useCallback((search: string) => {
+    // Session resolution is asynchronous. It may canonicalize only the exact
+    // still-visible visit, including before Router renders a newer navigation.
+    if (!mounted.current || search === location.search ||
+        (window.history.state?.key ?? "default") !== location.key || window.history.state?.idx !== index ||
+        window.location.pathname !== location.pathname || window.location.search !== location.search ||
+        window.location.hash !== location.hash) return;
+    const state = location.state && typeof location.state === "object" && !Array.isArray(location.state)
+      ? location.state : {};
+    void navigate({ pathname: location.pathname, search, hash: location.hash }, {
+      replace: true,
+      state: { ...state, instafyVisitKey: getStudioVisitKey(location) },
+    });
+  }, [index, location, navigate]);
+}
 
 export function useSharedBrowserResume(options: {
   search: string;

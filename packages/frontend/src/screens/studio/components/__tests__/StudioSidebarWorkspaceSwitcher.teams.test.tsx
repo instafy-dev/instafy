@@ -7,6 +7,7 @@ import {
   StudioSidebarWorkspaceSwitcher,
   type SidebarWorkspaceOrgOption,
 } from "../StudioSidebarWorkspaceSwitcher";
+import { studioPerformance, type StudioPerformanceSample } from "../../../../telemetry/studioPerformance";
 
 const teams: SidebarWorkspaceOrgOption[] = [
   { key: "personal", name: "Personal", label: "Personal", slug: null, count: 2 },
@@ -46,6 +47,7 @@ describe("StudioSidebarWorkspaceSwitcher team rows", () => {
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
+    studioPerformance.clear();
   });
 
   afterEach(async () => {
@@ -53,6 +55,9 @@ describe("StudioSidebarWorkspaceSwitcher team rows", () => {
       root.unmount();
     });
     container.remove();
+    studioPerformance.clear();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("lists every team by name, with the selected one marked current", async () => {
@@ -165,5 +170,52 @@ describe("StudioSidebarWorkspaceSwitcher team rows", () => {
     await render(root, { workspaceOrgKey: "fp", activeOrgKey: "fp" });
     expect(requested?.textContent).toContain("Current");
     expect(container.querySelector('[data-testid="sidebar-project-discovery-error"]')).toBeNull();
+  });
+
+  it("observes consecutive failed discovery attempts without completing while Retry is running", async () => {
+    let nextFrame = 0;
+    const frames = new Map<number, FrameRequestCallback>();
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback);
+      return nextFrame;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (frame: number) => { frames.delete(frame); });
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const paint = async () => {
+      const callbacks = [...frames.values()];
+      frames.clear();
+      await act(async () => { callbacks.forEach((callback) => callback(performance.now())); });
+    };
+    const samples: StudioPerformanceSample[] = [];
+    const stop = studioPerformance.subscribe((sample) => samples.push(sample));
+    const pending = { workspaceOrgKey: "fp", activeOrgKey: "acme", pendingOrgKey: "fp" };
+    const onRetryProjects = () => studioPerformance.begin("organization_switch", { organizationId: "fp" });
+    try {
+      studioPerformance.begin("organization_switch", { organizationId: "fp" });
+      await render(root, { ...pending, projectsRefreshing: true });
+      await paint();
+      await paint();
+      expect(samples).toEqual([]);
+      await render(root, { ...pending, projectsError: "Couldn't load spaces.", onRetryProjects });
+      await paint();
+      await paint();
+      expect(samples).toMatchObject([{ operation: "organization_switch", outcome: "error", loadingShown: true }]);
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>('[data-testid="sidebar-project-discovery-retry"]')?.click();
+      });
+      await render(root, { ...pending, projectsError: "Couldn't load spaces.", projectsRefreshing: true, onRetryProjects });
+      await paint();
+      await paint();
+      expect(samples).toHaveLength(1);
+      await render(root, { ...pending, projectsError: "Couldn't load spaces.", projectsRefreshing: false, onRetryProjects });
+      await paint();
+      await paint();
+      expect(samples).toMatchObject([
+        { operation: "organization_switch", outcome: "error", loadingShown: true },
+        { operation: "organization_switch", outcome: "error", loadingShown: true },
+      ]);
+    } finally {
+      stop();
+    }
   });
 });

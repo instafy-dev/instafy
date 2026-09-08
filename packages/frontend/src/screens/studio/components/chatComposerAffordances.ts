@@ -72,19 +72,11 @@ export function resolveChatComposerAffordances({
     (synchronouslyGateAiIntent && outOfCredits);
   const sendButtonVariant: "primary" | "ghost" =
     composerHasSendPayload && !sendButtonDisabled ? "primary" : "ghost";
-  // One dress for the rest row: the composer card is the only surface. At
-  // rest "+", image, mic and Send are icon-only ghost IconButtons — no fill,
-  // no border, no shadow — with the ghost variant's own quiet hover surface
-  // and its own box (44px on coarse pointers, md on fine ones). Nothing here
-  // may add a box, a radius or a size of its own; the family only tones the
-  // glyph. It tones the svg rather than the button because Button
-  // concatenates classes without merging, so a button-level text colour
-  // would fight the ghost variant's own and win or lose by stylesheet order.
+  // The composer owns the surface. Ghost controls only tone the glyph,
+  // retaining the shared 36px fine-pointer / 44px touch target geometry.
   const composerGhostActionClass = "[&_svg]:text-slate-600 dark:[&_svg]:text-slate-300";
-  // The accent dress Send takes once there is a payload (and the mic while it
-  // captures): the primary variant's fill plus a soft glow. It shares the
-  // ghost box, so lighting up changes colour and nothing else.
-  const composerPrimaryActionClass = "shadow-[0_10px_24px_-14px_rgba(59,130,246,0.95)]";
+  // A single primary action supplies the accent without a second shadow.
+  const composerPrimaryActionClass = "shadow-none";
   const composerActionIconClass = "h-[22px] w-[22px]";
 
   return {

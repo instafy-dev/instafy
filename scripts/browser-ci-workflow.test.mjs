@@ -47,7 +47,9 @@ test("standalone configs do not import the authenticated development harness", (
   const vite = read("packages/frontend/vite.browser-ui-ci.config.ts");
   assert.match(vite, /envFile: false/);
   assert.match(vite, /cacheDir: path\.join\(frontendRoot, "node_modules", "\.vite-browser-ui-ci"\)/);
-  assert.match(vite, /include: \["react", "react-dom\/client", "react-aria-components"\]/);
+  // The history fixtures use the real Router; a clean lane must optimize it
+  // explicitly instead of inheriting a developer's dependency-scan cache.
+  assert.match(vite, /include: \["react", "react-dom\/client", "react-aria-components", "react-router-dom"\]/);
   assert.match(vite, /noDiscovery: true/);
   assert.doesNotMatch(vite, /from ["']\.\/vite\.config|loadEnv\(/);
   const resolver = read("packages/frontend/tests/playwright/component/viteComponentDependencies.ts");

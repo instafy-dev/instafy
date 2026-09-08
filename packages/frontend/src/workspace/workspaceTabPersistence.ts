@@ -4,6 +4,7 @@ const WORKSPACE_GIT_REVIEW_STORAGE_KEY = "instafy.workspace.git-review-tabs";
 export interface PersistedWorkspaceProjectState {
   conversations: string[];
   activeConversationId?: string;
+  previewConversationId?: string;
 }
 
 export interface PersistedWorkspaceTabsState {
@@ -64,7 +65,15 @@ export function loadPersistedWorkspaceTabs(): PersistedWorkspaceTabsState | null
         typeof value.activeConversationId === "string"
           ? value.activeConversationId
           : undefined;
-      projects[projectId] = { conversations, activeConversationId };
+      const previewConversationId = typeof value.previewConversationId === "string"
+        && conversations.includes(value.previewConversationId)
+        ? value.previewConversationId
+        : undefined;
+      projects[projectId] = {
+        conversations,
+        activeConversationId,
+        ...(previewConversationId ? { previewConversationId } : {}),
+      };
     }
     return { projects };
   } catch (error) {

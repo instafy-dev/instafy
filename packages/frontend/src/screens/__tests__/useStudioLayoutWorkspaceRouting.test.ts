@@ -75,6 +75,7 @@ describe("resolveLeftDrawerFromSearch", () => {
     expect(resolveLeftDrawerFromSearch("?workspaceTab=files")).toBe("files");
     expect(resolveLeftDrawerFromSearch("?workspaceTab=history")).toBe("history");
     expect(resolveLeftDrawerFromSearch("?workspaceTab=sourceControl")).toBe("sourceControl");
+    expect(resolveLeftDrawerFromSearch("?workspaceTab=workspaces")).toBe("workspaces");
     expect(resolveLeftDrawerFromSearch("?workspaceTab=unknown")).toBeNull();
     expect(resolveLeftDrawerFromSearch("?panel=code")).toBeNull();
   });

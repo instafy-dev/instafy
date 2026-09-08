@@ -21,6 +21,7 @@ export interface WorkspaceControlsContextValue {
   sidebarCollapsed?: boolean;
   sidebarOpen?: boolean;
   onToggleSidebar?: () => void;
+  onOpenChatNavigation?: () => void;
   onStartNewProject?: (preferredOrgId?: string | null) => void;
   onStartNewConversation?: () => void;
   onStartPrivateConversation?: (target: PrivateChatTarget) => void;
@@ -62,6 +63,7 @@ const defaultWorkspaceControls: WorkspaceControlsContextValue = {
   sidebarCollapsed: undefined,
   sidebarOpen: undefined,
   onToggleSidebar: undefined,
+  onOpenChatNavigation: undefined,
   onStartNewProject: undefined,
   onStartNewConversation: undefined,
   onStartPrivateConversation: undefined,

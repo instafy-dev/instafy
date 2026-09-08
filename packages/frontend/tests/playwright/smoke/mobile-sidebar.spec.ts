@@ -83,7 +83,7 @@ test.describe("Mobile sidebar drawer", () => {
     await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
     await expect(page.getByTestId("sidebar-project-button")).toBeVisible();
 
-    const backdrop = page.getByTestId("mobile-sidebar-overlay").getByLabel("Close sidebar");
+    const backdrop = page.getByTestId("mobile-sidebar-overlay");
     const backdropBox = await backdrop.boundingBox();
     await backdrop.click({
       position: {
@@ -93,6 +93,44 @@ test.describe("Mobile sidebar drawer", () => {
     });
     await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
     await expect(page.getByTestId("sidebar-project-button")).toHaveCount(0);
+  });
+
+  test("switches recent chats from header navigation and restores each draft", async ({ page }) => {
+    test.setTimeout(120_000);
+    page.setDefaultTimeout(60_000);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await emulateTouchFirst(page);
+    await prepareStudio(page, { waitForHostedRuntime: false });
+
+    const input = page.getByTestId("chat-input");
+    await input.fill("First chat draft");
+    await openTouchSidebar(page);
+    const firstChat = page.getByTestId("sidebar-recent-chats-list").locator('button[data-testid^="sidebar-recent-chat-"][aria-current="page"]');
+    const firstChatTestId = await firstChat.getAttribute("data-testid");
+    expect(firstChatTestId).toBeTruthy();
+    await page.getByTestId("sidebar-drawer-toggle").click();
+    await page.getByTestId("mobile-header-more").click();
+    await page.getByTestId("chat-new-chat-public").click();
+    await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
+    await expect(input).toHaveText("");
+    await input.fill("Second chat draft");
+
+    // More retains the full sidebar's current chat rows and draft indicators.
+    // Capture exact identities rather than assuming the recency sort order.
+    await openTouchSidebar(page);
+    await expect(page.getByTestId("sidebar-nav-history")).toHaveAttribute("aria-expanded", "true");
+    const secondChat = page.getByTestId("sidebar-recent-chats-list").locator('button[data-testid^="sidebar-recent-chat-"][aria-current="page"]');
+    const secondChatTestId = await secondChat.getAttribute("data-testid");
+    expect(secondChatTestId).toBeTruthy();
+    expect(secondChatTestId).not.toBe(firstChatTestId);
+    await page.getByTestId(firstChatTestId!).click();
+    await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
+    await expect(input).toHaveText("First chat draft");
+
+    await openTouchSidebar(page);
+    await page.getByTestId(secondChatTestId!).click();
+    await expect(input).toHaveText("Second chat draft");
+    await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
   });
 
   test("keeps overview Home distinct from chat Back on mobile", async ({ page }) => {
@@ -121,7 +159,7 @@ test.describe("Mobile sidebar drawer", () => {
     await expect(page.getByTestId("mobile-bottom-dock")).toHaveCount(0);
   });
 
-  test("shows Home beside the sidebar toggle only from root chat on medium hidden-sidebar layouts", async ({ page }) => {
+  test("opens chat navigation from the composer on medium hidden-sidebar layouts", async ({ page }) => {
     test.setTimeout(120_000);
     page.setDefaultTimeout(60_000);
     await page.setViewportSize({ width: 834, height: 1194 });
@@ -129,11 +167,13 @@ test.describe("Mobile sidebar drawer", () => {
     await prepareStudio(page, { waitForHostedRuntime: false });
 
     await expect(page.getByTestId("topbar-sidebar-toggle")).toBeVisible();
-    await expect(page.getByTestId("topbar-home-button")).toBeVisible();
-    await expect(page.getByTestId("chat-home-button-mobile")).toHaveCount(0);
+    await expect(page.getByTestId("topbar-home-button")).toHaveCount(0);
+    await expect(page.getByTestId("chat-composer-navigation-button")).toBeVisible();
     await expect(page.getByTestId("mobile-bottom-dock")).toHaveCount(0);
 
-    await page.getByTestId("topbar-home-button").click();
+    await page.getByTestId("chat-composer-navigation-button").click();
+    await expect(page.getByTestId("sidebar-recent-chats-list")).toBeVisible();
+    await page.getByTestId("sidebar-home-button").click();
     await expect(page.getByTestId("home-panel")).toBeVisible();
     await expect(page.getByTestId("topbar-home-button")).toHaveCount(0);
     await expect(page.getByTestId("mobile-bottom-dock")).toHaveCount(0);
@@ -147,8 +187,8 @@ test.describe("Mobile sidebar drawer", () => {
     await prepareStudio(page, { waitForHostedRuntime: false });
 
     await expect(page.getByTestId("topbar-sidebar-toggle")).toBeVisible();
-    await expect(page.getByTestId("topbar-home-button")).toBeVisible();
-    await expect(page.getByTestId("chat-home-button-mobile")).toHaveCount(0);
+    await expect(page.getByTestId("topbar-home-button")).toHaveCount(0);
+    await expect(page.getByTestId("chat-composer-navigation-button")).toBeVisible();
     await expect(page.getByTestId("mobile-bottom-dock")).toHaveCount(0);
   });
 
@@ -482,15 +522,15 @@ test.describe("Mobile sidebar drawer", () => {
     await openTouchSidebar(page);
     await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
 
-    await page.getByTestId("sidebar-nav-history").click();
+    await page.getByTestId("sidebar-browse-all-chats").click();
     await expect(page.getByTestId("conversation-history-panel")).toBeVisible();
     await expect(page.getByTestId("conversation-history-filter")).toBeVisible();
-    await expect(page.getByTestId("conversation-history-close")).toHaveCount(0);
+    await expect(page.getByTestId("conversation-history-close")).toBeVisible();
     await expect(page.getByTestId("conversation-history-search")).toBeVisible();
     await expect(page.getByTestId("conversation-history-search-toggle")).toHaveCount(0);
   });
 
-  test("shows More items inline inside the mobile sidebar", async ({ page }) => {
+  test("folds secondary tools into More below the recent chats on mobile", async ({ page }) => {
     test.setTimeout(120_000);
     page.setDefaultTimeout(60_000);
     await page.setViewportSize({ width: 390, height: 844 });
@@ -501,9 +541,9 @@ test.describe("Mobile sidebar drawer", () => {
     await openTouchSidebar(page);
     await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
 
-    await expect(page.getByTestId("sidebar-nav-more")).toHaveCount(0);
-    await expect(page.getByTestId("sidebar-more-section")).toHaveCount(0);
+    await expect(page.getByTestId("sidebar-recent-chats-list")).toBeVisible();
+    await expect(page.getByTestId("sidebar-nav-more")).toBeVisible();
+    await page.getByTestId("sidebar-nav-more").click();
     await expect(page.getByTestId("sidebar-more-item-skills").first()).toBeVisible();
-    await expect(page.getByTestId("sidebar-more-menu")).toHaveCount(0);
   });
 });
