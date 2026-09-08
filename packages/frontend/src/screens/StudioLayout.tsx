@@ -37,6 +37,7 @@ import {
 import { StudioSidebar } from "./studio/components/StudioSidebar";
 import { StudioMobileSidebarOverlay } from "./studio/components/StudioMobileSidebarOverlay";
 import { StudioTopBar } from "./studio/components/StudioTopBar";
+import { useSidebarToggleFocus } from "./studio/useSidebarToggleFocus";
 import { MobileBottomDock } from "./studio/components/MobileBottomDock";
 import { ProjectLauncher } from "./studio/components/ProjectLauncher";
 import { ChatPanel } from "./studio/components/ChatPanel";
@@ -1284,12 +1285,10 @@ function StudioLayoutInner() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isLargeScreen, mobileGitReviewSheet, setMobileGitReviewSheet]);
 
+  const prepareSidebarToggleFocus = useSidebarToggleFocus(isLargeScreen, sidebarCollapsed);
   const handleToggleSidebar = useCallback(() => {
     if (isLargeScreen) {
-      // Keep keyboard focus on the surviving control before the context unmounts.
-      if (document.activeElement?.closest('[data-testid="sidebar-context-navigation"]')) {
-        document.querySelector<HTMLButtonElement>('[data-testid="topbar-sidebar-toggle"]')?.focus({ preventScroll: true });
-      }
+      prepareSidebarToggleFocus();
       setSidebarCollapsed((previous) => !previous);
       return;
     }
@@ -1299,7 +1298,7 @@ function StudioLayoutInner() {
       }
       return !previous;
     });
-  }, [isLargeScreen, setLeftDrawer, setMobileSidebarOpen, setSidebarCollapsed]);
+  }, [isLargeScreen, prepareSidebarToggleFocus, setLeftDrawer, setMobileSidebarOpen, setSidebarCollapsed]);
 
   const handleOpenConversationHistory = useCallback(() => {
     navigateToDestination({ kind: "panel", panel: "chat", workspaceTab: "history" });

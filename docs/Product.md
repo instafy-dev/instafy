@@ -74,7 +74,8 @@ their source whitespace and scroll horizontally when needed.
 On wide screens, a slim global rail selects Home or a team. The adjacent sidebar
 navigates that team and its selected space. Both remain visible inside a project;
 the space navigation can be collapsed while the global rail stays available.
-The workspace header provides the control to reopen it. New users start with the
+The sidebar header provides the collapse button. The workspace header shows a
+reopen button only while the sidebar is collapsed. New users start with the
 context sidebar expanded; existing saved collapse preferences are preserved.
 
 On narrow Home, team and account pages, the header keeps Home immediately left of

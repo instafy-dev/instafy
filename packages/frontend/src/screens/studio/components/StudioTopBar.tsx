@@ -9,7 +9,6 @@ import {
   NavArrowRight,
   NavArrowUp,
   Pin,
-  SidebarCollapse,
   SidebarExpand,
   Xmark
 } from "iconoir-react";
@@ -363,19 +362,18 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
       <NavArrowUp className="h-5 w-5" aria-hidden="true" />
     </IconButton>
   ) : null;
-  const desktopSidebarButton = onToggleSidebar && navigationPage !== "home" && navigationPage !== "account" ? (
+  const desktopSidebarButton = onToggleSidebar && sidebarCollapsed && navigationPage !== "home" && navigationPage !== "account" ? (
     <IconButton
       onPress={onToggleSidebar}
       variant="ghost"
       radius="none"
       size="sm"
-      aria-label={sidebarCollapsed ? "Expand space navigation" : "Collapse space navigation"}
-      aria-expanded={!sidebarCollapsed}
+      aria-label="Expand space navigation"
+      aria-expanded={false}
       data-testid="topbar-sidebar-toggle"
       className={desktopTabActionButtonClassName}
     >
-      {sidebarCollapsed ? <SidebarExpand className="h-5 w-5" aria-hidden="true" />
-        : <SidebarCollapse className="h-5 w-5" aria-hidden="true" />}
+      <SidebarExpand className="h-5 w-5" aria-hidden="true" />
     </IconButton>
   ) : null;
   const mobileBackButton = (
