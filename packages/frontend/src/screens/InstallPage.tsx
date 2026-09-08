@@ -94,9 +94,8 @@ export function InstallPage() {
               {/*
                 The desktop app is the flagship install -- native shell,
                 Personal Browser, auto-update -- so it leads at full width
-                with the page's one primary button. The phone surfaces are
-                lighter companions below it, not its equals: iOS is "open the
-                web app", Android does not exist yet.
+                with the page's one primary button. Native mobile apps are
+                coming soon; Studio remains available in a mobile browser.
               */}
               <div id="desktop" className={`scroll-mt-24 ${CARD_CLASSNAME} sm:p-8`}>
                 <div className="flex items-start gap-4">
@@ -129,7 +128,7 @@ export function InstallPage() {
                 </div>
               </div>
 
-              <div className="mt-4 grid gap-4 md:grid-cols-2">
+              <div id="mobile" className="mt-4 grid scroll-mt-24 gap-4 md:grid-cols-2">
                 <div className={CARD_CLASSNAME}>
                   <div className="flex items-start gap-4">
                     <div className="min-w-0 flex-1">
@@ -138,13 +137,14 @@ export function InstallPage() {
                         <Heading level={2} variant="title">
                           iOS
                         </Heading>
+                        <Badge size="xs">Soon</Badge>
                       </div>
                       <Text variant="body" tone="muted" className="mt-1">
-                        Open the Studio on your phone. Add to Home Screen for an app-like feel.
+                        The native iOS app is coming soon. You can use Studio in your browser today.
                       </Text>
                       <div className="mt-4">
                         <a className={theme.button.secondary} href={buildDestination()}>
-                          Open Studio
+                          Open Studio in browser
                         </a>
                       </div>
                     </div>
@@ -162,7 +162,7 @@ export function InstallPage() {
                         <Badge size="xs">Soon</Badge>
                       </div>
                       <Text variant="body" tone="muted" className="mt-1">
-                        Google Play install is coming soon.
+                        The native Android app is coming soon.
                       </Text>
                     </div>
                   </div>

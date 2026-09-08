@@ -46,6 +46,11 @@ describe("ComposerActionMenu", () => {
       onUploadImage?: () => void;
       uploadImageDisabled?: boolean;
       onInsertSuggestion?: () => void;
+      onStartVoiceInput?: () => void;
+      voiceInputDisabled?: boolean;
+      onToggleVoiceReplies?: () => void;
+      voiceRepliesEnabled?: boolean;
+      voiceRepliesDisabled?: boolean;
       mutationDisabled?: boolean;
     } = {},
   ) {
@@ -72,9 +77,11 @@ describe("ComposerActionMenu", () => {
 
     expect(container.querySelector('[data-testid="composer-action-menu-upload-image"]')).toBeNull();
     expect(container.querySelector('[data-testid="composer-action-menu-insert-suggestion"]')).toBeNull();
+    expect(container.querySelector('[data-testid="composer-action-menu-voice-input"]')).toBeNull();
+    expect(container.querySelector('[data-testid="composer-action-menu-voice-replies"]')).toBeNull();
   });
 
-  it("offers Upload image and Insert suggestion when the narrow composer folds them in", async () => {
+  it("offers Upload image and Insert suggestion from the composer actions", async () => {
     const onUploadImage = vi.fn();
     const onInsertSuggestion = vi.fn();
     await renderMenu(true, true, { onUploadImage, onInsertSuggestion });
@@ -92,7 +99,7 @@ describe("ComposerActionMenu", () => {
     expect(onInsertSuggestion).toHaveBeenCalledTimes(1);
   });
 
-  it("keeps the folded image upload gated like the inline button", async () => {
+  it("keeps image upload gated while unavailable or mutations are disabled", async () => {
     await renderMenu(true, true, { onUploadImage: vi.fn(), uploadImageDisabled: true });
     expect(
       container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-upload-image"]')?.disabled,
@@ -100,6 +107,62 @@ describe("ComposerActionMenu", () => {
 
     await renderMenu(true, true, { onUploadImage: vi.fn(), mutationDisabled: true });
     expect(container.querySelector('[data-testid="composer-action-menu-upload-image"]')).toBeNull();
+  });
+
+  it("keeps dictation reachable when the composer hands it to the menu", async () => {
+    const onStartVoiceInput = vi.fn();
+    await renderMenu(true, true, { onStartVoiceInput });
+
+    const dictate = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-voice-input"]')!;
+    expect(dictate.textContent).toContain("Dictate message");
+    await act(async () => dictate.click());
+    expect(onStartVoiceInput).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { voiceRepliesEnabled: false, label: "Turn on spoken replies" },
+    { voiceRepliesEnabled: true, label: "Turn off spoken replies" },
+  ])("offers '$label' for spoken replies", async ({ voiceRepliesEnabled, label }) => {
+    const onToggleVoiceReplies = vi.fn();
+    await renderMenu(true, true, { onToggleVoiceReplies, voiceRepliesEnabled });
+
+    const replies = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-voice-replies"]')!;
+    expect(replies.textContent).toContain(label);
+    await act(async () => replies.click());
+    expect(onToggleVoiceReplies).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not invoke unavailable dictation or spoken reply actions", async () => {
+    const onStartVoiceInput = vi.fn();
+    const onToggleVoiceReplies = vi.fn();
+    await renderMenu(true, true, {
+      onStartVoiceInput,
+      voiceInputDisabled: true,
+      onToggleVoiceReplies,
+      voiceRepliesDisabled: true,
+    });
+
+    const dictate = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-voice-input"]')!;
+    const replies = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-voice-replies"]')!;
+    expect(dictate.disabled).toBe(true);
+    expect(replies.disabled).toBe(true);
+    await act(async () => {
+      dictate.click();
+      replies.click();
+    });
+    expect(onStartVoiceInput).not.toHaveBeenCalled();
+    expect(onToggleVoiceReplies).not.toHaveBeenCalled();
+  });
+
+  it("omits dictation and spoken replies while mutations are disabled", async () => {
+    await renderMenu(true, true, {
+      onStartVoiceInput: vi.fn(),
+      onToggleVoiceReplies: vi.fn(),
+      mutationDisabled: true,
+    });
+
+    expect(container.querySelector('[data-testid="composer-action-menu-voice-input"]')).toBeNull();
+    expect(container.querySelector('[data-testid="composer-action-menu-voice-replies"]')).toBeNull();
   });
 
   it("labels the additional-page action as Shared-specific", async () => {

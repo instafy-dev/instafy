@@ -25,9 +25,8 @@ describe("sidebar org anchor", () => {
 
   it("shows teams exactly once, as the deck inside the team & spaces row", () => {
     const deckRenders = sidebar.match(/<SidebarOrgDeck\b/g) ?? [];
-    // One per trigger variant of the team & spaces row (desktop popover
-    // trigger + mobile drill-in trigger) — and nowhere else.
-    expect(deckRenders.length).toBe(2);
+    // Desktop and mobile share one trigger; only the panel presentation changes.
+    expect(deckRenders.length).toBe(1);
     expect(sidebar).not.toContain("sidebar-team-chip-");
   });
 
@@ -36,6 +35,6 @@ describe("sidebar org anchor", () => {
     // share for every nav icon; the deck fills it (h-full w-full) so the row
     // keeps its height when the rail expands.
     const shellUses = sidebar.match(/\$\{sidebarIconShellSizeClass\} shrink-0 items-center justify-center rounded-lg/g) ?? [];
-    expect(shellUses.length).toBe(2);
+    expect(shellUses.length).toBe(1);
   });
 });

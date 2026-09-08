@@ -26,9 +26,11 @@ function createPageHarness() {
       this.isContentEditable = false;
       this.clickCount = 0;
       this.events = [];
+      this.style = { outline: "", outlineOffset: "" };
       this.rect = { x: nextX, y: 10, width: 80, height: 30 };
       nextX += 100;
       this.onFocus = null;
+      this.ancestorForm = null;
     }
 
     getAttribute(name) {
@@ -46,6 +48,7 @@ function createPageHarness() {
     }
 
     matches(selector) {
+      if (selector === "input:not([type='hidden']), textarea, select, [contenteditable='true'], [role='textbox']") return ["INPUT", "TEXTAREA", "SELECT"].includes(this.tagName);
       if (selector === "iframe, frame, object, embed") return false;
       if (selector === "button, input[type='button'], input[type='submit']") {
         return this.tagName === "BUTTON" ||
@@ -56,7 +59,7 @@ function createPageHarness() {
 
     closest(selector) {
       if (selector === "a[href]" && this instanceof HTMLAnchorElement) return this;
-      if (selector === "form") return this.form ?? null;
+      if (selector === "form") return this.ancestorForm;
       return null;
     }
 
@@ -84,6 +87,14 @@ function createPageHarness() {
   }
 
   class HTMLElement extends Element {}
+  class HTMLButtonElement extends HTMLElement {
+    constructor(attributes = {}) {
+      super("button", attributes);
+      const type = this.attributes.get("type")?.toLowerCase();
+      this.type = ["button", "reset", "submit"].includes(type) ? type : "submit";
+      this.form = null;
+    }
+  }
   class HTMLInputElement extends HTMLElement {
     constructor(attributes = {}) {
       super("input", attributes);
@@ -134,6 +145,7 @@ function createPageHarness() {
     constructor(attributes = {}) {
       super("form", attributes);
       this.submissions = 0;
+      this.elements = [];
     }
 
     querySelector() {
@@ -186,6 +198,7 @@ function createPageHarness() {
     getComputedStyle: () => ({ visibility: "visible", display: "block", pointerEvents: "auto" }),
     Element,
     HTMLElement,
+    HTMLButtonElement,
     HTMLInputElement,
     HTMLTextAreaElement,
     HTMLAnchorElement,
@@ -205,7 +218,10 @@ function createPageHarness() {
     webContents,
     Element,
     HTMLElement,
+    HTMLButtonElement,
     HTMLInputElement,
+    HTMLTextAreaElement,
+    HTMLFormElement,
   };
 }
 
@@ -215,6 +231,105 @@ function expectationFor(descriptor) {
     securityFingerprint: security.personalBrowserTargetSecurityFingerprint(descriptor),
   };
 }
+
+test("native descriptors retain actual external form ownership and confirm associated submission controls", async () => {
+  const harness = createPageHarness();
+  const form = new harness.HTMLFormElement({ "aria-label": "Details" });
+  const controls = [
+    new harness.HTMLButtonElement({ text: "Continue" }),
+    new harness.HTMLButtonElement({ type: "submit", text: "Continue" }),
+    new harness.HTMLButtonElement({ type: "unknown", text: "Continue" }),
+    new harness.HTMLInputElement({ type: "text", "aria-label": "Notes" }),
+  ];
+  form.elements = controls;
+  for (const control of controls) control.form = form;
+  harness.document.elements = controls;
+  const snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.equal(snapshot.interactive.length, controls.length);
+  const formIdentity = snapshot.interactive[0].descriptor.formOwnerIdentity;
+  assert.ok(formIdentity);
+  for (const [index, item] of snapshot.interactive.entries()) {
+    assert.equal(item.descriptor.formOwnerIdentity, formIdentity);
+    assert.equal(item.descriptor.formActionText, "Continue");
+    if (index < 3) {
+      assert.equal(item.descriptor.type, "submit");
+      assert.equal(security.personalBrowserActivationRequiresConfirmation(item.descriptor, "routine"), true);
+    } else {
+      assert.equal(security.personalBrowserKeyRequiresConfirmation("Enter", item.descriptor), true);
+    }
+  }
+});
+
+test("non-submitting buttons remain routine and native no-owner state does not inherit an ancestor form", async () => {
+  const harness = createPageHarness();
+  const form = new harness.HTMLFormElement({ "aria-label": "Details" });
+  const ordinary = new harness.HTMLButtonElement({ type: "button", text: "Show details" });
+  const reset = new harness.HTMLButtonElement({ type: "reset", text: "Start again" });
+  ordinary.form = reset.form = form;
+  form.elements = [ordinary, reset];
+  const withoutOwner = new harness.HTMLButtonElement({ text: "Show details" });
+  withoutOwner.ancestorForm = form;
+  harness.document.elements = [ordinary, reset, withoutOwner];
+  const snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  assert.ok(snapshot.interactive[0].descriptor.formOwnerIdentity);
+  assert.ok(snapshot.interactive[1].descriptor.formOwnerIdentity);
+  assert.equal(snapshot.interactive[2].descriptor.formOwnerIdentity, "");
+  assert.equal(snapshot.interactive[2].descriptor.formActionText, "");
+  for (const { descriptor } of snapshot.interactive) {
+    assert.equal(security.personalBrowserActivationRequiresConfirmation(descriptor, "routine"), false);
+  }
+});
+
+test("form ownership is part of the fresh target fingerprint independently of its display label", async () => {
+  const harness = createPageHarness();
+  const originalForm = new harness.HTMLFormElement({ "aria-label": "Details" });
+  const otherForm = new harness.HTMLFormElement({ "aria-label": "Details" });
+  const button = new harness.HTMLButtonElement({ type: "submit", text: "Continue" });
+  button.form = originalForm;
+  originalForm.elements = [button];
+  harness.document.elements = [button];
+  const snapshot = await bridge.snapshotPersonalBrowserPage(harness.webContents);
+  const original = snapshot.interactive[0].descriptor;
+  button.form = otherForm;
+  otherForm.elements = [button];
+  const inspected = await bridge.inspectPersonalBrowserTarget(harness.webContents, { index: 0 });
+  assert.equal(inspected.formActionText, original.formActionText);
+  assert.notEqual(inspected.formOwnerIdentity, original.formOwnerIdentity);
+  assert.notEqual(security.personalBrowserTargetSecurityFingerprint(inspected), security.personalBrowserTargetSecurityFingerprint(original));
+});
+
+test("manual guidance outlines fresh fields without reading or changing values and clears on resume", async () => {
+  const harness = createPageHarness();
+  const input = new harness.HTMLInputElement({ type: "password" });
+  input.value = "private-user-entry";
+  harness.document.elements = [input];
+  const snapshot = await harness.bridge.snapshotPersonalBrowserPage(harness.webContents);
+  const highlighted = await harness.bridge.highlightPersonalBrowserHumanInput(harness.webContents, [
+    { index: 0, expectation: expectationFor(snapshot.interactive[0].descriptor) },
+  ]);
+  assert.equal(highlighted, true);
+  assert.equal(input.value, "private-user-entry");
+  assert.equal(input.style.outline, "3px solid #f59e0b");
+  input.rect.x += 50;
+  assert.equal(input.style.outline, "3px solid #f59e0b");
+  await harness.bridge.clearPersonalBrowserHumanInput(harness.webContents);
+  assert.equal(input.style.outline, "");
+  assert.equal(input.style.outlineOffset, "");
+  assert.equal(input.value, "private-user-entry");
+});
+
+test("manual guidance rejects a field replaced since the observed snapshot", async () => {
+  const harness = createPageHarness();
+  const input = new harness.HTMLInputElement({ type: "password" });
+  harness.document.elements = [input];
+  const snapshot = await harness.bridge.snapshotPersonalBrowserPage(harness.webContents);
+  const replacement = new harness.HTMLInputElement({ type: "password" });
+  harness.document.elements = [replacement];
+  assert.equal(await harness.bridge.highlightPersonalBrowserHumanInput(harness.webContents, [
+    { index: 0, expectation: expectationFor(snapshot.interactive[0].descriptor) },
+  ]), false);
+  assert.equal(replacement.style.outline, "");
+});
 
 test("isolated click rejects an adversarial index reorder before dispatching click", async () => {
   const harness = createPageHarness();

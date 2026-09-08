@@ -5,12 +5,15 @@ import {
   Group,
   MagicWand,
   MediaImage,
+  Microphone,
   NavArrowLeft,
   NavArrowRight,
   OpenNewWindow,
   Plus,
   Safari,
   Send,
+  SoundHigh,
+  SoundOff,
   Terminal,
 } from "iconoir-react";
 import { DialogTrigger } from "react-aria-components";
@@ -85,6 +88,11 @@ export function ComposerActionMenu({
   onUploadImage,
   uploadImageDisabled = false,
   onInsertSuggestion,
+  onStartVoiceInput,
+  voiceInputDisabled = false,
+  onToggleVoiceReplies,
+  voiceRepliesEnabled = false,
+  voiceRepliesDisabled = false,
   triggerClassName,
   triggerIconClassName,
   mutationDisabled = false,
@@ -104,17 +112,19 @@ export function ComposerActionMenu({
   onStashDraft?: () => void;
   queueDisabled?: boolean;
   stashDisabled?: boolean;
-  // The one-row composer folds actions it does not render inline into this
-  // menu so nothing is lost: image upload below sm, and the insert-suggestion
-  // wand on every viewport (Tab accepts the inline ghost suggestion from the
-  // keyboard). The composer passes each handler only while it applies.
+  // Image upload and insert suggestion live in this menu on every viewport
+  // (Tab also accepts the inline ghost suggestion from the keyboard). The
+  // composer passes each handler only while it applies.
   onUploadImage?: () => void;
   uploadImageDisabled?: boolean;
   onInsertSuggestion?: () => void;
+  onStartVoiceInput?: () => void;
+  voiceInputDisabled?: boolean;
+  onToggleVoiceReplies?: () => void;
+  voiceRepliesEnabled?: boolean;
+  voiceRepliesDisabled?: boolean;
   triggerClassName?: string;
-  // The trigger's glyph is sized by the composer, the same class it hands
-  // image, mic and Send, so "+" is one of four identical controls; the
-  // menu never picks a glyph size of its own.
+  // The trigger's glyph uses the same size as the composer's other controls.
   triggerIconClassName: string;
   mutationDisabled?: boolean;
   inviteActionLabel?: string;
@@ -216,7 +226,35 @@ export function ComposerActionMenu({
                 testId="composer-action-menu-upload-image"
               />
             ) : null}
-            {(onInsertSuggestion || (!mutationDisabled && onUploadImage)) &&
+            {!mutationDisabled && onStartVoiceInput ? (
+              <ActionRow
+                icon={<Microphone className="h-4 w-4" aria-hidden="true" />}
+                title="Dictate message"
+                onPress={() => {
+                  closeMenu();
+                  onStartVoiceInput();
+                }}
+                disabled={voiceInputDisabled}
+                testId="composer-action-menu-voice-input"
+              />
+            ) : null}
+            {!mutationDisabled && onToggleVoiceReplies ? (
+              <ActionRow
+                icon={voiceRepliesEnabled ? (
+                  <SoundHigh className="h-4 w-4" aria-hidden="true" />
+                ) : (
+                  <SoundOff className="h-4 w-4" aria-hidden="true" />
+                )}
+                title={voiceRepliesEnabled ? "Turn off spoken replies" : "Turn on spoken replies"}
+                onPress={() => {
+                  closeMenu();
+                  onToggleVoiceReplies();
+                }}
+                disabled={voiceRepliesDisabled}
+                testId="composer-action-menu-voice-replies"
+              />
+            ) : null}
+            {(onInsertSuggestion || (!mutationDisabled && (onUploadImage || onStartVoiceInput || onToggleVoiceReplies))) &&
             (!mutationDisabled || showInviteAction) ? (
               <div
                 role="separator"

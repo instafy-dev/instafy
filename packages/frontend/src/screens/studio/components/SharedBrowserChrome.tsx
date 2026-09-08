@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import { NavArrowLeft, NavArrowRight, Refresh } from "iconoir-react";
+import { IconButton } from "../../../components/Button";
 import type { BrowserSessionPage } from "./browserSessionPages";
 import { normalizeBrowserAddress } from "./browserAddress";
 import { BrowserChromeShell } from "./BrowserChromeShell";
@@ -68,17 +69,20 @@ function ChromeButton({
   children: React.ReactNode;
 }) {
   return (
-    <button
+    <IconButton
       aria-label={label}
-      className="inline-flex h-8 w-8 shrink-0 touch-manipulation items-center justify-center rounded-full text-slate-600 transition hover:bg-slate-200/70 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/50 disabled:cursor-not-allowed disabled:opacity-40 max-[540px]:h-10 max-[540px]:w-10 pointer-coarse:min-h-11 pointer-coarse:min-w-11 dark:text-slate-300 dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:hover:text-slate-50"
+      className="shrink-0 max-[540px]:h-10 max-[540px]:w-10"
       data-testid={testId}
-      disabled={disabled}
-      onClick={onClick}
+      isDisabled={disabled}
+      onPress={onClick}
+      radius="full"
+      size="sm"
       title={label}
       type="button"
+      variant="ghost"
     >
       {children}
-    </button>
+    </IconButton>
   );
 }
 
@@ -266,7 +270,7 @@ export function SharedBrowserChrome({
         />
         <button
           aria-label="Go"
-          className="absolute right-0 top-1/2 inline-flex h-6 w-6 -translate-y-1/2 touch-manipulation items-center justify-center rounded-full text-slate-500 transition hover:bg-slate-200/70 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/50 disabled:cursor-not-allowed disabled:opacity-40 max-[540px]:h-10 max-[540px]:w-10 pointer-coarse:h-10 pointer-coarse:w-10 dark:text-slate-400 dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:hover:text-slate-50"
+          className="absolute right-0 top-1/2 inline-flex h-6 w-6 -translate-y-1/2 touch-manipulation items-center justify-center rounded-full text-slate-500 transition hover:bg-slate-200/70 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/50 disabled:cursor-not-allowed disabled:opacity-40 max-[540px]:h-10 max-[540px]:w-10 pointer-coarse:min-h-11 pointer-coarse:min-w-11 dark:text-slate-400 dark:hover:bg-[var(--color-studio-dark-control-hover)] dark:hover:text-slate-50"
           data-testid="shared-browser-go"
           disabled={controlsDisabled || !controls.navigate}
           title="Go"

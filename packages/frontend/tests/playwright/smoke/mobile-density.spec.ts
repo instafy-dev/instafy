@@ -28,57 +28,59 @@ test.describe("Narrow-phone Studio density", () => {
     await expect(page.getByTestId("chat-input")).toBeVisible();
     expect(page.viewportSize()).toEqual({ width: 360, height: 649 });
 
-    const topbarToggle = page.getByTestId("topbar-sidebar-toggle");
-    const studioHeader = topbarToggle.locator("xpath=ancestor::header[1]");
-    await expectHeightBetween(studioHeader, 52, 54);
-    await expectHeightBetween(topbarToggle, 44, 44);
-    await expectHeightBetween(page.getByTestId("topbar-tab-selector"), 44, 44);
-    await expectHeightBetween(page.getByTestId("topbar-new-conversation"), 44, 44);
+    const headerPicker = page.getByTestId("mobile-header-picker");
+    const headerMore = page.getByTestId("mobile-header-more");
+    const studioHeader = headerPicker.locator("xpath=ancestor::header[1]");
+    await expectHeightBetween(studioHeader, 56, 58);
+    await expectHeightBetween(page.locator('[data-testid="mobile-header-back"], [data-testid="mobile-header-open-chats"]'), 48, 48);
+    await expectHeightBetween(headerPicker, 48, 48);
+    await expectHeightBetween(headerMore, 48, 48);
+    await expect(page.getByTestId("topbar-sidebar-toggle")).toHaveCount(0);
+    await expect(page.getByTestId("mobile-bottom-dock")).toHaveCount(0);
 
-    // The idle composer is one row: 1px top border + 6px top padding + the
-    // 44px control row + the 8px safe-area floor = 59px. Image upload folds
-    // into the "+" menu below sm. Chromium under Playwright supports web
-    // speech, so the rest row ends in the hold-to-talk mic AND Send: Send is
-    // always mounted, quiet (data-send-rest) while the draft is empty, and
-    // lights up in place once there is a payload. Typing adds nothing to the
-    // row and removes nothing from it.
+    // The rounded composer has a 44px touch row, 6px padding above and
+    // below, and two 1px borders. The form adds an 8px safe-area floor:
+    // about 58px for the surface and 66px overall. Its trailing slot holds
+    // the microphone while empty, then Send when a draft is present.
     const composer = page.getByTestId("chat-composer-overlay");
+    const surface = page.getByTestId("chat-composer-surface");
     const input = page.getByTestId("chat-input");
     const voice = page.getByTestId("chat-voice-input-button");
     const send = page.getByTestId("chat-send-button");
-    await expectHeightBetween(composer, 56, 62);
+    await expectHeightBetween(composer, 64, 68);
+    await expectHeightBetween(surface, 56, 60);
     await expect(input).toHaveCSS("font-size", "16px");
-    await expectHeightBetween(page.getByTestId("chat-home-button-mobile"), 44, 44);
+    await expect(page.getByTestId("chat-home-button-mobile")).toHaveCount(0);
+    await expect(page.getByTestId("chat-composer-navigation-button")).toHaveCount(0);
     await expectHeightBetween(page.getByTestId("composer-action-menu-trigger"), 44, 44);
     await expectHeightBetween(voice, 44, 44);
-    await expectHeightBetween(send, 44, 44);
-    await expect(send).toHaveAttribute("data-send-rest", "true");
+    await expect(send).toHaveCount(0);
     await expect(page.getByTestId("chat-image-upload-button")).toHaveCount(0);
     const restVoiceBox = await voice.boundingBox();
-    const restSendBox = await send.boundingBox();
     expect(restVoiceBox).not.toBeNull();
-    expect(restSendBox).not.toBeNull();
 
-    // With a one-line draft the composer is still the same one row: the 20px
-    // line + 8px editor padding sits inside the 44px row, Send lights up in
-    // its own slot and the mic keeps the slot it had.
+    // A single line leaves the row the same height. Send replaces the mic
+    // in the same position and retains the full 44px touch target.
     await input.fill("Density check");
     await expect(input.locator("p").last()).toHaveText("Density check");
     await expectHeightBetween(send, 44, 44);
-    await expectHeightBetween(voice, 44, 44);
-    await expectHeightBetween(composer, 56, 62);
-    const draftVoiceBox = await voice.boundingBox();
+    await expect(voice).toHaveCount(0);
+    await expectHeightBetween(composer, 64, 68);
+    await expectHeightBetween(surface, 56, 60);
     const draftSendBox = await send.boundingBox();
-    expect(draftVoiceBox).not.toBeNull();
     expect(draftSendBox).not.toBeNull();
-    expect(Math.abs(draftVoiceBox!.x - restVoiceBox!.x)).toBeLessThan(1);
-    expect(Math.abs(draftSendBox!.x - restSendBox!.x)).toBeLessThan(1);
+    expect(Math.abs(draftSendBox!.x - restVoiceBox!.x)).toBeLessThan(1);
+    expect(Math.abs(draftSendBox!.y - restVoiceBox!.y)).toBeLessThan(1);
+    expect(draftSendBox!.width).toBe(restVoiceBox!.width);
     await input.press("ControlOrMeta+a");
     await input.press("Backspace");
-    await expect(send).toHaveAttribute("data-send-rest", "true");
-    await expectHeightBetween(send, 44, 44);
+    await expect(send).toHaveCount(0);
     await expectHeightBetween(voice, 44, 44);
-    await expectHeightBetween(composer, 56, 62);
+    await expectHeightBetween(composer, 64, 68);
+    const restoredVoiceBox = await voice.boundingBox();
+    expect(restoredVoiceBox).not.toBeNull();
+    expect(Math.abs(restoredVoiceBox!.x - restVoiceBox!.x)).toBeLessThan(1);
+    expect(Math.abs(restoredVoiceBox!.y - restVoiceBox!.y)).toBeLessThan(1);
 
     const baseHeaderBox = await studioHeader.boundingBox();
     const baseComposerBox = await composer.boundingBox();
@@ -98,22 +100,30 @@ test.describe("Narrow-phone Studio density", () => {
       document.documentElement.style.removeProperty("--safe-area-inset-top");
       document.documentElement.style.removeProperty("--safe-area-inset-bottom");
     });
-    await expectHeightBetween(studioHeader, 52, 54);
-    await expectHeightBetween(composer, 56, 62);
+    await expectHeightBetween(studioHeader, 56, 58);
+    await expectHeightBetween(composer, 64, 68);
 
     await page.setViewportSize({ width: 374, height: 649 });
-    await expectHeightBetween(studioHeader, 52, 54);
-    await expectHeightBetween(topbarToggle, 44, 44);
-    await expectHeightBetween(composer, 56, 62);
+    await expectHeightBetween(studioHeader, 56, 58);
+    await expectHeightBetween(headerPicker, 48, 48);
+    await expectHeightBetween(composer, 64, 68);
     await page.setViewportSize({ width: 360, height: 649 });
 
-    await page.getByTestId("chat-home-button-mobile").click();
+    await headerPicker.click();
+    await page.getByTestId("mobile-navigation-sheet").getByRole("button", { name: "All chats", exact: true }).click();
+    await expect(page.getByTestId("conversation-history-panel")).toBeVisible();
     const dock = page.getByTestId("mobile-bottom-dock");
     await expect(dock).toBeVisible();
-    await expectHeightBetween(dock, 60, 62);
-    await expectHeightBetween(page.getByTestId("mobile-bottom-dock-return"), 48, 48);
+    await expectHeightBetween(dock, 56, 58);
+    for (const id of ["home", "chat", "projects"]) {
+      await expectHeightBetween(page.getByTestId(`mobile-bottom-dock-${id}`), 48, 48);
+    }
+    await page.getByTestId("mobile-bottom-dock-home").click();
+    await expect(page.getByTestId("home-panel")).toBeVisible();
 
-    await page.getByTestId("mobile-bottom-dock-files").click();
+    await page.getByTestId("mobile-header-picker").click();
+    await page.getByTestId("mobile-navigation-sheet").getByRole("button", { name: "Files", exact: true }).click();
+    await expect(dock).toHaveCount(0);
     const filesTree = page.getByTestId("files-explorer-tree");
     const searchRow = page.getByTestId("files-explorer-search-row");
     const searchInput = page.getByTestId("code-search-input");
@@ -136,21 +146,21 @@ test.describe("Narrow-phone Studio density", () => {
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(360);
 
     await page.setViewportSize({ width: 374, height: 649 });
-    await expectHeightBetween(studioHeader, 52, 54);
-    await expectHeightBetween(dock, 60, 62);
+    await expectHeightBetween(studioHeader, 56, 58);
+    await expect(dock).toHaveCount(0);
     await expect(filesTree).toHaveCSS("padding-top", "12px");
     await expect(filesTree).toHaveCSS("padding-right", "16px");
     await expect(searchRow).toHaveCSS("margin-top", "12px");
 
     await page.setViewportSize({ width: 375, height: 649 });
-    await expectHeightBetween(studioHeader, 60, 62);
-    await expectHeightBetween(topbarToggle, 44, 44);
+    await expectHeightBetween(studioHeader, 56, 58);
+    await expectHeightBetween(headerPicker, 48, 48);
     await expect(filesTree).toHaveCSS("padding-top", "20px");
     await expect(filesTree).toHaveCSS("padding-right", "20px");
     await expect(filesTree).toHaveCSS("padding-bottom", "20px");
     await expect(filesTree).toHaveCSS("padding-left", "20px");
     await expect(searchRow).toHaveCSS("margin-top", "20px");
-    await expectHeightBetween(dock, 64, 66);
+    await expect(dock).toHaveCount(0);
   });
 
   test("keeps landscape controls inside native horizontal safe areas", async ({ page }) => {
@@ -167,24 +177,24 @@ test.describe("Narrow-phone Studio density", () => {
     });
 
     const composer = page.getByTestId("chat-composer-overlay");
-    const toggle = page.getByTestId("topbar-sidebar-toggle");
-    const newConversation = page.getByTestId("topbar-new-conversation");
+    const backOrChats = page.locator('[data-testid="mobile-header-back"], [data-testid="mobile-header-open-chats"]');
+    const more = page.getByTestId("mobile-header-more");
     const voice = page.getByTestId("chat-voice-input-button");
-    const [composerBox, toggleBox, newConversationBox, voiceBox] = await Promise.all([
+    const [composerBox, backBox, moreBox, voiceBox] = await Promise.all([
       composer.boundingBox(),
-      toggle.boundingBox(),
-      newConversation.boundingBox(),
+      backOrChats.boundingBox(),
+      more.boundingBox(),
       voice.boundingBox(),
     ]);
 
     expect(composerBox).not.toBeNull();
-    expect(toggleBox).not.toBeNull();
-    expect(newConversationBox).not.toBeNull();
+    expect(backBox).not.toBeNull();
+    expect(moreBox).not.toBeNull();
     expect(voiceBox).not.toBeNull();
     expect(Math.abs(composerBox!.x - 27)).toBeLessThan(1);
     expect(Math.abs(composerBox!.x + composerBox!.width - 732)).toBeLessThan(1);
-    expect(toggleBox!.x).toBeGreaterThanOrEqual(27);
-    expect(newConversationBox!.x + newConversationBox!.width).toBeLessThanOrEqual(732);
+    expect(backBox!.x).toBeGreaterThanOrEqual(27);
+    expect(moreBox!.x + moreBox!.width).toBeLessThanOrEqual(732);
     expect(voiceBox!.x + voiceBox!.width).toBeLessThanOrEqual(732);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(780);
 
@@ -196,6 +206,9 @@ test.describe("Narrow-phone Studio density", () => {
     await page.keyboard.press("Escape");
     await expect(runtimeMenu).toHaveCount(0);
 
+    await more.click();
+    const toggle = page.getByTestId("topbar-sidebar-toggle");
+    await expectHeightBetween(toggle, 48, 48);
     await toggle.click();
     const sidebarOverlay = page.getByTestId("mobile-sidebar-overlay");
     const sidebar = sidebarOverlay.getByTestId("sidebar-project-button").locator("xpath=ancestor::nav[1]");

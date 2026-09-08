@@ -45,6 +45,8 @@ afterEach(() => {
 });
 
 describe("resolveNativeAppNavigationTarget", () => {
+  const projectId = "11111111-1111-4111-8111-111111111111";
+  const runtimeId = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
   it("builds a token-free studio handoff deep link", () => {
     const result = buildNativeStudioDeepLink({
       projectId: "project-1",
@@ -95,9 +97,60 @@ describe("resolveNativeAppNavigationTarget", () => {
       ),
     ).toBeNull();
   });
+
+  it("builds and receives a token-free Shared Browser locator for a native device", () => {
+    const link = buildNativeStudioDeepLink({
+      projectId,
+      browserRuntimeId: runtimeId,
+      conversationControllerId: "conversation-1",
+      panel: "files",
+    });
+    expect(link).toBe(`instafy://studio?projectId=${projectId}&panel=chat&browserRuntimeId=${runtimeId.toLowerCase()}`);
+    expect(resolveNativeAppNavigationTarget(link)).toBe(
+      `/studio?projectId=${projectId}&panel=chat&browserRuntimeId=${runtimeId.toLowerCase()}`,
+    );
+  });
+
+  it("preserves a valid public Shared Browser locator and normalizes its runtime ID", () => {
+    expect(resolveNativeAppNavigationTarget(
+      `https://instafy.dev/studio?projectId=${projectId}&panel=chat&browserRuntimeId=${runtimeId}`,
+    )).toBe(`/studio?projectId=${projectId}&panel=chat&browserRuntimeId=${runtimeId.toLowerCase()}`);
+  });
+
+  it.each([
+    "not-a-runtime",
+    "https%3A%2F%2Fexample.test",
+    `${runtimeId}&browserRuntimeId=${runtimeId}`,
+  ])("keeps normal navigation without forwarding an invalid/duplicate runtime locator: %s", (value) => {
+    expect(resolveNativeAppNavigationTarget(
+      `instafy://studio?projectId=${projectId}&panel=chat&browserRuntimeId=${value}`,
+    )).toBe(`/studio?projectId=${projectId}&panel=chat`);
+  });
+
+  it("omits a runtime from a builder request without a valid project or runtime", () => {
+    expect(buildNativeStudioDeepLink({ projectId: "project-1", browserRuntimeId: runtimeId })).toBe(
+      "instafy://studio?projectId=project-1",
+    );
+    expect(buildNativeStudioDeepLink({ projectId, browserRuntimeId: "not-a-runtime" })).toBe(
+      `instafy://studio?projectId=${projectId}`,
+    );
+  });
 });
 
 describe("installNativeDeepLinkBootstrap", () => {
+  it("opens a Shared Browser locator on a cold native launch without copying a grant", async () => {
+    const projectId = "11111111-1111-4111-8111-111111111111";
+    const runtimeId = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
+    nativeMocks.getLaunchUrl.mockResolvedValue({
+      url: buildNativeStudioDeepLink({ projectId, browserRuntimeId: runtimeId }),
+    });
+    const navigate = vi.fn();
+    installNativeDeepLinkBootstrap({ navigate });
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledWith(
+      `/studio?projectId=${projectId}&panel=chat&browserRuntimeId=${runtimeId.toLowerCase()}`,
+    ));
+  });
+
   it("navigates a cold native launch into the requested studio space", async () => {
     nativeMocks.getLaunchUrl.mockResolvedValue({
       url: "instafy://studio?projectId=11111111-1111-4111-8111-111111111111&panel=chat",

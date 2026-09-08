@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { REQUIRED_BROWSER_LANES } from "../packages/frontend/scripts/required-browser-reporter.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");
@@ -47,9 +48,43 @@ test("standalone configs do not import the authenticated development harness", (
   const vite = read("packages/frontend/vite.browser-ui-ci.config.ts");
   assert.match(vite, /envFile: false/);
   assert.match(vite, /cacheDir: path\.join\(frontendRoot, "node_modules", "\.vite-browser-ui-ci"\)/);
-  assert.match(vite, /include: \["react", "react-dom\/client", "react-aria-components"\]/);
+  // The history fixtures use the real Router; a clean lane must optimize it
+  // explicitly instead of inheriting a developer's dependency-scan cache.
+  assert.match(vite, /include: \["react", "react-dom\/client", "react-aria-components", "react-router-dom"\]/);
   assert.match(vite, /noDiscovery: true/);
   assert.doesNotMatch(vite, /from ["']\.\/vite\.config|loadEnv\(/);
   const resolver = read("packages/frontend/tests/playwright/component/viteComponentDependencies.ts");
   assert.ok(resolver.includes("\\.vite(?:-browser-ui-ci)?"));
+});
+
+test("the required browser UI job includes the real co-browsing protocol fixture", () => {
+  const workflow = read(".github/workflows/browser-e2e.yml");
+  const job = workflow.split("\n  browser-ui:\n")[1].split("\n  shared-profile:\n")[0];
+  assert.match(job, /name: Browser UI rendering/);
+  const install = job.indexOf("playwright install --with-deps chromium");
+  const guards = job.indexOf("node --test scripts/shared-browser-cobrowsing-e2e.test.mjs");
+  const fixture = job.indexOf("run: node scripts/shared-browser-cobrowsing-e2e.mjs");
+  const components = job.indexOf("run: pnpm test:browser:ci browser-ui");
+  assert.ok(install >= 0 && guards > install && fixture > guards && components > fixture);
+  assert.match(job, /packages\/frontend\/test-results\/browser-ci\/shared-cobrowsing/);
+  assert.doesNotMatch(job.slice(0, components), /if:|continue-on-error:|secrets:|secrets\./);
+  assert.ok(fs.existsSync(path.join(root, "scripts/shared-browser-cobrowsing-e2e.mjs")));
+  assert.ok(fs.existsSync(path.join(root, "scripts/shared-browser-cobrowsing-e2e.test.mjs")));
+});
+
+test("the expanded browser UI inventory has a bounded suite budget without relaxing test gates", () => {
+  const config = read("packages/frontend/playwright.browser-ui-ci.config.ts");
+  assert.match(config, /^\s+globalTimeout: 360_000,$/m);
+  assert.match(config, /^\s+timeout: 30_000,$/m);
+  assert.match(config, /^\s+workers: 1,$/m);
+  assert.match(config, /^\s+retries: 0,$/m);
+  assert.match(config, /^\s+fullyParallel: false,$/m);
+  assert.match(config, /^\s+forbidOnly: true,$/m);
+  assert.match(config, /^\s+testMatch: REQUIRED_BROWSER_UI_SPECS,$/m);
+  assert.match(config, /required-browser-reporter\.mjs", \{ lane: "browser-ui" \}/);
+  assert.equal(REQUIRED_BROWSER_LANES["browser-ui"].minimumTests, 39);
+  const workflow = read(".github/workflows/browser-e2e.yml");
+  const job = workflow.split("\n  browser-ui:\n")[1].split("\n  shared-profile:\n")[0];
+  assert.match(job, /^\s+runs-on: ubuntu-24\.04$/m);
+  assert.match(job, /^\s+timeout-minutes: 15$/m);
 });

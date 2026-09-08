@@ -1,5 +1,7 @@
 import { Capacitor } from "@capacitor/core";
 import { useEffect, type ReactNode } from "react";
+import { useMobileSidebarViewport } from "./useMobileSidebarViewport";
+import { Dialog, Modal, ModalOverlay } from "react-aria-components";
 
 interface SidebarStatusBarSession {
   users: number;
@@ -99,17 +101,18 @@ export function StudioMobileSidebarOverlay({
   onClose: () => void;
 }) {
   useSidebarStatusBarOverlay();
+  const { controlsRef, style } = useMobileSidebarViewport();
 
   return (
-    <div className="fixed inset-0 z-50" data-testid="mobile-sidebar-overlay">
-      <button
-        type="button"
-        className="absolute inset-0 bg-slate-900/30 backdrop-blur-sm"
-        aria-label="Close sidebar"
-        onClick={onClose}
-      />
-      <div
-        className="absolute inset-y-0 left-0 border-r border-slate-200/70 bg-slate-50/80 dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-rail)]"
+    <ModalOverlay
+      isOpen
+      onOpenChange={(open) => { if (!open) onClose(); }}
+      isDismissable
+      className="fixed inset-0 z-50 bg-slate-900/30 backdrop-blur-sm"
+      data-testid="mobile-sidebar-overlay"
+    >
+      <Modal
+        className="absolute inset-y-0 left-0 max-w-[calc(100vw-2rem)] border-r border-slate-200/70 bg-slate-50/80 outline-none dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-rail)]"
         data-testid="mobile-sidebar-surface"
         style={{
           // Inset controls, never the painted surface (including the home-indicator area).
@@ -118,8 +121,12 @@ export function StudioMobileSidebarOverlay({
           paddingLeft: "var(--instafy-safe-area-inset-left)",
         }}
       >
-        {children}
-      </div>
-    </div>
+        <Dialog aria-label="Navigation and recent chats" className="h-full outline-none">
+          <div ref={controlsRef} className="relative h-full min-h-0" style={style} data-testid="mobile-sidebar-controls">
+            {children}
+          </div>
+        </Dialog>
+      </Modal>
+    </ModalOverlay>
   );
 }

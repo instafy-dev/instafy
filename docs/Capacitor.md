@@ -192,11 +192,43 @@ still requires verification on a phone, even when the simulated-event test passe
 
 ## iOS release boundary
 
+Studio's touch layout keeps Back in its header and Forward in the Chats/Spaces picker,
+backed by the same React Router history as the browser and Electron renderer. A direct entry
+without previous history offers an explicit Chats destination instead of pretending it is Back.
+Do not confuse these controls with navigation
+inside the separate Shared/Personal browser. No native WKWebView swipe-navigation setting is
+changed by this frontend implementation. Android uses a single prioritized native Back listener
+for registered dismissible surfaces; the sidebar is lower priority than its native-aware dialogs.
+When no registered surface remains, Capacitor's normal Back behavior is restored. Physical checks
+must separately verify keyboard dismissal, drill-in dismissal and underlying route navigation.
+
+Only Home, Chats history and Spaces overviews have a bottom destination bar; conversations,
+job threads, editors and settings details do not, even with the keyboard closed. The compact
+picker opens from the header title/space. An overview's bar yields to a resized software keyboard.
+The viewport observer does not install a native keyboard listener or alter resize/accessory policy.
+Hardware-keyboard focus alone keeps the overview bar visible; pinch zoom is not classified as a keyboard.
+The transient navigation picker follows the visual viewport, fits short lists and caps long lists
+with scrolling. Its search stays mounted beside Close; section switching and Forward yield space
+while the software keyboard is open so short landscape viewports can still show results.
+Verify portrait/landscape, actual input, first-Back keyboard dismissal, second-Back picker dismissal,
+retained composer draft/focus and its own home-indicator inset on each native platform. Verify
+that chat has no destination bar before/during/after typing and that all three overview screens
+share the same destinations. Browser viewport
+simulation cannot replace those checks or establish physical one-hand comfort.
+
 The mobile sidebar paints to every screen edge, with safe-area padding around its controls.
 While this drawer is open, iOS temporarily overlays its status bar on the WebView; closing the
 drawer restores its previous status-bar overlay mode (normally non-overlay). Android and the
 static startup policy are unchanged. Verify opening, closing, rotating, and returning from a
 native screen on an iPhone, including the top status area and bottom home-indicator area.
+
+The drawer's controls follow the visual viewport independently of its full-screen
+background. Focused sidebar searches are centered within their own scroll area,
+with temporary trailing space so a filtered last row does not sit against a
+floating keyboard accessory toolbar. That space is removed on blur, search
+removal or drawer close; no native keyboard/accessory setting is changed. On a
+real iPhone, verify the field clears both the keyboard and its separate accessory
+controls, not only the main keyboard frame.
 
 Use `pnpm test:ios:config`, Capacitor sync, and an unsigned simulator build as the public validation
 path. A release pipeline may then build a signed IPA and upload it to TestFlight. Keep the

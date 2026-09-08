@@ -5,7 +5,19 @@ import {
   resolvePendingUrlSearchSync,
   resolveProjectScopedWorkspaceRouteValues,
   resolveWorkspaceUrlSyncBaseSearch,
+  workspaceRouteScopeReady,
 } from "../useStudioLayoutWorkspaceRouting";
+
+describe("pending route scope", () => {
+  const projectA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const projectB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  it("does not hydrate pending IDs while access or the destination space's conversations are loading", () => {
+    expect(workspaceRouteScopeReady({ search: `?projectId=${projectB}`, projectReady: false, activeProjectId: projectA, conversationsProjectKey: projectA })).toBe(false);
+    expect(workspaceRouteScopeReady({ search: `?projectId=${projectB}`, projectReady: true, activeProjectId: projectA, conversationsProjectKey: projectA })).toBe(false);
+    expect(workspaceRouteScopeReady({ search: `?projectId=${projectB}`, projectReady: true, activeProjectId: projectB, conversationsProjectKey: projectA })).toBe(false);
+    expect(workspaceRouteScopeReady({ search: `?projectId=%20${projectB}%20`, projectReady: true, activeProjectId: projectB, conversationsProjectKey: projectB })).toBe(true);
+  });
+});
 
 describe("doesWorkspaceTabMatchPanelRoute", () => {
   it("requires the active tab to render the routed Files workspace", () => {
@@ -63,6 +75,7 @@ describe("resolveLeftDrawerFromSearch", () => {
     expect(resolveLeftDrawerFromSearch("?workspaceTab=files")).toBe("files");
     expect(resolveLeftDrawerFromSearch("?workspaceTab=history")).toBe("history");
     expect(resolveLeftDrawerFromSearch("?workspaceTab=sourceControl")).toBe("sourceControl");
+    expect(resolveLeftDrawerFromSearch("?workspaceTab=workspaces")).toBe("workspaces");
     expect(resolveLeftDrawerFromSearch("?workspaceTab=unknown")).toBeNull();
     expect(resolveLeftDrawerFromSearch("?panel=code")).toBeNull();
   });

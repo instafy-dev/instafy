@@ -8,6 +8,10 @@ import {
   parseNativeAuthCallbackUrl,
 } from "../auth/nativeAuth";
 import { writePendingProjectSwitch } from "../screens/pendingProjectSwitch";
+import {
+  parseSharedBrowserResumeTarget,
+  SHARED_BROWSER_RUNTIME_PARAM,
+} from "../screens/studio/components/sharedBrowserResume";
 
 type RouterLike = {
   navigate: (to: string, options?: { replace?: boolean }) => unknown;
@@ -69,6 +73,7 @@ export function buildNativeStudioDeepLink(params: {
   projectId: string;
   conversationControllerId?: string | null;
   panel?: string | null;
+  browserRuntimeId?: string | null;
 }): string {
   const search = new URLSearchParams();
   search.set("projectId", params.projectId);
@@ -77,6 +82,17 @@ export function buildNativeStudioDeepLink(params: {
   }
   if (params.panel) {
     search.set("panel", params.panel);
+  }
+  if (params.browserRuntimeId) {
+    const candidate = new URLSearchParams(search);
+    candidate.set(SHARED_BROWSER_RUNTIME_PARAM, params.browserRuntimeId);
+    const target = parseSharedBrowserResumeTarget(candidate.toString());
+    if (target) {
+      search.delete("conversationControllerId");
+      search.set("projectId", target.projectId);
+      search.set("panel", "chat");
+      search.set(SHARED_BROWSER_RUNTIME_PARAM, target.runtimeId);
+    }
   }
   return `instafy://studio?${search.toString()}`;
 }
@@ -110,6 +126,15 @@ export function resolveNativeAppNavigationTarget(rawUrl: string): string | null 
 
   if (routePath === "/auth") {
     return null;
+  }
+
+  if (routePath === "/studio" && parsed.searchParams.has(SHARED_BROWSER_RUNTIME_PARAM)) {
+    const target = parseSharedBrowserResumeTarget(parsed.search);
+    parsed.searchParams.delete(SHARED_BROWSER_RUNTIME_PARAM);
+    if (target) {
+      parsed.searchParams.set("projectId", target.projectId);
+      parsed.searchParams.set(SHARED_BROWSER_RUNTIME_PARAM, target.runtimeId);
+    }
   }
 
   return `${routePath}${parsed.search}${parsed.hash}`;

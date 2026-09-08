@@ -10,6 +10,7 @@
 - Focused smoke subset: `pnpm test:e2e:smoke`
 - Controller-focused subset: `pnpm test:e2e:controller`
 - Benchmarks only: `pnpm test:e2e:bench`
+- Large-chat navigation/cache benchmark: `pnpm --filter @instafy/frontend test:e2e:conversation-perf`
 - Headed: `pnpm test:e2e:headed`
 - Target a failing spec: `pnpm -C packages/frontend test:e2e -- tests/playwright/app.spec.ts -g "renders landing hero content"`
 
@@ -17,6 +18,16 @@ The default `pnpm test:e2e` loop is intentionally product-focused:
 - it covers the regular Playwright regression surface
 - it does not load the opt-in benchmark specs under `tests/playwright/bench`
 - benchmark coverage stays available through `pnpm test:e2e:bench`, which sets `PLAYWRIGHT_RUN_BENCH=1`
+
+The separate [conversation performance lane](../packages/frontend/tests/playwright/conversation-perf/README.md)
+builds the production history/transcript components against synthetic HTTP. It needs no live
+account, controller, database or compute. It measures repeated warm switches, cancellation and
+failure recovery, cache eviction and post-GC Chromium heap across a navigation soak. Its fixture
+org/space/tab controls exercise conversation scopes; full Studio navigation and access checks
+remain the responsibility of the application suites. Install Playwright Chromium first, or set
+`PLAYWRIGHT_BROWSER_UI_CHANNEL=chrome` to select an installed Chrome explicitly. Measurements are
+written under `packages/frontend/test-results/conversation-perf/`; serialized cache payload and
+actual V8 heap are reported separately.
 
 Public Build keeps its existing job names:
 
@@ -156,10 +167,14 @@ attempt per test: skips, expected failures, retries, filtered subsets, and zero
 tests fail the lane. Failure traces and a machine-readable result are retained
 under `packages/frontend/test-results/browser-ci/<lane>`.
 
+The 39-case serial `browser-ui` lane has a six-minute total budget for hosted
+runners; each test still has a 30-second limit, with no retries or skips allowed.
+
 | Lane | What it proves | Local requirements |
 | --- | --- | --- |
-| `personal` | Real Electron profile/cookie persistence across restarts and projects, per-user isolation, clear, kill switch, and renderer ownership revocation (4 tests) | Installed workspace dependencies and compiled Desktop fixture; no Docker or database |
-| `browser-ui` | Real Chromium rendering of browser chrome, cursor overlay, approval layouts, rendered-frame checks, and mobile drawer safe-area geometry (13 tests) | Installed workspace dependencies and Playwright Chromium; no Docker, database, or controller |
+| `personal` | Real Electron profile/cookie persistence across restarts and projects, per-user isolation, clear, kill switch, renderer ownership revocation, and native form-owner/type descriptors (4 tests) | Installed workspace dependencies and compiled Desktop fixture; no Docker or database |
+| `browser-ui` | Real Chromium rendering of browser chrome, cursor overlay, routine approval, expansion/takeover sequencing, rendered-frame checks, full Shared modal safe-area/keyboard geometry, focused-editable reveal, phone session/resume/save-status controls, retained-editor Unicode input isolation, mobile drawer safe-area/focused-search geometry and Escape drill-in dismissal, Studio history/scroll navigation, and focused-chat header/overview dock/picker navigation with simulated keyboard geometry and a synthetic retained input (at least 39 tests) | Installed workspace dependencies and Playwright Chromium; no Docker, database, or controller |
+| Shared co-browsing tool fixture | Production browser tools in real Chromium: one routine grant across two sites, highlighted manual fields, fresh continuation observation, and local action timings | Installed workspace dependencies and locked Playwright Chromium; no Docker, database, controller, model or real accounts |
 | Shared profile fixture | Real Chromium HttpOnly/JS cookies, localStorage and server cookie echo; production runtime save/restore; controller authorization, encrypted database storage, stale-writer rejection, and clear/no-resurrection | Disposable Linux, Xvfb, Chromium, Go, Rust, and fully migrated loopback Postgres |
 | Shared Studio fixture | Real signed-in application, authorized project creation, Shared launch, CDP pixels/input, periodic snapshot, acknowledged provider stop, replacement login restoration, and UI clear | Disposable Linux, Xvfb, Chromium, Go, Rust, `x11-utils`, `sqlite3`, `psql`, and fresh local Supabase including GoTrue |
 
@@ -185,6 +200,93 @@ be used explicitly with
 `PLAYWRIGHT_BROWSER_UI_CHANNEL=chrome pnpm test:browser:ci browser-ui`.
 That verifies the installed channel, not the lockfile's Chromium revision;
 CI always installs and uses the locked Playwright browser.
+
+The two Shared session/status cases mount the complete production modal at
+390×844 and 844×390 with touch input and safe-area insets. They verify bounded
+scrolling, readable save-status guidance, 44px touch controls, token-free resume
+links, and exact session selection. Controller/status responses, transport and
+clipboard delivery are simulated; these cases do not prove a live cross-device
+runtime, native clipboard integration, or login recovery.
+
+The retained-editor input case uses the production CDP/WebRTC input binding and
+real Chromium pointer/keyboard events. It checks that Unicode text aimed at the
+remote canvas cannot edit a previously focused local draft, and that disabled
+input authority forwards no text. Its message sink is simulated; it does not
+prove every operating-system IME or noncancelable composition event sequence.
+
+The two expanded Shared mobile safe-area cases also simulate a visual-only
+keyboard shrink while keeping the layout viewport unchanged. They check
+visible height, viewport panning, restoration, and stable focused controls
+without remounting the browser surface. This is layout coverage, not proof that
+a physical iOS/Android keyboard opened or that a live remote field scrolled.
+
+The focused-editable case extracts the exact fixed reveal script from the
+origin and executes it after a real Chromium viewport shrink. It verifies
+clipped editable fields, open shadow roots, nested scrollers, and non-editable
+or already-visible no-ops without reading field values. This script-level case
+does not substitute for the origin's resize-acknowledgement and control checks.
+
+The mobile-sidebar keyboard case mounts the production drawer, drill-in and
+workspace switcher with inert teams/spaces. It simulates visual-only keyboard
+shrink and panning, including a search that filters away every following row,
+and checks centered focus, retained text, restoration and unchanged backdrop
+safe areas. Native iOS accessory controls are not part of Chromium's viewport:
+physical verification must compare the field with both the keyboard and any
+separate accessory toolbar, then verify normal clear/Back/close cleanup.
+
+Studio navigation cases combine the production tab provider, routing hook, destination API,
+chat scroll orchestration and mobile sidebar history with real Router/browser entries. They
+check exact chat and job IDs, repeated visits with different reading positions, rapid navigation,
+Home-style direct links, unloaded conversations and abandoned cross-space hydration. Separate
+cases exercise URL-driven Settings sections and delayed panel scroll restoration, plus the
+native-shell Back/Forward controls with 44px targets. Authentication, conversation/project data
+and transcript rows are synthetic. These are not signed-in controller or physical-device proofs;
+Android system Back, native keyboard ordering, iPhone Safari/WKWebView and the packaged Electron
+shell still need explicit smoke checks against the candidate assets.
+
+The three mobile navigation viewport cases use the production header, overview-only dock policy,
+destination bar and compact picker. They verify no extra bottom row in a conversation, stable
+Home/Chats/Spaces overview destinations, direct-entry Chats fallback, exact Back/Forward visits,
+remote-only space selection without legacy store mutation, and retained input/picker geometry
+across simulated keyboard transitions. Project access/data and the retained draft are inert
+fixture boundaries; these cases do not replace full Studio/native keyboard verification.
+
+Origin protocol unit tests also preserve fractional pointer coordinates, wheel
+deltas, and device pixel ratios with the runtime's actual JSON parser features.
+They retain strict field/type checks and the existing finite-value and viewport
+bounds; successful integer-coordinate clicks alone are insufficient coverage.
+
+The required **Browser UI rendering** job also runs the real co-browsing tool
+fixture before the UI lane. Run it locally with:
+
+```bash
+node --test scripts/shared-browser-cobrowsing-e2e.test.mjs
+node scripts/shared-browser-cobrowsing-e2e.mjs
+```
+
+The fixture creates two loopback websites and a disposable browser profile. It
+executes the production approval/tool scripts, grants routine browsing once,
+checks real field outlines at desktop and phone widths, waits for tool exit,
+enters inert values manually and starts a fresh observation. It checks that the
+password-style fixture value does not enter tool output or action telemetry.
+It also checks that ordinary non-submitting form buttons use routine approval,
+while genuine submission buttons wait for an explicit one-shot decision before
+the inert form's submission handler runs.
+Only fixed-schema results, timing summaries and inert-page screenshots are kept
+under `packages/frontend/test-results/browser-ci/shared-cobrowsing`; the profile
+and raw session files are removed.
+
+The accompanying UI tests use production React controls with a synthetic native
+host to prove Take over waits for confirmed quiescence, keeps manual state across
+Expand/Collapse, and sends an explicit Done continuation. Rust/native/hook tests
+separately cover shutdown, stale ownership and exact dispatch. These are layered
+proofs, not a complete live-model, signed-in Studio handoff or deployment proof.
+
+The tool fixture reports five-sample min/median/max wall times for snapshot and
+click at two page sizes. These include process startup, CDP attachment and
+settling; they are local responsiveness observations, not pixel-transport latency
+or a release performance threshold. Hidden Shared action polling and overlapping
+requests have separate regression coverage.
 
 The Shared fixture command on a disposable Linux machine is:
 

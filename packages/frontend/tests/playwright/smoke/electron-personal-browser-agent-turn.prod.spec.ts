@@ -137,7 +137,7 @@ const EXPECTED_PACKAGED_PERSONAL_BROWSER_CAPABILITY_CONTRACT = {
       name: "instafy_personal_browser",
       required: true,
       supportsParallelToolCalls: false,
-      enabledTools: ["status", "snapshot", "navigate", "click", "type", "press", "scroll"],
+      enabledTools: ["request_human_input", "status", "snapshot", "navigate", "click", "type", "press", "scroll"],
     },
   ],
   projectMcpServersAllowed: false,
