@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OriginApplyOptions } from "../../services/runtimeController/workspaceApply";
+import type { ControllerRequestContext } from "../../services/runtimeController/core";
 import { uploadConversationImageAttachments } from "../conversationSubmitHelpers";
 
 const { applyChanges } = vi.hoisted(() => ({ applyChanges: vi.fn() }));
@@ -13,6 +14,24 @@ const ORIGIN = "upload-test-origin";
 const UPLOAD_FAILURE = "origin apply failed (403): image rejected";
 const UNRELATED_PATH = "chat-upload-other-draft.png";
 const UNRELATED_BYTES = new Uint8Array([90, 91, 92]);
+type ApplyTarget = {
+  projectId: string;
+  originId: string;
+  runtimeId: string | null;
+  requestContext: ControllerRequestContext;
+};
+type PinnedApplyOptions = OriginApplyOptions & { target?: ApplyTarget };
+const TARGET: ApplyTarget = {
+  projectId: PROJECT,
+  originId: ORIGIN,
+  runtimeId: RUNTIME,
+  requestContext: {
+    baseUrl: "https://controller-a.invalid",
+    accessToken: "inert-upload-test-token-a",
+    credentialSource: "fixed",
+    generation: 7,
+  },
+};
 
 function image(name: string, bytes: number[]) {
   return new File([new Uint8Array(bytes)], name, { type: "image/png" });
@@ -38,16 +57,16 @@ function originFilesystem(options: {
       files.set(file.path, new Uint8Array(file.bytes ?? []));
       if (attemptedWrites.length === options.failWrite) {
         if (options.throwWrite) throw options.throwWrite;
-        return { ok: false, error: UPLOAD_FAILURE, originId: ORIGIN, runtimeId: RUNTIME };
+        return { ok: false, error: UPLOAD_FAILURE, target: TARGET };
       }
     }
     for (const path of params.deletes ?? []) {
       attemptedDeletes.push(path);
       if (options.failDelete instanceof Error) throw options.failDelete;
-      if (options.failDelete) return { ok: false, error: options.failDelete, originId: ORIGIN, runtimeId: RUNTIME };
+      if (options.failDelete) return { ok: false, error: options.failDelete, target: TARGET };
       files.delete(path);
     }
-    return { ok: true, originId: ORIGIN, runtimeId: RUNTIME };
+    return { ok: true, target: TARGET };
   });
   return { files, attemptedWrites, attemptedDeletes };
 }
@@ -56,6 +75,27 @@ beforeEach(() => vi.clearAllMocks());
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("conversation image upload rollback", () => {
+  it("rolls back a failed first write when its resolved target says the origin may have persisted it", async () => {
+    const storage = originFilesystem({ failWrite: 1 });
+    await expect(uploadConversationImageAttachments({
+      projectId: PROJECT, runtimeId: RUNTIME, imageFiles: [image("first.png", [1, 2])],
+    })).rejects.toThrow(UPLOAD_FAILURE);
+    expect(storage.attemptedWrites).toHaveLength(1);
+    expect(storage.attemptedDeletes).toEqual(storage.attemptedWrites);
+    expect(storage.files).toEqual(new Map([[UNRELATED_PATH, UNRELATED_BYTES]]));
+    expect(applyChanges.mock.calls[1]?.[0]).toMatchObject({ target: TARGET });
+  });
+
+  it("does not issue deletes when preflight fails before a destination or write was reached", async () => {
+    const failure = "request origin access token failed (403): access denied";
+    applyChanges.mockResolvedValue({ ok: false, error: failure });
+    await expect(uploadConversationImageAttachments({
+      projectId: PROJECT, runtimeId: RUNTIME, imageFiles: [image("first.png", [1, 2])],
+    })).rejects.toThrow(failure);
+    expect(applyChanges).toHaveBeenCalledOnce();
+    expect(applyChanges.mock.calls[0]?.[0].deletes ?? []).toEqual([]);
+  });
+
   it("removes both attempted writes after the second image fails, without reading the third or touching another draft", async () => {
     const storage = originFilesystem({ failWrite: 2 });
     const selected = [image("first.png", [1, 2]), image("second.png", [3, 4]), image("third.png", [5, 6])];
@@ -155,5 +195,66 @@ describe("conversation image upload rollback", () => {
     expect(new Set(storage.files.keys())).toEqual(new Set([UNRELATED_PATH, ...attachments.map(attachment => attachment.workspacePath)]));
     expect(storage.files.get(attachments[0]!.workspacePath)).toEqual(new Uint8Array([1, 2]));
     expect(storage.files.get(attachments[1]!.workspacePath)).toEqual(new Uint8Array([3, 4]));
+  });
+
+  it.each([
+    ["the first upload needs a retry", 1],
+    ["a later upload needs a retry", 2],
+  ])("pins retries, subsequent images and rollback to the resolved origin and auth context when %s", async (_label, retryByte) => {
+    vi.useFakeTimers();
+    const replacementTarget: ApplyTarget = {
+      projectId: PROJECT,
+      originId: "replacement-origin",
+      runtimeId: "replacement-runtime",
+      requestContext: {
+        baseUrl: "https://controller-b.invalid",
+        accessToken: "inert-upload-test-token-b",
+        credentialSource: "fixed",
+        generation: 8,
+      },
+    };
+    let currentDefault = TARGET;
+    const originalFiles = new Map<string, Uint8Array>([[UNRELATED_PATH, UNRELATED_BYTES]]);
+    const replacementFiles = new Map<string, Uint8Array>([[UNRELATED_PATH, UNRELATED_BYTES]]);
+    const attemptsByPath = new Map<string, number>();
+    const calls: PinnedApplyOptions[] = [];
+    applyChanges.mockImplementation(async (params: PinnedApplyOptions) => {
+      calls.push(params);
+      const target = params.target ?? currentDefault;
+      const files = target.originId === ORIGIN ? originalFiles : replacementFiles;
+      // Simulate a user/controller/default-origin change immediately after
+      // resolution. A new implicit resolution would now use a different scope.
+      currentDefault = replacementTarget;
+      for (const file of params.files) {
+        const bytes = new Uint8Array(file.bytes ?? []);
+        const attempt = (attemptsByPath.get(file.path) ?? 0) + 1;
+        attemptsByPath.set(file.path, attempt);
+        files.set(file.path, bytes);
+        if (bytes[0] === retryByte && attempt === 1) {
+          return { ok: false, error: "origin apply failed (503): try again", target };
+        }
+        if (bytes[0] === 3) return { ok: false, error: UPLOAD_FAILURE, target };
+      }
+      for (const path of params.deletes ?? []) files.delete(path);
+      return { ok: true, target };
+    });
+    const pending = uploadConversationImageAttachments({
+      projectId: PROJECT, runtimeId: RUNTIME,
+      imageFiles: [image("first.png", [1]), image("second.png", [2]), image("third.png", [3])],
+    }).then(() => null, (error: unknown) => error);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await pending).toMatchObject({ message: UPLOAD_FAILURE });
+
+    expect(calls.filter(call => call.files.length > 0)).toHaveLength(4);
+    expect(calls[0]!.target).toBeUndefined();
+    for (const call of calls.slice(1)) {
+      expect(call.target).toEqual(TARGET);
+      expect(call.projectId).toBe(PROJECT);
+    }
+    expect(calls.some(call => (call.deletes?.length ?? 0) > 0)).toBe(true);
+    expect(originalFiles).toEqual(new Map([[UNRELATED_PATH, UNRELATED_BYTES]]));
+    expect(replacementFiles).toEqual(new Map([[UNRELATED_PATH, UNRELATED_BYTES]]));
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
