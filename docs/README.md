@@ -20,6 +20,7 @@ These docs reflect the current product scope: a chat-first filesystem workspace 
 - Credits and billing: `docs/Credits-Billing.md`
 - Local development: `docs/Local-Dev.md`
 - Testing: `docs/Testing.md`
+- Reversible CI runner selection and isolation: [CI runners](CI-Runners.md)
 - Camera operator guide: `docs/Camera-Operator.md`
 - Voice operator guide: `docs/Voice-Operator.md`
 - Voice TODO: `docs/Voice-TODO.md`

@@ -47,9 +47,16 @@ Conflicting immutable bytes, malformed responses and registry errors fail immedi
 does not prove that the upload failed. Inspect the exact published version before recovery and
 never republish an immutable version just because its receipt is missing.
 
-Pull-request checks run on hosted runners with read-only repository access and no secrets.
+Pull-request checks use the [CI runner trust gates](CI-Runners.md), with read-only repository
+access and no secrets. The default, all forks, and all PRs after public visibility use hosted runners.
 Publishing never runs from `pull_request` or `pull_request_target`. Every external Action is pinned
 to an immutable commit.
+
+`pack` and `publish` always use GitHub-hosted runners, even when other Linux jobs are self-hosted.
+[npm trusted publishing](https://docs.npmjs.com/trusted-publishers/) does not support self-hosted
+GitHub Actions runners, and [npm provenance](https://docs.npmjs.com/generating-provenance-statements/)
+requires cloud-hosted builds. Do not replace OIDC with a static token or move tarball construction
+off hosted runners to work around those requirements.
 
 The source repository is currently internal. npm trusted publishing can still replace static npm
 tokens, but npm will not generate public provenance attestations until the source repository is

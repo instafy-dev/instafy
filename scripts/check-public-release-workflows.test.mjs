@@ -134,6 +134,12 @@ test("Changesets separates pull-request, version, pack, and npm publish authorit
   const pack = jobSection(source, "pack", "publish");
   const publish = jobSection(source, "publish");
 
+  // Preserve both the cloud build provenance and the npm trusted-publisher boundary.
+  assert.match(pack, /^    runs-on: ubuntu-24\.04$/mu);
+  assert.match(publish, /^    runs-on: ubuntu-24\.04$/mu);
+  assert.doesNotMatch(pack, /CI_RUNNER_MODE/u);
+  assert.doesNotMatch(publish, /CI_RUNNER_MODE/u);
+
   assert.doesNotMatch(source, /pull_request_target/u);
   const pullRequestTrigger = source.slice(
     source.indexOf("  pull_request:\n"),
@@ -267,7 +273,9 @@ test("runtime images publish only exact protected main from a fixed namespace", 
   assert.doesNotMatch(source, /setup-qemu/u);
   assert.doesNotMatch(source, /binfmt/u);
   assert.match(publish, /- release-approval/u);
-  assert.match(publish, /runs-on: \$\{\{ matrix\.runner \}\}/u);
+  assert.match(publish, /runs-on: >-/u);
+  assert.match(publish, /format\('\["\{0\}"\]', matrix\.runner\)/u);
+  assert.match(publish, /CI_LINUX_X64_SELF_HOSTED == 'true'/u);
   assert.match(publish, /runner: ubuntu-24\.04\n/u);
   assert.match(publish, /runner: ubuntu-24\.04-arm\n/u);
   assert.match(publish, /trivy_asset: Linux-64bit/u);

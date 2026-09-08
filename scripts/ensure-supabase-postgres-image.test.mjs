@@ -57,7 +57,7 @@ test("the build workflow ensures the image before running migrations", () => {
   // bump invalidates the cached tarball instead of loading the old image.
   assert.match(
     workflow,
-    /supabase-postgres-image-\$\{\{ hashFiles\('scripts\/test-supabase-migrations-empty-db\.mjs'\) \}\}/u,
+    /supabase-postgres-image-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-\$\{\{ hashFiles\('scripts\/test-supabase-migrations-empty-db\.mjs'\) \}\}/u,
   );
 });
 

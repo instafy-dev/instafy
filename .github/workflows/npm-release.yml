@@ -20,7 +20,15 @@ jobs:
   pull-request-policy:
     name: Require reviewed Changeset release intent
     if: ${{ github.event_name == 'pull_request' }}
-    runs-on: ubuntu-24.04
+    runs-on: >-
+      ${{ fromJSON(
+        vars.CI_RUNNER_MODE == 'self-hosted' && (
+          (github.ref == 'refs/heads/main' &&
+           (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) ||
+          (vars.CI_TRUSTED_PR_SELF_HOSTED == 'true' && github.event.repository.private == true &&
+           github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+        ) &&
+        '["self-hosted","Linux","ARM64","instafy-ci-control"]' || '["ubuntu-24.04"]') }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -68,7 +76,13 @@ jobs:
   select:
     name: Select version or publish mode
     if: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
-    runs-on: ubuntu-24.04
+    runs-on: >-
+      ${{ fromJSON(
+        vars.CI_RUNNER_MODE == 'self-hosted' && (
+          (github.ref == 'refs/heads/main' &&
+           (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))
+        ) &&
+        '["self-hosted","Linux","ARM64","instafy-ci-control"]' || '["ubuntu-24.04"]') }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -114,7 +128,13 @@ jobs:
     name: Create or update the signed version pull request
     needs: select
     if: ${{ needs.select.outputs.mode == 'version' }}
-    runs-on: ubuntu-24.04
+    runs-on: >-
+      ${{ fromJSON(
+        vars.CI_RUNNER_MODE == 'self-hosted' && (
+          (github.ref == 'refs/heads/main' &&
+           (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))
+        ) &&
+        '["self-hosted","Linux","ARM64","instafy-ci-control"]' || '["ubuntu-24.04"]') }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -160,6 +180,7 @@ jobs:
           push-with-git-cli: false
 
   pack:
+    # npm provenance requires cloud-hosted builds as well as hosted publication.
     name: Test and pack exact npm artifacts
     needs: select
     if: ${{ needs.select.outputs.mode == 'publish' }}
@@ -234,6 +255,7 @@ jobs:
           retention-days: 30
 
   publish:
+    # npm trusted publishing does not support self-hosted GitHub Actions runners.
     name: Publish the already-verified npm artifacts
     needs: pack
     runs-on: ubuntu-24.04
