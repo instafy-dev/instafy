@@ -29,7 +29,6 @@ import { StudioPopover } from "../../../components/aria/StudioPopover";
 import {
   DARK_PANEL_BORDER_CLASS,
   DARK_PANEL_SHADOW_CLASS,
-  DARK_PANEL_SOFT_BG_CLASS,
   DARK_RAISED_CONTROL_BG_CLASS,
   DARK_RAISED_CONTROL_CLASS,
 } from "../../../theme/darkSurfaces";
