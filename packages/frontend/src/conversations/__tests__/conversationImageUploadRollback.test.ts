@@ -197,6 +197,45 @@ describe("conversation image upload rollback", () => {
     expect(storage.files.get(attachments[1]!.workspacePath)).toEqual(new Uint8Array([3, 4]));
   });
 
+  it("retries cleanup while the origin finishes the preceding write", async () => {
+    vi.useFakeTimers();
+    const storage = originFilesystem({ failWrite: 2 });
+    const apply = applyChanges.getMockImplementation()!;
+    let busy = true;
+    applyChanges.mockImplementation(async (params: OriginApplyOptions) => {
+      if (params.deletes?.length && busy) {
+        busy = false;
+        return { ok: false, error: "origin apply failed (409): workspace is already applying changes", target: TARGET };
+      }
+      return apply(params);
+    });
+    const pending = uploadConversationImageAttachments({
+      projectId: PROJECT, runtimeId: RUNTIME,
+      imageFiles: [image("first.png", [1]), image("second.png", [2])],
+    }).catch((error: Error) => error);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(await pending).toMatchObject({ message: UPLOAD_FAILURE });
+    expect(storage.files).toEqual(new Map([[UNRELATED_PATH, UNRELATED_BYTES]]));
+    expect(applyChanges.mock.calls.filter(([params]) => params.deletes?.length)).toHaveLength(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("stops cleanup retries at their deadline and reports leftover files", async () => {
+    vi.useFakeTimers();
+    const storage = originFilesystem({ failWrite: 2, failDelete: "origin apply failed (503): unavailable" });
+    const pending = uploadConversationImageAttachments({
+      projectId: PROJECT, runtimeId: RUNTIME,
+      imageFiles: [image("first.png", [1]), image("second.png", [2])],
+    }).catch((error: Error) => error);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(await pending).toMatchObject({ message: expect.stringContaining("Cleanup could not finish") });
+    expect(storage.files.size).toBe(3);
+    const callsAtDeadline = applyChanges.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(applyChanges.mock.calls).toHaveLength(callsAtDeadline);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it.each([
     ["the first upload needs a retry", 1],
     ["a later upload needs a retry", 2],

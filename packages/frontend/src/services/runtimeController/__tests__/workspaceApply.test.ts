@@ -2,16 +2,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { applyWorkspaceChangesViaOrigin } from "../workspaceApply";
 import { fetchOriginSummary, requestOriginAccessToken } from "../origins";
 import { acquireWorkspaceLease, releaseWorkspaceLease } from "../workspaceLeases";
+import { resolveControllerRequestContext } from "../core";
 
-vi.mock("../core", () => ({ runtimeControllerEnabled: true }));
+vi.mock("../core", () => ({ runtimeControllerEnabled: true, resolveControllerRequestContext: vi.fn() }));
 vi.mock("../origins", () => ({ fetchOriginSummary: vi.fn(), requestOriginAccessToken: vi.fn() }));
 vi.mock("../workspaceLeases", () => ({ acquireWorkspaceLease: vi.fn(), releaseWorkspaceLease: vi.fn() }));
 const fetchMock = vi.fn();
 const params = { projectId: "project", runtimeId: "runtime", files: [{ path: "image.png", bytes: new Uint8Array([1, 2, 3]) }] };
+const requestContext = { baseUrl: "http://controller.invalid", accessToken: "inert-session", credentialSource: "ambient" as const, generation: 1 };
 
 beforeEach(() => {
   vi.clearAllMocks();
   vi.stubGlobal("fetch", fetchMock);
+  vi.mocked(resolveControllerRequestContext).mockResolvedValue(requestContext);
   vi.mocked(fetchOriginSummary).mockResolvedValue({ originId: "default-origin", runtimeId: "other-runtime", endpoint: "http://default.invalid", mode: "hosted", presence: null });
   vi.mocked(acquireWorkspaceLease).mockResolvedValue({ leaseId: "lease" } as Awaited<ReturnType<typeof acquireWorkspaceLease>>);
   vi.mocked(releaseWorkspaceLease).mockResolvedValue(undefined as never);
@@ -50,6 +53,76 @@ describe("workspace origin writes", () => {
     const pending = applyWorkspaceChangesViaOrigin(params);
     await vi.advanceTimersByTimeAsync(30_000);
     expect(await pending).toMatchObject({ ok: false, error: "origin apply timed out after 30000ms" });
+    expect(releaseWorkspaceLease).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("keeps the actual target after a write fails and pins rollback to its controller and credentials", async () => {
+    fetchMock.mockRejectedValueOnce(new Error("connection closed after write"));
+    const failure = await applyWorkspaceChangesViaOrigin(params);
+    expect(failure).toMatchObject({ ok: false, target: { projectId: "project", originId: "runtime-origin", runtimeId: "runtime", requestContext } });
+    vi.clearAllMocks();
+    const rollback = await applyWorkspaceChangesViaOrigin({ projectId: "project", files: [], deletes: ["image.png"], target: failure.target, runtimeId: "replacement-runtime" });
+    expect(rollback.ok).toBe(true);
+    expect(resolveControllerRequestContext).not.toHaveBeenCalled();
+    expect(fetchOriginSummary).not.toHaveBeenCalled();
+    expect(acquireWorkspaceLease).toHaveBeenCalledWith(expect.objectContaining({ runtimeId: "runtime", requestContext }));
+    expect(requestOriginAccessToken).toHaveBeenCalledWith(expect.objectContaining({ originId: "runtime-origin", preferRuntime: "runtime", requestContext }));
+    expect(releaseWorkspaceLease).toHaveBeenCalledWith(expect.objectContaining({ runtimeId: "runtime", requestContext }));
+  });
+  it("rejects a pinned target from another project without network calls", async () => {
+    const result = await applyWorkspaceChangesViaOrigin({ ...params, target: { projectId: "another-project", originId: "origin", runtimeId: "runtime", requestContext } });
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining("another project") });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(acquireWorkspaceLease).not.toHaveBeenCalled();
+  });
+  it("fails closed if the controller resolves a different origin for a pinned target", async () => {
+    const result = await applyWorkspaceChangesViaOrigin({ ...params, target: { projectId: "project", originId: "original-origin", runtimeId: "runtime", requestContext } });
+    expect(result).toMatchObject({ ok: false, error: "origin apply target changed" });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(releaseWorkspaceLease).toHaveBeenCalledOnce();
+  });
+  it("bounds stalled auth resolution and never starts a late request", async () => {
+    vi.useFakeTimers();
+    let resolveAuth!: (value: typeof requestContext) => void;
+    vi.mocked(resolveControllerRequestContext).mockImplementationOnce(() => new Promise(resolve => { resolveAuth = resolve; }));
+    const pending = applyWorkspaceChangesViaOrigin({ ...params, timeoutMs: 500 });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(await pending).toMatchObject({ ok: false, error: "origin apply timed out after 500ms" });
+    resolveAuth(requestContext);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchOriginSummary).not.toHaveBeenCalled();
+    expect(acquireWorkspaceLease).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("bounds stalled preflight and does not upload when it eventually resolves", async () => {
+    vi.useFakeTimers();
+    let resolveToken!: (value: Awaited<ReturnType<typeof requestOriginAccessToken>>) => void;
+    vi.mocked(requestOriginAccessToken).mockImplementationOnce(() => new Promise(resolve => { resolveToken = resolve; }));
+    const pending = applyWorkspaceChangesViaOrigin({ ...params, timeoutMs: 500 });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(await pending).toMatchObject({ ok: false, error: "origin apply timed out after 500ms" });
+    resolveToken({ originId: "runtime-origin", endpoint: "http://origin.invalid", mode: "hosted", token: "inert", expiresIn: 60, scopes: ["fs.write"] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(releaseWorkspaceLease).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("bounds stalled response bodies and lease release while retaining the attempted target", async () => {
+    vi.useFakeTimers();
+    fetchMock.mockResolvedValueOnce({ ok: true, headers: new Headers({ "content-type": "application/json" }), json: () => new Promise(() => {}) });
+    vi.mocked(releaseWorkspaceLease).mockImplementationOnce(() => new Promise(() => {}));
+    const pending = applyWorkspaceChangesViaOrigin({ ...params, timeoutMs: 500 });
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(await pending).toMatchObject({ ok: false, error: "origin apply timed out after 500ms", target: { originId: "runtime-origin" } });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it("preserves a permanent rejection when its error body stalls", async () => {
+    vi.useFakeTimers();
+    fetchMock.mockResolvedValueOnce({ ok: false, status: 403, text: () => new Promise(() => {}) });
+    const pending = applyWorkspaceChangesViaOrigin({ ...params, timeoutMs: 500 });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(await pending).toMatchObject({ ok: false, error: "origin apply failed (403): error response body unavailable", target: { originId: "runtime-origin" } });
     expect(releaseWorkspaceLease).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
   });

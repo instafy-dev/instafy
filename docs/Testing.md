@@ -17,6 +17,16 @@ then the remaining images; preserve the draft and keyboard focus. Preview an ima
 the keyboard: Tab stays in the dialog, and Escape returns to the same thumbnail. During
 an upload, previews remain available but removal is disabled until the send settles.
 
+For partial-batch recovery, let the first image upload and reject the second at the
+origin. Verify that both attempted upload paths are absent after cleanup and that an
+unrelated workspace file is unchanged. Retry the retained draft: only the successful
+batch's returned attachment paths should remain. Cleanup uses exact generated paths
+and the original controller, authorization, runtime and origin, even if the user
+switches workspaces during the upload. It retries briefly while an origin transaction
+is busy and reports when cleanup cannot finish. This is best-effort compensation:
+an unavailable origin, revoked access, or process termination can leave files behind;
+browser cancellation cannot stop an already accepted server write.
+
 For an actual upload, use a local controller and runtime-bound filesystem origin;
 mocked picker or queue callbacks do not prove storage or agent dispatch. Verify the
 stored image bytes and message metadata, including when the project's default origin

@@ -1,5 +1,5 @@
 import { zipSync, strToU8 } from "fflate";
-import { runtimeControllerEnabled } from "./core";
+import { resolveControllerRequestContext, runtimeControllerEnabled, type ControllerRequestContext } from "./core";
 import { fetchOriginSummary, requestOriginAccessToken } from "./origins";
 import {
   acquireWorkspaceLease,
@@ -26,6 +26,18 @@ export interface OriginApplyOptions {
   runtimeId?: string | null;
   leaseSeconds?: number;
   retainLease?: boolean;
+  /** Keep a related batch on the exact controller, credentials and origin. */
+  target?: OriginApplyTarget;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+/** Ephemeral request state. Never store this in attachment/message metadata. */
+export interface OriginApplyTarget {
+  readonly projectId: string;
+  readonly originId: string;
+  readonly runtimeId: string | null;
+  readonly requestContext: ControllerRequestContext;
 }
 
 export interface OriginApplyResult {
@@ -35,6 +47,7 @@ export interface OriginApplyResult {
   endpoint?: string;
   leaseId?: string | null;
   error?: string;
+  target?: OriginApplyTarget;
 }
 
 export async function applyWorkspaceChangesViaOrigin(
@@ -53,26 +66,50 @@ export async function applyWorkspaceChangesViaOrigin(
   if (files.length === 0 && deletes.length === 0) {
     return { ok: false, error: "no changes supplied" };
   }
+  if (params.target && params.target.projectId !== projectId) {
+    return { ok: false, error: "origin apply target belongs to another project" };
+  }
 
-  let runtimePreference = params.preferRuntime ?? params.runtimeId ?? null;
-  let runtimeId = params.runtimeId ?? runtimePreference ?? null;
+  let runtimePreference = params.target ? params.target.runtimeId : params.preferRuntime ?? params.runtimeId ?? null;
+  let runtimeId = params.target ? params.target.runtimeId : params.runtimeId ?? runtimePreference ?? null;
   const retainLease = params.retainLease === true;
   let leaseId = params.leaseId ?? null;
   let leaseIdForRelease: string | null = null;
   let acquiredLease: WorkspaceLease | null = null;
-  let applyTimeout: ReturnType<typeof setTimeout> | null = null;
+  let target = params.target;
+  let tokenFailureStatus: number | null = null;
+  let requestContext = target?.requestContext;
+  const applyAbort = new AbortController();
+  const forwardAbort = () => applyAbort.abort(params.signal?.reason);
+  params.signal?.addEventListener("abort", forwardAbort, { once: true });
+  if (params.signal?.aborted) forwardAbort();
+  const timeoutMs = Number.isFinite(params.timeoutMs)
+    ? Math.max(1, Math.min(params.timeoutMs!, 30_000))
+    : 30_000;
   let applyTimedOut = false;
+  const applyTimeout = setTimeout(() => {
+    applyTimedOut = true;
+    applyAbort.abort();
+  }, timeoutMs);
+  const { signal } = applyAbort;
 
   try {
-    const origin = await fetchOriginSummary({
+    requestContext ??= await untilAborted(resolveControllerRequestContext(params.accessToken ?? null), signal);
+    signal.throwIfAborted();
+    // Pinned writes must not rediscover a replacement default after an org or
+    // runtime switch. Use the original authorization context for every stage.
+    const origin = target ? null : await untilAborted(fetchOriginSummary({
       projectId,
       protocol: "http",
       accessToken: params.accessToken ?? null,
-    });
-    if (!origin && !runtimePreference && !params.originId) {
+      requestContext,
+      signal,
+    }), signal);
+    signal.throwIfAborted();
+    if (!origin && !runtimePreference && !params.originId && !target) {
       return { ok: false, error: "no origin available" };
     }
-    const requestedOriginId = params.originId?.trim() || null;
+    const requestedOriginId = target?.originId ?? (params.originId?.trim() || null);
     // A project's default origin may belong to a different runtime. Let the
     // controller resolve the requested runtime instead of pinning that default.
     const selectedOriginId = requestedOriginId ?? (
@@ -94,28 +131,31 @@ export async function applyWorkspaceChangesViaOrigin(
 
     if (!leaseId) {
       try {
-        acquiredLease = await acquireWorkspaceLease({
+        acquiredLease = await untilAborted(acquireWorkspaceLease({
           projectId,
           runtimeId,
           leaseSeconds: params.leaseSeconds,
           metadata: null,
           accessToken: params.accessToken ?? null,
-        });
+          requestContext,
+          signal,
+        }), signal);
         leaseId = acquiredLease.leaseId;
         leaseIdForRelease = leaseId;
+        signal.throwIfAborted();
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         console.warn(
           "[runtime-controller] acquireWorkspaceLease error:",
           message,
         );
-        return { ok: false, error: message };
+        throw error;
       }
     } else {
       leaseIdForRelease = leaseId;
     }
 
-    const token = await requestOriginAccessToken({
+    const token = await untilAborted(requestOriginAccessToken({
       projectId,
       protocol: "http",
       scopes: ["fs.write"],
@@ -124,10 +164,18 @@ export async function applyWorkspaceChangesViaOrigin(
       preferRuntime: runtimePreference,
       accessToken: params.accessToken ?? null,
       throwOnError: true,
-    });
+      requestContext,
+      signal,
+      onErrorResponse: (status) => { tokenFailureStatus = status; },
+    }), signal);
+    signal.throwIfAborted();
     if (!token) {
-      return { ok: false, error: "failed to obtain origin token" };
+      return { ok: false, error: "failed to obtain origin token", target };
     }
+    if (target && token.originId !== target.originId) {
+      return { ok: false, error: "origin apply target changed", target };
+    }
+    target = Object.freeze({ projectId, originId: token.originId, runtimeId, requestContext });
 
     if (token.leaseId) {
       leaseId = token.leaseId;
@@ -161,35 +209,34 @@ export async function applyWorkspaceChangesViaOrigin(
       "workspace.zip",
     );
 
-    const applyAbort = new AbortController();
-    applyTimeout = setTimeout(() => {
-      applyTimedOut = true;
-      applyAbort.abort();
-    }, 30_000);
-    const response = await fetch(applyUrl, {
+    signal.throwIfAborted();
+    const response = await untilAborted(fetch(applyUrl, {
       method: "POST",
       headers: {
         authorization: `Bearer ${token.token}`,
       },
       body: formData,
-      signal: applyAbort.signal,
-    });
+      signal,
+    }), signal);
 
     if (!response.ok) {
-      const text = await response.text().catch(() => "");
+      // The status is already authoritative even if its diagnostic body stalls.
+      // Keep permanent rejections distinguishable from retryable transport errors.
+      const text = await untilAborted(response.text(), signal).catch(() => "error response body unavailable");
       return {
         ok: false,
         mode: token.mode,
         endpoint: endpoint,
         leaseId: leaseId ?? null,
         error: `origin apply failed (${response.status}): ${text}`,
+        target,
       };
     }
 
     let rev: string | null = null;
     const contentType = response.headers.get("content-type") || "";
     if (contentType.includes("application/json")) {
-      const body = (await response.json()) as Record<string, unknown>;
+      const body = (await untilAborted(response.json(), signal)) as Record<string, unknown>;
       if (typeof body.rev === "string") {
         rev = body.rev;
       }
@@ -201,28 +248,38 @@ export async function applyWorkspaceChangesViaOrigin(
       mode: token.mode,
       endpoint,
       leaseId: leaseId ?? null,
+      target,
     };
   } catch (error) {
-    const message = applyTimedOut
-      ? "origin apply timed out after 30000ms"
+    const detail = applyTimedOut
+      ? `origin apply timed out after ${timeoutMs}ms`
       : error instanceof Error ? error.message : String(error);
+    // The overall deadline can fire before the token client's own body timer.
+    // Preserve a rejection whose headers already arrived in either ordering.
+    const tokenFailurePrefix = tokenFailureStatus === null
+      ? null : `request origin access token failed (${tokenFailureStatus}): `;
+    const message = tokenFailurePrefix && !detail.startsWith(tokenFailurePrefix)
+      ? tokenFailurePrefix + detail : detail;
     console.warn(
       "[runtime-controller] applyWorkspaceChangesViaOrigin error:",
       message,
     );
-    return { ok: false, error: message };
+    return { ok: false, error: message, target };
   } finally {
-    if (applyTimeout !== null) {
-      clearTimeout(applyTimeout);
-    }
+    clearTimeout(applyTimeout);
+    params.signal?.removeEventListener("abort", forwardAbort);
     if (acquiredLease && leaseIdForRelease && !retainLease) {
+      const releaseAbort = new AbortController();
+      const releaseTimeout = setTimeout(() => releaseAbort.abort(), 1_000);
       try {
-        await releaseWorkspaceLease({
+        await untilAborted(releaseWorkspaceLease({
           projectId,
           leaseId: leaseIdForRelease,
           runtimeId,
           accessToken: params.accessToken ?? null,
-        });
+          requestContext,
+          signal: releaseAbort.signal,
+        }), releaseAbort.signal);
       } catch (releaseError) {
         const releaseMessage =
           releaseError instanceof Error
@@ -232,9 +289,26 @@ export async function applyWorkspaceChangesViaOrigin(
           "[runtime-controller] releaseWorkspaceLease error:",
           releaseMessage,
         );
+      } finally {
+        clearTimeout(releaseTimeout);
       }
     }
   }
+}
+
+// Resolving browser auth (or a non-cooperative transport) can stall without
+// honoring AbortSignal. Bound the wait as well; each subsequent network stage
+// checks the same signal before it can issue a request.
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener("abort", abort);
+      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+    };
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+  });
 }
 
 function buildOriginManifest(input: {

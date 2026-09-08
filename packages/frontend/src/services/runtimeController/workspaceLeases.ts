@@ -3,6 +3,7 @@ import {
   resolveControllerRequestContext,
   runtimeControllerEnabled,
   safeJson,
+  type ControllerRequestContext,
 } from "./core";
 
 export interface AcquireWorkspaceLeaseParams {
@@ -11,6 +12,8 @@ export interface AcquireWorkspaceLeaseParams {
   leaseSeconds?: number;
   metadata?: Record<string, unknown> | null;
   accessToken?: string | null;
+  signal?: AbortSignal;
+  requestContext?: ControllerRequestContext;
 }
 
 export interface RenewWorkspaceLeaseParams {
@@ -28,6 +31,8 @@ export interface ReleaseWorkspaceLeaseParams {
   runtimeId?: string | null;
   status?: "released" | "revoked";
   accessToken?: string | null;
+  signal?: AbortSignal;
+  requestContext?: ControllerRequestContext;
 }
 
 export interface WorkspaceLease {
@@ -52,9 +57,11 @@ export async function acquireWorkspaceLease(
     throw new Error("projectId is required to acquire a project lock");
   }
 
-  const requestContext = await resolveControllerRequestContext(
+  params.signal?.throwIfAborted();
+  const requestContext = params.requestContext ?? await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  params.signal?.throwIfAborted();
   const accessToken = requestContext.accessToken;
   if (!accessToken) {
     throw new Error("controller session token is required to acquire a project lock");
@@ -83,11 +90,14 @@ export async function acquireWorkspaceLease(
     body.metadata = metadata;
   }
 
+  params.signal?.throwIfAborted();
   const response = await fetch(`${requestContext.baseUrl}/lease/acquire`, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
+    signal: params.signal,
   });
+  params.signal?.throwIfAborted();
 
   if (!response.ok) {
     const message = await readControllerError(
@@ -95,10 +105,12 @@ export async function acquireWorkspaceLease(
       "project lock acquisition failed",
       requestContext,
     );
+    params.signal?.throwIfAborted();
     throw new Error(message);
   }
 
   const payload = (await response.json()) as Record<string, unknown>;
+  params.signal?.throwIfAborted();
   return mapLeaseResponse(payload);
 }
 
@@ -183,9 +195,11 @@ export async function releaseWorkspaceLease(
     );
   }
 
-  const requestContext = await resolveControllerRequestContext(
+  params.signal?.throwIfAborted();
+  const requestContext = params.requestContext ?? await resolveControllerRequestContext(
     params.accessToken ?? null,
   );
+  params.signal?.throwIfAborted();
   const accessToken = requestContext.accessToken;
   if (!accessToken) {
     throw new Error("controller session token is required to release a project lock");
@@ -208,11 +222,14 @@ export async function releaseWorkspaceLease(
   const status = params.status ?? "released";
   body.status = status;
 
+  params.signal?.throwIfAborted();
   const response = await fetch(`${requestContext.baseUrl}/lease/release`, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
+    signal: params.signal,
   });
+  params.signal?.throwIfAborted();
 
   if (!response.ok) {
     const message = await readControllerError(
@@ -220,10 +237,12 @@ export async function releaseWorkspaceLease(
       "project lock release failed",
       requestContext,
     );
+    params.signal?.throwIfAborted();
     throw new Error(message);
   }
 
   const payload = (await response.json()) as Record<string, unknown>;
+  params.signal?.throwIfAborted();
   return mapLeaseResponse(payload);
 }
 
