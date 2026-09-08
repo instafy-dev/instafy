@@ -11,6 +11,8 @@ Rust binary that runs inside the hosted runtime container. Responsibilities:
   same time as the agent token, and re-registration would fail forever.
 - Execute Codex workflows (headless) for each leased job.
 - Collect Codex event logs and return artifacts via `/agent/complete`.
+- Stop per-job heartbeat and secret-refresh requests when cleanup begins, including requests
+  awaiting an HTTP response, so completed jobs cannot block the next lease poll.
 
 ## Current state
 
