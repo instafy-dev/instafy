@@ -350,6 +350,7 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
         ...authority,
         approvedOrigins: [],
         consumedApprovalIds: [],
+        routineBrowsingAllowed: false,
       };
     }
 
@@ -368,6 +369,7 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
           "browserPageId",
           "approvedOrigins",
           "consumedApprovalIds",
+          ...(Object.hasOwn(raw, "routineBrowsingAllowed") ? ["routineBrowsingAllowed"] : []),
         ],
         "Shared Browser approval state",
       );
@@ -377,6 +379,8 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
         state.runId !== authority.runId ||
         state.initiatorUserId !== authority.initiatorUserId ||
         state.browserPageId !== authority.browserPageId ||
+        (Object.hasOwn(state, "routineBrowsingAllowed") &&
+          typeof state.routineBrowsingAllowed !== "boolean") ||
         !Array.isArray(state.approvedOrigins) ||
         state.approvedOrigins.length > MAX_APPROVED_ORIGINS ||
         state.approvedOrigins.some(
@@ -406,7 +410,8 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
         return false;
       }
       const authority = readAuthority(initialAuthority);
-      return readState(authority).approvedOrigins.includes(origin);
+      const state = readState(authority);
+      return state.routineBrowsingAllowed === true || state.approvedOrigins.includes(origin);
     }
 
     function buildRequest(kind, details) {
@@ -472,7 +477,7 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
         !HEX_64_PATTERN.test(decision.requestFingerprint) ||
         decision.requestFingerprint !== request.requestFingerprint ||
         decision.decidedByUserId !== request.initiatorUserId ||
-        !["allow_origin", "allow_once", "deny"].includes(decision.decision) ||
+        !["allow_origin", "allow_routine", "allow_once", "deny"].includes(decision.decision) ||
         !Number.isSafeInteger(decision.decidedAtMs) ||
         !Number.isSafeInteger(decision.expiresAtMs) ||
         decision.decidedAtMs < request.requestedAtMs - CLOCK_SKEW_MS ||
@@ -486,7 +491,11 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
         fail("approval_stale_or_replayed", "Shared Browser approval was already consumed");
       }
       const expectedAllow = request.kind === "origin" ? "allow_origin" : "allow_once";
-      if (decision.decision !== "deny" && decision.decision !== expectedAllow) {
+      if (
+        decision.decision !== "deny" &&
+        decision.decision !== expectedAllow &&
+        !(request.kind === "origin" && decision.decision === "allow_routine")
+      ) {
         fail("approval_stale_or_replayed", "Shared Browser approval has the wrong grant type");
       }
       return decision;
@@ -545,7 +554,7 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       }
       const authority = readAuthority(initialAuthority);
       const current = readState(authority);
-      if (current.approvedOrigins.includes(origin)) {
+      if (current.routineBrowsingAllowed === true || current.approvedOrigins.includes(origin)) {
         return origin;
       }
       if (current.approvedOrigins.length >= MAX_APPROVED_ORIGINS) {
@@ -561,8 +570,13 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
         targetFingerprint: null,
         payloadFingerprint: null,
       });
-      const { state } = await awaitDecision(request);
+      const { decision, state } = await awaitDecision(request);
       readAuthority(initialAuthority);
+      // Only the authenticated initiating user's explicit origin-prompt choice
+      // can grant this policy. It never comes from tool arguments or job metadata.
+      if (decision.decision === "allow_routine") {
+        state.routineBrowsingAllowed = true;
+      }
       if (!state.approvedOrigins.includes(origin)) {
         state.approvedOrigins = [...state.approvedOrigins, origin];
       }
@@ -570,8 +584,13 @@ globalThis.__instafyCreateSharedBrowserApprovalProtocol = (() => {
       return origin;
     }
 
-    async function allowOnce(details) {
+    async function allowOnce(details, options = {}) {
       const request = buildRequest("action", details);
+      const authority = readAuthority(initialAuthority);
+      if (options.routine === true && readState(authority).routineBrowsingAllowed === true) {
+        readAuthority(initialAuthority);
+        return request;
+      }
       await awaitDecision(request);
       readAuthority(initialAuthority);
       return request;

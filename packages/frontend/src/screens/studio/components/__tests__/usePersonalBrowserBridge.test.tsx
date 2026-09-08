@@ -69,14 +69,16 @@ function Harness({
   active = true,
   profileUserId = "user-1",
   projectId = "project-1",
+  conversationBindingKey,
   resultRef,
 }: {
   active?: boolean;
   profileUserId?: string | null;
   projectId?: string | null;
+  conversationBindingKey?: string | null;
   resultRef: MutableRefObject<HookResult | null>;
 }) {
-  resultRef.current = usePersonalBrowserBridge({ active, profileUserId, projectId });
+  resultRef.current = usePersonalBrowserBridge({ active, profileUserId, projectId, conversationBindingKey });
   return null;
 }
 
@@ -165,6 +167,9 @@ describe("usePersonalBrowserBridge lifecycle", () => {
     });
     await waitUntil(() => firstResultRef.current?.status?.state === "ready");
     const firstOwnerId = owners[0];
+    current = { ...current, humanInputRequest: { version: 1, handoffId: "old-owner-handoff", origin: "https://example.test", createdAtMs: Date.now(), expiresAtMs: Date.now() + 600_000, fields: [{ label: "Highlighted field 1" }] } };
+    await act(async () => statusListener?.(current));
+    expect(firstResultRef.current?.status?.humanInputRequest?.handoffId).toBe("old-owner-handoff");
     expect(open).toHaveBeenCalledWith(
       expect.objectContaining({
         controllerUrl: "https://controller.example.test",
@@ -188,7 +193,69 @@ describe("usePersonalBrowserBridge lifecycle", () => {
     await waitUntil(() => open.mock.calls.length === 2);
     expect(owners[1]).not.toBe(firstOwnerId);
     expect(replacementResultRef.current?.status?.url).toBe("https://example.test/kept");
+    expect(replacementResultRef.current?.status?.humanInputRequest).toBeUndefined();
     expect(close).not.toHaveBeenCalled();
+  });
+
+  it("rotates only the control lease on an in-place conversation switch and rejects old async completion", async () => {
+    let current = personalBrowserStatus();
+    const delayedResume = deferred<InstafyDesktopPersonalBrowserStatus>();
+    const open = vi.fn(async ({ ownerId }: { ownerId: string }) => {
+      current = personalBrowserStatus({ state: "ready", ownerId, projectId: "project-1", url: "https://example.test/kept", humanControlReady: true });
+      return current;
+    });
+    const release = vi.fn(async ({ ownerId }: { ownerId: string }) => {
+      if (current.ownerId === ownerId) current = { ...current, ownerId: undefined, agentControlEnabled: false, humanControlReady: true, humanInputRequest: undefined };
+      return current;
+    });
+    const close = vi.fn(async () => personalBrowserStatus());
+    window.instafyDesktop = {
+      notify: vi.fn(async () => undefined),
+      onPersonalBrowserStatus: vi.fn((listener) => { statusListener = listener; return () => { statusListener = null; }; }),
+      personalBrowserOpen: open, personalBrowserRelease: release, personalBrowserClose: close,
+      personalBrowserSetAgentControlEnabled: vi.fn(() => delayedResume.promise),
+      personalBrowserSetBounds: vi.fn(async () => current), personalBrowserStatus: vi.fn(async () => current),
+    };
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => root.render(<Harness conversationBindingKey="conversation-a" resultRef={resultRef} />));
+    await waitUntil(() => Boolean(resultRef.current?.ownerId));
+    const oldOwner = resultRef.current!.ownerId!;
+    current = { ...current, humanInputRequest: { version: 1, handoffId: "conversation-a-handoff", origin: "https://example.test", createdAtMs: Date.now(), expiresAtMs: Date.now() + 600_000, fields: [{ label: "Highlighted field 1" }] } };
+    await act(async () => statusListener?.(current));
+    const staleResult = { ...current, agentControlEnabled: true, humanControlReady: false };
+    let resume!: Promise<InstafyDesktopPersonalBrowserStatus | null>;
+    await act(async () => { resume = resultRef.current!.setAgentControlEnabled(true); });
+    await act(async () => root.render(<Harness conversationBindingKey="conversation-b" resultRef={resultRef} />));
+    await waitUntil(() => Boolean(resultRef.current?.ownerId) && resultRef.current?.ownerId !== oldOwner);
+    expect(release).toHaveBeenCalledExactlyOnceWith({ ownerId: oldOwner });
+    expect(close).not.toHaveBeenCalled();
+    expect(open).toHaveBeenCalledTimes(2);
+    expect(resultRef.current?.status?.url).toBe("https://example.test/kept");
+    expect(resultRef.current?.status?.humanInputRequest).toBeUndefined();
+    const newOwner = resultRef.current!.ownerId;
+    await act(async () => delayedResume.resolve(staleResult));
+    expect(await resume).toBeNull();
+    expect(resultRef.current?.ownerId).toBe(newOwner);
+    expect(resultRef.current?.status?.agentControlEnabled).toBe(false);
+    expect(resultRef.current?.status?.humanInputRequest).toBeUndefined();
+  });
+
+  it("releases rather than destroys the profile when an explicit conversation binding becomes null", async () => {
+    let current = personalBrowserStatus();
+    const open = vi.fn(async ({ ownerId }: { ownerId: string }) => (current = personalBrowserStatus({ state: "ready", ownerId, projectId: "project-1", url: "https://example.test/kept" })));
+    const release = vi.fn(async () => (current = { ...current, ownerId: undefined, agentControlEnabled: false, humanInputRequest: undefined }));
+    const close = vi.fn(async () => personalBrowserStatus());
+    window.instafyDesktop = { notify: vi.fn(async () => undefined), personalBrowserOpen: open, personalBrowserRelease: release, personalBrowserClose: close,
+      personalBrowserSetBounds: vi.fn(async () => current), personalBrowserStatus: vi.fn(async () => current) };
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => root.render(<Harness conversationBindingKey="conversation-a" resultRef={resultRef} />));
+    await waitUntil(() => Boolean(resultRef.current?.ownerId));
+    await act(async () => root.render(<Harness conversationBindingKey={null} resultRef={resultRef} />));
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(close).not.toHaveBeenCalled();
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(resultRef.current?.ownerId).toBeNull();
+    expect(resultRef.current?.available).toBe(false);
   });
 
   it("does not open Personal Browser for a fixed controller binding", async () => {

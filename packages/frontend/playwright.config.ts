@@ -225,6 +225,8 @@ const defaultChromiumIgnore = [
   // data layer stubbed; they need no runtime stack, so they run in their own
   // dependency-free project instead of the heavy chromium one.
   "tests/playwright/component/**/*.spec.ts",
+  // Production fixture benchmarks use their own isolated config and budgets.
+  "tests/playwright/conversation-perf/**/*.spec.ts",
 ];
 if (!RUN_PLAYWRIGHT_BENCH) {
   // Benchmarks are opt-in evaluation coverage and should not inflate the default product regression loop.

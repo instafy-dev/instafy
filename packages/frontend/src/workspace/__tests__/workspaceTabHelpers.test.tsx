@@ -154,6 +154,16 @@ describe("workspaceTab helpers", () => {
     });
   });
 
+  it("restores preview ownership only for a chat in the same saved tab set", () => {
+    persistWorkspaceTabsState({ projects: {
+      first: { conversations: ["a", "b"], previewConversationId: "b" },
+      second: { conversations: ["x"], previewConversationId: "b" },
+    } });
+    const restored = loadPersistedWorkspaceTabs();
+    expect(restored?.projects.first.previewConversationId).toBe("b");
+    expect(restored?.projects.second.previewConversationId).toBeUndefined();
+  });
+
   it("creates conversation and git review tabs with stable derived state", () => {
     const conversationTab = createTabForConversation(
       createConversation({

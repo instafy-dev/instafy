@@ -566,7 +566,8 @@ async fn load_owner_email(
 //
 // One request that answers "how is the product doing" for the internal
 // operator console. Everything here is an aggregate over data the product
-// already writes; nothing new is instrumented.
+// already writes; nothing new is instrumented. The one non-aggregate is the
+// recent sign-up feed, a short newest-first slice of auth.users.
 //
 // Human activity is measured from conversation_messages and prompts rather
 // than conversations, because both carry the acting user and neither is
@@ -616,6 +617,19 @@ pub(crate) struct OperatorProjectMetrics {
     total: i64,
 }
 
+/// One entry in the newest-first sign-up feed. Every field but `created_at`
+/// is nullable on the wire so the console can show "unknown" rather than
+/// guess; absent values are sent as null, never skipped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OperatorRecentSignup {
+    email: Option<String>,
+    full_name: Option<String>,
+    created_at: String,
+    /// GoTrue's `raw_app_meta_data.provider`, e.g. `email` or `google`.
+    provider: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OperatorMetricsSummary {
@@ -623,6 +637,7 @@ pub(crate) struct OperatorMetricsSummary {
     people: OperatorPeopleMetrics,
     bugs: OperatorBugMetrics,
     projects: OperatorProjectMetrics,
+    recent_signups: Vec<OperatorRecentSignup>,
 }
 
 /// Raw counts as they come back from Postgres, kept separate from the response
@@ -645,9 +660,20 @@ pub(crate) struct OperatorMetricsCounts {
     pub(crate) bugs_system_open: i64,
 }
 
+/// One auth.users row as it comes back from Postgres, before the timestamp
+/// is formatted for the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OperatorRecentSignupRow {
+    pub(crate) email: Option<String>,
+    pub(crate) full_name: Option<String>,
+    pub(crate) created_at: chrono::DateTime<chrono::Utc>,
+    pub(crate) provider: Option<String>,
+}
+
 pub(crate) fn build_operator_metrics_summary(
     generated_at: chrono::DateTime<chrono::Utc>,
     counts: OperatorMetricsCounts,
+    recent_signups: Vec<OperatorRecentSignupRow>,
 ) -> OperatorMetricsSummary {
     OperatorMetricsSummary {
         generated_at: generated_at.to_rfc3339(),
@@ -671,6 +697,15 @@ pub(crate) fn build_operator_metrics_summary(
             active_7d: counts.projects_active_7d,
             total: counts.projects_total,
         },
+        recent_signups: recent_signups
+            .into_iter()
+            .map(|row| OperatorRecentSignup {
+                email: row.email,
+                full_name: row.full_name,
+                created_at: row.created_at.to_rfc3339(),
+                provider: row.provider,
+            })
+            .collect(),
     }
 }
 
@@ -722,6 +757,30 @@ const OPERATOR_BUGS_SQL: &str = "
       from bug_reports
 ";
 
+/// How many sign-ups the summary carries. Small on purpose: this is a glance
+/// at who is arriving, not a user directory.
+const OPERATOR_RECENT_SIGNUPS_LIMIT: i64 = 8;
+
+// The display name mirrors the coalesce in activity.rs so a person is named
+// the same way here as in their activity feed. GoTrue leaves created_at
+// nullable; a row without one has no place in a newest-first list.
+const OPERATOR_RECENT_SIGNUPS_SQL: &str = "
+    select
+        u.email,
+        coalesce(
+            nullif(btrim(p.full_name), ''),
+            nullif(btrim(u.raw_user_meta_data ->> 'full_name'), ''),
+            nullif(btrim(u.raw_user_meta_data ->> 'name'), '')
+        ) as full_name,
+        u.created_at,
+        u.raw_app_meta_data ->> 'provider' as provider
+      from auth.users u
+      left join profiles p on p.user_id = u.id
+     where u.created_at is not null and u.deleted_at is null
+     order by u.created_at desc, u.id desc
+     limit $1
+";
+
 async fn operator_metrics_summary(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -757,6 +816,14 @@ async fn operator_metrics_summary(
         .await
         .map_err(|error| internal_error(format!("failed to load bug metrics: {error}")))?;
 
+    let signups = transaction
+        .query(
+            OPERATOR_RECENT_SIGNUPS_SQL,
+            &[&OPERATOR_RECENT_SIGNUPS_LIMIT],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load recent signups: {error}")))?;
+
     let counts = OperatorMetricsCounts {
         active_24h: activity.get("active_24h"),
         active_7d: activity.get("active_7d"),
@@ -774,13 +841,45 @@ async fn operator_metrics_summary(
         bugs_system_open: bugs.get("system_open"),
     };
 
-    Ok(Json(build_operator_metrics_summary(generated_at, counts)))
+    let recent_signups = signups
+        .into_iter()
+        .map(|row| OperatorRecentSignupRow {
+            email: row.get("email"),
+            full_name: row.get("full_name"),
+            created_at: row.get("created_at"),
+            provider: row.get("provider"),
+        })
+        .collect();
+
+    Ok(Json(build_operator_metrics_summary(
+        generated_at,
+        counts,
+        recent_signups,
+    )))
 }
 
 #[cfg(test)]
 mod operator_metrics_tests {
-    use super::{build_operator_metrics_summary, OperatorMetricsCounts};
+    use super::{build_operator_metrics_summary, OperatorMetricsCounts, OperatorRecentSignupRow};
     use chrono::TimeZone;
+    use serde_json::Value as JsonValue;
+
+    fn sample_signups() -> Vec<OperatorRecentSignupRow> {
+        vec![
+            OperatorRecentSignupRow {
+                email: Some("ada@example.com".to_string()),
+                full_name: Some("Ada Lovelace".to_string()),
+                created_at: chrono::Utc.with_ymd_and_hms(2026, 9, 3, 11, 30, 0).unwrap(),
+                provider: Some("google".to_string()),
+            },
+            OperatorRecentSignupRow {
+                email: None,
+                full_name: None,
+                created_at: chrono::Utc.with_ymd_and_hms(2026, 9, 2, 8, 15, 0).unwrap(),
+                provider: None,
+            },
+        ]
+    }
 
     fn sample_counts() -> OperatorMetricsCounts {
         OperatorMetricsCounts {
@@ -809,6 +908,7 @@ mod operator_metrics_tests {
         let summary = build_operator_metrics_summary(
             chrono::Utc.with_ymd_and_hms(2026, 9, 3, 12, 0, 0).unwrap(),
             sample_counts(),
+            Vec::new(),
         );
         let payload = serde_json::to_value(&summary).expect("summary serialises");
 
@@ -840,6 +940,7 @@ mod operator_metrics_tests {
         let summary = build_operator_metrics_summary(
             chrono::Utc.with_ymd_and_hms(2026, 9, 3, 12, 0, 0).unwrap(),
             sample_counts(),
+            sample_signups(),
         );
         let payload = serde_json::to_value(&summary).expect("summary serialises");
         for (section, key) in [
@@ -856,13 +957,21 @@ mod operator_metrics_tests {
             );
         }
         assert!(payload.get("generated_at").is_none());
+        assert!(payload.get("recent_signups").is_none());
+        for key in ["full_name", "created_at"] {
+            assert!(
+                payload["recentSignups"][0].get(key).is_none(),
+                "recentSignups[].{key} leaked in snake_case"
+            );
+        }
     }
 
     #[test]
     fn maps_every_count_to_its_own_field() {
         // A transposed active7d/active30d is invisible to a test that seeds
         // symmetric data, so each input here is distinct.
-        let summary = build_operator_metrics_summary(chrono::Utc::now(), sample_counts());
+        let summary =
+            build_operator_metrics_summary(chrono::Utc::now(), sample_counts(), Vec::new());
         let payload = serde_json::to_value(&summary).expect("summary serialises");
         let mut seen: Vec<i64> = Vec::new();
         for section in ["people", "bugs", "projects"] {
@@ -872,5 +981,46 @@ mod operator_metrics_tests {
         }
         seen.sort_unstable();
         assert_eq!(seen, (1..=14).collect::<Vec<i64>>());
+    }
+
+    #[test]
+    fn serialises_recent_signups_in_query_order_with_explicit_nulls() {
+        // The console treats `recentSignups` as optional but, when present,
+        // reads each entry's keys directly: missing values must arrive as
+        // null rather than be dropped, and the order is whatever Postgres
+        // returned (newest first) — the builder must not re-sort.
+        let summary = build_operator_metrics_summary(
+            chrono::Utc.with_ymd_and_hms(2026, 9, 3, 12, 0, 0).unwrap(),
+            sample_counts(),
+            sample_signups(),
+        );
+        let payload = serde_json::to_value(&summary).expect("summary serialises");
+        let signups = payload["recentSignups"]
+            .as_array()
+            .expect("recentSignups is an array");
+        assert_eq!(signups.len(), 2);
+
+        assert_eq!(signups[0]["email"], "ada@example.com");
+        assert_eq!(signups[0]["fullName"], "Ada Lovelace");
+        assert_eq!(signups[0]["createdAt"], "2026-09-03T11:30:00+00:00");
+        assert_eq!(signups[0]["provider"], "google");
+
+        for key in ["email", "fullName", "provider"] {
+            assert!(
+                signups[1].get(key).is_some_and(JsonValue::is_null),
+                "recentSignups[1].{key} should be present and null"
+            );
+        }
+        assert_eq!(signups[1]["createdAt"], "2026-09-02T08:15:00+00:00");
+    }
+
+    #[test]
+    fn serialises_an_empty_signup_feed_as_an_empty_array() {
+        // Present-but-empty and absent both mean "nothing to render" to the
+        // console; this build always sends the key so the shape is stable.
+        let summary =
+            build_operator_metrics_summary(chrono::Utc::now(), sample_counts(), Vec::new());
+        let payload = serde_json::to_value(&summary).expect("summary serialises");
+        assert_eq!(payload["recentSignups"], serde_json::json!([]));
     }
 }

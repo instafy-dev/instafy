@@ -259,7 +259,7 @@ test.afterEach(async ({ page }) => {
     await expect(page.getByTestId("sidebar-project-new")).toBeVisible();
   });
 
-  loadsStudioTest("offers a verified Desktop release from wide web Studio", async ({ page }) => {
+  loadsStudioTest("offers a verified Desktop release above the account avatar in wide web Studio", async ({ page }) => {
     test.setTimeout(60_000);
     const version = "0.2.0";
     const stableBaseUrl = "https://downloads.instafy.dev/desktop-app/stable";
@@ -290,16 +290,26 @@ test.afterEach(async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto("/studio");
 
-    const topbarInstall = page.getByTestId("topbar-get-desktop");
-    await expect(topbarInstall).toBeVisible({ timeout: 15_000 });
-    await expect(topbarInstall).toHaveText("Get Desktop");
-    await expect(topbarInstall).toHaveAttribute("href", "/install#desktop");
-    await expect(topbarInstall).toHaveAttribute("target", "_blank");
+    const sidebarInstall = page.getByTestId("sidebar-get-desktop");
+    const profileTrigger = page.getByTestId("sidebar-profile-menu");
+    await expect(sidebarInstall).toBeVisible({ timeout: 15_000 });
+    await expect(sidebarInstall).toHaveAccessibleName("Get desktop app");
+    await expect(sidebarInstall).toHaveAttribute("href", "/install#desktop");
+    await expect(sidebarInstall).toHaveAttribute("target", "_blank");
+    await expect(page.getByTestId("topbar-get-desktop")).toHaveCount(0);
+    await expect(page.locator('header[aria-label$="workspace navigation"] a[href^="/install"]')).toHaveCount(0);
 
-    await page.getByTestId("sidebar-profile-menu").click();
-    const accountInstall = page.getByTestId("profile-install-button");
-    await expect(accountInstall).toBeVisible();
-    await expect(accountInstall).toHaveAttribute("href", "/install#desktop");
+    const installBounds = await sidebarInstall.boundingBox();
+    const profileBounds = await profileTrigger.boundingBox();
+    if (!installBounds || !profileBounds) {
+      throw new Error("Unable to measure the desktop acquisition and account controls.");
+    }
+    expect(installBounds.y + installBounds.height).toBeLessThanOrEqual(profileBounds.y);
+
+    await profileTrigger.click();
+    await expect(page.getByTestId("notifications-toggle-button")).toBeVisible();
+    await expect(page.getByTestId("profile-install-button")).toHaveCount(0);
+    await expect(sidebarInstall).toBeVisible();
   });
 
   loadsStudioTest("fresh preparation remounts initialized project access", async ({ page }) => {

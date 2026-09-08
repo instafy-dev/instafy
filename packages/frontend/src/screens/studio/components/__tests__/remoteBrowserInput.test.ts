@@ -20,10 +20,149 @@ function touchPointerEvent(
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   document.body.innerHTML = "";
 });
 
 describe("attachRemoteBrowserInput", () => {
+  it.each(["insertText", "insertReplacementText"])(
+    "forwards bounded %s without allowing insertion into a retained local editor selection",
+    (inputType) => {
+      const element = document.createElement("canvas");
+      const send = vi.fn();
+      const binding = attachRemoteBrowserInput(element, { getViewport: () => null, send });
+      const event = new InputEvent("beforeinput", {
+        bubbles: true, cancelable: true, inputType, data: "— inert text",
+      });
+
+      element.dispatchEvent(event);
+
+      expect(event.defaultPrevented).toBe(true);
+      expect(send).toHaveBeenCalledExactlyOnceWith({ type: "text", text: "— inert text" });
+      binding.dispose();
+    },
+  );
+
+  it("blocks local text insertion after input authority is lost without forwarding it", () => {
+    const element = document.createElement("canvas");
+    const send = vi.fn();
+    let active = true;
+    const binding = attachRemoteBrowserInput(element, {
+      enabled: () => active, getViewport: () => null, send,
+    });
+    active = false;
+    const event = new InputEvent("beforeinput", {
+      cancelable: true, inputType: "insertText", data: "inert text",
+    });
+    element.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    const paste = new Event("paste", { cancelable: true });
+    Object.defineProperty(paste, "clipboardData", {
+      value: { getData: () => "inert paste" },
+    });
+    element.dispatchEvent(paste);
+    expect(paste.defaultPrevented).toBe(true);
+    expect(send).not.toHaveBeenCalled();
+    binding.dispose();
+  });
+
+  it.each([
+    { inputType: "insertFromPaste", data: "pasted text" },
+    { inputType: "insertFromComposition", data: "語" },
+    { inputType: "insertCompositionText", data: "語", isComposing: true },
+    { inputType: "insertText", data: "語", isComposing: true },
+    { inputType: "deleteContentBackward", data: null },
+    { inputType: "insertText", data: "" },
+    { inputType: "insertText", data: "a".repeat(8193) },
+  ])("cancels but does not forward unsupported or unbounded beforeinput: $inputType", (init) => {
+    const element = document.createElement("canvas");
+    const send = vi.fn();
+    const binding = attachRemoteBrowserInput(element, { getViewport: () => null, send });
+    const event = new InputEvent("beforeinput", { ...init, cancelable: true });
+    element.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    expect(send).not.toHaveBeenCalled();
+    binding.dispose();
+  });
+
+  it("does not forward a noncancelable beforeinput or a nested local input event", () => {
+    const element = document.createElement("div");
+    const localInput = document.createElement("input");
+    element.append(localInput);
+    const send = vi.fn();
+    const binding = attachRemoteBrowserInput(element, { getViewport: () => null, send });
+    element.dispatchEvent(new InputEvent("beforeinput", {
+      inputType: "insertText", data: "inert text", cancelable: false,
+    }));
+    const nestedEvent = new InputEvent("beforeinput", {
+      bubbles: true, cancelable: true, inputType: "insertText", data: "local text",
+    });
+    localInput.dispatchEvent(nestedEvent);
+    expect(nestedEvent.defaultPrevented).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+    binding.dispose();
+  });
+
+  it.each(["keydown", "paste", "compositionend"] as const)(
+    "does not duplicate a paired beforeinput after %s or suppress a later insertion",
+    (kind) => {
+      vi.useFakeTimers();
+      const element = document.createElement("canvas");
+      const send = vi.fn();
+      const binding = attachRemoteBrowserInput(element, { getViewport: () => null, send });
+      const text = kind === "keydown" ? "a" : "語";
+      if (kind === "keydown") {
+        element.dispatchEvent(new KeyboardEvent("keydown", {
+          key: text, code: "KeyA", cancelable: true,
+        }));
+      } else if (kind === "paste") {
+        const event = new Event("paste", { cancelable: true });
+        Object.defineProperty(event, "clipboardData", {
+          value: { getData: () => text },
+        });
+        element.dispatchEvent(event);
+        expect(event.defaultPrevented).toBe(true);
+      } else {
+        element.dispatchEvent(new CompositionEvent("compositionstart"));
+        element.dispatchEvent(new CompositionEvent("compositionend", { data: text }));
+      }
+      const event = new InputEvent("beforeinput", {
+        cancelable: true, inputType: "insertText", data: text,
+      });
+      element.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+      expect(send).toHaveBeenCalledTimes(1);
+      vi.runOnlyPendingTimers();
+      element.dispatchEvent(new InputEvent("beforeinput", {
+        cancelable: true, inputType: "insertText", data: text,
+      }));
+      expect(send).toHaveBeenCalledTimes(2);
+      expect(send).toHaveBeenLastCalledWith({ type: "text", text });
+      binding.dispose();
+    },
+  );
+
+  it("expires an unpaired composition suppression and removes text listeners on disposal", () => {
+    vi.useFakeTimers();
+    const element = document.createElement("canvas");
+    const send = vi.fn();
+    const binding = attachRemoteBrowserInput(element, { getViewport: () => null, send });
+    element.dispatchEvent(new CompositionEvent("compositionend", { data: "語" }));
+    vi.runOnlyPendingTimers();
+    element.dispatchEvent(new InputEvent("beforeinput", {
+      cancelable: true, inputType: "insertText", data: "語",
+    }));
+    expect(send).toHaveBeenCalledTimes(2);
+    binding.dispose();
+    const event = new InputEvent("beforeinput", {
+      cancelable: true, inputType: "insertText", data: "disposed",
+    });
+    element.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("maps pointer and keyboard events into the bounded shared input API", () => {
     const element = document.createElement("canvas");
     element.tabIndex = 0;

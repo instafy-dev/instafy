@@ -91,20 +91,22 @@ const BROWSER_MODE_DEVELOPER_INSTRUCTIONS: &str = r#"Browser/UI execution run:
 - Use the dedicated browser tools configured for this turn when browser execution was requested.
 - Keep the visible page open and focused. Report only concrete observed state or exact execution errors."#;
 const SHARED_BROWSER_DEVELOPER_INSTRUCTIONS: &str = r#"Shared Browser transport (managed runtime policy):
-- A headed browser in the project's isolated hosted runtime is available. Use the dedicated tools from the `instafy_shared_browser` MCP server: `status`, `snapshot`, `navigate`, `click`, `type`, `press`, and `scroll`.
+- A headed browser in the project's isolated hosted runtime is available. Use the dedicated tools from the `instafy_shared_browser` MCP server: `status`, `snapshot`, `navigate`, `click`, `type`, `press`, `scroll`, and `request_human_input`.
 - Take a snapshot and pass both its `snapshotId` and one indexed element to each interaction. If the page or indexed target set changes, take another snapshot instead of retrying a stale target. Arbitrary CSS selectors are not accepted.
 - Do not invoke Shared Browser through shell commands or write an ad-hoc Playwright/CDP script. The capability is deliberately exposed only through the bounded MCP server for this turn.
 - The controller automatically emits the visible AI cursor and action-ticker events. Do not bypass it.
 - Never type authentication, payment, or identity secrets. Stop and ask the user to enter them directly.
-- The authenticated initiating user approves each site for this run. Every explicit navigation, interactive click, typed-text operation, form submission, and key press also pauses for a short-lived **Allow once** decision, independent of the control's language or label.
+- For a manual field step, use `request_human_input` with one to eight indices and the fresh snapshotId. It highlights the actual fields and ends this turn. Do not issue any further browser calls; the user explicitly continues after entering values directly, and the next turn must take a fresh snapshot. Never request or repeat those values in chat.
+- By default, the authenticated initiating user approves each site and every navigation, click, type, submission and key press for this run. The user may explicitly grant routine browsing at the first site prompt; the runtime then handles routine actions without repeated prompts while recognized consequential actions, submissions and activation keys still require **Allow once**. Never assume, request through a tool, or synthesize that grant; it is only a user-facing policy choice. Secret-entry restrictions always apply.
 - A denial, timeout, stale target, changed page, or replayed approval is final for that attempted action. Do not retry it automatically; report the exact returned error and wait for a new user instruction.
 - Approval is never a model-visible tool. Do not search for, inspect, edit, or simulate runtime approval files."#;
 const PERSONAL_BROWSER_DEVELOPER_INSTRUCTIONS: &str = r#"Personal Browser transport (managed runtime policy):
 - A private browser embedded in the user's desktop app is available to this runtime. Use it for browser work instead of Playwright, CDP, noVNC, or a hosted browser.
-- Use the dedicated tools from the `instafy_personal_browser` MCP server: `status`, `snapshot`, `navigate`, `click`, `type`, `press`, and `scroll`. Do not invoke Personal Browser through shell commands.
+- Use the dedicated tools from the `instafy_personal_browser` MCP server: `status`, `snapshot`, `navigate`, `click`, `type`, `press`, `scroll`, and `request_human_input`. Do not invoke Personal Browser through shell commands.
 - The broker currently controls one visible page. Reuse it and navigate sequentially; do not invent tab/window endpoints or silently switch to a hosted/shared browser.
 - Get interactive element indices from `snapshot`, then use one fresh index for exactly one click/type/press action. Snapshot again before every subsequent indexed action and after navigation, scrolling, or DOM changes. Arbitrary CSS selectors are not accepted.
 - The Personal Browser capability is deliberately unavailable to shell tools and subprocesses. Never try to discover, print, persist, or reconstruct it.
+- For a manual field step, use `request_human_input` with one to eight fresh snapshot indices. It highlights the fields and revokes agent control. End this turn immediately; the user fills the page directly and explicitly continues in a fresh turn. Never request or repeat their values in chat.
 - Stop on a 423 response because the user paused control. Stop on 401 because the session capability was rotated or revoked; do not inspect or retry the token."#;
 const LOCAL_BROWSER_DEVELOPER_INSTRUCTIONS: &str = r#"Owner-local browser observation (self-hosted runtime policy):
 - The `instafy_local_browser.observe` tool can open one public HTTP(S) URL in a fresh headless browser, count matching elements, read bounded text and computed CSS, and optionally save a PNG under `artifacts/browser/`.
@@ -182,8 +184,15 @@ const CODEX_STATE_VERSION_KEY: &str = "version";
 const CODEX_REQUIRED_TOOL_METADATA_KEY: &str = "codex.required_tool";
 const PERSONAL_BROWSER_MCP_SERVER_NAME: &str = "instafy_personal_browser";
 const SHARED_BROWSER_MCP_SERVER_NAME: &str = "instafy_shared_browser";
-const BROWSER_MCP_TOOL_NAMES: [&str; 7] = [
-    "status", "snapshot", "navigate", "click", "type", "press", "scroll",
+const BROWSER_MCP_TOOL_NAMES: [&str; 8] = [
+    "request_human_input",
+    "status",
+    "snapshot",
+    "navigate",
+    "click",
+    "type",
+    "press",
+    "scroll",
 ];
 const CODEX_REQUIRED_TOOL_COMMAND_ONCE: &str = "command_once";
 const MISSING_FINAL_ASSISTANT_MESSAGE_SUMMARY: &str =
@@ -4272,7 +4281,11 @@ mod tests {
         assert!(enabled.contains("visible AI cursor"));
         assert!(enabled.contains("Do not invoke Shared Browser through shell"));
         assert!(enabled.contains("Allow once"));
-        assert!(enabled.contains("typed-text operation"));
+        assert!(
+            enabled.contains("By default, the authenticated initiating user approves each site")
+        );
+        assert!(enabled.contains("explicitly grant routine browsing"));
+        assert!(enabled.contains("Secret-entry restrictions always apply"));
         assert!(enabled.contains("key press"));
         assert!(enabled.contains("Do not retry it automatically"));
         assert!(enabled.contains("never a model-visible tool"));
@@ -4389,7 +4402,7 @@ mod tests {
                     "required": true,
                     "supportsParallelToolCalls": false,
                     "enabledTools": [
-                        "status", "snapshot", "navigate", "click", "type", "press", "scroll"
+                        "request_human_input", "status", "snapshot", "navigate", "click", "type", "press", "scroll"
                     ],
                 }],
                 "projectMcpServersAllowed": false,

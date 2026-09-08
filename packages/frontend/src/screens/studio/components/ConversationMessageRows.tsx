@@ -176,6 +176,7 @@ export function ConversationMessageRows({
   projectId,
   runtimeId,
   conversationLocalId,
+  scrollSnapshotKey = null,
   conversationControllerId,
   firstPlanMessageId,
   mentionableAgentHandles,
@@ -199,6 +200,7 @@ export function ConversationMessageRows({
   projectId: string | null;
   runtimeId: string | null;
   conversationLocalId: string | null;
+  scrollSnapshotKey?: string | null;
   conversationControllerId: string | null;
   firstPlanMessageId: string | null;
   mentionableAgentHandles?: string[] | null;
@@ -229,7 +231,7 @@ export function ConversationMessageRows({
   }, []);
 
   const rows: JSX.Element[] = [];
-  const anchorMessageId = getConversationScrollAnchorMessageId(conversationLocalId);
+  const anchorMessageId = getConversationScrollAnchorMessageId(scrollSnapshotKey);
   const anchorIndex = anchorMessageId ? messages.findIndex((message) => message.id === anchorMessageId) : -1;
   const assistantContextMessages = allConversationMessages ?? messages;
   const multiAgentGroupByParentJob = buildMultiAgentGroupByParentJob(assistantContextMessages);

@@ -132,12 +132,16 @@ struct ApprovalState {
     browser_page_id: String,
     approved_origins: Vec<String>,
     consumed_approval_ids: Vec<String>,
+    // Additive policy grant; old state means the strict ask-every-action mode.
+    #[serde(default, rename = "routineBrowsingAllowed")]
+    _routine_browsing_allowed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum ApprovalDecision {
     AllowOrigin,
+    AllowRoutine,
     AllowOnce,
     Deny,
 }
@@ -747,6 +751,7 @@ fn require_decision_kind(
         || matches!(
             (decision, kind),
             (ApprovalDecision::AllowOrigin, ApprovalKind::Origin)
+                | (ApprovalDecision::AllowRoutine, ApprovalKind::Origin)
                 | (ApprovalDecision::AllowOnce, ApprovalKind::Action)
         );
     if !allowed {

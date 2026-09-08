@@ -101,6 +101,31 @@ describe("SharedBrowserApprovalPrompt", () => {
     expect(onDecision).toHaveBeenCalledWith("deny");
   });
 
+  it("offers explicit routine approval at the first site prompt and scopes it to that request", async () => {
+    const onDecision = vi.fn();
+    const render = (request = originRequest) => root.render(
+      <SharedBrowserApprovalPrompt routineApprovalAvailable onDecision={onDecision} request={request} submitting={false} />,
+    );
+    await act(async () => render());
+    const checkbox = container.querySelector<HTMLInputElement>('[data-testid="shared-browser-approval-routine"]');
+    expect(checkbox?.checked).toBe(false);
+    expect(document.activeElement).toBe(container.querySelector('[data-testid="shared-browser-approval-deny"]'));
+    await act(async () => checkbox?.click());
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="shared-browser-approval-allow"]')?.click());
+    expect(onDecision).toHaveBeenLastCalledWith("allow_routine");
+    await act(async () => render({ ...originRequest, approvalId: "new-request" }));
+    expect(container.querySelector<HTMLInputElement>('[data-testid="shared-browser-approval-routine"]')?.checked).toBe(false);
+    await act(async () => render({ ...originRequest, kind: "action", operation: "click" }));
+    expect(container.querySelector('[data-testid="shared-browser-approval-routine"]')).toBeNull();
+  });
+
+  it("never offers routine approval without runtime support", async () => {
+    await act(async () => root.render(
+      <SharedBrowserApprovalPrompt onDecision={vi.fn()} request={originRequest} submitting={false} />,
+    ));
+    expect(container.querySelector('[data-testid="shared-browser-approval-routine"]')).toBeNull();
+  });
+
   it.each([
     ["type", "Search", "type into “Search”"],
     ["form-submit", "Email", "submit the form from “Email”"],

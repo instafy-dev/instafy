@@ -19,6 +19,7 @@ interface UseWorkspaceTabControllerArgs {
   setActiveFile: (fileId: string | null) => void;
   setActivePanel: (panel: StudioPanel) => void;
   workspaceProjectId: string | null;
+  canPersistTabs: boolean;
   tabsRef: MutableRefObject<WorkspaceTabState[]>;
   activeTabIdRef: MutableRefObject<string | null>;
   activeConversationIdRef: MutableRefObject<string | null>;
@@ -39,6 +40,7 @@ export function useWorkspaceTabController({
   setActiveFile,
   setActivePanel,
   workspaceProjectId,
+  canPersistTabs,
   tabsRef,
   activeTabIdRef,
   activeConversationIdRef,
@@ -49,18 +51,42 @@ export function useWorkspaceTabController({
   setTabs,
   setActiveTabId,
 }: UseWorkspaceTabControllerArgs) {
+  const {
+    requestUrlNavigation,
+    peekUrlNavigation,
+    consumeUrlNavigation,
+    requestUrlPush,
+    consumeUrlPush,
+  } = useWorkspaceTabUrlIntents({ urlNavigationModeRef });
   const commitTabs = useCallback(
     (nextTabs: WorkspaceTabState[]) => {
       tabsRef.current = nextTabs;
+      // Reconciliation can run before the persistence effect. Update its
+      // source immediately so replacing a preview cannot resurrect its tab.
+      if (workspaceProjectId && canPersistTabs) {
+        const current = persistedStateRef.current ?? { projects: {} };
+        const conversationTabs = nextTabs.filter((tab) => tab.kind === "conversation");
+        persistedStateRef.current = {
+          projects: {
+            ...current.projects,
+            [workspaceProjectId]: {
+              conversations: conversationTabs.map((tab) => tab.conversationId),
+              activeConversationId: conversationTabs.find((tab) => tab.id === activeTabIdRef.current)?.conversationId,
+              previewConversationId: conversationTabs.find((tab) => tab.preview)?.conversationId,
+            },
+          },
+        };
+      }
       setTabs(nextTabs);
     },
-    [setTabs, tabsRef],
+    [activeTabIdRef, canPersistTabs, persistedStateRef, setTabs, tabsRef, workspaceProjectId],
   );
 
   const {
     setActiveTabInternal,
     ensureTabForPanel,
     focusTab,
+    keepTabOpen,
     closeTab,
     moveTab,
     setTabDirty,
@@ -73,11 +99,13 @@ export function useWorkspaceTabController({
     setActiveFile,
     setActivePanel,
     workspaceProjectId,
+    canPersistTabs,
     tabsRef,
     activeTabIdRef,
     activeConversationIdRef,
     suppressPanelSyncRef,
     urlNavigationModeRef,
+    requestUrlNavigation,
     persistedStateRef,
     commitTabs,
     setActiveTabId,
@@ -105,14 +133,6 @@ export function useWorkspaceTabController({
     ensureTabForPanel,
   });
 
-  const {
-    requestUrlNavigation,
-    peekUrlNavigation,
-    consumeUrlNavigation,
-    requestUrlPush,
-    consumeUrlPush,
-  } = useWorkspaceTabUrlIntents({ urlNavigationModeRef });
-
   return {
     setActiveTabInternal,
     ensureTabForPanel,
@@ -125,6 +145,7 @@ export function useWorkspaceTabController({
     restoreGitReviewTab,
     openExplorerTab,
     focusTab,
+    keepTabOpen,
     closeTab,
     moveTab,
     setTabDirty,

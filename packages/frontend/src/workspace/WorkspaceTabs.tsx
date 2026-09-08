@@ -15,11 +15,12 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { desktopTitleBarFree } from "../lib/desktopShell";
-import { NavArrowLeft, NavArrowRight, Trash, Xmark } from "iconoir-react";
+import { NavArrowLeft, NavArrowRight, Pin, Trash, Xmark } from "iconoir-react";
 import { useEffect, useMemo, useCallback, useRef, useState, type KeyboardEvent, type MouseEvent, type PointerEvent, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Button, IconButton } from "../components/Button";
+import { IconButton } from "../components/Button";
 import { Surface } from "../components/Surface";
+import { StudioMenu, StudioMenuItem, StudioMenuSeparator } from "../components/aria/StudioMenu";
 import { HorizontalTabStrip } from "../components/tabs/HorizontalTabStrip";
 import { useConversations, type ConversationLifecycleStatus } from "../conversations/ConversationsProvider";
 import { controllerClient } from "../sdk/instafy";
@@ -51,7 +52,7 @@ export interface WorkspaceTabsProps {
 }
 
 const CONVERSATION_MENU_WIDTH = 240;
-const CONVERSATION_MENU_HEIGHT_ESTIMATE = 244;
+const CONVERSATION_MENU_HEIGHT_ESTIMATE = 280;
 const CONVERSATION_MENU_PADDING = 12;
 
 function getWorkspaceTabBaseClassName(showBaseline: boolean): string {
@@ -98,7 +99,7 @@ export function WorkspaceTabs({
   // Integrated macOS title bar: the strip sits on row zero and must clear
   // the window buttons. False on every other target and on older shells.
   const titleBarFree = desktopTitleBarFree();
-  const { tabs, activeTabId, focusTab, closeTab, moveTab, openConversationTab, requestUrlPush } = useWorkspaceTabs();
+  const { tabs, activeTabId, focusTab, closeTab, keepTabOpen, moveTab, openConversationTab, requestUrlPush } = useWorkspaceTabs();
   const {
     conversations,
     createConversation,
@@ -125,6 +126,7 @@ export function WorkspaceTabs({
   const renameInputRef = useRef<HTMLInputElement>(null);
   const renameIgnoreBlurRef = useRef(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const menuTriggerRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (!conversationMenu) {
@@ -144,6 +146,7 @@ export function WorkspaceTabs({
       if (event.key === "Escape") {
         event.preventDefault();
         setConversationMenu(null);
+        menuTriggerRef.current?.focus();
       }
     };
     document.addEventListener("pointerdown", handlePointerDown, true);
@@ -291,8 +294,9 @@ export function WorkspaceTabs({
     [activeTabId, focusTab, requestUrlPush],
   );
 
-  const handleOpenConversationMenu = (params: { tabId: string; conversationId: string; clientX: number; clientY: number }) => {
+  const handleOpenConversationMenu = (params: ConversationMenuTrigger) => {
     const { x, y, maxHeight } = clampConversationMenuPosition(params.clientX, params.clientY);
+    menuTriggerRef.current = params.trigger;
     setConversationMenu({
       tabId: params.tabId,
       conversationId: params.conversationId,
@@ -456,6 +460,15 @@ export function WorkspaceTabs({
     setConversationMenu(null);
   }, [closeTab, conversationMenu]);
 
+  const handleConversationMenuKeepOpen = useCallback(() => {
+    if (!conversationMenu) {
+      return;
+    }
+    keepTabOpen(conversationMenu.tabId);
+    setConversationMenu(null);
+    menuTriggerRef.current?.focus();
+  }, [conversationMenu, keepTabOpen]);
+
   const handleConversationMenuInvite = useCallback(() => {
     if (!conversationMenu) {
       return;
@@ -532,6 +545,7 @@ export function WorkspaceTabs({
     conversationMenu && conversationMenu.conversationId
       ? conversations.find((entry) => entry.localId === conversationMenu.conversationId) ?? null
       : null;
+  const menuTab = tabs.find((tab) => tab.id === conversationMenu?.tabId);
 
   const conversationMenuPortal =
     conversationMenu && typeof document !== "undefined"
@@ -552,65 +566,65 @@ export function WorkspaceTabs({
               shadow="lg"
               className={`p-1 ${DARK_FLOATING_SURFACE_CLASS} ${DARK_PANEL_SHADOW_CLASS}`}
             >
-              <Button
-                variant="ghost"
-                size="sm"
-                radius="lg"
-                fullWidth
-                className="justify-start"
-                onPress={handleConversationMenuNewThread}
-                data-testid="conversation-tab-menu-new-thread"
-              >
-                New thread
-              </Button>
-              <Button
-                variant="ghost"
-                size="sm"
-                radius="lg"
-                fullWidth
-                className="justify-start"
-                onPress={handleConversationMenuRename}
-                data-testid="conversation-tab-menu-rename"
-              >
-                Rename
-              </Button>
-              {menuConversation?.visibility === "private" ? (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  radius="lg"
-                  fullWidth
-                  className="justify-start"
-                  onPress={handleConversationMenuInvite}
-                  data-testid="conversation-tab-menu-invite"
+              <StudioMenu aria-label="Conversation tab actions" autoFocus="first">
+                {menuTab?.kind === "conversation" && menuTab.preview ? (
+                  <StudioMenuItem
+                    className="justify-start gap-2 pointer-coarse:min-h-11"
+                    onAction={handleConversationMenuKeepOpen}
+                    id="keep-open"
+                    textValue="Keep open"
+                    data-testid="conversation-tab-menu-keep-open"
+                  >
+                    <Pin className="h-4 w-4" aria-hidden="true" />
+                    <span>Keep open</span>
+                  </StudioMenuItem>
+                ) : null}
+                <StudioMenuItem
+                  className="justify-start gap-2 pointer-coarse:min-h-11"
+                  onAction={handleConversationMenuNewThread}
+                  id="new-thread"
+                  data-testid="conversation-tab-menu-new-thread"
                 >
-                  Invite teammate…
-                </Button>
-              ) : null}
-              <Button
-                variant="ghost"
-                size="sm"
-                radius="lg"
-                fullWidth
-                className="justify-start"
-                onPress={handleConversationMenuClose}
-                data-testid="conversation-tab-menu-close"
-              >
-                Close tab
-              </Button>
-              <div className={`my-1 h-px bg-slate-200 ${DARK_DIVIDER_CLASS}`} />
-              <Button
-                variant="ghost"
-                size="sm"
-                radius="lg"
-                fullWidth
-                className="justify-start text-rose-600 hover:text-rose-700 dark:text-rose-300 dark:hover:text-rose-200"
-                onPress={handleConversationMenuDelete}
-                data-testid="conversation-tab-menu-delete"
-              >
-                <Trash className="h-4 w-4" aria-hidden="true" />
-                <span>Delete…</span>
-              </Button>
+                  New thread
+                </StudioMenuItem>
+                <StudioMenuItem
+                  className="justify-start gap-2 pointer-coarse:min-h-11"
+                  onAction={handleConversationMenuRename}
+                  id="rename"
+                  data-testid="conversation-tab-menu-rename"
+                >
+                  Rename
+                </StudioMenuItem>
+                {menuConversation?.visibility === "private" ? (
+                  <StudioMenuItem
+                    className="justify-start gap-2 pointer-coarse:min-h-11"
+                    onAction={handleConversationMenuInvite}
+                    id="invite"
+                    data-testid="conversation-tab-menu-invite"
+                  >
+                    Invite teammate…
+                  </StudioMenuItem>
+                ) : null}
+                <StudioMenuItem
+                  className="justify-start gap-2 pointer-coarse:min-h-11"
+                  onAction={handleConversationMenuClose}
+                  id="close"
+                  data-testid="conversation-tab-menu-close"
+                >
+                  Close tab
+                </StudioMenuItem>
+                <StudioMenuSeparator />
+                <StudioMenuItem
+                  className="justify-start gap-2 pointer-coarse:min-h-11 text-rose-600 hover:text-rose-700 dark:text-rose-300 dark:hover:text-rose-200"
+                  onAction={handleConversationMenuDelete}
+                  id="delete"
+                  textValue="Delete…"
+                  data-testid="conversation-tab-menu-delete"
+                >
+                  <Trash className="h-4 w-4" aria-hidden="true" />
+                  <span>Delete…</span>
+                </StudioMenuItem>
+              </StudioMenu>
             </Surface>
           </div>,
           document.body,
@@ -622,6 +636,11 @@ export function WorkspaceTabs({
       <div
         className={[
           `relative flex max-w-full flex-none items-end gap-2 bg-white pr-2 pb-0 pt-0 ${DARK_CANVAS_CLASS}`,
+          // Offset every interactive child, including leading Back/Forward and
+          // overflow controls, past the integrated macOS drag corner. Padding
+          // only the scrolling tab content leaves leading controls underneath it.
+          // pl-6 equals DESKTOP_TITLE_BAR_TAB_OFFSET_PX (24px).
+          titleBarFree ? "pl-6" : "",
           className ?? "",
         ]
           .filter(Boolean)
@@ -635,20 +654,12 @@ export function WorkspaceTabs({
         {leading ? <div className="relative z-10 flex flex-none items-end">{leading}</div> : null}
         <HorizontalTabStrip
           className="relative z-10"
-          // The integrated macOS title bar puts this strip on row zero, where
-          // the traffic lights live. Offset the content so the first tab
-          // starts clear of them; the shell's drag corner is sized to stop
-          // short of exactly this position.
-          // pl-6 is 24px: a literal, because Tailwind scans source text and
-          // would never emit a class built from a runtime value. The constant
-          // it must equal is asserted in the tests.
-          contentClassName={titleBarFree ? "flex w-max items-end pr-1 pl-6" : undefined}
           testId="workspace-tabs-strip"
           overflowActions={tabStripActions}
           inlineOverflowActionsTestId="workspace-tabs-inline-actions"
           overflowActionsTestId="workspace-tabs-inline-actions"
           activeItemId={activeTabId}
-          activeItemAttribute="data-tab-id"
+          activeItemAttribute="data-workspace-tab-trigger"
           renderScrollControl={({ direction, canScroll, scrollByDirection }) => (
             <IconButton
               key={direction}
@@ -689,6 +700,7 @@ export function WorkspaceTabs({
                       title={tab.title}
                       icon={tab.icon}
                       dirty={tab.dirty}
+                      preview={tab.kind === "conversation" && tab.preview}
                       closable={tab.closable}
                       isActive={tab.id === activeTabId}
                       isFirstTab={index === 0}
@@ -712,6 +724,7 @@ export function WorkspaceTabs({
                       onOpenConversationMenu={handleOpenConversationMenu}
                       onSelect={handleSelectTab}
                       onClose={closeTab}
+                      onKeepOpen={keepTabOpen}
                     />
                   ))
                 : emptyStateContent}
@@ -729,6 +742,14 @@ export function WorkspaceTabs({
   );
 }
 
+interface ConversationMenuTrigger {
+  tabId: string;
+  conversationId: string;
+  clientX: number;
+  clientY: number;
+  trigger: HTMLElement;
+}
+
 interface WorkspaceSortableTabProps {
   tabId: string;
   kind: WorkspaceTabKind;
@@ -736,6 +757,7 @@ interface WorkspaceSortableTabProps {
   title: string;
   icon?: ReactNode;
   dirty: boolean;
+  preview?: boolean;
   closable: boolean;
   isActive: boolean;
   isFirstTab: boolean;
@@ -751,9 +773,10 @@ interface WorkspaceSortableTabProps {
   onRenameCommit?: () => void;
   onRenameCancel?: (options?: { ignoreBlur?: boolean }) => void;
   onRenameBlur?: () => void;
-  onOpenConversationMenu?: (params: { tabId: string; conversationId: string; clientX: number; clientY: number }) => void;
+  onOpenConversationMenu?: (params: ConversationMenuTrigger) => void;
   onSelect: (tabId: string) => void;
   onClose: (tabId: string) => void;
+  onKeepOpen: (tabId: string) => void;
 }
 
 function WorkspaceSortableTab({
@@ -763,6 +786,7 @@ function WorkspaceSortableTab({
   title,
   icon,
   dirty,
+  preview = false,
   closable,
   isActive,
   isFirstTab,
@@ -780,7 +804,8 @@ function WorkspaceSortableTab({
   onRenameBlur,
   onOpenConversationMenu,
   onSelect,
-  onClose
+  onClose,
+  onKeepOpen,
 }: WorkspaceSortableTabProps) {
   const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } = useSortable({
     id: tabId
@@ -824,6 +849,7 @@ function WorkspaceSortableTab({
         conversationId,
         clientX: event.clientX,
         clientY: event.clientY,
+        trigger: event.currentTarget.querySelector<HTMLElement>("[data-workspace-tab-trigger]") ?? event.currentTarget as HTMLElement,
       });
     },
     [conversationId, kind, onOpenConversationMenu, tabId],
@@ -837,12 +863,18 @@ function WorkspaceSortableTab({
   }, [closable, onClose, tabId]);
   const handleShellKeyDown = useCallback(
     (event: KeyboardEvent<HTMLDivElement>) => {
+      if ((event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) && kind === "conversation" && conversationId) {
+        event.preventDefault();
+        const bounds = event.currentTarget.getBoundingClientRect();
+        onOpenConversationMenu?.({ tabId, conversationId, clientX: bounds.left, clientY: bounds.bottom, trigger: event.currentTarget });
+        return;
+      }
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
         handleSelect();
       }
     },
-    [handleSelect],
+    [conversationId, handleSelect, kind, onOpenConversationMenu, tabId],
   );
   const handleShellPointerDown = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
@@ -942,8 +974,17 @@ function WorkspaceSortableTab({
           .join(" ")}
         role="button"
         tabIndex={0}
+        data-workspace-tab-trigger={tabId}
+        title={preview ? `${title} · Preview — double-click to keep open` : title}
+        aria-label={preview ? `${title}, preview tab${badge ? `, ${badge} unread messages` : ""}` : undefined}
+        aria-haspopup={kind === "conversation" ? "menu" : undefined}
         onPointerDown={handleShellPointerDown}
         onClick={handleSelect}
+        onDoubleClick={(event) => {
+          if (preview && !(event.target as HTMLElement).closest("button")) {
+            onKeepOpen(tabId);
+          }
+        }}
         onKeyDown={handleShellCombinedKeyDown}
         {...sortableActivatorAttributes}
         {...restSortableListeners}
@@ -953,6 +994,7 @@ function WorkspaceSortableTab({
           data-tab-id={tabId}
           data-tab-kind={kind}
           data-conversation-id={conversationId}
+          data-preview={preview || undefined}
           aria-current={isActive ? "page" : undefined}
         >
           {icon ? (
@@ -960,7 +1002,7 @@ function WorkspaceSortableTab({
               {icon}
             </span>
           ) : null}
-          <span className="min-w-0 flex-1 truncate">{title}</span>
+          <span className={`min-w-0 flex-1 truncate ${preview ? "italic" : ""}`}>{title}</span>
           {badge ? (
             <span
               className={[

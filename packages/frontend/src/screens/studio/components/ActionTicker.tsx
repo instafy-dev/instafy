@@ -11,6 +11,7 @@ const TYPE_DOT: Record<RuntimeBrowserSessionAction["type"], string> = {
   click: "bg-emerald-400",
   type: "bg-violet-400",
   scroll: "bg-slate-400",
+  human_input: "bg-amber-400",
 };
 
 function actionCaption(action: RuntimeBrowserSessionAction): string {
@@ -29,6 +30,8 @@ function actionCaption(action: RuntimeBrowserSessionAction): string {
       return "Typing";
     case "scroll":
       return "Scrolling";
+    case "human_input":
+      return "Waiting for your input";
     default:
       return "Working";
   }

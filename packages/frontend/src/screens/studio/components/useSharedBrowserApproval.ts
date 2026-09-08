@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   controllerClient,
   type RuntimeSharedBrowserApprovalDecision,
@@ -32,13 +32,22 @@ export function useSharedBrowserApproval({
   const [pending, setPending] = useState<RuntimeSharedBrowserPendingApproval | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [routineApprovedRunId, setRoutineApprovedRunId] = useState<string | null>(null);
   const submittingRef = useRef(false);
   const pendingRef = useRef<RuntimeSharedBrowserPendingApproval | null>(null);
   const settledApprovalIdRef = useRef<string | null>(null);
   const decisionAbortRef = useRef<AbortController | null>(null);
   pendingRef.current = pending;
 
-  const identity = `${projectId ?? ""}:${browserSessionId}:${runtimeId ?? ""}:${browserPageId ?? ""}`;
+  const identity = JSON.stringify([projectId, browserSessionId, runtimeId, browserPageId]);
+  // A decision belongs to one mounted, authenticated browser surface. The token
+  // itself is never persisted; changing credentials invalidates in-flight work.
+  const scope = useMemo(
+    () => ({ active, identity, originEndpoint, originAccessToken }),
+    [active, identity, originEndpoint, originAccessToken],
+  );
+  const scopeRef = useRef(scope);
+  scopeRef.current = scope;
   useEffect(() => {
     pendingRef.current = null;
     settledApprovalIdRef.current = null;
@@ -46,9 +55,10 @@ export function useSharedBrowserApproval({
     setPending(null);
     setSubmitting(false);
     setError(null);
+    setRoutineApprovedRunId(null);
     decisionAbortRef.current?.abort();
     decisionAbortRef.current = null;
-  }, [identity]);
+  }, [scope]);
 
   useEffect(() => {
     if (
@@ -76,7 +86,7 @@ export function useSharedBrowserApproval({
           browserPageId,
           signal: pollAbort.signal,
         });
-        if (cancelled) {
+        if (cancelled || scopeRef.current !== scope) {
           return;
         }
         const live = next && next.request.expiresAtMs > Date.now() ? next : null;
@@ -90,11 +100,11 @@ export function useSharedBrowserApproval({
         }
         setError(null);
       } catch (pollError) {
-        if (!cancelled && !isAbortError(pollError) && pendingRef.current) {
+        if (!cancelled && scopeRef.current === scope && !isAbortError(pollError) && pendingRef.current) {
           setError("Approval connection interrupted. Reconnecting…");
         }
       } finally {
-        if (!cancelled) {
+        if (!cancelled && scopeRef.current === scope) {
           timerId = window.setTimeout(
             poll,
             pendingRef.current
@@ -121,6 +131,7 @@ export function useSharedBrowserApproval({
     originEndpoint,
     projectId,
     runtimeId,
+    scope,
   ]);
 
   useEffect(
@@ -134,6 +145,7 @@ export function useSharedBrowserApproval({
     async (decision: RuntimeSharedBrowserApprovalDecision) => {
       const current = pendingRef.current;
       if (
+        !active ||
         submittingRef.current ||
         !current ||
         !projectId ||
@@ -158,31 +170,47 @@ export function useSharedBrowserApproval({
           decision,
           signal: controller.signal,
         });
-        if (!accepted) {
-          setError("This approval changed or expired. Waiting for the current request…");
+        if (controller.signal.aborted || scopeRef.current !== scope) {
           return;
         }
+        if (!accepted) {
+          if (pendingRef.current?.request.approvalId === current.request.approvalId) {
+            setError("This approval changed or expired. Waiting for the current request…");
+          }
+          return;
+        }
+        if (decision === "allow_routine" && current.request.kind === "origin") {
+          setRoutineApprovedRunId(current.request.runId);
+        }
         settledApprovalIdRef.current = current.request.approvalId;
-        pendingRef.current = null;
-        setPending(null);
+        if (pendingRef.current?.request.approvalId === current.request.approvalId) {
+          pendingRef.current = null;
+          setPending(null);
+        }
       } catch (decisionError) {
-        if (!isAbortError(decisionError)) {
+        if (
+          !controller.signal.aborted &&
+          scopeRef.current === scope &&
+          pendingRef.current?.request.approvalId === current.request.approvalId &&
+          !isAbortError(decisionError)
+        ) {
           setError("Could not save the approval. Check your connection and try again.");
         }
       } finally {
         if (decisionAbortRef.current === controller) {
           decisionAbortRef.current = null;
+          submittingRef.current = false;
+          setSubmitting(false);
         }
-        submittingRef.current = false;
-        setSubmitting(false);
       }
-    }, [browserPageId, originAccessToken, originEndpoint, projectId, runtimeId],
+    }, [active, browserPageId, originAccessToken, originEndpoint, projectId, runtimeId, scope],
   );
 
   return {
     pending,
     submitting,
     error,
+    routineApprovedRunId,
     decide,
   };
 }
