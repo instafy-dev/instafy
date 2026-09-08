@@ -138,6 +138,26 @@ describe("useComposerMultilineLayout lifecycle", () => {
     expect(frames.size).toBe(0);
   });
 
+  it("commits expansion and collapse before the queued frame callback returns", async () => {
+    geometry.editorHeight = 36;
+    await render();
+    expect(isMultiline()).toBe("false");
+
+    for (const [height, expected] of [[60, "true"], [36, "false"]] as const) {
+      geometry.editorHeight = height;
+      currentMutations().deliver();
+      const [id, callback] = [...frames.entries()][0];
+      frames.delete(id);
+      act(() => {
+        callback(16);
+        // This assertion runs inside the same task, before act flushes its
+        // queued React work. A deferred state update exposes the old row to
+        // the browser's next paint even though the measurement is complete.
+        expect(isMultiline()).toBe(expected);
+      });
+    }
+  });
+
   it("releases scheduled work when disabled, reads the current editor on re-enable, and cleans up on unmount", async () => {
     await render();
     const oldEditor = container.querySelector('[data-testid="chat-input"]');

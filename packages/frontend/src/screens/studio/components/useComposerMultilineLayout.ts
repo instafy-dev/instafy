@@ -1,4 +1,5 @@
-import { useLayoutEffect, useState, type RefObject } from "react";
+import { useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { flushSync } from "react-dom";
 
 /** Measure the existing editor without copying its contents or remounting it. */
 export function useComposerMultilineLayout(
@@ -6,6 +7,7 @@ export function useComposerMultilineLayout(
   enabled: boolean,
 ): boolean {
   const [multiline, setMultiline] = useState(false);
+  const multilineRef = useRef(false);
 
   useLayoutEffect(() => {
     const row = rowRef.current;
@@ -13,12 +15,23 @@ export function useComposerMultilineLayout(
     const leading = row?.querySelector<HTMLElement>('[data-testid="chat-composer-leading-controls"]');
     const trailing = row?.querySelector<HTMLElement>('[data-testid="chat-composer-trailing-controls"]');
     if (!enabled || !row || !editor || !leading || !trailing) {
+      multilineRef.current = false;
       setMultiline(false);
       return;
     }
 
     let frame: number | null = null;
-    const measure = () => {
+    const commitLayout = (next: boolean, beforePaint: boolean) => {
+      if (next === multilineRef.current) return;
+      multilineRef.current = next;
+      // Observer measurements run in rAF, outside React's commit. Finish an
+      // actual row change before paint so a newly wrapped narrow editor is
+      // not displayed for a frame before it expands. Initial layout effects
+      // already flush before paint and must not call flushSync themselves.
+      if (beforePaint) flushSync(() => setMultiline(next));
+      else setMultiline(next);
+    };
+    const measure = (beforePaint = false) => {
       frame = null;
       const rowWidth = row.getBoundingClientRect().width;
       if (rowWidth <= 0) return;
@@ -28,7 +41,7 @@ export function useComposerMultilineLayout(
       const paddingY = Number.parseFloat(style.paddingTop) + Number.parseFloat(style.paddingBottom);
       const hasMultipleLines = editor.childElementCount > 1 || editor.scrollHeight - paddingY > lineHeight + 1;
       if (hasMultipleLines) {
-        setMultiline(true);
+        commitLayout(true, beforePaint);
         return;
       }
 
@@ -42,10 +55,10 @@ export function useComposerMultilineLayout(
       const range = document.createRange();
       range.selectNodeContents(editor.firstElementChild ?? editor);
       const textWidth = range.getBoundingClientRect().width;
-      setMultiline((previous) => textWidth <= inlineWidth - 1 ? false : previous);
+      if (textWidth <= inlineWidth - 1) commitLayout(false, beforePaint);
     };
     const schedule = () => {
-      if (frame === null) frame = window.requestAnimationFrame(measure);
+      if (frame === null) frame = window.requestAnimationFrame(() => measure(true));
     };
     const resize = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(schedule);
     for (const node of [row, editor, leading, trailing]) resize?.observe(node);
