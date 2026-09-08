@@ -4753,8 +4753,28 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn codex_threads_guard_stops_all_idle_threads_on_finish_and_drop() -> Result<()> {
+    #[test]
+    fn codex_threads_guard_stops_all_idle_threads_on_finish_and_drop() -> Result<()> {
+        // Codex startup has large debug-build futures. Match main.rs's 16 MiB
+        // worker stacks; a current-thread Tokio test would poll even spawned
+        // startup/session tasks on the default 2 MiB libtest thread.
+        const STACK_SIZE: usize = 16 * 1024 * 1024;
+        std::thread::Builder::new()
+            .name("codex-thread-cleanup-fixture".to_string())
+            .stack_size(STACK_SIZE)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .thread_stack_size(STACK_SIZE)
+                    .enable_all()
+                    .build()?
+                    .block_on(codex_threads_guard_fixture())
+            })?
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    }
+
+    async fn codex_threads_guard_fixture() -> Result<()> {
         let home = tempfile::tempdir()?;
         let workspace = tempfile::tempdir()?;
         let mut config = ConfigBuilder::default()
