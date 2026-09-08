@@ -255,7 +255,7 @@ export function useChatSubmitFlow({
     controllerId: string | null;
     at: number;
   } | null>;
-  performSubmit: (payload: ChatSubmitDispatchPayload) => Promise<void>;
+  performSubmit: (payload: ChatSubmitDispatchPayload) => Promise<boolean | void>;
   personalBrowserActive: boolean;
   personalBrowserAgentControlEnabled: boolean;
   personalBrowserAgentError: string | null;
@@ -751,7 +751,7 @@ export function useChatSubmitFlow({
       return false;
     }
 
-    await performSubmit({
+    const submitted = await performSubmit({
       message: dispatchedMessage,
       composerMessage: messageToSend,
       editorState,
@@ -760,6 +760,7 @@ export function useChatSubmitFlow({
       runtimeOverride: submitRuntimeOverride,
       expectedLaneIdle: !allowWhileBusy && !participationBypassesBusySerialization,
     });
+    if (submitted === false) return false;
     consumeBrowserComposerTarget();
     return true;
   }, [

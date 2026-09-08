@@ -1,6 +1,6 @@
 import { Capacitor } from "@capacitor/core";
-import { useCallback, type MutableRefObject } from "react";
-import type { SubmitConversationOptions } from "../../../conversations/useConversation";
+import { useCallback, useRef, type MutableRefObject } from "react";
+import type { SubmitConversationOptions, SubmitConversationResult } from "../../../conversations/useConversation";
 
 export type ChatSubmitDispatchPayload = {
   message: string;
@@ -14,14 +14,17 @@ export type ChatSubmitDispatchPayload = {
 
 type UseChatSubmitDispatchOptions = {
   activeConversationId: string | null;
+  draftScopeKey: string;
   clearInputEditor?: () => void;
-  clearImageAttachments: () => void;
+  clearSubmittedImageAttachments: (files: File[]) => void;
+  clearConversationDraftIfUnchanged: (conversationId: string, draft: string, editorState: string | null) => boolean;
   focusInput: (options?: { force?: boolean }) => void;
   isChatInputFocused: () => boolean;
   latestInputValueRef: MutableRefObject<string>;
+  latestInputEditorStateRef: MutableRefObject<string | null>;
   mentionableAgentHandles: string[];
   onInputChange: (conversationId: string | null, value: string, editorState?: string | null) => void;
-  onSubmit: (conversationId: string | null, input: string, options?: SubmitConversationOptions) => Promise<void>;
+  onSubmit: (conversationId: string | null, input: string, options?: SubmitConversationOptions) => Promise<SubmitConversationResult>;
   scrollToBottom: () => void;
   setSendingAttachment: (value: boolean) => void;
   shouldAutoScrollRef: MutableRefObject<boolean>;
@@ -29,11 +32,14 @@ type UseChatSubmitDispatchOptions = {
 
 export function useChatSubmitDispatch({
   activeConversationId,
+  draftScopeKey,
   clearInputEditor,
-  clearImageAttachments,
+  clearSubmittedImageAttachments,
+  clearConversationDraftIfUnchanged,
   focusInput,
   isChatInputFocused,
   latestInputValueRef,
+  latestInputEditorStateRef,
   mentionableAgentHandles,
   onInputChange,
   onSubmit,
@@ -41,9 +47,11 @@ export function useChatSubmitDispatch({
   setSendingAttachment,
   shouldAutoScrollRef,
 }: UseChatSubmitDispatchOptions) {
+  const currentScopeRef = useRef(draftScopeKey);
+  currentScopeRef.current = draftScopeKey;
   const clearComposerIfUnchanged = useCallback(
     (conversationId: string, expectedDraft: string) => {
-      if (activeConversationId !== conversationId) {
+      if (currentScopeRef.current !== draftScopeKey || activeConversationId !== conversationId) {
         return;
       }
       const current = latestInputValueRef.current ?? "";
@@ -54,7 +62,7 @@ export function useChatSubmitDispatch({
       onInputChange(conversationId, "", null);
       clearInputEditor?.();
     },
-    [activeConversationId, clearInputEditor, latestInputValueRef, onInputChange],
+    [activeConversationId, clearInputEditor, draftScopeKey, latestInputValueRef, onInputChange],
   );
 
   const clearComposerAfterQueue = useCallback(
@@ -77,19 +85,24 @@ export function useChatSubmitDispatch({
       scrollToBottom();
       if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
         window.requestAnimationFrame(() => {
+          if (currentScopeRef.current !== draftScopeKey) return;
           shouldAutoScrollRef.current = true;
           scrollToBottom();
         });
       }
       const composerMessage = payload.composerMessage ?? payload.message;
-      if (activeConversationId && latestInputValueRef.current.trim() === composerMessage.trim()) {
+      const submittedDraft = latestInputValueRef.current;
+      const submittedEditorState = latestInputEditorStateRef.current;
+      const sendsCurrentDraft = currentScopeRef.current === draftScopeKey && submittedDraft.trim() === composerMessage.trim();
+      const hasImages = payload.imageFiles.length > 0;
+      if (!hasImages && activeConversationId && sendsCurrentDraft) {
         latestInputValueRef.current = "";
         onInputChange(activeConversationId, "", null);
         clearInputEditor?.();
       }
       setSendingAttachment(true);
       try {
-        await onSubmit(activeConversationId, composerMessage, {
+        const result = await onSubmit(activeConversationId, composerMessage, {
           dispatchInput: payload.message !== composerMessage ? payload.message : null,
           imageFiles: payload.imageFiles,
           editorState: payload.editorState,
@@ -98,12 +111,25 @@ export function useChatSubmitDispatch({
           runtimeOverride: payload.runtimeOverride ?? null,
           expectedLaneIdle: payload.expectedLaneIdle,
         });
-        clearImageAttachments();
-        if (shouldRefocus && !Capacitor.isNativePlatform()) {
+        if (result?.ok === false) return false;
+        if (hasImages && activeConversationId && sendsCurrentDraft) {
+          const cleared = clearConversationDraftIfUnchanged(activeConversationId, submittedDraft, submittedEditorState);
+          if (cleared && currentScopeRef.current === draftScopeKey &&
+            latestInputValueRef.current === submittedDraft && latestInputEditorStateRef.current === submittedEditorState) {
+            latestInputValueRef.current = "";
+            latestInputEditorStateRef.current = null;
+            clearInputEditor?.();
+          }
+        }
+        clearSubmittedImageAttachments(payload.imageFiles);
+        if (shouldRefocus && currentScopeRef.current === draftScopeKey && !Capacitor.isNativePlatform()) {
           focusInput({ force: true });
         }
-        shouldAutoScrollRef.current = true;
-        scrollToBottom();
+        if (currentScopeRef.current === draftScopeKey) {
+          shouldAutoScrollRef.current = true;
+          scrollToBottom();
+        }
+        return true;
       } finally {
         setSendingAttachment(false);
       }
@@ -111,10 +137,13 @@ export function useChatSubmitDispatch({
     [
       activeConversationId,
       clearInputEditor,
-      clearImageAttachments,
+      clearSubmittedImageAttachments,
+      clearConversationDraftIfUnchanged,
+      draftScopeKey,
       focusInput,
       isChatInputFocused,
       latestInputValueRef,
+      latestInputEditorStateRef,
       mentionableAgentHandles,
       onInputChange,
       onSubmit,

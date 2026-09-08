@@ -11,6 +11,7 @@ import { useConversationHistoryState } from "./useConversationHistoryState";
 import {
   buildConversationAgentHandles,
   type SubmitConversationOptions,
+  type SubmitConversationResult,
   useConversationSubmitFlow,
 } from "./useConversationSubmitFlow";
 import {
@@ -29,7 +30,7 @@ import {
   resolveNonRecoverableGoalErrorRunId,
   settleGoalAfterNonRecoverableRunError,
 } from "./conversationGoals";
-export type { SubmitConversationOptions, SubmitConversationRuntimeOverride } from "./useConversationSubmitFlow";
+export type { SubmitConversationOptions, SubmitConversationRuntimeOverride, SubmitConversationResult } from "./useConversationSubmitFlow";
 
 const { updateMetadata: updateControllerConversationMetadata } = controllerClient.conversations;
 
@@ -67,7 +68,7 @@ interface UseConversationResult {
   onResolveGroupParticipationBeforeSubmit: (
     input: ConversationGroupParticipationPreflightInput,
   ) => Promise<ConversationGroupParticipationPreflightResult>;
-  onSubmit: (conversationId: string | null, input: string, options?: SubmitConversationOptions) => Promise<void>;
+  onSubmit: (conversationId: string | null, input: string, options?: SubmitConversationOptions) => Promise<SubmitConversationResult>;
   stickyMentionedAgentByConversationRef: MutableRefObject<Map<string, string>>;
 }
 

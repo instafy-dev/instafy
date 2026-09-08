@@ -212,6 +212,11 @@ The composer uses one compact, rounded writing row on phones and wider screens. 
 with the draft, then scrolls within the editor. Image upload and other message tools live
 in the `+` menu.
 
+Image submissions keep their draft and previews while uploading. A failed upload leaves
+them available to retry and does not add an unsent message to the transcript. Successful
+uploads clear only the submitted images and unchanged source draft, including when the
+user has switched to another conversation or space in the meantime.
+
 On clients with voice input, the trailing action is the microphone for an empty draft and
 Send or Steer for a text or image draft. Recording and transcription keep the microphone
 available until capture finishes. Use **Dictate message** in `+` to start voice input with

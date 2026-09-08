@@ -86,6 +86,7 @@ export type ConversationsAction =
   | { type: "CLOSE"; id: string }
   | { type: "SET_LIFECYCLE"; id: string; status: ConversationLifecycleStatus }
   | { type: "SET_DRAFT"; id: string; draft: string; editorState: string | null }
+  | { type: "CLEAR_SUBMITTED_DRAFT"; projectKey: string; id: string; draft: string; editorState: string | null }
   | { type: "SET_ASSISTANT_ENABLED"; id: string; enabled: boolean }
   | {
       type: "SET_ROUTING_PREFERENCES";
@@ -461,6 +462,17 @@ export function conversationsReducer(
             ? { ...conversation, lifecycleStatus: action.status }
             : conversation,
         ),
+      };
+    }
+    case "CLEAR_SUBMITTED_DRAFT": {
+      if (state.projectKey !== action.projectKey) return state;
+      const conversation = state.conversations.find((entry) => entry.localId === action.id);
+      if (!conversation || conversation.draft !== action.draft || conversation.draftEditorState !== action.editorState) return state;
+      return {
+        ...state,
+        conversations: state.conversations.map((entry) => entry === conversation
+          ? { ...entry, draft: "", draftEditorState: null }
+          : entry),
       };
     }
     case "SET_DRAFT": {

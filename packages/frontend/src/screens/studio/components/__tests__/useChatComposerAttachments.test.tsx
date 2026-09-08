@@ -88,6 +88,22 @@ describe("useChatComposerAttachments", () => {
     expect(names()).toEqual(["private.png"]);
   });
 
+  it("clears only submitted file identities in the source chat after more images are added", async () => {
+    await select("chat-a");
+    await attach("same.png");
+    const submittedFiles = latest.imageAttachments.map((attachment) => attachment.file);
+    const completeUpload = latest.clearSubmittedImageAttachments;
+    await attach("same.png");
+    await select("chat-b");
+    await attach("b.png");
+    await act(async () => completeUpload(submittedFiles));
+    expect(names()).toEqual(["b.png"]);
+    expect(revokeObjectURL).toHaveBeenCalledExactlyOnceWith("blob:attachment-1");
+    await select("chat-a");
+    expect(names()).toEqual(["same.png"]);
+    expect(latest.imageAttachments[0].file).not.toBe(submittedFiles[0]);
+  });
+
   it("revokes removed and cleared URLs once and releases all retained drafts on unmount", async () => {
     await select("chat-a");
     await attach("remove.png");

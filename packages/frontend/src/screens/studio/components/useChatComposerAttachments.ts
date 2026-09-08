@@ -89,6 +89,15 @@ export function useChatComposerAttachments({
     });
   }, [setImageAttachments]);
 
+  const clearSubmittedImageAttachments = useCallback((files: File[]) => {
+    const submitted = new Set(files);
+    setImageAttachments((previous) => previous.filter((attachment) => {
+      if (!submitted.has(attachment.file)) return true;
+      revokePreviewUrl(attachment.previewUrl);
+      return false;
+    }));
+  }, [setImageAttachments]);
+
   const attachImageFiles = useCallback(
     (files: File[]) => {
       const maxBytes = 5 * 1024 * 1024;
@@ -231,6 +240,7 @@ export function useChatComposerAttachments({
   return {
     attachImageFiles,
     clearImageAttachments,
+    clearSubmittedImageAttachments,
     handleComposerDragOver,
     handleComposerDrop,
     handleComposerPaste,

@@ -189,6 +189,20 @@ describe("useChatSubmitFlow queued composer draft", () => {
     expect(clearComposerAfterQueue).toHaveBeenCalledWith("conversation-local", UNDO_REQUEST);
   });
 
+  it("propagates upload rejection without consuming the pending browser target", async () => {
+    const options = createOptions({
+      isAssistantTyping: false,
+      imageFiles: [new File(["image"], "photo.png", { type: "image/png" })],
+      performSubmit: vi.fn(async () => false),
+    });
+    const resultRef: MutableRefObject<HookResult | null> = { current: null };
+    await act(async () => root.render(<Harness options={options} resultRef={resultRef} />));
+    await act(async () => { await expect(resultRef.current!.submitMessage()).resolves.toBe(false); });
+    expect(options.performSubmit).toHaveBeenCalledOnce();
+    expect(options.clearPendingBrowserLaunchMode).not.toHaveBeenCalled();
+    expect(options.clearComposerAfterQueue).not.toHaveBeenCalled();
+  });
+
   it("still clears the composer when the queued message is the user's own draft", async () => {
     const { composer, clearComposerAfterQueue, clearComposerIfUnchanged } =
       createComposer(TYPED_DRAFT);

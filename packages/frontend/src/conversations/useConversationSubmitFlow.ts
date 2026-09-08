@@ -66,6 +66,7 @@ import {
 import type {
   SubmitConversationOptions,
   SubmitConversationRuntimeOverride,
+  SubmitConversationResult,
   UseConversationSubmitFlowArgs,
 } from "./conversationSubmitTypes";
 import { useConversationAutoTitle } from "./useConversationAutoTitle";
@@ -75,6 +76,7 @@ import { withUserMentionMetadata } from "./userMentions";
 export type {
   SubmitConversationOptions,
   SubmitConversationRuntimeOverride,
+  SubmitConversationResult,
 } from "./conversationSubmitTypes";
 
 const {
@@ -334,7 +336,7 @@ export function useConversationSubmitFlow({
       conversationId: string | null,
       rawInput: string,
       options?: SubmitConversationOptions,
-    ) => {
+    ): Promise<SubmitConversationResult> => {
       const trimmed = rawInput.trim();
       const dispatchTrimmed =
         typeof options?.dispatchInput === "string" && options.dispatchInput.trim().length > 0
@@ -560,8 +562,6 @@ export function useConversationSubmitFlow({
         currentUserId,
         promptMetadata,
       );
-      appendMessages(displayConversationId, [userMessage]);
-
       const imageFiles = resolveSubmittedImageFiles(options?.imageFile, options?.imageFiles);
 
       if (imageFiles.length > 0) {
@@ -578,18 +578,17 @@ export function useConversationSubmitFlow({
             attachments,
           };
 
-          patchConversationMessageMetadata(
-            updateMessage,
-            displayConversationId,
-            userMessage.id,
-            promptMetadata,
-          );
+          userMessage.metadata = promptMetadata;
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           showStatus(`Image upload failed: ${message}`, "error", 5000);
-          return;
+          return { ok: false, reason: "image_upload_failed" };
         }
       }
+
+      // Only publish a message after its images exist. A failed upload leaves
+      // the composer retryable and must not leave an optimistic ghost row.
+      appendMessages(displayConversationId, [userMessage]);
 
       const configuredAgentHandles =
         options?.agentHandles

@@ -476,6 +476,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     appendMessages,
     createConversation,
     setConversationDraft,
+    clearConversationDraftIfUnchanged,
   } = useConversations();
   const {
     activeConversationId,
@@ -1836,6 +1837,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   const {
     clearImageAttachments,
+    clearSubmittedImageAttachments,
     handleComposerDragOver,
     handleComposerDrop,
     handleComposerPaste,
@@ -3755,11 +3757,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   const { clearComposerAfterQueue, clearComposerIfUnchanged, performSubmit } = useChatSubmitDispatch({
     activeConversationId,
+    draftScopeKey: JSON.stringify([currentUserId, activeProjectId, activeConversationId]),
+    clearConversationDraftIfUnchanged,
+    clearSubmittedImageAttachments,
     clearInputEditor,
-    clearImageAttachments,
     focusInput,
     isChatInputFocused,
     latestInputValueRef,
+    latestInputEditorStateRef,
     mentionableAgentHandles,
     onInputChange,
     onSubmit,
