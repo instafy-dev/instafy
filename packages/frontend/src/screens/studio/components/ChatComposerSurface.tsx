@@ -1400,16 +1400,18 @@ export function ChatComposerSurface({
                             else imageRemoveButtonsRef.current.delete(attachment.id);
                           }}
                           type="button"
-                          variant="secondary"
+                          variant="ghost"
                           size="sm"
                           radius="full"
-                          className="absolute right-0 top-0 border border-white/70 shadow-sm dark:border-slate-700"
+                          className="absolute right-0 top-0 !bg-transparent !shadow-none"
                           onPress={() => handleRemoveImageAttachment(attachment.id)}
                           isDisabled={sendingAttachment}
                           aria-label={`Remove image ${index + 1}: ${attachment.file.name}`}
                           data-testid="chat-image-upload-remove"
                         >
-                          <Xmark className="h-4 w-4" aria-hidden="true" />
+                          <span className="flex h-7 w-7 items-center justify-center rounded-full border border-slate-300 bg-white/95 text-slate-700 shadow-sm dark:border-slate-600 dark:bg-slate-800/95 dark:text-slate-100" aria-hidden="true">
+                            <Xmark className="h-4 w-4" />
+                          </span>
                         </IconButton>
                         <Text as="div" variant="caption" tone="secondary" className="truncate px-1 pt-1 text-xs" title={attachment.file.name}>
                           {attachment.file.name}
