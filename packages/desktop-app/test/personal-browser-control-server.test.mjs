@@ -193,7 +193,7 @@ test("Personal Browser exposes only its bounded operations as authenticated MCP 
     });
     assert.deepEqual(
       listed.body.result.tools.map((tool) => tool.name),
-      ["status", "snapshot", "navigate", "click", "type", "press", "scroll"],
+      ["request_human_input", "status", "snapshot", "navigate", "click", "type", "press", "scroll"],
     );
     for (const name of ["click", "type", "press"]) {
       const tool = listed.body.result.tools.find((candidate) => candidate.name === name);
@@ -324,4 +324,28 @@ test("binding rotation while a request body is streaming prevents operation disp
   } finally {
     await server.stop();
   }
+});
+
+test("human input acknowledges its own revocation and rejects every later old-token request", async () => {
+  const calls = [];
+  const server = new PersonalBrowserControlServer({ handle: async (operation) => {
+    calls.push(operation);
+    if (operation === "request_human_input") {
+      server.clearBinding();
+      return { humanInputRequired: true };
+    }
+    return {};
+  } });
+  const credentials = await server.bindProject("manual-project");
+  const headers = { Authorization: `Bearer ${credentials.token}`, "X-Instafy-Project-Id": "manual-project", "Content-Type": "application/json" };
+  try {
+    const handoff = await requestJson(`${credentials.controlUrl}/mcp`, {
+      method: "POST", headers, body: { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "request_human_input", arguments: { indices: [0] } } },
+    });
+    assert.equal(handoff.body.result.structuredContent.humanInputRequired, true);
+    assert.equal(handoff.body.result.isError, false);
+    const oldToken = await requestJson(`${credentials.controlUrl}/v1/snapshot`, { headers });
+    assert.equal(oldToken.statusCode, 401);
+    assert.deepEqual(calls, ["request_human_input"]);
+  } finally { await server.stop(); }
 });

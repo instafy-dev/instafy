@@ -18,6 +18,10 @@ export interface SubmitConversationOptions {
   metadata?: Record<string, unknown> | null;
   runtimeOverride?: SubmitConversationRuntimeOverride | null;
   expectedLaneIdle?: boolean;
+  /** Opt-in UI transactions must reject unless a controller run was accepted. */
+  requireDispatch?: boolean;
+  /** Local-only scope fence, rechecked after preflight immediately before send. */
+  assertDispatchCurrent?: () => void;
 }
 
 export interface UseConversationSubmitFlowArgs {

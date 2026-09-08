@@ -65,6 +65,7 @@ describe("useBrowserSessionActions", () => {
       root.unmount();
     });
     container.remove();
+    vi.useRealTimers();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -75,10 +76,10 @@ describe("useBrowserSessionActions", () => {
     preferRuntimeId: "rt-1",
   };
 
-  async function render(): Promise<MutableRefObject<HookResult | null>> {
+  async function render(renderOptions = options): Promise<MutableRefObject<HookResult | null>> {
     const resultRef: MutableRefObject<HookResult | null> = { current: null };
     await act(async () => {
-      root.render(<Harness options={options} resultRef={resultRef} />);
+      root.render(<Harness options={renderOptions} resultRef={resultRef} />);
     });
     return resultRef;
   }
@@ -176,5 +177,110 @@ describe("useBrowserSessionActions", () => {
       await resultRef.current?.refresh();
     });
     expect(fetchActions).not.toHaveBeenCalled();
+  });
+
+  it("scopes cursor and ticker to the exact selected page, including identical URLs", async () => {
+    fetchActions.mockResolvedValue({
+      actions: [
+        action({ seq: 1, pageId: "page-1", type: "click", url: "https://same.test", x: 10, y: 20 }),
+        action({ seq: 2, pageId: "page-2", type: "click", url: "https://same.test", x: 40, y: 50 }),
+        action({ seq: 3, type: "click", url: "https://same.test", x: 70, y: 80 }),
+      ],
+      cursor: 300,
+    });
+    const resultRef = await render({ ...options, pageId: "page-1" });
+    expect(resultRef.current?.actions.map((item) => item.seq)).toEqual([1]);
+    expect(resultRef.current?.latestClick?.seq).toBe(1);
+
+    // Switching pages filters the same buffer immediately; it does not poll
+    // again, reset the runtime cursor, or flash another page's latest click.
+    fetchActions.mockClear();
+    await act(async () => {
+      root.render(<Harness options={{ ...options, pageId: "page-2" }} resultRef={resultRef} />);
+    });
+    expect(resultRef.current?.actions.map((item) => item.seq)).toEqual([2]);
+    expect(resultRef.current?.latestClick?.seq).toBe(2);
+    expect(fetchActions).not.toHaveBeenCalled();
+    fetchActions.mockResolvedValueOnce({ actions: [], cursor: 300 });
+    await act(async () => { await resultRef.current?.refresh(); });
+    expect(fetchActions).toHaveBeenLastCalledWith(expect.objectContaining({ sinceCursor: 300 }));
+
+    await act(async () => {
+      root.render(<Harness options={{ ...options, pageId: null }} resultRef={resultRef} />);
+    });
+    expect(resultRef.current?.actions).toEqual([]);
+    expect(resultRef.current?.latestClick).toBeNull();
+  });
+
+  it("never polls a hidden transport and resumes when the mounted surface becomes visible", async () => {
+    vi.useFakeTimers();
+    fetchActions.mockResolvedValue({ actions: [action({ seq: 1 })], cursor: 100 });
+    const resultRef = await render({ ...options, transportActive: false });
+    await act(async () => {
+      await resultRef.current?.refresh();
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(fetchActions).not.toHaveBeenCalled();
+    expect(resultRef.current?.actions).toEqual([]);
+
+    await act(async () => {
+      root.render(<Harness options={{ ...options, transportActive: true }} resultRef={resultRef} />);
+    });
+    expect(fetchActions).toHaveBeenCalledTimes(1);
+    expect(resultRef.current?.actions).toHaveLength(1);
+    await act(async () => {
+      root.render(<Harness options={{ ...options, transportActive: false }} resultRef={resultRef} />);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(fetchActions).toHaveBeenCalledTimes(1);
+    expect(resultRef.current?.actions).toEqual([]);
+  });
+
+  it("ignores an in-flight response after hiding the surface", async () => {
+    let resolveFetch!: (value: unknown) => void;
+    fetchActions.mockReturnValueOnce(new Promise((resolve) => { resolveFetch = resolve; }));
+    const resultRef = await render();
+    await act(async () => {
+      root.render(<Harness options={{ ...options, transportActive: false }} resultRef={resultRef} />);
+    });
+    await act(async () => {
+      resolveFetch({ actions: [action({ seq: 9, type: "click", x: 1, y: 2 })], cursor: 999 });
+    });
+    expect(resultRef.current?.actions).toEqual([]);
+    expect(resultRef.current?.latestClick).toBeNull();
+  });
+
+  it("does not let a late previous-runtime response overwrite the new runtime cursor", async () => {
+    let resolveFetch!: (value: unknown) => void;
+    fetchActions.mockReturnValueOnce(new Promise((resolve) => { resolveFetch = resolve; }));
+    const resultRef = await render();
+    fetchActions.mockResolvedValue({ actions: [action({ seq: 2 })], cursor: 200 });
+    await act(async () => {
+      root.render(<Harness options={{ ...options, preferRuntimeId: "rt-2" }} resultRef={resultRef} />);
+    });
+    await act(async () => {
+      resolveFetch({ actions: [action({ seq: 9 })], cursor: 999 });
+    });
+    expect(resultRef.current?.actions.map((item) => item.seq)).toEqual([2]);
+    await act(async () => { await resultRef.current?.refresh(); });
+    expect(fetchActions).toHaveBeenLastCalledWith(
+      expect.objectContaining({ preferRuntimeId: "rt-2", sinceCursor: 200 }),
+    );
+  });
+
+  it("keeps at most one poll in flight per runtime generation", async () => {
+    vi.useFakeTimers();
+    let resolveFetch!: (value: unknown) => void;
+    fetchActions.mockReturnValueOnce(new Promise((resolve) => { resolveFetch = resolve; }));
+    const resultRef = await render();
+    await act(async () => {
+      await resultRef.current?.refresh();
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(fetchActions).toHaveBeenCalledTimes(1);
+    await act(async () => { resolveFetch({ actions: [action({ seq: 1 })], cursor: 100 }); });
+    expect(resultRef.current?.actions.map((item) => item.seq)).toEqual([1]);
   });
 });

@@ -3,7 +3,8 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { useStudioNavigationPosture } from "../useStudioNavigationPosture";
+import { resolveMobileOverviewSection, useStudioNavigationPosture } from "../useStudioNavigationPosture";
+import { createTabForPanel, type WorkspaceTabState } from "../../../workspace/workspaceTabFactories";
 
 function NavigationPosture() {
   const posture = useStudioNavigationPosture();
@@ -45,9 +46,9 @@ describe("useStudioNavigationPosture", () => {
   });
 
   it.each([
-    { label: "phone", viewportWidth: 390, touchInput: true, composerNavigation: true },
+    { label: "phone", viewportWidth: 390, touchInput: true, composerNavigation: false },
     { label: "narrow mouse browser", viewportWidth: 390, touchInput: false, composerNavigation: true },
-    { label: "narrow tablet", viewportWidth: 820, touchInput: true, composerNavigation: true },
+    { label: "narrow tablet", viewportWidth: 820, touchInput: true, composerNavigation: false },
     { label: "narrow desktop window", viewportWidth: 899, touchInput: false, composerNavigation: true },
     { label: "desktop breakpoint", viewportWidth: 900, touchInput: false, composerNavigation: false },
     { label: "wide touch screen", viewportWidth: 1280, touchInput: true, composerNavigation: false },
@@ -57,7 +58,10 @@ describe("useStudioNavigationPosture", () => {
     await act(async () => root.render(<NavigationPosture />));
     const posture = JSON.parse(container.textContent ?? "{}");
     expect(posture.showComposerNavigationButton).toBe(composerNavigation);
-    expect(posture.isLargeScreen).toBe(!composerNavigation);
+    expect(posture.isLargeScreen).toBe(viewportWidth >= 900);
+    expect(posture.showTouchBottomDock).toBe(viewportWidth < 900 && touchInput);
+    expect(posture.showComposerHomeButton).toBe(false);
+    expect(posture.showTopbarHomeButton).toBe(false);
     expect(posture.touchLikeInput).toBe(touchInput);
   });
 
@@ -71,4 +75,38 @@ describe("useStudioNavigationPosture", () => {
     });
     expect(JSON.parse(container.textContent ?? "{}").showComposerNavigationButton).toBe(false);
   });
+});
+
+describe("Studio overview destination policy", () => {
+  it("reserves the destination bar for Home, Spaces and the full Chats overview", () => {
+    expect(resolveMobileOverviewSection(createTabForPanel("home"), null)).toBe("home");
+    expect(resolveMobileOverviewSection(createTabForPanel("projects"), null)).toBe("projects");
+    expect(resolveMobileOverviewSection(createTabForPanel("chat"), "history")).toBe("chat");
+    expect(resolveMobileOverviewSection(null, "history")).toBe("chat");
+  });
+
+  it("never adds a bottom row to an empty chat, conversation, job or editor/detail", () => {
+    for (const panel of ["chat", "code", "settings"] as const) {
+      expect(resolveMobileOverviewSection(createTabForPanel(panel), null)).toBeNull();
+    }
+    const shared = { id: "fixture", title: "Fixture", closable: true, dirty: false, badge: null, draggable: true };
+    const details: WorkspaceTabState[] = [
+      { ...shared, kind: "conversation", conversationId: "chat-a" },
+      { ...shared, kind: "jobThread", conversationId: "chat-a", jobId: "job-a" },
+      { ...shared, kind: "file", panel: "code", fileId: "file-a", filePath: "a.txt" },
+      { ...shared, kind: "explorer", rootPath: "/" },
+      { ...shared, kind: "gitDiff", path: "a.txt", commitRange: null },
+    ];
+    for (const tab of details) expect(resolveMobileOverviewSection(tab, null)).toBeNull();
+    expect(resolveMobileOverviewSection(null, null)).toBeNull();
+  });
+
+  it("lets the visible drawer override an underlying overview or conversation", () => {
+    const home = createTabForPanel("home");
+    expect(resolveMobileOverviewSection(home, "history")).toBe("chat");
+    expect(resolveMobileOverviewSection(home, "files")).toBeNull();
+    expect(resolveMobileOverviewSection(home, "sourceControl")).toBeNull();
+    expect(resolveMobileOverviewSection(home, "workspaces")).toBeNull();
+  });
+
 });

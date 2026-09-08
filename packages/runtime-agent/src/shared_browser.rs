@@ -59,7 +59,8 @@ const MAX_PAGE_ID_BYTES: usize = 256;
 const SHARED_BROWSER_CONSENT_VERSION: u64 = 1;
 const APPROVAL_DIRECTORY_MAX_ENTRIES: usize = 16;
 const APPROVAL_FIXED_FILES: [&str; 3] = ["request.json", "decision.json", "state.json"];
-const TERMINAL_APPROVAL_FAILURE_CODES: [&str; 9] = [
+const TERMINAL_APPROVAL_FAILURE_CODES: [&str; 10] = [
+    "human_input_required",
     "approval_denied",
     "approval_timeout",
     "approval_stale",
@@ -675,6 +676,13 @@ fn terminal_consent_status(code: &'static str) -> JsonValue {
 }
 
 fn terminal_consent_call_result(code: &'static str) -> CallToolResult {
+    if code == "human_input_required" {
+        let mut result = CallToolResult::success(vec![Content::text(
+            "Human input is needed. End this turn now. The user will fill the highlighted fields directly after confirmed shutdown, then explicitly continue in a fresh browser turn. Never request or repeat their values.",
+        )]);
+        result.structured_content = Some(terminal_consent_signal(code));
+        return result;
+    }
     let mut result = CallToolResult::error(vec![Content::text(format!(
         "Shared Browser consent is blocked for this run ({code}). Start a fresh browser run before requesting another browser action."
     ))]);
@@ -832,6 +840,21 @@ fn shared_browser_mcp_tools() -> Vec<Tool> {
     });
     vec![
         Tool::new(
+            Cow::Borrowed("request_human_input"),
+            Cow::Borrowed(
+                "End this turn and ask the user to fill one to eight highlighted fields from a fresh snapshot. Never include field values. The user explicitly continues in a fresh turn.",
+            ),
+            schema(json!({
+                "type": "object", "additionalProperties": false,
+                "properties": {
+                    "indices": { "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true,
+                        "items": { "type": "integer", "minimum": 0, "maximum": MAX_TARGET_INDEX } },
+                    "snapshotId": target_properties["snapshotId"].clone()
+                },
+                "required": ["indices", "snapshotId"]
+            })),
+        ),
+        Tool::new(
             Cow::Borrowed("status"),
             Cow::Borrowed("Read Shared Browser readiness and current page identity."),
             schema(json!({ "type": "object", "properties": {}, "additionalProperties": false })),
@@ -924,6 +947,11 @@ fn mcp_tool_request(name: &str, arguments: Option<JsonObject>) -> Result<SharedB
         "type" => ("POST", "/v1/type", Some(JsonValue::Object(arguments))),
         "press" => ("POST", "/v1/press", Some(JsonValue::Object(arguments))),
         "scroll" => ("POST", "/v1/scroll", Some(JsonValue::Object(arguments))),
+        "request_human_input" => (
+            "POST",
+            "/v1/request-human-input",
+            Some(JsonValue::Object(arguments)),
+        ),
         _ => bail!("unknown Shared Browser tool {name}"),
     };
     if let Some(body) = body.as_ref() {
@@ -1047,6 +1075,29 @@ fn validate_request_body(path: &str, body: &JsonValue) -> Result<()> {
                 bail!("Shared Browser navigation requires a credential-free HTTP(S) URL");
             }
         }
+        "/v1/request-human-input" => {
+            require_only_keys(object, &["indices", "snapshotId"])?;
+            let indices = object
+                .get("indices")
+                .and_then(JsonValue::as_array)
+                .context("Human input requires observed indices")?;
+            if indices.is_empty() || indices.len() > 8 {
+                bail!("Human input requires one to eight fields");
+            }
+            let mut unique = std::collections::HashSet::new();
+            for index in indices {
+                let index = index
+                    .as_u64()
+                    .filter(|index| *index <= MAX_TARGET_INDEX)
+                    .context("Human input index is invalid")?;
+                if !unique.insert(index) {
+                    bail!("Human input indices must be unique");
+                }
+                let mut target = object.clone();
+                target.insert("index".to_string(), json!(index));
+                validate_target(&target)?;
+            }
+        }
         "/v1/click" => {
             require_only_keys(object, &["index", "snapshotId"])?;
             validate_target(object)?;
@@ -1106,7 +1157,12 @@ fn normalize_allowed_path(method: &str, raw: &str) -> Result<String> {
         ("GET", "/v1/status" | "/v1/snapshot")
             | (
                 "POST",
-                "/v1/navigate" | "/v1/click" | "/v1/type" | "/v1/press" | "/v1/scroll"
+                "/v1/navigate"
+                    | "/v1/click"
+                    | "/v1/type"
+                    | "/v1/press"
+                    | "/v1/scroll"
+                    | "/v1/request-human-input"
             )
     );
     if !allowed {

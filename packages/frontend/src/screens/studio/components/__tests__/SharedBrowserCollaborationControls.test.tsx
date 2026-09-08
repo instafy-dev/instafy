@@ -328,4 +328,87 @@ describe("SharedBrowserCollaborationControls", () => {
       container.querySelector('[data-testid="shared-browser-collaboration-control-action"]'),
     ).toBeNull();
   });
+
+  it("hands control to the requested device even when both devices have the same account name", async () => {
+    const onGrantControl = vi.fn();
+    const onRequestControl = vi.fn();
+    const participants = [
+      participant("self", "Marcus"),
+      participant("second-device", "Marcus"),
+      participant("viewer", "Anna", false),
+    ];
+    const renderDevice = async (participantId: string, ownerId: string) => {
+      await act(async () => root.render(
+        <SharedBrowserCollaborationControls
+          client={client({
+            participantId,
+            state: {
+              revision: 1,
+              participants,
+              controlOwner: { kind: "human", participantId: ownerId },
+              requests: ownerId === "self" ? ["second-device"] : [],
+            },
+          })}
+          compact
+          localControlOwner={{ kind: "human" }}
+          onGrantControl={onGrantControl}
+          onReleaseControl={vi.fn()}
+          onRequestControl={onRequestControl}
+          onTakeControl={vi.fn()}
+        />,
+      ));
+    };
+    await renderDevice("self", "self");
+    expect(container.textContent).toContain("You control");
+    const grant = container.querySelector<HTMLButtonElement>(
+      '[data-testid="shared-browser-collaboration-control-action"]',
+    )!;
+    expect(grant.dataset.action).toBe("grant");
+    await act(async () => grant.click());
+    expect(onGrantControl).toHaveBeenCalledExactlyOnceWith("second-device");
+
+    await renderDevice("self", "second-device");
+    expect(container.textContent).not.toContain("You control");
+    expect(container.textContent).toContain("Marcus controls");
+    const request = container.querySelector<HTMLButtonElement>(
+      '[data-testid="shared-browser-collaboration-control-action"]',
+    )!;
+    expect(request.dataset.action).toBe("request");
+    await act(async () => request.click());
+    expect(onRequestControl).toHaveBeenCalledOnce();
+
+    await renderDevice("second-device", "second-device");
+    expect(container.textContent).toContain("You control");
+    expect(container.querySelector<HTMLElement>(
+      '[data-testid="shared-browser-collaboration-control-action"]',
+    )?.dataset.action).toBe("release");
+  });
+
+  it.each([
+    { compact: false, ownerId: "peer" },
+    { compact: true, ownerId: "peer" },
+    { compact: false, ownerId: null },
+    { compact: true, ownerId: null },
+  ])("keeps a read-only participant view-only (compact=$compact, owner=$ownerId)", async ({ compact, ownerId }) => {
+    await act(async () => root.render(
+      <SharedBrowserCollaborationControls
+        client={client({
+          state: {
+            revision: 1,
+            participants: [participant("self", "Anna", false), participant("peer", "Marcus")],
+            controlOwner: ownerId ? { kind: "human", participantId: ownerId } : null,
+            requests: [],
+          },
+        })}
+        compact={compact}
+        localControlOwner={{ kind: "human" }}
+        onGrantControl={vi.fn()}
+        onReleaseControl={vi.fn()}
+        onRequestControl={vi.fn()}
+        onTakeControl={vi.fn()}
+      />,
+    ));
+    expect(container.textContent).toContain(ownerId ? "Marcus controls" : "Control available");
+    expect(container.querySelector('[data-testid="shared-browser-collaboration-control-action"]')).toBeNull();
+  });
 });

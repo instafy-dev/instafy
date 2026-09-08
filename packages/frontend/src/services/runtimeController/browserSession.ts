@@ -15,6 +15,7 @@ export type SharedBrowserViewerKind = "rfb" | "cdp-screencast" | "webrtc";
 
 export type RuntimeBrowserSessionCapabilities = {
   version: 2;
+  approvalModes?: Array<"ask" | "routine">;
   viewerKinds: SharedBrowserViewerKind[];
   preferredViewer: SharedBrowserViewerKind;
   viewportOnly: boolean;
@@ -49,11 +50,27 @@ export type RuntimeBrowserSessionActionType =
   | "nav_result"
   | "click"
   | "type"
-  | "scroll";
+  | "scroll"
+  | "human_input";
+
+export type RuntimeBrowserHumanInputRequest = {
+  version: 1;
+  handoffId: string;
+  runId: string;
+  initiatorUserId: string;
+  browserPageId: string;
+  origin: string;
+  createdAtMs: number;
+  expiresAtMs: number;
+  fields: Array<{ label: string }>;
+};
 
 export type RuntimeBrowserSessionAction = {
   seq: number;
   ts: number;
+  // Legacy runtimes may omit this; unscoped events must not be drawn over a
+  // selected page. Never use a URL as a substitute for exact target identity.
+  pageId?: string | null;
   type: RuntimeBrowserSessionActionType;
   label: string;
   url: string | null;
@@ -63,6 +80,7 @@ export type RuntimeBrowserSessionAction = {
   y: number | null;
   viewportW: number | null;
   viewportH: number | null;
+  humanInputRequest?: RuntimeBrowserHumanInputRequest;
 };
 
 export type RuntimeBrowserSessionActionsResult = {
@@ -77,6 +95,7 @@ const BROWSER_SESSION_ACTION_TYPES = new Set<RuntimeBrowserSessionActionType>([
   "click",
   "type",
   "scroll",
+  "human_input",
 ]);
 
 const SHARED_BROWSER_VIEWER_KINDS = new Set<SharedBrowserViewerKind>([
@@ -288,6 +307,12 @@ export function mapRuntimeBrowserSessionCapabilitiesPayload(
 
   return {
     version: 2,
+    ...(Array.isArray(record.approvalModes) &&
+    record.approvalModes.length > 0 && record.approvalModes.length <= 2 &&
+    record.approvalModes.includes("ask") &&
+    record.approvalModes.every((mode) => mode === "ask" || mode === "routine")
+      ? { approvalModes: [...new Set(record.approvalModes)] as Array<"ask" | "routine"> }
+      : {}),
     viewerKinds,
     preferredViewer,
     viewportOnly: record.viewportOnly === true,
@@ -510,6 +535,73 @@ function toFiniteNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+const BROWSER_HANDOFF_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+function isBrowserActionPageId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 256
+    && !/[^A-Za-z0-9_-]/.test(value);
+}
+
+function isBrowserHandoffUuid(value: unknown): value is string {
+  return typeof value === "string" && value.length === 36 && BROWSER_HANDOFF_UUID_PATTERN.test(value);
+}
+
+function mapBrowserHumanInputRequest(value: unknown): RuntimeBrowserHumanInputRequest | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const row = value as Record<string, unknown>;
+  const keys = ["version", "handoffId", "runId", "initiatorUserId", "browserPageId", "origin", "createdAtMs", "expiresAtMs", "fields"];
+  if (Object.keys(row).length !== keys.length || !keys.every((key) => Object.hasOwn(row, key))) {
+    return null;
+  }
+  if (row.version !== 1
+    || !isBrowserHandoffUuid(row.handoffId)
+    || !isBrowserHandoffUuid(row.runId)
+    || !isBrowserHandoffUuid(row.initiatorUserId)
+    || !isBrowserActionPageId(row.browserPageId)
+    || typeof row.origin !== "string" || new TextEncoder().encode(row.origin).length > 512
+    || typeof row.createdAtMs !== "number" || !Number.isSafeInteger(row.createdAtMs) || row.createdAtMs <= 0
+    || typeof row.expiresAtMs !== "number" || !Number.isSafeInteger(row.expiresAtMs)
+    || row.expiresAtMs <= row.createdAtMs || row.expiresAtMs - row.createdAtMs > 600_000
+    || !Array.isArray(row.fields) || row.fields.length < 1 || row.fields.length > 8) {
+    return null;
+  }
+  try {
+    const origin = new URL(row.origin);
+    if (!["http:", "https:"].includes(origin.protocol) || origin.username || origin.password || origin.origin !== row.origin) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+  const fields: Array<{ label: string }> = [];
+  for (const field of row.fields) {
+    if (!field || typeof field !== "object" || Array.isArray(field)
+      || Object.keys(field).length !== 1 || !Object.hasOwn(field, "label")
+      || typeof field.label !== "string" || !field.label.trim()
+      || new TextEncoder().encode(field.label).length > 80
+      || Array.from(field.label as string).some((character) => {
+        const code = character.charCodeAt(0);
+        return code < 32 || (code >= 127 && code <= 159);
+      })) {
+      return null;
+    }
+    fields.push({ label: field.label });
+  }
+  return {
+    version: 1,
+    handoffId: row.handoffId,
+    runId: row.runId,
+    initiatorUserId: row.initiatorUserId,
+    browserPageId: row.browserPageId,
+    origin: row.origin,
+    createdAtMs: row.createdAtMs,
+    expiresAtMs: row.expiresAtMs,
+    fields,
+  };
+}
+
 export function mapRuntimeBrowserSessionActionsPayload(
   payload: unknown,
 ): RuntimeBrowserSessionActionsResult {
@@ -521,7 +613,7 @@ export function mapRuntimeBrowserSessionActionsPayload(
   const rawActions = Array.isArray(record.actions) ? record.actions : [];
 
   const actions = rawActions
-    .map((entry) => {
+    .map((entry): RuntimeBrowserSessionAction | null => {
       if (!entry || typeof entry !== "object") {
         return null;
       }
@@ -532,9 +624,19 @@ export function mapRuntimeBrowserSessionActionsPayload(
         return null;
       }
       const url = typeof row.url === "string" && row.url.trim().length > 0 ? row.url.trim() : null;
+      const pageId = isBrowserActionPageId(row.pageId)
+        ? row.pageId
+        : null;
+      const humanInputRequest = type === "human_input"
+        ? mapBrowserHumanInputRequest(row.humanInputRequest)
+        : null;
+      if (type === "human_input" && (!humanInputRequest || humanInputRequest.browserPageId !== pageId)) {
+        return null;
+      }
       return {
         seq,
         ts: toFiniteNumber(row.ts) ?? 0,
+        pageId,
         type: type as RuntimeBrowserSessionActionType,
         label: typeof row.label === "string" ? row.label.trim() : "",
         url,
@@ -542,6 +644,7 @@ export function mapRuntimeBrowserSessionActionsPayload(
         y: toFiniteNumber(row.y),
         viewportW: toFiniteNumber(row.viewportW),
         viewportH: toFiniteNumber(row.viewportH),
+        ...(humanInputRequest ? { humanInputRequest } : {}),
       } satisfies RuntimeBrowserSessionAction;
     })
     .filter((action): action is RuntimeBrowserSessionAction => Boolean(action));

@@ -427,6 +427,7 @@ contextBridge.exposeInMainWorld("instafyDesktop", {
   personalBrowserSetAgentControlEnabled: async (options: {
     enabled: boolean;
     ownerId: string;
+    approvalMode?: "ask" | "routine";
   }): Promise<PersonalBrowserStatus> => {
     return (await ipcRenderer.invoke(
       "instafy:personalBrowserSetAgentControlEnabled",

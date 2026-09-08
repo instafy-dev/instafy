@@ -53,6 +53,9 @@ describe("StudioMobileSidebarOverlay accessibility", () => {
     expect(dialog?.getAttribute("aria-label")).toBe("Navigation and recent chats");
     expect(dialog?.contains(document.activeElement)).toBe(true);
     expect(container.getAttribute("aria-hidden")).toBe("true");
+    // The viewport observer must attach after the semantic modal portal mounts.
+    const controls = document.querySelector<HTMLElement>('[data-testid="mobile-sidebar-controls"]');
+    expect(controls?.style.height).not.toBe("");
   });
 
   it("dismisses on Escape and restores focus to the composer menu trigger", async () => {

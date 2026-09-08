@@ -24,6 +24,7 @@ import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { StudioDialogBody, StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
 import { Input } from "../../../components/Input";
 import { useStatus } from "../../../status/useStatus";
+import { useStudioNavigation } from "../../../navigation/useStudioNavigation";
 import { studioPerformance } from "../../../telemetry/studioPerformance";
 import { useProfile } from "../../../profile/ProfileProvider";
 import { useProjects } from "../../../projects/useProjects";
@@ -45,6 +46,7 @@ import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
 import { getOrgDisambiguator, getOrgDisplayName } from "../../../org/orgNaming";
 import { SidebarOrgDeck } from "./SidebarOrgDeck";
 import { useAppLogs } from "../../../debug/useAppLogs";
+import type { MobileSidebarNavigation } from "../../useMobileSidebarHistory";
 import {
   controllerClient,
   runtimeControllerEnabled,
@@ -114,6 +116,8 @@ export interface StudioSidebarProps {
   workspaceSwitcherPortalTarget: HTMLDivElement | null;
   onRequestClose?: () => void;
   mobileOverlay?: boolean;
+  mobileNavigation?: MobileSidebarNavigation;
+  runSidebarAction?: (action: () => void) => void;
 }
 
 export function StudioSidebar({
@@ -129,11 +133,13 @@ export function StudioSidebar({
   openConversationIds,
   onSelectConversation,
   isConversationHistoryActive = false,
-  workspaceSwitcherOpen,
+  workspaceSwitcherOpen: desktopWorkspaceSwitcherOpen,
   onWorkspaceSwitcherOpenChange,
   workspaceSwitcherPortalTarget,
   onRequestClose,
   mobileOverlay = false,
+  mobileNavigation,
+  runSidebarAction,
 }: StudioSidebarProps) {
   const {
     onShowLogs,
@@ -159,7 +165,8 @@ export function StudioSidebar({
     shakeToReportStatus,
     shakeToReportDetail,
   } = useWorkspaceControls();
-  const { projectList, activeProjectId, switchProject, createProject } = useProjects();
+  const { projectList, activeProjectId } = useProjects();
+  const navigateToDestination = useStudioNavigation();
   const {
     runtime: runtimeContext,
     runtimeOptions,
@@ -175,6 +182,7 @@ export function StudioSidebar({
   const [updateDialogShowDetails, setUpdateDialogShowDetails] = useState(false);
   const [updateActionPending, setUpdateActionPending] = useState(false);
   const workspaceTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const [localWorkspaceMobileViewOpen, setWorkspaceMobileViewOpen] = useState(false);
   const [workspaceOrgKey, setWorkspaceOrgKey] = useState("personal");
   const [workspaceProjectQuery, setWorkspaceProjectQuery] = useState("");
   const [workspaceProjectSearchOpen, setWorkspaceProjectSearchOpen] = useState(false);
@@ -190,8 +198,17 @@ export function StudioSidebar({
   const [pendingOrgSwitchKey, setPendingOrgSwitchKey] = useState<string | null>(null);
   const [orgsRefreshEpoch, setOrgsRefreshEpoch] = useState(0);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const [localMoreMobileViewOpen, setMoreMobileViewOpen] = useState(false);
+  const moreMobileViewOpen = mobileNavigation ? mobileNavigation.view === "more" : localMoreMobileViewOpen;
+  const runDestination = useCallback((action: () => void) => {
+    if (runSidebarAction) {
+      runSidebarAction(action);
+    } else {
+      action();
+      onRequestClose?.();
+    }
+  }, [onRequestClose, runSidebarAction]);
   const [recentChatsExpanded, setRecentChatsExpanded] = useState(true);
-  const [moreMobileViewOpen, setMoreMobileViewOpen] = useState(false);
   const [appLogsOverlayOpen, setAppLogsOverlayOpen] = useState(false);
   const navRef = useRef<HTMLElement | null>(null);
   const footerRef = useRef<HTMLDivElement | null>(null);
@@ -202,6 +219,9 @@ export function StudioSidebar({
   const { logs: appLogs, hasLogs: hasAppLogs, hasErrors: hasAppLogErrors, clearLogs: clearAppLogs } =
     useAppLogs();
   const isLargeScreen = useStudioDesktopLayout();
+  const workspaceSwitcherOpen = isLargeScreen
+    ? desktopWorkspaceSwitcherOpen
+    : mobileNavigation ? mobileNavigation.view === "workspace" : desktopWorkspaceSwitcherOpen || localWorkspaceMobileViewOpen;
   const acquisitionTarget = getAppAcquisitionTarget();
   const { lookup: desktopReleaseLookup } = useDesktopReleaseLookup({
     enabled: acquisitionTarget === "desktop",
@@ -915,11 +935,18 @@ export function StudioSidebar({
   const canSearchSpaces =
     switcherProjects.length > 0 || workspaceProjectSearchOpen || workspaceProjectQuery.trim().length > 0;
 
-  const closeWorkspaceSwitcher = useCallback(() => {
-    onWorkspaceSwitcherOpenChange(false);
+  const resetWorkspaceSwitcher = useCallback(() => {
+    // A local reset is not Back. Destination actions own their history write.
+    setWorkspaceMobileViewOpen(false);
     setWorkspaceProjectQuery("");
     setWorkspaceProjectSearchOpen(false);
-  }, [onWorkspaceSwitcherOpenChange]);
+  }, []);
+
+  const dismissWorkspaceSwitcher = useCallback(() => {
+    resetWorkspaceSwitcher();
+    if (!isLargeScreen && mobileNavigation) mobileNavigation.back();
+    else onWorkspaceSwitcherOpenChange(false);
+  }, [isLargeScreen, mobileNavigation, onWorkspaceSwitcherOpenChange, resetWorkspaceSwitcher]);
 
   const openWorkspaceSwitcher = useCallback(() => {
     setMoreMenuOpen(false);
@@ -937,8 +964,13 @@ export function StudioSidebar({
     setPendingOrgSwitchKey(null);
     setWorkspaceProjectQuery("");
     setWorkspaceProjectSearchOpen(false);
-    onWorkspaceSwitcherOpenChange(true);
-  }, [activeOrgKey, canBrowseAllWorkspaceOrgs, onWorkspaceSwitcherOpenChange]);
+    if (!isLargeScreen) {
+      if (mobileNavigation) mobileNavigation.openView("workspace");
+      else setWorkspaceMobileViewOpen(true);
+    } else {
+      onWorkspaceSwitcherOpenChange(true);
+    }
+  }, [activeOrgKey, canBrowseAllWorkspaceOrgs, isLargeScreen, mobileNavigation, onWorkspaceSwitcherOpenChange]);
 
   const pendingOrgContextSwitchRef = useRef<string | null>(null);
 
@@ -949,18 +981,11 @@ export function StudioSidebar({
       }
       const destination = mergedProjects.find((entry) => entry.id === projectId);
       studioPerformance.beginProject(projectId, destination?.orgId ?? null, activeProject?.orgId ?? null);
-      if (!projectList.some((project) => project.id === projectId)) {
-        const project = mergedProjects.find((entry) => entry.id === projectId);
-        createProject({
-          projectId,
-          projectName: project?.name ?? `Space ${projectId.slice(0, 8)}`,
-          orgId: project?.orgId ?? null,
-          orgName: project?.orgName ?? null,
-        });
-      }
-      switchProject(projectId);
+      // Resolve previously unseen spaces through the authenticated route owner;
+      // createProject followed by a stale switchProject closure can return early.
+      navigateToDestination({ kind: "conversation", projectId });
     },
-    [activeProject?.orgId, activeProjectId, createProject, mergedProjects, projectList, switchProject],
+    [activeProject?.orgId, activeProjectId, mergedProjects, navigateToDestination],
   );
 
   const handleWorkspaceOrgChange = useCallback(
@@ -1015,31 +1040,34 @@ export function StudioSidebar({
       [...orgProjects].sort((a, b) =>
         (a.name || "Untitled space").localeCompare(b.name || "Untitled space"),
       )[0].id;
-    performProjectSwitch(targetId);
-  }, [activeProject?.orgId, mergedProjects, mergedProjectsLoading, performProjectSwitch, remoteDiscoveryResolved, remoteLoadedScope, showStatus, workspaceOrgKey]);
+    runDestination(() => performProjectSwitch(targetId));
+  }, [activeProject?.orgId, mergedProjects, mergedProjectsLoading, performProjectSwitch, remoteDiscoveryResolved, remoteLoadedScope, runDestination, showStatus, workspaceOrgKey]);
 
   const handleProjectSwitch = useCallback(
     (projectId: string) => {
-      closeWorkspaceSwitcher();
-      performProjectSwitch(projectId);
-      onRequestClose?.();
+      if (projectId === activeProjectId && !mobileNavigation) {
+        // Choosing Current is dismissal, not a new destination. A route-owned
+        // drawer has no sidebar branch for runDestination to collapse.
+        dismissWorkspaceSwitcher();
+        return;
+      }
+      resetWorkspaceSwitcher();
+      runDestination(() => performProjectSwitch(projectId));
     },
-    [closeWorkspaceSwitcher, onRequestClose, performProjectSwitch],
+    [activeProjectId, dismissWorkspaceSwitcher, mobileNavigation, resetWorkspaceSwitcher, performProjectSwitch, runDestination],
   );
 
   const handleProjectMenuAction = useCallback(
     (key: string | number) => {
       const action = String(key);
       if (action === "project:settings") {
-        closeWorkspaceSwitcher();
-        onOpenProjectSettings?.();
-        onRequestClose?.();
+        resetWorkspaceSwitcher();
+        runDestination(() => onOpenProjectSettings?.());
         return;
       }
       if (action === "project:new") {
-        closeWorkspaceSwitcher();
-        onStartNewProject?.();
-        onRequestClose?.();
+        resetWorkspaceSwitcher();
+        runDestination(() => onStartNewProject?.());
         return;
       }
       if (action.startsWith("project:")) {
@@ -1047,10 +1075,10 @@ export function StudioSidebar({
       }
     },
     [
-      closeWorkspaceSwitcher,
+      resetWorkspaceSwitcher,
       handleProjectSwitch,
       onOpenProjectSettings,
-      onRequestClose,
+      runDestination,
       onStartNewProject,
     ],
   );
@@ -1063,10 +1091,9 @@ export function StudioSidebar({
       }
       setMoreMenuOpen(false);
       setMoreMobileViewOpen(false);
-      onSelect(action.slice("panel:".length) as StudioPanel);
-      onRequestClose?.();
+      runDestination(() => onSelect(action.slice("panel:".length) as StudioPanel));
     },
-    [onRequestClose, onSelect],
+    [onSelect, runDestination],
   );
 
   const closeMoreMenu = useCallback(() => {
@@ -1075,13 +1102,14 @@ export function StudioSidebar({
   }, []);
 
   const openMoreMenu = useCallback(() => {
-    closeWorkspaceSwitcher();
+    resetWorkspaceSwitcher();
     if (isLargeScreen) {
       setMoreMenuOpen(true);
       return;
     }
-    setMoreMobileViewOpen(true);
-  }, [closeWorkspaceSwitcher, isLargeScreen]);
+    if (mobileNavigation) mobileNavigation.openView("more");
+    else setMoreMobileViewOpen(true);
+  }, [resetWorkspaceSwitcher, isLargeScreen, mobileNavigation]);
 
   const previousActiveProjectId = useRef(activeProjectId);
   useEffect(() => {
@@ -1090,8 +1118,8 @@ export function StudioSidebar({
     if (!previousProjectId || !activeProjectId || previousProjectId === activeProjectId) {
       return;
     }
-    closeWorkspaceSwitcher();
-  }, [activeProjectId, closeWorkspaceSwitcher]);
+    resetWorkspaceSwitcher();
+  }, [activeProjectId, resetWorkspaceSwitcher]);
 
   useEffect(() => {
     setWorkspaceOrgKey(canBrowseAllWorkspaceOrgs ? "all" : activeOrgKey);
@@ -1167,8 +1195,7 @@ export function StudioSidebar({
       // a "no spaces yet" notice. Go straight to making its first space; fall
       // back to plain selection where the new-space flow isn't available.
       if (onStartNewProject) {
-        onStartNewProject(created.id);
-        onRequestClose?.();
+        runDestination(() => onStartNewProject(created.id));
       } else {
         handleWorkspaceOrgChange(created.id);
       }
@@ -1180,7 +1207,7 @@ export function StudioSidebar({
     handleWorkspaceOrgChange,
     newTeamName,
     newTeamPending,
-    onRequestClose,
+    runDestination,
     onStartNewProject,
     showStatus,
   ]);
@@ -1198,7 +1225,7 @@ export function StudioSidebar({
       onCreateOrg={
         runtimeControllerEnabled
           ? () => {
-              closeWorkspaceSwitcher();
+              resetWorkspaceSwitcher();
               setNewTeamOpen(true);
             }
           : undefined
@@ -1208,9 +1235,8 @@ export function StudioSidebar({
       onOpenOrgSettings={
         onOpenOrgSettings
           ? () => {
-              closeWorkspaceSwitcher();
-              onOpenOrgSettings();
-              onRequestClose?.();
+              resetWorkspaceSwitcher();
+              runDestination(onOpenOrgSettings);
             }
           : undefined
       }
@@ -1223,13 +1249,12 @@ export function StudioSidebar({
       onCreateProject={
         onStartNewProject
           ? () => {
-              closeWorkspaceSwitcher();
-              onStartNewProject(
+              resetWorkspaceSwitcher();
+              runDestination(() => onStartNewProject(
                 selectedWorkspaceOrg?.key && selectedWorkspaceOrg.key !== "personal"
                   ? selectedWorkspaceOrg.key
                   : null,
-              );
-              onRequestClose?.();
+              ));
             }
           : undefined
       }
@@ -1238,9 +1263,8 @@ export function StudioSidebar({
       onOpenProjectSettings={
         onOpenProjectSettings
           ? () => {
-              closeWorkspaceSwitcher();
-              onOpenProjectSettings();
-              onRequestClose?.();
+              resetWorkspaceSwitcher();
+              runDestination(onOpenProjectSettings);
             }
           : undefined
       }
@@ -1330,10 +1354,9 @@ export function StudioSidebar({
           <li>
             <Button
               onPress={() => {
-                closeWorkspaceSwitcher();
+                resetWorkspaceSwitcher();
                 closeMoreMenu();
-                onSelect("home");
-                onRequestClose?.();
+                runDestination(() => onSelect("home"));
               }}
               variant="ghost"
               size="sm"
@@ -1376,7 +1399,7 @@ export function StudioSidebar({
               aria-expanded={workspaceSwitcherOpen}
               onPress={() => {
                 if (workspaceSwitcherOpen) {
-                  closeWorkspaceSwitcher();
+                  dismissWorkspaceSwitcher();
                   return;
                 }
                 openWorkspaceSwitcher();
@@ -1427,8 +1450,8 @@ export function StudioSidebar({
                   conversations={recentConversations}
                   activeConversationId={activeConversationId}
                   openConversationIds={openConversationIds}
-                  onSelectConversation={onSelectConversation}
-                  onBrowseAll={onOpenConversationHistory}
+                  onSelectConversation={(id) => runDestination(() => onSelectConversation(id))}
+                  onBrowseAll={onOpenConversationHistory ? () => runDestination(onOpenConversationHistory) : undefined}
                   isHistoryActive={isConversationHistoryActive}
                   collapsed={!showLabels}
                   expanded={recentChatsExpanded}
@@ -1451,7 +1474,7 @@ export function StudioSidebar({
             <Fragment key={item.id}>
               <li>
                 <Button
-                  onPress={() => onSelect(item.id)}
+                  onPress={() => runDestination(() => onSelect(item.id))}
                   variant="ghost"
                   size="sm"
                   radius="lg"
@@ -1510,7 +1533,7 @@ export function StudioSidebar({
               {item.id === "chat" && onOpenConversationHistory ? (
                 <li>
                   <Button
-                    onPress={onOpenConversationHistory}
+                    onPress={() => runDestination(onOpenConversationHistory)}
                     variant="ghost"
                     size="sm"
                     radius="lg"
@@ -1553,12 +1576,13 @@ export function StudioSidebar({
               setMoreMenuOpen((current) => (open && current ? false : open));
               if (open) {
                 setMoreMobileViewOpen(false);
-                closeWorkspaceSwitcher();
+                resetWorkspaceSwitcher();
               }
             }}
             onMobileMoreToggle={() => {
               if (moreMobileViewOpen) {
                 closeMoreMenu();
+                mobileNavigation?.back();
                 return;
               }
               openMoreMenu();
@@ -1595,8 +1619,8 @@ export function StudioSidebar({
         onUpdateEntryContextMenu={handleUpdateEntryContextMenu}
         onUpdateEntryPointerDown={handleUpdateEntryPointerDown}
         clearUpdateLongPress={clearUpdateLongPress}
-        onOpenProfileSettings={onOpenProfileSettings}
-        onOpenSupport={onOpenBugReportInbox}
+        onOpenProfileSettings={onOpenProfileSettings ? () => runDestination(onOpenProfileSettings) : undefined}
+        onOpenSupport={onOpenBugReportInbox ? () => runDestination(onOpenBugReportInbox) : undefined}
         supportUnreadCount={supportUnreadCount}
         notificationsPending={notificationsPending}
         notificationsEnabled={notificationsEnabled}
@@ -1617,7 +1641,7 @@ export function StudioSidebar({
         desktop={isLargeScreen}
         portalTarget={workspaceSwitcherPortalTarget}
         triggerRef={workspaceTriggerRef}
-        onClose={closeWorkspaceSwitcher}
+        onClose={dismissWorkspaceSwitcher}
       >
         {workspaceSwitcherSections}
       </StudioSidebarWorkspacePanel>
@@ -1627,7 +1651,7 @@ export function StudioSidebar({
         title="More"
         backLabel="Back"
         backTestId="sidebar-more-back"
-        onBack={closeMoreMenu}
+        onBack={() => { closeMoreMenu(); mobileNavigation?.back(); }}
       >
         <ul className="space-y-1" aria-label="More panels">
           {collapsedMoreItems.map((item) => {

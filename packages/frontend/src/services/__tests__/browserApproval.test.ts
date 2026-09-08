@@ -147,7 +147,7 @@ describe("Shared Browser approval transport", () => {
     );
   });
 
-  it("rejects a grant type that does not match the live request without network access", async () => {
+  it.each(["allow_origin", "allow_routine"] as const)("rejects %s on an action request without network access", async (decision) => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
     await expect(
@@ -155,7 +155,7 @@ describe("Shared Browser approval transport", () => {
         originEndpoint: "https://origin.example.test/",
         originAccessToken: "origin-token",
         pending: pendingApprovalPayload.pending,
-        decision: "allow_origin",
+        decision,
       }),
     ).resolves.toBe(false);
     expect(fetchMock).not.toHaveBeenCalled();

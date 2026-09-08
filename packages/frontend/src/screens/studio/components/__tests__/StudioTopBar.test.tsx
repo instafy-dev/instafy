@@ -30,6 +30,7 @@ vi.mock("../../useStudioNavigationPosture", () => ({
   useStudioNavigationPosture: () => ({ isLargeScreen: mocks.isLargeScreen, showComposerNavigationButton: !mocks.isLargeScreen }),
 }));
 vi.mock("../../../../projects/useProjects", () => ({ useProjects: () => ({ activeProjectId: "project-1" }) }));
+vi.mock("../../../../providers/AuthProvider", () => ({ useAuth: () => ({ user: { id: "test-user" } }) }));
 vi.mock("../../../../projects/useProject", () => ({ useProject: () => ({ projectAccessBlocked: mocks.projectAccessBlocked }) }));
 vi.mock("../../../../runtime/useRuntime", () => ({ useRuntime: () => ({ runtime: { controllerProjectMissing: mocks.controllerProjectMissing } }) }));
 vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({

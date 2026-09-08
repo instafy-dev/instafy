@@ -88,6 +88,7 @@ so changing teams can use the existing list immediately. Authentication, access 
 returning to the app refresh discovery in the background. First-time discovery still needs the
 controller. Failed discovery preserves the saved list, retries three times with backoff, and
 offers Retry. The current-team indicator changes only when the destination space becomes active.
+An unmatched space search shows **No matching spaces**, distinct from an empty space list.
 Space discovery, organization lists, access summaries and conversation lists have a 10-second
 deadline covering authentication and response reads; navigation cancels superseded reads.
 Failed conversation-list reads show an error and Retry after the first failed attempt while
@@ -128,9 +129,73 @@ pages are trimmed. If that message is no longer loaded, the view starts at the o
 message, where earlier history can be requested. Conversations left at the bottom keep following
 new messages.
 
+## Navigation and reading positions
+
+Studio uses the browser/React Router history in every shell. Back and Forward retrace visits;
+**Open parent conversation** opens the parent as a new visit, and **Home** always opens Home.
+Desktop shells expose explicit Back/Forward controls because they do not have a browser toolbar.
+Touch layouts below the desktop breakpoint keep three bottom destinations — Home, Chats and
+Spaces — only on those overview screens, in both mobile web and native apps. Chats opens the
+full history overview, not the compact picker. Conversations (including empty chats and job
+threads), editors and settings details have no bottom navigation row. The full history overview
+owns its destination bar rather than covering a second one underneath it.
+
+The touch header provides Back and a tappable current title/space that opens the compact
+Chats/Spaces picker. At a direct entry with no known previous visit, it offers an explicitly
+labeled Chats destination instead of a misleading Back action. Secondary actions, including
+sidebar/settings access, new chat and notifications, are in the header menu. Forward remains a
+secondary action in the picker; there is no duplicate top history row on these layouts.
+Ordinary desktop web keeps its browser controls. App controls do not leave the app from its
+first known entry; Forward becomes available after visiting a later entry in the current mounted
+session. The separate Personal/Shared browser has its own page history.
+
+The mobile picker opens from the bottom, fits short lists and caps long lists with scrolling.
+Search and navigation controls sit below its results. While the keyboard is open, only search
+and Close remain in the footer, leaving room to see matching results even in landscape; dismiss
+the keyboard to restore section switching and Forward. Chats searches the current space's loaded active conversations; All chats opens the
+full history surface. Spaces discovers accessible spaces across teams only when that section
+opens. Selecting a different space records its URL as a new visit, without carrying the old
+chat or browser-session target; Back restores the previous chat. Search does not autofocus or
+summon the keyboard on opening. The picker is transient:
+Close, Escape, backdrop or Android Back dismisses it; a route/account/space change or desktop
+resize also closes it, without adding a synthetic history destination.
+
+The overview dock yields space when a focused text editor and actual viewport occlusion indicate
+a software keyboard. Focus with a hardware keyboard alone does not hide it. Chat never adds the
+dock, before, during or after typing. The composer keeps its existing editor/control tree and owns
+its bottom safe area; no extra Home shortcut or floating navigation control is added to it.
+Detection uses viewport geometry, not native keyboard settings: floating keyboards that do not
+resize the viewport cannot be reliably inferred. Physical one-handed comfort and iOS accessory-bar
+clearance still require device testing; automated target-size checks do not establish thumb reach.
+
+Chat positions are remembered per signed-in account, space, history visit and conversation
+(or job thread), not merely per conversation. Visiting the same chat twice can therefore retain
+two reading positions. Restoring a route waits for the matching space and conversation; a late
+response from a previous space must not select that chat or rewrite the destination. Drafts remain
+conversation-owned and are not restored from history, put in URLs or shared with other clients.
+Navigation history and reading positions stay local to each client, even when clients collaborate
+in the same chat or remote browser session.
+
+Scroll snapshots contain only IDs/geometry, remain in memory, and are bounded to 200 recent chat
+visits and 200 panel positions. They do not survive an app reload. Chat snapshots use message
+anchors and offsets; ordinary panels use scroll coordinates and wait up to ten seconds for delayed
+content to become tall enough. Missing/evicted chat anchors fall back to the oldest loaded message.
+
+On mobile, the sidebar and its Team & spaces/More drill-ins have history entries. Back dismisses
+one level; selecting a destination first closes that sidebar history branch and then opens the
+destination once. Android's keyboard dismissal remains platform-owned. Native-aware dialogs use
+one prioritized Back listener so one press cannot dismiss several registered surfaces at once;
+this does not make every application dialog history-aware.
+
 This does not restore an entire
 editor session: file and panel tabs currently carry across space switches, while file selection
 and explorer state reset for the destination space.
+
+A desktop workspace-picker URL remains the same visit when the window becomes narrow; its
+mobile presentation does not add a sidebar-history entry. Dismissal returns to the known prior
+app visit, or removes only the picker from a direct-entry URL. Ordinary mobile sidebar drill-ins
+still use their own one-level Back behavior. Compact fine-pointer windows retain their existing
+composer navigation control; touch layouts use the focused header instead.
 
 The sidebar's **Chats** section starts expanded and shows up to six recently visited active
 conversations in the current space. Selecting a row opens a preview or focuses its existing tab;
@@ -146,11 +211,12 @@ the heading and marks the filter icon; counts live in the filter menu. Starting 
 the search and returns to active chats. Per-chat actions, including closing an open tab,
 live in its More menu.
 
-At widths below 900px, the composer's lower-left menu opens the navigation drawer with Chats
-expanded. Selecting a recent chat closes the drawer, making chat switching two taps. On wider
-layouts, the expanded sidebar offers direct selection; a collapsed sidebar opens the same list
-in a popover. Home remains in the sidebar, and the top menu remains available when the composer
-is hidden while scrolling.
+In fine-pointer windows below 900px, the composer's lower-left menu opens the navigation drawer
+with Chats expanded. Touch layouts instead open their compact picker from the header. Selecting
+a chat closes either surface, making chat switching two taps. On wider layouts, the expanded
+sidebar offers direct selection; a collapsed sidebar opens the same list in a popover. Home
+remains in the sidebar, and the top menu remains available when the composer is hidden while
+scrolling.
 
 Browsing existing chats through recents, history or browser Back reuses one preview conversation
 tab per space. Wide layouts show its title in italics. Reading, scrolling and focusing the
@@ -186,7 +252,10 @@ Settings categories use a side list when the settings pane has enough room. Open
 workspace side panel can switch this to a compact picker without changing the selected
 category or resetting the form. Form fields and member controls respond to the available
 content width as well. Space settings categories follow the URL; returning to Overview
-clears the category parameter, so browser Back and reload retain the expected destination.
+clears the category parameter. Team, space and profile categories and available Voice & audio
+subsections follow the URL. A distinct section adds one visit, selecting the same section is a
+no-op, and browser Back/Forward and reload restore the selected section. Filters and form edits
+do not add history entries.
 
 Settings cards use the shared Studio surfaces and control styling. Lists own one internal
 gutter, invitation counts stay beside their heading, and narrow profile forms place Save

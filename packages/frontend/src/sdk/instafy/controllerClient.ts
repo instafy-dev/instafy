@@ -142,6 +142,7 @@ import {
   postControllerBugReportMessage,
   submitControllerBugReport,
   clearSharedBrowserData,
+  fetchSharedBrowserProfileStatus,
 } from "../../services/runtimeController";
 import {
   browserSessionStatusIndicatesUnavailable,
@@ -374,6 +375,7 @@ export const controllerClient = createControllerClient({
   }),
   browserProfiles: Object.freeze({
     clearForProject: clearSharedBrowserData,
+    fetchStatus: fetchSharedBrowserProfileStatus,
   }),
   completions: Object.freeze({
     requestProjectEditorInline: requestProjectEditorInlineCompletion,

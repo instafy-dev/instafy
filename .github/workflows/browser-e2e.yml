@@ -72,6 +72,10 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Install locked Chromium and operating-system dependencies
         run: pnpm --filter @instafy/frontend exec playwright install --with-deps chromium
+      - name: Prove isolated co-browsing fixture boundaries
+        run: node --test scripts/shared-browser-cobrowsing-e2e.test.mjs
+      - name: Exercise routine approval and human-input handoff in real Chromium
+        run: node scripts/shared-browser-cobrowsing-e2e.mjs
       - name: Run browser component rendering proofs
         run: pnpm test:browser:ci browser-ui
       - name: Retain fixture-only results and failure traces
@@ -79,7 +83,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: browser-ui-rendering
-          path: packages/frontend/test-results/browser-ci/browser-ui
+          path: |
+            packages/frontend/test-results/browser-ci/browser-ui
+            packages/frontend/test-results/browser-ci/shared-cobrowsing
           if-no-files-found: error
           retention-days: 7
 
