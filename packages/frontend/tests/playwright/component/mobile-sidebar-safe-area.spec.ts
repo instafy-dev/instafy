@@ -87,6 +87,11 @@ for (const dark of [false, true]) {
         }
       }, { layout, dark });
 
+      // Controls follow the coalesced VisualViewport update; the painted
+      // surface itself remains CSS-sized and covers the layout viewport.
+      await expect.poll(() => page.getByTestId("sidebar-controls").evaluate((nav) =>
+        nav.getBoundingClientRect().bottom)).toBe(layout.height - layout.bottom);
+
       const geometry = await page.evaluate(() => {
         const panel = document.querySelector<HTMLElement>('[data-testid="mobile-sidebar-surface"]')!;
         const nav = document.querySelector<HTMLElement>('[data-testid="sidebar-controls"]')!;

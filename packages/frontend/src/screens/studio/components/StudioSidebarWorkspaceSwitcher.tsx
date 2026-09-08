@@ -366,7 +366,7 @@ export function StudioSidebarWorkspaceSwitcher({
 
       {!currentOrgProject && switcherProjects.length === 0 ? (
         <Text as="p" variant="body" tone="muted" className="mt-2 px-3.5">
-          No spaces yet.
+          {trimmedWorkspaceProjectQuery.length > 0 ? "No matching spaces." : "No spaces yet."}
         </Text>
       ) : (
         <>

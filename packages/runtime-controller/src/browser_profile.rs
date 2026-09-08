@@ -23,12 +23,12 @@ use uuid::Uuid;
 use crate::agent::{
     ensure_agent_token_matches_runtime_lease, extract_agent_token, verify_agent_token_with_scopes,
 };
-use crate::auth::authenticate_request;
+use crate::auth::{authenticate_request, require_user_session};
 use crate::config::PgPool;
 use crate::secrets::{decrypt_secret_payload, encrypt_secret_payload};
 use crate::{
-    bad_request, ensure_project_write_access, forbidden, internal_error, load_project_record,
-    not_found, unauthorized, ApiError, AppState,
+    bad_request, ensure_project_access, ensure_project_write_access, forbidden, internal_error,
+    load_project_record, not_found, unauthorized, ApiError, AppState,
 };
 
 const BROWSER_PROFILE_SCOPE_PROJECT: &str = "project";
@@ -56,6 +56,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/projects/:project_id/browser-profile",
             axum::routing::delete(reset_browser_profile),
+        )
+        .route(
+            "/projects/:project_id/browser-profile/status",
+            get(get_browser_profile_status),
         )
 }
 
@@ -160,6 +164,67 @@ struct BrowserProfileResetResponse {
     ok: bool,
     cleared: bool,
     stopped_runtime_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserProfileStatusResponse {
+    enabled: bool,
+    last_saved_at: Option<String>,
+    saved_by_runtime_id: Option<Uuid>,
+}
+
+/// Member-visible durability metadata only. Reading status neither restores
+/// login material nor implies that the saved profile is still usable by a site.
+async fn get_browser_profile_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(project_id_raw): Path<String>,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    let context = authenticate_request(&state.config, &headers).await?;
+    require_user_session(&context)?;
+    let project_id = Uuid::parse_str(project_id_raw.trim())
+        .map_err(|_| bad_request("projectId must be a valid UUID"))?;
+    let mut connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| internal_error(format!("failed to get connection: {error}")))?;
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|error| internal_error(format!("failed to start transaction: {error}")))?;
+    let project = load_project_record(&transaction, &project_id).await?;
+    ensure_project_access(&transaction, &project, &context, None).await?;
+
+    // Do not select or decrypt the archive. Revoking the persistence policy can
+    // leave a saved row, so report that timestamp independently of `enabled`.
+    let row = transaction
+        .query_opt(
+            "select updated_at, updated_by_runtime from project_browser_profiles
+             where project_id = $1 and scope = $2",
+            &[&project_id, &BROWSER_PROFILE_SCOPE_PROJECT],
+        )
+        .await
+        .map_err(|error| {
+            internal_error(format!("failed to load browser profile status: {error}"))
+        })?;
+    let response = BrowserProfileStatusResponse {
+        enabled: state
+            .config
+            .browser_profile_persistence_enabled_for_project(&project_id),
+        last_saved_at: row.as_ref().map(|row| {
+            row.get::<_, chrono::DateTime<chrono::Utc>>("updated_at")
+                .to_rfc3339()
+        }),
+        saved_by_runtime_id: row.as_ref().and_then(|row| row.get("updated_by_runtime")),
+    };
+    transaction.commit().await.map_err(|error| {
+        internal_error(format!(
+            "failed to finalize browser profile status: {error}"
+        ))
+    })?;
+    Ok(([("cache-control", "no-store")], Json(response)).into_response())
 }
 
 #[derive(Debug)]
@@ -680,6 +745,10 @@ async fn get_browser_profile(
         .body(Body::from(plaintext))
         .map_err(|error| internal_error(error.to_string()))
 }
+
+#[cfg(test)]
+#[path = "browser_profile_status_tests.rs"]
+mod status_tests;
 
 #[cfg(test)]
 mod tests {

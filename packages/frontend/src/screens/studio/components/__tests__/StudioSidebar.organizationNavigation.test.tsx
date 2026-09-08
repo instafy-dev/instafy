@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { BrowserRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const fixture = vi.hoisted(() => ({
@@ -60,13 +61,13 @@ describe("StudioSidebar organization navigation", () => {
   const onSelect = vi.fn();
   const onRequestClose = vi.fn();
   const render = async (props: Partial<ComponentProps<typeof StudioSidebar>> = {}) => {
-    await act(async () => root.render(<StudioSidebar
+    await act(async () => root.render(<BrowserRouter><StudioSidebar
       items={[{ id: "chat", label: "Chats", icon: () => <span />, accent: "text-primary-600" }]}
       activePanel="chat" onSelect={onSelect} collapsed={false}
       workspaceSwitcherOpen={false} onWorkspaceSwitcherOpenChange={onSwitcherChange}
       workspaceSwitcherPortalTarget={portal} onOpenTeam={onOpenTeam}
       onReturnToTeam={onReturnToTeam} onActivateProject={onActivateProject}
-      onRequestClose={onRequestClose} {...props} />));
+      onRequestClose={onRequestClose} {...props} /></BrowserRouter>));
   };
   const click = async (testId: string) => act(async () => container.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`)?.click());
   beforeEach(() => {
@@ -132,13 +133,13 @@ describe("StudioSidebar organization navigation", () => {
     expect(fixture.switchProject).not.toHaveBeenCalled();
   });
 
-  it("activates a populated team's selected project after switching it", async () => {
+  it("activates a populated team's selected project through its destination callback", async () => {
     await render({ activePanel: "home" });
     await click("sidebar-team-org-c");
-    expect(fixture.switchProject).toHaveBeenCalledWith("space-c");
+    expect(fixture.switchProject).not.toHaveBeenCalled();
+    expect(fixture.createProject).not.toHaveBeenCalled();
     expect(onActivateProject).toHaveBeenCalledWith("space-c", "org-c");
     expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(onActivateProject.mock.invocationCallOrder[0]);
-    expect(fixture.switchProject.mock.invocationCallOrder[0]).toBeLessThan(onActivateProject.mock.invocationCallOrder[0]);
   });
 
   it("opens explicit overview from the inner heading and limits its picker to spaces", async () => {

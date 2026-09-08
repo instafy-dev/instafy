@@ -32,7 +32,7 @@ async function emulateTouchFirst(page: Page) {
 
 async function openFilesDrawerOverChat(page: Page) {
   await expect(page.getByTestId("chat-input")).toBeVisible();
-  await page.getByTestId("topbar-sidebar-toggle").click();
+  await openTouchSidebar(page);
   await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
   await page.getByTestId("sidebar-nav-code").click();
   const drawer = page.getByTestId("mobile-left-drawer-overlay");
@@ -40,12 +40,43 @@ async function openFilesDrawerOverChat(page: Page) {
   return drawer;
 }
 
+async function openTouchSidebar(page: Page) {
+  // A global picker is a direct entry: Back closes it. Select the current
+  // space to resume its workspace before opening that space's navigation.
+  if (await page.getByTestId("topbar-team-selector").isVisible()) {
+    const projectId = new URL(page.url()).searchParams.get("projectId");
+    expect(projectId).toBeTruthy();
+    await page.getByTestId("topbar-team-selector").click();
+    await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
+    await page.getByTestId(`sidebar-project-current-${projectId}`).click();
+    await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
+    await expect(page.getByTestId("topbar-global-navigation")).toHaveCount(0);
+  }
+  await page.getByTestId("mobile-header-picker").last().click();
+  await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
+  await expect(page.getByTestId("sidebar-project-button")).toBeVisible();
+  await expect(page.getByTestId("mobile-navigation-sheet")).toHaveCount(0);
+}
+
+async function openNavigationDestination(page: Page, destination: "All chats" | "Files") {
+  await openTouchSidebar(page);
+  await page.getByTestId(destination === "All chats" ? "sidebar-browse-all-chats" : "sidebar-nav-code").click();
+  await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
+}
+
+async function openTouchHome(page: Page) {
+  await openNavigationDestination(page, "All chats");
+  await expect(page.getByTestId("conversation-history-panel")).toBeVisible();
+  await page.getByTestId("mobile-bottom-dock-home").click();
+  await expect(page.getByTestId("home-panel")).toBeVisible();
+}
+
 test.describe("Mobile sidebar drawer", () => {
   test.afterEach(async ({ page }) => {
     await resetRuntimeUserState(page, { source: "mobile-sidebar:cleanup" }).catch(() => {});
   });
 
-  test("hides the sidebar and opens it from the topbar on small screens", async ({ page }) => {
+  test("hides the sidebar and opens it from the header More menu on small screens", async ({ page }) => {
     test.setTimeout(120_000);
     page.setDefaultTimeout(60_000);
     await page.setViewportSize({ width: 390, height: 844 });
@@ -57,6 +88,8 @@ test.describe("Mobile sidebar drawer", () => {
     await expect(page.getByTestId("topbar-home-button")).toHaveCount(0);
 
     const toggle = page.getByTestId("topbar-sidebar-toggle");
+    await expect(toggle).toHaveCount(0);
+    await page.getByTestId("mobile-header-more").click();
     await expect(toggle).toBeVisible();
     await toggle.click();
 
@@ -75,7 +108,7 @@ test.describe("Mobile sidebar drawer", () => {
     await expect(page.getByTestId("sidebar-project-button")).toHaveCount(0);
   });
 
-  test("switches recent chats in two taps and restores each draft", async ({ page }) => {
+  test("switches recent chats from header navigation and restores each draft", async ({ page }) => {
     test.setTimeout(120_000);
     page.setDefaultTimeout(60_000);
     await page.setViewportSize({ width: 390, height: 844 });
@@ -84,31 +117,36 @@ test.describe("Mobile sidebar drawer", () => {
 
     const input = page.getByTestId("chat-input");
     await input.fill("First chat draft");
-    await page.getByTestId("chat-composer-navigation-button").click();
-    const firstChat = page.getByTestId("sidebar-recent-chats-list").getByRole("button").first();
+    await openTouchSidebar(page);
+    const firstChat = page.getByTestId("sidebar-recent-chats-list").locator('button[data-testid^="sidebar-recent-chat-"][aria-current="page"]');
     const firstChatTestId = await firstChat.getAttribute("data-testid");
     expect(firstChatTestId).toBeTruthy();
     await page.getByTestId("sidebar-drawer-toggle").click();
-    await page.getByTestId("topbar-new-conversation").click();
+    await page.getByTestId("mobile-header-more").click();
     await page.getByTestId("chat-new-chat-public").click();
     await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
     await expect(input).toHaveText("");
     await input.fill("Second chat draft");
 
-    // Menu tap opens Chats already expanded; the next tap switches directly.
-    await page.getByTestId("chat-composer-navigation-button").click();
+    // The title opens the shared sidebar's current chat rows and draft indicators.
+    // Capture exact identities rather than assuming the recency sort order.
+    await openTouchSidebar(page);
     await expect(page.getByTestId("sidebar-nav-history")).toHaveAttribute("aria-expanded", "true");
+    const secondChat = page.getByTestId("sidebar-recent-chats-list").locator('button[data-testid^="sidebar-recent-chat-"][aria-current="page"]');
+    const secondChatTestId = await secondChat.getAttribute("data-testid");
+    expect(secondChatTestId).toBeTruthy();
+    expect(secondChatTestId).not.toBe(firstChatTestId);
     await page.getByTestId(firstChatTestId!).click();
     await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
     await expect(input).toHaveText("First chat draft");
 
-    await page.getByTestId("chat-composer-navigation-button").click();
-    await page.getByTestId("sidebar-recent-chats-list").getByRole("button").nth(1).click();
+    await openTouchSidebar(page);
+    await page.getByTestId(secondChatTestId!).click();
     await expect(input).toHaveText("Second chat draft");
     await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
   });
 
-  test("opens Home from the composer navigation and returns to chat on mobile", async ({ page }) => {
+  test("keeps overview Home distinct from chat Back on mobile", async ({ page }) => {
     test.setTimeout(120_000);
     page.setDefaultTimeout(60_000);
     await page.setViewportSize({ width: 390, height: 844 });
@@ -116,20 +154,25 @@ test.describe("Mobile sidebar drawer", () => {
 
     await prepareStudio(page, { waitForHostedRuntime: false });
 
-    await page.getByTestId("topbar-sidebar-toggle").click();
-    await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
-    await page.getByTestId("sidebar-recent-chats-list").getByRole("button").first().click();
     await expect(page.getByTestId("chat-input")).toBeVisible();
-    await expect(page.getByTestId("chat-composer-navigation-button")).toBeVisible();
+    await expect(page.getByTestId("chat-home-button-mobile")).toHaveCount(0);
+    await expect(page.getByTestId("mobile-bottom-dock")).toHaveCount(0);
+    const chatUrl = page.url();
 
-    await page.getByTestId("chat-composer-navigation-button").click();
-    await expect(page.getByTestId("sidebar-recent-chats-list")).toBeVisible();
-    await page.getByTestId("sidebar-home-button").click();
-    await expect(page.getByTestId("home-panel")).toBeVisible();
-    await expect(page.getByTestId("mobile-bottom-dock-return")).toBeVisible();
+    await openTouchHome(page);
+    await expect(page.getByTestId("mobile-bottom-dock").getByRole("button")).toHaveText(["Home", "Chats", "Spaces"]);
+    await expect(page.getByTestId("mobile-bottom-dock-home")).toHaveAttribute("aria-current", "page");
 
-    await page.getByTestId("mobile-bottom-dock-return").click();
+    await expect(page.getByTestId("topbar-home-button")).toHaveAttribute("aria-current", "page");
+    await expect(page.getByTestId("topbar-team-selector")).toBeVisible();
+    await expect(page.getByTestId("mobile-header-back")).toHaveCount(0);
+    await page.goBack();
+    await expect(page.getByTestId("conversation-history-panel")).toBeVisible();
+    await expect(page.getByTestId("mobile-bottom-dock-chat")).toHaveAttribute("aria-current", "page");
+    await page.getByTestId("mobile-header-back").last().click();
+    await expect(page).toHaveURL(chatUrl);
     await expect(page.getByTestId("chat-input")).toBeVisible();
+    await expect(page.getByTestId("mobile-bottom-dock")).toHaveCount(0);
   });
 
   test("opens chat navigation from the composer on medium hidden-sidebar layouts", async ({ page }) => {
@@ -148,7 +191,8 @@ test.describe("Mobile sidebar drawer", () => {
     await expect(page.getByTestId("sidebar-recent-chats-list")).toBeVisible();
     await page.getByTestId("sidebar-home-button").click();
     await expect(page.getByTestId("home-panel")).toBeVisible();
-    await expect(page.getByTestId("topbar-home-button")).toHaveCount(0);
+    await expect(page.getByTestId("topbar-home-button")).toHaveAttribute("aria-current", "page");
+    await expect(page.getByTestId("topbar-team-selector")).toBeVisible();
     await expect(page.getByTestId("mobile-bottom-dock")).toHaveCount(0);
   });
 
@@ -197,7 +241,7 @@ test.describe("Mobile sidebar drawer", () => {
     const overlay = page.getByTestId("mobile-left-drawer-overlay");
     await expect(overlay).toBeVisible();
     await expect(page.getByTestId("files-explorer-search-toggle")).toBeVisible();
-    await expect(overlay.getByTestId("topbar-tab-selector")).toContainText("Files");
+    await expect(overlay.getByTestId("topbar-sidebar-toggle")).toContainText("Files");
     await expect(page.getByTestId("topbar-home-button")).toHaveCount(0);
   });
 
@@ -209,42 +253,42 @@ test.describe("Mobile sidebar drawer", () => {
 
     await prepareStudio(page, { waitForHostedRuntime: false });
 
-    await expect(page.getByTestId("chat-composer-navigation-button")).toBeVisible();
-    await page.getByTestId("chat-composer-navigation-button").click();
-    await expect(page.getByTestId("sidebar-recent-chats-list")).toBeVisible();
-    await page.getByTestId("sidebar-home-button").click();
-    await expect(page.getByTestId("home-panel")).toBeVisible();
+    await openTouchHome(page);
 
-    const toggle = page.getByTestId("topbar-sidebar-toggle");
-    const tabSelector = page.getByTestId("topbar-tab-selector");
-    const newConversation = page.getByTestId("topbar-new-conversation");
+    const home = page.getByTestId("topbar-home-button");
+    const team = page.getByTestId("topbar-team-selector");
+    const profile = page.getByTestId("topbar-profile-button");
+    await expect(home).toHaveAttribute("aria-current", "page");
+    await expect(team).toBeVisible();
+    await expect(profile).toBeVisible();
+    await expect(page.getByTestId("mobile-studio-navigation-header")).toHaveCount(0);
 
-    await expect(toggle).toBeVisible();
-    await expect(tabSelector).toBeVisible();
-    await expect(newConversation).toBeVisible();
-
-    const [toggleBox, tabSelectorBox, newConversationBox] = await Promise.all([
-      toggle.boundingBox(),
-      tabSelector.boundingBox(),
-      newConversation.boundingBox(),
-    ]);
-
-    expect(toggleBox).not.toBeNull();
-    expect(tabSelectorBox).not.toBeNull();
-    expect(newConversationBox).not.toBeNull();
-
-    const rowTops = [toggleBox!.y, tabSelectorBox!.y, newConversationBox!.y];
-    const rowCenters = [
-      toggleBox!.y + toggleBox!.height / 2,
-      tabSelectorBox!.y + tabSelectorBox!.height / 2,
-      newConversationBox!.y + newConversationBox!.height / 2,
-    ];
-
+    const boxes = await Promise.all([home.boundingBox(), team.boundingBox(), profile.boundingBox()]);
+    for (const box of boxes) {
+      expect(box).not.toBeNull();
+      expect(box!.height).toBeGreaterThanOrEqual(48);
+      expect(box!.x).toBeGreaterThanOrEqual(0);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(390);
+    }
+    expect(boxes[0]!.x + boxes[0]!.width).toBeLessThanOrEqual(boxes[1]!.x);
+    expect(boxes[1]!.x + boxes[1]!.width).toBeLessThanOrEqual(boxes[2]!.x);
+    const rowTops = boxes.map(box => box!.y);
+    const rowCenters = boxes.map(box => box!.y + box!.height / 2);
     expect(Math.max(...rowTops) - Math.min(...rowTops)).toBeLessThan(8);
     expect(Math.max(...rowCenters) - Math.min(...rowCenters)).toBeLessThan(8);
+
+    const homeUrl = page.url();
+    await team.click();
+    await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
+    await expect(page.getByTestId("sidebar-project-switcher-back")).toBeVisible();
+    await expect(page.getByTestId("mobile-navigation-sheet")).toHaveCount(0);
+    await page.getByTestId("sidebar-project-switcher-back").click();
+    await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
+    await expect(page.getByTestId("topbar-home-button")).toHaveAttribute("aria-current", "page");
+    await expect(page).toHaveURL(homeUrl);
   });
 
-  test("opens the file tree from the mobile dock instead of the empty editor shell", async ({ page }) => {
+  test("resumes the selected space from Home, opens Files and closes back to its workspace", async ({ page }) => {
     test.setTimeout(120_000);
     page.setDefaultTimeout(60_000);
     await page.setViewportSize({ width: 390, height: 844 });
@@ -252,17 +296,15 @@ test.describe("Mobile sidebar drawer", () => {
 
     await prepareStudio(page, { waitForHostedRuntime: false });
 
-    await expect(page.getByTestId("chat-composer-navigation-button")).toBeVisible();
-    await page.getByTestId("chat-composer-navigation-button").click();
-    await expect(page.getByTestId("sidebar-recent-chats-list")).toBeVisible();
+    const chatUrl = page.url();
+    await openTouchSidebar(page);
     await page.getByTestId("sidebar-home-button").click();
     await expect(page.getByTestId("home-panel")).toBeVisible();
+    await openNavigationDestination(page, "Files");
+    await expect(page.getByTestId("mobile-bottom-dock")).toHaveCount(0);
 
-    const filesButton = page.getByTestId("mobile-bottom-dock-files");
-    await expect(filesButton).toBeVisible();
-    await filesButton.click();
-
-    await expect(page.getByTestId("mobile-left-drawer-overlay")).toHaveCount(0);
+    await expect(page.getByTestId("mobile-left-drawer-overlay")).toBeVisible();
+    await expect(page.getByTestId("mobile-left-drawer-overlay").getByTestId("mobile-header-title")).toHaveText("Files");
     await expect(page.getByTestId("code-search-input")).toBeVisible();
     await expect(page.getByTestId("files-explorer-touch-actions")).toBeVisible();
     await expect(page.getByTestId("files-explorer-close")).toBeVisible();
@@ -278,7 +320,10 @@ test.describe("Mobile sidebar drawer", () => {
 
     await expect(page.getByTestId("code-search-input")).toHaveCount(0);
     await expect(page.getByTestId("files-explorer-close")).toHaveCount(0);
-    await expect(page.getByText("Select a file to start editing.")).toBeVisible();
+    await expect(page.getByTestId("mobile-left-drawer-overlay")).toHaveCount(0);
+    await expect(page).toHaveURL(chatUrl);
+    await expect(page.getByTestId("chat-input")).toBeVisible();
+    await expect(page.getByTestId("topbar-home-button")).toHaveCount(0);
   });
 
   test("opens a mobile drawer file in the editor and restores it through history", async ({ page }) => {
@@ -295,7 +340,7 @@ test.describe("Mobile sidebar drawer", () => {
     const targetPath = "MOBILE_VIEWER.py";
     await writeWorkspaceFile(page, targetPath, "print('mobile viewer')\n", { projectId });
 
-    await page.getByTestId("topbar-sidebar-toggle").click();
+    await openTouchSidebar(page);
     await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
     await page.getByTestId("sidebar-nav-code").click();
 
@@ -311,7 +356,7 @@ test.describe("Mobile sidebar drawer", () => {
     await expect(page.getByTestId("monaco-editor")).toHaveAttribute("data-file", targetPath);
     await expect(page.getByTestId("files-back-button")).toBeVisible();
 
-    await page.getByTestId("topbar-sidebar-toggle").click();
+    await openTouchSidebar(page);
     await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
     await page.getByTestId("sidebar-nav-code").click();
     await expect(page.getByTestId("code-search-input")).toBeVisible();
@@ -425,8 +470,8 @@ test.describe("Mobile sidebar drawer", () => {
     if (!openedFromDrawer) {
       // Pre-existing mobile handoff race (reproducible on main): the drawer's
       // bounded rAF handoff can lose the code-panel mount. Recover the way a
-      // user would — reopen the files surface from the dock and tap again.
-      await page.getByTestId("mobile-bottom-dock-files").click();
+      // user would — reopen Files from the shared navigation and tap again.
+      await openNavigationDestination(page, "Files");
       await expect(page.getByTestId("code-search-input")).toBeVisible({ timeout: 15_000 });
       await page.getByText(targetPath, { exact: true }).first().click();
       await expect(heading).toBeVisible({ timeout: 15_000 });
@@ -443,7 +488,7 @@ test.describe("Mobile sidebar drawer", () => {
     await page.getByTestId("files-back-button").click();
     await expect(page.getByTestId("code-search-input")).toBeVisible();
     if (openedFromDrawer) {
-      // The dock-based recovery pushes extra history entries, so the
+      // Reopening through navigation pushes extra history entries, so the
       // history-restore expectation only holds on the clean drawer handoff.
       await page.goBack();
       await expect(page.getByRole("heading", { name: targetPath })).toBeVisible({
@@ -453,7 +498,7 @@ test.describe("Mobile sidebar drawer", () => {
     }
   });
 
-  test("leaves the mobile files surface when switching back to chat from the dock", async ({ page }) => {
+  test("leaves the mobile files surface when returning through header Back", async ({ page }) => {
     test.setTimeout(120_000);
     page.setDefaultTimeout(60_000);
     await page.setViewportSize({ width: 390, height: 844 });
@@ -461,16 +506,13 @@ test.describe("Mobile sidebar drawer", () => {
 
     await prepareStudio(page, { waitForHostedRuntime: false });
 
-    await expect(page.getByTestId("chat-composer-navigation-button")).toBeVisible();
-    await page.getByTestId("chat-composer-navigation-button").click();
-    await expect(page.getByTestId("sidebar-recent-chats-list")).toBeVisible();
-    await page.getByTestId("sidebar-home-button").click();
-    await expect(page.getByTestId("home-panel")).toBeVisible();
-
-    await page.getByTestId("mobile-bottom-dock-files").click();
+    const chatUrl = page.url();
+    await openNavigationDestination(page, "Files");
     await expect(page.getByTestId("code-search-input")).toBeVisible();
+    await expect(page.getByTestId("mobile-bottom-dock")).toHaveCount(0);
 
-    await page.getByTestId("mobile-bottom-dock-chat").click();
+    await page.getByTestId("mobile-left-drawer-overlay").getByTestId("mobile-header-back").click();
+    await expect(page).toHaveURL(chatUrl);
     await expect(page.getByTestId("chat-input")).toBeVisible();
     await expect(page.getByTestId("mobile-left-drawer-overlay")).toHaveCount(0);
     await expect(page.getByTestId("code-search-input")).toHaveCount(0);
@@ -484,11 +526,7 @@ test.describe("Mobile sidebar drawer", () => {
 
     await prepareStudio(page, { waitForHostedRuntime: false });
 
-    await expect(page.getByTestId("chat-composer-navigation-button")).toBeVisible();
-    await page.getByTestId("chat-composer-navigation-button").click();
-    await expect(page.getByTestId("sidebar-recent-chats-list")).toBeVisible();
-    await page.getByTestId("sidebar-home-button").click();
-    await expect(page.getByTestId("home-panel")).toBeVisible();
+    await openTouchHome(page);
 
     await page.getByTestId("mobile-bottom-dock-projects").click();
     await expect(page.getByTestId("project-picker-new-project")).toBeVisible();
@@ -509,7 +547,7 @@ test.describe("Mobile sidebar drawer", () => {
 
     await prepareStudio(page, { waitForHostedRuntime: false });
 
-    await page.getByTestId("topbar-sidebar-toggle").click();
+    await openTouchSidebar(page);
     await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
 
     await page.getByTestId("sidebar-browse-all-chats").click();
@@ -528,7 +566,7 @@ test.describe("Mobile sidebar drawer", () => {
 
     await prepareStudio(page, { waitForHostedRuntime: false });
 
-    await page.getByTestId("topbar-sidebar-toggle").click();
+    await openTouchSidebar(page);
     await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
 
     await expect(page.getByTestId("sidebar-recent-chats-list")).toBeVisible();

@@ -1,5 +1,6 @@
 import { Capacitor } from "@capacitor/core";
 import { useEffect, type ReactNode } from "react";
+import { useMobileSidebarViewport } from "./useMobileSidebarViewport";
 import { Dialog, Modal, ModalOverlay } from "react-aria-components";
 
 interface SidebarStatusBarSession {
@@ -100,6 +101,7 @@ export function StudioMobileSidebarOverlay({
   onClose: () => void;
 }) {
   useSidebarStatusBarOverlay();
+  const { controlsRef, style } = useMobileSidebarViewport();
 
   return (
     <ModalOverlay
@@ -120,7 +122,9 @@ export function StudioMobileSidebarOverlay({
         }}
       >
         <Dialog aria-label="Navigation and recent chats" className="h-full outline-none">
-          {children}
+          <div ref={controlsRef} className="relative h-full min-h-0" style={style} data-testid="mobile-sidebar-controls">
+            {children}
+          </div>
         </Dialog>
       </Modal>
     </ModalOverlay>

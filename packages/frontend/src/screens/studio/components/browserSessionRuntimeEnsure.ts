@@ -64,42 +64,48 @@ export interface BrowserRuntimeCandidate {
   endpoint: string | null;
 }
 
+export function listBrowserRuntimeCandidates(
+  entries: ControllerRuntimeStatusEntry[],
+): BrowserRuntimeCandidate[] {
+  return entries.filter((entry) =>
+    isManagedInstafyCloudProvider(entry.provider) &&
+    entry.isPrivateSelfHosted !== true &&
+    runtimeEntryIsDispatchable(entry) &&
+    runtimeEntryHasOriginId(entry) &&
+    runtimeNameLooksBrowserCapable(entry.displayName),
+  ).map((entry) => ({
+    runtimeId: entry.runtimeId,
+    originId: entry.origin!.originId!.trim(),
+    endpoint: runtimeEntryOriginEndpoint(entry),
+  }));
+}
+
+export type BrowserRuntimeSelection =
+  | { kind: "selected"; candidate: BrowserRuntimeCandidate }
+  | { kind: "missing"; runtimeId: string; candidates: BrowserRuntimeCandidate[] }
+  | { kind: "choose"; candidates: BrowserRuntimeCandidate[] }
+  | { kind: "new"; candidates: BrowserRuntimeCandidate[] };
+
+export function resolveBrowserRuntimeSelection(
+  entries: ControllerRuntimeStatusEntry[],
+  exactRuntimeId: string | null,
+): BrowserRuntimeSelection {
+  const candidates = listBrowserRuntimeCandidates(entries);
+  if (exactRuntimeId) {
+    const candidate = candidates.find((item) => item.runtimeId === exactRuntimeId);
+    return candidate ? { kind: "selected", candidate } : { kind: "missing", runtimeId: exactRuntimeId, candidates };
+  }
+  if (candidates.length === 1) return { kind: "selected", candidate: candidates[0]! };
+  return { kind: candidates.length ? "choose" : "new", candidates };
+}
+
 export function resolveBrowserRuntimeCandidate(
   entries: ControllerRuntimeStatusEntry[],
   preferRuntimeId: string | null,
 ): BrowserRuntimeCandidate | null {
-  const usable = entries.filter(
-    (entry) =>
-      isManagedInstafyCloudProvider(entry.provider) &&
-      entry.isPrivateSelfHosted !== true &&
-      runtimeEntryIsDispatchable(entry) &&
-      runtimeEntryHasOriginId(entry),
-  );
-  const preferred =
-    preferRuntimeId && preferRuntimeId.trim().length > 0
-      ? usable.find(
-          (entry) =>
-            entry.runtimeId === preferRuntimeId.trim() &&
-            runtimeNameLooksBrowserCapable(entry.displayName),
-        ) ?? null
-      : null;
-  if (preferred) {
-    return {
-      runtimeId: preferred.runtimeId,
-      originId: preferred.origin?.originId?.trim() ?? "",
-      endpoint: runtimeEntryOriginEndpoint(preferred),
-    };
-  }
-  const named =
-    usable.find((entry) => runtimeNameLooksBrowserCapable(entry.displayName)) ?? null;
-  if (!named) {
-    return null;
-  }
-  return {
-    runtimeId: named.runtimeId,
-    originId: named.origin?.originId?.trim() ?? "",
-    endpoint: runtimeEntryOriginEndpoint(named),
-  };
+  const preferred = listBrowserRuntimeCandidates(entries).find((item) => item.runtimeId === preferRuntimeId?.trim());
+  const selection = resolveBrowserRuntimeSelection(entries, preferred?.runtimeId ?? null);
+  return selection.kind === "selected" ? selection.candidate : null;
 }
 
 export interface BrowserRuntimeProjectStatusSnapshot {

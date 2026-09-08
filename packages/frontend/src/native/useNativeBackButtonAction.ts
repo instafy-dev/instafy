@@ -1,9 +1,9 @@
 import { Capacitor } from "@capacitor/core";
-import { App } from "@capacitor/app";
 import { useEffect, useRef } from "react";
+import { registerNativeBackAction } from "./nativeBackButtonCoordinator";
 
 /** Consume Android's system Back action while a dismissible native surface is open. */
-export function useNativeBackButtonAction(enabled: boolean, onBack: () => void) {
+export function useNativeBackButtonAction(enabled: boolean, onBack: () => void, priority = 100) {
   const onBackRef = useRef(onBack);
   onBackRef.current = onBack;
 
@@ -12,22 +12,6 @@ export function useNativeBackButtonAction(enabled: boolean, onBack: () => void) 
       return;
     }
 
-    let disposed = false;
-    let listener: { remove: () => Promise<void> } | null = null;
-
-    void App.addListener("backButton", () => onBackRef.current())
-      .then((nextListener) => {
-        if (disposed) {
-          void nextListener.remove();
-          return;
-        }
-        listener = nextListener;
-      })
-      .catch(() => undefined);
-
-    return () => {
-      disposed = true;
-      void listener?.remove();
-    };
-  }, [enabled]);
+    return registerNativeBackAction(() => onBackRef.current(), priority);
+  }, [enabled, priority]);
 }

@@ -5,7 +5,19 @@ import {
   resolvePendingUrlSearchSync,
   resolveProjectScopedWorkspaceRouteValues,
   resolveWorkspaceUrlSyncBaseSearch,
+  workspaceRouteScopeReady,
 } from "../useStudioLayoutWorkspaceRouting";
+
+describe("pending route scope", () => {
+  const projectA = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+  const projectB = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+  it("does not hydrate pending IDs while access or the destination space's conversations are loading", () => {
+    expect(workspaceRouteScopeReady({ search: `?projectId=${projectB}`, projectReady: false, activeProjectId: projectA, conversationsProjectKey: projectA })).toBe(false);
+    expect(workspaceRouteScopeReady({ search: `?projectId=${projectB}`, projectReady: true, activeProjectId: projectA, conversationsProjectKey: projectA })).toBe(false);
+    expect(workspaceRouteScopeReady({ search: `?projectId=${projectB}`, projectReady: true, activeProjectId: projectB, conversationsProjectKey: projectA })).toBe(false);
+    expect(workspaceRouteScopeReady({ search: `?projectId=%20${projectB}%20`, projectReady: true, activeProjectId: projectB, conversationsProjectKey: projectB })).toBe(true);
+  });
+});
 
 describe("doesWorkspaceTabMatchPanelRoute", () => {
   it("requires the active tab to render the routed Files workspace", () => {
@@ -137,6 +149,14 @@ describe("resolvePendingUrlSearchSync", () => {
 });
 
 describe("resolveWorkspaceUrlSyncBaseSearch", () => {
+  it.each([null, "replace"] as const)("does not overwrite a newer explicit destination with a settled old route (%s)", (pendingNavigationMode) => {
+    expect(resolveWorkspaceUrlSyncBaseSearch({
+      browserSearch: "?projectId=project-1",
+      lastHydratedSearch: "?projectId=project-1&panel=home",
+      routedSearch: "?projectId=project-1&panel=home",
+      pendingNavigationMode,
+    })).toBeNull();
+  });
   it("chains a rapid second push from the URL already committed by the browser", () => {
     expect(
       resolveWorkspaceUrlSyncBaseSearch({

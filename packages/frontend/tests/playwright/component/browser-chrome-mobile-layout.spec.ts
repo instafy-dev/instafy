@@ -11,6 +11,7 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
     import ReactNS from "${deps.react}";
     import ReactDomClientNS from "${deps.reactDomClient}";
     import { BrowserStatusPill } from "/src/screens/studio/components/BrowserChromeShell.tsx";
+    import { BrowserExpandButton } from "/src/screens/studio/components/BrowserExpandButton.tsx";
     import { ChatBrowserSubtabs } from "/src/screens/studio/components/ChatBrowserSubtabs.tsx";
     import { BrowserTransportSelector } from "/src/screens/studio/components/PersonalBrowserSurface.tsx";
     import { RemoteBrowserMobileKeyboard } from "/src/screens/studio/components/RemoteBrowserMobileKeyboard.tsx";
@@ -45,6 +46,8 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
 
     function Fixture() {
       const [agentControls, setAgentControls] = React.useState(false);
+      const [expanded, setExpanded] = React.useState(false);
+      const [keyboardHeight, setKeyboardHeight] = React.useState(0);
       const compact = shouldUseCompactBrowserChrome({
         containerWidth: window.innerWidth,
         compactViewport: window.innerWidth < 640,
@@ -100,13 +103,17 @@ async function mountCompactBrowserChrome(page: Page): Promise<void> {
             state: "ready",
             testId: "browser-session-status",
           }),
-          toolbarActions: collaboration,
+          toolbarActions: h(React.Fragment, null, collaboration, h(BrowserExpandButton, { expanded, onPress: () => setExpanded(!expanded) })),
           interactionEnabled: false,
         }),
-        h(RemoteBrowserMobileKeyboard, {
-          enabled: true,
-          onMessage: (message) => window.__remoteKeyboardMessages.push(message),
-        }),
+        h("div", { "data-testid": "keyboard-layout-stage", style: { position: "relative", height: 240 } },
+          h("div", { "data-testid": "keyboard-layout-viewer", style: { position: "absolute", inset: 0, bottom: keyboardHeight } }),
+          h(RemoteBrowserMobileKeyboard, {
+            enabled: true,
+            onOccupiedHeightChange: setKeyboardHeight,
+            onMessage: (message) => window.__remoteKeyboardMessages.push(message),
+          }),
+        ),
       );
     }
     createRoot(document.getElementById("root")).render(h(Fixture));
@@ -188,6 +195,9 @@ test("keeps compact browser identity, control, and tabs usable at 360px", async 
   await expect(pageSelect).toBeVisible();
   await expect(pageSelect.locator("option")).toHaveCount(3);
   await expect(address).toBeVisible();
+  await expect(page.getByTestId("browser-session-fullscreen-toggle")).toBeVisible();
+  await page.getByTestId("browser-session-fullscreen-toggle").click();
+  await expect(page.getByTestId("browser-session-fullscreen-toggle")).toHaveAttribute("aria-expanded", "true");
   await expect(page.getByTestId("conversation-subtab-browser")).toHaveAccessibleName(
     "Browser, approval needed",
   );
@@ -304,6 +314,13 @@ test("uses one real Chromium action per mobile keyboard control key", async ({ p
   await expect(input).toHaveAttribute("autocapitalize", "none");
   await expect(input).toHaveAttribute("autocorrect", "off");
   await expect(input).toHaveAttribute("spellcheck", "false");
+  // The app input reserves its measured footer; it does not cover the remote
+  // surface. This fixture substitutes the transport, not the keyboard control.
+  await expect.poll(async () => {
+    const viewer = await page.getByTestId("keyboard-layout-viewer").boundingBox();
+    const bar = await keyboard.boundingBox();
+    return Boolean(viewer && bar && viewer.height > 100 && viewer.y + viewer.height <= bar.y);
+  }).toBe(true);
 
   await input.press("Backspace");
   await input.press("Enter");
@@ -323,4 +340,84 @@ test("uses one real Chromium action per mobile keyboard control key", async ({ p
   expect(messages.filter((message) => message.type === "text")).toEqual([
     { type: "text", text: "a" },
   ]);
+  await page.getByTestId("shared-browser-mobile-keyboard-close").click();
+  await expect.poll(async () => (await page.getByTestId("keyboard-layout-viewer").boundingBox())?.height).toBe(240);
+});
+
+test("keeps Unicode remote input out of a previously focused local editor", async ({ page }) => {
+  // Use the production binding and actual Chromium pointer/keyboard defaults.
+  // The message sink is simulated; remote transport/authorization is covered
+  // by the separate Shared runtime tests.
+  const fixturePath = "/__remote-browser-text-input-fixture__";
+  await page.route(`**${fixturePath}`, (route) => route.fulfill({
+    contentType: "text/html",
+    body: `<!doctype html><html><head><meta charset="utf-8" />
+      <style>body { font: 16px sans-serif; } canvas { display: block; border: 2px solid #888; }
+      [contenteditable] { margin-top: 20px; padding: 16px; border: 1px solid #888; }</style>
+      </head><body>
+      <canvas id="remote" tabindex="0" width="600" height="240" aria-label="Remote page"></canvas>
+      <div id="composer" contenteditable="true" aria-label="Local draft">Local draft stays here.</div>
+      <script type="module">
+        import { attachRemoteBrowserInput } from "/src/screens/studio/components/remoteBrowserInput.ts";
+        window.__inputMessages = [];
+        window.__beforeInputs = [];
+        window.__inputEnabled = true;
+        const canvas = document.getElementById("remote");
+        attachRemoteBrowserInput(canvas, {
+          enabled: () => window.__inputEnabled,
+          getViewport: () => ({ width: 600, height: 240, deviceWidth: 600, deviceHeight: 240, dpr: 1 }),
+          send: (message) => window.__inputMessages.push(message),
+        });
+        canvas.addEventListener("beforeinput", (event) => window.__beforeInputs.push({
+          inputType: event.inputType, canceled: event.defaultPrevented, cancelable: event.cancelable,
+        }));
+        window.__inputReady = true;
+      </script></body></html>`,
+  }));
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.goto(fixturePath);
+  await expect.poll(() => page.evaluate(() => Boolean(
+    (window as Window & { __inputReady?: boolean }).__inputReady,
+  ))).toBe(true);
+  const composer = page.locator("#composer");
+  const canvas = page.locator("#remote");
+  await composer.click();
+  await canvas.click();
+  await expect(canvas).toBeFocused();
+  expect(await page.evaluate(() => document.getSelection()?.anchorNode?.parentElement
+    ?.closest("[contenteditable]")?.id)).toBe("composer");
+
+  const phrase = "Desktop to phone — inert test";
+  await page.keyboard.type(phrase);
+  await expect(composer).toHaveText("Local draft stays here.");
+  await expect(canvas).toBeFocused();
+  const messages = await page.evaluate(() => (
+    window as Window & { __inputMessages?: Array<{ type: string; kind?: string; text?: string }> }
+  ).__inputMessages ?? []);
+  expect(messages.filter((message) => message.type === "text" ||
+    (message.type === "key" && message.kind === "keyDown"))
+    .map((message) => message.text ?? "").join("")).toBe(phrase);
+  expect(await page.evaluate(() => (
+    window as Window & { __beforeInputs?: unknown[] }
+  ).__beforeInputs)).toEqual([
+    { inputType: "insertText", canceled: true, cancelable: true },
+  ]);
+
+  await page.evaluate(() => {
+    (window as Window & { __inputEnabled?: boolean }).__inputEnabled = false;
+  });
+  await page.keyboard.insertText("— inert blocked");
+  await expect(composer).toHaveText("Local draft stays here.");
+  await expect(canvas).toBeFocused();
+  expect(await page.evaluate(() => (
+    window as Window & { __inputMessages?: unknown[] }
+  ).__inputMessages?.length)).toBe(messages.length);
+  expect(await page.evaluate(() => (
+    window as Window & { __beforeInputs?: unknown[] }
+  ).__beforeInputs)).toEqual([
+    { inputType: "insertText", canceled: true, cancelable: true },
+    { inputType: "insertText", canceled: true, cancelable: true },
+  ]);
+  expect(errors).toEqual([]);
 });

@@ -115,7 +115,17 @@ function fixtureHandler(request: import("node:http").IncomingMessage, response: 
   if (request.url === "/target") {
     response.end(`<!doctype html>
       <html><head><title>Personal Browser fixture</title></head>
-      <body><h1>Persistent personal page</h1><button id="continue">Continue</button></body></html>`);
+      <body><h1>Persistent personal page</h1><button id="continue">Continue</button>
+      <form id="fixture-details" aria-label="Details">
+        <button id="fixture-button" type="button">Show details</button>
+        <button id="fixture-reset" type="reset">Start again</button>
+        <button id="fixture-no-owner" form="fixture-missing">No associated form</button>
+      </form>
+      <button id="fixture-default" form="fixture-details">Continue</button>
+      <button id="fixture-submit" type="submit" form="fixture-details">Continue</button>
+      <button id="fixture-normalized" type="unknown" form="fixture-details">Continue</button>
+      <input id="fixture-notes" form="fixture-details" aria-label="Notes">
+      </body></html>`);
     return;
   }
   response.end(`<!doctype html>
@@ -349,6 +359,48 @@ test.describe("Electron Personal Browser", () => {
     );
     expect(beforeSameDocumentNavigation.after.agentControlEnabled).toBe(true);
     expect(beforeSameDocumentNavigation.after.visible).toBe(true);
+
+    // Read corrected production descriptors from real native Chromium. This
+    // checks native form association/default types without activating a form.
+    const formSemantics = await electronApp!.evaluate(async ({ webContents }, options) => {
+      const contents = webContents.getAllWebContents().find(candidate => candidate.getURL() === options.url);
+      if (!contents) throw new Error("Personal WebContentsView was not found.");
+      const requireBundle = process.getBuiltinModule("node:module").createRequire(options.pageBridgePath);
+      const pageBridge = requireBundle(options.pageBridgePath) as typeof import("../../../../desktop-app/src/personalBrowserPageBridge");
+      const security = requireBundle(options.securityPath) as typeof import("../../../../desktop-app/src/personalBrowserSecurity");
+      const snapshot = await pageBridge.snapshotPersonalBrowserPage(contents);
+      return snapshot.interactive.filter(({ descriptor }) => descriptor.id?.startsWith("fixture-")).map(({ descriptor }) => ({
+        id: descriptor.id,
+        type: descriptor.type,
+        formOwnerIdentity: descriptor.formOwnerIdentity,
+        formActionText: descriptor.formActionText,
+        activationNeedsConfirmation: security.personalBrowserActivationRequiresConfirmation(descriptor, "routine"),
+        enterNeedsConfirmation: security.personalBrowserKeyRequiresConfirmation("Enter", descriptor),
+      }));
+    }, {
+      url: targetUrl,
+      pageBridgePath: path.join(DESKTOP_APP_DIR, "dist", "personalBrowserPageBridge.js"),
+      securityPath: path.join(DESKTOP_APP_DIR, "dist", "personalBrowserSecurity.js"),
+    });
+    expect(formSemantics).toHaveLength(7);
+    const associatedOwner = formSemantics.find(row => row.id === "fixture-default")?.formOwnerIdentity;
+    expect(associatedOwner).toBeTruthy();
+    for (const id of ["fixture-default", "fixture-submit", "fixture-normalized"]) {
+      expect(formSemantics.find(row => row.id === id)).toMatchObject({
+        type: "submit", formOwnerIdentity: associatedOwner, formActionText: "Continue", activationNeedsConfirmation: true,
+      });
+    }
+    for (const id of ["fixture-button", "fixture-reset"]) {
+      expect(formSemantics.find(row => row.id === id)).toMatchObject({
+        formOwnerIdentity: associatedOwner, activationNeedsConfirmation: false,
+      });
+    }
+    expect(formSemantics.find(row => row.id === "fixture-no-owner")).toMatchObject({
+      formOwnerIdentity: "", formActionText: "", activationNeedsConfirmation: false,
+    });
+    expect(formSemantics.find(row => row.id === "fixture-notes")).toMatchObject({
+      formOwnerIdentity: associatedOwner, enterNeedsConfirmation: true,
+    });
 
     const firstView = await electronApp!.evaluate(async ({ webContents }, url) => {
       const contents = webContents.getAllWebContents().find(candidate => candidate.getURL() === url);

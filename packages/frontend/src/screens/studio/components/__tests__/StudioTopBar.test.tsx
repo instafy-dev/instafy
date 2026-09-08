@@ -51,11 +51,12 @@ vi.mock("../../workspaceControls", () => ({
   }),
 }));
 vi.mock("../../../../profile/ProfileProvider", () => ({ useProfile: () => ({ profile: mocks.profile }) }));
-vi.mock("../../../../lib/desktopShell", () => ({ desktopTitleBarFree: () => mocks.titleBarFree }));
+vi.mock("../../../../lib/desktopShell", () => ({ desktopTitleBarFree: () => mocks.titleBarFree, isDesktopShell: () => false }));
 vi.mock("../../useStudioNavigationPosture", () => ({
   useStudioNavigationPosture: () => ({ isLargeScreen: mocks.isLargeScreen, showComposerNavigationButton: !mocks.isLargeScreen }),
 }));
 vi.mock("../../../../projects/useProjects", () => ({ useProjects: () => ({ activeProjectId: "project-1" }) }));
+vi.mock("../../../../providers/AuthProvider", () => ({ useAuth: () => ({ user: { id: "test-user" } }) }));
 vi.mock("../../../../projects/useProject", () => ({ useProject: () => ({ projectAccessBlocked: mocks.projectAccessBlocked }) }));
 vi.mock("../../../../runtime/useRuntime", () => ({ useRuntime: () => ({ runtime: { controllerProjectMissing: mocks.controllerProjectMissing } }) }));
 vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
@@ -214,15 +215,15 @@ describe("StudioTopBar navigation", () => {
     expect(mocks.openConversationTab).not.toHaveBeenCalled();
   });
 
-  it("opens a parent conversation before considering the workspace back callback", async () => {
+  it("keeps parent navigation separate from the workspace back callback", async () => {
     mocks.conversations = [
       { localId: "conversation-1", title: "Child chat", parentConversationId: "parent-controller" },
       { localId: "parent-local", controllerId: "parent-controller", title: "Parent chat" },
     ];
     await act(async () => root.render(<StudioTopBar />));
     const back = container.querySelector<HTMLButtonElement>('[data-testid="topbar-parent-conversation-button"]');
-    expect(back?.getAttribute("aria-label")).toBe("Back to parent conversation: Parent chat");
-    expect(container.querySelector('[data-testid="topbar-back-button"]')).toBeNull();
+    expect(back?.getAttribute("aria-label")).toBe("Open parent conversation: Parent chat");
+    expect(container.querySelector('[data-testid="topbar-back-button"]')).not.toBeNull();
     await act(async () => back?.click());
     expect(mocks.requestUrlPush).toHaveBeenCalledOnce();
     expect(mocks.openConversationTab).toHaveBeenCalledWith("parent-local");

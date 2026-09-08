@@ -8,9 +8,11 @@ import { createInitialConversation, type ConversationState } from "../../convers
 import { WorkspaceTabsProvider, useWorkspaceTabs } from "../../workspace/WorkspaceTabsProvider";
 import { AutomationsPanel } from "../studio/components/AutomationsPanel";
 import { useStudioLayoutWorkspaceRouting } from "../useStudioLayoutWorkspaceRouting";
-import { buildOrganizationSettingsCategorySearch } from "../studio/settingsRoute";
+import { resolveSettingsRoute } from "../studio/settingsRoute";
 import { useSettingsOrganization } from "../studio/components/useSettingsOrganization";
-import { buildTeamNavigationSearch, navigateStudioExplicitly, resolveTeamNavigationScope } from "../studio/teamNavigation";
+import { resolveTeamNavigationScope } from "../studio/teamNavigation";
+import { useStudioNavigation, StudioNavigationProvider } from "../../navigation/useStudioNavigation";
+import { useMobileSidebarHistory } from "../useMobileSidebarHistory";
 import type { StudioPanel } from "../studio/types";
 import type { LeftDrawerPanel } from "../useStudioLayoutChromeState";
 
@@ -75,7 +77,16 @@ function RoutedWorkspace() {
   const location = useLocation();
   const navigate = useNavigate();
   const [leftDrawer, setLeftDrawer] = useState<LeftDrawerPanel | null>(null);
-  const [, setMobileSidebarOpen] = useState(false);
+  const [isLargeScreen, setIsLargeScreen] = useState(true);
+  const sidebar = useMobileSidebarHistory({ enabled: !isLargeScreen, scopeKey: `test-user:${fixture.projectId}` });
+  const setMobileSidebarOpen = sidebar.setMobileSidebarOpen;
+  const runAfterSidebarClose = sidebar.runAfterSidebarClose;
+  const consumeUrlNavigation = tabs.consumeUrlNavigation;
+  const runNavigation = useCallback((action: () => void) => runAfterSidebarClose(() => {
+    consumeUrlNavigation();
+    action();
+  }), [consumeUrlNavigation, runAfterSidebarClose]);
+  const go = useStudioNavigation(runNavigation);
   const [, setIsProjectLauncherOpen] = useState(false);
   const tab = tabs.activeTab;
   const conversation = data.conversations.conversations.find((item) => item.localId === data.conversations.activeConversationId);
@@ -86,19 +97,22 @@ function RoutedWorkspace() {
     activeProjectId: fixture.projectId,
     activeWorkspaceGitReviewReturnTabId: null,
     activeWorkspaceReviewTabId: null,
-    activeWorkspaceTabConversationId: tab?.kind === "conversation" || tab?.kind === "jobThread" ? tab.conversationId : null,
+    activeWorkspaceTabConversationId: tab?.kind === "jobThread" ? tab.conversationId : null,
     activeWorkspaceTabId: tabs.activeTabId,
     activeWorkspaceTabJobId: tab?.kind === "jobThread" ? tab.jobId : null,
     activeWorkspaceTabKind: tab?.kind ?? null,
     activeWorkspaceTabPanel: tab?.kind === "panel" ? tab.panel : null,
+    conversationTabsReady: tabs.conversationTabsReady,
     consumeUrlNavigation: tabs.consumeUrlNavigation,
     conversations: data.conversations.conversations,
     conversationsProjectKey: fixture.projectId,
     focusWorkspaceTab: tabs.focusTab,
-    isLargeScreen: true,
+    isLargeScreen,
     leftDrawer,
     locationPathname: location.pathname,
     locationSearch: location.search,
+    locationKey: location.key,
+    locationState: location.state,
     navigate,
     openConversationTab: tabs.openConversationTab,
     openJobThreadTab: tabs.openJobThreadTab,
@@ -119,27 +133,33 @@ function RoutedWorkspace() {
     organizationId: route.settingsOrgId, selectOrganization: tab?.kind === "panel" && tab.panel === "settings",
   });
   const navigationScope = resolveTeamNavigationScope(location.search, fixture.projectTeamId);
-  return <>
+  return <StudioNavigationProvider value={runNavigation}>
+    <button data-testid="use-mobile" onClick={() => setIsLargeScreen(false)}>Mobile layout</button>
+    <button data-testid="open-drawer" onClick={() => sidebar.setMobileSidebarOpen(true)}>Open drawer</button>
+    <button data-testid="drill-workspaces" onClick={() => sidebar.mobileSidebarNavigation.openView("workspace")}>Spaces</button>
+    <output data-testid="drawer-view">{sidebar.mobileSidebarNavigation.view ?? "closed"}</output>
     <button data-testid="open-empty-team-overview" onClick={() => {
-      void navigateStudioExplicitly(tabs.consumeUrlNavigation, navigate, { pathname: location.pathname, search: buildTeamNavigationSearch(location.search, fixture.emptyTeamId, "team") });
+      go({ kind: "panel", panel: "team", teamId: fixture.emptyTeamId });
     }}>Open empty team</button>
     <button data-testid="open-home" onClick={() => {
-      void navigateStudioExplicitly(tabs.consumeUrlNavigation, navigate, { pathname: location.pathname, search: buildTeamNavigationSearch(location.search, navigationScope.orgKey, "home") });
+      go({ kind: "panel", panel: "home", teamId: navigationScope.orgKey });
     }}>Home</button>
-    <button data-testid="open-workspace-automations" onClick={() => route.handlePanelSelect("automations")}>Open workspace automations</button>
+    <button data-testid="open-workspace-automations" onClick={() => go({ kind: "panel", panel: "automations" })}>Open workspace automations</button>
     <button data-testid="navigate-back" onClick={() => {
-      void navigateStudioExplicitly(tabs.consumeUrlNavigation, navigate, -1);
+      tabs.consumeUrlNavigation();
+      void navigate(-1);
     }}>Back</button>
     <button data-testid="activate-retained-workspace" onClick={() => {
       // Closing the real team/space drawer requests a tab URL push before
       // StudioLayout navigates to the selected space's remembered URL.
       tabs.requestUrlNavigation("push");
       setLeftDrawer(null);
-      void navigateStudioExplicitly(tabs.consumeUrlNavigation, navigate, { pathname: location.pathname, search: `?projectId=${fixture.projectId}` });
+      go({ kind: "conversation", projectId: fixture.projectId });
     }}>Activate retained workspace</button>
     <button data-testid="open-empty-team-profile" onClick={() => {
-      const search = buildOrganizationSettingsCategorySearch(location.search, "profile", fixture.emptyTeamId);
-      void navigateStudioExplicitly(tabs.consumeUrlNavigation, navigate, { pathname: location.pathname, search: `?${search}` });
+      // The sidebar action and settings action share the same collapse owner.
+      runNavigation(() => go({ kind: "panel", panel: "settings", settingsTab: "org",
+        settingsOrgId: fixture.emptyTeamId, settingsCategory: "profile" }));
     }}>Open empty team profile</button>
     <output data-testid="selected-workspace-tab">{tab?.kind}:{tab?.id}</output>
     <output data-testid="active-panel">{data.workspace.activePanel}</output>
@@ -151,16 +171,17 @@ function RoutedWorkspace() {
       {data.conversations.conversations.find((item) => item.localId === tab.conversationId)?.title}
     </main> : null}
     {tab?.kind === "panel" && tab.panel === "settings" ? <>
-      <main data-testid="visible-team-settings" data-settings-tab={route.settingsTab} data-role={organization.role}>
+      <main data-testid="visible-team-settings" data-settings-tab={route.settingsTab}
+        data-settings-category={resolveSettingsRoute(location.search, route.settingsTab).category} data-role={organization.role}>
         {organization.selectedId}
       </main>
       <button data-testid="select-empty-team" onClick={() => {
         organization.select(fixture.emptyTeamId);
-        const search = buildOrganizationSettingsCategorySearch(location.search, "profile", fixture.emptyTeamId);
-        void navigateStudioExplicitly(tabs.consumeUrlNavigation, navigate, { pathname: location.pathname, search: `?${search}` });
+        go({ kind: "panel", panel: "settings", settingsTab: "org", settingsOrgId: fixture.emptyTeamId,
+          settingsCategory: resolveSettingsRoute(window.location.search, "org").category });
       }}>Select empty team</button>
     </> : null}
-  </>;
+  </StudioNavigationProvider>;
 }
 
 describe("automation workspace navigation", () => {
@@ -198,6 +219,18 @@ describe("automation workspace navigation", () => {
       window.history.back();
       await popped;
     });
+    await settle();
+  }
+  async function forward() {
+    await act(async () => {
+      const popped = new Promise<void>((resolve) => window.addEventListener("popstate", () => resolve(), { once: true }));
+      window.history.forward();
+      await popped;
+    });
+    await settle();
+  }
+  async function click(testId: string) {
+    await act(async () => container.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`)!.click());
     await settle();
   }
   function expectRoute(panel: StudioPanel, scope: string, expectedParams: Record<string, string>) {
@@ -259,7 +292,7 @@ describe("automation workspace navigation", () => {
 
   it("keeps an empty team's scope on Home and restores Team then workspace through browser Back", async () => {
     await render();
-    const workParams = { projectId: fixture.projectId, panel: "automations" };
+    const workParams = { projectId: fixture.projectId, panel: "automations", conversationId: "previous-chat" };
     expectRoute("automations", fixture.projectTeamId, workParams);
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="open-empty-team-overview"]')!.click());
     await settle();
@@ -288,7 +321,7 @@ describe("automation workspace navigation", () => {
     window.history.replaceState(null, "", `/studio?projectId=${fixture.projectId}&panel=team&teamId=${fixture.emptyTeamId}`);
     await render();
     expectRoute("team", fixture.emptyTeamId, {
-      projectId: fixture.projectId, panel: "team", teamId: fixture.emptyTeamId,
+      projectId: fixture.projectId, panel: "team", teamId: fixture.emptyTeamId, conversationId: "previous-chat",
     });
     expect(container.querySelector('[data-testid="visible-team-overview"]')?.textContent).toBe(fixture.emptyTeamId);
   });
@@ -296,12 +329,12 @@ describe("automation workspace navigation", () => {
   it("uses settingsOrgId for team settings and restores the Home team before workspace navigation removes teamId", async () => {
     window.history.replaceState(null, "", `/studio?projectId=${fixture.projectId}&panel=home&teamId=${fixture.projectTeamId}`);
     await render();
-    const homeParams = { projectId: fixture.projectId, panel: "home", teamId: fixture.projectTeamId };
+    const homeParams = { projectId: fixture.projectId, panel: "home", teamId: fixture.projectTeamId, conversationId: "previous-chat" };
     expectRoute("home", fixture.projectTeamId, homeParams);
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="open-empty-team-profile"]')!.click());
     await settle();
     expectRoute("settings", fixture.emptyTeamId, {
-      projectId: fixture.projectId, panel: "settings", teamId: fixture.projectTeamId, settingsTab: "org", settingsOrgId: fixture.emptyTeamId,
+      projectId: fixture.projectId, panel: "settings", settingsTab: "org", settingsOrgId: fixture.emptyTeamId, settingsCategory: "profile", conversationId: "previous-chat",
     });
     expect(container.querySelector('[data-testid="visible-team-settings"]')?.getAttribute("data-role")).toBe("owner");
     await back();
@@ -322,7 +355,7 @@ describe("automation workspace navigation", () => {
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="activate-retained-workspace"]')!.click());
     await settle();
     expect(Object.fromEntries(new URLSearchParams(window.location.search))).toEqual({
-      projectId: fixture.projectId,
+      projectId: fixture.projectId, conversationId: "previous-chat",
     });
     expect(container.querySelector('[data-testid="active-panel"]')?.textContent).toBe("chat");
     expect(container.querySelector('[data-testid="visible-chat"]')?.getAttribute("data-conversation-id")).toBe("previous-chat");
@@ -333,7 +366,58 @@ describe("automation workspace navigation", () => {
     });
     await settle();
     expectRoute("home", fixture.projectTeamId, {
-      projectId: fixture.projectId, panel: "home", teamId: fixture.projectTeamId, workspaceTab: "workspaces",
+      projectId: fixture.projectId, panel: "home", teamId: fixture.projectTeamId, workspaceTab: "workspaces", conversationId: "previous-chat",
     });
+  });
+
+  it("collapses a mobile drawer and its space drill-in before pushing Team profile or Home once", async () => {
+    await render();
+    await click("use-mobile");
+    const initialIndex = window.history.state.idx;
+    const initialVisit = window.history.state.usr?.instafyVisitKey ?? window.history.state.key;
+    const closed = () => expect(container.querySelector('[data-testid="drawer-view"]')?.textContent).toBe("closed");
+    const teamProfileParams = {
+      projectId: fixture.projectId, panel: "settings", settingsTab: "org", settingsCategory: "profile",
+      settingsOrgId: fixture.emptyTeamId, conversationId: "previous-chat",
+    };
+    await click("open-drawer");
+    expect(container.querySelector('[data-testid="drawer-view"]')?.textContent).toBe("sidebar");
+    await click("drill-workspaces");
+    expect(container.querySelector('[data-testid="drawer-view"]')?.textContent).toBe("workspace");
+    expect(window.history.state.idx).toBe(initialIndex + 2);
+    await click("open-empty-team-profile");
+    closed();
+    expect(window.history.state.idx).toBe(initialIndex + 1);
+    expect(window.history.state.usr?.instafySidebar).toBeUndefined();
+    expect(window.history.state.usr?.instafyVisitKey ?? window.history.state.key).not.toBe(initialVisit);
+    expectRoute("settings", fixture.emptyTeamId, teamProfileParams);
+    expect(container.querySelector('[data-testid="visible-team-settings"]')?.getAttribute("data-settings-category")).toBe("profile");
+    expect(container.querySelector('[data-testid="visible-team-settings"]')?.getAttribute("data-role")).toBe("owner");
+    await back();
+    closed();
+    expectRoute("automations", fixture.projectTeamId, {
+      projectId: fixture.projectId, panel: "automations", conversationId: "previous-chat",
+    });
+    await forward();
+    closed();
+    expectRoute("settings", fixture.emptyTeamId, teamProfileParams);
+
+    await click("open-drawer");
+    await click("drill-workspaces");
+    expect(window.history.state.idx).toBe(initialIndex + 3);
+    await click("open-home");
+    closed();
+    expect(window.history.state.idx).toBe(initialIndex + 2);
+    expect(window.history.state.usr?.instafySidebar).toBeUndefined();
+    const homeParams = {
+      projectId: fixture.projectId, panel: "home", teamId: fixture.emptyTeamId, conversationId: "previous-chat",
+    };
+    expectRoute("home", fixture.emptyTeamId, homeParams);
+    await back();
+    closed();
+    expectRoute("settings", fixture.emptyTeamId, teamProfileParams);
+    await forward();
+    closed();
+    expectRoute("home", fixture.emptyTeamId, homeParams);
   });
 });

@@ -1,5 +1,5 @@
 export type RuntimeSharedBrowserApprovalKind = "origin" | "action";
-export type RuntimeSharedBrowserApprovalDecision = "allow_origin" | "allow_once" | "deny";
+export type RuntimeSharedBrowserApprovalDecision = "allow_origin" | "allow_once" | "allow_routine" | "deny";
 export type RuntimeSharedBrowserApprovalOperation =
   | "approve-origin"
   | "navigate"
@@ -53,6 +53,7 @@ const APPROVAL_OPERATIONS = new Set<RuntimeSharedBrowserApprovalOperation>([
 const APPROVAL_DECISIONS = new Set<RuntimeSharedBrowserApprovalDecision>([
   "allow_origin",
   "allow_once",
+  "allow_routine",
   "deny",
 ]);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -265,7 +266,7 @@ export async function decideRuntimeSharedBrowserApproval(params: {
     !originEndpoint ||
     !originAccessToken ||
     !APPROVAL_DECISIONS.has(params.decision) ||
-    (params.decision === "allow_origin" && request.kind !== "origin") ||
+    ((params.decision === "allow_origin" || params.decision === "allow_routine") && request.kind !== "origin") ||
     (params.decision === "allow_once" && request.kind !== "action")
   ) {
     return false;

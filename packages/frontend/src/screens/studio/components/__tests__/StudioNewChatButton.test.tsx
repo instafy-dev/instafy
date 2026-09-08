@@ -10,8 +10,10 @@ const mocks = vi.hoisted(() => ({
   privateChat: vi.fn(),
   listOrgMembers: vi.fn(),
   listProjectMembers: vi.fn(),
+  nativeBack: vi.fn(),
   allowed: true,
 }));
+vi.mock("../../../../native/useNativeBackButtonAction", () => ({ useNativeBackButtonAction: mocks.nativeBack }));
 
 vi.mock("../../workspaceControls", () => ({
   useWorkspaceControls: () => ({
@@ -124,5 +126,40 @@ describe("StudioNewChatButton", () => {
     await act(async () => root.render(<StudioNewChatButton />));
     expect(container.querySelector("button")).toBeNull();
     expect(mocks.listProjectMembers).not.toHaveBeenCalled();
+  });
+
+  it("keeps a custom navigation trigger mounted without offering blocked creation actions", async () => {
+    mocks.allowed = false;
+    await act(async () => root.render(<StudioNewChatButton renderTrigger={({ onNewChat, onNewPrivateChat }) => {
+      expect(onNewChat).toBeUndefined();
+      expect(onNewPrivateChat).toBeUndefined();
+      return <button data-testid="custom-navigation">Navigation</button>;
+    }} />));
+    expect(container.querySelector('[data-testid="custom-navigation"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="topbar-new-conversation"]')).toBeNull();
+    expect(mocks.listProjectMembers).not.toHaveBeenCalled();
+  });
+
+  it("keeps the private picker in its shared owner and dismisses it on native Back or a new visit", async () => {
+    const render = (dismissalKey: string) => root.render(<StudioNewChatButton dismissalKey={dismissalKey}
+      renderTrigger={({ onNewChat, onNewPrivateChat }) => <>
+        <button data-testid="custom-public" onClick={onNewChat}>Public</button>
+        <button data-testid="custom-private" onClick={onNewPrivateChat}>Private</button>
+      </>} />);
+    await act(async () => render("visit-a"));
+    await click("custom-public");
+    expect(mocks.publicChat).toHaveBeenCalledOnce();
+    await click("custom-private");
+    expect(container.querySelector('[data-testid="private-chat-picker"]')).not.toBeNull();
+    const enabled = mocks.nativeBack.mock.calls.filter(([active]) => active).at(-1);
+    expect(enabled).toBeDefined();
+    await act(async () => enabled![1]());
+    expect(container.querySelector('[data-testid="private-chat-picker"]')).toBeNull();
+    await click("custom-private");
+    await act(async () => render("visit-b"));
+    expect(container.querySelector('[data-testid="private-chat-picker"]')).toBeNull();
+    expect(mocks.privateChat).not.toHaveBeenCalled();
+    await click("custom-private");
+    expect(container.querySelector<HTMLInputElement>('[data-testid="chat-private-chat-search"]')?.value).toBe("");
   });
 });

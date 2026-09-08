@@ -1,18 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { buildTeamNavigationSearch, canRememberTeamWorkspace, resolveTeamNavigationScope } from "../teamNavigation";
+import { buildStudioDestinationSearch } from "../../../navigation/studioNavigation";
+import { canRememberTeamWorkspace, resolveTeamNavigationScope } from "../teamNavigation";
 
 const teamA = "11111111-1111-4111-8111-111111111111";
 const teamB = "22222222-2222-4222-8222-222222222222";
 
 describe("team navigation scope", () => {
   it("keeps an empty team's overview independent of the active space and browser Back", () => {
-    const search = buildTeamNavigationSearch("?projectId=space-a&panel=chat&workspaceTab=files", teamB, "team");
+    const search = buildStudioDestinationSearch("?projectId=space-a&panel=chat&workspaceTab=files", { kind: "panel", panel: "team", teamId: teamB });
     expect(resolveTeamNavigationScope(search, teamA)).toEqual({ page: "team", orgKey: teamB });
     expect(new URLSearchParams(search).has("workspaceTab")).toBe(false);
     expect(resolveTeamNavigationScope("?projectId=space-a&panel=chat", teamA)).toEqual({ page: "workspace", orgKey: teamA });
   });
   it("retains the last team on Home without making Home team-scoped", () => {
-    const search = buildTeamNavigationSearch("?projectId=space-a", teamB, "home");
+    const search = buildStudioDestinationSearch("?projectId=space-a", { kind: "panel", panel: "home", teamId: teamB });
     expect(resolveTeamNavigationScope(search, teamA)).toEqual({ page: "home", orgKey: teamB });
     expect(canRememberTeamWorkspace(search, "space-a", teamA)).toBe(false);
   });

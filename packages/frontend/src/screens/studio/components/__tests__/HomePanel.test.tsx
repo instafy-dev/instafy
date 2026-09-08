@@ -27,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   openOrgSettings: vi.fn(),
   markConversationRead: vi.fn(),
   openConversationTab: vi.fn(),
+  requestUrlPush: vi.fn(),
   navigate: vi.fn(),
   showStatus: vi.fn(),
 }));
@@ -53,7 +54,7 @@ vi.mock("../../../../providers/AuthProvider", () => ({
 }));
 vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus: mocks.showStatus }) }));
 vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
-  useWorkspaceTabs: () => ({ requestUrlPush: vi.fn(), openConversationTab: mocks.openConversationTab }),
+  useWorkspaceTabs: () => ({ requestUrlPush: mocks.requestUrlPush, openConversationTab: mocks.openConversationTab }),
 }));
 vi.mock("../../workspaceControls", () => ({
   useWorkspaceControls: () => ({
@@ -148,6 +149,24 @@ describe("HomePanel activity states", () => {
     expect(button).not.toBeNull();
     await act(async () => button?.click());
   }
+
+  it("opens unloaded Home activity with one destination, without a competing tab push", async () => {
+    window.history.replaceState(null, "", "/studio?projectId=project-personal&panel=home&jobId=old-job&settingsCategory=danger");
+    mocks.activity.activityItems = [activityItem()];
+    await render();
+    await click("home-recent-item-20");
+    expect(mocks.navigate).toHaveBeenCalledTimes(1);
+    const [target, options] = mocks.navigate.mock.calls[0];
+    const params = new URLSearchParams(target.search);
+    expect(target.pathname).toBe("/studio");
+    expect(params.get("conversationControllerId")).toBe("conversation-recent");
+    expect(params.get("panel")).toBeNull();
+    expect(params.get("jobId")).toBeNull();
+    expect(params.get("settingsCategory")).toBeNull();
+    expect(options).toEqual({ state: null });
+    expect(mocks.requestUrlPush).not.toHaveBeenCalled();
+    expect(mocks.openConversationTab).not.toHaveBeenCalled();
+  });
 
   it("lets a filtered team load history even when the loaded page has no matching rows", async () => {
     mocks.activity.activityItems = [activityItem()];

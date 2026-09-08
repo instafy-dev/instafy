@@ -30,7 +30,7 @@ export default defineConfig({
     // chrome also reaches use-sync-external-store's CommonJS shim through
     // react-aria-components, so optimize that package boundary as a unit.
     entries: [],
-    include: ["react", "react-dom/client", "react-aria-components"],
+    include: ["react", "react-dom/client", "react-aria-components", "react-router-dom"],
     noDiscovery: true,
   },
   server: {
