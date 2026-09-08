@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { writeFile } from "node:fs/promises";
 import { resolveViteReactDependencies } from "./viteComponentDependencies.js";
 
 const FIXTURE = "/__composer-image-strip__";
@@ -275,4 +276,55 @@ test("browser mode expands for selected images and returns to its compact layout
   await expect(editor).toBeFocused();
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
   expect(failures).toEqual([]);
+});
+
+test.describe("touch hit targets", () => {
+  test.use({hasTouch:true,viewport:{width:360,height:438}});
+
+  test("center taps preview every thumbnail and the remove target deletes only its own image", async ({page},testInfo) => {
+    const failures=await mount(page,true);
+    await selectImages(page);
+    expect(await page.evaluate(()=>matchMedia("(pointer: coarse)").matches)).toBe(true);
+    const hitTargets=[];
+    for (let index=0;index<IMAGE_NAMES.length;index++) {
+      const preview=page.getByRole("button",{name:`Preview image ${index+1}: ${IMAGE_NAMES[index]}`,exact:true});
+      await preview.scrollIntoViewIfNeeded();
+      const bounds=await preview.boundingBox();
+      expect(bounds).not.toBeNull();
+      const target=await preview.evaluate(node=>{
+        const rect=node.getBoundingClientRect();
+        const remove=node.parentElement?.querySelector('[data-testid="chat-image-upload-remove"]');
+        const removeRect=remove?.getBoundingClientRect();
+        const actual=document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2)?.closest("button");
+        return {preview:rect.toJSON(),remove:removeRect?.toJSON(),removeRadius:remove?getComputedStyle(remove).borderRadius:null,
+          centerHitsPreview:actual===node};
+      });
+      hitTargets.push(target);
+      expect(target.centerHitsPreview).toBe(true);
+      // Touch the physical center without locator hit-target retries choosing
+      // a different point or hiding an overlapping sibling remove button.
+      await page.touchscreen.tap(bounds!.x+bounds!.width/2,bounds!.y+bounds!.height/2);
+      await expect(page.getByTestId("chat-image-upload-remove")).toHaveCount(IMAGE_NAMES.length);
+      const dialog=page.getByRole("dialog",{name:"Image preview",exact:true});
+      await expect(dialog).toBeVisible();
+      await expect(page.getByTestId("chat-image-lightbox-image")).toHaveAttribute("alt",IMAGE_NAMES[index]);
+      await page.getByTestId("chat-image-lightbox-close").tap();
+      await expect(dialog).toBeHidden();
+    }
+    const remove=page.getByRole("button",{name:`Remove image 4: ${IMAGE_NAMES[3]}`,exact:true});
+    await remove.scrollIntoViewIfNeeded();
+    const bounds=await remove.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.width).toBeGreaterThanOrEqual(44);
+    expect(bounds!.height).toBeGreaterThanOrEqual(44);
+    await page.touchscreen.tap(bounds!.x+bounds!.width/2,bounds!.y+bounds!.height/2);
+    await expect(page.getByTestId("chat-image-upload-remove")).toHaveCount(7);
+    expect(await selectedFiles(page)).toEqual(IMAGE_NAMES.filter((_,index)=>index!==3));
+    await expect(page.getByTestId("fixture-editor")).toHaveValue(DRAFT);
+    await expect(page.getByTestId("chat-image-lightbox")).toBeHidden();
+    const evidencePath=testInfo.outputPath("touch-hit-targets.json");
+    await writeFile(evidencePath,JSON.stringify(hitTargets,null,2));
+    await testInfo.attach("touch-hit-targets",{contentType:"application/json",path:evidencePath});
+    expect(failures).toEqual([]);
+  });
 });
