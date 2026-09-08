@@ -135,9 +135,11 @@ function emitAction(event) {
         viewportW: event.viewportW ?? null,
         viewportH: event.viewportH ?? null,
         pageId: EXPECTED_BROWSER_PAGE_ID,
+        ...(event.type === "human_input" ? { humanInputRequest: event.humanInputRequest } : {}),
       })}\n`,
     );
   } catch (_) {
+    if (event.type === "human_input") throw new Error("Could not publish manual-input guidance");
     // Cursor/ticker telemetry must never change browser control flow.
   }
 }
@@ -228,7 +230,9 @@ async function describeElement(locator, index) {
         valueAttribute: bounded(element.getAttribute("value")),
         href: element instanceof HTMLAnchorElement ? bounded(element.href, 4_096) : "",
         inputType:
-          element instanceof HTMLInputElement ? bounded(element.type || "text", 64) : "",
+          element instanceof HTMLInputElement || element instanceof HTMLButtonElement
+            ? bounded(element.type, 64)
+            : "",
         autocomplete: bounded(element.getAttribute("autocomplete"), 512),
         inputMode: bounded(element.getAttribute("inputmode"), 64),
         formAction,
@@ -312,6 +316,9 @@ async function collectInteractiveElements(page) {
 }
 
 function snapshotFingerprint(url, interactive) {
+  // A restored conversation must observe again after human input or a new
+  // control lease, even when the URL and element descriptors are unchanged.
+  const { ownerId, runId } = approvalProtocol.authority();
   const elements = interactive.map(({ description }) => ({
     index: description.index,
     tag: description.tag,
@@ -336,7 +343,7 @@ function snapshotFingerprint(url, interactive) {
   }));
   return crypto
     .createHash("sha256")
-    .update(JSON.stringify({ pageId: EXPECTED_BROWSER_PAGE_ID, url, elements }))
+    .update(JSON.stringify({ ownerId, runId, pageId: EXPECTED_BROWSER_PAGE_ID, url, elements }))
     .digest("hex");
 }
 
@@ -500,6 +507,26 @@ function assertSafeTypeTarget(description) {
   }
 }
 
+// Routine browsing is an explicit, run-scoped user grant, not a claim that
+// arbitrary website JavaScript is side-effect-free. Keep recognized consequential
+// controls, form submissions and activation keys behind one-shot confirmation.
+const CONSEQUENTIAL_ACTION_PATTERN =
+  /\b(?:buy|purchase|pay|checkout|place[\s_-]*order|delete|remove|erase|destroy|send|post|publish|submit|authorize|approve|allow|confirm[\s_-]*(?:order|payment|purchase)|transfer|withdraw|book|reserve|sign[\s_-]*(?:contract|document|agreement))\b/i;
+
+function isConsequentialAction(description) {
+  return CONSEQUENTIAL_ACTION_PATTERN.test(descriptionContent(description));
+}
+
+function isFormSubmissionControl(description) {
+  const tag = String(description.tag || "").toLowerCase();
+  const type = String(description.inputType || "").toLowerCase();
+  return (
+    (tag === "input" && ["submit", "image"].includes(type)) ||
+    (tag === "button" && type !== "button" && type !== "reset" &&
+      Boolean(description.formAction || description.formMethod || description.formActionText))
+  );
+}
+
 async function settleAfterAction(page) {
   await page.waitForLoadState("domcontentloaded", { timeout: 8_000 }).catch(() => {});
   await page.waitForTimeout(250).catch(() => {});
@@ -614,7 +641,15 @@ function validateTarget(body) {
 }
 
 function validateRequestBody(requestPath, body) {
-  if (requestPath === "/v1/navigate") {
+  if (requestPath === "/v1/request-human-input") {
+    requireOnlyKeys(body, new Set(["indices", "snapshotId"]));
+    if (!Array.isArray(body.indices) || body.indices.length < 1 || body.indices.length > 8 ||
+        new Set(body.indices).size !== body.indices.length ||
+        body.indices.some((index) => !Number.isInteger(index) || index < 0 || index >= 200) ||
+        typeof body.snapshotId !== "string" || !SNAPSHOT_ID_PATTERN.test(body.snapshotId)) {
+      throw new Error("Human input requires one to eight unique indices from a fresh snapshot");
+    }
+  } else if (requestPath === "/v1/navigate") {
     requireOnlyKeys(body, new Set(["url"]));
     validateNavigationUrl(body.url);
   } else if (requestPath === "/v1/click") {
@@ -648,6 +683,19 @@ function validateRequestBody(requestPath, body) {
   }
 }
 
+async function clearHumanInputHighlights(page) {
+  await page.evaluate(() => {
+    const key = "__instafyHumanInputHighlights";
+    const records = Array.isArray(globalThis[key]) ? globalThis[key].slice(0, 8) : [];
+    for (const record of records) {
+      if (!(record?.element instanceof HTMLElement)) continue;
+      if (record.element.style.outline === record.appliedOutline) record.element.style.outline = typeof record.outline === "string" ? record.outline : "";
+      if (record.element.style.outlineOffset === "3px") record.element.style.outlineOffset = typeof record.offset === "string" ? record.offset : "";
+    }
+    globalThis[key] = [];
+  });
+}
+
 async function execute(browser, method, requestPath, body) {
   approvalProtocol.authority();
   let page = await resolveExpectedPage(browser);
@@ -679,6 +727,7 @@ async function execute(browser, method, requestPath, body) {
     );
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), approvedOrigin);
+    await clearHumanInputHighlights(page);
     const result = await snapshot(page);
     emitAction({
       type: "nav_result",
@@ -686,6 +735,52 @@ async function execute(browser, method, requestPath, body) {
       url: result.url,
     });
     return result;
+  }
+
+  if (method === "POST" && requestPath === "/v1/request-human-input") {
+    const sourceOrigin = await approvalProtocol.ensureOriginApproved(page.url(), "Allow the assistant to identify fields for your input");
+    page = await resolveExpectedPage(browser);
+    assertSameOrigin(page.url(), sourceOrigin);
+    const interactive = await collectInteractiveElements(page);
+    if (snapshotFingerprint(page.url(), interactive) !== body.snapshotId) {
+      throw new Error("The page changed; take a fresh snapshot before requesting human input");
+    }
+    const selected = body.indices.map((index) => interactive[index]);
+    if (selected.some((entry) => !entry || !["input", "textarea", "select"].includes(entry.description.tag))) {
+      throw new Error("Human input targets must be observed editable fields");
+    }
+    await clearHumanInputHighlights(page);
+    for (const entry of selected) {
+      await entry.locator.evaluate((element) => {
+        // Fixed native DOM styling follows scrolling/reflow. No values or
+        // DOM-derived text are copied to the handoff or action log.
+        const key = "__instafyHumanInputHighlights";
+        const records = Array.isArray(globalThis[key]) ? globalThis[key] : [];
+        if (records.length >= 8) throw new Error("Human input highlight limit");
+        const record = { element, outline: element.style.outline, offset: element.style.outlineOffset };
+        records.push(record);
+        globalThis[key] = records;
+        element.style.outline = "3px solid #f59e0b";
+        element.style.outlineOffset = "3px";
+        record.appliedOutline = element.style.outline;
+      });
+    }
+    assertSameOrigin(page.url(), sourceOrigin);
+    const authority = approvalProtocol.authority();
+    const createdAtMs = Date.now();
+    emitAction({
+      type: "human_input", label: "Human input needed", url: null,
+      humanInputRequest: {
+        version: 1, handoffId: crypto.randomUUID(), runId: authority.runId,
+        initiatorUserId: authority.initiatorUserId, browserPageId: EXPECTED_BROWSER_PAGE_ID,
+        origin: sourceOrigin, createdAtMs, expiresAtMs: createdAtMs + 600_000,
+        fields: selected.map((_, index) => ({ label: `Highlighted field ${index + 1}` })),
+      },
+    });
+    // The MCP latch blocks all further observation/mutation for this turn.
+    // The existing guard, not this helper, restores human authority only after
+    // confirmed shutdown. Never remove the agent marker to lend control.
+    throw new Error("User input is needed. End this turn; the user will explicitly continue after filling the highlighted fields. [human_input_required_non_retryable]");
   }
 
   if (method === "POST" && requestPath === "/v1/navigate") {
@@ -704,7 +799,7 @@ async function execute(browser, method, requestPath, body) {
       snapshotId: null,
       targetFingerprint: null,
       payloadFingerprint: approvalProtocol.sha256("navigate"),
-    });
+    }, { routine: !CONSEQUENTIAL_ACTION_PATTERN.test(url) });
     page = await resolveExpectedPage(browser);
     if (sourceOrigin) {
       assertSameOrigin(page.url(), sourceOrigin);
@@ -746,6 +841,9 @@ async function execute(browser, method, requestPath, body) {
       snapshotId: body.snapshotId,
       targetFingerprint: approvedTargetFingerprint,
       payloadFingerprint: approvalProtocol.sha256("click"),
+    }, {
+      routine: !isConsequentialAction(target.description) &&
+        !isFormSubmissionControl(target.description),
     });
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
@@ -818,7 +916,7 @@ async function execute(browser, method, requestPath, body) {
       payloadFingerprint: approvalProtocol.sha256(
         JSON.stringify({ text: body.text, submit: submitting }),
       ),
-    });
+    }, { routine: !submitting });
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
     target = await targetLocator(page, body, true);
@@ -906,7 +1004,7 @@ async function execute(browser, method, requestPath, body) {
       snapshotId: body.snapshotId,
       targetFingerprint: approvedTargetFingerprint,
       payloadFingerprint: approvalProtocol.sha256(body.key),
-    });
+    }, { routine: !activationKey && !isConsequentialAction(target.description) });
     page = await resolveExpectedPage(browser);
     assertSameOrigin(page.url(), sourceOrigin);
     target = await targetLocator(page, body, true);

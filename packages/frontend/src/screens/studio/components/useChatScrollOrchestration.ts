@@ -8,6 +8,7 @@ import {
 } from "react";
 import type { ChatMessage } from "../types";
 import type { AiCredentialsGateState } from "./AiCredentialsStatusBubble";
+import { chatScrollSnapshotKey, type ChatScrollHistoryVisit } from "./chatScrollHistory";
 
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 24;
 const SCROLL_SNAPSHOT_INTERVAL_MS = 250;
@@ -30,6 +31,7 @@ const HISTORY_AUTO_FILL_MAX_STALLED_PAGES = 2;
 const HISTORY_AUTO_FILL_MIN_PROGRESS_PX = 4;
 const HISTORY_UNDERFILL_THRESHOLD_PX = 4;
 const CHAT_SCROLL_MESSAGE_SELECTOR = "[data-chat-scroll-message-id]";
+const MAX_CHAT_SCROLL_SNAPSHOTS = 200;
 
 type MessageScrollAnchor = { messageId: string; offset: number };
 
@@ -68,6 +70,7 @@ type ScrollToBottomOptions = {
 
 type UseChatScrollControllerOptions = {
   activeConversationId: string | null;
+  historyVisit: ChatScrollHistoryVisit | null;
   hasMoreHistory: boolean;
   isHistoryLoading: boolean;
   isInitialHistoryLoading?: boolean;
@@ -103,21 +106,26 @@ type ConversationScrollSnapshot = {
 
 const conversationScrollSnapshots = new Map<string, ConversationScrollSnapshot>();
 
-export function getConversationScrollAnchorMessageId(conversationId: string | null): string | null {
-  const snapshot = conversationId ? conversationScrollSnapshots.get(conversationId) : null;
+export function getConversationScrollAnchorMessageId(snapshotKey: string | null): string | null {
+  const snapshot = snapshotKey ? conversationScrollSnapshots.get(snapshotKey) : null;
   return snapshot && !snapshot.wasAtBottom ? snapshot.anchor?.messageId ?? null : null;
 }
 
 export function useChatScrollController({
   activeConversationId,
+  historyVisit,
   hasMoreHistory,
   isHistoryLoading,
   isInitialHistoryLoading = false,
   loadOlderMessages,
   messages,
 }: UseChatScrollControllerOptions) {
+  const scrollSnapshotKey = historyVisit?.conversationId === activeConversationId
+    ? chatScrollSnapshotKey(historyVisit)
+    : null;
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const [scrollContentNode, setScrollContentNode] = useState<HTMLDivElement | null>(null);
+  const [layoutRevision, setLayoutRevision] = useState(0);
   const [historyWindowUnderfilled, setHistoryWindowUnderfilled] = useState(false);
   const [historyAutoFillExhausted, setHistoryAutoFillExhausted] = useState(false);
   const autoScrollSuspendedRef = useRef(false);
@@ -129,12 +137,12 @@ export function useChatScrollController({
   const scrollAnimationStartRef = useRef<number | null>(null);
   const scrollAnimationStartTopRef = useRef(0);
   const historyAutoFillRef = useRef<{
-    conversationId: string | null;
+    snapshotKey: string | null;
     attempts: number;
     stalledPages: number;
     pendingPage: { messages: ChatMessage[]; scrollHeight: number } | null;
   }>({
-    conversationId: null,
+    snapshotKey: null,
     attempts: 0,
     stalledPages: 0,
     pendingPage: null,
@@ -147,8 +155,10 @@ export function useChatScrollController({
     pending: false,
     scrollHeight: 0,
   });
-  const activeConversationIdRef = useRef<string | null>(activeConversationId);
-  const restoredConversationIdRef = useRef<string | null>(null);
+  // Only a committed, route/data-matched visit can own geometry. During route
+  // hydration this is null, even if the old transcript is still on screen.
+  const activeSnapshotKeyRef = useRef<string | null>(null);
+  const restoredSnapshotKeyRef = useRef<string | null>(null);
   const restoringInitialHistoryRef = useRef(false);
   const historyScrollAnchorRef = useRef<{
     active: boolean;
@@ -167,19 +177,24 @@ export function useChatScrollController({
   });
 
   const saveCurrentConversationScrollSnapshot = useCallback(() => {
-    const conversationId = activeConversationIdRef.current;
+    const snapshotKey = activeSnapshotKeyRef.current;
     const node = scrollContainerRef.current;
-    if (!conversationId || !node || autoScrollSuspendedRef.current || autoScrollPendingRef.current) {
+    if (!snapshotKey || !node || node.clientHeight <= 0 || autoScrollSuspendedRef.current || autoScrollPendingRef.current) {
       return;
     }
     const distanceFromBottom = node.scrollHeight - (node.scrollTop + node.clientHeight);
-    conversationScrollSnapshots.set(conversationId, {
+    conversationScrollSnapshots.delete(snapshotKey);
+    conversationScrollSnapshots.set(snapshotKey, {
       scrollTop: node.scrollTop,
       scrollHeight: node.scrollHeight,
       clientHeight: node.clientHeight,
       wasAtBottom: distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX,
       anchor: distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX ? null : readVisibleMessageAnchor(node),
     });
+    if (conversationScrollSnapshots.size > MAX_CHAT_SCROLL_SNAPSHOTS) {
+      const oldest = conversationScrollSnapshots.keys().next().value;
+      if (oldest) conversationScrollSnapshots.delete(oldest);
+    }
   }, []);
 
   const cancelScrollAnimation = useCallback(() => {
@@ -272,7 +287,7 @@ export function useChatScrollController({
 
   const scrollToBottom = useCallback((options?: ScrollToBottomOptions) => {
     const node = scrollContainerRef.current;
-    if (!node) {
+    if (!node || !activeSnapshotKeyRef.current) {
       return;
     }
     if (autoScrollSuspendedRef.current) {
@@ -329,7 +344,7 @@ export function useChatScrollController({
 
     const animate = (time: number) => {
       const container = scrollContainerRef.current;
-      if (!container || autoScrollSuspendedRef.current) {
+      if (!container || !activeSnapshotKeyRef.current || autoScrollSuspendedRef.current) {
         cancelScrollAnimation();
         return;
       }
@@ -352,15 +367,20 @@ export function useChatScrollController({
   }, [cancelScrollAnimation, saveCurrentConversationScrollSnapshot]);
 
   useLayoutEffect(() => {
-    const conversationChanged = restoredConversationIdRef.current !== activeConversationId;
-    activeConversationIdRef.current = activeConversationId;
-    restoredConversationIdRef.current = activeConversationId;
+    const conversationChanged = restoredSnapshotKeyRef.current !== scrollSnapshotKey;
+    activeSnapshotKeyRef.current = scrollSnapshotKey;
+    restoredSnapshotKeyRef.current = scrollSnapshotKey;
     if (conversationChanged) {
       historyPaginationRef.current = { pending: false, scrollHeight: 0 };
       clearHistoryScrollAnchor();
+      cancelScrollAnimation();
     }
     const node = scrollContainerRef.current;
-    if (!node || !activeConversationId) {
+    if (!node || !scrollSnapshotKey) {
+      cancelScrollAnimation();
+      shouldAutoScrollRef.current = false;
+      autoScrollPendingRef.current = true;
+      restoringInitialHistoryRef.current = true;
       return;
     }
     measureHistoryWindowUnderfill();
@@ -372,7 +392,15 @@ export function useChatScrollController({
       return;
     }
 
-    const snapshot = conversationScrollSnapshots.get(activeConversationId) ?? null;
+    const snapshot = conversationScrollSnapshots.get(scrollSnapshotKey) ?? null;
+    if (isInitialHistoryLoading || node.clientHeight <= 0) {
+      cancelScrollAnimation();
+      shouldAutoScrollRef.current = false;
+      // Neither hydration placeholders nor hidden panels are a reading position.
+      autoScrollPendingRef.current = true;
+      restoringInitialHistoryRef.current = true;
+      return;
+    }
     if (!conversationChanged && !restoringInitialHistoryRef.current) {
       // Pagination already owns its prepend/settle correction. Otherwise only
       // reanchor a reader; normal new-message bottom-following stays with the
@@ -386,15 +414,6 @@ export function useChatScrollController({
         clearHistoryScrollAnchor();
       }
       if (!snapshot?.anchor || snapshot.wasAtBottom) return;
-    }
-    if (snapshot && !snapshot.wasAtBottom && isInitialHistoryLoading) {
-      cancelScrollAnimation();
-      shouldAutoScrollRef.current = false;
-      // Keep the loading placeholder from becoming the saved reading position
-      // or triggering bottom-following before the target rows arrive.
-      autoScrollPendingRef.current = true;
-      restoringInitialHistoryRef.current = true;
-      return;
     }
     restoringInitialHistoryRef.current = false;
     if (historyPaginationRef.current.pending) return;
@@ -419,29 +438,32 @@ export function useChatScrollController({
     lastScrollHeightRef.current = node.scrollHeight;
     if (anchorRow && snapshot.anchor) startHistoryScrollAnchor(node, snapshot.anchor);
     saveCurrentConversationScrollSnapshot();
-  }, [activeConversationId, applyHistoryScrollAnchor, cancelScrollAnimation, clearHistoryScrollAnchor, isInitialHistoryLoading, measureHistoryWindowUnderfill, messages, saveCurrentConversationScrollSnapshot, scrollToBottom, startHistoryScrollAnchor]);
+  }, [scrollSnapshotKey, applyHistoryScrollAnchor, cancelScrollAnimation, clearHistoryScrollAnchor, isInitialHistoryLoading, layoutRevision, measureHistoryWindowUnderfill, messages, saveCurrentConversationScrollSnapshot, scrollToBottom, startHistoryScrollAnchor]);
 
   const handleScrollContentRef = useCallback((node: HTMLDivElement | null) => {
     setScrollContentNode(node);
   }, []);
 
   const requestOlderMessages = useCallback(() => {
-    if (!hasMoreHistory || isHistoryLoading) {
+    if (!activeSnapshotKeyRef.current || restoringInitialHistoryRef.current || !hasMoreHistory || isHistoryLoading) {
       return;
     }
     const container = scrollContainerRef.current;
     if (!container || historyPaginationRef.current.pending) {
       return;
     }
-    historyPaginationRef.current = {
+    const request = {
       pending: true,
       scrollHeight: container.scrollHeight,
     };
+    historyPaginationRef.current = request;
     shouldAutoScrollRef.current = false;
     const result = loadOlderMessages();
     if (result && typeof (result as Promise<unknown>).catch === "function") {
       (result as Promise<unknown>).catch(() => {
-        historyPaginationRef.current = { pending: false, scrollHeight: 0 };
+        if (historyPaginationRef.current === request) {
+          historyPaginationRef.current = { pending: false, scrollHeight: 0 };
+        }
       });
     }
   }, [hasMoreHistory, isHistoryLoading, loadOlderMessages]);
@@ -492,7 +514,7 @@ export function useChatScrollController({
   }, [saveCurrentConversationScrollSnapshot]);
 
   useEffect(() => {
-    if (typeof window === "undefined" || !activeConversationId) {
+    if (typeof window === "undefined" || !scrollSnapshotKey) {
       return;
     }
     const intervalId = window.setInterval(
@@ -502,7 +524,7 @@ export function useChatScrollController({
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [activeConversationId, saveCurrentConversationScrollSnapshot]);
+  }, [scrollSnapshotKey, saveCurrentConversationScrollSnapshot]);
 
   useLayoutEffect(() => {
     if (!scrollContentNode || typeof ResizeObserver === "undefined") {
@@ -513,7 +535,12 @@ export function useChatScrollController({
     const syncBottomState = () => {
       frameId = null;
       const node = scrollContainerRef.current;
-      if (!node || autoScrollPendingRef.current) {
+      if (!node || !activeSnapshotKeyRef.current) return;
+      if (restoringInitialHistoryRef.current && node.clientHeight > 0) {
+        setLayoutRevision((revision) => revision + 1);
+        return;
+      }
+      if (autoScrollPendingRef.current) {
         return;
       }
       measureHistoryWindowUnderfill();
@@ -552,6 +579,8 @@ export function useChatScrollController({
       scheduleSync();
     });
     observer.observe(scrollContentNode);
+    // A docked/hidden transcript can regain a viewport without changing content.
+    if (scrollContainerRef.current) observer.observe(scrollContainerRef.current);
 
     return () => {
       observer.disconnect();
@@ -582,20 +611,20 @@ export function useChatScrollController({
   }, [isHistoryLoading, messages, startHistoryScrollAnchor]);
 
   useLayoutEffect(() => {
-    if (historyAutoFillRef.current.conversationId === activeConversationId) {
+    if (historyAutoFillRef.current.snapshotKey === scrollSnapshotKey) {
       return;
     }
     historyAutoFillRef.current = {
-      conversationId: activeConversationId,
+      snapshotKey: scrollSnapshotKey,
       attempts: 0,
       stalledPages: 0,
       pendingPage: null,
     };
     setHistoryAutoFillExhausted(false);
-  }, [activeConversationId]);
+  }, [scrollSnapshotKey]);
 
   useLayoutEffect(() => {
-    if (!activeConversationId || !hasMoreHistory || isHistoryLoading) {
+    if (!scrollSnapshotKey || restoringInitialHistoryRef.current || !hasMoreHistory || isHistoryLoading) {
       return;
     }
     if (historyPaginationRef.current.pending) {
@@ -645,7 +674,7 @@ export function useChatScrollController({
     autoFill.pendingPage = { messages, scrollHeight: node.scrollHeight };
     requestOlderMessages();
   }, [
-    activeConversationId,
+    scrollSnapshotKey,
     hasMoreHistory,
     isHistoryLoading,
     measureHistoryWindowUnderfill,
@@ -667,6 +696,7 @@ export function useChatScrollController({
     lastComposerScrollTopRef,
     lastScrollHeightRef,
     recordScrollPosition: saveCurrentConversationScrollSnapshot,
+    scrollSnapshotKey,
     requestOlderMessages,
     scrollContainerRef,
     scrollToBottom,

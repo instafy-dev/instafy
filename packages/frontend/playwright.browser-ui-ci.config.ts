@@ -29,10 +29,19 @@ const BROWSER_CHANNEL = resolveBrowserChannel();
  */
 const REQUIRED_BROWSER_UI_SPECS = [
   "browser-chrome-mobile-layout.spec.ts",
+  "browser-cobrowsing-ui.spec.ts",
   "browser-cursor-overlay.spec.ts",
   "browser-live-proof.spec.ts",
+  "mobile-sidebar-keyboard.spec.ts",
   "mobile-sidebar-safe-area.spec.ts",
+  "mobile-thumb-navigation.spec.ts",
   "shared-browser-approval-responsive.spec.ts",
+  "shared-browser-expanded-safe-area.spec.ts",
+  "shared-browser-focused-editable.spec.ts",
+  "shared-browser-sessions-responsive.spec.ts",
+  "studio-history-navigation.spec.ts",
+  "settings-history-scroll.spec.ts",
+  "studio-history-controls.spec.ts",
 ];
 
 export default defineConfig({
@@ -43,7 +52,9 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   timeout: 30_000,
-  globalTimeout: 180_000,
+  // The 39-case required inventory runs serially on hosted runners. Bound the
+  // complete lane to six minutes without extending any individual test.
+  globalTimeout: 360_000,
   outputDir: "test-results/browser-ci/browser-ui",
   reporter: [
     ["list"],

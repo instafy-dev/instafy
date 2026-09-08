@@ -16,6 +16,10 @@ fn strings(values: &[&str]) -> Vec<String> {
 const FAKE_PLAYWRIGHT: &str = r#"
 const fs = require("fs");
 const mode = process.env.INSTAFY_SHARED_BROWSER_FAKE_MODE || "safe";
+const formButtonTypes = { "form-button": "button", "form-reset": "reset", "form-submit-button": "submit" };
+const formInputTypes = { "form-submit-input": "submit", "form-image-input": "image" };
+const isFormButton = Object.hasOwn(formButtonTypes, mode);
+const hasForm = mode === "form-input" || isFormButton || Object.hasOwn(formInputTypes, mode);
 const decoyLooksIdentical = mode === "identical-targets";
 const approvalWasConsumed = () => {
   try {
@@ -29,7 +33,7 @@ const approvalWasConsumed = () => {
   }
 };
 const descriptionFor = (targetId) => ({
-  tag: mode === "localized-button" || mode === "icon-button" ? "button" : "input",
+  tag: isFormButton || mode === "localized-button" || mode === "icon-button" ? "button" : "input",
   role: mode === "icon-button" ? "button" : null,
   idAttribute:
     mode === "reordered" || (mode === "stale-after-allow" && approvalWasConsumed())
@@ -48,12 +52,12 @@ const descriptionFor = (targetId) => ({
   titleAttribute: null,
   valueAttribute: mode === "delete-value" ? "Delete account" : null,
   href: null,
-  inputType: "text",
+  inputType: formButtonTypes[mode] || formInputTypes[mode] || "text",
   autocomplete: mode === "credit-card" ? "section-checkout shipping cc-private-token" : "off",
   inputMode: "text",
-  formAction: mode === "form-input" ? "https://example.test/search" : "",
-  formMethod: mode === "form-input" ? "get" : "",
-  formActionText: mode === "form-input" ? "Search form" : "",
+  formAction: hasForm ? "https://example.test/search" : "",
+  formMethod: hasForm ? "get" : "",
+  formActionText: hasForm ? "Search form" : "",
   labels: mode === "localized-button" || mode === "icon-button" ? "" : "Search",
   text: mode === "localized-button" ? "Eliminar" : "",
 });
@@ -1183,6 +1187,228 @@ fn localized_and_icon_only_controls_require_allow_once_independent_of_label() {
 }
 
 #[test]
+fn unchanged_page_snapshots_cannot_be_reused_after_a_new_run_or_control_lease() {
+    for rotate_owner in [false, true] {
+        let mut fixture = EmbeddedControllerFixture::new();
+        let old_snapshot = fixture.snapshot_id("safe");
+        if rotate_owner {
+            fixture.owner_id = Uuid::new_v4();
+        } else {
+            fixture.run_id = Uuid::new_v4();
+        }
+        let stale_body = json!({"index": 0, "snapshotId": old_snapshot});
+        let stale = fixture.run("safe", "POST", "/v1/click", Some(&stale_body.to_string()));
+        assert!(!stale.status.success());
+        assert!(String::from_utf8_lossy(&stale.stderr).contains("snapshot is stale"));
+        let fresh_snapshot = fixture.snapshot_id("safe");
+        assert_ne!(fresh_snapshot, old_snapshot);
+        let fresh_body = json!({"index": 0, "snapshotId": fresh_snapshot});
+        let (fresh, requests) = fixture.run_with_decisions(
+            "safe",
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&fresh_body.to_string()),
+            &["https://example.test"],
+            &["allow_once"],
+        );
+        assert!(
+            fresh.status.success(),
+            "{}",
+            String::from_utf8_lossy(&fresh.stderr)
+        );
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0]["kind"], "action");
+    }
+}
+
+#[test]
+fn explicit_routine_origin_grant_covers_new_sites_and_ordinary_actions_for_only_this_run() {
+    let fixture = EmbeddedControllerFixture::new();
+    let (snapshot, requests) = fixture.run_with_decisions(
+        "safe",
+        "page-target",
+        "GET",
+        "/v1/snapshot",
+        None,
+        &[],
+        &["allow_routine"],
+    );
+    assert!(
+        snapshot.status.success(),
+        "{}",
+        String::from_utf8_lossy(&snapshot.stderr)
+    );
+    assert_eq!(requests.len(), 1);
+    let snapshot: JsonValue = serde_json::from_slice(&snapshot.stdout).expect("snapshot JSON");
+    let snapshot_id = snapshot["snapshotId"].as_str().expect("snapshot id");
+    let bodies = [
+        (
+            "/v1/navigate",
+            json!({"url": "https://another.example/docs"}),
+        ),
+        ("/v1/click", json!({"index": 0, "snapshotId": snapshot_id})),
+        (
+            "/v1/type",
+            json!({"index": 0, "snapshotId": snapshot_id, "text": "ordinary search"}),
+        ),
+        (
+            "/v1/press",
+            json!({"index": 0, "snapshotId": snapshot_id, "key": "Tab"}),
+        ),
+    ];
+    for (path, body) in bodies {
+        let output = fixture
+            .command_for_with_timeout(
+                "safe",
+                "page-target",
+                "POST",
+                path,
+                Some(&body.to_string()),
+                "100",
+            )
+            .output()
+            .expect("run granted routine action");
+        assert!(
+            output.status.success(),
+            "{path}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!fixture.approval_dir.join("request.json").exists());
+    }
+    let mut marker: JsonValue =
+        serde_json::from_slice(&std::fs::read(&fixture.authority_path).expect("authority"))
+            .expect("authority JSON");
+    marker["runId"] = json!(Uuid::new_v4());
+    std::fs::write(
+        &fixture.authority_path,
+        serde_json::to_vec(&marker).unwrap(),
+    )
+    .unwrap();
+    let changed = fixture
+        .command_for_with_timeout("safe", "page-target", "GET", "/v1/snapshot", None, "100")
+        .output()
+        .expect("run changed authority");
+    assert!(!changed.status.success());
+    assert!(String::from_utf8_lossy(&changed.stderr).contains("another run"));
+}
+
+#[test]
+fn routine_form_buttons_preserve_one_shot_confirmation_for_submission_controls() {
+    for (mode, needs_confirmation) in [
+        ("form-button", false),
+        ("form-reset", false),
+        ("form-submit-button", true),
+        ("form-submit-input", true),
+        ("form-image-input", true),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        let body = json!({"index": 0, "snapshotId": snapshot_id});
+        let (output, requests) = fixture.run_with_decisions(
+            mode,
+            "page-target",
+            "POST",
+            "/v1/click",
+            Some(&body.to_string()),
+            &[],
+            &["allow_routine", "allow_once"],
+        );
+        assert!(
+            output.status.success(),
+            "approved {mode} click failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(requests[0]["kind"], "origin");
+        assert_eq!(
+            requests.len(),
+            if needs_confirmation { 2 } else { 1 },
+            "{mode}"
+        );
+        if needs_confirmation {
+            assert_eq!(requests[1]["kind"], "action");
+            assert_eq!(requests[1]["operation"], "click");
+        }
+    }
+}
+
+#[test]
+fn routine_policy_still_confirms_consequential_controls_submissions_and_activation_keys() {
+    for (mode, path, extra) in [
+        ("aria-delete", "/v1/click", json!({})),
+        ("delete-value", "/v1/click", json!({})),
+        (
+            "safe",
+            "/v1/type",
+            json!({"text": "ordinary text", "submit": true}),
+        ),
+        ("safe", "/v1/press", json!({"key": "Enter"})),
+        ("safe", "/v1/press", json!({"key": "Space"})),
+    ] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        let mut body = json!({"index": 0, "snapshotId": snapshot_id});
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let (output, requests) = fixture.run_with_decisions(
+            mode,
+            "page-target",
+            "POST",
+            path,
+            Some(&body.to_string()),
+            &[],
+            &["allow_routine", "deny"],
+        );
+        assert!(
+            !output.status.success(),
+            "{mode} {path} bypassed confirmation"
+        );
+        assert_eq!(requests.len(), 2, "{mode} {path}");
+        assert_eq!(requests[1]["kind"], "action");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("approval_denied"));
+    }
+    let fixture = EmbeddedControllerFixture::new();
+    let (output, requests) = fixture.run_with_decisions(
+        "safe",
+        "page-target",
+        "POST",
+        "/v1/navigate",
+        Some(r#"{"url":"https://example.test/delete-account"}"#),
+        &[],
+        &["allow_routine", "deny"],
+    );
+    assert!(!output.status.success());
+    assert_eq!(requests.len(), 2);
+}
+
+#[test]
+fn routine_policy_never_types_secrets_or_accepts_model_authored_grants() {
+    for mode in ["password-name", "credit-card", "aria-sensitive"] {
+        let fixture = EmbeddedControllerFixture::new();
+        let snapshot_id = fixture.snapshot_id(mode);
+        let body = json!({"index": 0, "snapshotId": snapshot_id, "text": "fixture-secret"});
+        let (output, requests) = fixture.run_with_decisions(
+            mode,
+            "page-target",
+            "POST",
+            "/v1/type",
+            Some(&body.to_string()),
+            &[],
+            &["allow_routine"],
+        );
+        assert!(!output.status.success());
+        assert_eq!(requests.len(), 1);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("refuses to type"));
+    }
+    let fixture = EmbeddedControllerFixture::new();
+    let body = json!({"url": "https://example.test/", "routine": true});
+    let output = fixture.run("safe", "POST", "/v1/navigate", Some(&body.to_string()));
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported field routine"));
+}
+
+#[test]
 fn origin_form_navigation_and_activation_each_use_the_bounded_consent_lane() {
     let fixture = EmbeddedControllerFixture::new();
     let (snapshot, origin_requests) = fixture.run_with_decisions(
@@ -1710,7 +1936,14 @@ fn mcp_exposes_only_the_bounded_shared_browser_operations() {
             .map(|tool| tool.name.as_ref())
             .collect::<Vec<_>>(),
         [
-            "status", "snapshot", "navigate", "click", "type", "press", "scroll"
+            "request_human_input",
+            "status",
+            "snapshot",
+            "navigate",
+            "click",
+            "type",
+            "press",
+            "scroll"
         ]
     );
     assert!(tools.iter().all(|tool| {
@@ -1781,4 +2014,63 @@ fn mcp_requests_reuse_strict_controller_validation() {
         .is_ok()
     );
     assert!(mcp_tool_request("evaluate", None).is_err());
+}
+#[test]
+fn human_input_tool_accepts_only_bounded_fresh_indices() {
+    let valid = json!({ "indices": [0, 2], "snapshotId": "a".repeat(64) });
+    assert!(mcp_tool_request("request_human_input", valid.as_object().cloned()).is_ok());
+    for invalid in [
+        json!({ "indices": [], "snapshotId": "a".repeat(64) }),
+        json!({ "indices": [0, 0], "snapshotId": "a".repeat(64) }),
+        json!({ "indices": [200], "snapshotId": "a".repeat(64) }),
+        json!({ "indices": [0], "snapshotId": "stale" }),
+        json!({ "indices": [0], "snapshotId": "a".repeat(64), "value": "must-not-be-accepted" }),
+    ] {
+        assert!(mcp_tool_request("request_human_input", invalid.as_object().cloned()).is_err());
+    }
+}
+
+#[tokio::test]
+async fn human_input_latch_blocks_every_later_observation_or_action() {
+    let server = SharedBrowserMcpServer::new();
+    let request = mcp_tool_request(
+        "request_human_input",
+        json!({
+            "indices": [0], "snapshotId": "a".repeat(64)
+        })
+        .as_object()
+        .cloned(),
+    )
+    .unwrap();
+    let outcome = server
+        .execute_with_failure_latch(&request, || async {
+            Err(anyhow::anyhow!(
+                "User input needed [human_input_required_non_retryable]"
+            ))
+        })
+        .await;
+    assert!(matches!(
+        outcome,
+        Err(SharedBrowserMcpExecutionFailure::TerminalConsent(
+            "human_input_required"
+        ))
+    ));
+    let snapshot = mcp_tool_request("snapshot", None).unwrap();
+    let denied = server
+        .execute_with_failure_latch(&snapshot, || async {
+            panic!("human-input latch must not read page content")
+        })
+        .await;
+    assert!(matches!(
+        denied,
+        Err(SharedBrowserMcpExecutionFailure::TerminalConsent(
+            "human_input_required"
+        ))
+    ));
+    let result = terminal_consent_call_result("human_input_required");
+    assert_ne!(result.is_error, Some(true));
+    assert_eq!(
+        result.structured_content.unwrap()["terminalConsent"]["retryable"],
+        false
+    );
 }

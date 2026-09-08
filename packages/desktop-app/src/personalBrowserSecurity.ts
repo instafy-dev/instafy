@@ -3,6 +3,13 @@ import { createHash, timingSafeEqual } from "node:crypto";
 export const PERSONAL_BROWSER_PARTITION_PREFIX = "persist:instafy-personal-";
 export const MAX_PERSONAL_BROWSER_URL_LENGTH = 4_096;
 export const MAX_PERSONAL_BROWSER_TEXT_LENGTH = 16_384;
+export type PersonalBrowserApprovalMode = "ask" | "routine";
+
+export function normalizePersonalBrowserApprovalMode(value: unknown): PersonalBrowserApprovalMode {
+  if (value === undefined || value === "ask") return "ask";
+  if (value === "routine") return "routine";
+  throw new Error("Personal Browser approval mode must be ask or routine.");
+}
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type PersonalBrowserBounds = {
@@ -33,6 +40,8 @@ export type PersonalBrowserActionDescriptor = {
   title?: string | null;
   value?: string | null;
   href?: string | null;
+  /** Empty means no native form owner; absent means ownership was not observed. */
+  formOwnerIdentity?: string | null;
   formActionText?: string | null;
 };
 
@@ -57,6 +66,7 @@ export const PERSONAL_BROWSER_SECURITY_FINGERPRINT_FIELDS = [
   "title",
   "value",
   "href",
+  "formOwnerIdentity",
   "formActionText",
   "disabled",
 ] as const;
@@ -281,7 +291,7 @@ export function isSensitivePersonalBrowserEditable(
 export function isHighImpactPersonalBrowserAction(
   value: PersonalBrowserActionDescriptor,
 ): boolean {
-  const text = [value.text, value.ariaLabel, value.title, value.value, value.formActionText]
+  const text = [value.text, value.ariaLabel, value.title, value.value, value.href, value.formActionText]
     .filter((part): part is string => typeof part === "string")
     .join(" ");
   return HIGH_IMPACT_ACTION_PATTERN.test(text);
@@ -289,10 +299,21 @@ export function isHighImpactPersonalBrowserAction(
 
 export function personalBrowserActivationRequiresConfirmation(
   value: PersonalBrowserActionDescriptor,
+  approvalMode: PersonalBrowserApprovalMode = "ask",
 ): boolean {
   const tag = value.tag?.trim().toLowerCase();
   const role = value.role?.trim().toLowerCase();
   const type = value.type?.trim().toLowerCase();
+  if (approvalMode === "routine") {
+    return (
+      isHighImpactPersonalBrowserAction(value) ||
+      (tag === "input" && ["submit", "image"].includes(type ?? "")) ||
+      (tag === "button" && !["button", "reset"].includes(type ?? "") &&
+        // Submit semantics come from the native type and form owner, not a
+        // human-readable label. Older/incomplete descriptors fail closed.
+        value.formOwnerIdentity !== "")
+    );
+  }
   return (
     isHighImpactPersonalBrowserAction(value) ||
     tag === "button" ||
@@ -311,11 +332,14 @@ export function isPersonalBrowserActivationKey(key: string): boolean {
 export function personalBrowserKeyRequiresConfirmation(
   key: string,
   value: PersonalBrowserActionDescriptor,
+  approvalMode: PersonalBrowserApprovalMode = "ask",
 ): boolean {
+  // Activation keys can implicitly submit a form, even without a submit label.
+  if (approvalMode === "routine" && isPersonalBrowserActivationKey(key)) return true;
   return (
     isPersonalBrowserActivationKey(key) &&
     (personalBrowserActivationRequiresConfirmation(value) ||
-      (key === "Enter" && Boolean(value.formActionText?.trim())))
+      (key === "Enter" && Boolean(value.formOwnerIdentity?.trim() || value.formActionText?.trim())))
   );
 }
 

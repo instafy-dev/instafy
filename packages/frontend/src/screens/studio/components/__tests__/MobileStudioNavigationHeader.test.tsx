@@ -1,0 +1,145 @@
+// @vitest-environment jsdom
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Button } from "../../../../components/Button";
+import { MobileStudioNavigationHeader, type MobileStudioNavigationHeaderProps } from "../MobileStudioNavigationHeader";
+
+const mocks = vi.hoisted(() => ({ nativeBack: vi.fn() }));
+vi.mock("../../../../native/useNativeBackButtonAction", () => ({ useNativeBackButtonAction: mocks.nativeBack }));
+
+describe("MobileStudioNavigationHeader", () => {
+  let root: Root;
+  let container: HTMLDivElement;
+  let props: MobileStudioNavigationHeaderProps;
+  beforeEach(() => {
+    (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+    vi.clearAllMocks();
+    container = document.createElement("div"); document.body.appendChild(container);
+    root = createRoot(container);
+    props = {
+      history: { canGoBack: false, canGoForward: false, goBack: vi.fn(), goForward: vi.fn() },
+      title: "A long conversation title", spaceName: "Alpha space",
+      onOpenPicker: vi.fn(), onOpenChats: vi.fn(),
+    };
+  });
+  afterEach(async () => {
+    await act(async () => root.unmount()); container.remove(); document.body.replaceChildren();
+    vi.restoreAllMocks();
+    delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+  const render = () => act(async () => root.render(<MobileStudioNavigationHeader {...props} />));
+  const query = (testId: string) => document.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`);
+  async function click(testId: string) {
+    const target = query(testId); expect(target).not.toBeNull();
+    await act(async () => target!.click());
+  }
+  async function clickText(text: string) {
+    const target = [...document.querySelectorAll<HTMLButtonElement>("button")].find(node => node.textContent === text);
+    expect(target).toBeDefined(); await act(async () => target!.click());
+  }
+
+  it("uses an explicit Chats destination at direct entry, never a fake Back", async () => {
+    await render();
+    expect(query("mobile-header-back")).toBeNull();
+    expect(query("mobile-header-open-chats")?.getAttribute("aria-label")).toBe("Open chats");
+    expect(query("mobile-header-open-chats")?.textContent).toBe("Chats");
+    await click("mobile-header-open-chats");
+    expect(props.onOpenChats).toHaveBeenCalledTimes(1);
+    expect(props.history.goBack).not.toHaveBeenCalled();
+  });
+
+  it("uses the supplied current history and switches back to the direct-entry fallback", async () => {
+    props.history.canGoBack = true;
+    await render();
+    expect(query("mobile-header-open-chats")).toBeNull();
+    expect(query("mobile-header-back")?.textContent).toBe("Back");
+    await click("mobile-header-back");
+    expect(props.history.goBack).toHaveBeenCalledTimes(1);
+    expect(props.onOpenChats).not.toHaveBeenCalled();
+    props.history = { ...props.history, canGoBack: false };
+    await render();
+    expect(query("mobile-header-back")).toBeNull();
+    expect(query("mobile-header-open-chats")).not.toBeNull();
+  });
+
+  it("keeps both chat and space visible in one bounded, accessible picker target", async () => {
+    await render();
+    const picker = query("mobile-header-picker")!;
+    expect(picker.getAttribute("aria-label")).toBe("Switch chat or space");
+    expect(picker.getAttribute("aria-haspopup")).toBe("dialog");
+    expect(query("mobile-header-title")?.textContent).toBe(props.title);
+    expect(query("mobile-header-space")?.textContent).toBe(props.spaceName);
+    expect(query("mobile-header-title")?.classList.contains("truncate")).toBe(true);
+    expect(query("mobile-header-space")?.classList.contains("truncate")).toBe(true);
+    for (const button of container.querySelectorAll("button")) {
+      expect(button.classList.contains("!min-h-12")).toBe(true);
+      expect(button.classList.contains("!min-w-12")).toBe(true);
+    }
+    expect(document.activeElement).not.toBe(picker);
+    await click("mobile-header-picker");
+    expect(props.onOpenPicker).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps secondary chat, parent, sidebar and settings actions reachable and closes after each", async () => {
+    const actions = [vi.fn(), vi.fn(), vi.fn(), vi.fn(), vi.fn()];
+    Object.assign(props, {
+      onNewChat: actions[0], onNewPrivateChat: actions[1],
+      parentConversation: { title: "Parent", onOpen: actions[2] },
+      onOpenSidebar: actions[3], onOpenSettings: actions[4],
+    });
+    await render();
+    for (const [index, title] of ["Public chat", "Private chat", "Open parent conversationParent", "Open sidebar", "Space settings"].entries()) {
+      await click("mobile-header-more");
+      expect(query("mobile-header-actions")).not.toBeNull();
+      // Observe the real shared Dialog/React Aria fallback, not just the
+      // trigger label: the dialog must reference the named trigger in the DOM.
+      const dialog = query("mobile-header-actions")!.querySelector('[role="dialog"]');
+      expect(dialog).not.toBeNull();
+      const labelId = dialog!.getAttribute("aria-labelledby");
+      expect(labelId).toBe(query("mobile-header-more")!.id);
+      expect(document.getElementById(labelId!)?.getAttribute("aria-label")).toBe("More actions");
+      for (const row of query("mobile-header-actions")!.querySelectorAll("button")) {
+        if (row.getAttribute("aria-label") === "Dismiss") continue;
+        expect(row.classList.contains("!min-h-12")).toBe(true);
+      }
+      await clickText(title);
+      expect(actions[index]).toHaveBeenCalledTimes(1);
+      expect(query("mobile-header-more")?.getAttribute("aria-expanded")).toBe("false");
+    }
+  });
+
+  it("preserves the existing notification and tabs controls without inventing disabled actions", async () => {
+    const notification = vi.fn(); const tabs = vi.fn();
+    props.notificationBell = <Button onPress={notification} aria-label="Notifications">Bell</Button>;
+    props.tabsAction = <Button onPress={tabs}>Browse tabs</Button>;
+    await render(); await click("mobile-header-more");
+    expect(document.body.textContent).not.toContain("Private chat");
+    expect(document.body.textContent).not.toContain("Open parent conversation");
+    await clickText("Bell"); expect(notification).toHaveBeenCalledTimes(1);
+    expect(query("mobile-header-more")?.getAttribute("aria-expanded")).toBe("false");
+    await click("mobile-header-more");
+    await clickText("Browse tabs"); expect(tabs).toHaveBeenCalledTimes(1);
+  });
+
+  it("consumes native Back only while More is open, without navigating underneath", async () => {
+    await render();
+    expect(mocks.nativeBack).toHaveBeenLastCalledWith(false, expect.any(Function));
+    await click("mobile-header-more");
+    const [enabled, dismiss] = mocks.nativeBack.mock.lastCall!;
+    expect(enabled).toBe(true);
+    await act(async () => dismiss());
+    expect(query("mobile-header-more")?.getAttribute("aria-expanded")).toBe("false");
+    expect(mocks.nativeBack).toHaveBeenLastCalledWith(false, expect.any(Function));
+    expect(props.history.goBack).not.toHaveBeenCalled();
+  });
+
+  it("drops an open menu when the owner changes route, account or space scope", async () => {
+    for (const scope of [["account-a", "space-a", "visit-a"], ["account-a", "space-a", "visit-b"], ["account-b", "space-a", "visit-b"], ["account-b", "space-b", "visit-b"]]) {
+      await act(async () => root.render(<MobileStudioNavigationHeader key={JSON.stringify(scope)} {...props} />));
+      expect(query("mobile-header-more")?.getAttribute("aria-expanded")).toBe("false");
+      await click("mobile-header-more");
+      expect(query("mobile-header-more")?.getAttribute("aria-expanded")).toBe("true");
+    }
+  });
+});

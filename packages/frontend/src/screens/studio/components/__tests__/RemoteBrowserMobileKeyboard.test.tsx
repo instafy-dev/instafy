@@ -24,6 +24,44 @@ describe("RemoteBrowserMobileKeyboard", () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = false;
   });
 
+  it("reserves only its visible measured bar, releases space when closed or disabled, and cleans up", async () => {
+    const onMessage = vi.fn();
+    const onOccupiedHeightChange = vi.fn();
+    let barHeight = 58;
+    let parentHeight = 232;
+    const rect = (top: number, height: number, width = 390) => ({ top, bottom: top + height, height, width }) as DOMRect;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return this === host ? rect(154, parentHeight) : rect(154 + parentHeight - barHeight - 12, barHeight);
+    });
+    const render = (enabled = true) => act(async () => root.render(
+      <RemoteBrowserMobileKeyboard enabled={enabled} onMessage={onMessage} onOccupiedHeightChange={onOccupiedHeightChange} />,
+    ));
+    const open = async () => act(async () => host.querySelector<HTMLButtonElement>('[data-testid="shared-browser-mobile-keyboard-open"]')!.click());
+    await render(); expect(onOccupiedHeightChange).toHaveBeenLastCalledWith(0);
+    await open(); expect(onOccupiedHeightChange).toHaveBeenLastCalledWith(70);
+    const input = host.querySelector<HTMLInputElement>('[data-testid="shared-browser-mobile-keyboard-input"]')!;
+    parentHeight = 61;
+    await act(async () => window.dispatchEvent(new Event("resize")));
+    expect(onOccupiedHeightChange).toHaveBeenLastCalledWith(61);
+    expect(host.querySelector("input")).toBe(input); expect(document.activeElement).toBe(input);
+    barHeight = 0; // Fine-pointer CSS can hide the still-open mobile control.
+    await act(async () => window.dispatchEvent(new Event("resize")));
+    expect(onOccupiedHeightChange).toHaveBeenLastCalledWith(0);
+    barHeight = 58; parentHeight = 232;
+    await act(async () => window.dispatchEvent(new Event("resize")));
+    expect(onOccupiedHeightChange).toHaveBeenLastCalledWith(70);
+    await act(async () => host.querySelector<HTMLButtonElement>('[data-testid="shared-browser-mobile-keyboard-close"]')!.click());
+    expect(onOccupiedHeightChange).toHaveBeenLastCalledWith(0);
+    await open(); await render(false);
+    expect(onOccupiedHeightChange).toHaveBeenLastCalledWith(0); expect(host.querySelector("input")).toBeNull();
+    await render(); await open();
+    await act(async () => root.render(null));
+    expect(onOccupiedHeightChange).toHaveBeenLastCalledWith(0);
+    onOccupiedHeightChange.mockClear();
+    await act(async () => window.dispatchEvent(new Event("resize")));
+    expect(onOccupiedHeightChange).not.toHaveBeenCalled(); expect(onMessage).not.toHaveBeenCalled();
+  });
+
   it("focuses in the opening tap and deduplicates paired control-key events", async () => {
     const onMessage = vi.fn();
     const requestAnimationFrame = vi.spyOn(window, "requestAnimationFrame");

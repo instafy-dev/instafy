@@ -51,6 +51,13 @@ export function useWorkspaceTabController({
   setTabs,
   setActiveTabId,
 }: UseWorkspaceTabControllerArgs) {
+  const {
+    requestUrlNavigation,
+    peekUrlNavigation,
+    consumeUrlNavigation,
+    requestUrlPush,
+    consumeUrlPush,
+  } = useWorkspaceTabUrlIntents({ urlNavigationModeRef });
   const commitTabs = useCallback(
     (nextTabs: WorkspaceTabState[]) => {
       tabsRef.current = nextTabs;
@@ -98,6 +105,7 @@ export function useWorkspaceTabController({
     activeConversationIdRef,
     suppressPanelSyncRef,
     urlNavigationModeRef,
+    requestUrlNavigation,
     persistedStateRef,
     commitTabs,
     setActiveTabId,
@@ -124,14 +132,6 @@ export function useWorkspaceTabController({
     setActiveTabInternal,
     ensureTabForPanel,
   });
-
-  const {
-    requestUrlNavigation,
-    peekUrlNavigation,
-    consumeUrlNavigation,
-    requestUrlPush,
-    consumeUrlPush,
-  } = useWorkspaceTabUrlIntents({ urlNavigationModeRef });
 
   return {
     setActiveTabInternal,
