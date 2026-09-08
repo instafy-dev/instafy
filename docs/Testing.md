@@ -1,5 +1,21 @@
 # Testing
 
+### Composer checks on a physical phone
+
+Use disposable local conversations and a named test image. With the native keyboard
+open and closed, check Send, the action menu, image picker cancellation, previews,
+removal, Stash/Restore/Delete, and Android Back. Menus must stay within their surface
+and scroll when the keyboard reduces the available height. Image attachments require
+message text. A rejected upload must retain the draft and attachments without adding
+an unsent message bubble; retrying successfully must create only one message.
+
+For an actual upload, use a local controller and runtime-bound filesystem origin;
+mocked picker or queue callbacks do not prove storage or agent dispatch. Verify the
+stored image bytes and message metadata, including when the project's default origin
+differs from the selected runtime. Test Queue, Steer and Send now separately with a
+controlled active turn, and identify callback-only coverage explicitly. Clean up only
+the test user's records, runtime, files and device mappings after verification.
+
 ## Playwright (Studio)
 - Required frontend CI mirror: `pnpm quality:frontend:required`
 - Frontend lint budget gate: `pnpm lint`

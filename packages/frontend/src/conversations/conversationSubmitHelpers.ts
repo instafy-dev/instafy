@@ -124,6 +124,13 @@ export function mimeTypeToExtension(mimeType: string): string {
 
 export function shouldRetryChatImageUploadError(message: string): boolean {
   const lower = (message ?? "").toLowerCase();
+  const statusMatch = lower.match(/(?:origin apply|request origin access token) failed \((\d+)\)/);
+  if (statusMatch) {
+    const status = Number(statusMatch[1]);
+    // A permanent rejection must not be retried just because its detail mentions
+    // an offline runtime or a network timeout.
+    return status === 408 || status === 429 || (status >= 500 && status <= 599);
+  }
   if (
     lower.includes("failed to fetch") ||
     lower.includes("networkerror") ||
@@ -134,13 +141,6 @@ export function shouldRetryChatImageUploadError(message: string): boolean {
     lower.includes("aborterror")
   ) {
     return true;
-  }
-  const match = lower.match(/origin apply failed \((\d+)\)/);
-  if (match) {
-    const status = Number(match[1]);
-    if (status === 408 || status === 429 || (status >= 500 && status <= 599)) {
-      return true;
-    }
   }
   return (
     lower.includes("no origin available") ||

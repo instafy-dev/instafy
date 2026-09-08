@@ -60,6 +60,8 @@ export async function applyWorkspaceChangesViaOrigin(
   let leaseId = params.leaseId ?? null;
   let leaseIdForRelease: string | null = null;
   let acquiredLease: WorkspaceLease | null = null;
+  let applyTimeout: ReturnType<typeof setTimeout> | null = null;
+  let applyTimedOut = false;
 
   try {
     const origin = await fetchOriginSummary({
@@ -67,14 +69,22 @@ export async function applyWorkspaceChangesViaOrigin(
       protocol: "http",
       accessToken: params.accessToken ?? null,
     });
-    if (!origin) {
+    if (!origin && !runtimePreference && !params.originId) {
       return { ok: false, error: "no origin available" };
     }
-    if (origin.presence?.status === "offline") {
+    const requestedOriginId = params.originId?.trim() || null;
+    // A project's default origin may belong to a different runtime. Let the
+    // controller resolve the requested runtime instead of pinning that default.
+    const selectedOriginId = requestedOriginId ?? (
+      !runtimePreference || origin?.runtimeId === runtimePreference
+        ? origin?.originId ?? null
+        : null
+    );
+    if (selectedOriginId === origin?.originId && origin?.presence?.status === "offline") {
       return { ok: false, error: "origin is offline" };
     }
-    const requestedOriginId = params.originId?.trim() || null;
     if (
+      origin &&
       !runtimePreference &&
       (!requestedOriginId || requestedOriginId === origin.originId)
     ) {
@@ -109,10 +119,11 @@ export async function applyWorkspaceChangesViaOrigin(
       projectId,
       protocol: "http",
       scopes: ["fs.write"],
-      originId: params.originId ?? origin.originId,
+      originId: selectedOriginId,
       leaseId,
       preferRuntime: runtimePreference,
       accessToken: params.accessToken ?? null,
+      throwOnError: true,
     });
     if (!token) {
       return { ok: false, error: "failed to obtain origin token" };
@@ -150,12 +161,18 @@ export async function applyWorkspaceChangesViaOrigin(
       "workspace.zip",
     );
 
+    const applyAbort = new AbortController();
+    applyTimeout = setTimeout(() => {
+      applyTimedOut = true;
+      applyAbort.abort();
+    }, 30_000);
     const response = await fetch(applyUrl, {
       method: "POST",
       headers: {
         authorization: `Bearer ${token.token}`,
       },
       body: formData,
+      signal: applyAbort.signal,
     });
 
     if (!response.ok) {
@@ -186,13 +203,18 @@ export async function applyWorkspaceChangesViaOrigin(
       leaseId: leaseId ?? null,
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = applyTimedOut
+      ? "origin apply timed out after 30000ms"
+      : error instanceof Error ? error.message : String(error);
     console.warn(
       "[runtime-controller] applyWorkspaceChangesViaOrigin error:",
       message,
     );
     return { ok: false, error: message };
   } finally {
+    if (applyTimeout !== null) {
+      clearTimeout(applyTimeout);
+    }
     if (acquiredLease && leaseIdForRelease && !retainLease) {
       try {
         await releaseWorkspaceLease({

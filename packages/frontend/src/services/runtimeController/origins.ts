@@ -135,6 +135,8 @@ export interface RequestOriginAccessTokenParams {
   accessToken?: string | null;
   forceRefresh?: boolean;
   timeoutMs?: number;
+  /** Preserve request failures for callers that need to distinguish retryable errors. */
+  throwOnError?: boolean;
 }
 
 export interface OriginAccessTokenResponse {
@@ -436,7 +438,9 @@ export async function requestOriginAccessToken(
     typeof params.timeoutMs === "number" && Number.isFinite(params.timeoutMs) && params.timeoutMs > 0
       ? params.timeoutMs
       : ORIGIN_ACCESS_TOKEN_REQUEST_TIMEOUT_MS;
-  const inFlightKey = cacheKey ? `${cacheKey}|timeout:${requestTimeoutMs}` : null;
+  const inFlightKey = cacheKey
+    ? `${cacheKey}|timeout:${requestTimeoutMs}|strict:${params.throwOnError === true}`
+    : null;
 
   if (cacheKey && params.forceRefresh !== true) {
     const cached = originAccessTokenCache.get(cacheKey);
@@ -507,16 +511,16 @@ export async function requestOriginAccessToken(
         }
       });
 
-      if (response.status === 404) {
+      if (response.status === 404 && !params.throwOnError) {
         return null;
       }
       if (!response.ok) {
         throw new Error(
-          await readControllerError(
+          `request origin access token failed (${response.status}): ${await readControllerError(
             response,
             "request origin access token failed",
             requestContext,
-          ),
+          )}`,
         );
       }
 
@@ -583,6 +587,9 @@ export async function requestOriginAccessToken(
             ? error.message
             : String(error);
       console.warn("[runtime-controller] requestOriginAccessToken error:", message);
+      if (params.throwOnError) {
+        throw new Error(message);
+      }
       return null;
     }
   };
