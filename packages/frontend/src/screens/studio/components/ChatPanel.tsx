@@ -1836,7 +1836,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   });
 
   const {
-    clearImageAttachments,
     clearSubmittedImageAttachments,
     handleComposerDragOver,
     handleComposerDrop,
