@@ -159,3 +159,59 @@ test("expanded routing regressions execute in the main scanner and PR policy", (
   }
   assert.match(section("npm-release.yml", "pull-request-policy"), /pnpm install --frozen-lockfile --ignore-scripts/u);
 });
+
+function preflight(job, mutate = () => {}, missingTool) {
+  const source = section(job.file, job.key);
+  assert.match(source, /    steps:\n      - name: Qualify isolated expanded CI runner\n        if: runner\.environment == 'self-hosted'\n        shell: bash\n        run: \|/u);
+  const match = source.match(/          node <<'NODE'\n([\s\S]*?)          NODE\n/u);
+  assert.ok(match);
+  assert.ok(source.indexOf(match[0]) < source.indexOf("uses: actions/checkout@"));
+  const state = {
+    platform: "linux", arch: "arm64", getuid: () => 503, versions: { node: "22.23.2" },
+    env: { RUNNER_OS: "Linux", RUNNER_ARCH: "ARM64", INSTAFY_CI_JOB_ISOLATION: "ephemeral" },
+  };
+  mutate(state);
+  const observed = [];
+  const program = match[1].replace(/^          /gmu, "");
+  vm.runInNewContext(program, { process: state, require(name) {
+    if (name === "node:assert/strict") return assert;
+    assert.equal(name, "node:child_process");
+    return { execFileSync(file, args, options) {
+      assert.equal(file, "/bin/bash");
+      assert.deepEqual(Array.from(args.slice(0, 3)), ["-c", 'command -v "$1" >/dev/null', "expanded-ci-preflight"]);
+      assert.equal(options.timeout, 1000);
+      assert.equal(options.stdio, "ignore");
+      const tool = args[3];
+      if (tool === missingTool) throw new Error("missing required tool");
+      observed.push(tool);
+    } };
+  } }, { timeout: 1000 });
+  return observed;
+}
+
+test("each expanded job checks actual isolated guest prerequisites before checkout", () => {
+  for (const job of jobs) {
+    const expected = ["bash", "git", "curl", "tar", "sha256sum", "unzip"];
+    if (job.key === "secret-scan") expected.push("sudo", "install");
+    if (job.key === "rust-fmt") expected.push("rustup");
+    assert.deepEqual(preflight(job), expected);
+    for (const tool of expected) assert.throws(() => preflight(job, undefined, tool), /missing required tool/u);
+  }
+});
+
+test("expanded preflight rejects wrong platform, architecture, UID, runtime and environment", () => {
+  const mutations = [
+    state => { state.platform = "darwin"; },
+    state => { state.arch = "x64"; },
+    state => { state.getuid = () => 0; },
+    state => { state.getuid = () => undefined; },
+    state => { state.versions.node = "20.20.2"; },
+    state => { state.versions.node = "24.13.1"; },
+    state => { state.env.RUNNER_OS = "macOS"; },
+    state => { state.env.RUNNER_ARCH = "X64"; },
+    state => { delete state.env.INSTAFY_CI_JOB_ISOLATION; },
+    state => { state.env.INSTAFY_CI_JOB_ISOLATION = "persistent"; },
+    state => { state.env.INSTAFY_ENV_DIR = "inert-disallowed-configuration"; },
+  ];
+  for (const job of jobs) for (const mutate of mutations) assert.throws(() => preflight(job, mutate));
+});
