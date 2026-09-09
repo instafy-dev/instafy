@@ -33,6 +33,8 @@
 .studio-context-search-mobile { padding: calc(8px + var(--instafy-safe-area-inset-top)) 8px 8px; background: var(--color-slate-50); border-bottom: 1px solid var(--color-slate-200); }
 .studio-context-mobile-picker { display: flex; flex: none; min-width: 0; padding: 4px 12px; border-bottom: 1px solid var(--color-slate-200); }
 .dark .studio-context-header, .dark .studio-context-search-mobile { background: var(--color-studio-dark-rail); border-color: var(--color-studio-dark-divider); color: var(--color-slate-100); }
+/* The tab outline defines this edge; a second bright rule above it looks doubled. */
+.dark .studio-context-header { border-bottom-color: transparent; }
 .dark .studio-context-mobile-picker { border-color: var(--color-studio-dark-divider); }
 @media (pointer: coarse) {
   .studio-context-layout { --studio-context-height: 64px; }
