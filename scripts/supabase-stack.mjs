@@ -19,9 +19,10 @@ import {
   resolveLocalSupabaseServiceRoleKey,
 } from "./lib/localSupabaseEnv.mjs";
 import { ensureSupabaseEmailTemplateMounts } from "./lib/supabaseEmailTemplateMounts.mjs";
+import { prepareSupabaseSerialPull } from "./lib/supabaseSerialPull.mjs";
 import {
   buildSupabaseStartArgs,
-  parseSupabaseDatabaseOnly,
+  resolveSupabaseStartMode,
 } from "./lib/supabaseStartMode.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -95,13 +96,23 @@ function readSupabaseEnv() {
 }
 
 function startSupabase() {
+  const mode = resolveSupabaseStartMode(process.env.SUPABASE_DATABASE_ONLY, process.env.SUPABASE_AUTH_ONLY, process.env.SUPABASE_BROWSER_TEST);
+  const databaseOnly = mode === "database";
+  const authOnly = mode === "auth-email";
+  const browserTest = mode === "browser-test";
+  const startArgs = buildSupabaseStartArgs(process.env.SUPABASE_DATABASE_ONLY, {
+    authOnly: process.env.SUPABASE_AUTH_ONLY,
+    browserTest: process.env.SUPABASE_BROWSER_TEST,
+  });
   syncSupabaseMigrationsDir();
-  const databaseOnly = parseSupabaseDatabaseOnly(process.env.SUPABASE_DATABASE_ONLY);
-  const startArgs = buildSupabaseStartArgs(process.env.SUPABASE_DATABASE_ONLY);
+  // Preparation failures must not enter the existing startup retry fallback.
+  prepareSupabaseSerialPull({ repoRoot, databaseOnly, authOnly, browserTest });
   console.log(
     databaseOnly
       ? "[supabase-stack] Starting database-only Supabase..."
-      : "[supabase-stack] Starting Supabase local stack...",
+      : authOnly ? "[supabase-stack] Starting Auth-only Supabase (five services)..."
+        : browserTest ? "[supabase-stack] Starting browser-test Supabase (Edge Runtime excluded)..."
+        : "[supabase-stack] Starting Supabase local stack...",
   );
   try {
     runSupabase(startArgs);
@@ -120,6 +131,8 @@ function startSupabase() {
     runSupabase(
       buildSupabaseStartArgs(process.env.SUPABASE_DATABASE_ONLY, {
         ignoreHealthCheck: !databaseOnly,
+        authOnly: process.env.SUPABASE_AUTH_ONLY,
+        browserTest: process.env.SUPABASE_BROWSER_TEST,
       }),
     );
   }
@@ -134,7 +147,8 @@ function startSupabase() {
 }
 
 function ensureSupabase() {
-  const databaseOnly = parseSupabaseDatabaseOnly(process.env.SUPABASE_DATABASE_ONLY);
+  const mode = resolveSupabaseStartMode(process.env.SUPABASE_DATABASE_ONLY, process.env.SUPABASE_AUTH_ONLY, process.env.SUPABASE_BROWSER_TEST);
+  const databaseOnly = mode === "database";
   const existingEnv = readSupabaseEnv();
   if (existingEnv) {
     console.log("[supabase-stack] Supabase already running.");

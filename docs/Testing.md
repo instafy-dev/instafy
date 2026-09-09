@@ -38,8 +38,9 @@ Public Build keeps its existing job names:
 
 It also calls the secret-free `Browser verification` workflow on every pull
 request, `main` push, and manual Public Build run. That workflow has three
-non-optional jobs: `Personal Browser E2E`, `Browser UI rendering`, and
-`Shared Browser profile E2E`. A failure in any of them fails Public Build,
+required checks: `Personal Browser E2E`, `Browser UI rendering`, and
+`Shared Browser profile E2E`. The Shared check aggregates two complete,
+independent fixture jobs. A failure in any of them fails Public Build,
 including its downstream release-workflow result. Repository administrators
 must also require the emitted browser job checks in branch protection; adding
 workflow YAML does not change repository protection settings.
@@ -105,8 +106,8 @@ Before checkout, each self-hosted job requires an actual non-root Linux ARM64
 process, Node22, the ephemeral marker, no private environment directory and its
 baseline tools. This prerequisite check does not itself prove guest isolation.
 
-Rust compilation/tests, browsers and all release jobs remain hosted. JavaScript
-has its own separately gated split described below.
+Release jobs remain outside these switches. JavaScript, Rust compilation/tests
+and the two browser lanes have their own independent switches described below.
 The four job names, permissions and timeouts are unchanged; the main scanner
 uses the same pinned x64/ARM64 Gitleaks archives as the boundary. Disable the
 expanded switch to restore hosted routing for new runs; already queued jobs
@@ -187,6 +188,78 @@ already queued runs do not change runners. No required-check rule changes
 are needed. Run `node --test scripts/check-javascript-ci.test.mjs` for routing,
 coverage and aggregate regressions; these are not live workload qualification.
 
+### Bounded Rust CI
+
+`Rust packages` and `Rust tests` retain their existing check names as strict
+five-minute aggregates. The first requires all five compile-check children;
+the second requires all five test children. Each child is independent, uses
+the same exact event commit and recursive submodules, and has a 30-minute
+limit. Missing, skipped, cancelled or failed children fail the corresponding
+aggregate. Aggregates have no repository permissions or checkout and are
+scheduled only after their children finish; they do not hold a worker while
+waiting for other workers.
+
+| Child | Preserved commands | Runner-label suffix |
+| --- | --- | --- |
+| Rust check runtime controller | Controller `cargo check --locked --tests` | `public-rust-check-controller` |
+| Rust check runtime agent | Agent `cargo check --locked --tests` | `public-rust-check-agent` |
+| Rust check git service | Git service `cargo check --locked --tests` | `public-rust-check-git` |
+| Rust check runtime provider | Provider service `cargo check --locked --tests` | `public-rust-check-provider` |
+| Rust check tunnel broker | Tunnel workspace `cargo check --locked --tests` | `public-rust-check-tunnel` |
+| Rust test runtime contracts | Complete runtime-contracts suite | `public-rust-test-contracts` |
+| Rust test runtime agent | Agent `--no-run`, followed by `--lib --test controller_client -- --test-threads=1` | `public-rust-test-agent` |
+| Rust test OpenAI proxy | Complete openai-proxy-server suite | `public-rust-test-proxy` |
+| Rust test origin server | Complete origin-http-server suite | `public-rust-test-origin` |
+| Rust test git service | Complete git-service suite | `public-rust-test-git` |
+
+All eleven original Cargo commands retain their arguments and repository-root
+working directory. Test children also retain the full frozen Node20/pnpm
+installation, including the pinned Playwright fixture required by agent tests.
+Stable native Rust and debug-info settings are unchanged. Each child has its
+own target directory; Cargo caches are partitioned by job, operating system,
+CPU architecture and the exact workspace Cargo lockfiles, with no cross-arch
+or old-lock fallback. The existing unused-toolchain disk cleanup runs only on
+GitHub-hosted images, never against a self-hosted host or guest image.
+
+All twelve jobs default to `ubuntu-latest`. Only the independent
+`CI_RUST_SELF_HOSTED=true` switch may select isolated Linux ARM64 workers, for
+private same-repository PRs to `main` and protected-main pushes. It uses the
+same trust-specific organization groups and per-run, per-attempt, per-job
+labels as the JavaScript split. The aggregate suffixes are
+`public-rust-check-aggregate` and `public-rust-test-aggregate`. Other switches
+do not enable Rust compilation or tests; Rust formatting remains separately
+controlled by `CI_EXPANDED_SELF_HOSTED`. Forks, public visibility, manual
+dispatches and unsupported events keep hosted runners.
+
+Do not enable this switch before independently enrolling the reviewed workflow
+and all twelve exact job identities in the runner manager. Its existing
+35-minute worker lifecycle remains sufficient only if the actual cold setup
+and each full child workload fit their allotted window. Before checkout,
+self-hosted children require non-root Linux ARM64, Node22, the ephemeral marker,
+no private environment directory, and native Rust/C build tools. Those checks
+do not prove that native libraries, downloads or workload timings are ready.
+Each self-hosted child then installs the fixed missing native package set
+(`clang`, `lld`, `cmake`, `libcap-dev`, `protobuf-compiler`) in a visible,
+five-minute GitHub step inside the unchanged 30-minute job. Hosted jobs and
+aggregates do not run that step. The manager must first qualify only APT's
+fixed proxy configuration in the fresh guest; package installation stays in
+the workflow, without changing the base image, repository trust or TLS rules.
+The corresponding qualification resource profile is 8GiB/two CPUs and two
+parallel Cargo jobs for these ten children only; aggregates and unrelated
+jobs retain their existing resources. That configuration is not compile or
+memory evidence.
+Qualify each real cold ARM64 compile/test, Cargo and Node20 proxy downloads,
+memory/disk use and complete guest teardown first. A split or a warm cache hit
+is not that qualification; never reduce the test selection or ignore a timeout
+to make a job green. No database, provider, signing or release credentials are
+introduced by this lane.
+
+Disable the Rust switch to restore hosted selection for new runs; already
+queued jobs retain their selected pools. No required-check rule changes are
+needed. Run `node --test scripts/check-rust-ci.test.mjs` for the exact command
+inventory, routing and strict aggregate regressions. These source tests do not
+run Cargo or establish real ARM workload completion.
+
 The empty-database test
 prefetches its digest-pinned Postgres image with bounded retry/backoff and then
 disables implicit pulls; image acquisition may retry, while container, SQL, and
@@ -214,6 +287,86 @@ Automation browser cleanup:
 For the full-stack suites, run the local stack first:
 - `pnpm stack:up`
 - `pnpm stack:down` when finished.
+
+## Disposable database and auth-email CI
+
+For a clean, unlinked local stack on a connection-constrained Docker host,
+`SUPABASE_SERIAL_PULL=true pnpm supabase:up` prepares image references one at a
+time before the unchanged startup command. The default is unchanged. The option
+requires the locked Supabase CLI 2.92.0: its ten-image `services --output json`
+inventory is supplemented with the four ancillary images from that exact CLI.
+Full-stack mode prepares all 14 images, including disabled extras (an intentional
+download/disk cost); database-only mode prepares only its resolved Postgres image.
+The explicit Auth-only profile prepares seven images after validating the same
+complete pinned inventory: five persistent services plus Realtime and Storage
+images for the CLI's one-shot schema initialization. Serial preparation itself does not change the selected
+startup profile, skip tests, alter TLS, or increase runner limits.
+The separate browser-test profile validates that complete inventory too, then
+prepares all 13 images except Edge Runtime.
+
+Preparation uses an empty temporary CLI/Docker home and anonymous public-ECR
+pulls against the default local Docker daemon. Linked projects, local dotenv
+files, registry/Docker/configuration overrides and credential-bearing proxies
+are refused on this opt-in path. Only validated HTTP(S) proxy origins are copied;
+existing developer homes and credentials are not loaded. A fixed invalid token
+sentinel also prevents the CLI from consulting the operating-system keychain.
+Each pull is bounded to three minutes and total preparation to ten minutes inside the existing job
+timeout. Exact-ref local inspection must succeed before startup; failures stop
+without entering the normal startup retry. CLI upgrades require updating and
+testing the pinned ancillary inventory. Run
+`node --test scripts/lib/supabaseSerialPull.test.mjs` for offline regression tests.
+These do not qualify real cold downloads or concurrent connection usage.
+
+The independent, default-off `CI_DATABASE_SELF_HOSTED=true` switch covers only
+`Controller database tests` (30 minutes) and `signup -> email -> activate`
+(25 minutes). Both preserve their complete existing commands, frozen Node20
+workspace installation, and read-only checkout. Controller tests use the local
+Postgres-only stack and all public migrations; auth-email explicitly sets
+`SUPABASE_AUTH_ONLY=1` for its startup step. This fixed profile retains Postgres,
+GoTrue, Kong, Mailpit and PostgREST; PostgREST is needed for the unchanged CLI
+status reader to report `API_URL`. Both initial startup and its existing retry
+exclude Realtime, Storage, imgproxy, Edge Runtime, Postgres Meta, Studio,
+Logflare, Vector and Supavisor. Template-mount verification, every migration,
+status resolution and all signup/email/OTP/activation assertions remain intact.
+With the pinned CLI 2.92.0 and Postgres 17, enabled Realtime and Storage still run
+their sequential initialization containers before service exclusions apply.
+Their images are therefore prepared too; configuration and schema initialization
+are not disabled merely because those persistent services are unnecessary here.
+
+For the same local profile, run `SUPABASE_AUTH_ONLY=1 pnpm supabase:up`, optionally
+with `SUPABASE_SERIAL_PULL=true`. Auth-only accepts only unset, `0` or `1`, and
+cannot be combined with `SUPABASE_DATABASE_ONLY=1`. Neither flag changes default
+full-stack startup; database-only startup still uses `supabase db start`.
+An already-running stack retains the existing reuse behavior, so the Auth workflow
+explicitly stops stale stacks first. A passing Auth-only run does not qualify the
+separate browser-test workloads used by Shared Browser. Neither lane needs
+production credentials, an external mailbox, a deployment, or released images.
+
+Only private, same-repository PRs to `main` and protected-main pushes may use
+native Linux ARM64 guests in the corresponding `instafy-ci-pr` or
+`instafy-ci-main` group. Forks, public visibility, manual dispatches and disabled
+switches retain hosted Ubuntu. Exclusive label suffixes are
+`public-controller-db` and `public-auth-email`, prefixed with the repository ID,
+run ID and attempt as in the other bounded lanes. Separate source authentication,
+exact job assignment, complete guest destruction and credential revocation are
+still provisioning requirements; the inline prerequisite check cannot prove them.
+
+The controller needs native Rust, a C/C++ compiler, Make, pkg-config and OpenSSL
+development files. Its protobuf compiler is vendored by the locked Rust build,
+not a host installation. Cargo uses two compile jobs and an OS/architecture/lock-
+specific cache. Auth-email does not compile Rust. Both need a real ARM64 Linux
+Docker daemon, with its own restricted download proxy and loopback bypass for
+the disposable stack. No cross-architecture Docker cache is introduced. Keep
+TLS verification enabled. Both workflows stop their local stack on exit; failed
+or interrupted cleanup still requires destruction of the whole guest.
+
+Run `node --test scripts/check-database-ci-routing.test.mjs` for selector,
+command-parity, prerequisite and cache regressions. These are not real cold ARM
+workload qualification. Before enabling the switch, the manager must admit both
+exact workflow identities, all four PR/push tuples and the 25-minute Listener
+budget, then prove both complete workloads and cleanup within the unchanged
+bounded worker lifecycle. Disable the switch for hosted routing of new runs;
+already queued runs do not move pools automatically.
 
 ## Support workflow simulation
 
@@ -247,6 +400,116 @@ operator replies, review, resolution, acknowledgement, customer follow-up, and r
 The privacy check verifies owner isolation, operator boundaries, and account mismatch rejection.
 
 ## Secret-free browser CI lanes
+
+The independent, default-off `CI_BROWSER_SELF_HOSTED=true` switch covers only
+`Browser verification / Browser UI rendering` and
+`Browser verification / Personal Browser E2E`, called by Public
+Build. It requires private visibility, a same-repository PR to `main` or a
+protected-main push, and the exact `build.yml` caller. Forks, public visibility,
+manual runs and other callers retain `ubuntu-24.04`; Shared Browser has its
+own independent switch below. Both short browser jobs have a 30-minute
+limit, including their hosted fallback, to leave room for cold workspace,
+browser and system-package installation. This is a conservative capacity bound,
+not a measured completion claim. The worker lifecycle remains bounded to
+35 minutes with its existing cleanup reserve; browser test-level timeouts,
+commands, permissions, locked installations and required reports are unchanged.
+
+The two label suffixes are `public-browser-ui` and `public-browser-personal`,
+using the same trust-specific groups and per-run/attempt labels described
+above. Provisioning must authenticate both caller and callee bytes at the same
+tested commit and protected main, including the exact attempt's reusable-workflow
+metadata. A caller-supplied input or matching label is not source authority.
+Initially enable this switch only for supervised cold ARM64 qualification;
+require both jobs and their cleanup to pass before routine use. Workers require
+Node22, Xvfb and xauth before checkout; the unchanged
+Playwright installation obtains Chromium and system libraries. The self-hosted
+Personal job also explicitly installs Ubuntu24.04's GTK3 runtime package for
+Electron before building its fixture. Restricted
+workers must configure the disposable guest's APT proxy too: sudo does not
+preserve the browser installer's proxy environment. Keep TLS and browser
+sandbox protections intact. No template, host paths or proxy credentials belong
+in the public workflow. Disable the switch to restore hosted routing for new
+runs; queued jobs retain their original selection. The routing and prerequisite
+regressions run in `node --test scripts/browser-ci-workflow.test.mjs`; they are
+not a substitute for real browser execution and teardown.
+
+### Bounded Shared Browser CI
+
+`Browser verification / Shared Browser profile E2E` retains its required name
+as an always-run five-minute aggregate. It succeeds only when both fixed
+children finish successfully; missing, skipped, cancelled or failed children
+fail the aggregate. It has no repository permissions or checkout and starts
+only after the children end, without holding a worker while waiting.
+
+| Child | Complete command | Runner-label suffix |
+| --- | --- | --- |
+| Shared Browser profile lifecycle | `xvfb-run -a node scripts/browser-profile-e2e.mjs` | `public-shared-browser-profile` |
+| Shared Browser Studio journey | `xvfb-run -a node scripts/shared-browser-studio-e2e.mjs` | `public-shared-browser-studio` |
+
+Each child has a 30-minute limit and repeats the full locked workspace,
+Chromium, Go/Rust, system-library and fixture-safety preparation. Each owns a
+fresh migrated Supabase stack with local authentication and always attempts
+stack teardown. The profile-only script still permits a separately provisioned
+migrated loopback database; the signed-in Studio journey needs real local
+GoTrue. No fixture command, scenario, receipt, cleanup or safety check is
+replaced by the aggregate. Only the same fixed credential-free receipt paths
+are uploaded, separately per child. Image and compiler cache keys include the
+operating system and architecture; compiler targets are child-specific with
+no old-lock or cross-architecture fallback.
+
+Both children explicitly set `SUPABASE_BROWSER_TEST=1` only for startup. This
+fixed profile excludes **only Edge Runtime**, using `supabase start --exclude
+edge-runtime` on initial startup and the existing retry. Postgres, GoTrue, Kong,
+Mailpit, PostgREST, Realtime, Storage and every other configured service remain
+unchanged. The fixtures do not contain or invoke Edge Functions: the lifecycle
+fixture exercises the real database/controller/browser, and the Studio journey
+uses local Auth plus controller APIs. Excluding Edge Runtime avoids its unrelated
+bootstrap module downloads; it does not replace any browser assertion, disable
+schema initialization, change global Supabase configuration or grant network
+access. New function-dependent scenarios require re-reviewing the profile.
+
+For the same local profile, start a fresh stack with
+`SUPABASE_BROWSER_TEST=1 pnpm supabase:up`, optionally adding
+`SUPABASE_SERIAL_PULL=true` for the 13-image preparation. The profile accepts
+only unset, `0` or `1`, and cannot be combined with Auth-only or database-only.
+Default startup is still the full stack, database-only still uses `db start`,
+and Auth-only retains its five persistent services plus two schema images.
+Existing-stack reuse is unchanged: stop a previous stack before switching
+profiles. This source change does not qualify cold Shared Browser execution;
+both complete child scenarios and cleanup must still pass on the target runner.
+
+All three jobs default to hosted Ubuntu24.04. The separate, default-off
+`CI_SHARED_BROWSER_SELF_HOSTED=true` switch uses the same private, same-repository
+PR/protected-main and exact Public Build caller guards as the other browser
+lanes. Its aggregate suffix is `public-shared-browser-aggregate`. Forks, public
+visibility, manual runs and other callers stay hosted. The manager must pin
+both caller and callee source at the same tested commit and protected main and
+authenticate exact-attempt reusable-workflow metadata before issuing a runner.
+Neither the ordinary browser switch nor another CI switch enables this lane.
+
+Only the two Shared compiler children use 8GiB/two CPUs, two parallel Cargo
+jobs, and fresh-guest APT plus Docker proxy preparation; the aggregate retains
+standard resources and neither daemon setup. Native package installation is
+visible in the workflow and bounded inside each job. The base template, TLS
+checks, network restrictions and 35-minute worker/cleanup budget are unchanged.
+Before checkout, each child verifies a non-root ephemeral Linux ARM64 runner,
+Node22 and an actual Linux ARM64 Docker daemon.
+
+The self-hosted fixture step explicitly opts into compiler-only proxy handling.
+The six Go/Cargo build calls receive only validated credential-free HTTP/HTTPS
+proxy origins and their derived tool aliases, alongside the existing scrubbed
+compiler environment. Database commands, display probes, production runtime
+helpers, controller services and browser processes retain their existing
+proxy/credential scrubbing. No general inherited environment, bypass list,
+private endpoint, credential or TLS override is added to the public source.
+
+Cold ARM64 completion within 30 minutes is unproven: prior hosted timings or
+warm caches do not qualify these split jobs. Keep activation supervised until
+both full jobs and guest teardown pass; do not shorten scenarios or ignore
+timeouts. Disable the switch to restore hosted selection for new runs;
+already queued jobs keep their chosen pool. Run
+`node --test scripts/check-shared-browser-ci.test.mjs scripts/browser-profile-e2e.test.mjs scripts/shared-browser-studio-e2e.test.mjs`
+for local routing and environment regressions, not live browser qualification.
 
 These lanes use disposable data, do not load local `.env` files, and do not
 need a real account, model API key, or production controller. Personal and UI
