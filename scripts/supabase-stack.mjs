@@ -96,19 +96,22 @@ function readSupabaseEnv() {
 }
 
 function startSupabase() {
-  const mode = resolveSupabaseStartMode(process.env.SUPABASE_DATABASE_ONLY, process.env.SUPABASE_AUTH_ONLY);
+  const mode = resolveSupabaseStartMode(process.env.SUPABASE_DATABASE_ONLY, process.env.SUPABASE_AUTH_ONLY, process.env.SUPABASE_BROWSER_TEST);
   const databaseOnly = mode === "database";
   const authOnly = mode === "auth-email";
+  const browserTest = mode === "browser-test";
   const startArgs = buildSupabaseStartArgs(process.env.SUPABASE_DATABASE_ONLY, {
     authOnly: process.env.SUPABASE_AUTH_ONLY,
+    browserTest: process.env.SUPABASE_BROWSER_TEST,
   });
   syncSupabaseMigrationsDir();
   // Preparation failures must not enter the existing startup retry fallback.
-  prepareSupabaseSerialPull({ repoRoot, databaseOnly, authOnly });
+  prepareSupabaseSerialPull({ repoRoot, databaseOnly, authOnly, browserTest });
   console.log(
     databaseOnly
       ? "[supabase-stack] Starting database-only Supabase..."
       : authOnly ? "[supabase-stack] Starting Auth-only Supabase (five services)..."
+        : browserTest ? "[supabase-stack] Starting browser-test Supabase (Edge Runtime excluded)..."
         : "[supabase-stack] Starting Supabase local stack...",
   );
   try {
@@ -129,6 +132,7 @@ function startSupabase() {
       buildSupabaseStartArgs(process.env.SUPABASE_DATABASE_ONLY, {
         ignoreHealthCheck: !databaseOnly,
         authOnly: process.env.SUPABASE_AUTH_ONLY,
+        browserTest: process.env.SUPABASE_BROWSER_TEST,
       }),
     );
   }
@@ -143,7 +147,7 @@ function startSupabase() {
 }
 
 function ensureSupabase() {
-  const mode = resolveSupabaseStartMode(process.env.SUPABASE_DATABASE_ONLY, process.env.SUPABASE_AUTH_ONLY);
+  const mode = resolveSupabaseStartMode(process.env.SUPABASE_DATABASE_ONLY, process.env.SUPABASE_AUTH_ONLY, process.env.SUPABASE_BROWSER_TEST);
   const databaseOnly = mode === "database";
   const existingEnv = readSupabaseEnv();
   if (existingEnv) {
