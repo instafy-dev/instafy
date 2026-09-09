@@ -301,6 +301,8 @@ The explicit Auth-only profile prepares seven images after validating the same
 complete pinned inventory: five persistent services plus Realtime and Storage
 images for the CLI's one-shot schema initialization. Serial preparation itself does not change the selected
 startup profile, skip tests, alter TLS, or increase runner limits.
+The separate browser-test profile validates that complete inventory too, then
+prepares all 13 images except Edge Runtime.
 
 Preparation uses an empty temporary CLI/Docker home and anonymous public-ECR
 pulls against the default local Docker daemon. Linked projects, local dotenv
@@ -337,7 +339,7 @@ cannot be combined with `SUPABASE_DATABASE_ONLY=1`. Neither flag changes default
 full-stack startup; database-only startup still uses `supabase db start`.
 An already-running stack retains the existing reuse behavior, so the Auth workflow
 explicitly stops stale stacks first. A passing Auth-only run does not qualify the
-full-stack workloads used by Shared Browser. Neither lane needs
+separate browser-test workloads used by Shared Browser. Neither lane needs
 production credentials, an external mailbox, a deployment, or released images.
 
 Only private, same-repository PRs to `main` and protected-main pushes may use
@@ -454,6 +456,27 @@ replaced by the aggregate. Only the same fixed credential-free receipt paths
 are uploaded, separately per child. Image and compiler cache keys include the
 operating system and architecture; compiler targets are child-specific with
 no old-lock or cross-architecture fallback.
+
+Both children explicitly set `SUPABASE_BROWSER_TEST=1` only for startup. This
+fixed profile excludes **only Edge Runtime**, using `supabase start --exclude
+edge-runtime` on initial startup and the existing retry. Postgres, GoTrue, Kong,
+Mailpit, PostgREST, Realtime, Storage and every other configured service remain
+unchanged. The fixtures do not contain or invoke Edge Functions: the lifecycle
+fixture exercises the real database/controller/browser, and the Studio journey
+uses local Auth plus controller APIs. Excluding Edge Runtime avoids its unrelated
+bootstrap module downloads; it does not replace any browser assertion, disable
+schema initialization, change global Supabase configuration or grant network
+access. New function-dependent scenarios require re-reviewing the profile.
+
+For the same local profile, start a fresh stack with
+`SUPABASE_BROWSER_TEST=1 pnpm supabase:up`, optionally adding
+`SUPABASE_SERIAL_PULL=true` for the 13-image preparation. The profile accepts
+only unset, `0` or `1`, and cannot be combined with Auth-only or database-only.
+Default startup is still the full stack, database-only still uses `db start`,
+and Auth-only retains its five persistent services plus two schema images.
+Existing-stack reuse is unchanged: stop a previous stack before switching
+profiles. This source change does not qualify cold Shared Browser execution;
+both complete child scenarios and cleanup must still pass on the target runner.
 
 All three jobs default to hosted Ubuntu24.04. The separate, default-off
 `CI_SHARED_BROWSER_SELF_HOSTED=true` switch uses the same private, same-repository
