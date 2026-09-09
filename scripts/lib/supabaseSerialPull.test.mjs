@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { AUTH_ONLY_EXCLUDED_CONTAINERS } from "./supabaseStartMode.mjs";
 import {
   SERIAL_PULL_CLI_VERSION, SERIAL_PULL_BUDGET_MS, parseSupabaseSerialPull,
   serialPullImages, serialPullEnvironment, prepareSupabaseSerialPull,
@@ -65,6 +66,67 @@ test("pinned CLI inventory covers all fourteen exact mapped images, irrespective
 test("database-only selection retains the CLI-resolved Postgres version", () => {
   const rows = inventory(); rows[0].local = "15.8.1.085";
   assert.deepEqual(serialPullImages(JSON.stringify(rows), { databaseOnly: true }), ["public.ecr.aws/supabase/postgres:15.8.1.085"]);
+});
+
+test("Auth-only selection validates the complete pinned inventory before selecting five service and two schema images", () => {
+  const rows = inventory(); rows[0].local = "15.8.1.085";
+  const full = serialPullImages(JSON.stringify(rows));
+  const selected = serialPullImages(JSON.stringify(rows), { authOnly: true });
+  assert.deepEqual(selected, [
+    "public.ecr.aws/supabase/postgres:15.8.1.085", "public.ecr.aws/supabase/gotrue:v2.188.1",
+    "public.ecr.aws/supabase/postgrest:v14.8", "public.ecr.aws/supabase/realtime:v2.82.0",
+    "public.ecr.aws/supabase/storage-api:v1.48.28", "public.ecr.aws/supabase/kong:2.8.1",
+    "public.ecr.aws/supabase/mailpit:v1.22.3",
+  ]);
+  assert.deepEqual(full.filter((image) => !selected.includes(image)).map((image) => image.split("/").at(-1).split(":")[0]).sort(),
+    AUTH_ONLY_EXCLUDED_CONTAINERS.filter(name => !["realtime", "storage-api"].includes(name)).sort());
+  // A malformed excluded service is still an inventory error, never hidden by filtering.
+  for (const mutate of [r => r.pop(), r => { r[5].local = "latest"; }, r => { r[5].name = r[6].name; },
+    r => { r[5].remote = "v1"; }, r => { r[5].unexpected = "inert"; }]) {
+    const invalid = inventory(); mutate(invalid);
+    assert.throws(() => serialPullImages(JSON.stringify(invalid), { authOnly: true }), /inventory-invalid/);
+  }
+});
+
+test("pinned PG17 configuration preserves Realtime and Storage schema initialization despite service exclusions", () => {
+  // v2.92.0 initSchema15 uses Config.Enabled, not --exclude, for these sequential
+  // DockerRunJob migrations. They need cached images even without persistent services.
+  const config = fs.readFileSync(new URL("../../supabase/supabase/config.toml", import.meta.url), "utf8");
+  assert.match(config, /^major_version = 17$/m);
+  for (const name of ["realtime", "storage", "auth"]) {
+    assert.match(config, new RegExp(`^\\[${name}\\]\\nenabled = true$`, "m"));
+  }
+  for (const name of ["realtime", "storage-api"]) assert.ok(AUTH_ONLY_EXCLUDED_CONTAINERS.includes(name));
+  assert.equal(serialPullImages(JSON.stringify(inventory()), { authOnly: true }).length, 7);
+});
+
+test("Auth-only preparation pulls exactly seven images with the same finite budgets and cleanup", (t) => {
+  const h = harness(t);
+  assert.deepEqual(h.run({ env: { PATH: "/usr/bin:/bin", SUPABASE_SERIAL_PULL: "true", SUPABASE_AUTH_ONLY: "1" } }),
+    { enabled: true, images: 7, pulled: 7 });
+  assert.equal(h.calls.length, 23);
+  assert.deepEqual(h.calls.filter(({ args }) => args[0] === "pull").map(({ args }) => args.at(-1)),
+    serialPullImages(JSON.stringify(inventory()), { authOnly: true }));
+  assert.ok(h.calls.every(({ options }) => options.timeout <= 180_000 && options.killSignal === "SIGKILL"));
+  assert.equal(fs.existsSync(h.calls[0].options.env.HOME), false);
+  assert.ok(h.calls.every(({ options }) => options.env.SUPABASE_AUTH_ONLY === undefined));
+  h.calls.length = 0;
+  assert.deepEqual(h.run({ authOnly: true }), { enabled: true, images: 7, pulled: 0 });
+  assert.equal(h.calls.length, 9);
+});
+
+test("serial image profiles reject ambiguous booleans and conflicting flags before commands", (t) => {
+  for (const options of [{ databaseOnly: true, authOnly: true }, { authOnly: "1" }, { databaseOnly: "1" }]) {
+    const h = harness(t);
+    assert.throws(() => serialPullImages(JSON.stringify(inventory()), options), /start-mode-invalid/);
+    assert.throws(() => h.run(options), /start-mode-invalid/);
+    assert.equal(h.calls.length, 0);
+  }
+  for (const flags of [{ SUPABASE_AUTH_ONLY: "true" }, { SUPABASE_DATABASE_ONLY: "1", SUPABASE_AUTH_ONLY: "1" }]) {
+    const h = harness(t);
+    assert.throws(() => h.run({ env: { SUPABASE_SERIAL_PULL: "true", ...flags } }), /must be unset|start-mode-invalid/);
+    assert.equal(h.calls.length, 0);
+  }
 });
 
 test("incomplete, duplicate, remote, unversioned, credential-bearing and unexpected inventory is rejected", () => {
@@ -172,7 +234,7 @@ test("total preparation budget is finite and cannot reset between images", (t) =
 
 test("startup integration preserves commands and keeps preparation outside the retry catch", () => {
   const source = fs.readFileSync(new URL("../supabase-stack.mjs", import.meta.url), "utf8");
-  assert.match(source, /prepareSupabaseSerialPull\(\{ repoRoot, databaseOnly \}\);[\s\S]*?try \{\n    runSupabase\(startArgs\);/);
+  assert.match(source, /prepareSupabaseSerialPull\(\{ repoRoot, databaseOnly, authOnly \}\);[\s\S]*?try \{\n    runSupabase\(startArgs\);/);
   assert.equal((source.match(/prepareSupabaseSerialPull\(\{/g) ?? []).length, 1);
   assert.match(source, /function ensureSupabase\(\)[\s\S]*?if \(existingEnv\)[\s\S]*?return \{ env: existingEnv, started: false \};/);
 });
