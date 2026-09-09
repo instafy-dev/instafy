@@ -59,7 +59,7 @@
     "test:android:build": "node scripts/test-android-build.mjs",
     "test:ios:automation:probe": "node scripts/ios-automation-probe.mjs",
     "test:chat:voice:speech": "pnpm --filter @instafy/frontend test:e2e:chat:voice:speech",
-    "test:runtime-env": "node --test scripts/lib/runtimeEnvHelpers.test.mjs scripts/lib/localSupabaseEnv.test.mjs scripts/lib/privateEnvPaths.test.mjs scripts/lib/proxyCredentialMode.test.mjs scripts/lib/supabaseEmailTemplateMounts.test.mjs scripts/lib/supabaseStartMode.test.mjs scripts/lib/prebuiltRustBinary.test.mjs scripts/lib/gitServicesImageFingerprint.test.mjs",
+    "test:runtime-env": "node --test scripts/lib/runtimeEnvHelpers.test.mjs scripts/lib/localSupabaseEnv.test.mjs scripts/lib/privateEnvPaths.test.mjs scripts/lib/proxyCredentialMode.test.mjs scripts/lib/supabaseEmailTemplateMounts.test.mjs scripts/lib/supabaseStartMode.test.mjs scripts/lib/supabaseSerialPull.test.mjs scripts/lib/prebuiltRustBinary.test.mjs scripts/lib/gitServicesImageFingerprint.test.mjs",
     "test:public-boundary": "node --test scripts/check-public-boundary.test.mjs scripts/check-public-boundary-workflow.test.mjs && node scripts/check-public-boundary.mjs",
     "test:migrations:empty-db": "node scripts/test-supabase-migrations-empty-db.mjs",
     "test:self-host:config": "node scripts/check-self-host-compose.mjs",
