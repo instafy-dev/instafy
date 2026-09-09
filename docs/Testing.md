@@ -82,6 +82,37 @@ the pinned Gitleaks 8.30.1 archive for either Linux x64 or ARM64 and rejects
 unsupported architectures. Remove or disable the switch to restore hosted
 routing; no runner credentials or host configuration belong in this tree.
 
+The independent, default-off `CI_EXPANDED_SELF_HOSTED=true` switch covers only
+four additional short jobs. It does not replace the boundary switch:
+
+| Job | Eligible events | Literal runner-label suffix |
+| --- | --- | --- |
+| Secret scan | Protected `main` push | `public-secret-scan` |
+| Go packages | Same-repository PR to `main`; protected `main` push | `public-go` |
+| Require reviewed Changeset release intent | Same-repository PR to `main` | `public-npm-policy` |
+| Rust formatting | Same-repository PR to `main`; protected `main` push | `public-rust-fmt` |
+
+All four require this repository to remain private; forks, public visibility,
+manual dispatches and other events keep their existing hosted selection.
+Each disposable Linux ARM64 runner uses the same trust-specific organization
+group and unique `instafy-ci-bootstrap-<repository-id>-<run-id>-<attempt>-<suffix>`
+label format as the boundary lane, without an ordinary role label. Labels are
+placement constraints, not an exclusive job reservation: provisioning must
+authenticate the exact workflow source and assignment, retain bounded job and
+cleanup deadlines, and destroy the guest. Unknown cleanup must quarantine
+capacity, not trigger a blind retry. No host credentials belong in the guest.
+Before checkout, each self-hosted job requires an actual non-root Linux ARM64
+process, Node22, the ephemeral marker, no private environment directory and its
+baseline tools. This prerequisite check does not itself prove guest isolation.
+
+JavaScript, Rust compilation/tests, browsers and all release jobs remain hosted.
+The four job names, permissions and timeouts are unchanged; the main scanner
+uses the same pinned x64/ARM64 Gitleaks archives as the boundary. Disable the
+expanded switch to restore hosted routing for new runs; already queued jobs
+do not automatically move pools. Run `node --test scripts/check-expanded-ci-routing.test.mjs`
+for routing regressions. These tests are not real ARM64 workload or teardown
+qualification, which is required before enabling the switch.
+
 The trusted gate rejects unreviewed environment templates, live
 environment/auth files, private-only package/product markers, personal paths,
 private hosts/networks, browser-exposed service-role names, token prefixes,
