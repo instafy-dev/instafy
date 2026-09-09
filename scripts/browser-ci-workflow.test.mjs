@@ -2,10 +2,124 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import vm from "node:vm";
 import { REQUIRED_BROWSER_LANES } from "../packages/frontend/scripts/required-browser-reporter.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");
+
+const routedJobs = [
+  { key: "personal", label: "public-browser-personal", name: "Personal Browser E2E", minutes: 20 },
+  { key: "browser-ui", label: "public-browser-ui", name: "Browser UI rendering", minutes: 15 },
+];
+const jobSource = key => read(".github/workflows/browser-e2e.yml").split(`\n  ${key}:\n`)[1].split(/\n  [\w-]+:\n/u)[0];
+function callerContext(event = "pull_request") {
+  const ref = event === "pull_request" ? "refs/pull/11/merge" : "refs/heads/main";
+  return { repository: "instafy-dev/instafy", repository_id: "1001", run_id: "2002", run_attempt: "3",
+    ref, workflow_ref: `instafy-dev/instafy/.github/workflows/build.yml@${ref}`,
+    event_name: event, ref_protected: event === "push",
+    event: { repository: { private: true }, ...(event === "pull_request" ? { pull_request: {
+      number: 11, base: { ref: "main", repo: { full_name: "instafy-dev/instafy" } },
+      head: { repo: { full_name: "instafy-dev/instafy", fork: false } },
+    } } : {}) } };
+}
+function selectBrowser(job, github, toggle = "true") {
+  const expression = jobSource(job.key).match(/^    runs-on: >-\n((?:      .*\n)+)/mu)?.[1]
+    .trim().replace(/^\$\{\{\s*|\s*\}\}$/gu, "");
+  assert.ok(expression);
+  assert.doesNotMatch(expression, /github\.job\b|inputs\.|matrix\./u);
+  return JSON.parse(JSON.stringify(vm.runInNewContext(expression, { github,
+    vars: { CI_BROWSER_SELF_HOSTED: toggle, CI_BOOTSTRAP_SELF_HOSTED: "true", CI_EXPANDED_SELF_HOSTED: "true", CI_JAVASCRIPT_SELF_HOSTED: "true" },
+    fromJSON: JSON.parse,
+    format: (template, ...values) => template.replace(/\{\{|\}\}|\{(\d+)\}/gu,
+      (match, index) => match === "{{" ? "{" : match === "}}" ? "}" : String(values[index])),
+  }, { timeout: 1000 })));
+}
+
+test("browser routing is independently default-off and preserves the exact two job names and budgets", () => {
+  for (const job of routedJobs) for (const event of ["pull_request", "push"]) {
+    for (const flag of ["", "false", "0", "unknown"]) assert.equal(selectBrowser(job, callerContext(event), flag), "ubuntu-24.04");
+    assert.ok(jobSource(job.key).includes(`    name: ${job.name}\n`));
+    assert.ok(jobSource(job.key).includes(`    timeout-minutes: ${job.minutes}\n`));
+  }
+  const shared = jobSource("shared-profile");
+  assert.match(shared, /^    runs-on: ubuntu-24\.04$/mu);
+  assert.match(shared, /^    timeout-minutes: 60$/mu);
+  assert.doesNotMatch(shared, /self-hosted|CI_BROWSER_SELF_HOSTED/u);
+  assert.equal((read(".github/workflows/browser-e2e.yml").match(/vars\.CI_BROWSER_SELF_HOSTED/g) ?? []).length, 2);
+});
+
+test("browser labels bind each literal job, repository, run, attempt and caller trust", () => {
+  for (const job of routedJobs) for (const event of ["pull_request", "push"]) {
+    const github = callerContext(event), trust = event === "push" ? "main" : "pr";
+    const runner = selectBrowser(job, github);
+    assert.deepEqual(runner, { group: `org/instafy-ci-${trust}`,
+      labels: ["self-hosted", "Linux", "ARM64", `instafy-ci-bootstrap-1001-2002-3-${job.label}`, `instafy-ci-trust-${trust}`] });
+    for (const field of ["repository_id", "run_id", "run_attempt"]) {
+      const other = structuredClone(github); other[field] = "9009";
+      assert.notEqual(selectBrowser(job, other).labels[3], runner.labels[3]);
+    }
+  }
+});
+
+test("public, fork, manual, alternate caller and stale-shaped browser routing stay hosted", () => {
+  for (const job of routedJobs) {
+    for (const event of ["workflow_dispatch", "workflow_call", "pull_request_target", "schedule", "workflow_run"]) {
+      assert.equal(selectBrowser(job, callerContext(event)), "ubuntu-24.04");
+    }
+    for (const event of ["pull_request", "push"]) for (const mutate of [
+      g => { g.event.repository.private = false; }, g => { g.repository = "someone/instafy"; },
+      g => { delete g.workflow_ref; }, g => { g.workflow_ref = `instafy-dev/instafy/.github/workflows/browser-e2e.yml@${g.ref}`; },
+      g => { g.workflow_ref = `instafy-dev/instafy/.github/workflows/other.yml@${g.ref}`; },
+      g => { g.workflow_ref = "instafy-dev/instafy/.github/workflows/build.yml@refs/heads/other"; },
+    ]) { const g = callerContext(event); mutate(g); assert.equal(selectBrowser(job, g), "ubuntu-24.04"); }
+    for (const mutate of [
+      g => { g.event.pull_request.base.ref = "other"; },
+      g => { g.event.pull_request.base.repo.full_name = "someone/instafy"; },
+      g => { g.event.pull_request.head.repo.full_name = "someone/instafy"; },
+      g => { g.event.pull_request.head.repo.fork = true; },
+      g => { g.event.pull_request.number = 12; },
+      g => { g.ref = "refs/heads/main"; g.workflow_ref = `instafy-dev/instafy/.github/workflows/build.yml@${g.ref}`; },
+    ]) { const g = callerContext(); mutate(g); assert.equal(selectBrowser(job, g), "ubuntu-24.04"); }
+    for (const mutate of [g => { g.ref_protected = false; }, g => { g.ref = "refs/heads/other"; g.workflow_ref = `instafy-dev/instafy/.github/workflows/build.yml@${g.ref}`; }]) {
+      const g = callerContext("push"); mutate(g); assert.equal(selectBrowser(job, g), "ubuntu-24.04");
+    }
+  }
+});
+
+function qualifyBrowser(job, mutate = () => {}, missingTool) {
+  const source = jobSource(job.key);
+  assert.match(source, /    steps:\n      - name: Qualify isolated browser CI runner\n        if: runner.environment == 'self-hosted'\n        shell: bash\n        run: \|/u);
+  const program = source.match(/          node <<'NODE'\n([\s\S]*?)          NODE\n/u);
+  assert.ok(program && source.indexOf(program[0]) < source.indexOf("uses: actions/checkout@"));
+  const state = { platform: "linux", arch: "arm64", getuid: () => 503, versions: { node: "22.23.2" },
+    env: { RUNNER_OS: "Linux", RUNNER_ARCH: "ARM64", INSTAFY_CI_JOB_ISOLATION: "ephemeral" } };
+  mutate(state); const observed = [];
+  vm.runInNewContext(program[1].replace(/^          /gmu, ""), { process: state, require(name) {
+    if (name === "node:assert/strict") return assert;
+    assert.equal(name, "node:child_process");
+    return { execFileSync(file, args, options) {
+      assert.equal(file, "/bin/bash"); assert.equal(args[1], 'command -v "$1" >/dev/null');
+      assert.equal(options.timeout, 1000); assert.equal(options.stdio, "ignore");
+      observed.push(args[3]); if (args[3] === missingTool) throw Error("missing prerequisite");
+    } };
+  } }, { timeout: 1000 });
+  return observed;
+}
+
+test("browser qualification fails before checkout for wrong isolation, platform, Node or missing baseline tools", () => {
+  for (const job of routedJobs) {
+    const tools = qualifyBrowser(job);
+    assert.deepEqual(tools, ["bash", "git", "curl", "tar", "unzip", "sudo", "apt-get", "xvfb-run", "Xvfb", "xauth"]);
+    for (const tool of tools) assert.throws(() => qualifyBrowser(job, () => {}, tool));
+    for (const mutate of [s => { s.platform = "darwin"; }, s => { s.arch = "x64"; }, s => { s.getuid = () => 0; },
+      s => { s.versions.node = "20.20.2"; }, s => { s.env.RUNNER_OS = "macOS"; }, s => { s.env.RUNNER_ARCH = "X64"; },
+      s => { delete s.env.INSTAFY_CI_JOB_ISOLATION; }, s => { s.env.INSTAFY_ENV_DIR = "/inert-private-env"; }]) {
+      assert.throws(() => qualifyBrowser(job, mutate));
+    }
+    assert.equal((jobSource(job.key).match(/^        if: /gmu) ?? []).length, 2, "only qualification and always-upload may be conditional");
+  }
+});
 
 test("Public Build includes browser verification in its existing release result", () => {
   const build = read(".github/workflows/build.yml");
@@ -17,9 +131,10 @@ test("Public Build includes browser verification in its existing release result"
 test("required browser lanes execute without secret or production authority", () => {
   const workflow = read(".github/workflows/browser-e2e.yml");
   assert.match(workflow, /\n  workflow_call:/);
-  assert.doesNotMatch(workflow, /secrets:|secrets\.|continue-on-error:|pull_request_target:|self-hosted|environment:/);
+  assert.doesNotMatch(workflow, /secrets:|secrets\.|continue-on-error:|pull_request_target:|environment:/);
   assert.equal((workflow.match(/persist-credentials: false/g) ?? []).length, 3);
-  assert.equal((workflow.match(/runs-on: ubuntu-24\.04/g) ?? []).length, 3);
+  assert.equal((workflow.match(/runs-on: ubuntu-24\.04/g) ?? []).length, 1);
+  assert.equal((workflow.match(/\|\| 'ubuntu-24\.04' }}/g) ?? []).length, 2);
   assert.match(workflow, /xvfb-run -a pnpm test:browser:ci personal/);
   assert.match(workflow, /run: pnpm test:browser:ci browser-ui/);
   assert.match(workflow, /xvfb-run -a node scripts\/browser-profile-e2e\.mjs/);
@@ -67,7 +182,8 @@ test("the required browser UI job includes the real co-browsing protocol fixture
   const components = job.indexOf("run: pnpm test:browser:ci browser-ui");
   assert.ok(install >= 0 && guards > install && fixture > guards && components > fixture);
   assert.match(job, /packages\/frontend\/test-results\/browser-ci\/shared-cobrowsing/);
-  assert.doesNotMatch(job.slice(0, components), /if:|continue-on-error:|secrets:|secrets\./);
+  const beforeChecks = job.slice(0, components).replace("        if: runner.environment == 'self-hosted'\n", "");
+  assert.doesNotMatch(beforeChecks, /if:|continue-on-error:|secrets:|secrets\./);
   assert.ok(fs.existsSync(path.join(root, "scripts/shared-browser-cobrowsing-e2e.mjs")));
   assert.ok(fs.existsSync(path.join(root, "scripts/shared-browser-cobrowsing-e2e.test.mjs")));
 });
@@ -85,6 +201,6 @@ test("the expanded browser UI inventory has a bounded suite budget without relax
   assert.equal(REQUIRED_BROWSER_LANES["browser-ui"].minimumTests, 39);
   const workflow = read(".github/workflows/browser-e2e.yml");
   const job = workflow.split("\n  browser-ui:\n")[1].split("\n  shared-profile:\n")[0];
-  assert.match(job, /^\s+runs-on: ubuntu-24\.04$/m);
+  assert.match(job, /\|\| 'ubuntu-24\.04' }}/);
   assert.match(job, /^\s+timeout-minutes: 15$/m);
 });

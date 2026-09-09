@@ -10,9 +10,41 @@ permissions:
 jobs:
   personal:
     name: Personal Browser E2E
-    runs-on: ubuntu-24.04
+    runs-on: >-
+      ${{ vars.CI_BROWSER_SELF_HOSTED == 'true'
+          && github.repository == 'instafy-dev/instafy'
+          && github.event.repository.private == true
+          && github.workflow_ref == format('instafy-dev/instafy/.github/workflows/build.yml@{0}', github.ref)
+          && ((github.event_name == 'pull_request'
+               && github.ref == format('refs/pull/{0}/merge', github.event.pull_request.number)
+               && github.event.pull_request.base.ref == 'main'
+               && github.event.pull_request.base.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.fork == false)
+              || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
+          && fromJSON(format('{{"group":"org/instafy-ci-{3}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-browser-personal","instafy-ci-trust-{3}"]}}', github.repository_id, github.run_id, github.run_attempt, github.event_name == 'push' && 'main' || 'pr'))
+          || 'ubuntu-24.04' }}
     timeout-minutes: 20
     steps:
+      - name: Qualify isolated browser CI runner
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const { execFileSync } = require('node:child_process');
+          assert.equal(process.platform, 'linux');
+          assert.equal(process.arch, 'arm64');
+          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
+          assert.equal(process.versions.node.split('.')[0], '22');
+          assert.equal(process.env.RUNNER_OS, 'Linux');
+          assert.equal(process.env.RUNNER_ARCH, 'ARM64');
+          assert.equal(process.env.INSTAFY_CI_JOB_ISOLATION, 'ephemeral');
+          assert.ok(!process.env.INSTAFY_ENV_DIR);
+          for (const tool of ['bash', 'git', 'curl', 'tar', 'unzip', 'sudo', 'apt-get', 'xvfb-run', 'Xvfb', 'xauth']) {
+            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'browser-ci-preflight', tool], { timeout: 1000, stdio: 'ignore' });
+          }
+          NODE
       - name: Checkout the tested revision
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -51,9 +83,41 @@ jobs:
 
   browser-ui:
     name: Browser UI rendering
-    runs-on: ubuntu-24.04
+    runs-on: >-
+      ${{ vars.CI_BROWSER_SELF_HOSTED == 'true'
+          && github.repository == 'instafy-dev/instafy'
+          && github.event.repository.private == true
+          && github.workflow_ref == format('instafy-dev/instafy/.github/workflows/build.yml@{0}', github.ref)
+          && ((github.event_name == 'pull_request'
+               && github.ref == format('refs/pull/{0}/merge', github.event.pull_request.number)
+               && github.event.pull_request.base.ref == 'main'
+               && github.event.pull_request.base.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.fork == false)
+              || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
+          && fromJSON(format('{{"group":"org/instafy-ci-{3}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-browser-ui","instafy-ci-trust-{3}"]}}', github.repository_id, github.run_id, github.run_attempt, github.event_name == 'push' && 'main' || 'pr'))
+          || 'ubuntu-24.04' }}
     timeout-minutes: 15
     steps:
+      - name: Qualify isolated browser CI runner
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const { execFileSync } = require('node:child_process');
+          assert.equal(process.platform, 'linux');
+          assert.equal(process.arch, 'arm64');
+          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
+          assert.equal(process.versions.node.split('.')[0], '22');
+          assert.equal(process.env.RUNNER_OS, 'Linux');
+          assert.equal(process.env.RUNNER_ARCH, 'ARM64');
+          assert.equal(process.env.INSTAFY_CI_JOB_ISOLATION, 'ephemeral');
+          assert.ok(!process.env.INSTAFY_ENV_DIR);
+          for (const tool of ['bash', 'git', 'curl', 'tar', 'unzip', 'sudo', 'apt-get', 'xvfb-run', 'Xvfb', 'xauth']) {
+            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'browser-ci-preflight', tool], { timeout: 1000, stdio: 'ignore' });
+          }
+          NODE
       - name: Checkout the tested revision
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:

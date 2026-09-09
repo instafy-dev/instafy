@@ -105,8 +105,8 @@ Before checkout, each self-hosted job requires an actual non-root Linux ARM64
 process, Node22, the ephemeral marker, no private environment directory and its
 baseline tools. This prerequisite check does not itself prove guest isolation.
 
-Browsers and all release jobs remain hosted. JavaScript and Rust compilation/tests
-have their own separately gated splits described below.
+Release jobs remain outside these switches. JavaScript, Rust compilation/tests
+and the two browser lanes have their own independent switches described below.
 The four job names, permissions and timeouts are unchanged; the main scanner
 uses the same pinned x64/ARM64 Gitleaks archives as the boundary. Disable the
 expanded switch to restore hosted routing for new runs; already queued jobs
@@ -319,6 +319,32 @@ operator replies, review, resolution, acknowledgement, customer follow-up, and r
 The privacy check verifies owner isolation, operator boundaries, and account mismatch rejection.
 
 ## Secret-free browser CI lanes
+
+The independent, default-off `CI_BROWSER_SELF_HOSTED=true` switch covers only
+`Browser verification / Browser UI rendering` (15 minutes) and
+`Browser verification / Personal Browser E2E` (20 minutes), called by Public
+Build. It requires private visibility, a same-repository PR to `main` or a
+protected-main push, and the exact `build.yml` caller. Forks, public visibility,
+manual runs and other callers retain `ubuntu-24.04`; the 60-minute Shared
+Browser profile job remains hosted. Existing checks, permissions, locked
+installations, reports and timeout limits are unchanged.
+
+The two label suffixes are `public-browser-ui` and `public-browser-personal`,
+using the same trust-specific groups and per-run/attempt labels described
+above. Provisioning must authenticate both caller and callee bytes at the same
+tested commit and protected main, including the exact attempt's reusable-workflow
+metadata. A caller-supplied input or matching label is not source authority.
+Initially enable this switch only for supervised cold ARM64 qualification;
+require both jobs and their cleanup to pass before routine use. Workers require
+Node22, Xvfb and xauth before checkout; the unchanged
+Playwright installation obtains Chromium and system libraries. Restricted
+workers must configure the disposable guest's APT proxy too: sudo does not
+preserve the browser installer's proxy environment. Keep TLS and browser
+sandbox protections intact. No template, host paths or proxy credentials belong
+in the public workflow. Disable the switch to restore hosted routing for new
+runs; queued jobs retain their original selection. The routing and prerequisite
+regressions run in `node --test scripts/browser-ci-workflow.test.mjs`; they are
+not a substitute for real browser execution and teardown.
 
 These lanes use disposable data, do not load local `.env` files, and do not
 need a real account, model API key, or production controller. Personal and UI
