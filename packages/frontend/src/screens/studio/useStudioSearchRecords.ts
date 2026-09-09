@@ -190,6 +190,6 @@ export function useStudioSearchRecords({
     }
     return output;
   }, [activeConversations, canSearch, current.conversations, current.projects, onActivate, projects, viewerUserId]);
-  const notice = `Searches recent chat titles (up to ${CHAT_LIMIT} per space), known file names and settings. Message and file contents are not included.${current.limitedSpaces ? ` Showing the first ${SPACE_LIMIT} spaces alphabetically; choose a team or space to narrow the search.` : ""}`;
+  const notice = `Searches recent chat titles (up to ${CHAT_LIMIT} per space), opened file names and settings. Message and file contents are not included.${current.limitedSpaces ? ` Showing the first ${SPACE_LIMIT} spaces alphabetically; choose a team or space to narrow the search.` : ""}`;
   return { records, loading: current.loading, error: current.error, notice, retry };
 }

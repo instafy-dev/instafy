@@ -776,14 +776,17 @@ function StudioLayoutInner() {
     enabled: routeOwnedMobileWorkspaceDrawer,
     history: mobileHistory,
   });
-  const visibleChatId = !searchHidesWorkspace && isChatSurfaceVisible && leftDrawer !== "history"
+  // Search temporarily covers the workspace; it does not end the current chat
+  // visit or discard an established blank chat from recents.
+  const retainedChatId = isChatSurfaceVisible && leftDrawer !== "history"
     ? (activeWorkspaceTab?.kind === "conversation" || activeWorkspaceTab?.kind === "jobThread"
       ? activeWorkspaceTab.conversationId
       : activeConversationId)
     : null;
+  const visibleChatId = searchHidesWorkspace ? null : retainedChatId;
   const recentConversations = useRecentConversations({
     conversations,
-    activeConversationId: visibleChatId,
+    activeConversationId: retainedChatId,
     userId: currentUserId,
     projectKey: conversationsProjectKey,
     // The local guest fallback has no authenticated remote history to wait for.

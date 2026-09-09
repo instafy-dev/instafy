@@ -11,6 +11,7 @@ export interface MobileStudioNavigationHeaderProps {
   history: StudioHistory;
   title: string;
   spaceName: string;
+  showSpaceName?: boolean;
   onOpenPicker: () => void;
   onOpenChats: () => void;
   onOpenSidebar?: () => void;
@@ -29,7 +30,7 @@ const TOUCH_TARGET = "!min-h-12 !min-w-12";
 /** Touch navigation uses the history owner supplied by Studio, never a second
  * history stack. Secondary actions keep the existing shared popover controls. */
 export function MobileStudioNavigationHeader({
-  history, title, spaceName, onOpenPicker, onOpenChats,
+  history, title, spaceName, showSpaceName = true, onOpenPicker, onOpenChats,
   onOpenSidebar, sidebarOpen = false, onOpenSettings,
   onNewChat, onNewPrivateChat, parentConversation, notificationBell, tabsAction, onMoreOpenChange,
 }: MobileStudioNavigationHeaderProps) {
@@ -78,7 +79,7 @@ export function MobileStudioNavigationHeader({
       >
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-semibold" data-testid="mobile-header-title">{title}</span>
-          <span className="block truncate text-xs font-normal text-slate-600 dark:text-slate-400" data-testid="mobile-header-space">{spaceName}</span>
+          {showSpaceName ? <span className="block truncate text-xs font-normal text-slate-600 dark:text-slate-400" data-testid="mobile-header-space">{spaceName}</span> : null}
         </span>
         <SidebarExpand className="h-4 w-4 shrink-0" aria-hidden="true" />
       </Button>

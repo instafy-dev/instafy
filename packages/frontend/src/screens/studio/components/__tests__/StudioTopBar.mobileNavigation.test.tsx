@@ -66,6 +66,33 @@ describe("StudioTopBar mobile navigation integration", () => {
     expect(query("studio-mobile-history-bar")).toBeNull();
   });
 
+  it.each([true, false])("omits the repeated space label beneath a context header while preserving navigation (touch=%s)", async touch => {
+    props.contextHeaderAbove = true;
+    props.mobileNavigation!.history.canGoBack = true;
+    mocks.posture.mockReturnValue({ isLargeScreen: false, showTopbarHomeButton: false, showTouchBottomDock: touch });
+    await render();
+    const pickerId = touch ? "mobile-header-picker" : "topbar-sidebar-toggle";
+    expect(query(pickerId)?.textContent).toBe("Active chat");
+    expect(query(pickerId)?.getAttribute("aria-label")).toBe("Open space navigation: Alpha space");
+    expect(query("mobile-header-space")).toBeNull();
+    await click(pickerId);
+    expect(mocks.controls().onToggleSidebar).toHaveBeenCalledOnce();
+
+    if (touch) {
+      await click("mobile-header-back");
+      expect(props.mobileNavigation!.history.goBack).toHaveBeenCalledOnce();
+      await click("mobile-header-more");
+      expect(query("chat-new-chat-private")).not.toBeNull();
+      expect(query("chat-new-chat-public")).not.toBeNull();
+      expect(query("topbar-tab-overflow")).not.toBeNull();
+    } else {
+      expect(query("studio-mobile-history-bar")).not.toBeNull();
+      expect(query("topbar-tab-selector")).not.toBeNull();
+      await click("topbar-new-conversation");
+      expect(query("chat-new-chat-private")).not.toBeNull();
+    }
+  });
+
   it.each(["home", "team", "account"])("opens the regular navigation drawer on touch %s while keeping Home and profile actions stable", async (navigationPage) => {
     mocks.controls.mockReturnValue({ ...mocks.controls(), navigationPage, activeTeamName: "Research team", activeTeamAvatarUrl: "https://example.test/team.png", onOpenHome: vi.fn(), onOpenTeamSwitcher: vi.fn(), onOpenProfileSettings: vi.fn() });
     await render();

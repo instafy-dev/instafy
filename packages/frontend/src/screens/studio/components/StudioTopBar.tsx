@@ -562,6 +562,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation, newChatInSide
               onOpenPicker={onToggleSidebar ?? mobileNavigation.onOpenPicker}
               title={topbarLocationTitle}
               spaceName={resolvedProjectName}
+              showSpaceName={!contextHeaderAbove}
               onOpenSidebar={onToggleSidebar}
               sidebarOpen={sidebarOpen}
               onOpenSettings={onOpenProjectSettings}
@@ -599,7 +600,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation, newChatInSide
             className={`${COMPACT_TAB_SELECTOR_CLASS} flex-1 text-left`}
           >
             <span className="min-w-0 flex-1">
-              <span className="block truncate text-2xs font-normal text-slate-600 dark:text-slate-400">{resolvedProjectName}</span>
+              {!contextHeaderAbove ? <span className="block truncate text-2xs font-normal text-slate-600 dark:text-slate-400">{resolvedProjectName}</span> : null}
               <span className="block truncate text-xs font-semibold">{topbarLocationTitle}</span>
             </span>
             <SidebarExpand className="h-4 w-4 shrink-0" aria-hidden="true" />

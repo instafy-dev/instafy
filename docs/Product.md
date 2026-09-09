@@ -125,12 +125,13 @@ picker still performs normal navigation. Desktop dismissal clears the query and 
 working scope.
 
 Search reads authenticated accessible-space and conversation summaries. It matches recent
-chat titles, already-known file paths, and space/team settings or automation destinations;
+chat titles, opened file paths, and space/team settings or automation destinations;
 it does not search message bodies or file contents. Reads cover up to 200 chats per space
 and 40 spaces per request, with explicit coverage, loading, error and retry feedback. Results
 initially show 100 rows with Show more; queries still match the full retrieved set. Files
-from unvisited/unloaded directories are not indexed. Search never starts runtimes or reads
-files in the background. Scope/account changes and access refresh discard stale results.
+must have been opened to appear in the file index; directory listings alone do not populate
+it. Search never starts runtimes or reads files in the background. Scope/account changes and
+access refresh discard stale results.
 File results wait for the authorized destination space to hydrate before opening an editor;
 a later navigation cancels that pending selection.
 

@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createInitialConversation } from "../../conversations/conversationState";
 import { useRecentConversations, type UseRecentConversationsOptions } from "../useRecentConversations";
+import { useStudioSearch } from "../../screens/studio/components/useStudioSearch";
 
 function conversation(id: string, overrides: Partial<ReturnType<typeof createInitialConversation>> = {}) {
   return {
@@ -22,6 +23,16 @@ function Probe(props: UseRecentConversationsOptions) {
       {chat.title}
     </span>
   ))}</div>;
+}
+
+function SearchRecentsProbe(props: UseRecentConversationsOptions) {
+  const search = useStudioSearch({ scopeKey: `${props.userId}:${props.projectKey}`,
+    org: { id: "team-1", name: "Team" }, space: { id: props.projectKey, name: "Space" }, records: [], persistentControl: true });
+  const recent = useRecentConversations(props);
+  const visibleChatId = search.open ? null : props.activeConversationId;
+  return <>{search.renderControl()}{search.results}<div data-search-scope={search.scope}>{recent.map((chat) => (
+    <span key={chat.localId} data-id={chat.localId} data-selected={visibleChatId === chat.localId || undefined}>{chat.title}</span>
+  ))}</div></>;
 }
 
 describe("useRecentConversations", () => {
@@ -150,6 +161,28 @@ describe("useRecentConversations", () => {
     expect(ids()).toEqual(["blank"]);
     await render({ activeConversationId: null, historyResolved: true });
     expect(ids()).toEqual([]);
+  });
+
+  it("retains an established blank chat's visit while search broadens scope during a history refresh", async () => {
+    options = { ...options, conversations: [conversation("blank", { controllerId: null })], activeConversationId: "blank" };
+    await act(async () => root.render(<SearchRecentsProbe {...options} />));
+    expect(ids()).toEqual(["blank"]);
+    expect(container.querySelector('[data-id="blank"]')?.getAttribute("data-selected")).toBe("true");
+    const input = container.querySelector<HTMLInputElement>('[data-testid="studio-search-input"]')!;
+    await act(async () => input.focus());
+    options = { ...options, historyResolved: false };
+    await act(async () => root.render(<SearchRecentsProbe {...options} />));
+    expect(ids()).toEqual(["blank"]);
+    expect(container.querySelector('[data-id="blank"]')?.hasAttribute("data-selected")).toBe(false);
+    for (const expectedScope of ["org", "all"]) {
+      await act(async () => input.dispatchEvent(new KeyboardEvent("keydown", { key: "Backspace", bubbles: true })));
+      expect(container.querySelector("[data-search-scope]")?.getAttribute("data-search-scope")).toBe(expectedScope);
+      expect(ids()).toEqual(["blank"]);
+    }
+    await act(async () => input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(ids()).toEqual(["blank"]);
+    expect(container.querySelector('[data-id="blank"]')?.getAttribute("data-selected")).toBe("true");
+    expect(storedVisits()).toEqual([{ scope: ["user-1", "space-1"], ids: ["blank"] }]);
   });
 
   it("limits visible chats to six and bounds persisted visits independently", async () => {

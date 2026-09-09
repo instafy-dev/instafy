@@ -117,7 +117,7 @@ describe("useStudioSearchRecords", () => {
     expect(JSON.stringify(current.records)).not.toContain("content must not be indexed");
     files[0].activate();
     expect(options.onActivate).toHaveBeenLastCalledWith({ kind: "file", projectId: "space-a", path: "src/main.ts", fileId: "file-0" });
-    expect(current.notice).toContain("known file names");
+    expect(current.notice).toContain("opened file names");
     expect(current.notice).toContain("Message and file contents are not included");
   });
 
