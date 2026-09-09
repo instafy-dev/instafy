@@ -297,7 +297,9 @@ requires the locked Supabase CLI 2.92.0: its ten-image `services --output json`
 inventory is supplemented with the four ancillary images from that exact CLI.
 Full-stack mode prepares all 14 images, including disabled extras (an intentional
 download/disk cost); database-only mode prepares only its resolved Postgres image.
-It does not exclude services, skip tests, alter TLS, or increase runner limits.
+The explicit Auth-only profile prepares five images after validating the same
+complete pinned inventory. Serial preparation itself does not change the selected
+startup profile, skip tests, alter TLS, or increase runner limits.
 
 Preparation uses an empty temporary CLI/Docker home and anonymous public-ECR
 pulls against the default local Docker daemon. Linked projects, local dotenv
@@ -316,8 +318,21 @@ The independent, default-off `CI_DATABASE_SELF_HOSTED=true` switch covers only
 `Controller database tests` (30 minutes) and `signup -> email -> activate`
 (25 minutes). Both preserve their complete existing commands, frozen Node20
 workspace installation, and read-only checkout. Controller tests use the local
-Postgres-only stack and all public migrations; auth-email starts the full local
-Supabase stack, including GoTrue and its mail catcher. Neither lane needs
+Postgres-only stack and all public migrations; auth-email explicitly sets
+`SUPABASE_AUTH_ONLY=1` for its startup step. This fixed profile retains Postgres,
+GoTrue, Kong, Mailpit and PostgREST; PostgREST is needed for the unchanged CLI
+status reader to report `API_URL`. Both initial startup and its existing retry
+exclude Realtime, Storage, imgproxy, Edge Runtime, Postgres Meta, Studio,
+Logflare, Vector and Supavisor. Template-mount verification, every migration,
+status resolution and all signup/email/OTP/activation assertions remain intact.
+
+For the same local profile, run `SUPABASE_AUTH_ONLY=1 pnpm supabase:up`, optionally
+with `SUPABASE_SERIAL_PULL=true`. Auth-only accepts only unset, `0` or `1`, and
+cannot be combined with `SUPABASE_DATABASE_ONLY=1`. Neither flag changes default
+full-stack startup; database-only startup still uses `supabase db start`.
+An already-running stack retains the existing reuse behavior, so the Auth workflow
+explicitly stops stale stacks first. A passing Auth-only run does not qualify the
+full-stack workloads used by Shared Browser. Neither lane needs
 production credentials, an external mailbox, a deployment, or released images.
 
 Only private, same-repository PRs to `main` and protected-main pushes may use
