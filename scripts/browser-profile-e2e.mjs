@@ -167,6 +167,35 @@ export function fixtureChildEnvironment(env) {
   return Object.fromEntries(allowed.filter(key => env[key] !== undefined).map(key => [key, env[key]]));
 }
 
+// Compilation alone may need the disposable CI runner's download proxy. Keep
+// this separate from every runtime, database, browser and display environment.
+// Only credential-free HTTP proxy origins cross this explicit opt-in boundary;
+// no ambient bypass lists, authentication, TLS overrides or Node options do.
+export function fixtureCompilerEnvironment(env) {
+  const compiler = fixtureChildEnvironment(env);
+  const enabled = env.INSTAFY_SHARED_BROWSER_COMPILER_PROXY;
+  if (enabled === undefined || enabled === "" || enabled === "0") return compiler;
+  assert.equal(enabled, "1", "unknown Shared Browser compiler proxy opt-in");
+  assert.equal(env.CI, "true", "compiler proxy requires explicit CI");
+  assert.equal(env.GITHUB_ACTIONS, "true", "compiler proxy requires the Actions fixture");
+  assert.equal(env.INSTAFY_CI_JOB_ISOLATION, "ephemeral", "compiler proxy requires a disposable job");
+  for (const key of ["HTTP_PROXY", "HTTPS_PROXY"]) {
+    const value = env[key];
+    let proxy;
+    try {
+      assert.ok(typeof value === "string" && value.length > 0 && value.length <= 2048 && !/\s/u.test(value));
+      proxy = new URL(value);
+      assert.ok(["http:", "https:"].includes(proxy.protocol));
+      assert.ok(proxy.hostname && !proxy.username && !proxy.password && !proxy.search && !proxy.hash && proxy.pathname === "/");
+    } catch { throw new Error("credential-free compiler proxy origin required"); }
+    compiler[key] = proxy.origin;
+    // Cargo also consults lowercase http_proxy. Derive aliases from the same
+    // validated origins; never inherit competing lowercase ambient values.
+    compiler[key.toLowerCase()] = proxy.origin;
+  }
+  return compiler;
+}
+
 export async function copyFixtureEntrypoint(binDirectory) {
   const destination = path.join(binDirectory, "runtime-entrypoint");
   // Docker makes the checked-in 0644 script executable while copying it into
@@ -329,6 +358,7 @@ async function browserAction(mode, value = "") {
 async function lifecycle() {
   validateFixtureEnvironment(process.env);
   const env = fixtureChildEnvironment(process.env);
+  const compilerEnv = fixtureCompilerEnvironment(process.env);
   const playwright = playwrightPackage();
   const temporary = await mkdtemp(path.join(tmpdir(), "instafy-profile-e2e-"));
   let claimedFixedDirectory = false;
@@ -355,7 +385,7 @@ async function lifecycle() {
     await mkdir(bin);
     const entrypoint = await copyFixtureEntrypoint(bin);
     stage = "build-egress-helper";
-    await run("go", ["build", "-o", path.join(bin, "browser-egress-proxy"), "."], { cwd: path.join(root, "packages/browser-egress-proxy") });
+    await run("go", ["build", "-o", path.join(bin, "browser-egress-proxy"), "."], { cwd: path.join(root, "packages/browser-egress-proxy"), env: compilerEnv });
     const supportedChromium = ["/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome", "/usr/bin/google-chrome-stable"];
     let found = false;
     for (const candidate of supportedChromium) {
@@ -363,9 +393,9 @@ async function lifecycle() {
     }
     assert.ok(found, "existing production launch helper requires /usr/bin/chromium or /usr/bin/google-chrome (runner-only symlink to Playwright Chromium is supported)");
     stage = "build-runtime-fixture";
-    const agent = cargoTestArtifact(await run("cargo", ["test", "--locked", "--manifest-path", "packages/runtime-agent/Cargo.toml", "--test", "browser_profile_e2e", "--no-run", "--message-format=json"]), "browser_profile_e2e", "test");
+    const agent = cargoTestArtifact(await run("cargo", ["test", "--locked", "--manifest-path", "packages/runtime-agent/Cargo.toml", "--test", "browser_profile_e2e", "--no-run", "--message-format=json"], { env: compilerEnv }), "browser_profile_e2e", "test");
     stage = "build-controller-fixture";
-    const controller = cargoTestArtifact(await run("cargo", ["test", "--locked", "--manifest-path", "packages/runtime-controller/Cargo.toml", "--bin", "runtime-controller", "--no-run", "--message-format=json"]), "runtime-controller", "bin");
+    const controller = cargoTestArtifact(await run("cargo", ["test", "--locked", "--manifest-path", "packages/runtime-controller/Cargo.toml", "--bin", "runtime-controller", "--no-run", "--message-format=json"], { env: compilerEnv }), "runtime-controller", "bin");
     const runEnv = { ...env,
       PATH: `${bin}:${env.PATH}`,
       TEST_DATABASE_URL: process.env.TEST_DATABASE_URL,
