@@ -237,6 +237,16 @@ and each full child workload fit their allotted window. Before checkout,
 self-hosted children require non-root Linux ARM64, Node22, the ephemeral marker,
 no private environment directory, and native Rust/C build tools. Those checks
 do not prove that native libraries, downloads or workload timings are ready.
+Each self-hosted child then installs the fixed missing native package set
+(`clang`, `lld`, `cmake`, `libcap-dev`, `protobuf-compiler`) in a visible,
+five-minute GitHub step inside the unchanged 30-minute job. Hosted jobs and
+aggregates do not run that step. The manager must first qualify only APT's
+fixed proxy configuration in the fresh guest; package installation stays in
+the workflow, without changing the base image, repository trust or TLS rules.
+The corresponding qualification resource profile is 8GiB/two CPUs and two
+parallel Cargo jobs for these ten children only; aggregates and unrelated
+jobs retain their existing resources. That configuration is not compile or
+memory evidence.
 Qualify each real cold ARM64 compile/test, Cargo and Node20 proxy downloads,
 memory/disk use and complete guest teardown first. A split or a warm cache hit
 is not that qualification; never reduce the test selection or ignore a timeout

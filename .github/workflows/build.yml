@@ -725,6 +725,25 @@ jobs:
       - name: Verify Rust CI coverage and routing
         run: node --test scripts/check-rust-ci.test.mjs
 
+      - name: Install scoped Rust native prerequisites
+        if: runner.environment == 'self-hosted'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
+          sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          for package in clang lld cmake libcap-dev protobuf-compiler; do
+            [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
+          done
+          pkg-config --exists libcap
+          clang --version
+          ld.lld --version
+          cmake --version
+          protoc --version
+
       - name: Set up stable Rust
         run: |
           rustup toolchain install stable --profile minimal
@@ -795,6 +814,25 @@ jobs:
 
       - name: Verify Rust CI coverage and routing
         run: node --test scripts/check-rust-ci.test.mjs
+
+      - name: Install scoped Rust native prerequisites
+        if: runner.environment == 'self-hosted'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
+          sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          for package in clang lld cmake libcap-dev protobuf-compiler; do
+            [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
+          done
+          pkg-config --exists libcap
+          clang --version
+          ld.lld --version
+          cmake --version
+          protoc --version
 
       - name: Set up stable Rust
         run: |
@@ -867,6 +905,25 @@ jobs:
       - name: Verify Rust CI coverage and routing
         run: node --test scripts/check-rust-ci.test.mjs
 
+      - name: Install scoped Rust native prerequisites
+        if: runner.environment == 'self-hosted'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
+          sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          for package in clang lld cmake libcap-dev protobuf-compiler; do
+            [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
+          done
+          pkg-config --exists libcap
+          clang --version
+          ld.lld --version
+          cmake --version
+          protoc --version
+
       - name: Set up stable Rust
         run: |
           rustup toolchain install stable --profile minimal
@@ -938,6 +995,25 @@ jobs:
       - name: Verify Rust CI coverage and routing
         run: node --test scripts/check-rust-ci.test.mjs
 
+      - name: Install scoped Rust native prerequisites
+        if: runner.environment == 'self-hosted'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
+          sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          for package in clang lld cmake libcap-dev protobuf-compiler; do
+            [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
+          done
+          pkg-config --exists libcap
+          clang --version
+          ld.lld --version
+          cmake --version
+          protoc --version
+
       - name: Set up stable Rust
         run: |
           rustup toolchain install stable --profile minimal
@@ -1008,6 +1084,25 @@ jobs:
 
       - name: Verify Rust CI coverage and routing
         run: node --test scripts/check-rust-ci.test.mjs
+
+      - name: Install scoped Rust native prerequisites
+        if: runner.environment == 'self-hosted'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
+          sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          for package in clang lld cmake libcap-dev protobuf-compiler; do
+            [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
+          done
+          pkg-config --exists libcap
+          clang --version
+          ld.lld --version
+          cmake --version
+          protoc --version
 
       - name: Set up stable Rust
         run: |
@@ -1230,6 +1325,25 @@ jobs:
       - name: Verify Rust CI coverage and routing
         run: node --test scripts/check-rust-ci.test.mjs
 
+      - name: Install scoped Rust native prerequisites
+        if: runner.environment == 'self-hosted'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
+          sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          for package in clang lld cmake libcap-dev protobuf-compiler; do
+            [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
+          done
+          pkg-config --exists libcap
+          clang --version
+          ld.lld --version
+          cmake --version
+          protoc --version
+
       - name: Set up stable Rust
         run: |
           rustup toolchain install stable --profile minimal
@@ -1324,6 +1438,25 @@ jobs:
 
       - name: Verify Rust CI coverage and routing
         run: node --test scripts/check-rust-ci.test.mjs
+
+      - name: Install scoped Rust native prerequisites
+        if: runner.environment == 'self-hosted'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
+          sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          for package in clang lld cmake libcap-dev protobuf-compiler; do
+            [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
+          done
+          pkg-config --exists libcap
+          clang --version
+          ld.lld --version
+          cmake --version
+          protoc --version
 
       - name: Set up stable Rust
         run: |
@@ -1421,6 +1554,25 @@ jobs:
       - name: Verify Rust CI coverage and routing
         run: node --test scripts/check-rust-ci.test.mjs
 
+      - name: Install scoped Rust native prerequisites
+        if: runner.environment == 'self-hosted'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
+          sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          for package in clang lld cmake libcap-dev protobuf-compiler; do
+            [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
+          done
+          pkg-config --exists libcap
+          clang --version
+          ld.lld --version
+          cmake --version
+          protoc --version
+
       - name: Set up stable Rust
         run: |
           rustup toolchain install stable --profile minimal
@@ -1516,6 +1668,25 @@ jobs:
       - name: Verify Rust CI coverage and routing
         run: node --test scripts/check-rust-ci.test.mjs
 
+      - name: Install scoped Rust native prerequisites
+        if: runner.environment == 'self-hosted'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
+          sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          for package in clang lld cmake libcap-dev protobuf-compiler; do
+            [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
+          done
+          pkg-config --exists libcap
+          clang --version
+          ld.lld --version
+          cmake --version
+          protoc --version
+
       - name: Set up stable Rust
         run: |
           rustup toolchain install stable --profile minimal
@@ -1610,6 +1781,25 @@ jobs:
 
       - name: Verify Rust CI coverage and routing
         run: node --test scripts/check-rust-ci.test.mjs
+
+      - name: Install scoped Rust native prerequisites
+        if: runner.environment == 'self-hosted'
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
+          sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          for package in clang lld cmake libcap-dev protobuf-compiler; do
+            [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
+          done
+          pkg-config --exists libcap
+          clang --version
+          ld.lld --version
+          cmake --version
+          protoc --version
 
       - name: Set up stable Rust
         run: |
