@@ -20,7 +20,17 @@ jobs:
   pull-request-policy:
     name: Require reviewed Changeset release intent
     if: ${{ github.event_name == 'pull_request' }}
-    runs-on: ubuntu-24.04
+    runs-on: >-
+      ${{ vars.CI_EXPANDED_SELF_HOSTED == 'true'
+          && github.repository == 'instafy-dev/instafy'
+          && github.event.repository.private == true
+          && github.event_name == 'pull_request'
+          && github.event.pull_request.base.ref == 'main'
+          && github.event.pull_request.base.repo.full_name == github.repository
+          && github.event.pull_request.head.repo.full_name == github.repository
+          && github.event.pull_request.head.repo.fork == false
+          && fromJSON(format('{{"group":"org/instafy-ci-pr","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-npm-policy","instafy-ci-trust-pr"]}}', github.repository_id, github.run_id, github.run_attempt))
+          || 'ubuntu-24.04' }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -46,6 +56,9 @@ jobs:
 
       - name: Install the exact dependency graph without lifecycle scripts
         run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Test expanded CI routing
+        run: node --test scripts/check-expanded-ci-routing.test.mjs
 
       - name: Validate ordinary or generated release changes
         shell: bash
