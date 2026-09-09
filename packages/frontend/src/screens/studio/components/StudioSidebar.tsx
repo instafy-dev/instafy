@@ -14,14 +14,12 @@ import {
   SidebarCollapse,
   SidebarExpand,
   Xmark,
-  Group,
-  Settings,
   Plus,
 } from "iconoir-react";
-import { ChatsIcon, HomeIcon } from "../../../components/AppIcons";
+import { ChatsIcon } from "../../../components/AppIcons";
+import { OctoMark } from "../../../components/OctoMark";
 import { AttentionBadge } from "../../../components/AttentionBadge";
 import { Button, IconButton } from "../../../components/Button";
-import { ControlChevron } from "../../../components/ControlChevron";
 import { Text } from "../../../components/Text";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 
@@ -48,7 +46,6 @@ import { useWorkspaceControls } from "../workspaceControls";
 import type { StudioNavItem, StudioPanel } from "../types";
 import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
 import { getOrgDisambiguator, getOrgDisplayName } from "../../../org/orgNaming";
-import { SidebarOrgDeck } from "./SidebarOrgDeck";
 import { useAppLogs } from "../../../debug/useAppLogs";
 import type { MobileSidebarNavigation } from "../../useMobileSidebarHistory";
 import {
@@ -203,6 +200,7 @@ export function StudioSidebar({
   const workspaceTriggerRef = useRef<HTMLButtonElement | null>(null);
   const browseTriggerRef = useRef<HTMLButtonElement | null>(null);
   const spaceTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const moreTriggerRef = useRef<HTMLButtonElement | null>(null);
   const [workspaceSwitcherMode, setWorkspaceSwitcherMode] = useState<"teams-and-spaces" | "spaces">("teams-and-spaces");
   const requestedSwitcherModeRef = useRef<"teams-and-spaces" | "spaces" | null>(null);
   const [localWorkspaceMobileViewOpen, setWorkspaceMobileViewOpen] = useState(false);
@@ -250,6 +248,7 @@ export function StudioSidebar({
   const workspaceSwitcherOpen = isLargeScreen
     ? desktopWorkspaceSwitcherOpen
     : mobileNavigation ? mobileNavigation.view === "workspace" : desktopWorkspaceSwitcherOpen || localWorkspaceMobileViewOpen;
+  const mobileDrillInOpen = !isLargeScreen && (workspaceSwitcherOpen || moreMobileViewOpen);
   useEffect(() => {
     if (!workspaceSwitcherOpen) return;
     // Header and browser-history entry points always browse all teams. Only
@@ -307,7 +306,7 @@ export function StudioSidebar({
   const hasRecentChats = Boolean(onSelectConversation);
   // Desktop has a header and space selector, plus a team-menu icon when
   // compact. Home/account controls live in the separate global rail.
-  const fixedEntryCount = (desktopRail ? showLabels ? 2 : 3 : showLabels ? 5 : 6) + items.length + (onOpenConversationHistory && !hasRecentChats ? 1 : 0);
+  const fixedEntryCount = (desktopRail ? showLabels ? 2 : 3 : showLabels ? 2 : 4) + items.length + (onOpenConversationHistory && !hasRecentChats ? 1 : 0);
   const recentChatsReservePx = hasRecentChats && showLabels && recentChatsExpanded
     ? Math.max(1, Math.min(recentConversations.length, SIDEBAR_RECENT_CHAT_LIMIT)) * 40 + 56
     : 0;
@@ -914,27 +913,9 @@ export function StudioSidebar({
     publishedActiveTeamRef.current = { user: activeTeamUserKey, ...team };
     onActiveTeamChange?.(team);
   }, [activeOrgKey, activeOrgName, activeOrgAvatarUrl, activeTeamMetadataReady, activeTeamUserKey, onActiveTeamChange]);
-  // The org deck (the team & spaces row's icon) shows the selected team on top
-  // and reads as a stack when there is more than one; switching happens in the
-  // panel it opens. Selection follows the user's CHOICE instantly; the active
-  // project catches up once that team's spaces load.
   const orgDeckTeams = useMemo(
     () => orgOptions.filter((org) => org.key !== "all"),
     [orgOptions],
-  );
-  const orgDeckSelectedKey = activeOrgKey;
-  const orgDeckTeam = useMemo(
-    () => orgDeckTeams.find((team) => team.key === orgDeckSelectedKey) ?? orgDeckTeams[0] ?? null,
-    [orgDeckSelectedKey, orgDeckTeams],
-  );
-  const orgDeckOtherAttention = useMemo(
-    () =>
-      orgDeckTeams.reduce(
-        (total, team) =>
-          team.key === orgDeckSelectedKey ? total : total + (homeAttentionByOrg[team.key] ?? 0),
-        0,
-      ),
-    [homeAttentionByOrg, orgDeckSelectedKey, orgDeckTeams],
   );
   // Refresh the snapshot after every successful load (never after a failure —
   // a flaky request must not erase teams the user really has).
@@ -1299,11 +1280,14 @@ export function StudioSidebar({
   // A selected-team/account/page change discards any open menu, including
   // changes that retain the same loaded project behind a global panel.
   const teamMenu = <StudioSidebarTeamMenu
-    key={JSON.stringify([activeTeamUserKey, activeOrgKey, activeProjectId, activePanel])}
+    key={JSON.stringify([activeTeamUserKey, activeOrgKey, activeProjectId, activePanel, desktopRail, showLabels])}
     teamName={activeOrgName} compact={!showLabels}
     active={activePanel === "team" || activePanel === "settings"}
     rowClassName={`${sidebarRowLayoutClass} ${getSidebarRowToneClass(activePanel === "team" || activePanel === "settings")}`}
     iconClassName={getSidebarNavIconClass(activePanel === "team" || activePanel === "settings")}
+    mobile={!desktopRail}
+    triggerRef={!desktopRail ? workspaceTriggerRef : undefined}
+    onSwitchTeam={!desktopRail ? () => openWorkspaceSwitcher() : undefined}
     onOpenOverview={openSelectedTeam}
     onOpenSettings={activeOrgKey !== "personal" && onOpenOrgSettings ? openSelectedTeamSettings : undefined}
   />;
@@ -1494,125 +1478,36 @@ export function StudioSidebar({
           </div>
           {showLabels ? teamMenu : null}
         </div> : null}
-        <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto overflow-x-hidden pb-2" data-testid="sidebar-context-scroll">
-          {!desktopRail ? <li className="flex items-center gap-1" data-testid="sidebar-team-header">
-            <Button
-              ref={workspaceTriggerRef}
-              variant="ghost"
-              size="sm"
-              radius="lg"
-              data-testid="sidebar-project-button"
-              aria-expanded={workspaceSwitcherOpen}
-              onPress={() => {
-                if (workspaceSwitcherOpen) {
-                  dismissWorkspaceSwitcher();
-                  return;
-                }
-                openWorkspaceSwitcher();
-              }}
-              className={[
-                "group/item relative min-w-0 flex-1 py-1.5 transition focus-visible:ring-offset-0 data-[pressed]:translate-y-0 data-[pressed]:scale-100",
-                sidebarRowLayoutClass,
-                getSidebarRowToneClass(workspaceSwitcherOpen),
-              ].join(" ")}
-              aria-label="Team and spaces"
-            >
-              <span
-                className={[
-                  `relative flex ${sidebarIconShellSizeClass} shrink-0 items-center justify-center rounded-lg transition-transform active:scale-95`,
-                  workspaceSwitcherOpen ? "ring-2 ring-primary-400/60 ring-offset-1 ring-offset-slate-50 dark:ring-offset-[color:var(--color-studio-dark-rail)]" : "",
-                ]
-                  .filter(Boolean)
-                  .join(" ")}
-              >
-                <SidebarOrgDeck
-                  team={orgDeckTeam}
-                  teamCount={orgDeckTeams.length}
-                  otherAttentionCount={orgDeckOtherAttention}
-                  pending={pendingOrgSwitchKey !== null && !mergedProjectsError}
-                />
-              </span>
-              {showLabels ? (
-                <span className="flex min-w-0 flex-1 items-center justify-between gap-2 text-left">
-                  <span className="min-w-0 flex-1">
-                    <Text as="span" variant="bodyStrong" tone="primary" className="block truncate text-sm">
-                      {activeOrgName}
-                    </Text>
-
-                  </span>
-                  <ControlChevron direction={workspaceSwitcherOpen ? "left" : "right"} />
-                </span>
-              ) : null}
-            </Button>
-            {showLabels ? <IconButton variant="ghost" size="sm" aria-label={onRequestClose ? "Close navigation" : "Collapse sidebar"}
-              data-testid="sidebar-drawer-toggle" onPress={onRequestClose ?? onToggleSidebar}
-              isDisabled={!onRequestClose && !onToggleSidebar} className="mr-1 shrink-0">
-              {onRequestClose ? <Xmark className="h-4 w-4" /> : <SidebarCollapse className="h-4 w-4" />}
-            </IconButton> : null}
-          </li> : null}
-
-          {!showLabels && !desktopRail ? <li className="flex justify-center"><IconButton variant="ghost" size="sm"
-            aria-label="Expand sidebar" data-testid="sidebar-drawer-toggle" onPress={onToggleSidebar}
-            isDisabled={!onToggleSidebar}><SidebarExpand className="h-4 w-4" /></IconButton></li> : null}
-          {!desktopRail ? <li>
-            <Button
-              onPress={() => {
-                resetWorkspaceSwitcher();
-                closeMoreMenu();
-                runDestination(() => onSelect("home"));
-              }}
-              variant="ghost"
-              size="sm"
-              radius="lg"
-              fullWidth
-              data-testid="sidebar-home-button"
-              className={[
-                "group/item relative py-1.5 transition focus-visible:ring-offset-0",
-                sidebarRowLayoutClass,
-                getSidebarRowToneClass(activePanel === "home"),
-              ].join(" ")}
-              aria-current={activePanel === "home" ? "page" : undefined}
-              aria-label="Open home"
-            >
-              <span className={getSidebarNavIconClass(activePanel === "home")}>
-                <HomeIcon className="h-6 w-6" />
-                <AttentionBadge
-                  count={homeAttentionCount}
-                  testId="sidebar-home-badge"
-                  aria-hidden
-                  className="absolute right-[1px] top-[1px] ring-2 ring-slate-50 dark:ring-[color:var(--color-studio-dark-rail)]"
-                />
-              </span>
-              {showLabels ? (
-                <span className="flex flex-1 items-center gap-2 text-sm font-medium text-slate-700 dark:text-slate-200">
-                  <span>Home</span>
-                </span>
-              ) : null}
-            </Button>
-          </li> : null}
-
+        {!desktopRail ? <div
+          className={`flex shrink-0 items-center gap-1 px-1 py-1 ${showLabels ? "min-h-14" : "flex-col"}`}
+          inert={mobileDrillInOpen || undefined} aria-hidden={mobileDrillInOpen || undefined}
+          data-testid="sidebar-team-header">
+          <IconButton variant="ghost" size="sm" radius="lg"
+            onPress={() => {
+              resetWorkspaceSwitcher();
+              closeMoreMenu();
+              runDestination(() => onSelect("home"));
+            }}
+            data-testid="sidebar-home-button"
+            aria-current={activePanel === "home" ? "page" : undefined}
+            aria-label="Home — all teams" title="Home — all teams"
+            className="relative !min-h-12 !min-w-12 shrink-0 aria-[current=page]:bg-primary-50 dark:aria-[current=page]:bg-primary-500/10">
+            <span aria-hidden="true"><OctoMark className="h-6 w-6 text-brand-ink dark:text-brand-paper" /></span>
+            <AttentionBadge count={homeAttentionCount} testId="sidebar-home-badge" aria-hidden
+              className="absolute right-0 top-0 ring-2 ring-slate-50 dark:ring-[color:var(--color-studio-dark-rail)]" />
+          </IconButton>
+          {teamMenu}
+          <IconButton variant="ghost" size="sm"
+            aria-label={onRequestClose ? "Close navigation" : showLabels ? "Collapse sidebar" : "Expand sidebar"}
+            data-testid="sidebar-drawer-toggle" onPress={onRequestClose ?? onToggleSidebar}
+            isDisabled={!onRequestClose && !onToggleSidebar} className="!min-h-12 !min-w-12 shrink-0">
+            {onRequestClose ? <Xmark className="h-4 w-4" /> : showLabels ? <SidebarCollapse className="h-4 w-4" /> : <SidebarExpand className="h-4 w-4" />}
+          </IconButton>
+        </div> : null}
+        <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto overflow-x-hidden pb-2" data-testid="sidebar-context-scroll"
+          inert={mobileDrillInOpen || undefined} aria-hidden={mobileDrillInOpen || undefined}>
           {desktopRail && !showLabels ? <li>{teamMenu}</li> : null}
-          {!desktopRail ? <li>
-            <Button variant="ghost" size="sm" radius="lg" fullWidth data-testid="sidebar-nav-team"
-              aria-label="Open team" aria-current={activePanel === "team" ? "page" : undefined}
-              title={showLabels ? undefined : `${activeOrgName} overview`}
-              className={`${sidebarRowLayoutClass} ${getSidebarRowToneClass(activePanel === "team")}`}
-              onPress={openSelectedTeam}>
-              <span className={getSidebarNavIconClass(activePanel === "team")}><Group className="h-5 w-5" aria-hidden="true" /></span>
-              {showLabels ? <span className="text-sm font-medium">Team overview</span> : null}
-            </Button>
-          </li> : null}
-          {!desktopRail && activeOrgKey !== "personal" ? <li>
-            <Button variant="ghost" size="sm" radius="lg" fullWidth aria-label="Team settings" data-testid="sidebar-settings"
-              title={showLabels ? undefined : "Team settings"}
-              className={`${sidebarRowLayoutClass} ${getSidebarRowToneClass(activePanel === "settings")}`}
-              onPress={openSelectedTeamSettings}
-              isDisabled={!onOpenOrgSettings}>
-              <span className={getSidebarNavIconClass(activePanel === "settings")}><Settings className="h-5 w-5" aria-hidden="true" /></span>
-              {showLabels ? <span className="text-sm font-medium">Team settings</span> : null}
-            </Button>
-          </li> : null}
-          <li className={`${desktopRail ? "pt-1" : "mt-3 pt-2"} border-t border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]`}>
+          <li className="border-t border-slate-200/70 pt-1 dark:border-[color:var(--color-studio-dark-divider)]">
             <StudioRecentSpaces
               key={JSON.stringify([activeTeamUserKey, activeOrgKey, activePanel])}
               spaces={recentSpaceCandidates}
@@ -1758,6 +1653,7 @@ export function StudioSidebar({
         })}
 
           <StudioSidebarMorePanels
+            triggerRef={moreTriggerRef}
             resolvedMoreItems={resolvedMoreItems}
             showInlineMoreItems={showInlineMoreItems}
             inlineMoreItems={inlineMoreItems}
@@ -1801,10 +1697,14 @@ export function StudioSidebar({
           </li>}
       </ul>
 
-      {!desktopRail ? accountSection : null}
+      {!desktopRail ? <div className="shrink-0" data-testid="sidebar-account-navigation"
+        inert={mobileDrillInOpen || undefined} aria-hidden={mobileDrillInOpen || undefined}>
+        {accountSection}
+      </div> : null}
       {!desktopRail ? workspacePanel : null}
       <StudioSidebarMobileDrillIn
         open={!isLargeScreen && moreMobileViewOpen}
+        triggerRef={moreTriggerRef}
         testId="sidebar-more-menu"
         title="More"
         backLabel="Back"

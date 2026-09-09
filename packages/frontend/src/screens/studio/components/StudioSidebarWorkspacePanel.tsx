@@ -32,7 +32,7 @@ export function StudioSidebarWorkspacePanel({
   const panelRef = useRef<HTMLDivElement | null>(null);
 
   useLayoutEffect(() => {
-    if (!open || (desktop && !portalTarget)) {
+    if (!open || !desktop || !portalTarget) {
       return;
     }
     // Move focus before the new panel can receive keyboard input. Delaying a
@@ -58,18 +58,17 @@ export function StudioSidebarWorkspacePanel({
   }
   if (!desktop) {
     return (
-      <div ref={panelRef} tabIndex={-1} className="outline-none" onKeyDown={handleKeyDown}>
-        <StudioSidebarMobileDrillIn
-          open
-          testId="sidebar-project-switcher-menu"
-          title={title}
-          backLabel="Back"
-          backTestId="sidebar-project-switcher-back"
-          onBack={dismiss}
-        >
-          {children}
-        </StudioSidebarMobileDrillIn>
-      </div>
+      <StudioSidebarMobileDrillIn
+        open
+        testId="sidebar-project-switcher-menu"
+        title={title}
+        backLabel="Back"
+        backTestId="sidebar-project-switcher-back"
+        triggerRef={triggerRef}
+        onBack={onClose}
+      >
+        {children}
+      </StudioSidebarMobileDrillIn>
     );
   }
   if (!portalTarget) {

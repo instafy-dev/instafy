@@ -6,7 +6,7 @@ import {
   waitForProjectBootstrap,
 } from "./utils/harness.js";
 import { createPublicChatFromTopBar } from "./utils/chatUi.js";
-import { openCreditsPanel, openSecretsPanel } from "./utils/sidebar.js";
+import { openTeamDirectory, openCreditsPanel, openSecretsPanel } from "./utils/sidebar.js";
 
 interface StudioStoreSnapshot {
   activeProjectId?: string | null;
@@ -253,8 +253,8 @@ test.afterEach(async ({ page }) => {
 
   /*   await expect(page.getByText(/Pick a quick action/i)).toBeVisible();  TODO later */
     await expect(page.getByTestId("chat-input")).toBeVisible({ timeout: 30_000 });
-    await expect(page.getByTestId("sidebar-project-button")).toBeVisible();
-    await page.getByTestId("sidebar-project-button").click();
+    await expect(page.getByTestId("sidebar-browse-teams")).toBeVisible();
+    await openTeamDirectory(page);
     await expect(page.getByTestId("sidebar-project-switcher-menu")).toBeVisible();
     await expect(page.getByTestId("sidebar-project-new")).toBeVisible();
   });

@@ -1,4 +1,5 @@
 import { Plus } from "iconoir-react";
+import type { RefObject } from "react";
 import { DialogTrigger } from "react-aria-components";
 import { Button } from "../../../components/Button";
 import { MenuItemContent } from "../../../components/MenuItemContent";
@@ -7,6 +8,7 @@ import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu"
 import type { StudioNavItem, StudioPanel } from "../types";
 
 type StudioSidebarMorePanelsProps = {
+  triggerRef?: RefObject<HTMLButtonElement | null>;
   resolvedMoreItems: StudioNavItem[];
   showInlineMoreItems: boolean;
   inlineMoreItems: StudioNavItem[];
@@ -54,6 +56,7 @@ function renderIndicator(indicator: StudioNavItem["indicator"] | null, testId?: 
 }
 
 export function StudioSidebarMorePanels({
+  triggerRef,
   resolvedMoreItems,
   showInlineMoreItems,
   inlineMoreItems,
@@ -190,6 +193,7 @@ export function StudioSidebarMorePanels({
             </DialogTrigger>
           ) : (
             <Button
+              ref={triggerRef}
               variant="ghost"
               size="sm"
               radius="lg"

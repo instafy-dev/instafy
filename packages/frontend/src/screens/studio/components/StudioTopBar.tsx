@@ -486,18 +486,18 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
             <span aria-hidden="true"><OctoMark className="h-6 w-6 text-brand-ink dark:text-brand-paper" /></span>
           </IconButton>
           <Button
-            onPress={onOpenTeamSwitcher ?? onToggleSidebar}
+            onPress={onToggleSidebar ?? onOpenTeamSwitcher}
             isDisabled={!onOpenTeamSwitcher && !onToggleSidebar}
             variant="ghost"
             size="sm"
             radius="lg"
-            aria-label={`Choose team: ${resolvedTeamName}`}
+            aria-label={`${onToggleSidebar ? "Open navigation" : "Choose team"}: ${resolvedTeamName}`}
             aria-expanded={sidebarOpen ?? false}
             data-testid="topbar-team-selector"
             className={`!min-h-12 min-w-0 max-w-72 justify-start gap-2 px-1.5 text-left text-slate-900 dark:text-slate-100 ${DARK_RAIL_HOVER_CLASS}`}
           >
             <span aria-hidden="true" data-testid="topbar-team-avatar"
-              className="flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-slate-200 text-2xs font-semibold text-slate-700 dark:bg-white/10 dark:text-slate-200">
+              className="flex h-7 w-7 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-slate-200 text-2xs font-semibold text-slate-700 max-[375px]:hidden dark:bg-white/10 dark:text-slate-200">
               {activeTeamAvatarUrl ? <img src={activeTeamAvatarUrl} alt="" className="h-full w-full object-cover" /> : getOrgInitials(resolvedTeamName)}
             </span>
             <span className="min-w-0 truncate text-sm font-semibold" data-testid="topbar-team-name">{resolvedTeamName}</span>

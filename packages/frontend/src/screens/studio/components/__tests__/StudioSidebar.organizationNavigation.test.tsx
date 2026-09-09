@@ -10,6 +10,7 @@ const fixture = vi.hoisted(() => ({
     { id: "space-c", name: "Design", orgId: "org-c", orgName: "Charlie", state: null, isRemoteOnly: false },
   ],
   activeProjectId: "space-a",
+  homeAttentionCount: 0,
   homeAttentionByProject: {} as Record<string, number>,
   orgs: [
     { id: "org-a", name: "Alpha", slug: "alpha", role: "builder", avatarUrl: null as string | null },
@@ -40,6 +41,7 @@ vi.mock("../../../../sdk/instafy", async () => {
 });
 vi.mock("../../workspaceControls", () => ({ useWorkspaceControls: () => ({
   userEmail: fixture.userEmail, hasLogs: false, sidebarOpen: true,
+  homeAttentionCount: fixture.homeAttentionCount,
   homeAttentionByProject: fixture.homeAttentionByProject,
   onOpenOrgSettings: fixture.settingsAvailable ? fixture.onSettings : undefined, onStartNewProject: fixture.onNewSpace,
   onToggleSidebar: fixture.onToggleSidebar,
@@ -82,7 +84,7 @@ describe("StudioSidebar organization navigation", () => {
     expect(element).not.toBeNull();
     await act(async () => element!.click());
   };
-  const chooseTeamAction = async (action: "overview" | "settings") => {
+  const chooseTeamAction = async (action: "overview" | "settings" | "switch") => {
     await click("sidebar-team-menu-trigger");
     await click(`sidebar-team-menu-${action}`);
     expect(document.querySelector('[data-testid="sidebar-team-menu"]')).toBeNull();
@@ -97,6 +99,7 @@ describe("StudioSidebar organization navigation", () => {
     fixture.desktop = true;
     fixture.settingsAvailable = true;
     fixture.activeProjectId = "space-a";
+    fixture.homeAttentionCount = 0;
     fixture.homeAttentionByProject = {};
     fixture.projects = [
       { id: "space-a", name: "Core", orgId: "org-a", orgName: "Alpha", state: null, isRemoteOnly: false },
@@ -261,21 +264,146 @@ describe("StudioSidebar organization navigation", () => {
     expect(fixture.onSettings).toHaveBeenCalledWith("unavailable-team");
   });
 
-  it("keeps the narrow layout as a labeled closeable drawer", async () => {
+  it("keeps mobile global actions in one fixed header with space navigation immediately below", async () => {
     fixture.desktop = false;
+    fixture.homeAttentionCount = 3;
     await render({ mobileOverlay: true });
+    const header = container.querySelector('[data-testid="sidebar-team-header"]')!;
+    const home = container.querySelector<HTMLButtonElement>('[data-testid="sidebar-home-button"]')!;
+    const team = container.querySelector('[data-testid="sidebar-team-menu-trigger"]');
+    const close = container.querySelector('[data-testid="sidebar-drawer-toggle"]');
+    const scroll = container.querySelector('[data-testid="sidebar-context-scroll"]')!;
     expect(container.querySelector('[data-testid="sidebar-organization-rail"]')).toBeNull();
-    expect(container.querySelector('[data-testid="sidebar-context-navigation"]')?.textContent).toContain("Team overview");
-    expect(container.querySelector('[data-testid="sidebar-drawer-toggle"]')?.getAttribute("aria-label")).toBe("Close navigation");
-    expect(container.querySelector('[data-testid="sidebar-team-menu-trigger"]')).toBeNull();
-    await click("sidebar-nav-team");
+    expect(header.parentElement).toBe(container.querySelector('[data-testid="sidebar-context-navigation"]'));
+    expect(header.children).toHaveLength(3);
+    expect(header.firstElementChild).toBe(home);
+    expect(home.nextElementSibling).toBe(team);
+    expect(team?.nextElementSibling).toBe(close);
+    expect(home.getAttribute("aria-label")).toBe("Home — all teams");
+    expect(home.title).toBe("Home — all teams");
+    expect(home.querySelector(".octo-mark")).not.toBeNull();
+    expect(home.querySelector('[data-testid="sidebar-home-badge"]')?.textContent).toBe("3");
+    expect(close?.getAttribute("aria-label")).toBe("Close navigation");
+    expect(container.querySelector('[data-testid="sidebar-nav-team"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-settings"]')).toBeNull();
+    expect(scroll.firstElementChild?.querySelector('[data-testid="sidebar-space-button"]')).not.toBeNull();
+    expect(scroll.textContent).not.toContain("Team overview");
+    await chooseTeamAction("overview");
     expect(onOpenTeam).toHaveBeenCalledWith("org-a");
-    await click("sidebar-settings");
+    expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(onOpenTeam.mock.invocationCallOrder[0]);
+    await chooseTeamAction("settings");
     expect(fixture.onSettings).toHaveBeenCalledWith("org-a");
     onRequestClose.mockClear();
     await click("sidebar-drawer-toggle");
     expect(onRequestClose).toHaveBeenCalledOnce();
     expect(fixture.onToggleSidebar).not.toHaveBeenCalled();
+  });
+
+  it.each(["home", "chat", "settings"] as const)("keeps Home a close-before-navigation destination on narrow %s", async (activePanel) => {
+    fixture.desktop = false;
+    await render({ mobileOverlay: true, activePanel, hideContext: activePanel === "settings" });
+    const home = container.querySelector('[data-testid="sidebar-home-button"]')!;
+    expect(home.getAttribute("aria-current")).toBe(activePanel === "home" ? "page" : null);
+    expect(container.querySelector('[data-testid="sidebar-recent-space-space-a"]')).not.toBeNull();
+    await click("sidebar-home-button");
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith("home");
+    expect(onRequestClose).toHaveBeenCalledOnce();
+    expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(onSelect.mock.invocationCallOrder[0]);
+    expect(onSwitcherChange).not.toHaveBeenCalled();
+    expect(onActivateProject).not.toHaveBeenCalled();
+  });
+
+  it("opens explicit team switching inside the shared drawer and restores its menu trigger on Back", async () => {
+    fixture.desktop = false;
+    const navigation = { view: "root", openView: vi.fn(), back: vi.fn() };
+    const props = { mobileOverlay: true, activePanel: "home" as const, mobileNavigation: navigation as never };
+    await render(props);
+    const trigger = container.querySelector<HTMLButtonElement>('[data-testid="sidebar-team-menu-trigger"]')!;
+    const search = window.location.search;
+    await click("sidebar-team-menu-trigger");
+    expect(navigation.openView).not.toHaveBeenCalled();
+    expect(onOpenTeam).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-testid="sidebar-team-menu-switch"]')).not.toBeNull();
+    await click("sidebar-team-menu-switch");
+    expect(document.querySelector('[data-testid="sidebar-team-menu"]')).toBeNull();
+    expect(navigation.openView).toHaveBeenCalledExactlyOnceWith("workspace");
+    expect(onRequestClose).not.toHaveBeenCalled();
+    navigation.view = "workspace";
+    await render(props);
+    expect(document.querySelector('[data-testid="sidebar-project-switcher-menu"]')?.textContent).toContain("Browse teams");
+    expect(document.querySelector('[data-testid="sidebar-org-selector"]')).not.toBeNull();
+    await click("sidebar-project-switcher-back");
+    expect(navigation.back).toHaveBeenCalledOnce();
+    navigation.view = "root";
+    await render(props);
+    await act(async () => { await new Promise(resolve => requestAnimationFrame(resolve)); });
+    expect(document.querySelector('[data-testid="sidebar-project-switcher-menu"]')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+    expect(window.location.search).toBe(search);
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(onOpenTeam).not.toHaveBeenCalled();
+    expect(onActivateProject).not.toHaveBeenCalled();
+  });
+
+  it.each(["workspace", "more"])("hides covered root controls from interaction while the mobile %s view is open", async (view) => {
+    fixture.desktop = false;
+    const navigation = { view, openView: vi.fn(), back: vi.fn() };
+    const props = { mobileOverlay: true, mobileNavigation: navigation as never,
+      moreItems: [{ id: "secrets" as const, label: "Secrets", icon: () => <span />, accent: "" }],
+    };
+    await render(props);
+    const rootParts = ["sidebar-team-header", "sidebar-context-scroll", "sidebar-account-navigation"];
+    for (const testId of rootParts) {
+      const element = container.querySelector(`[data-testid="${testId}"]`)!;
+      expect(element.hasAttribute("inert")).toBe(true);
+      expect(element.getAttribute("aria-hidden")).toBe("true");
+    }
+    const drillIn = document.querySelector(`[data-testid="${view === "workspace" ? "sidebar-project-switcher-menu" : "sidebar-more-menu"}"]`)!;
+    expect(drillIn).not.toBeNull();
+    expect(drillIn.closest('[inert], [aria-hidden="true"]')).toBeNull();
+    navigation.view = "root";
+    await render(props);
+    for (const testId of rootParts) {
+      const element = container.querySelector(`[data-testid="${testId}"]`)!;
+      expect(element.hasAttribute("inert")).toBe(false);
+      expect(element.getAttribute("aria-hidden")).toBeNull();
+    }
+  });
+
+  it("returns from More to its persistent trigger before resuming mobile navigation", async () => {
+    fixture.desktop = false;
+    const navigation = { view: "root", openView: vi.fn(), back: vi.fn() };
+    const props = { mobileOverlay: true, mobileNavigation: navigation as never, onSelectConversation: vi.fn(),
+      moreItems: [{ id: "secrets" as const, label: "Secrets", icon: () => <span />, accent: "" }],
+    };
+    await render(props);
+    const trigger = container.querySelector<HTMLButtonElement>('[data-testid="sidebar-nav-more"]')!;
+    await click("sidebar-nav-more");
+    expect(navigation.openView).toHaveBeenCalledExactlyOnceWith("more");
+    navigation.view = "more";
+    await render(props);
+    await click("sidebar-more-back");
+    expect(navigation.back).toHaveBeenCalledOnce();
+    navigation.view = "root";
+    await render(props);
+    await act(async () => { await new Promise(resolve => requestAnimationFrame(resolve)); });
+    expect(document.activeElement).toBe(trigger);
+    expect(document.querySelector('[data-testid="sidebar-more-menu"]')).toBeNull();
+    expect(onRequestClose).not.toHaveBeenCalled();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it.each(["org-b", "personal"])("keeps narrow %s scope isolated from the previous space", async (selectedOrgKey) => {
+    fixture.desktop = false;
+    await render({ mobileOverlay: true, activePanel: "team", selectedOrgKey });
+    expect(container.querySelector('[data-testid="sidebar-nav-chat"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-recent-space-space-a"]')).toBeNull();
+    await click("sidebar-team-menu-trigger");
+    expect(document.querySelector('[data-testid="sidebar-team-menu-switch"]')).not.toBeNull();
+    expect(Boolean(document.querySelector('[data-testid="sidebar-team-menu-settings"]'))).toBe(selectedOrgKey !== "personal");
+    await click("sidebar-team-menu-overview");
+    expect(onOpenTeam).toHaveBeenCalledExactlyOnceWith(selectedOrgKey);
+    expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(onOpenTeam.mock.invocationCallOrder[0]);
   });
 
   it("returns to the same team's remembered work from Home without switching projects", async () => {
@@ -491,6 +619,7 @@ describe("StudioSidebar organization navigation", () => {
     await click("sidebar-team-menu-trigger");
     expect(trigger.getAttribute("aria-expanded")).toBe("true");
     expect(document.querySelector('[role="menu"]')?.getAttribute("aria-label")).toBe("Team actions: Alpha");
+    expect(document.querySelector('[data-testid="sidebar-team-menu-switch"]')).toBeNull();
     expect(portal.querySelector('[data-testid="sidebar-project-switcher-menu"]')).toBeNull();
     expect(onSwitcherChange).not.toHaveBeenCalled();
     expect(onOpenTeam).not.toHaveBeenCalled();

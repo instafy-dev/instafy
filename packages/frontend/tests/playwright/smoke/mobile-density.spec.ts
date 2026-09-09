@@ -1,6 +1,7 @@
 import { expect, test, type Locator } from "@playwright/test";
 
 import { prepareStudio, resetRuntimeUserState } from "../utils/harness.js";
+import { openTeamDirectory } from "../utils/sidebar.js";
 
 test.use({
   viewport: { width: 360, height: 649 },
@@ -135,6 +136,9 @@ test.describe("Narrow-phone Studio density", () => {
     expect(projectId).toBeTruthy();
     await page.getByTestId("topbar-team-selector").click();
     await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
+    await expect(page.getByTestId("sidebar-team-menu-trigger")).toBeVisible();
+    await expect(page.getByTestId("sidebar-project-switcher-back")).toHaveCount(0);
+    await openTeamDirectory(page);
     await page.getByTestId(`sidebar-project-current-${projectId}`).click();
     await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
     await expect(globalHeader).toHaveCount(0);
@@ -231,7 +235,7 @@ test.describe("Narrow-phone Studio density", () => {
     await expectHeightBetween(toggle, 48, 48);
     await toggle.click();
     const sidebarOverlay = page.getByTestId("mobile-sidebar-overlay");
-    const sidebar = sidebarOverlay.getByTestId("sidebar-project-button").locator("xpath=ancestor::nav[1]");
+    const sidebar = sidebarOverlay.getByTestId("sidebar-team-menu-trigger").locator("xpath=ancestor::nav[1]");
     const sidebarBox = await sidebar.boundingBox();
     expect(sidebarBox).not.toBeNull();
     expect(sidebarBox!.x).toBeGreaterThanOrEqual(27);

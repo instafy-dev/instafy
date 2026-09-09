@@ -82,11 +82,18 @@ expanded; existing saved collapse preferences are preserved.
 
 On narrow Home, team and account pages, the header keeps Home immediately left of
 the compact team avatar and name, with the profile action at the right. The team's
-navigation icon opens the shared left drawer. Home is selected without
+navigation icon opens the regular navigation view in the shared left drawer, with
+the remembered team's current space, recent spaces and chats. Home is selected without
 removing access to the last team. Inside a working area, Back and the current
 space replace those global controls; the space title opens navigation, and the
 tab menu keeps other work reachable. Team selection and space navigation share
-the existing navigation drawer rather than stacking modal drawers.
+the existing navigation drawer rather than stacking modal drawers. The drawer's
+top row contains the Instafy Home action, team menu and close button. Team overview,
+settings and an explicit **Switch team** action live in that menu, leaving the current
+space directly below it. Switch team opens the team directory within the same drawer;
+Back returns to navigation, then dismisses it. Home always navigates to the global Home
+page, including from a workspace; opening navigation does not change the page behind it.
+Team overview and team settings do not replace a space's remembered workspace destination.
 
 In wide desktop browsers, **Get desktop app** sits above the rail profile as
 an icon with a tooltip. Compact desktop browser windows keep

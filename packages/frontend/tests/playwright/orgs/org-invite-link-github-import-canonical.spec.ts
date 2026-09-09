@@ -1,4 +1,5 @@
 import { expect, test, type APIResponse, type Page } from "@playwright/test";
+import { openTeamDirectory } from "../utils/sidebar.js";
 import { randomUUID } from "node:crypto";
 import { deriveGithubImportTargetPath } from "../../../src/services/runtimeController/githubImportPath.js";
 import {
@@ -199,7 +200,7 @@ async function seedControllerConversationMessage(page: Page, input: {
 }
 
 async function openProjectSettings(page: Page) {
-  await page.getByTestId("sidebar-project-button").click();
+  await openTeamDirectory(page);
   await page.getByTestId("sidebar-project-settings").click();
   await expect(page.getByTestId("settings-panel")).toBeVisible();
   await page.getByTestId("settings-category-project-access").click();

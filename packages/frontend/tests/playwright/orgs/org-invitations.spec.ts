@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { openTeamDirectory } from "../utils/sidebar.js";
 import {
   createControllerOrgAndProject,
   getControllerUrl,
@@ -222,14 +223,14 @@ async function loginWithEmailPassword(
 }
 
 async function openOrgSettings(page: import("@playwright/test").Page) {
-  await page.getByTestId("sidebar-project-button").click();
+  await openTeamDirectory(page);
   await expect(page.getByTestId("sidebar-project-switcher-menu")).toBeVisible();
   await page.getByTestId("sidebar-org-settings-button").click();
   await expect(page.getByTestId("settings-panel")).toBeVisible();
 }
 
 async function openProjectSettings(page: import("@playwright/test").Page) {
-  await page.getByTestId("sidebar-project-button").click();
+  await openTeamDirectory(page);
   await expect(page.getByTestId("sidebar-project-switcher-menu")).toBeVisible();
   await page.getByTestId("sidebar-project-settings").click();
   await expect(page.getByTestId("settings-panel")).toBeVisible();

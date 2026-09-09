@@ -19,11 +19,11 @@ export function resolveTeamNavigationScope(search: string, activeOrgKey: string)
   return { page, orgKey: requestedKey ?? activeOrgKey };
 }
 
-/** Only record a settled route owned by the current account and team. */
+/** Remember workspace destinations, so global pages cannot replace a space's work. */
 export function canRememberTeamWorkspace(search: string, projectId: string | null, orgKey: string) {
   const params = new URLSearchParams(search);
   const scope = resolveTeamNavigationScope(search, orgKey);
-  if (scope.page === "home" || scope.page === "account" || scope.orgKey !== orgKey) return false;
+  if (scope.page !== "workspace" || scope.orgKey !== orgKey) return false;
   const urlProject = params.get("projectId");
   return Boolean(projectId) && (!urlProject || urlProject === projectId);
 }

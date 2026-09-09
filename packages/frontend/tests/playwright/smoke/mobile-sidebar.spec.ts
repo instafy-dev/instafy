@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { openTeamDirectory } from "../utils/sidebar.js";
 import { prepareStudio, resetRuntimeUserState, writeWorkspaceFile } from "../utils/harness.js";
 
 async function emulateTouchFirst(page: Page) {
@@ -41,12 +42,12 @@ async function openFilesDrawerOverChat(page: Page) {
 }
 
 async function openTouchSidebar(page: Page) {
-  // A global picker is a direct entry: Back closes it. Select the current
-  // space to resume its workspace before opening that space's navigation.
+  // From Home, browse teams inside the shared navigation drawer, then resume
+  // the current space before opening that space's navigation.
   if (await page.getByTestId("topbar-team-selector").isVisible()) {
     const projectId = new URL(page.url()).searchParams.get("projectId");
     expect(projectId).toBeTruthy();
-    await page.getByTestId("topbar-team-selector").click();
+    await openTeamDirectory(page);
     await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
     await page.getByTestId(`sidebar-project-current-${projectId}`).click();
     await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
@@ -54,7 +55,7 @@ async function openTouchSidebar(page: Page) {
   }
   await page.getByTestId("mobile-header-picker").last().click();
   await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
-  await expect(page.getByTestId("sidebar-project-button")).toBeVisible();
+  await expect(page.getByTestId("sidebar-team-menu-trigger")).toBeVisible();
   await expect(page.getByTestId("mobile-navigation-sheet")).toHaveCount(0);
 }
 
@@ -84,7 +85,7 @@ test.describe("Mobile sidebar drawer", () => {
 
     await prepareStudio(page, { waitForHostedRuntime: false });
 
-    await expect(page.getByTestId("sidebar-project-button")).toHaveCount(0);
+    await expect(page.getByTestId("sidebar-team-menu-trigger")).toHaveCount(0);
     await expect(page.getByTestId("topbar-home-button")).toHaveCount(0);
 
     const toggle = page.getByTestId("topbar-sidebar-toggle");
@@ -94,7 +95,7 @@ test.describe("Mobile sidebar drawer", () => {
     await toggle.click();
 
     await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
-    await expect(page.getByTestId("sidebar-project-button")).toBeVisible();
+    await expect(page.getByTestId("sidebar-team-menu-trigger")).toBeVisible();
 
     const backdrop = page.getByTestId("mobile-sidebar-overlay");
     const backdropBox = await backdrop.boundingBox();
@@ -105,7 +106,7 @@ test.describe("Mobile sidebar drawer", () => {
       }
     });
     await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
-    await expect(page.getByTestId("sidebar-project-button")).toHaveCount(0);
+    await expect(page.getByTestId("sidebar-team-menu-trigger")).toHaveCount(0);
   });
 
   test("switches recent chats from header navigation and restores each draft", async ({ page }) => {
@@ -280,9 +281,16 @@ test.describe("Mobile sidebar drawer", () => {
     const homeUrl = page.url();
     await team.click();
     await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
+    await expect(page.getByTestId("sidebar-team-menu-trigger")).toBeVisible();
+    await expect(page.getByTestId("sidebar-project-switcher-back")).toHaveCount(0);
+    await expect(page.getByTestId("mobile-navigation-sheet")).toHaveCount(0);
+    await openTeamDirectory(page);
     await expect(page.getByTestId("sidebar-project-switcher-back")).toBeVisible();
     await expect(page.getByTestId("mobile-navigation-sheet")).toHaveCount(0);
     await page.getByTestId("sidebar-project-switcher-back").click();
+    await expect(page.getByTestId("mobile-sidebar-overlay")).toBeVisible();
+    await expect(page.getByTestId("sidebar-team-menu-trigger")).toBeVisible();
+    await page.getByTestId("sidebar-drawer-toggle").click();
     await expect(page.getByTestId("mobile-sidebar-overlay")).toHaveCount(0);
     await expect(page.getByTestId("topbar-home-button")).toHaveAttribute("aria-current", "page");
     await expect(page).toHaveURL(homeUrl);

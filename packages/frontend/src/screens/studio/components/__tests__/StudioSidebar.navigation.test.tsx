@@ -98,12 +98,15 @@ describe("StudioSidebar navigation ownership", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
+    // JSDOM lacks CSS.escape, which React Aria uses for keyboard menu focus.
+    vi.stubGlobal("CSS", { escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, "\\$&") });
     window.history.replaceState({ idx: 0, key: "base" }, "", `/studio${chatSearch}`);
     container = document.createElement("div"); document.body.appendChild(container); root = createRoot(container);
   });
   afterEach(async () => {
     await act(async () => root.unmount()); container.remove();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
   const state = () => JSON.parse(container.querySelector('[data-testid="state"]')!.textContent!) as { search: string; view: string | null; index: number };
@@ -111,6 +114,11 @@ describe("StudioSidebar navigation ownership", () => {
   async function click(id: string) {
     const button = document.querySelector<HTMLButtonElement>(`[data-testid="${id}"]`);
     expect(button).not.toBeNull(); await act(async () => button!.click());
+  }
+  async function openTeamPicker() {
+    await click("sidebar-team-menu-trigger");
+    await click("sidebar-team-menu-switch");
+    expect(document.querySelector('[data-testid="sidebar-team-menu"]')).toBeNull();
   }
   async function settle(assertion: () => void) {
     let failure: unknown;
@@ -124,7 +132,7 @@ describe("StudioSidebar navigation ownership", () => {
   }
 
   it("pops exactly one drill-in level and opening More does not first dismiss the drawer", async () => {
-    await render(); await click("open-sidebar"); await click("sidebar-project-button");
+    await render(); await click("open-sidebar"); await openTeamPicker();
     expect(state().view).toBe("workspace"); expect(state().index).toBe(2);
     const go = vi.spyOn(window.history, "go");
     await click("sidebar-project-switcher-back");
@@ -138,7 +146,7 @@ describe("StudioSidebar navigation ownership", () => {
   });
 
   it("collapses owned drawer history once before pushing an unseen space and preserves Back/Forward", async () => {
-    await render(); await click("open-sidebar"); await click("sidebar-project-button");
+    await render(); await click("open-sidebar"); await openTeamPicker();
     const go = vi.spyOn(window.history, "go");
     await click("select-unseen-space");
     await settle(() => expect(new URLSearchParams(state().search).get("projectId")).toBe(mocks.unseen.id));
@@ -178,7 +186,7 @@ describe("StudioSidebar navigation ownership", () => {
   it("returns from Home to the same team's work after collapsing the drawer branch once", async () => {
     const homeSearch = `${chatSearch}&panel=home&teamId=personal`;
     window.history.replaceState({ idx: 0, key: "home" }, "", `/studio${homeSearch}`);
-    await render(true); await click("open-sidebar"); await click("sidebar-project-button");
+    await render(true); await click("open-sidebar"); await openTeamPicker();
     const go = vi.spyOn(window.history, "go");
     await click("select-personal-team");
     await settle(() => {
@@ -209,7 +217,7 @@ describe("StudioSidebar navigation ownership", () => {
   });
 
   it("opens an empty team's overview and reactivates the loaded space without dismissing to the wrong scope", async () => {
-    await render(true); await click("open-sidebar"); await click("sidebar-project-button");
+    await render(true); await click("open-sidebar"); await openTeamPicker();
     const go = vi.spyOn(window.history, "go");
     await click("select-empty-team");
     await settle(() => expect(new URLSearchParams(state().search).get("panel")).toBe("team"));
@@ -217,7 +225,7 @@ describe("StudioSidebar navigation ownership", () => {
     expect(state()).toMatchObject({ view: null, index: 1 });
     expect(go.mock.calls).toEqual([[-2]]);
     const overviewSearch = state().search;
-    await click("open-sidebar"); await click("sidebar-project-button");
+    await click("open-sidebar"); await openTeamPicker();
     go.mockClear(); await click("select-current-space");
     await settle(() => expect(new URLSearchParams(state().search).get("panel")).toBeNull());
     expect(state()).toMatchObject({ view: null, index: 2 });

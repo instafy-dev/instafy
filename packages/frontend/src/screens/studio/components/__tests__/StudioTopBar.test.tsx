@@ -153,7 +153,7 @@ describe("StudioTopBar navigation", () => {
     expect(document.querySelector('[data-testid="topbar-tab-keep-open-conversation-1"]')).toBeNull();
   });
 
-  it.each(["home", "team", "account"] as const)("uses Home, the remembered team and profile for mobile %s navigation", async (navigationPage) => {
+  it.each(["home", "team", "account"] as const)("uses Home, the regular navigation drawer and profile for narrow %s navigation", async (navigationPage) => {
     mocks.navigationPage = navigationPage;
     // Global navigation must not derive the team selector from the current tab.
     mocks.tab = { id: "home", kind: "panel", panel: "home", title: "Home" };
@@ -169,15 +169,17 @@ describe("StudioTopBar navigation", () => {
     expect(home?.getAttribute("aria-current")).toBe(navigationPage === "home" ? "page" : null);
     expect(team?.querySelector('[data-testid="topbar-team-name"]')?.textContent).toBe("My team");
     expect(team?.querySelector('[data-testid="topbar-team-avatar"]')?.textContent).toBe("MT");
+    expect(team?.getAttribute("aria-label")).toBe("Open navigation: My team");
+    expect(team?.getAttribute("aria-expanded")).toBe("false");
     expect(profile?.getAttribute("aria-current")).toBe(navigationPage === "account" ? "page" : null);
     expect(profile?.textContent).toBe("AM");
     expect(container.querySelector('[data-testid="topbar-workspace-navigation"]')).toBeNull();
     expect(container.querySelector('[aria-label="New chat"]')).toBeNull();
     await act(async () => { home?.click(); team?.click(); profile?.click(); });
     expect(mocks.openHome).toHaveBeenCalledOnce();
-    expect(mocks.openTeamSwitcher).toHaveBeenCalledOnce();
+    expect(mocks.openTeamSwitcher).not.toHaveBeenCalled();
     expect(mocks.openProfileSettings).toHaveBeenCalledOnce();
-    expect(mocks.toggleSidebar).not.toHaveBeenCalled();
+    expect(mocks.toggleSidebar).toHaveBeenCalledOnce();
   });
 
   it("shows the profile avatar in global navigation with a labeled button", async () => {
@@ -199,7 +201,7 @@ describe("StudioTopBar navigation", () => {
     const avatar = team?.querySelector("img");
     expect(avatar?.getAttribute("src")).toBe(mocks.activeTeamAvatarUrl);
     expect(avatar?.alt).toBe("");
-    expect(team?.getAttribute("aria-label")).toBe("Choose team: My team");
+    expect(team?.getAttribute("aria-label")).toBe("Open navigation: My team");
     expect(container.querySelector('[data-testid="topbar-profile-button"] img')?.getAttribute("src")).toBe(mocks.profile.avatarUrl);
 
     mocks.activeTeamName = "Research team";
@@ -207,7 +209,7 @@ describe("StudioTopBar navigation", () => {
     await act(async () => root.render(<StudioTopBar />));
     expect(team?.querySelector("img")).toBeNull();
     expect(team?.querySelector('[data-testid="topbar-team-avatar"]')?.textContent).toBe("RT");
-    expect(team?.getAttribute("aria-label")).toBe("Choose team: Research team");
+    expect(team?.getAttribute("aria-label")).toBe("Open navigation: Research team");
   });
 
   it("goes back through the supplied navigation callback in a workspace", async () => {

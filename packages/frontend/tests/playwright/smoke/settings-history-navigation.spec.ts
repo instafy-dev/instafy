@@ -1,6 +1,6 @@
 import { test, expect, type Page } from "@playwright/test";
 import { prepareStudio, resetRuntimeUserState } from "../utils/harness.js";
-import { openSecretsPanel as openSecretsSidebarPanel } from "../utils/sidebar.js";
+import { openTeamDirectory, openSecretsPanel as openSecretsSidebarPanel } from "../utils/sidebar.js";
 
 async function openSecretsPanel(page: Page) {
   await openSecretsSidebarPanel(page);
@@ -8,7 +8,7 @@ async function openSecretsPanel(page: Page) {
 }
 
 async function openOrgSettings(page: Page) {
-  await page.getByTestId("sidebar-project-button").click();
+  await openTeamDirectory(page);
   await expect(page.getByTestId("sidebar-project-switcher-menu")).toBeVisible();
   await page.getByTestId("sidebar-org-settings-button").click();
   await expect(page.getByTestId("settings-panel")).toBeVisible();
@@ -16,10 +16,7 @@ async function openOrgSettings(page: Page) {
 }
 
 async function openProjectSettings(page: Page) {
-  if (!(await page.getByTestId("sidebar-project-button").isVisible())) {
-    await page.getByTestId("topbar-sidebar-toggle").click();
-  }
-  await page.getByTestId("sidebar-project-button").click();
+  await openTeamDirectory(page);
   await expect(page.getByTestId("sidebar-project-switcher-menu")).toBeVisible();
   await page.getByTestId("sidebar-project-settings").click();
   await expect(page.getByTestId("settings-panel")).toBeVisible();

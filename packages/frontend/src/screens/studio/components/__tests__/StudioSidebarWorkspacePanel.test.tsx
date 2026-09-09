@@ -87,7 +87,7 @@ describe("StudioSidebarWorkspacePanel", () => {
     const frame = vi.spyOn(window, "requestAnimationFrame").mockReturnValue(0);
     try {
       await act(async () => root.render(<Harness desktop={false} />));
-      const panel = container.querySelector('[data-testid="sidebar-project-switcher-menu"]')?.parentElement;
+      const panel = container.querySelector('[data-testid="sidebar-project-switcher-menu"]');
       expect(panel).toBe(document.activeElement);
     } finally {
       frame.mockRestore();
@@ -106,10 +106,12 @@ describe("StudioSidebarWorkspacePanel", () => {
     expect(document.activeElement).toBe(container.querySelector('[data-testid="trigger"]'));
   });
 
-  it("preserves navigation focus when selection closes the controlled panel", async () => {
-    await render();
+  it.each([true, false])("preserves navigation focus when selection closes the controlled panel with desktop=%s", async (desktop) => {
+    await render({ desktop });
     await click("space");
+    await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
     expect(portalTarget.textContent).toBe("");
+    expect(document.querySelector('[data-testid="sidebar-project-switcher-menu"]')).toBeNull();
     expect(document.activeElement).toBe(container.querySelector('[data-testid="destination"]'));
     expect(onClose).not.toHaveBeenCalled();
   });
@@ -135,6 +137,7 @@ describe("StudioSidebarWorkspacePanel", () => {
     }
     expect(document.querySelector('[data-testid="sidebar-project-switcher-menu"]')).toBeNull();
     expect(container.querySelector('[data-testid="navigation"]')).not.toBeNull();
+    await act(async () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve())));
     expect(document.activeElement).toBe(container.querySelector('[data-testid="trigger"]'));
     expect(onClose).toHaveBeenCalledOnce();
   });

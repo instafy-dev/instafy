@@ -66,7 +66,7 @@ describe("StudioTopBar mobile navigation integration", () => {
     expect(query("studio-mobile-history-bar")).toBeNull();
   });
 
-  it.each(["home", "team", "account"])("keeps global %s navigation ahead of the touch working header", async (navigationPage) => {
+  it.each(["home", "team", "account"])("opens the regular navigation drawer on touch %s while keeping Home and profile actions stable", async (navigationPage) => {
     mocks.controls.mockReturnValue({ ...mocks.controls(), navigationPage, activeTeamName: "Research team", activeTeamAvatarUrl: "https://example.test/team.png", onOpenHome: vi.fn(), onOpenTeamSwitcher: vi.fn(), onOpenProfileSettings: vi.fn() });
     await render();
     expect(query("mobile-studio-navigation-header")).toBeNull();
@@ -75,6 +75,8 @@ describe("StudioTopBar mobile navigation integration", () => {
     expect(query("topbar-home-button")?.getAttribute("aria-current")).toBe(navigationPage === "home" ? "page" : null);
     expect(query("topbar-profile-button")?.getAttribute("aria-current")).toBe(navigationPage === "account" ? "page" : null);
     expect(query("topbar-team-name")?.textContent).toBe("Research team");
+    expect(query("topbar-team-selector")?.getAttribute("aria-label")).toBe("Open navigation: Research team");
+    expect(query("topbar-team-selector")?.getAttribute("aria-expanded")).toBe("false");
     expect(query("topbar-team-selector")?.querySelector("img")?.getAttribute("src")).toBe("https://example.test/team.png");
     expect(query("topbar-profile-button")?.querySelector("img")?.getAttribute("src")).toBe("https://example.test/account.png");
     for (const id of ["topbar-home-button", "topbar-team-selector", "topbar-profile-button"]) {
@@ -82,10 +84,32 @@ describe("StudioTopBar mobile navigation integration", () => {
     }
     await click("topbar-home-button"); await click("topbar-team-selector"); await click("topbar-profile-button");
     expect(mocks.controls().onOpenHome).toHaveBeenCalledTimes(1);
-    expect(mocks.controls().onOpenTeamSwitcher).toHaveBeenCalledTimes(1);
+    expect(mocks.controls().onOpenTeamSwitcher).not.toHaveBeenCalled();
+    expect(mocks.controls().onToggleSidebar).toHaveBeenCalledTimes(1);
     expect(mocks.controls().onOpenProfileSettings).toHaveBeenCalledTimes(1);
     expect(props.mobileNavigation!.onOpenPicker).not.toHaveBeenCalled();
     expect(query("chat-new-conversation")).toBeNull();
+
+    mocks.controls.mockReturnValue({ ...mocks.controls(), sidebarOpen: true });
+    await render();
+    expect(query("topbar-team-selector")?.getAttribute("aria-expanded")).toBe("true");
+    await click("topbar-team-selector");
+    expect(mocks.controls().onToggleSidebar).toHaveBeenCalledTimes(2);
+    expect(mocks.controls().onOpenTeamSwitcher).not.toHaveBeenCalled();
+  });
+
+  it("keeps the team picker fallback available when the shell has no navigation drawer", async () => {
+    const onOpenTeamSwitcher = vi.fn();
+    mocks.controls.mockReturnValue({ ...mocks.controls(), navigationPage: "home", activeTeamName: "Research team", onToggleSidebar: undefined, onOpenTeamSwitcher });
+    await render();
+    expect(query("topbar-team-selector")?.getAttribute("aria-label")).toBe("Choose team: Research team");
+    expect(query("topbar-team-selector")?.disabled).toBe(false);
+    await click("topbar-team-selector");
+    expect(onOpenTeamSwitcher).toHaveBeenCalledTimes(1);
+
+    mocks.controls.mockReturnValue({ ...mocks.controls(), onOpenTeamSwitcher: undefined });
+    await render();
+    expect(query("topbar-team-selector")?.disabled).toBe(true);
   });
 
   it.each(["home", "team", "account"])("uses chronological history on global %s without opening a drawer", async (navigationPage) => {

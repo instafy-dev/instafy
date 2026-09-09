@@ -28,6 +28,16 @@ describe("team navigation scope", () => {
     expect(canRememberTeamWorkspace("?projectId=space-a&conversationId=thread-a", "space-a", teamA)).toBe(true);
     expect(canRememberTeamWorkspace("?panel=chat", null, teamA)).toBe(false);
   });
+  it.each([
+    `?projectId=space-a&panel=team&teamId=${teamA}`,
+    `?projectId=space-a&panel=settings&settingsTab=org&settingsOrgId=${teamA}`,
+    "?projectId=space-a&panel=team&teamId=personal",
+  ])("does not replace a space's remembered work with its team page: %s", (search) => {
+    const team = search.includes("personal") ? "personal" : teamA;
+    expect(canRememberTeamWorkspace(search, "space-a", team)).toBe(false);
+    expect(canRememberTeamWorkspace("?projectId=space-a&panel=automations", "space-a", team)).toBe(true);
+    expect(canRememberTeamWorkspace("?projectId=space-a&panel=settings&settingsTab=project", "space-a", team)).toBe(true);
+  });
   it("supports personal scope and ignores malformed scope hints", () => {
     expect(resolveTeamNavigationScope("?panel=team&teamId=personal", teamA).orgKey).toBe("personal");
     expect(resolveTeamNavigationScope("?panel=team&teamId=garbage", teamA).orgKey).toBe(teamA);
