@@ -8,7 +8,7 @@ import { createRequire } from "node:module";
 import { cargoBinaryArtifact, closeStudioConnections, createStudioGenerationBridge, fixtureHTML, fixtureOrigin, startDaemon,
   resolvePlaywrightChromiumExecutable, studioProcessEnvironment, validateStudioStack,
   viteCliPath } from "./shared-browser-studio-e2e.mjs";
-import { fixtureChildEnvironment } from "./browser-profile-e2e.mjs";
+import { fixtureChildEnvironment, fixtureCompilerEnvironment } from "./browser-profile-e2e.mjs";
 
 const jwt = claims => `fixture.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.fixture`;
 const localStack = () => ({
@@ -69,11 +69,24 @@ test("builds retain scrubbed toolchain locations without passing them to isolate
   assert.equal(buildEnv.RUSTUP_HOME, source.RUSTUP_HOME);
 
   // Guard the real call sites as well as the environment helpers: Cargo must
-  // use run()'s buildEnv default, not the later empty-home service environment.
+  // use the explicit compiler environment, never the later empty-home service
+  // environment. The ordinary run() default must remain proxy-free.
   const runner = await readFile(new URL("./shared-browser-studio-e2e.mjs", import.meta.url), "utf8");
   assert.match(runner, /const buildEnv = fixtureChildEnvironment\(process\.env\)/);
   assert.match(runner, /const run = \(command, args, options = \{\}\) => runOwnedProcess\(command, args,\s*\{ env: buildEnv, signal, \.\.\.options \}\)/);
-  assert.equal((runner.match(/await run\("cargo", \["build", [^\n]+?"--message-format=json"\]\)/g) ?? []).length, 2);
+  assert.equal((runner.match(/await run\("cargo", \["build", [^\n]+?"--message-format=json"\], \{ env: compilerEnv \}\)/g) ?? []).length, 2);
+});
+
+test("compiler opt-in cannot leak proxy routing into Studio services or its empty browser home", () => {
+  const input = { PATH: "/fixture/bin", HOME: "/fixture/builder", CARGO_HOME: "/fixture/cargo",
+    CI: "true", GITHUB_ACTIONS: "true", INSTAFY_CI_JOB_ISOLATION: "ephemeral", INSTAFY_SHARED_BROWSER_COMPILER_PROXY: "1",
+    HTTP_PROXY: "http://proxy.example:3128", HTTPS_PROXY: "http://proxy.example:3128", NO_PROXY: "*", NODE_OPTIONS: "must-not-copy" };
+  const compiler = fixtureCompilerEnvironment(input);
+  assert.equal(compiler.http_proxy, input.HTTP_PROXY);
+  for (const source of [input, compiler]) assert.deepEqual(studioProcessEnvironment(source, "/fixture/home"), {
+    PATH: input.PATH, HOME: "/fixture/home", CODEX_HOME: "/fixture/home/.codex",
+    INSTAFY_ENV_DIR: "/fixture/home/empty-env", CODEX_DISABLED: "1",
+  });
 });
 
 test("Cargo artifact selection requires exactly one production binary with the requested name", () => {
