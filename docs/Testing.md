@@ -105,8 +105,8 @@ Before checkout, each self-hosted job requires an actual non-root Linux ARM64
 process, Node22, the ephemeral marker, no private environment directory and its
 baseline tools. This prerequisite check does not itself prove guest isolation.
 
-Rust compilation/tests, browsers and all release jobs remain hosted. JavaScript
-has its own separately gated split described below.
+Browsers and all release jobs remain hosted. JavaScript and Rust compilation/tests
+have their own separately gated splits described below.
 The four job names, permissions and timeouts are unchanged; the main scanner
 uses the same pinned x64/ARM64 Gitleaks archives as the boundary. Disable the
 expanded switch to restore hosted routing for new runs; already queued jobs
@@ -186,6 +186,68 @@ Disable the JavaScript switch to restore hosted selection for new runs;
 already queued runs do not change runners. No required-check rule changes
 are needed. Run `node --test scripts/check-javascript-ci.test.mjs` for routing,
 coverage and aggregate regressions; these are not live workload qualification.
+
+### Bounded Rust CI
+
+`Rust packages` and `Rust tests` retain their existing check names as strict
+five-minute aggregates. The first requires all five compile-check children;
+the second requires all five test children. Each child is independent, uses
+the same exact event commit and recursive submodules, and has a 30-minute
+limit. Missing, skipped, cancelled or failed children fail the corresponding
+aggregate. Aggregates have no repository permissions or checkout and are
+scheduled only after their children finish; they do not hold a worker while
+waiting for other workers.
+
+| Child | Preserved commands | Runner-label suffix |
+| --- | --- | --- |
+| Rust check runtime controller | Controller `cargo check --locked --tests` | `public-rust-check-controller` |
+| Rust check runtime agent | Agent `cargo check --locked --tests` | `public-rust-check-agent` |
+| Rust check git service | Git service `cargo check --locked --tests` | `public-rust-check-git` |
+| Rust check runtime provider | Provider service `cargo check --locked --tests` | `public-rust-check-provider` |
+| Rust check tunnel broker | Tunnel workspace `cargo check --locked --tests` | `public-rust-check-tunnel` |
+| Rust test runtime contracts | Complete runtime-contracts suite | `public-rust-test-contracts` |
+| Rust test runtime agent | Agent `--no-run`, followed by `--lib --test controller_client -- --test-threads=1` | `public-rust-test-agent` |
+| Rust test OpenAI proxy | Complete openai-proxy-server suite | `public-rust-test-proxy` |
+| Rust test origin server | Complete origin-http-server suite | `public-rust-test-origin` |
+| Rust test git service | Complete git-service suite | `public-rust-test-git` |
+
+All eleven original Cargo commands retain their arguments and repository-root
+working directory. Test children also retain the full frozen Node20/pnpm
+installation, including the pinned Playwright fixture required by agent tests.
+Stable native Rust and debug-info settings are unchanged. Each child has its
+own target directory; Cargo caches are partitioned by job, operating system,
+CPU architecture and the exact workspace Cargo lockfiles, with no cross-arch
+or old-lock fallback. The existing unused-toolchain disk cleanup runs only on
+GitHub-hosted images, never against a self-hosted host or guest image.
+
+All twelve jobs default to `ubuntu-latest`. Only the independent
+`CI_RUST_SELF_HOSTED=true` switch may select isolated Linux ARM64 workers, for
+private same-repository PRs to `main` and protected-main pushes. It uses the
+same trust-specific organization groups and per-run, per-attempt, per-job
+labels as the JavaScript split. The aggregate suffixes are
+`public-rust-check-aggregate` and `public-rust-test-aggregate`. Other switches
+do not enable Rust compilation or tests; Rust formatting remains separately
+controlled by `CI_EXPANDED_SELF_HOSTED`. Forks, public visibility, manual
+dispatches and unsupported events keep hosted runners.
+
+Do not enable this switch before independently enrolling the reviewed workflow
+and all twelve exact job identities in the runner manager. Its existing
+35-minute worker lifecycle remains sufficient only if the actual cold setup
+and each full child workload fit their allotted window. Before checkout,
+self-hosted children require non-root Linux ARM64, Node22, the ephemeral marker,
+no private environment directory, and native Rust/C build tools. Those checks
+do not prove that native libraries, downloads or workload timings are ready.
+Qualify each real cold ARM64 compile/test, Cargo and Node20 proxy downloads,
+memory/disk use and complete guest teardown first. A split or a warm cache hit
+is not that qualification; never reduce the test selection or ignore a timeout
+to make a job green. No database, provider, signing or release credentials are
+introduced by this lane.
+
+Disable the Rust switch to restore hosted selection for new runs; already
+queued jobs retain their selected pools. No required-check rule changes are
+needed. Run `node --test scripts/check-rust-ci.test.mjs` for the exact command
+inventory, routing and strict aggregate regressions. These source tests do not
+run Cargo or establish real ARM workload completion.
 
 The empty-database test
 prefetches its digest-pinned Postgres image with bounded retry/backoff and then

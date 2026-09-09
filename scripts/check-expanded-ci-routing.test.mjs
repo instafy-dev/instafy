@@ -132,7 +132,10 @@ test("only the four short jobs use the expanded switch and existing identities s
     assert.ok(source.includes(`    timeout-minutes: ${job.minutes}\n`));
     assert.doesNotMatch(source, /secrets\.|environment:|continue-on-error:|permissions:\s*write-all|CI_BOOTSTRAP_SELF_HOSTED/u);
   }
-  for (const key of ["rust", "rust-tests"]) assert.match(section("build.yml", key), /^    runs-on: ubuntu-latest$/mu);
+  for (const key of ["rust", "rust-tests"]) {
+    assert.match(section("build.yml", key), /vars\.CI_RUST_SELF_HOSTED == 'true'/u);
+    assert.doesNotMatch(section("build.yml", key), /CI_EXPANDED_SELF_HOSTED/u);
+  }
   assert.match(section("build.yml", "javascript"), /vars\.CI_JAVASCRIPT_SELF_HOSTED == 'true'/u);
   assert.doesNotMatch(section("build.yml", "javascript"), /CI_EXPANDED_SELF_HOSTED/u);
   for (const key of ["select", "version", "pack", "publish"]) assert.match(section("npm-release.yml", key), /^    runs-on: ubuntu-24\.04$/mu);
