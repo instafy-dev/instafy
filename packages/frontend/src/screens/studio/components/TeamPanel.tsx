@@ -75,7 +75,7 @@ export function TeamPanel({ organizationId: requestedOrganizationId }: TeamPanel
       <Button variant="outline" size="sm" onPress={() => onStartNewProject(null)}>New space</Button>
     ) : undefined}>
       <section className="space-y-4" aria-label="Personal spaces">
-        <p className="text-sm text-slate-500 dark:text-slate-400">Your personal spaces. Shared team work remains in its team.</p>
+        <p className="text-sm text-slate-600 dark:text-slate-400">Your personal spaces. Shared team work remains in its team.</p>
         {personalSpaces.length === 0 ? <p>No personal spaces are loaded yet.</p> : (
           <ul className="space-y-2">{personalSpaces.map((space) => <li key={space.id}>
             <Button variant="ghost" size="sm" className="max-w-full justify-start text-left" onPress={() => navigate(`/studio?${new URLSearchParams({ projectId: space.id })}`)}>
@@ -116,21 +116,21 @@ export function TeamPanel({ organizationId: requestedOrganizationId }: TeamPanel
                 <li key={item.id} className="py-3">
                   <button type="button" className="w-full text-left" onClick={() => openWork(teamWorkHref(item))}>
                     <span className="flex flex-wrap items-center justify-between gap-2"><span className="text-sm font-semibold text-primary-600 dark:text-primary-400">{item.conversation?.title || item.title || "Chat"}</span><span className="text-xs">{teamWorkStatus(item)}</span></span>
-                    <span className="mt-1 block text-xs text-slate-500 dark:text-slate-400">{item.project?.name || "Untitled space"} · {formatRelativeTimestamp(Date.parse(item.at), Date.now())}{item.conversation?.visibility === "private" ? " · Private chat" : ""}</span>
+                    <span className="mt-1 block text-xs text-slate-600 dark:text-slate-400">{item.project?.name || "Untitled space"} · {formatRelativeTimestamp(Date.parse(item.at), Date.now())}{item.conversation?.visibility === "private" ? " · Private chat" : ""}</span>
                     {item.preview ? <span className="mt-2 line-clamp-3 block break-words text-sm text-slate-600 dark:text-slate-300">{item.preview}</span> : null}
                   </button>
                 </li>
               ))}</ul>
-              {!activity.activityLoading && !activity.activityError && work.length === 0 ? <p className="text-sm text-slate-500 dark:text-slate-400">No activity for this team in the loaded history.</p> : null}
+              {!activity.activityLoading && !activity.activityError && work.length === 0 ? <p className="text-sm text-slate-600 dark:text-slate-400">No activity for this team in the loaded history.</p> : null}
               {activity.activityHasMore ? <Button variant="outline" size="sm" isDisabled={activity.activityLoadingMore} onPress={() => void activity.loadMoreActivity()}>Load more activity</Button> : null}
             </section>
 
             <section className={SECTION} aria-label="Agents in recent activity">
               <h2 className="text-sm font-semibold">Agents in recent activity</h2>
-              {agents.length === 0 ? (!activity.activityLoading && !activity.activityError ? <p className="text-sm text-slate-500 dark:text-slate-400">No agent activity in the loaded history yet.</p> : null) : (
+              {agents.length === 0 ? (!activity.activityLoading && !activity.activityError ? <p className="text-sm text-slate-600 dark:text-slate-400">No agent activity in the loaded history yet.</p> : null) : (
                 <ul className="space-y-2">{agents.map((item) => <li key={item.id}>
                   <button type="button" className="flex w-full items-center justify-between gap-3 rounded-lg px-3 py-3 text-left hover:bg-slate-100 dark:hover:bg-[var(--color-studio-dark-rail-hover)]" onClick={() => openWork(teamWorkHref(item))}>
-                    <span className="min-w-0"><span className="block text-sm font-medium">{item.actor.handle ? `@${item.actor.handle}` : item.actor.displayName || "Agent"}</span><span className="block truncate text-xs text-slate-500 dark:text-slate-400">{item.project?.name || "Untitled space"} · {item.conversation?.title || "Chat"}</span></span>
+                    <span className="min-w-0"><span className="block text-sm font-medium">{item.actor.handle ? `@${item.actor.handle}` : item.actor.displayName || "Agent"}</span><span className="block truncate text-xs text-slate-600 dark:text-slate-400">{item.project?.name || "Untitled space"} · {item.conversation?.title || "Chat"}</span></span>
                     <span className="shrink-0 text-xs">{teamWorkStatus(item)}</span>
                   </button>
                 </li>)}</ul>
@@ -147,16 +147,16 @@ export function TeamPanel({ organizationId: requestedOrganizationId }: TeamPanel
                 {members.members.slice(0, peopleExpanded ? undefined : 8).map((member) => {
                   const lastWork = work.find((item) => item.actor.kind === "user" && item.actor.userId === member.userId);
                   return <li key={member.userId} className="flex items-start gap-3 py-3">
-                    <Group className="mt-0.5 h-5 w-5 shrink-0 text-slate-500" aria-hidden="true" />
+                    <Group className="mt-0.5 h-5 w-5 shrink-0 text-slate-600 dark:text-slate-400" aria-hidden="true" />
                     <div className="min-w-0 flex-1">
                       <p className="break-words text-sm font-medium">{member.fullName || member.email || "Team member"}{member.userId === user?.id ? " · You" : ""}</p>
                       {lastWork ? <button type="button" className="mt-1 text-left text-xs text-primary-600 hover:underline dark:text-primary-400" onClick={() => openWork(teamWorkHref(lastWork))}>{lastWork.conversation?.title || lastWork.title || "Open recent work"}</button> : null}
                     </div>
-                    <span className="text-xs capitalize text-slate-500 dark:text-slate-400">{member.role}</span>
+                    <span className="text-xs capitalize text-slate-600 dark:text-slate-400">{member.role}</span>
                   </li>;
                 })}
               </ul>
-              {!members.loading && !members.error && members.members.length === 0 ? <p className="text-sm text-slate-500">No matching members.</p> : null}
+              {!members.loading && !members.error && members.members.length === 0 ? <p className="text-sm text-slate-600 dark:text-slate-400">No matching members.</p> : null}
               {!peopleExpanded && members.members.length > 8 ? <Button variant="ghost" size="sm" onPress={() => setPeopleExpanded(true)}>Show all loaded people</Button> : null}
               {members.hasMore ? <Button variant="outline" size="sm" isDisabled={members.loadingMore} onPress={() => void members.loadMore()}>More people</Button> : null}
             </section>
@@ -166,12 +166,12 @@ export function TeamPanel({ organizationId: requestedOrganizationId }: TeamPanel
                 <h2 className="text-sm font-semibold">Available spaces</h2>
                 {canCreateSpace && onStartNewProject ? <Button variant="outline" size="sm" onPress={() => onStartNewProject(organization.id)}>New space</Button> : null}
               </div>
-              <p className="text-xs text-slate-500 dark:text-slate-400">Spaces loaded in this workspace. Open the space picker to find more.</p>
-              {spaces.length === 0 ? <p className="text-sm text-slate-500 dark:text-slate-400">No spaces for this team are loaded in this workspace.</p> : (
+              <p className="text-xs text-slate-600 dark:text-slate-400">Spaces loaded in this workspace. Open the space picker to find more.</p>
+              {spaces.length === 0 ? <p className="text-sm text-slate-600 dark:text-slate-400">No spaces for this team are loaded in this workspace.</p> : (
                 <ul className="space-y-2">{spaces.map((space) => <li key={space.id}>
                   <button type="button" className="flex items-center gap-2 text-sm text-primary-600 dark:text-primary-400" onClick={() => navigate(`/studio?${new URLSearchParams({ projectId: space.id, panel: "automations" })}`)}>
                     <SpaceIdentity name={space.name} icon={space.projectIcon} color={space.projectColor} className="h-7 w-7" />
-                    {space.name || "Untitled space"}<span className="text-xs text-slate-500">· Automations</span>
+                    {space.name || "Untitled space"}<span className="text-xs text-slate-600 dark:text-slate-400">· Automations</span>
                   </button>
                 </li>)}</ul>
               )}

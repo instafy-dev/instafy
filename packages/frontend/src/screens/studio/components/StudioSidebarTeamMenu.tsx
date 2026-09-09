@@ -17,6 +17,8 @@ interface StudioSidebarTeamMenuProps {
   onOpenSettings?: () => void;
 }
 
+const MENU_ICON_CLASS = "shrink-0 text-slate-600 dark:text-slate-300 [&>svg]:h-4 [&>svg]:w-4";
+
 /** Team actions stay anchored to the header or its compact rail equivalent. */
 export function StudioSidebarTeamMenu({
   teamName,
@@ -35,7 +37,7 @@ export function StudioSidebarTeamMenu({
         data-testid="sidebar-team-menu-trigger"
         aria-label={`Team menu: ${teamName}`} title={`Team menu: ${teamName}`}
         aria-haspopup="menu"
-        className={compact ? rowClassName : "min-w-0 flex-1 justify-between gap-1 py-2 pl-2 pr-3"}
+        className={`${compact ? rowClassName : "min-w-0 flex-1 justify-between gap-1 py-2 pl-2 pr-3"} data-[pressed]:!translate-y-0 data-[pressed]:!scale-100`}
       >
         {compact ? (
           <span className={iconClassName} data-active={active || undefined}>
@@ -48,8 +50,8 @@ export function StudioSidebarTeamMenu({
           </>
         )}
       </Button>
-      <StudioPopover placement={compact ? "right top" : "bottom start"} offset={6}
-        className="w-56 max-w-[calc(100vw-1rem)] p-2" data-testid="sidebar-team-menu">
+      <StudioPopover placement={compact ? "right top" : "bottom end"} offset={6}
+        className="w-52 max-w-[calc(100vw-1rem)] p-2" data-testid="sidebar-team-menu">
         <StudioMenu aria-label={`Team actions: ${teamName}`} className="space-y-1"
           onAction={(key) => {
             setOpen(false);
@@ -57,10 +59,10 @@ export function StudioSidebarTeamMenu({
             if (key === "settings") onOpenSettings?.();
           }}>
           <StudioMenuItem id="overview" textValue="Team overview" data-testid="sidebar-team-menu-overview">
-            <MenuItemContent start={<Group aria-hidden="true" />}>Team overview</MenuItemContent>
+            <MenuItemContent startClassName={MENU_ICON_CLASS} start={<Group aria-hidden="true" />}>Team overview</MenuItemContent>
           </StudioMenuItem>
           {onOpenSettings ? <StudioMenuItem id="settings" textValue="Team settings" data-testid="sidebar-team-menu-settings">
-            <MenuItemContent start={<Settings aria-hidden="true" />}>Team settings</MenuItemContent>
+            <MenuItemContent startClassName={MENU_ICON_CLASS} start={<Settings aria-hidden="true" />}>Team settings</MenuItemContent>
           </StudioMenuItem> : null}
         </StudioMenu>
       </StudioPopover>

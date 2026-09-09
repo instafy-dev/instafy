@@ -1,11 +1,13 @@
 import { useLayoutEffect, useRef, type ReactNode, type RefObject } from "react";
 import { Compass, Plus } from "iconoir-react";
-import { HomeIcon } from "../../../components/AppIcons";
 import { AttentionBadge } from "../../../components/AttentionBadge";
 import { IconButton } from "../../../components/Button";
+import { OctoMark } from "../../../components/OctoMark";
 import { DESKTOP_TITLE_BAR_HEIGHT_PX } from "../../../lib/desktopShell";
 import { getOrgInitials } from "../../../org/orgNaming";
 import type { SidebarWorkspaceOrgOption } from "./StudioSidebarWorkspaceSwitcher";
+
+const SELECTION_MARKER_CLASS = "pointer-events-none absolute -left-2 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r-full bg-primary-600 dark:bg-primary-400";
 
 export interface StudioOrganizationRailProps {
   organizations: SidebarWorkspaceOrgOption[];
@@ -72,10 +74,11 @@ export function StudioOrganizationRail({
         style={{ top: `${DESKTOP_TITLE_BAR_HEIGHT_PX}px` }} /> : null}
       <div className="shrink-0 py-2">
         <IconButton variant="ghost" size="sm" radius="lg" onPress={onHome}
-          aria-label="Home, all teams" title="Home" aria-current={homeActive ? "page" : undefined}
+          aria-label="Home — all teams" title="Home — all teams" aria-current={homeActive ? "page" : undefined}
           data-testid="sidebar-home-button"
-          className="relative h-11 w-11 aria-[current=page]:bg-primary-50 aria-[current=page]:text-primary-600 dark:aria-[current=page]:bg-primary-500/10 dark:aria-[current=page]:text-primary-400">
-          <HomeIcon className="h-5 w-5" aria-hidden="true" />
+          className="relative h-11 w-11 aria-[current=page]:bg-primary-50 dark:aria-[current=page]:bg-primary-500/10">
+          {homeActive ? <span aria-hidden="true" className={SELECTION_MARKER_CLASS} /> : null}
+          <span aria-hidden="true"><OctoMark className="h-6 w-6 text-brand-ink dark:text-brand-paper" /></span>
           <AttentionBadge count={homeAttentionCount} aria-hidden testId="sidebar-home-badge"
             className="absolute right-0 top-0 ring-2 ring-slate-50 dark:ring-[color:var(--color-studio-dark-rail)]" />
         </IconButton>
@@ -92,6 +95,7 @@ export function StudioOrganizationRail({
             title={org.label} aria-current={selected && !homeActive ? "page" : undefined}
             aria-busy={pending || undefined} data-testid={`sidebar-team-${org.key}`}
             className="relative h-11 w-11 shrink-0 aria-[current=page]:bg-primary-50 aria-[current=page]:text-primary-600 dark:aria-[current=page]:bg-primary-500/10 dark:aria-[current=page]:text-primary-400">
+            {selected && !homeActive ? <span aria-hidden="true" className={SELECTION_MARKER_CLASS} /> : null}
             <span className={`flex h-8 w-8 items-center justify-center overflow-hidden rounded-lg bg-slate-200 text-xs font-medium text-slate-700 dark:bg-slate-700 dark:text-slate-100 ${pending ? "animate-pulse" : ""}`}>
               {org.avatarUrl ? <img src={org.avatarUrl} alt="" draggable={false} className="h-full w-full object-cover" /> : getOrgInitials(org.name)}
             </span>

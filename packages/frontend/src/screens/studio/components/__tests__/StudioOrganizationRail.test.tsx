@@ -54,7 +54,11 @@ describe("StudioOrganizationRail", () => {
 
   it("selects exact teams and keeps global Home selection distinct from remembered team", async () => {
     await render({ homeActive: true, homeAttentionCount: 3, orgAttentionCounts: { empty: 2 } });
-    expect(container.querySelector('[data-testid="sidebar-home-button"]')?.getAttribute("aria-current")).toBe("page");
+    const home = container.querySelector('[data-testid="sidebar-home-button"]');
+    expect(home?.getAttribute("aria-current")).toBe("page");
+    expect(home?.getAttribute("aria-label")).toBe("Home — all teams");
+    expect(home?.getAttribute("title")).toBe("Home — all teams");
+    expect(container.querySelector('[data-testid="sidebar-home-badge"]')?.textContent).toBe("3");
     expect(container.querySelector('[data-testid="sidebar-team-one"]')?.hasAttribute("aria-current")).toBe(false);
     expect(container.querySelector('[data-testid="sidebar-team-empty"]')?.getAttribute("aria-label")).toContain("2 updates");
     await act(async () => {

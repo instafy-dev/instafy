@@ -101,9 +101,14 @@ The global rail keeps Home fixed above a scrollable team list, with New team,
 Browse teams and the account controls below it. Browse teams shows the signed-in
 account's accessible teams and spaces; it is not a public team directory.
 Invitation links continue to use the existing invitation acceptance flow.
+Home uses the static Instafy mark with the label and tooltip “Home — all teams”,
+in dark ink on light surfaces and white on dark surfaces. The selected Home or
+team has a persistent side marker as well as its background highlight.
 
 On desktop, clicking the selected team name in the context header opens an
-anchored menu for Team overview and Team settings. The space selector sits
+anchored menu for Team overview and Team settings. The 208px menu aligns within
+the expanded sidebar with approximately 8px side gutters, or opens beside the
+compact rail. The space selector sits
 immediately below that header and groups Chats, Automations, Files and Changes.
 The compact rail provides the same menu through a single team icon. On mobile,
 Team overview and Team settings remain direct actions in the navigation drawer.

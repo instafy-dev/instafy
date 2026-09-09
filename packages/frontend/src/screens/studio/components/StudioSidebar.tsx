@@ -383,7 +383,7 @@ export function StudioSidebar({
           ? showLabels
             ? `border-transparent bg-transparent ${accentClass}`
             : `border-primary-200 bg-primary-50 ${accentClass} dark:border-primary-500/40 dark:bg-primary-500/10`
-          : "border-transparent text-slate-400 group-hover/item:text-primary-600 dark:text-slate-500 dark:group-hover/item:text-primary-500",
+          : "border-transparent text-slate-600 group-hover/item:text-primary-600 dark:text-slate-500 dark:group-hover/item:text-primary-500",
       ].join(" "),
     [showLabels, sidebarIconShellSizeClass],
   );
@@ -1475,7 +1475,7 @@ export function StudioSidebar({
           />
         ) : null}
         {desktopRail ? <div
-          className="flex min-h-11 shrink-0 items-center gap-1"
+          className={`flex min-h-11 shrink-0 items-center gap-1 ${showLabels ? "pr-[7px]" : ""}`}
           data-testid="sidebar-team-header">
           <div className="flex w-[calc(4rem-1px)] shrink-0 items-center justify-center">
             <IconButton variant="ghost" size="sm"

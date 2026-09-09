@@ -16,7 +16,7 @@ import { StudioHistoryControls, studioHistoryControlsAvailable } from "../../../
 import { Button, IconButton } from "../../../components/Button";
 import { Badge } from "../../../components/Badge";
 import { Text } from "../../../components/Text";
-import { HomeIcon } from "../../../components/AppIcons";
+import { OctoMark } from "../../../components/OctoMark";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import { useProfile } from "../../../profile/ProfileProvider";
 import { getOrgInitials } from "../../../org/orgNaming";
@@ -54,7 +54,7 @@ import { useStudioNavigationPosture } from "../useStudioNavigationPosture";
 import { StudioNewChatButton } from "./StudioNewChatButton";
 
 const COMPACT_TAB_SELECTOR_CLASS =
-  "h-10 min-w-0 justify-between gap-2 rounded-xl !border-transparent !bg-slate-100 px-2.5 !text-slate-950 !shadow-none hover:!bg-slate-100 data-[hovered]:!bg-slate-100 focus-visible:ring-white/16 focus-visible:ring-offset-white max-[375px]:min-h-11 dark:!bg-white/[0.06] dark:!text-slate-50 dark:hover:!bg-white/[0.09] dark:data-[hovered]:!bg-white/[0.09] dark:focus-visible:ring-white/16 dark:focus-visible:ring-offset-[var(--color-studio-dark-rail)]";
+  "h-10 min-w-0 justify-between gap-2 rounded-xl !border-transparent !bg-slate-100 px-2.5 !text-slate-950 hover:!bg-slate-100 data-[hovered]:!bg-slate-100 focus-visible:ring-primary-600 focus-visible:ring-offset-white max-[375px]:min-h-11 dark:!bg-white/[0.06] dark:!text-slate-50 dark:hover:!bg-white/[0.09] dark:data-[hovered]:!bg-white/[0.09] dark:focus-visible:ring-primary-400 dark:focus-visible:ring-offset-[var(--color-studio-dark-rail)]";
 
 export interface StudioTopBarProps {
   notificationBell?: ReactNode;
@@ -238,7 +238,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
                 ].join(" ")}
                 aria-current={isActive ? "page" : undefined}
               >
-                <span aria-hidden="true" className="shrink-0 text-slate-400 dark:text-slate-400">
+                <span aria-hidden="true" className="shrink-0 text-slate-600 dark:text-slate-400">
                   {tab.icon}
                 </span>
                 <span className={`min-w-0 flex-1 truncate text-left ${isLargeScreen && tab.kind === "conversation" && tab.preview ? "italic" : ""}`}>{tab.title}</span>
@@ -301,7 +301,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
   );
   const projectNameLabel = (
     <div className="flex min-w-0 items-center gap-2">
-      <Cube className="text-base text-slate-400 dark:text-slate-400" aria-hidden="true" />
+      <Cube className="text-base text-slate-600 dark:text-slate-400" aria-hidden="true" />
       {projectNameText}
       {desktopVoiceStatusSummary ? (
         <Button
@@ -326,7 +326,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
       className="inline-flex h-[48px] items-center gap-2 px-4 text-sm font-medium text-slate-900 dark:text-slate-50"
       data-testid="workspace-tabs-empty-state"
     >
-      <Cube className="text-base text-slate-400 dark:text-slate-400" aria-hidden="true" />
+      <Cube className="text-base text-slate-600 dark:text-slate-400" aria-hidden="true" />
       <span className="truncate">{resolvedProjectName}</span>
     </div>
   );
@@ -346,7 +346,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
   ) : null;
 
   const desktopTabActionButtonClassName =
-    `h-[48px] w-12 flex-none rounded-none border border-transparent px-0 text-slate-500 transition-colors hover:bg-slate-100/80 hover:text-slate-900 data-[hovered]:bg-slate-100/80 data-[hovered]:text-slate-900 focus-visible:ring-white/16 focus-visible:ring-offset-white dark:text-slate-300 dark:hover:text-slate-50 dark:data-[hovered]:text-slate-50 dark:focus-visible:ring-white/16 dark:focus-visible:ring-offset-[var(--color-studio-dark-rail)] [aria-expanded=true]:dark:bg-white/[0.05] ${DARK_RAIL_HOVER_CLASS}`;
+    `h-[48px] w-12 flex-none rounded-none border border-transparent px-0 text-slate-500 transition-colors hover:bg-slate-100/80 hover:text-slate-900 data-[hovered]:bg-slate-100/80 data-[hovered]:text-slate-900 focus-visible:ring-primary-600 focus-visible:ring-offset-white dark:text-slate-300 dark:hover:text-slate-50 dark:data-[hovered]:text-slate-50 dark:focus-visible:ring-primary-400 dark:focus-visible:ring-offset-[var(--color-studio-dark-rail)] [aria-expanded=true]:dark:bg-white/[0.05] ${DARK_RAIL_HOVER_CLASS}`;
   const desktopParentConversationButton = parentConversation ? (
     <IconButton
       onPress={handleOpenParentConversation}
@@ -477,12 +477,13 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
             variant="ghost"
             radius="full"
             size="md"
-            aria-label="Home"
+            aria-label="Home — all teams"
+            title="Home — all teams"
             aria-current={navigationPage === "home" ? "page" : undefined}
             data-testid="topbar-home-button"
             className={`!min-h-12 !min-w-12 shrink-0 text-slate-600 dark:text-slate-200 ${DARK_RAIL_HOVER_CLASS} aria-[current=page]:bg-primary-50 aria-[current=page]:text-primary-600 dark:aria-[current=page]:bg-primary-500/15 dark:aria-[current=page]:text-primary-400`}
           >
-            <HomeIcon className="h-5 w-5" aria-hidden="true" />
+            <span aria-hidden="true"><OctoMark className="h-6 w-6 text-brand-ink dark:text-brand-paper" /></span>
           </IconButton>
           <Button
             onPress={onOpenTeamSwitcher ?? onToggleSidebar}
@@ -500,7 +501,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
               {activeTeamAvatarUrl ? <img src={activeTeamAvatarUrl} alt="" className="h-full w-full object-cover" /> : getOrgInitials(resolvedTeamName)}
             </span>
             <span className="min-w-0 truncate text-sm font-semibold" data-testid="topbar-team-name">{resolvedTeamName}</span>
-            <SidebarExpand className="h-4 w-4 shrink-0 text-slate-500 dark:text-slate-400" aria-hidden="true" />
+            <SidebarExpand className="h-4 w-4 shrink-0 text-slate-600 dark:text-slate-400" aria-hidden="true" />
           </Button>
           <div className="ml-auto flex shrink-0 items-center gap-1">
             {notificationBell}
@@ -596,7 +597,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
             className={`${COMPACT_TAB_SELECTOR_CLASS} flex-1 text-left`}
           >
             <span className="min-w-0 flex-1">
-              <span className="block truncate text-2xs font-normal text-slate-500 dark:text-slate-400">{resolvedProjectName}</span>
+              <span className="block truncate text-2xs font-normal text-slate-600 dark:text-slate-400">{resolvedProjectName}</span>
               <span className="block truncate text-xs font-semibold">{topbarLocationTitle}</span>
             </span>
             <SidebarExpand className="h-4 w-4 shrink-0" aria-hidden="true" />

@@ -164,6 +164,8 @@ describe("StudioTopBar navigation", () => {
     const team = row?.querySelector<HTMLButtonElement>('[data-testid="topbar-team-selector"]');
     const profile = row?.querySelector<HTMLButtonElement>('[data-testid="topbar-profile-button"]');
     expect(home?.nextElementSibling).toBe(team);
+    expect(home?.getAttribute("aria-label")).toBe("Home — all teams");
+    expect(home?.title).toBe("Home — all teams");
     expect(home?.getAttribute("aria-current")).toBe(navigationPage === "home" ? "page" : null);
     expect(team?.querySelector('[data-testid="topbar-team-name"]')?.textContent).toBe("My team");
     expect(team?.querySelector('[data-testid="topbar-team-avatar"]')?.textContent).toBe("MT");

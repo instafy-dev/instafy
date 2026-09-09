@@ -78,7 +78,7 @@ export function MobileStudioNavigationHeader({
       >
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-semibold" data-testid="mobile-header-title">{title}</span>
-          <span className="block truncate text-xs font-normal text-slate-500 dark:text-slate-400" data-testid="mobile-header-space">{spaceName}</span>
+          <span className="block truncate text-xs font-normal text-slate-600 dark:text-slate-400" data-testid="mobile-header-space">{spaceName}</span>
         </span>
         <SidebarExpand className="h-4 w-4 shrink-0" aria-hidden="true" />
       </Button>

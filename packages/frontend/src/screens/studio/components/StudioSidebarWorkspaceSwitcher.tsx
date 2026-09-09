@@ -192,7 +192,7 @@ export function StudioSidebarWorkspaceSwitcher({
         <span className="min-w-0 flex-1 truncate">{isAll ? "All teams" : org.label}</span>
         <span className="flex shrink-0 items-center gap-1.5">
           {isCurrent || isSelected ? (
-            <span className="text-3xs font-medium uppercase tracking-[0.08em] text-slate-400 dark:text-slate-500">
+            <span className="text-3xs font-medium uppercase tracking-[0.08em] text-slate-600 dark:text-slate-500">
               {isCurrent ? "Current" : isPending ? "Switching…" : "Selected"}
             </span>
           ) : null}
@@ -231,7 +231,7 @@ export function StudioSidebarWorkspaceSwitcher({
           <span className="flex min-w-0 items-center gap-2"><SpaceIdentity name={project.name} icon={project.projectIcon} color={project.projectColor} className="h-6 w-6 shrink-0" /><span className="truncate">{project.name || "Untitled space"}</span></span>
           <span className="flex shrink-0 items-center gap-1.5">
             {options.current ? (
-              <span className="text-3xs font-medium uppercase tracking-[0.08em] text-slate-400 dark:text-slate-500">
+              <span className="text-3xs font-medium uppercase tracking-[0.08em] text-slate-600 dark:text-slate-500">
                 Current
               </span>
             ) : null}
