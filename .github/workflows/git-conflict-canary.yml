@@ -23,12 +23,22 @@ concurrency:
 jobs:
   deterministic-conflict:
     name: Deterministic conflict fixture
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(
+        vars.CI_RUNNER_MODE == 'self-hosted' && (
+          (github.ref == 'refs/heads/main' &&
+           (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) ||
+          (vars.CI_TRUSTED_PR_SELF_HOSTED == 'true' && github.event.repository.private == true &&
+           github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+        ) &&
+        (github.event_name == 'pull_request' && '{"group":"org/instafy-ci-pr","labels":["self-hosted","Linux","ARM64","instafy-ci-control","instafy-ci-trust-pr"]}' || '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-control","instafy-ci-trust-main"]}') || '["ubuntu-latest"]') }}
     timeout-minutes: 5
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - name: Verify conflict-resolution fixture
         shell: bash

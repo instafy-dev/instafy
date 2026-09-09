@@ -23,7 +23,13 @@ concurrency:
 jobs:
   authorize:
     name: Authorize exact release source
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(
+        vars.CI_RUNNER_MODE == 'self-hosted' && (
+          (github.ref == 'refs/heads/main' &&
+           (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))
+        ) &&
+        '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-control","instafy-ci-trust-main"]}' || '["ubuntu-latest"]') }}
     permissions:
       actions: read
       contents: read
@@ -102,7 +108,13 @@ jobs:
   release-approval:
     name: Approve the exact release once
     needs: authorize
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(
+        vars.CI_RUNNER_MODE == 'self-hosted' && (
+          (github.ref == 'refs/heads/main' &&
+           (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))
+        ) &&
+        '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-control","instafy-ci-trust-main"]}' || '["ubuntu-latest"]') }}
     environment: ghcr-release
     permissions: {}
     steps:
@@ -128,7 +140,15 @@ jobs:
     needs:
       - authorize
       - release-approval
-    runs-on: ${{ matrix.runner }}
+    runs-on: >-
+      ${{ fromJSON(
+        vars.CI_RUNNER_MODE == 'self-hosted' && (
+          (github.ref == 'refs/heads/main' &&
+           (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))
+        ) &&
+        ((matrix.architecture == 'arm64' && '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-main"]}') ||
+         (matrix.architecture == 'amd64' && vars.CI_LINUX_X64_SELF_HOSTED == 'true' && '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","X64","instafy-ci-linux-x64","instafy-ci-trust-main"]}')) ||
+        format('["{0}"]', matrix.runner)) }}
     # Cache-hit cells normally finish in under 15 minutes, but observed cold
     # Rust rebuilds can approach an hour. Keep a bounded 75-minute path while
     # still preventing a wedged BuildKit worker from consuming six hours.
@@ -193,10 +213,12 @@ jobs:
           # preinstalled SDK paths are unrelated to this Docker-only job and
           # otherwise crowd out the audited image; on runner images where a
           # path does not exist the removal is a harmless no-op.
-          sudo rm -rf -- \
-            /opt/ghc \
-            /usr/local/lib/android \
-            /usr/share/dotnet
+          if [[ "$RUNNER_ENVIRONMENT" == "github-hosted" ]]; then
+            sudo rm -rf -- \
+              /opt/ghc \
+              /usr/local/lib/android \
+              /usr/share/dotnet
+          fi
           available_kib="$(df -Pk / | awk 'NR == 2 { print $4 }')"
           echo "Free disk after reclaim: ${available_kib} KiB"
           if [[ ! "$available_kib" =~ ^[0-9]+$ ]] ||
@@ -435,7 +457,13 @@ jobs:
     needs:
       - authorize
       - build-scan-push
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(
+        vars.CI_RUNNER_MODE == 'self-hosted' && (
+          (github.ref == 'refs/heads/main' &&
+           (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))
+        ) &&
+        '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-control","instafy-ci-trust-main"]}' || '["ubuntu-latest"]') }}
     permissions:
       contents: read
       packages: write

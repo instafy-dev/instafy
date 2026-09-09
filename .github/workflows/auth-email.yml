@@ -43,7 +43,15 @@ concurrency:
 jobs:
   auth-email:
     name: signup -> email -> activate
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(
+        vars.CI_RUNNER_MODE == 'self-hosted' && (
+          (github.ref == 'refs/heads/main' &&
+           (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) ||
+          (vars.CI_TRUSTED_PR_SELF_HOSTED == 'true' && github.event.repository.private == true &&
+           github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+        ) &&
+        (github.event_name == 'pull_request' && '{"group":"org/instafy-ci-pr","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-pr"]}' || '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-main"]}') || '["ubuntu-latest"]') }}
     # `supabase start` pulls several Docker images on a cold runner; cap the job
     # so a hung pull can't burn the 6h default.
     timeout-minutes: 25
@@ -51,6 +59,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          persist-credentials: false
           fetch-depth: 1
           set-safe-directory: true
 

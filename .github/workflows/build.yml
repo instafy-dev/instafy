@@ -27,13 +27,20 @@ jobs:
     if: >-
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(
+        vars.CI_RUNNER_MODE == 'self-hosted' && (
+          (github.ref == 'refs/heads/main' &&
+           (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))
+        ) &&
+        '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-control","instafy-ci-trust-main"]}' || '["ubuntu-latest"]') }}
     timeout-minutes: 10
 
     steps:
       - name: Checkout repository history
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          persist-credentials: false
           fetch-depth: 0
           submodules: false
 
@@ -41,13 +48,19 @@ jobs:
         env:
           GITLEAKS_VERSION: "8.30.1"
           GITLEAKS_LINUX_X64_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+          GITLEAKS_LINUX_ARM64_SHA256: "e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080"
         run: |
           set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) asset=linux_x64; checksum="$GITLEAKS_LINUX_X64_SHA256" ;;
+            aarch64) asset=linux_arm64; checksum="$GITLEAKS_LINUX_ARM64_SHA256" ;;
+            *) echo "::error::Unsupported Linux scanner architecture."; exit 1 ;;
+          esac
           archive="$RUNNER_TEMP/gitleaks.tar.gz"
           curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_${asset}.tar.gz" \
             --output "$archive"
-          printf '%s  %s\n' "$GITLEAKS_LINUX_X64_SHA256" "$archive" | sha256sum --check --status
+          printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check --status
           tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
           sudo install -m 0755 "$RUNNER_TEMP/gitleaks" /usr/local/bin/gitleaks
           test "$(gitleaks version)" = "$GITLEAKS_VERSION"
@@ -139,13 +152,22 @@ jobs:
 
   javascript:
     name: JavaScript packages
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(
+        vars.CI_RUNNER_MODE == 'self-hosted' && (
+          (github.ref == 'refs/heads/main' &&
+           (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) ||
+          (vars.CI_TRUSTED_PR_SELF_HOSTED == 'true' && github.event.repository.private == true &&
+           github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+        ) &&
+        (github.event_name == 'pull_request' && '{"group":"org/instafy-ci-pr","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-pr"]}' || '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-main"]}') || '["ubuntu-latest"]') }}
     timeout-minutes: 45
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          persist-credentials: false
           fetch-depth: 1
           submodules: recursive
 
@@ -173,6 +195,7 @@ jobs:
             scripts/check-production-image-inputs.test.mjs \
             scripts/check-production-services-workflow.test.mjs \
             scripts/check-public-release-workflows.test.mjs \
+            scripts/check-ci-runner-routing.test.mjs \
             scripts/check-changesets.test.mjs \
             scripts/verify-changeset-pack.test.mjs \
             scripts/lib/codexMachineAuthExpiry.test.mjs \
@@ -191,7 +214,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.instafy-image-cache
-          key: supabase-postgres-image-${{ hashFiles('scripts/test-supabase-migrations-empty-db.mjs') }}
+          key: supabase-postgres-image-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/test-supabase-migrations-empty-db.mjs') }}
 
       - name: Ensure Supabase Postgres image
         run: node scripts/ensure-supabase-postgres-image.mjs
@@ -228,13 +251,22 @@ jobs:
 
   go:
     name: Go packages
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(
+        vars.CI_RUNNER_MODE == 'self-hosted' && (
+          (github.ref == 'refs/heads/main' &&
+           (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) ||
+          (vars.CI_TRUSTED_PR_SELF_HOSTED == 'true' && github.event.repository.private == true &&
+           github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+        ) &&
+        (github.event_name == 'pull_request' && '{"group":"org/instafy-ci-pr","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-pr"]}' || '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-main"]}') || '["ubuntu-latest"]') }}
     timeout-minutes: 20
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          persist-credentials: false
           fetch-depth: 1
           submodules: false
 
@@ -254,7 +286,15 @@ jobs:
 
   rust:
     name: Rust packages
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(
+        vars.CI_RUNNER_MODE == 'self-hosted' && (
+          (github.ref == 'refs/heads/main' &&
+           (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) ||
+          (vars.CI_TRUSTED_PR_SELF_HOSTED == 'true' && github.event.repository.private == true &&
+           github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+        ) &&
+        (github.event_name == 'pull_request' && '{"group":"org/instafy-ci-pr","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-pr"]}' || '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-main"]}') || '["ubuntu-latest"]') }}
     timeout-minutes: 60
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -263,6 +303,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          persist-credentials: false
           fetch-depth: 1
           submodules: recursive
 
@@ -285,13 +326,22 @@ jobs:
   # this reports in about a minute rather than after the 45-minute test job.
   rust-fmt:
     name: Rust formatting
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(
+        vars.CI_RUNNER_MODE == 'self-hosted' && (
+          (github.ref == 'refs/heads/main' &&
+           (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) ||
+          (vars.CI_TRUSTED_PR_SELF_HOSTED == 'true' && github.event.repository.private == true &&
+           github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+        ) &&
+        (github.event_name == 'pull_request' && '{"group":"org/instafy-ci-pr","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-pr"]}' || '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-main"]}') || '["ubuntu-latest"]') }}
     timeout-minutes: 10
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          persist-credentials: false
           fetch-depth: 1
           submodules: recursive
 
@@ -323,7 +373,15 @@ jobs:
   # (issue #142's other half). None of them need a database.
   rust-tests:
     name: Rust tests
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ fromJSON(
+        vars.CI_RUNNER_MODE == 'self-hosted' && (
+          (github.ref == 'refs/heads/main' &&
+           (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) ||
+          (vars.CI_TRUSTED_PR_SELF_HOSTED == 'true' && github.event.repository.private == true &&
+           github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+        ) &&
+        (github.event_name == 'pull_request' && '{"group":"org/instafy-ci-pr","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-pr"]}' || '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-main"]}') || '["ubuntu-latest"]') }}
     timeout-minutes: 45
     env:
       CARGO_PROFILE_DEV_DEBUG: "0"
@@ -336,6 +394,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
+          persist-credentials: false
           fetch-depth: 1
           submodules: recursive
 
@@ -363,14 +422,15 @@ jobs:
       # Hosted runners keep ~14GB free on /; five crates of test builds plus
       # the restored cache need headroom. Drop toolchains this job never uses.
       - name: Free runner disk space
+        if: runner.environment == 'github-hosted'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
 
       # Test builds are much heavier than the check job's; cache the registry
       # and the shared target dir keyed on the lockfiles so warm runs skip
-      # most of the compile. v2 namespace: the v1 cache carried the full
-      # controller build and ENOSPC'd the runner during restore.
+      # most of the compile. v3 separates native architectures; the retired v1
+      # cache carried the full controller build and overflowed runner storage.
       - name: Restore cargo cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -378,9 +438,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             .cargo-target
-          key: rust-tests-v2-${{ runner.os }}-${{ hashFiles('packages/*/Cargo.lock') }}
+          key: rust-tests-v3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/*/Cargo.lock') }}
           restore-keys: |
-            rust-tests-v2-${{ runner.os }}-
+            rust-tests-v3-${{ runner.os }}-${{ runner.arch }}-
 
       - name: Run database-free Rust test suites
         run: |

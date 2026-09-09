@@ -31,7 +31,13 @@ jobs:
     if: >-
       github.repository == 'instafy-dev/instafy' &&
       github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
+    runs-on: >-
+      ${{ fromJSON(
+        vars.CI_RUNNER_MODE == 'self-hosted' && (
+          (github.ref == 'refs/heads/main' &&
+           (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'))
+        ) &&
+        '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-coordinator","instafy-ci-trust-main"]}' || '["ubuntu-24.04"]') }}
     timeout-minutes: 180
 
     steps:

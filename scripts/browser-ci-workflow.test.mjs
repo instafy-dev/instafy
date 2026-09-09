@@ -17,9 +17,10 @@ test("Public Build includes browser verification in its existing release result"
 test("required browser lanes execute without secret or production authority", () => {
   const workflow = read(".github/workflows/browser-e2e.yml");
   assert.match(workflow, /\n  workflow_call:/);
-  assert.doesNotMatch(workflow, /secrets:|secrets\.|continue-on-error:|pull_request_target:|self-hosted|environment:/);
+  assert.doesNotMatch(workflow, /secrets:|secrets\.|continue-on-error:|pull_request_target:|environment:/);
   assert.equal((workflow.match(/persist-credentials: false/g) ?? []).length, 3);
-  assert.equal((workflow.match(/runs-on: ubuntu-24\.04/g) ?? []).length, 3);
+  assert.equal((workflow.match(/runs-on: >-/g) ?? []).length, 3);
+  assert.equal((workflow.match(/'\["ubuntu-24\.04"\]'/g) ?? []).length, 3);
   assert.match(workflow, /xvfb-run -a pnpm test:browser:ci personal/);
   assert.match(workflow, /run: pnpm test:browser:ci browser-ui/);
   assert.match(workflow, /xvfb-run -a node scripts\/browser-profile-e2e\.mjs/);
@@ -85,6 +86,7 @@ test("the expanded browser UI inventory has a bounded suite budget without relax
   assert.equal(REQUIRED_BROWSER_LANES["browser-ui"].minimumTests, 39);
   const workflow = read(".github/workflows/browser-e2e.yml");
   const job = workflow.split("\n  browser-ui:\n")[1].split("\n  shared-profile:\n")[0];
-  assert.match(job, /^\s+runs-on: ubuntu-24\.04$/m);
+  assert.match(job, /^\s+runs-on: >-$/m);
+  assert.match(job, /'\["ubuntu-24\.04"\]'/);
   assert.match(job, /^\s+timeout-minutes: 15$/m);
 });

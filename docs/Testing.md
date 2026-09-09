@@ -1,5 +1,8 @@
 # Testing
 
+Linux CI has a reversible [runner selection policy](CI-Runners.md). Hosted fallback preserves
+the same checks; temporary trusted-PR routing never grants repository or production secrets.
+
 ## Playwright (Studio)
 - Required frontend CI mirror: `pnpm quality:frontend:required`
 - Frontend lint budget gate: `pnpm lint`

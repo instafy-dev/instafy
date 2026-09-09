@@ -30,8 +30,11 @@ release signing and deployment configuration do not belong here.
   must not receive refresh tokens or raw credential-storage files.
 - Constrain filesystem operations to the active project root, reject traversal and symlink
   escapes, and preserve the existing permission checks.
-- Treat public pull requests as untrusted. Public CI must use hosted runners and must not
-  receive repository, deployment or production secrets.
+- Treat public and fork pull requests as untrusted: they use GitHub-hosted runners and must
+  not receive repository, deployment or production secrets. While the repository is private,
+  maintainers may temporarily opt reviewed same-repository PRs into disposable, isolated,
+  credential-free self-hosted Linux workers as described in [CI runner policy](docs/CI-Runners.md).
+  That opt-in does not authorize secrets, signing runners, persistent host access, or deployment.
 - Protected local credentials may intentionally cover both `instafy-dev/instafy` and
   `instafy-dev/instafy-internal` for explicitly authorized cross-repository release or operations
   work. That cross-repository scope is allowed: target authenticated commands at an explicit

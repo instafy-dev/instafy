@@ -10,7 +10,15 @@ permissions:
 jobs:
   personal:
     name: Personal Browser E2E
-    runs-on: ubuntu-24.04
+    runs-on: >-
+      ${{ fromJSON(
+        vars.CI_RUNNER_MODE == 'self-hosted' && (
+          (github.ref == 'refs/heads/main' &&
+           (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) ||
+          (vars.CI_TRUSTED_PR_SELF_HOSTED == 'true' && github.event.repository.private == true &&
+           github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+        ) &&
+        (github.event_name == 'pull_request' && '{"group":"org/instafy-ci-pr","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-pr"]}' || '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-main"]}') || '["ubuntu-24.04"]') }}
     timeout-minutes: 20
     steps:
       - name: Checkout the tested revision
@@ -51,7 +59,15 @@ jobs:
 
   browser-ui:
     name: Browser UI rendering
-    runs-on: ubuntu-24.04
+    runs-on: >-
+      ${{ fromJSON(
+        vars.CI_RUNNER_MODE == 'self-hosted' && (
+          (github.ref == 'refs/heads/main' &&
+           (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) ||
+          (vars.CI_TRUSTED_PR_SELF_HOSTED == 'true' && github.event.repository.private == true &&
+           github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+        ) &&
+        (github.event_name == 'pull_request' && '{"group":"org/instafy-ci-pr","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-pr"]}' || '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-main"]}') || '["ubuntu-24.04"]') }}
     timeout-minutes: 15
     steps:
       - name: Checkout the tested revision
@@ -91,7 +107,15 @@ jobs:
 
   shared-profile:
     name: Shared Browser profile E2E
-    runs-on: ubuntu-24.04
+    runs-on: >-
+      ${{ fromJSON(
+        vars.CI_RUNNER_MODE == 'self-hosted' && (
+          (github.ref == 'refs/heads/main' &&
+           (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')) ||
+          (vars.CI_TRUSTED_PR_SELF_HOSTED == 'true' && github.event.repository.private == true &&
+           github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+        ) &&
+        (github.event_name == 'pull_request' && '{"group":"org/instafy-ci-pr","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-pr"]}' || '{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-linux-arm64","instafy-ci-trust-main"]}') || '["ubuntu-24.04"]') }}
     timeout-minutes: 60
     env:
       CARGO_BUILD_JOBS: "2"
@@ -124,6 +148,7 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
       - name: Free space on the disposable hosted runner
+        if: runner.environment == 'github-hosted'
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
@@ -136,8 +161,8 @@ jobs:
         run: |
           chromium_path="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')"
           test -x "$chromium_path"
-          # This path is confined to a fresh GitHub-hosted runner; it is never
-          # installed or changed by the local test script on a user's machine.
+          # Both runner modes require a fresh disposable Linux guest. This is
+          # never installed by the local test script on a user's machine.
           sudo ln -sf "$chromium_path" /usr/bin/chromium
       - name: Install fixture display and database probes
         run: sudo apt-get update && sudo apt-get install -y x11-utils sqlite3 postgresql-client
@@ -145,7 +170,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.instafy-image-cache
-          key: supabase-postgres-image-${{ hashFiles('scripts/test-supabase-migrations-empty-db.mjs') }}
+          key: supabase-postgres-image-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/test-supabase-migrations-empty-db.mjs') }}
       - name: Start disposable migrated Supabase and local authentication
         run: |
           node scripts/ensure-supabase-postgres-image.mjs
