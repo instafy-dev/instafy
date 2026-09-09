@@ -519,6 +519,27 @@
   border-color: var(--color-primary-500);
 }
 
+/* The persistent context belongs to the header. Only typing needs a field
+   outline; focusing either scope picker keeps its own button indicator. */
+.studio-search-control[data-search-persistent] .studio-search-field {
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.studio-search-control[data-search-persistent] .studio-search-field:hover,
+.studio-search-control[data-search-persistent] .studio-search-field:has(input:focus) {
+  background: var(--color-slate-100);
+}
+
+.dark .studio-search-control[data-search-persistent] .studio-search-field:hover,
+.dark .studio-search-control[data-search-persistent] .studio-search-field:has(input:focus) {
+  background: var(--color-studio-dark-control-hover);
+}
+
+.studio-search-control[data-search-persistent] .studio-search-field:has(input:focus) {
+  box-shadow: inset 0 0 0 1px var(--color-primary-500);
+}
+
 .dark .studio-search-trigger:hover,
 .dark .studio-search-close:hover,
 .dark .studio-search-result:hover,
