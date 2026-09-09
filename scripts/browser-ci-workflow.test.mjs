@@ -9,8 +9,8 @@ const root = path.resolve(import.meta.dirname, "..");
 const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");
 
 const routedJobs = [
-  { key: "personal", label: "public-browser-personal", name: "Personal Browser E2E", minutes: 20 },
-  { key: "browser-ui", label: "public-browser-ui", name: "Browser UI rendering", minutes: 15 },
+  { key: "personal", label: "public-browser-personal", name: "Personal Browser E2E", minutes: 30 },
+  { key: "browser-ui", label: "public-browser-ui", name: "Browser UI rendering", minutes: 30 },
 ];
 const jobSource = key => read(".github/workflows/browser-e2e.yml").split(`\n  ${key}:\n`)[1].split(/\n  [\w-]+:\n/u)[0];
 function callerContext(event = "pull_request") {
@@ -117,8 +117,20 @@ test("browser qualification fails before checkout for wrong isolation, platform,
       s => { delete s.env.INSTAFY_CI_JOB_ISOLATION; }, s => { s.env.INSTAFY_ENV_DIR = "/inert-private-env"; }]) {
       assert.throws(() => qualifyBrowser(job, mutate));
     }
-    assert.equal((jobSource(job.key).match(/^        if: /gmu) ?? []).length, 2, "only qualification and always-upload may be conditional");
+    assert.equal((jobSource(job.key).match(/^        if: /gmu) ?? []).length, job.key === "personal" ? 3 : 2,
+      "only qualification, Personal native dependency setup and always-upload may be conditional");
   }
+});
+
+test("only the self-hosted Personal job installs its documented GTK3 dependency before the native fixture build", () => {
+  const personal = jobSource("personal");
+  const step = "      - name: Install Linux Electron runtime dependency\n        if: runner.environment == 'self-hosted'\n        run: sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libgtk-3-0t64\n";
+  assert.ok(personal.includes(step));
+  assert.ok(personal.indexOf(step) > personal.indexOf("playwright install --with-deps chromium"));
+  assert.ok(personal.indexOf(step) < personal.indexOf("pnpm --filter @instafy/desktop-runtime-agent build"));
+  for (const key of ["browser-ui", "shared-profile"]) assert.doesNotMatch(jobSource(key), /libgtk-3-0t64|Install Linux Electron runtime dependency/u);
+  assert.match(personal, /xvfb-run -a pnpm test:browser:ci personal/u);
+  assert.doesNotMatch(personal, /--no-sandbox|--allow-unauthenticated|--ignore-scripts|NODE_TLS_REJECT_UNAUTHORIZED/u);
 });
 
 test("Public Build includes browser verification in its existing release result", () => {
@@ -202,5 +214,5 @@ test("the expanded browser UI inventory has a bounded suite budget without relax
   const workflow = read(".github/workflows/browser-e2e.yml");
   const job = workflow.split("\n  browser-ui:\n")[1].split("\n  shared-profile:\n")[0];
   assert.match(job, /\|\| 'ubuntu-24\.04' }}/);
-  assert.match(job, /^\s+timeout-minutes: 15$/m);
+  assert.match(job, /^\s+timeout-minutes: 30$/m);
 });
