@@ -53,11 +53,11 @@ test("the build workflow ensures the image before running migrations", () => {
   assert.ok(migrateIndex > -1, "build.yml must still run the migration test");
   assert.ok(cacheIndex < ensureIndex, "cache restore must precede the ensure step");
   assert.ok(ensureIndex < migrateIndex, "ensure must precede the migration test");
-  // The cache key must depend on the file that carries the digest, so a digest
-  // bump invalidates the cached tarball instead of loading the old image.
+  // The cache key binds the runner platform as well as the digest-bearing file:
+  // an AMD64 tarball must not be reused on the independently native ARM64 lane.
   assert.match(
     workflow,
-    /supabase-postgres-image-\$\{\{ hashFiles\('scripts\/test-supabase-migrations-empty-db\.mjs'\) \}\}/u,
+    /supabase-postgres-image-\$\{\{ runner\.os \}\}-\$\{\{ runner\.arch \}\}-\$\{\{ hashFiles\('scripts\/test-supabase-migrations-empty-db\.mjs'\) \}\}/u,
   );
 });
 

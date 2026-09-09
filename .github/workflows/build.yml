@@ -174,15 +174,113 @@ jobs:
 
   javascript:
     name: JavaScript packages
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-
+    needs:
+      - javascript-contracts
+      - javascript-frontend
+      - javascript-cli
+      - javascript-desktop
+    if: ${{ always() }}
+    runs-on: >-
+      ${{ vars.CI_JAVASCRIPT_SELF_HOSTED == 'true'
+          && github.repository == 'instafy-dev/instafy'
+          && github.event.repository.private == true
+          && ((github.event_name == 'pull_request'
+               && github.event.pull_request.base.ref == 'main'
+               && github.event.pull_request.base.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.fork == false)
+              || (github.event_name == 'push'
+                  && github.ref == 'refs/heads/main'
+                  && github.ref_protected == true))
+          && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-js-aggregate","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions: {}
     steps:
+      - name: Qualify isolated JavaScript CI runner
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const { execFileSync } = require('node:child_process');
+          assert.equal(process.platform, 'linux');
+          assert.equal(process.arch, 'arm64');
+          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
+          assert.equal(process.versions.node.split('.')[0], '22');
+          assert.equal(process.env.RUNNER_OS, 'Linux');
+          assert.equal(process.env.RUNNER_ARCH, 'ARM64');
+          assert.equal(process.env.INSTAFY_CI_JOB_ISOLATION, 'ephemeral');
+          assert.ok(!process.env.INSTAFY_ENV_DIR);
+          for (const tool of ['bash', 'git', 'curl', 'tar', 'sha256sum', 'unzip']) {
+            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'javascript-ci-preflight', tool], { timeout: 1000, stdio: 'ignore' });
+          }
+          NODE
+
+      - name: Require every JavaScript lane to succeed
+        env:
+          JAVASCRIPT_RESULTS: ${{ toJSON(needs) }}
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const expected = ['javascript-contracts', 'javascript-frontend', 'javascript-cli', 'javascript-desktop'];
+          const results = JSON.parse(process.env.JAVASCRIPT_RESULTS);
+          assert.deepEqual(Object.keys(results).sort(), expected.sort());
+          for (const name of expected) {
+            assert.equal(results[name].result, 'success', 'Every JavaScript lane must succeed: ' + name);
+          }
+          console.log('All JavaScript contracts, migrations, frontend, CLI and Desktop checks passed.');
+          NODE
+
+  javascript-contracts:
+    name: JavaScript contracts and migrations
+    runs-on: >-
+      ${{ vars.CI_JAVASCRIPT_SELF_HOSTED == 'true'
+          && github.repository == 'instafy-dev/instafy'
+          && github.event.repository.private == true
+          && ((github.event_name == 'pull_request'
+               && github.event.pull_request.base.ref == 'main'
+               && github.event.pull_request.base.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.fork == false)
+              || (github.event_name == 'push'
+                  && github.ref == 'refs/heads/main'
+                  && github.ref_protected == true))
+          && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-js-contracts","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    steps:
+      - name: Qualify isolated JavaScript CI runner
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const { execFileSync } = require('node:child_process');
+          assert.equal(process.platform, 'linux');
+          assert.equal(process.arch, 'arm64');
+          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
+          assert.equal(process.versions.node.split('.')[0], '22');
+          assert.equal(process.env.RUNNER_OS, 'Linux');
+          assert.equal(process.env.RUNNER_ARCH, 'ARM64');
+          assert.equal(process.env.INSTAFY_CI_JOB_ISOLATION, 'ephemeral');
+          assert.ok(!process.env.INSTAFY_ENV_DIR);
+          for (const tool of ['bash', 'git', 'curl', 'tar', 'sha256sum', 'unzip', 'docker']) {
+            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'javascript-ci-preflight', tool], { timeout: 1000, stdio: 'ignore' });
+          }
+          const engine = JSON.parse(execFileSync('docker', ['info', '--format', '{{json .}}'], { timeout: 5000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }));
+          assert.equal(engine.OSType, 'linux');
+          assert.ok(['aarch64', 'arm64'].includes(engine.Architecture));
+          NODE
+
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 1
           submodules: recursive
+          persist-credentials: false
+          ref: ${{ github.sha }}
 
       - name: Set up pnpm
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
@@ -197,6 +295,9 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Verify JavaScript CI coverage and routing
+        run: node --test scripts/check-javascript-ci.test.mjs
 
       - name: Validate public migration ordering
         run: node scripts/check-supabase-migrations.mjs
@@ -226,13 +327,76 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.instafy-image-cache
-          key: supabase-postgres-image-${{ hashFiles('scripts/test-supabase-migrations-empty-db.mjs') }}
+          key: supabase-postgres-image-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/test-supabase-migrations-empty-db.mjs') }}
 
       - name: Ensure Supabase Postgres image
         run: node scripts/ensure-supabase-postgres-image.mjs
 
       - name: Apply public migrations to an empty database
         run: node scripts/test-supabase-migrations-empty-db.mjs
+
+  javascript-frontend:
+    name: JavaScript frontend
+    runs-on: >-
+      ${{ vars.CI_JAVASCRIPT_SELF_HOSTED == 'true'
+          && github.repository == 'instafy-dev/instafy'
+          && github.event.repository.private == true
+          && ((github.event_name == 'pull_request'
+               && github.event.pull_request.base.ref == 'main'
+               && github.event.pull_request.base.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.fork == false)
+              || (github.event_name == 'push'
+                  && github.ref == 'refs/heads/main'
+                  && github.ref_protected == true))
+          && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-js-frontend","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    steps:
+      - name: Qualify isolated JavaScript CI runner
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const { execFileSync } = require('node:child_process');
+          assert.equal(process.platform, 'linux');
+          assert.equal(process.arch, 'arm64');
+          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
+          assert.equal(process.versions.node.split('.')[0], '22');
+          assert.equal(process.env.RUNNER_OS, 'Linux');
+          assert.equal(process.env.RUNNER_ARCH, 'ARM64');
+          assert.equal(process.env.INSTAFY_CI_JOB_ISOLATION, 'ephemeral');
+          assert.ok(!process.env.INSTAFY_ENV_DIR);
+          for (const tool of ['bash', 'git', 'curl', 'tar', 'sha256sum', 'unzip']) {
+            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'javascript-ci-preflight', tool], { timeout: 1000, stdio: 'ignore' });
+          }
+          NODE
+
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          submodules: recursive
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify JavaScript CI coverage and routing
+        run: node --test scripts/check-javascript-ci.test.mjs
 
       - name: Lint frontend
         run: pnpm --filter @instafy/frontend lint
@@ -243,6 +407,69 @@ jobs:
       - name: Test frontend
         run: pnpm --filter @instafy/frontend test:unit
 
+  javascript-cli:
+    name: JavaScript CLI and provider contract
+    runs-on: >-
+      ${{ vars.CI_JAVASCRIPT_SELF_HOSTED == 'true'
+          && github.repository == 'instafy-dev/instafy'
+          && github.event.repository.private == true
+          && ((github.event_name == 'pull_request'
+               && github.event.pull_request.base.ref == 'main'
+               && github.event.pull_request.base.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.fork == false)
+              || (github.event_name == 'push'
+                  && github.ref == 'refs/heads/main'
+                  && github.ref_protected == true))
+          && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-js-cli","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    steps:
+      - name: Qualify isolated JavaScript CI runner
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const { execFileSync } = require('node:child_process');
+          assert.equal(process.platform, 'linux');
+          assert.equal(process.arch, 'arm64');
+          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
+          assert.equal(process.versions.node.split('.')[0], '22');
+          assert.equal(process.env.RUNNER_OS, 'Linux');
+          assert.equal(process.env.RUNNER_ARCH, 'ARM64');
+          assert.equal(process.env.INSTAFY_CI_JOB_ISOLATION, 'ephemeral');
+          assert.ok(!process.env.INSTAFY_ENV_DIR);
+          for (const tool of ['bash', 'git', 'curl', 'tar', 'sha256sum', 'unzip']) {
+            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'javascript-ci-preflight', tool], { timeout: 1000, stdio: 'ignore' });
+          }
+          NODE
+
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          submodules: recursive
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify JavaScript CI coverage and routing
+        run: node --test scripts/check-javascript-ci.test.mjs
+
       - name: Test CLI package artifact
         run: pnpm --filter @instafy/cli test:package
 
@@ -252,6 +479,69 @@ jobs:
 
       - name: Test CLI automations
         run: pnpm --filter @instafy/cli exec vitest run test/automations.e2e.spec.ts
+
+  javascript-desktop:
+    name: JavaScript Desktop and runtime
+    runs-on: >-
+      ${{ vars.CI_JAVASCRIPT_SELF_HOSTED == 'true'
+          && github.repository == 'instafy-dev/instafy'
+          && github.event.repository.private == true
+          && ((github.event_name == 'pull_request'
+               && github.event.pull_request.base.ref == 'main'
+               && github.event.pull_request.base.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.fork == false)
+              || (github.event_name == 'push'
+                  && github.ref == 'refs/heads/main'
+                  && github.ref_protected == true))
+          && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-js-desktop","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    steps:
+      - name: Qualify isolated JavaScript CI runner
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const { execFileSync } = require('node:child_process');
+          assert.equal(process.platform, 'linux');
+          assert.equal(process.arch, 'arm64');
+          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
+          assert.equal(process.versions.node.split('.')[0], '22');
+          assert.equal(process.env.RUNNER_OS, 'Linux');
+          assert.equal(process.env.RUNNER_ARCH, 'ARM64');
+          assert.equal(process.env.INSTAFY_CI_JOB_ISOLATION, 'ephemeral');
+          assert.ok(!process.env.INSTAFY_ENV_DIR);
+          for (const tool of ['bash', 'git', 'curl', 'tar', 'sha256sum', 'unzip']) {
+            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'javascript-ci-preflight', tool], { timeout: 1000, stdio: 'ignore' });
+          }
+          NODE
+
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 1
+          submodules: recursive
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "20"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify JavaScript CI coverage and routing
+        run: node --test scripts/check-javascript-ci.test.mjs
 
       - name: Build and test desktop runtime
         run: |

@@ -105,7 +105,8 @@ Before checkout, each self-hosted job requires an actual non-root Linux ARM64
 process, Node22, the ephemeral marker, no private environment directory and its
 baseline tools. This prerequisite check does not itself prove guest isolation.
 
-JavaScript, Rust compilation/tests, browsers and all release jobs remain hosted.
+Rust compilation/tests, browsers and all release jobs remain hosted. JavaScript
+has its own separately gated split described below.
 The four job names, permissions and timeouts are unchanged; the main scanner
 uses the same pinned x64/ARM64 Gitleaks archives as the boundary. Disable the
 expanded switch to restore hosted routing for new runs; already queued jobs
@@ -144,10 +145,49 @@ require a security maintainer to inspect the bytes or object, update the policy,
 and use the explicit protected-branch break-glass path. Normal source
 contributions do not require that manual security review.
 
-The JavaScript job performs a frozen install, validates and applies the public
-migration track to an empty database, checks the self-host contract, lints and
-builds the frontend, runs frontend units, proves the CLI package artifact, and
-builds/tests the Desktop app and its runtime helper. The empty-database test
+The required `JavaScript packages` context is an always-run aggregate over four
+independent jobs. Each child has a 30-minute limit, checks out the same exact
+event commit and recursive submodules, and performs its own unfiltered frozen
+monorepo installation on Node20. No existing check is removed:
+
+| Child | Checks | Runner-label suffix |
+| --- | --- | --- |
+| JavaScript contracts and migrations | Workflow/release/migration/self-host contracts and real empty-database migration application | `public-js-contracts` |
+| JavaScript frontend | Frontend lint, build and the complete unit suite | `public-js-frontend` |
+| JavaScript CLI and provider contract | CLI package artifact and automations; provider-contract packing | `public-js-cli` |
+| JavaScript Desktop and runtime | Runtime helper build/tests and complete Desktop build/tests | `public-js-desktop` |
+
+The aggregate keeps the existing required name and fails if any fixed child
+fails, times out, is cancelled, skipped or missing. It receives no repository
+credentials and checks out no source. Its own label suffix is
+`public-js-aggregate`, with a five-minute limit; it starts only after the child
+jobs end, so it does not occupy a worker while waiting for another worker.
+
+All five jobs default to hosted Ubuntu. The independent
+`CI_JAVASCRIPT_SELF_HOSTED=true` switch selects isolated Linux ARM64 workers
+only for private, same-repository PRs to main and protected-main pushes, using
+the same group and per-job identity rules above. Neither the bootstrap switch
+nor the expanded four-job switch enables these jobs. Manual dispatches, forks
+and public visibility stay hosted. Use canonical lowercase switch values.
+
+Do not enable this switch until the manager admits all five exact job names,
+labels and time budgets from the reviewed protected-main workflow. Its
+existing 35-minute worker lifecycle may be retained; publication, migrations
+outside the disposable fixture and credentials remain out of scope. Before
+checkout, workers verify their native Linux ARM64 identity and ephemeral
+marker; the migration child additionally checks a real Linux ARM64 Docker
+daemon. Image acquisition needs a guest-owned Docker daemon configured to use
+the restricted egress proxy. Node20 downloads, including Desktop speech assets,
+must support that proxy without disabling TLS verification. Every child still
+installs the full workspace, including approved dependency build scripts.
+Splitting the source is not proof that cold installation/builds finish within
+30 minutes: each actual ARM64 workload and complete cleanup needs qualification.
+Disable the JavaScript switch to restore hosted selection for new runs;
+already queued runs do not change runners. No required-check rule changes
+are needed. Run `node --test scripts/check-javascript-ci.test.mjs` for routing,
+coverage and aggregate regressions; these are not live workload qualification.
+
+The empty-database test
 prefetches its digest-pinned Postgres image with bounded retry/backoff and then
 disables implicit pulls; image acquisition may retry, while container, SQL, and
 schema-verification failures remain fatal. The Go and Rust jobs test
