@@ -27,10 +27,38 @@ jobs:
     if: >-
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ vars.CI_EXPANDED_SELF_HOSTED == 'true'
+          && github.repository == 'instafy-dev/instafy'
+          && github.event.repository.private == true
+          && github.event_name == 'push'
+          && github.ref == 'refs/heads/main'
+          && github.ref_protected == true
+          && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-secret-scan","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt))
+          || 'ubuntu-latest' }}
     timeout-minutes: 10
 
     steps:
+      - name: Qualify isolated expanded CI runner
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const { execFileSync } = require('node:child_process');
+          assert.equal(process.platform, 'linux');
+          assert.equal(process.arch, 'arm64');
+          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
+          assert.equal(process.versions.node.split('.')[0], '22');
+          assert.equal(process.env.RUNNER_OS, 'Linux');
+          assert.equal(process.env.RUNNER_ARCH, 'ARM64');
+          assert.equal(process.env.INSTAFY_CI_JOB_ISOLATION, 'ephemeral');
+          assert.ok(!process.env.INSTAFY_ENV_DIR);
+          for (const tool of ['bash', 'git', 'curl', 'tar', 'sha256sum', 'unzip', 'sudo', 'install']) {
+            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'expanded-ci-preflight', tool], { timeout: 1000, stdio: 'ignore' });
+          }
+          NODE
+
       - name: Checkout repository history
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -41,13 +69,19 @@ jobs:
         env:
           GITLEAKS_VERSION: "8.30.1"
           GITLEAKS_LINUX_X64_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+          GITLEAKS_LINUX_ARM64_SHA256: "e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080"
         run: |
           set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) asset=linux_x64; checksum="$GITLEAKS_LINUX_X64_SHA256" ;;
+            aarch64) asset=linux_arm64; checksum="$GITLEAKS_LINUX_ARM64_SHA256" ;;
+            *) echo "::error::Unsupported Linux scanner architecture."; exit 1 ;;
+          esac
           archive="$RUNNER_TEMP/gitleaks.tar.gz"
           curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
-            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_${asset}.tar.gz" \
             --output "$archive"
-          printf '%s  %s\n' "$GITLEAKS_LINUX_X64_SHA256" "$archive" | sha256sum --check --status
+          printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check --status
           tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
           sudo install -m 0755 "$RUNNER_TEMP/gitleaks" /usr/local/bin/gitleaks
           test "$(gitleaks version)" = "$GITLEAKS_VERSION"
@@ -56,7 +90,8 @@ jobs:
         run: |
           node --test \
             scripts/check-public-boundary.test.mjs \
-            scripts/check-public-boundary-workflow.test.mjs
+            scripts/check-public-boundary-workflow.test.mjs \
+            scripts/check-expanded-ci-routing.test.mjs
 
       - name: Enforce public repository boundary
         run: node scripts/check-public-boundary.mjs
@@ -228,10 +263,43 @@ jobs:
 
   go:
     name: Go packages
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ vars.CI_EXPANDED_SELF_HOSTED == 'true'
+          && github.repository == 'instafy-dev/instafy'
+          && github.event.repository.private == true
+          && ((github.event_name == 'pull_request'
+               && github.event.pull_request.base.ref == 'main'
+               && github.event.pull_request.base.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.fork == false)
+              || (github.event_name == 'push'
+                  && github.ref == 'refs/heads/main'
+                  && github.ref_protected == true))
+          && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-go","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || 'ubuntu-latest' }}
     timeout-minutes: 20
 
     steps:
+      - name: Qualify isolated expanded CI runner
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const { execFileSync } = require('node:child_process');
+          assert.equal(process.platform, 'linux');
+          assert.equal(process.arch, 'arm64');
+          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
+          assert.equal(process.versions.node.split('.')[0], '22');
+          assert.equal(process.env.RUNNER_OS, 'Linux');
+          assert.equal(process.env.RUNNER_ARCH, 'ARM64');
+          assert.equal(process.env.INSTAFY_CI_JOB_ISOLATION, 'ephemeral');
+          assert.ok(!process.env.INSTAFY_ENV_DIR);
+          for (const tool of ['bash', 'git', 'curl', 'tar', 'sha256sum', 'unzip']) {
+            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'expanded-ci-preflight', tool], { timeout: 1000, stdio: 'ignore' });
+          }
+          NODE
+
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -285,10 +353,43 @@ jobs:
   # this reports in about a minute rather than after the 45-minute test job.
   rust-fmt:
     name: Rust formatting
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ vars.CI_EXPANDED_SELF_HOSTED == 'true'
+          && github.repository == 'instafy-dev/instafy'
+          && github.event.repository.private == true
+          && ((github.event_name == 'pull_request'
+               && github.event.pull_request.base.ref == 'main'
+               && github.event.pull_request.base.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.fork == false)
+              || (github.event_name == 'push'
+                  && github.ref == 'refs/heads/main'
+                  && github.ref_protected == true))
+          && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-rust-fmt","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || 'ubuntu-latest' }}
     timeout-minutes: 10
 
     steps:
+      - name: Qualify isolated expanded CI runner
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const { execFileSync } = require('node:child_process');
+          assert.equal(process.platform, 'linux');
+          assert.equal(process.arch, 'arm64');
+          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
+          assert.equal(process.versions.node.split('.')[0], '22');
+          assert.equal(process.env.RUNNER_OS, 'Linux');
+          assert.equal(process.env.RUNNER_ARCH, 'ARM64');
+          assert.equal(process.env.INSTAFY_CI_JOB_ISOLATION, 'ephemeral');
+          assert.ok(!process.env.INSTAFY_ENV_DIR);
+          for (const tool of ['bash', 'git', 'curl', 'tar', 'sha256sum', 'unzip', 'rustup']) {
+            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'expanded-ci-preflight', tool], { timeout: 1000, stdio: 'ignore' });
+          }
+          NODE
+
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
