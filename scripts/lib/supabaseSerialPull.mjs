@@ -3,6 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
+import {
+  AUTH_ONLY_EXCLUDED_CONTAINERS, parseSupabaseAuthOnly, parseSupabaseDatabaseOnly,
+} from "./supabaseStartMode.mjs";
 
 export const SERIAL_PULL_CLI_VERSION = "2.92.0";
 export const SERIAL_PULL_BUDGET_MS = 10 * 60_000;
@@ -25,7 +28,14 @@ export function parseSupabaseSerialPull(value) {
   throw new Error("SUPABASE_SERIAL_PULL must be unset, false, or true");
 }
 
-export function serialPullImages(output, { databaseOnly = false } = {}) {
+function assertModes(databaseOnly, authOnly) {
+  if (typeof databaseOnly !== "boolean" || typeof authOnly !== "boolean" || (databaseOnly && authOnly)) {
+    throw new Error("supabase-serial-start-mode-invalid");
+  }
+}
+
+export function serialPullImages(output, { databaseOnly = false, authOnly = false } = {}) {
+  assertModes(databaseOnly, authOnly);
   let rows;
   try { rows = JSON.parse(output); } catch { throw new Error("supabase-serial-inventory-invalid"); }
   if (!Array.isArray(rows) || rows.length !== SERVICE_NAMES.length) {
@@ -45,7 +55,8 @@ export function serialPullImages(output, { databaseOnly = false } = {}) {
   const images = names.map((name) => `${name}:${versions.get(name)}`);
   if (!databaseOnly) images.push(...ANCILLARY_IMAGES);
   // Same default mapping as v2.92.0 internal/utils/docker.go GetRegistryImageUrl.
-  return images.map((ref) => `public.ecr.aws/supabase/${ref.split("/").at(-1)}`);
+  return images.map((ref) => `public.ecr.aws/supabase/${ref.split("/").at(-1)}`)
+    .filter((ref) => !authOnly || !AUTH_ONLY_EXCLUDED_CONTAINERS.includes(ref.split("/").at(-1).split(":")[0]));
 }
 
 function optionalStat(target) {
@@ -77,7 +88,7 @@ export function assertSerialPullProject(repoRoot, env) {
   if (optionalStat(path.join(temporary, "project-ref"))) throw new Error("supabase-serial-requires-unlinked-project");
   for (const [key, value] of Object.entries(env)) {
     if (!value) continue;
-    if ((key.startsWith("SUPABASE_") && !["SUPABASE_SERIAL_PULL", "SUPABASE_DATABASE_ONLY"].includes(key))
+    if ((key.startsWith("SUPABASE_") && !["SUPABASE_SERIAL_PULL", "SUPABASE_DATABASE_ONLY", "SUPABASE_AUTH_ONLY"].includes(key))
       || ["DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_AUTH_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"].includes(key)) {
       throw new Error("supabase-serial-unsupported-override");
     }
@@ -130,9 +141,12 @@ function assertCliDiagnostics(stderr) {
 // max-concurrent-downloads layer limit. Cached exact refs use PullPolicyMissing:
 // https://github.com/supabase/cli/blob/v2.92.0/internal/utils/config.go
 export function prepareSupabaseSerialPull({
-  repoRoot, env = process.env, databaseOnly = false,
+  repoRoot, env = process.env,
+  databaseOnly = parseSupabaseDatabaseOnly(env.SUPABASE_DATABASE_ONLY),
+  authOnly = parseSupabaseAuthOnly(env.SUPABASE_AUTH_ONLY),
   execute = spawnSync, now = () => performance.now(), log = console.log,
 }) {
+  assertModes(databaseOnly, authOnly);
   if (!parseSupabaseSerialPull(env.SUPABASE_SERIAL_PULL)) return { enabled: false, images: 0, pulled: 0 };
   assertSerialPullProject(repoRoot, env);
   const temporaryHome = fs.mkdtempSync(path.join(os.tmpdir(), "supabase-serial-pull-"));
@@ -162,7 +176,7 @@ export function prepareSupabaseSerialPull({
     const version = command("pnpm", ["exec", "supabase", "--version"], 30_000, "version", { cli: true });
     if (version.stdout.trim() !== SERIAL_PULL_CLI_VERSION) throw new Error("supabase-serial-cli-version-mismatch");
     const inventory = command("pnpm", ["exec", "supabase", "--workdir", "supabase", "services", "--output", "json"], 30_000, "inventory", { cli: true });
-    const images = serialPullImages(inventory.stdout, { databaseOnly });
+    const images = serialPullImages(inventory.stdout, { databaseOnly, authOnly });
     let pulled = 0;
     for (const [index, image] of images.entries()) {
       const inspectArgs = ["image", "inspect", "--format", "{{.Id}}", image];
