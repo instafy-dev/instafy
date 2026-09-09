@@ -71,29 +71,20 @@ and interactive file references retain their behavior. Explicit fenced code bloc
 their source whitespace and scroll horizontally when needed.
 
 ## Header
-On wide screens, a slim global rail selects Home or a team. The adjacent sidebar
-navigates that team and its selected space. Both remain visible inside a project.
-Collapsing the inner sidebar leaves a narrow icon rail with tooltips, the space
-selector and direct access to its tools. Its expand/collapse button stays at the
-same top-left position in both widths, with the team name to its right when
-expanded; the workspace header has no duplicate control. Expanding
-reveals labels and recent chats. New users start with the context sidebar
-expanded; existing saved collapse preferences are preserved.
+On wide screens, a slim global rail selects Home or a team. A persistent context/search
+field above the workspace contains selectable team and space chips separated by a muted slash.
+It stays in place when the inner sidebar collapses or search opens. The adjacent sidebar
+contains recent chats and workspace tools. Its expand/collapse control stays at the same
+position in either width, with **New chat** beside it when expanded and below it when compact.
+Existing saved collapse preferences are preserved.
 
-On narrow Home, team and account pages, the header keeps Home immediately left of
-the compact team avatar and name, with the profile action at the right. The team's
-navigation icon opens the regular navigation view in the shared left drawer, with
-the remembered team's current space, recent spaces and chats. Home is selected without
-removing access to the last team. Inside a working area, Back and the current
-space replace those global controls; the space title opens navigation, and the
-tab menu keeps other work reachable. Team selection and space navigation share
-the existing navigation drawer rather than stacking modal drawers. The drawer's
-top row contains the Instafy Home action, team menu and close button. Team overview,
-settings and an explicit **Switch team** action live in that menu, leaving the current
-space directly below it. Switch team opens the team directory within the same drawer;
-Back returns to navigation, then dismisses it. Home always navigates to the global Home
-page, including from a workspace; opening navigation does not change the page behind it.
-Team overview and team settings do not replace a space's remembered workspace destination.
+Narrow layouts keep Home, the team/space path, Search and the signed-in profile in the context
+header. Home remains available from a workspace, and team/space controls remain available on
+Home. Workspace history, tab selection and secondary actions remain in the working header
+below it. Global pages provide an explicit Open navigation control. The navigation drawer
+shares the same team/space path and has a separate Close/New chat row; directories and More
+remain drill-ins with Back, without stacking navigation drawers. Opening navigation does not
+change the page behind it. Team overview/settings do not replace a space's remembered work.
 
 Navigation uses a solid warm off-white surface in light mode and the dark rail
 surface in dark mode. The drawer and its team/space directory or More view keep
@@ -107,19 +98,41 @@ Mobile browsers show **Get the app · Soon** in the profile menu, linking to the
 availability section; iOS and Android downloads are marked coming soon. Native apps hide
 these acquisition actions and retain their existing update controls.
 
-The current space sits directly below the team header. Its chevron expands or collapses
-an inline grid of up to six named space icons, followed by **Browse all spaces**. Recent
-visits choose which accessible spaces appear; the selected set is displayed alphabetically
-by name, with the current space highlighted in its alphabetical position. Selecting a
-space already in that set does not move it to the front. Visiting a space outside the set
-can replace the oldest shortcut. Recent visits are remembered per account on this device
-and update automatically. The compact rail opens the same grid beside the current-space
-icon. Chats retains its inline collapsible recent list scoped to the current space.
+The space chip opens an anchored picker with up to six named space shortcuts and
+**Browse all spaces**. Recent visits choose which accessible spaces appear; the selected
+set is displayed alphabetically, with the current space highlighted in its alphabetical
+position. Choosing a shortcut does not move it to the front. Visiting another space can
+replace the oldest shortcut. Recent visits are remembered per account on this device.
+Chats retains its inline collapsible recent list scoped to the current space.
 
 Space icons use the same numbered unread badges as Home and the full space directory:
 chats with unread assistant replies for the signed-in user, excluding the visible chat.
 Zero is hidden and counts over nine display as **9+**. These badges describe personal unread
 activity, not all unfinished jobs or decisions needing approval.
+
+## Scoped search
+
+Focusing Search opens a temporary results page, keeping the workspace mounted so drafts,
+tabs and scroll survive dismissal. Desktop search uses the same input and context chips
+before and after focus. Narrow layouts open one full results screen and return focus to the
+Search button when dismissed. Escape/Close returns to the workspace; Android system Back
+also closes search. Selecting a result opens its normal Studio destination.
+
+Search starts within the working space. Empty Backspace broadens it to the team, then all
+teams; chip removal buttons and the Scope selector provide the same controls. These changes
+do not switch the working space. Home/account start across teams. Clicking a team/space chip's
+picker still performs normal navigation. Desktop dismissal clears the query and restores the
+working scope.
+
+Search reads authenticated accessible-space and conversation summaries. It matches recent
+chat titles, already-known file paths, and space/team settings or automation destinations;
+it does not search message bodies or file contents. Reads cover up to 200 chats per space
+and 40 spaces per request, with explicit coverage, loading, error and retry feedback. Results
+initially show 100 rows with Show more; queries still match the full retrieved set. Files
+from unvisited/unloaded directories are not indexed. Search never starts runtimes or reads
+files in the background. Scope/account changes and access refresh discard stale results.
+File results wait for the authorized destination space to hydrate before opening an editor;
+a later navigation cancels that pending selection.
 
 ## Team experience
 
@@ -131,16 +144,10 @@ Home uses the static Instafy mark with the label and tooltip “Home — all tea
 in dark ink on light surfaces and white on dark surfaces. The selected Home or
 team has a persistent side marker as well as its background highlight.
 
-On desktop, clicking the selected team name in the context header opens an
-anchored menu for Team overview and Team settings. The 208px menu aligns within
-the expanded sidebar with approximately 8px side gutters, or opens beside the
-compact rail. The space selector sits
-immediately below that header and groups Chats, Automations, Files and Changes.
-The compact rail provides the same menu through a single team icon. On mobile,
-Team overview and Team settings remain direct actions in the navigation drawer.
-Less frequent tools, personal AI connections
-and Credits remain available through More. The desktop space picker shows only
-the selected team's spaces; Browse teams retains the full team-and-space picker.
+The team chip opens an anchored menu for Switch team, Team overview and Team settings.
+The space chip beside it changes the working space. Less frequent tools, personal AI
+connections and Credits remain available through More. The desktop space picker shows only
+the selected team's spaces; Browse teams retains the full team-and-space directory.
 Home and account pages hide the team-specific desktop sidebar.
 
 An empty team's overview and settings can be selected independently of the

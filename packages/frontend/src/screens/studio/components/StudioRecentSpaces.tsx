@@ -55,6 +55,7 @@ export interface StudioRecentSpacesProps {
   rowClassName: string;
   iconClassName: string;
   triggerRef?: RefObject<HTMLButtonElement | null>;
+  presentation?: "inline" | "path";
 }
 
 export function StudioRecentSpaces({
@@ -70,13 +71,16 @@ export function StudioRecentSpaces({
   rowClassName,
   iconClassName,
   triggerRef,
+  presentation = "inline",
 }: StudioRecentSpacesProps) {
   const listId = useId();
   const [popoverOpen, setPopoverOpen] = useState(false);
   useEffect(() => {
     // Width changes move the anchor; external project changes replace its context.
     setPopoverOpen(false);
-  }, [collapsed, activeProjectId]);
+  }, [collapsed, activeProjectId, presentation]);
+  const pathPresentation = presentation === "path" && !collapsed;
+  const usePopover = collapsed || pathPresentation;
   const currentSpace = spaces.find((space) => space.id === activeProjectId);
   const attentionFor = (id: string) => {
     const count = attentionCounts?.[id] ?? 0;
@@ -159,32 +163,35 @@ export function StudioRecentSpaces({
       data-testid="sidebar-space-button"
       aria-label={triggerLabel}
       title={triggerLabel}
-      aria-expanded={collapsed ? popoverOpen : expanded}
-      aria-controls={!collapsed && expanded ? listId : undefined}
-      onPress={collapsed ? undefined : () => onExpandedChange(!expanded)}
+      aria-expanded={usePopover ? popoverOpen : expanded}
+      aria-controls={!usePopover && expanded ? listId : undefined}
+      onPress={usePopover ? undefined : () => onExpandedChange(!expanded)}
       className={`group/item relative min-w-0 py-1.5 transition focus-visible:ring-offset-0 data-[pressed]:!translate-y-0 data-[pressed]:!scale-100 ${rowClassName}`}
     >
-      <span className={`relative ${iconClassName}`}>
-        {currentSpace ? <SpaceIdentity name={spaceName(currentSpace)} icon={currentSpace.icon} color={currentSpace.color} />
+      {!pathPresentation ? <span className={`relative ${iconClassName}`}>
+        {currentSpace ? <SpaceIdentity name={spaceName(currentSpace)} icon={currentSpace.icon} color={currentSpace.color}
+          />
           : <Folder className="h-5 w-5" aria-hidden="true" />}
         <AttentionBadge count={currentAttention} aria-hidden testId="sidebar-current-space-attention"
           title={unreadDescription(currentAttention)} className="absolute -right-1 -top-1" />
-      </span>
+      </span> : null}
+      {pathPresentation && currentAttention > 0 ? <AttentionBadge count={currentAttention} aria-hidden testId="sidebar-current-space-attention"
+        title={unreadDescription(currentAttention)} className="absolute -right-1 -top-1" /> : null}
       {!collapsed ? (
-        <span className="flex min-w-0 flex-1 items-center justify-between gap-2 text-sm font-medium">
+        <span className={`flex min-w-0 flex-1 items-center text-sm ${pathPresentation ? "justify-start gap-1 font-semibold" : "justify-between gap-2 font-medium"}`}>
           <span className="truncate">{currentSpace ? spaceName(currentSpace) : "Choose space"}</span>
-          <ControlChevron direction={expanded ? "down" : "right"} />
+          <ControlChevron direction={usePopover || expanded ? "down" : "right"} />
         </span>
       ) : null}
     </Button>
   );
 
-  if (collapsed) {
+  if (usePopover) {
     return (
       <DialogTrigger isOpen={popoverOpen} onOpenChange={setPopoverOpen}>
         {trigger}
         <StudioDialogPopover
-          placement="right top"
+          placement={pathPresentation ? "bottom start" : "right top"}
           offset={8}
           className="w-72 max-w-[calc(100vw-1rem)] p-2"
           data-testid="sidebar-recent-spaces-popover"

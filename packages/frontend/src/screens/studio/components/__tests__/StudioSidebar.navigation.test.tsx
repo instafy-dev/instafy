@@ -18,6 +18,7 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("../../workspaceControls", () => ({ useWorkspaceControls: () => ({ sidebarOpen: true, userEmail: "qa@example.test" }) }));
 vi.mock("../../useStudioDesktopLayout", () => ({ useStudioDesktopLayout: () => false }));
+vi.mock("../../../../hooks/useTouchLikeInput", () => ({ useTouchLikeInput: () => false }));
 vi.mock("../../../../projects/useProjects", () => ({ useProjects: () => ({ projectList: mocks.projects, activeProjectId: mocks.projects[0].id, switchProject: mocks.legacySwitch, createProject: mocks.legacyCreate }) }));
 vi.mock("../../../../projects/useMergedControllerProjects", () => ({ useMergedControllerProjects: ({ orgId }: { orgId: string | null }) => ({ mergedProjects: [...mocks.projects, mocks.unseen], remoteLoading: false, remoteDiscoveryResolved: true, remoteLoadedScope: orgId }) }));
 vi.mock("../../../../runtime/useRuntimeMenu", () => ({ useRuntimeMenuOptions: () => ({ runtime: {}, runtimeOptions: [] }) }));
@@ -29,7 +30,7 @@ vi.mock("../../../../updates/useAppUpdateMetadata", () => ({ useAppUpdateMetadat
 vi.mock("../../../../updates/useDesktopReleaseLookup", () => ({ useDesktopReleaseLookup: () => ({ lookup: { status: "idle" } }) }));
 vi.mock("../../../../updates/desktopAcquisition", () => ({ getAppAcquisitionTarget: () => null }));
 vi.mock("../../../../telemetry/studioPerformance", () => ({ studioPerformance: { begin: vi.fn(), beginProject: mocks.beginProject, cancel: vi.fn(), cancelOrganizationDiscovery: vi.fn() } }));
-vi.mock("../../../../sdk/instafy", () => ({ runtimeControllerEnabled: false, controllerClient: { organizations: { list: vi.fn() } } }));
+vi.mock("../../../../sdk/instafy", () => ({ runtimeControllerEnabled: false, controllerClient: { organizations: { list: vi.fn(), listMembers: vi.fn() }, projects: { listMembers: vi.fn() } } }));
 vi.mock("../StudioSidebarAccountSection", () => ({ StudioSidebarAccountSection: () => null }));
 vi.mock("../DevDiagnosticsMenu", () => ({ DevDiagnosticsMenu: () => null }));
 vi.mock("../BuildLogOverlay", () => ({ BuildLogOverlay: () => null }));

@@ -58,6 +58,8 @@ const COMPACT_TAB_SELECTOR_CLASS =
 
 export interface StudioTopBarProps {
   notificationBell?: ReactNode;
+  newChatInSidebar?: boolean;
+  contextHeaderAbove?: boolean;
   mobileNavigation?: {
     history: StudioHistory;
     visitKey: string;
@@ -66,7 +68,7 @@ export interface StudioTopBarProps {
   };
 }
 
-export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBarProps = {}) {
+export function StudioTopBar({ notificationBell, mobileNavigation, newChatInSidebar = false, contextHeaderAbove = false }: StudioTopBarProps = {}) {
   const {
     activeProjectName,
     onStartNewConversation,
@@ -100,7 +102,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
   const { conversations } = useConversations();
   const { runtime } = useRuntime();
   const controllerProjectMissing = runtime.controllerProjectMissing || projectAccessBlocked;
-  const shouldShowNewChat = showChatActions && Boolean(onStartNewConversation);
+  const shouldShowNewChat = !newChatInSidebar && showChatActions && Boolean(onStartNewConversation);
   const { isLargeScreen, showTouchBottomDock } = useStudioNavigationPosture();
   const isGlobalPage = navigationPage !== "workspace";
   const globalHistoryAvailable = !isLargeScreen && isGlobalPage && showTouchBottomDock &&
@@ -388,7 +390,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
           // rail absorbs the buttons instead. Everywhere else (iOS notches,
           // older shells) the inset still applies and must: it is the same
           // variable.
-          titleBarFree ? "" : "pt-[var(--instafy-safe-area-inset-top)]",
+          titleBarFree || contextHeaderAbove ? "" : "pt-[var(--instafy-safe-area-inset-top)]",
           // With the shell's drag strip reduced to a corner, this row is the
           // window's drag handle. The class also opts interactive descendants
           // back out of dragging -- see instafy-titlebar-drag in tailwind.css.

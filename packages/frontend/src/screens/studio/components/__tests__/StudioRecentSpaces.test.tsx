@@ -55,6 +55,35 @@ describe("StudioRecentSpaces", () => {
       .map((row) => row.getAttribute("data-testid"));
   }
 
+  it("keeps path shortcuts in a dropdown and closes after choosing a space", async () => {
+    const onSelectSpace = vi.fn();
+    const onExpandedChange = vi.fn();
+    await render({ presentation: "path", onSelectSpace, onExpandedChange, attentionCounts: { current: 2 } });
+    const trigger = container.querySelector('[data-testid="sidebar-space-button"]')!;
+    expect(trigger.textContent).toContain("Website");
+    expect(trigger.getAttribute("aria-label")).toContain("2 chats with unread replies");
+    expect(document.querySelector('[data-testid="sidebar-recent-spaces-list"]')).toBeNull();
+    await click("sidebar-space-button");
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    expect(rowIds()).toEqual(["sidebar-recent-space-recent", "sidebar-recent-space-current"]);
+    await click("sidebar-recent-space-recent");
+    expect(onSelectSpace).toHaveBeenCalledExactlyOnceWith("recent");
+    expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')).toBeNull();
+    expect(onExpandedChange).not.toHaveBeenCalled();
+  });
+
+  it("keeps Browse all spaces reachable in the path dropdown for an empty team", async () => {
+    const onBrowseAll = vi.fn();
+    await render({ presentation: "path", spaces: [], activeProjectId: null, onBrowseAll });
+    const trigger = container.querySelector('[data-testid="sidebar-space-button"]')!;
+    expect(trigger.textContent).toContain("Choose space");
+    await click("sidebar-space-button");
+    expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')?.textContent).toContain("No recent spaces in this team");
+    await click("sidebar-browse-all-spaces");
+    expect(onBrowseAll).toHaveBeenCalledOnce();
+    expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')).toBeNull();
+  });
+
   it("selects the current space and five most recent visits, then lays them out A–Z without mutating candidates", async () => {
     const spaces = Object.freeze([
       { id: "oldest", name: "An old space" },

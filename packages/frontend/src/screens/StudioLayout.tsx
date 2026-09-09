@@ -9,7 +9,7 @@ import { resolveSettingsRoute } from "./studio/settingsRoute";
 import { getStudioVisitKey } from "../navigation/studioVisit";
 import { useStudioHistory } from "../navigation/useStudioHistory";
 import { useRouteOwnedWorkspaceDrawer } from "./useRouteOwnedWorkspaceDrawer";
-import { ChatLines, Clock, Coins, Cpu, Cube, GitBranch, Globe, Group, Lock, Page, Puzzle, User, Xmark } from "iconoir-react";
+import { ChatLines, Clock, Coins, Cpu, Cube, GitBranch, Globe, Group, Lock, Page, Puzzle, Search, SidebarExpand, User, Xmark } from "iconoir-react";
 import { ResizablePanels } from "../components/ResizablePanels";
 import { fetchCreditPolicy } from "../credits/creditService";
 import { clearIdlePaused, markIdlePaused } from "../runtime/idlePauseRegistry";
@@ -21,6 +21,8 @@ import { Badge } from "../components/Badge";
 import { Heading } from "../components/Heading";
 import { Surface } from "../components/Surface";
 import { Text } from "../components/Text";
+import { OctoMark } from "../components/OctoMark";
+import { AttentionBadge } from "../components/AttentionBadge";
 import { ChatsIcon } from "../components/AppIcons";
 import {
   resolvePreferredFilesMobileViewForExplorerOpen,
@@ -34,6 +36,14 @@ import {
   setParticipantsDrawerOpen,
   useParticipantsDrawerOpen,
 } from "./studio/components/chatParticipantsStore";
+import { useStudioSearch, type StudioSearchRequest } from "./studio/components/useStudioSearch";
+import { StudioSearchContext } from "./studio/components/StudioSearchContext";
+import { StudioMobileContextHeader } from "./studio/components/StudioMobileContextHeader";
+import { useStudioSearchRecords } from "./studio/useStudioSearchRecords";
+import { useStudioSearchNavigation } from "./studio/useStudioSearchNavigation";
+import { useNativeBackButtonAction } from "../native/useNativeBackButtonAction";
+import { desktopTitleBarFree } from "../lib/desktopShell";
+import "./studio/StudioContextLayout.css";
 import { StudioSidebar } from "./studio/components/StudioSidebar";
 import { StudioMobileSidebarOverlay } from "./studio/components/StudioMobileSidebarOverlay";
 import { StudioTopBar } from "./studio/components/StudioTopBar";
@@ -169,6 +179,7 @@ function StudioLayoutInner() {
   const signOut = auth.signOut;
   const { isLargeScreen, showTouchBottomDock } = useStudioNavigationPosture();
   const location = useLocation();
+  const [searchRequest, setSearchRequest] = useState<StudioSearchRequest & { key: string } | null>(null);
   const navigate = useNavigate();
   const { viewportHeightPx, keyboardOpen } = useStudioViewportState({ trackKeyboard: showTouchBottomDock });
   // Keep one chronological history owner across responsive header changes.
@@ -216,6 +227,7 @@ function StudioLayoutInner() {
     tabs: workspaceTabs,
     conversationTabsReady,
     openPanelTab,
+    openFileTab,
     openConversationTab,
     openJobThreadTab,
     openGitReviewTab,
@@ -264,6 +276,11 @@ function StudioLayoutInner() {
   const currentUserId = user?.id ?? null;
   const activeProjectOrgKey = activeProjectSummary?.orgId ?? "personal";
   const navigationScope = resolveTeamNavigationScope(location.search, activeProjectOrgKey);
+  const searchRoute = new URLSearchParams(location.search);
+  const searchKey = JSON.stringify([currentUserId, navigationScope.orgKey, activeProjectId, navigationScope.page, isLargeScreen,
+    ...["conversationId", "conversationControllerId", "jobId", "panel", "settingsTab", "settingsOrgId", "settingsCategory"].map(key => searchRoute.get(key))]);
+  const searchHidesWorkspace = searchRequest?.key === searchKey && searchRequest.open;
+
   const [navigationTeam, setNavigationTeam] = useState<{ userId: string | null; key: string; name: string; avatarUrl: string | null } | null>(null);
   const handleActiveTeamChange = useCallback((team: { key: string; name: string; avatarUrl: string | null }) => {
     setNavigationTeam((current) => current?.userId === currentUserId && current.key === team.key && current.name === team.name && current.avatarUrl === team.avatarUrl
@@ -364,7 +381,7 @@ function StudioLayoutInner() {
   // so it needs no width gate — it renders over the workspace content when open.
   const participantsDrawerOpen = useParticipantsDrawerOpen();
   const visibleConversationControllerId = useMemo((): string | null => {
-    if (!isChatSurfaceVisible) {
+    if (!isChatSurfaceVisible || searchHidesWorkspace) {
       return null;
     }
     try {
@@ -378,9 +395,9 @@ function StudioLayoutInner() {
     }
     const fromActiveConversation = (activeConversation?.controllerId ?? "").trim();
     return fromActiveConversation || null;
-  }, [activeConversation?.controllerId, isChatSurfaceVisible, location.search]);
+  }, [activeConversation?.controllerId, isChatSurfaceVisible, location.search, searchHidesWorkspace]);
   const visibleConversationLocalId = useMemo((): string | null => {
-    if (!isChatSurfaceVisible) {
+    if (!isChatSurfaceVisible || searchHidesWorkspace) {
       return null;
     }
     const controllerId = (visibleConversationControllerId ?? "").trim().toLowerCase();
@@ -399,6 +416,7 @@ function StudioLayoutInner() {
     conversations,
     isChatSurfaceVisible,
     visibleConversationControllerId,
+    searchHidesWorkspace,
   ]);
   const {
     buildLogs,
@@ -742,7 +760,9 @@ function StudioLayoutInner() {
   useEffect(() => {
     if (mobileSidebarNavigation.error) showStatus(mobileSidebarNavigation.error, "error", 5000);
   }, [mobileSidebarNavigation.error, showStatus]);
+  const closeSearchForNavigation = useRef<() => void>(() => {});
   const runStudioNavigation = useCallback((action: () => void) => {
+    closeSearchForNavigation.current();
     runAfterSidebarClose(() => {
       consumeUrlNavigation();
       action();
@@ -756,7 +776,7 @@ function StudioLayoutInner() {
     enabled: routeOwnedMobileWorkspaceDrawer,
     history: mobileHistory,
   });
-  const visibleChatId = isChatSurfaceVisible && leftDrawer !== "history"
+  const visibleChatId = !searchHidesWorkspace && isChatSurfaceVisible && leftDrawer !== "history"
     ? (activeWorkspaceTab?.kind === "conversation" || activeWorkspaceTab?.kind === "jobThread"
       ? activeWorkspaceTab.conversationId
       : activeConversationId)
@@ -1304,6 +1324,7 @@ function StudioLayoutInner() {
     navigateToDestination({ kind: "panel", panel: "chat", workspaceTab: "history" });
   }, [navigateToDestination]);
 
+  const [mobilePickerMode, setMobilePickerMode] = useState<"teams-and-spaces" | "spaces">("teams-and-spaces");
   const handleWorkspaceSwitcherOpenChange = useCallback((open: boolean) => {
     if (!isLargeScreen) {
       if (routeOwnedMobileWorkspaceDrawer) {
@@ -1317,6 +1338,12 @@ function StudioLayoutInner() {
       navigateToDestination({ kind: "drawer", workspaceTab: open ? "workspaces" : null });
     }
   }, [dismissRouteOwnedWorkspaceDrawer, isLargeScreen, leftDrawer, mobileSidebarNavigation, navigateToDestination, routeOwnedMobileWorkspaceDrawer]);
+
+  const openMobileContextDirectory = useCallback((mode: "teams-and-spaces" | "spaces") => {
+    setMobilePickerMode(mode);
+    setLeftDrawer(null);
+    mobileSidebarNavigation.openView("workspace");
+  }, [mobileSidebarNavigation, setLeftDrawer]);
 
   const handleMobileSidebarOpenChange = useCallback((open: boolean) => {
     if (!open && routeOwnedMobileWorkspaceDrawer) {
@@ -1720,10 +1747,6 @@ function StudioLayoutInner() {
     requestHistoryPush();
     setLeftDrawer("files");
   }, [isLargeScreen, leftDrawer, requestHistoryPush, setLeftDrawer]);
-  if (!user) {
-    return null;
-  }
-
   const projectAccessBlocked = controllerProjectMissing;
   const effectiveSideVisible = projectAccessBlocked ? false : sideVisible;
   const scrollPaddingClass = isLargeScreen && effectiveSideVisible ? "pr-6" : "pr-0";
@@ -1964,6 +1987,53 @@ function StudioLayoutInner() {
     </div>
   );
 
+  const [desktopContextTarget, setDesktopContextTarget] = useState<HTMLDivElement | null>(null);
+  const [mobileContextTarget, setMobileContextTarget] = useState<HTMLDivElement | null>(null);
+  const mobileSearchTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const overlaySearchTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const globalSearch = navigationScope.page === "home" || navigationScope.page === "account";
+  const searchOrg = globalSearch ? null : { id: navigationScope.orgKey, name: activeTeamName };
+  const searchSpace = !globalSearch && activeProjectId && activeProjectOrgKey === navigationScope.orgKey && !projectAccessBlocked
+    ? { id: activeProjectId, name: activeProjectName } : null;
+  const searchNavigation = useStudioSearchNavigation({
+    viewerUserId: currentUserId, location, activeProjectId,
+    projectReady: projectReadyForWorkspace, projectAccessBlocked, conversationsProjectKey,
+    navigateToDestination, openFileTab,
+  });
+  const searchData = useStudioSearchRecords({
+    viewerUserId: currentUserId,
+    enabled: searchRequest?.key === searchKey && searchRequest.open,
+    scope: searchRequest?.key === searchKey ? searchRequest.scope : searchSpace ? "space" : searchOrg ? "org" : "all",
+    orgId: searchOrg?.id ?? null,
+    spaceId: searchSpace?.id ?? null,
+    projects: projectList,
+    activeConversations: activeProjectId && conversationsProjectKey === activeProjectId ? { projectId: activeProjectId, items: conversations } : null,
+    onActivate: searchNavigation.activateTarget,
+  });
+  const search = useStudioSearch({
+    scopeKey: searchKey, org: searchOrg, space: searchSpace, records: searchData.records,
+    loading: searchData.loading, error: searchData.error, onRetry: searchData.retry, notice: searchData.notice,
+    fullPage: true, persistentControl: isLargeScreen, returnFocusRef: showMobileLeftDrawerOverlay ? overlaySearchTriggerRef : mobileSearchTriggerRef,
+    onRequestChange: request => setSearchRequest({ ...request, key: searchKey }),
+    onOpen: () => { if (!isLargeScreen) runAfterSidebarClose(() => {}); },
+  });
+  closeSearchForNavigation.current = () => { search.closeSearch(false); searchNavigation.cancelPending(); };
+  useNativeBackButtonAction(search.open, () => search.closeSearch(), 200);
+  const contextHomeActive = navigationScope.page === "home";
+  const mobileContextHeader = (overlay = false) => <StudioMobileContextHeader
+    teamName={activeTeamName} teamAvatarUrl={activeTeamAvatarUrl} teamId={navigationScope.orgKey}
+    projects={projectList} activeProjectId={activeProjectId} attentionCounts={homeAttentionByProject}
+    homeActive={contextHomeActive} homeAttentionCount={homeAttentionCount} searchRef={overlay ? overlaySearchTriggerRef : mobileSearchTriggerRef}
+    onHome={handleOpenHome} onSearch={search.openSearch} onProfile={handleOpenProfileSettings}
+    onTeam={() => handleOpenTeam(navigationScope.orgKey)}
+    onSettings={navigationScope.orgKey === "personal" ? undefined : () => handleOpenOrgSettings(navigationScope.orgKey)}
+    onSwitchTeam={() => openMobileContextDirectory("teams-and-spaces")}
+    onBrowseSpaces={() => openMobileContextDirectory("spaces")}
+    onSpace={id => handleActivateProject(id, navigationScope.orgKey)}
+  />;
+
+  if (!user) return null;
+
   return (
     <StudioNavigationProvider value={runStudioNavigation}>
     <ControllerNoticeActionsProvider value={controllerNoticeActionsValue}>
@@ -1980,11 +2050,15 @@ function StudioLayoutInner() {
         />
       ) : null}
       <div
-        className="flex h-screen min-h-screen overflow-hidden bg-slate-50 dark:bg-[var(--color-studio-dark-canvas)]"
+        className="studio-context-layout relative flex h-screen min-h-screen overflow-hidden bg-slate-50 dark:bg-[var(--color-studio-dark-canvas)]"
+        data-search-open={search.open}
+        data-wide={isLargeScreen}
+        data-titlebar-free={desktopTitleBarFree()}
         style={{
           ...viewportHeightStyle,
           paddingLeft: "var(--instafy-safe-area-inset-left)",
           paddingRight: "var(--instafy-safe-area-inset-right)",
+          ...({ "--studio-context-top": desktopTitleBarFree() ? "0px" : "var(--instafy-safe-area-inset-top)", } as React.CSSProperties),
         }}
       >
         <WorkspaceControlsProvider
@@ -2028,8 +2102,14 @@ function StudioLayoutInner() {
             shakeToReportDetail: bugReportController.shakeToReportDetail,
           }}
         >
+          {isLargeScreen ? <header className="studio-context-header" aria-label="Working context"><div ref={setDesktopContextTarget} className="studio-context-slot" /></header> : null}
           {isLargeScreen ? (
               <StudioSidebar
+                navigationPresentation="path"
+                navigationHeaderExternal
+                navigationHeaderPortalTarget={desktopContextTarget}
+                renderNavigationHeader={context => search.renderControl(false, <StudioSearchContext scope={search.scope} context={context} onBroaden={search.changeScope} />)}
+                onNavigationHeaderAction={() => search.closeSearch(false)}
                 items={sidebarItems}
                 moreItems={sidebarMoreItems}
                 activePanel={sidebarActivePanel}
@@ -2056,7 +2136,7 @@ function StudioLayoutInner() {
 
           {isLargeScreen && leftDrawer ? (
             <div
-              className="relative flex h-full shrink-0"
+              className="studio-context-drawer relative flex h-full shrink-0"
               style={{ width: `${leftDrawerWidth}px` }}
             >
               <div className="flex h-full min-w-0 flex-1 flex-col border-r border-slate-200/70 bg-white dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-panel)]">
@@ -2108,12 +2188,22 @@ function StudioLayoutInner() {
             </div>
           ) : null}
 
+          {search.open ? <div className="studio-context-search-screen">
+            {!isLargeScreen ? <header className="studio-context-search-mobile" aria-label="Search">{search.renderControl()}</header> : null}
+            <main className="flex min-h-0 min-w-0 flex-1" aria-label="Search results" data-testid="studio-search-screen">{search.results}</main>
+          </div> : null}
           <div
-            className="flex flex-1 min-h-0 min-w-0 flex-col"
-            aria-hidden={showMobileLeftDrawerOverlay || undefined}
-            inert={showMobileLeftDrawerOverlay || undefined}
+            className="studio-context-workspace flex flex-1 min-h-0 min-w-0 flex-col"
+            hidden={search.open}
+            aria-hidden={search.open || showMobileLeftDrawerOverlay || undefined}
+            inert={search.open || showMobileLeftDrawerOverlay || undefined}
           >
-            <StudioTopBar notificationBell={notificationCenter.bell} mobileNavigation={mobileTopbarNavigation} />
+            {!isLargeScreen ? mobileContextHeader() : null}
+            {isLargeScreen || navigationScope.page === "workspace" ? <StudioTopBar newChatInSidebar={isLargeScreen} contextHeaderAbove notificationBell={notificationCenter.bell} mobileNavigation={mobileTopbarNavigation} /> : <div className="flex min-h-12 items-center gap-2 border-b border-slate-200/70 px-1 dark:border-[color:var(--color-studio-dark-divider)]">
+              <IconButton variant="ghost" aria-label="Open navigation" data-testid="topbar-sidebar-toggle" onPress={handleToggleSidebar} className="!min-h-12 !min-w-12"><SidebarExpand className="h-4 w-4" /></IconButton>
+              <span className="min-w-0 flex-1 truncate text-sm text-slate-500 dark:text-slate-400">{topbarLocationOverride?.title ?? (contextHomeActive ? "Home" : activeTeamName)}</span>
+              {notificationCenter.bell}
+            </div>}
             <ProjectAccessRecoveryBanner />
             {/* relative: the participants drawer overlays the right edge of the
                 workspace content rather than pushing it, so it never competes
@@ -2154,9 +2244,23 @@ function StudioLayoutInner() {
             </div>
           </div>
 
-          {!isLargeScreen && (mobileSidebarOpen || routeOwnedMobileWorkspaceDrawer) ? (
+          {!search.open && !isLargeScreen && (mobileSidebarOpen || routeOwnedMobileWorkspaceDrawer) ? (
             <StudioMobileSidebarOverlay onClose={() => handleMobileSidebarOpenChange(false)}>
+              <div className="flex h-full min-h-0 flex-col">
+              <div className="studio-context-mobile-picker" inert={mobileSidebarNavigation.view !== "sidebar" || undefined} aria-hidden={mobileSidebarNavigation.view !== "sidebar" || undefined}>
+                <IconButton variant="ghost" onPress={handleOpenHome} aria-label="Home — all teams" aria-current={contextHomeActive ? "page" : undefined} className="relative !min-h-12 !min-w-11 shrink-0">
+                  <OctoMark className="h-6 w-6 text-brand-ink dark:text-brand-paper" />
+                  <AttentionBadge count={homeAttentionCount} aria-hidden className="absolute right-0 top-0" />
+                </IconButton>
+                <div ref={setMobileContextTarget} className="min-w-0 flex-1" />
+                <IconButton variant="ghost" aria-label="Search" onPress={search.openSearch} className="!min-h-12 !min-w-11 shrink-0"><Search className="h-[18px] w-[18px]" /></IconButton>
+              </div>
+              <div className="min-h-0 flex-1">
               <StudioSidebar
+                navigationPresentation="path"
+                workspaceSwitcherInitialMode={mobilePickerMode}
+                navigationHeaderExternal
+                navigationHeaderPortalTarget={mobileContextTarget}
                 mobileOverlay
                 hideContext={navigationScope.page === "account"}
                 mobileNavigation={mobileSidebarOpen ? mobileSidebarNavigation : undefined}
@@ -2183,6 +2287,7 @@ function StudioLayoutInner() {
                 onSelectConversation={handleSelectRecentConversation}
                 collapsed={false}
               />
+              </div></div>
             </StudioMobileSidebarOverlay>
           ) : null}
 
@@ -2190,6 +2295,9 @@ function StudioLayoutInner() {
             <div
               className="fixed inset-0 z-[60] flex h-full flex-col bg-white dark:bg-[var(--color-studio-dark-panel)]"
               data-testid="mobile-left-drawer-overlay"
+              hidden={search.open}
+              inert={search.open || undefined}
+              aria-hidden={search.open || undefined}
               style={{
                 ...viewportHeightStyle,
                 paddingBottom: showMobileBottomDock || keyboardOpen ? "0px" : "var(--instafy-safe-area-inset-bottom)",
@@ -2197,7 +2305,8 @@ function StudioLayoutInner() {
                 paddingRight: "var(--instafy-safe-area-inset-right)",
               }}
             >
-              <StudioTopBar notificationBell={notificationCenter.bell} mobileNavigation={mobileTopbarNavigation} />
+              {mobileContextHeader(true)}
+              <StudioTopBar contextHeaderAbove notificationBell={notificationCenter.bell} mobileNavigation={mobileTopbarNavigation} />
               <div className="flex-1 min-h-0 overflow-hidden">
                   {leftDrawer === "history" ? (
                     <ConversationHistoryTab
@@ -2227,7 +2336,7 @@ function StudioLayoutInner() {
             </div>
           ) : null}
 
-          {!isLargeScreen && mobileGitReviewSheet ? (
+          {!search.open && !isLargeScreen && mobileGitReviewSheet ? (
             <div
               className="fixed inset-0 z-[70] flex items-end"
               data-testid="mobile-git-review-sheet-overlay"
