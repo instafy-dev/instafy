@@ -40,6 +40,7 @@ import { useStudioSearch, type StudioSearchRequest } from "./studio/components/u
 import { StudioSearchContext } from "./studio/components/StudioSearchContext";
 import { StudioMobileContextHeader } from "./studio/components/StudioMobileContextHeader";
 import { useStudioSearchRecords } from "./studio/useStudioSearchRecords";
+import { getStudioWorkspaceOwnerKey, useStudioKnownFiles } from "./studio/useStudioKnownFiles";
 import { useStudioSearchNavigation } from "./studio/useStudioSearchNavigation";
 import { useNativeBackButtonAction } from "../native/useNativeBackButtonAction";
 import { desktopTitleBarFree } from "../lib/desktopShell";
@@ -255,7 +256,7 @@ function StudioLayoutInner() {
     activeProjectId,
   } = useProject();
   const { billing: creditBilling, controllerEnabled: creditsControllerEnabled } = useCredits();
-  const { runtime, runtimeReady, effectiveRuntimeId, runtimeStatuses, showDesktopRuntimeHelp } =
+  const { runtime, runtimeReady, effectiveRuntimeId, runtimeStatuses, showDesktopRuntimeHelp, localWorkspace, desktopOrigin } =
     useRuntime();
 
   const controllerProjectMissing =
@@ -274,6 +275,9 @@ function StudioLayoutInner() {
   );
   const orgSettingsTitle = isPersonalOrgName(activeProjectSummary?.orgName) ? "Personal settings" : "Team settings";
   const currentUserId = user?.id ?? null;
+  const knownWorkspaceFiles = useStudioKnownFiles(currentUserId,
+    projectReadyForWorkspace && !controllerProjectMissing ? activeProjectId : null,
+    getStudioWorkspaceOwnerKey({ effectiveRuntimeId, localWorkspace, desktopOrigin }));
   const activeProjectOrgKey = activeProjectSummary?.orgId ?? "personal";
   const navigationScope = resolveTeamNavigationScope(location.search, activeProjectOrgKey);
   const searchRoute = new URLSearchParams(location.search);
@@ -1835,6 +1839,7 @@ function StudioLayoutInner() {
       <FilesPanel
         tabsSlot={workspaceTabsElement}
         previewOwnerId={user?.id ?? null}
+        onDirectoryEntriesLoaded={knownWorkspaceFiles.recordDirectory}
         showExplorer
         explorerPortalTarget={filesExplorerPortalTarget}
         mobileView={filesMobileView}
@@ -2010,6 +2015,7 @@ function StudioLayoutInner() {
     orgId: searchOrg?.id ?? null,
     spaceId: searchSpace?.id ?? null,
     projects: projectList,
+    knownFiles: knownWorkspaceFiles.files,
     activeConversations: activeProjectId && conversationsProjectKey === activeProjectId ? { projectId: activeProjectId, items: conversations } : null,
     onActivate: searchNavigation.activateTarget,
   });
@@ -2044,6 +2050,7 @@ function StudioLayoutInner() {
         <FilesPanel
           renderMode="portal"
           previewOwnerId={user?.id ?? null}
+          onDirectoryEntriesLoaded={knownWorkspaceFiles.recordDirectory}
           showExplorer
           explorerPortalTarget={filesExplorerPortalTarget}
           mobileView={filesMobileView}

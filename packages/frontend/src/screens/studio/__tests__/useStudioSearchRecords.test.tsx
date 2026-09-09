@@ -118,7 +118,29 @@ describe("useStudioSearchRecords", () => {
     files[0].activate();
     expect(options.onActivate).toHaveBeenLastCalledWith({ kind: "file", projectId: "space-a", path: "src/main.ts", fileId: "file-0" });
     expect(current.notice).toContain("opened file names");
-    expect(current.notice).toContain("Message and file contents are not included");
+    expect(current.notice).toContain("Unloaded folders, message and file contents are not included");
+  });
+
+  it("adds already-listed unopened files without more I/O and prefers an opened file identity", async () => {
+    await render({ projects: [knownProject("space-a", [{ path: "CLAUDE.md" }])] });
+    const discoveryCount = discover.mock.calls.length;
+    const chatReadCount = listChats.mock.calls.length;
+    await render({ knownFiles: [
+      { projectId: "space-a", path: "CLAUDE.md", fileId: "CLAUDE.md" },
+      { projectId: "space-a", path: "INSTAFY.md", fileId: "INSTAFY.md" },
+      { projectId: "space-a", path: "INSTAFY.md", fileId: "duplicate" },
+      { projectId: "space-a", path: "../private", fileId: "unsafe" },
+      { projectId: "inaccessible", path: "private.md", fileId: "foreign" },
+    ] });
+    const files = current.records.filter((record) => record.group === "Files");
+    expect(files.map((record) => record.title)).toEqual(["CLAUDE.md", "INSTAFY.md"]);
+    files[0].activate();
+    expect(options.onActivate).toHaveBeenLastCalledWith({ kind: "file", projectId: "space-a", path: "CLAUDE.md", fileId: "file-0" });
+    files[1].activate();
+    expect(options.onActivate).toHaveBeenLastCalledWith({ kind: "file", projectId: "space-a", path: "INSTAFY.md", fileId: "INSTAFY.md", requiresLoad: true });
+    expect(discover).toHaveBeenCalledTimes(discoveryCount);
+    expect(listChats).toHaveBeenCalledTimes(chatReadCount);
+    expect(current.notice).toContain("files already listed in the current space");
   });
 
   it("deduplicates synchronized chats, preserves new local chats and drops unauthorized cached private chats", async () => {

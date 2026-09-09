@@ -9,6 +9,7 @@ import { PROJECT_ACCESS_REFRESH_EVENT } from "../../projects/projectAccessEvents
 import type { ProjectListItem } from "../../projects/useProjects";
 import { controllerClient, type ControllerProjectConversation, type ControllerProjectSummary } from "../../sdk/instafy";
 import type { StudioSearchRecord, StudioSearchScope } from "./components/useStudioSearch";
+import { isSafeStudioFilePath, type StudioKnownFile } from "./useStudioKnownFiles";
 
 const CHAT_LIMIT = 200;
 const SPACE_LIMIT = 40;
@@ -16,7 +17,7 @@ const CONCURRENT_READS = 4;
 
 export type StudioSearchTarget =
   | { kind: "conversation"; projectId: string; conversationId: string | null; conversationControllerId: string | null }
-  | { kind: "file"; projectId: string; path: string; fileId: string }
+  | { kind: "file"; projectId: string; path: string; fileId: string; requiresLoad?: boolean }
   | { kind: "space-panel"; projectId: string; panel: "settings" | "automations" }
   | { kind: "org-settings"; orgId: string };
 
@@ -28,6 +29,7 @@ export interface StudioSearchRecordsOptions {
   orgId: string | null;
   spaceId: string | null;
   projects: readonly ProjectListItem[];
+  knownFiles?: readonly StudioKnownFile[];
   activeConversations: {
     projectId: string;
     items: readonly (Pick<ConversationState, "localId" | "controllerId" | "title"> & Partial<Pick<ConversationState, "lifecycleStatus">>)[];
@@ -50,7 +52,7 @@ function emptySnapshot(key: string, loading: boolean): SearchSnapshot {
 
 /** Search does not open origins or start runtimes: files are already-known paths only. */
 export function useStudioSearchRecords({
-  viewerUserId, enabled, scope, orgId, spaceId, projects, activeConversations, onActivate,
+  viewerUserId, enabled, scope, orgId, spaceId, projects, knownFiles, activeConversations, onActivate,
 }: StudioSearchRecordsOptions) {
   const [revision, setRevision] = useState(0);
   const retry = useCallback(() => setRevision((value) => value + 1), []);
@@ -176,10 +178,17 @@ export function useStudioSearchRecords({
       const seenPaths = new Set<string>();
       for (const file of knownProjects.get(projectId)?.state.code.files ?? []) {
         const path = file.path.replace(/\\/g, "/");
-        if (file.kind === "directory" || file.kind === "other" || !path || path.startsWith("/") || /^[a-z]:/i.test(path)
-          || path.split("/").some((part) => !part || part === "." || part === "..") || seenPaths.has(path)) continue;
+        if (file.kind === "directory" || file.kind === "other" || !isSafeStudioFilePath(path) || seenPaths.has(path)) continue;
         seenPaths.add(path);
         push({ id: `file:${projectId}:${path}`, title: path, keywords: "file source document", group: "Files" }, { kind: "file", projectId, path, fileId: file.id });
+      }
+      for (const file of knownFiles ?? []) {
+        const { path } = file;
+        if (file.projectId !== projectId || !isSafeStudioFilePath(path) || seenPaths.has(path)) continue;
+        seenPaths.add(path);
+        push({ id: `file:${projectId}:${path}`, title: path, keywords: "file source document", group: "Files" }, {
+          kind: "file", projectId, path, fileId: file.fileId, requiresLoad: true,
+        });
       }
       push({ id: `settings:${projectId}`, title: "Space settings", keywords: "settings configuration preferences", group: "Settings" }, { kind: "space-panel", projectId, panel: "settings" });
       push({ id: `automations:${projectId}`, title: "Open automations", keywords: "action automation jobs schedules", group: "Actions" }, { kind: "space-panel", projectId, panel: "automations" });
@@ -189,7 +198,7 @@ export function useStudioSearchRecords({
       }
     }
     return output;
-  }, [activeConversations, canSearch, current.conversations, current.projects, onActivate, projects, viewerUserId]);
-  const notice = `Searches recent chat titles (up to ${CHAT_LIMIT} per space), opened file names and settings. Message and file contents are not included.${current.limitedSpaces ? ` Showing the first ${SPACE_LIMIT} spaces alphabetically; choose a team or space to narrow the search.` : ""}`;
+  }, [activeConversations, canSearch, current.conversations, current.projects, knownFiles, onActivate, projects, viewerUserId]);
+  const notice = `Searches recent chat titles (up to ${CHAT_LIMIT} per space), opened file names, files already listed in the current space and settings. Unloaded folders, message and file contents are not included.${current.limitedSpaces ? ` Showing the first ${SPACE_LIMIT} spaces alphabetically; choose a team or space to narrow the search.` : ""}`;
   return { records, loading: current.loading, error: current.error, notice, retry };
 }

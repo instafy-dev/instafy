@@ -59,6 +59,7 @@ import { resolveViewerStateWithoutActiveFile } from "./filesPanelViewerSync";
 import { FilesExplorerTree } from "./FilesExplorerTree";
 import { type DirectoryEntries, useFilesPanelWorkspaceTree } from "./useFilesPanelWorkspaceTree";
 import type { FilesPanelMobileView } from "../../studioFilesMobileView";
+import { getStudioWorkspaceOwnerKey, type StudioDirectoryListingListener } from "../useStudioKnownFiles";
 
 const runtimeControllerEnabled = controllerClient.core.enabled;
 
@@ -75,6 +76,7 @@ interface FilesPanelProps {
   onMobileViewChange?: (value: FilesPanelMobileView) => void;
   onRequestOpenExplorer?: () => void;
   onRequestCloseExplorer?: () => void;
+  onDirectoryEntriesLoaded?: StudioDirectoryListingListener;
 }
 
 const IMAGE_EXTENSIONS = new Set([
@@ -445,6 +447,7 @@ export function FilesPanel({
   onMobileViewChange,
   onRequestOpenExplorer,
   onRequestCloseExplorer,
+  onDirectoryEntriesLoaded,
 }: FilesPanelProps) {
   const { workspace, setActiveFile, updateFileContent, updateWorkspace, replaceWorkspace } = useCode();
   const {
@@ -454,6 +457,7 @@ export function FilesPanel({
     localWorkspace,
     desktopOrigin,
   } = useRuntime();
+  const workspaceOwnerKey = getStudioWorkspaceOwnerKey({ effectiveRuntimeId, localWorkspace, desktopOrigin });
   const { showStatus } = useStatus();
   const { activeProjectId, projectCapabilitiesResolved, canWriteProject } = useProject();
   const projectWriteDisabled =
@@ -797,6 +801,9 @@ export function FilesPanel({
     setViewerStateRef: setViewerStateBridgeRef,
     waitingForPreferredRuntime,
     workspaceBrowseReady,
+    workspaceOwnerId: previewOwnerId,
+    workspaceOwnerKey,
+    onDirectoryEntriesLoaded,
     readOnly: projectWriteDisabled,
   });
 
@@ -1054,6 +1061,7 @@ export function FilesPanel({
     openUnsupportedFile,
     openFileFromEvent,
   } = useFilesPanelViewerState({
+    workspaceOwnerKey,
     acceptExternalOpenEvents: renderMode !== "portal",
     activeFile,
     activeProjectId,
@@ -1205,7 +1213,7 @@ export function FilesPanel({
       setFileViewerReturnTarget(null);
       if (entry.kind === "directory") {
         if (options?.viaSearch) {
-          await ensureEntryVisible(entry);
+          if (!await ensureEntryVisible(entry)) return;
         }
         setViewerState({ mode: "directory", entry, error: null });
         if (!isLargeScreen) {
@@ -1216,7 +1224,7 @@ export function FilesPanel({
       }
 
       if (options?.viaSearch) {
-        await ensureEntryVisible(entry);
+        if (!await ensureEntryVisible(entry)) return;
       }
 
       if (isImageEntry(entry)) {

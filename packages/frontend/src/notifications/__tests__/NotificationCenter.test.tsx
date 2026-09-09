@@ -56,6 +56,35 @@ describe("notification center", () => {
     await click("Archive");
     expect(mocks.state).toHaveBeenCalledWith({ id: A, action: "archive", accessToken: `token-${A}` });
   });
+  it("shows controller unavailability without an empty inbox claim and retries the current account and filter", async () => {
+    mocks.list.mockRejectedValue(new Error("Unable to load notifications (404)"));
+    await act(async () => root.render(<Harness userId={B} />));
+    await open();
+    expect(document.querySelector('[role="alert"]')?.textContent).toBe("Notifications are unavailable on this server.");
+    expect(document.body.textContent).not.toContain("No notifications yet.");
+    await click("Unread");
+    expect(document.body.textContent).not.toContain("You're all caught up.");
+
+    mocks.list.mockResolvedValue(page([]));
+    mocks.list.mockClear();
+    await click("Retry");
+    expect(mocks.list).toHaveBeenCalledWith({ view: "unread", before: undefined, accessToken: `token-${B}` });
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(document.body.textContent).toContain("You're all caught up.");
+    expect([...document.querySelectorAll("button")].some((button) => button.textContent?.trim() === "Retry")).toBe(false);
+  });
+  it("preserves other load errors and shows recovered notifications after retry", async () => {
+    mocks.list.mockRejectedValue(new Error("Unable to load notifications (502): Gateway unavailable"));
+    await act(async () => root.render(<Harness userId={B} />));
+    await open();
+    expect(document.querySelector('[role="alert"]')?.textContent).toBe("Unable to load notifications (502): Gateway unavailable");
+    expect(document.body.textContent).not.toContain("No notifications yet.");
+
+    mocks.list.mockResolvedValue(page([event(B)]));
+    await click("Retry");
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(document.querySelector(`[data-testid="notification-${B}"]`)).not.toBeNull();
+  });
   it("saves preview and category/channel preferences on the server", async () => {
     await open(); await click("Preferences");
     const preview = [...document.querySelectorAll('input[type="checkbox"]')][0] as HTMLInputElement;

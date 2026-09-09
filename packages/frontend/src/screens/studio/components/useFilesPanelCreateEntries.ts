@@ -33,7 +33,7 @@ type UseFilesPanelCreateEntriesOptions = {
     intent?: "success" | "warning" | "error" | "info",
     durationMs?: number,
   ) => void;
-  ensureEntryVisible: (entry: ControllerWorkspaceEntry) => Promise<void>;
+  ensureEntryVisible: (entry: ControllerWorkspaceEntry) => Promise<boolean>;
   openTextFile: OpenTextFile;
   focusEditorWhenReady: () => void;
   onLocalCommit: (rev: string) => void;
@@ -215,7 +215,7 @@ export function useFilesPanelCreateEntries({
       });
 
       void loadDirectory(parentPath, { force: true });
-      void ensureEntryVisible(createdEntry);
+      if (!await ensureEntryVisible(createdEntry)) return;
       await openTextFile(createdEntry, { forceFetch: true });
       focusEditorWhenReady();
       showStatus("Created file.", "success", 2000);
@@ -352,7 +352,7 @@ export function useFilesPanelCreateEntries({
       });
 
       void loadDirectory(parentPath, { force: true });
-      await ensureEntryVisible(createdEntry);
+      if (!await ensureEntryVisible(createdEntry)) return;
       showStatus("Created folder.", "success", 2000);
       setCreateFolderState(null);
     } catch (error) {

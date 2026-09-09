@@ -55,7 +55,10 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
       setPage((old) => ({ ...next, items: before ? [...old.items, ...next.items.filter((item) => !old.items.some((entry) => entry.id === item.id))] : next.items }));
       setError(null);
     } catch (caught) {
-      if (current(userId, accessToken) && generation === requests.current) setError(caught instanceof Error ? caught.message : "Unable to load notifications.");
+      if (current(userId, accessToken) && generation === requests.current) {
+        const message = caught instanceof Error ? caught.message : "Unable to load notifications.";
+        setError(message === "Unable to load notifications (404)" ? "Notifications are unavailable on this server." : message);
+      }
     }
   }, [accessToken, current, setPage, userId, view]);
 
@@ -155,7 +158,7 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
   const dialog = <StudioDialogModal isOpen={open && Boolean(userId)} onOpenChange={setOpen} isDismissable dialogAriaLabel="Notifications" modalClassName="max-w-xl overflow-hidden" data-testid="notification-center">
     <StudioDialogHeader title="Notifications" onClose={() => setOpen(false)} trailing={<Button variant="ghost" onPress={() => setSettings((value) => !value)}>{settings ? "Inbox" : "Preferences"}</Button>} />
     <div className="max-h-[70dvh] overflow-y-auto p-4 text-sm text-slate-700 dark:text-slate-200">
-      {error ? <p role="alert" className="mb-3 text-rose-600">{error}</p> : null}
+      {error ? <div className="mb-3 flex items-start justify-between gap-3"><p role="alert" className="text-rose-600">{error}</p>{!settings ? <Button variant="ghost" size="sm" isDisabled={pending} onPress={() => void refresh()}>Retry</Button> : null}</div> : null}
       {settings ? preferences ? <div className="space-y-5">
         <label className="flex items-center gap-2"><input type="checkbox" checked={preferences.hidePreviews} disabled={pending} onChange={(event) => void changePreferences({ hidePreviews: event.target.checked })} />Hide lock-screen previews</label>
         <p className="text-xs text-slate-500">Your notification center remains available when external alerts are off.</p>
@@ -163,7 +166,7 @@ export function useNotificationCenter({ userId, accessToken, navigate }: { userI
         <Button isDisabled={pending} onPress={() => void mutate(async () => { if (!(await enableMessageNotifications())) throw new Error("Notifications are unavailable or permission was not granted on this device."); })}>Enable alerts on this device</Button>
       </div> : <p>Loading preferences…</p> : <>
         <div className="mb-3 flex items-center gap-2"><Button variant={view === "all" ? "primary" : "ghost"} onPress={() => setView("all")}>All</Button><Button variant={view === "unread" ? "primary" : "ghost"} onPress={() => setView("unread")}>Unread</Button><Button className="ml-auto" variant="ghost" isDisabled={pending || !page.unreadCount || !page.asOf} onPress={() => void mutate(() => controllerClient.notifications.readAll({ before: page.asOf, accessToken: accessToken ?? undefined }))}>Mark all read</Button></div>
-        {page.items.length === 0 ? <p className="py-8 text-center text-slate-500">{view === "unread" ? "You're all caught up." : "No notifications yet."}</p> : <ul className="space-y-2">{page.items.map((item) => <li key={item.id} className={`rounded-xl border border-slate-200 p-3 dark:border-slate-700 ${item.readAt ? "" : "bg-primary-50 dark:bg-primary-950/20"}`} data-testid={`notification-${item.id}`}>
+        {page.items.length === 0 ? !error ? <p className="py-8 text-center text-slate-500">{view === "unread" ? "You're all caught up." : "No notifications yet."}</p> : null : <ul className="space-y-2">{page.items.map((item) => <li key={item.id} className={`rounded-xl border border-slate-200 p-3 dark:border-slate-700 ${item.readAt ? "" : "bg-primary-50 dark:bg-primary-950/20"}`} data-testid={`notification-${item.id}`}>
           <button type="button" className="w-full text-left" onClick={() => openItem(item)}><span className="block font-medium">{item.body}</span><time className="mt-1 block text-xs text-slate-500" dateTime={item.occurredAt}>{new Date(item.occurredAt).toLocaleString()}</time></button>
           <div className="mt-2 flex gap-2">{!item.readAt ? <Button variant="ghost" size="xs" isDisabled={pending} onPress={() => void read(item)}>Mark read</Button> : null}<Button variant="ghost" size="xs" isDisabled={pending} onPress={() => void mutate(() => controllerClient.notifications.updateState({ id: item.id, action: "archive", accessToken: accessToken ?? undefined }))}>Archive</Button></div>
         </li>)}</ul>}

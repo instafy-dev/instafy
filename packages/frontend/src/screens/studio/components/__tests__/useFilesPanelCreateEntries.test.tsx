@@ -27,6 +27,8 @@ describe("useFilesPanelCreateEntries read-only guard", () => {
   let latest: HookValue | null;
   const loadDirectory = vi.fn();
   const openTextFile = vi.fn();
+  const ensureEntryVisible = vi.fn();
+  const focusEditorWhenReady = vi.fn();
 
   function Harness({ readOnly }: { readOnly: boolean }) {
     latest = useFilesPanelCreateEntries({
@@ -41,9 +43,9 @@ describe("useFilesPanelCreateEntries read-only guard", () => {
       sortEntries: (entries) => entries,
       loadDirectory,
       showStatus: vi.fn(),
-      ensureEntryVisible: vi.fn().mockResolvedValue(undefined),
+      ensureEntryVisible,
       openTextFile,
-      focusEditorWhenReady: vi.fn(),
+      focusEditorWhenReady,
       onLocalCommit: vi.fn(),
       setDirectoryEntries: vi.fn(),
       setExpandedDirectories: vi.fn(),
@@ -67,6 +69,9 @@ describe("useFilesPanelCreateEntries read-only guard", () => {
     loadDirectory.mockResolvedValue([]);
     openTextFile.mockReset();
     openTextFile.mockResolvedValue(undefined);
+    ensureEntryVisible.mockReset();
+    ensureEntryVisible.mockResolvedValue(true);
+    focusEditorWhenReady.mockReset();
   });
 
   afterEach(async () => {
@@ -100,5 +105,16 @@ describe("useFilesPanelCreateEntries read-only guard", () => {
 
     expect(latest?.createFileState).toBeNull();
     expect(mocks.write).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("opens the created file only if its reveal is still current (%s)", async (revealCurrent) => {
+    ensureEntryVisible.mockResolvedValue(revealCurrent);
+    await act(async () => root.render(<Harness readOnly={false} />));
+    await act(async () => latest?.setCreateFileState({ parentPath: "", draft: "created.md", busy: false }));
+    await act(async () => latest?.handleCommitCreateFile());
+    expect(mocks.write).toHaveBeenCalledExactlyOnceWith({ projectId: "project-1", path: "created.md", content: "", runtimeId: "runtime-1" });
+    expect(ensureEntryVisible).toHaveBeenCalledTimes(1);
+    expect(openTextFile).toHaveBeenCalledTimes(revealCurrent ? 1 : 0);
+    expect(focusEditorWhenReady).toHaveBeenCalledTimes(revealCurrent ? 1 : 0);
   });
 });
