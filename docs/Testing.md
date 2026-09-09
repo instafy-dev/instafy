@@ -38,8 +38,9 @@ Public Build keeps its existing job names:
 
 It also calls the secret-free `Browser verification` workflow on every pull
 request, `main` push, and manual Public Build run. That workflow has three
-non-optional jobs: `Personal Browser E2E`, `Browser UI rendering`, and
-`Shared Browser profile E2E`. A failure in any of them fails Public Build,
+required checks: `Personal Browser E2E`, `Browser UI rendering`, and
+`Shared Browser profile E2E`. The Shared check aggregates two complete,
+independent fixture jobs. A failure in any of them fails Public Build,
 including its downstream release-workflow result. Repository administrators
 must also require the emitted browser job checks in branch protection; adding
 workflow YAML does not change repository protection settings.
@@ -325,8 +326,8 @@ The independent, default-off `CI_BROWSER_SELF_HOSTED=true` switch covers only
 `Browser verification / Personal Browser E2E`, called by Public
 Build. It requires private visibility, a same-repository PR to `main` or a
 protected-main push, and the exact `build.yml` caller. Forks, public visibility,
-manual runs and other callers retain `ubuntu-24.04`; the 60-minute Shared
-Browser profile job remains hosted. Both short browser jobs have a 30-minute
+manual runs and other callers retain `ubuntu-24.04`; Shared Browser has its
+own independent switch below. Both short browser jobs have a 30-minute
 limit, including their hosted fallback, to leave room for cold workspace,
 browser and system-package installation. This is a conservative capacity bound,
 not a measured completion claim. The worker lifecycle remains bounded to
@@ -351,6 +352,63 @@ in the public workflow. Disable the switch to restore hosted routing for new
 runs; queued jobs retain their original selection. The routing and prerequisite
 regressions run in `node --test scripts/browser-ci-workflow.test.mjs`; they are
 not a substitute for real browser execution and teardown.
+
+### Bounded Shared Browser CI
+
+`Browser verification / Shared Browser profile E2E` retains its required name
+as an always-run five-minute aggregate. It succeeds only when both fixed
+children finish successfully; missing, skipped, cancelled or failed children
+fail the aggregate. It has no repository permissions or checkout and starts
+only after the children end, without holding a worker while waiting.
+
+| Child | Complete command | Runner-label suffix |
+| --- | --- | --- |
+| Shared Browser profile lifecycle | `xvfb-run -a node scripts/browser-profile-e2e.mjs` | `public-shared-browser-profile` |
+| Shared Browser Studio journey | `xvfb-run -a node scripts/shared-browser-studio-e2e.mjs` | `public-shared-browser-studio` |
+
+Each child has a 30-minute limit and repeats the full locked workspace,
+Chromium, Go/Rust, system-library and fixture-safety preparation. Each owns a
+fresh migrated Supabase stack with local authentication and always attempts
+stack teardown. The profile-only script still permits a separately provisioned
+migrated loopback database; the signed-in Studio journey needs real local
+GoTrue. No fixture command, scenario, receipt, cleanup or safety check is
+replaced by the aggregate. Only the same fixed credential-free receipt paths
+are uploaded, separately per child. Image and compiler cache keys include the
+operating system and architecture; compiler targets are child-specific with
+no old-lock or cross-architecture fallback.
+
+All three jobs default to hosted Ubuntu24.04. The separate, default-off
+`CI_SHARED_BROWSER_SELF_HOSTED=true` switch uses the same private, same-repository
+PR/protected-main and exact Public Build caller guards as the other browser
+lanes. Its aggregate suffix is `public-shared-browser-aggregate`. Forks, public
+visibility, manual runs and other callers stay hosted. The manager must pin
+both caller and callee source at the same tested commit and protected main and
+authenticate exact-attempt reusable-workflow metadata before issuing a runner.
+Neither the ordinary browser switch nor another CI switch enables this lane.
+
+Only the two Shared compiler children use 8GiB/two CPUs, two parallel Cargo
+jobs, and fresh-guest APT plus Docker proxy preparation; the aggregate retains
+standard resources and neither daemon setup. Native package installation is
+visible in the workflow and bounded inside each job. The base template, TLS
+checks, network restrictions and 35-minute worker/cleanup budget are unchanged.
+Before checkout, each child verifies a non-root ephemeral Linux ARM64 runner,
+Node22 and an actual Linux ARM64 Docker daemon.
+
+The self-hosted fixture step explicitly opts into compiler-only proxy handling.
+The six Go/Cargo build calls receive only validated credential-free HTTP/HTTPS
+proxy origins and their derived tool aliases, alongside the existing scrubbed
+compiler environment. Database commands, display probes, production runtime
+helpers, controller services and browser processes retain their existing
+proxy/credential scrubbing. No general inherited environment, bypass list,
+private endpoint, credential or TLS override is added to the public source.
+
+Cold ARM64 completion within 30 minutes is unproven: prior hosted timings or
+warm caches do not qualify these split jobs. Keep activation supervised until
+both full jobs and guest teardown pass; do not shorten scenarios or ignore
+timeouts. Disable the switch to restore hosted selection for new runs;
+already queued jobs keep their chosen pool. Run
+`node --test scripts/check-shared-browser-ci.test.mjs scripts/browser-profile-e2e.test.mjs scripts/shared-browser-studio-e2e.test.mjs`
+for local routing and environment regressions, not live browser qualification.
 
 These lanes use disposable data, do not load local `.env` files, and do not
 need a real account, model API key, or production controller. Personal and UI

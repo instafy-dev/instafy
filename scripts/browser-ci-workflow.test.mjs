@@ -43,9 +43,9 @@ test("browser routing is independently default-off and preserves the exact two j
     assert.ok(jobSource(job.key).includes(`    timeout-minutes: ${job.minutes}\n`));
   }
   const shared = jobSource("shared-profile");
-  assert.match(shared, /^    runs-on: ubuntu-24\.04$/mu);
-  assert.match(shared, /^    timeout-minutes: 60$/mu);
-  assert.doesNotMatch(shared, /self-hosted|CI_BROWSER_SELF_HOSTED/u);
+  assert.match(shared, /vars\.CI_SHARED_BROWSER_SELF_HOSTED/u);
+  assert.match(shared, /^    timeout-minutes: 5$/mu);
+  assert.doesNotMatch(shared, /vars\.CI_BROWSER_SELF_HOSTED/u);
   assert.equal((read(".github/workflows/browser-e2e.yml").match(/vars\.CI_BROWSER_SELF_HOSTED/g) ?? []).length, 2);
 });
 
@@ -144,17 +144,17 @@ test("required browser lanes execute without secret or production authority", ()
   const workflow = read(".github/workflows/browser-e2e.yml");
   assert.match(workflow, /\n  workflow_call:/);
   assert.doesNotMatch(workflow, /secrets:|secrets\.|continue-on-error:|pull_request_target:|environment:/);
-  assert.equal((workflow.match(/persist-credentials: false/g) ?? []).length, 3);
-  assert.equal((workflow.match(/runs-on: ubuntu-24\.04/g) ?? []).length, 1);
-  assert.equal((workflow.match(/\|\| 'ubuntu-24\.04' }}/g) ?? []).length, 2);
+  assert.equal((workflow.match(/persist-credentials: false/g) ?? []).length, 4);
+  assert.equal((workflow.match(/runs-on: ubuntu-24\.04/g) ?? []).length, 0);
+  assert.equal((workflow.match(/\|\| 'ubuntu-24\.04' }}/g) ?? []).length, 5);
   assert.match(workflow, /xvfb-run -a pnpm test:browser:ci personal/);
   assert.match(workflow, /run: pnpm test:browser:ci browser-ui/);
   assert.match(workflow, /xvfb-run -a node scripts\/browser-profile-e2e\.mjs/);
   assert.match(workflow, /xvfb-run -a node scripts\/shared-browser-studio-e2e\.mjs/);
-  assert.match(workflow, /apt-get install -y x11-utils sqlite3 postgresql-client/);
+  assert.match(workflow, /install --yes --no-install-recommends x11-utils sqlite3 postgresql-client/);
   assert.doesNotMatch(workflow, /SUPABASE_DATABASE_ONLY:/);
   assert.match(workflow, /TEST_DATABASE_URL: postgresql:\/\/postgres:postgres@127\.0\.0\.1:54322\/postgres/);
-  assert.equal((workflow.match(/if-no-files-found: error/g) ?? []).length, 3);
+  assert.equal((workflow.match(/if-no-files-found: error/g) ?? []).length, 4);
   assert.match(workflow, /browser-ci\/shared-profile\/result\.json/);
   assert.match(workflow, /browser-ci\/shared-studio\/required-browser-result\.json/);
   assert.doesNotMatch(workflow, /--pass-with-no-tests|--retries=[1-9]|--grep/);
