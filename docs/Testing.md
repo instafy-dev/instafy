@@ -101,6 +101,9 @@ placement constraints, not an exclusive job reservation: provisioning must
 authenticate the exact workflow source and assignment, retain bounded job and
 cleanup deadlines, and destroy the guest. Unknown cleanup must quarantine
 capacity, not trigger a blind retry. No host credentials belong in the guest.
+Before checkout, each self-hosted job requires an actual non-root Linux ARM64
+process, Node22, the ephemeral marker, no private environment directory and its
+baseline tools. This prerequisite check does not itself prove guest isolation.
 
 JavaScript, Rust compilation/tests, browsers and all release jobs remain hosted.
 The four job names, permissions and timeouts are unchanged; the main scanner
