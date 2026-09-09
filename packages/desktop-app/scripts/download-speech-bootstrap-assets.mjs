@@ -2,6 +2,7 @@
 
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { EnvHttpProxyAgent, fetch } from "undici";
 import {
   DEFAULT_MANAGED_UV_VERSION,
   listManagedUvInstallerArtifacts,
@@ -13,11 +14,26 @@ const __dirname = path.dirname(__filename);
 const packageRoot = path.resolve(__dirname, "..");
 const distScriptRoot = path.join(packageRoot, "dist", "frontend-scripts");
 
-export async function downloadManagedUvInstallerArtifact({
-  artifact,
-  outputRoot = distScriptRoot,
-  fetchImpl = globalThis.fetch,
-}) {
+async function withDownloadFetch(fetchImpl, download) {
+  if (fetchImpl !== undefined) return download(fetchImpl);
+
+  // Own this invocation's connections without changing fetch for other callers.
+  // Undici 6 also supports Node 20, whose built-in fetch ignores proxy env vars.
+  const dispatcher = new EnvHttpProxyAgent();
+  try {
+    const result = await download((url, init) =>
+      fetch(url, { ...init, dispatcher }),
+    );
+    await dispatcher.close();
+    return result;
+  } catch (error) {
+    // Abort remaining parallel downloads as well as releasing idle connections.
+    await dispatcher.destroy();
+    throw error;
+  }
+}
+
+async function downloadArtifact({ artifact, outputRoot, fetchImpl }) {
   if (!artifact || typeof artifact.url !== "string") {
     throw new Error("Managed uv installer artifact metadata is missing.");
   }
@@ -27,9 +43,13 @@ export async function downloadManagedUvInstallerArtifact({
     },
   });
   if (!response.ok) {
-    throw new Error(
-      `Failed to download bundled uv installer (${response.status}) from ${artifact.url}.`,
-    );
+    try {
+      await response.body?.cancel();
+    } finally {
+      throw new Error(
+        `Failed to download bundled uv installer (${response.status}) from ${artifact.url}.`,
+      );
+    }
   }
   const installerContent = Buffer.from(await response.arrayBuffer());
   const targetPath = path.join(
@@ -51,10 +71,20 @@ export async function downloadManagedUvInstallerArtifact({
   };
 }
 
+export async function downloadManagedUvInstallerArtifact({
+  artifact,
+  outputRoot = distScriptRoot,
+  fetchImpl,
+}) {
+  return withDownloadFetch(fetchImpl, (downloadFetch) =>
+    downloadArtifact({ artifact, outputRoot, fetchImpl: downloadFetch }),
+  );
+}
+
 export async function downloadSpeechBootstrapAssets({
   managedUvVersion = DEFAULT_MANAGED_UV_VERSION,
   outputRoot = distScriptRoot,
-  fetchImpl = globalThis.fetch,
+  fetchImpl,
 } = {}) {
   const artifacts = listManagedUvInstallerArtifacts(managedUvVersion);
   if (artifacts.length === 0) {
@@ -62,13 +92,15 @@ export async function downloadSpeechBootstrapAssets({
       `Managed uv ${managedUvVersion} has no source-controlled installer trust anchors.`,
     );
   }
-  return Promise.all(
-    artifacts.map((artifact) =>
-      downloadManagedUvInstallerArtifact({
-        artifact,
-        outputRoot,
-        fetchImpl,
-      }),
+  return withDownloadFetch(fetchImpl, (downloadFetch) =>
+    Promise.all(
+      artifacts.map((artifact) =>
+        downloadArtifact({
+          artifact,
+          outputRoot,
+          fetchImpl: downloadFetch,
+        }),
+      ),
     ),
   );
 }
