@@ -134,6 +134,8 @@ export function StudioSidebarMorePanels({
                 radius="lg"
                 fullWidth
                 data-testid="sidebar-nav-more"
+                aria-label="More"
+                title={showLabels ? undefined : "More"}
                 className={[
                   "group/item relative py-1.5 transition focus-visible:ring-offset-0",
                   sidebarRowLayoutClass,
@@ -193,6 +195,8 @@ export function StudioSidebarMorePanels({
               radius="lg"
               fullWidth
               data-testid="sidebar-nav-more"
+              aria-label="More"
+              title={showLabels ? undefined : "More"}
               onPress={onMobileMoreToggle}
               className={[
                 "group/item relative py-1.5 transition focus-visible:ring-offset-0",

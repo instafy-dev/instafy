@@ -113,6 +113,19 @@ describe("StudioRecentChats", () => {
     expect(document.querySelector('[data-testid="sidebar-recent-chats-popover"]')).toBeNull();
   });
 
+  it("keeps the chats popover closed after expanding and collapsing the inner rail", async () => {
+    await render({ collapsed: true });
+    expect(container.querySelector('[data-testid="sidebar-nav-history"]')?.getAttribute("title")).toBe("Open chats");
+    await click("sidebar-nav-history");
+    expect(document.querySelector('[data-testid="sidebar-recent-chats-popover"]')).not.toBeNull();
+    await render({ collapsed: false });
+    expect(document.querySelector('[data-testid="sidebar-recent-chats-popover"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-recent-chats-list"]')).not.toBeNull();
+    await render({ collapsed: true });
+    expect(document.querySelector('[data-testid="sidebar-recent-chats-popover"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-nav-history"]')?.getAttribute("aria-expanded")).toBe("false");
+  });
+
   it("marks Browse all as the current destination and dismisses the rail panel after opening it", async () => {
     const onBrowseAll = vi.fn();
     await render({ collapsed: true, isHistoryActive: true, onBrowseAll });

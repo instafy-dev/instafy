@@ -244,21 +244,13 @@ describe("StudioTopBar navigation", () => {
     { posture: "with a missing project", hasTabs: true, controllerProjectMissing: true, projectAccessBlocked: false, navigationPage: "workspace" as const },
     { posture: "with blocked project access", hasTabs: true, controllerProjectMissing: false, projectAccessBlocked: true, navigationPage: "workspace" as const },
     { posture: "on the team page", hasTabs: true, controllerProjectMissing: false, projectAccessBlocked: false, navigationPage: "team" as const },
-  ])("only offers desktop space navigation when collapsed $posture", async ({ hasTabs, controllerProjectMissing, projectAccessBlocked, navigationPage }) => {
+  ])("leaves the desktop toggle in the inner rail $posture", async ({ hasTabs, controllerProjectMissing, projectAccessBlocked, navigationPage }) => {
     Object.assign(mocks, { hasTabs, controllerProjectMissing, projectAccessBlocked, navigationPage });
     mocks.isLargeScreen = true;
     await act(async () => root.render(<StudioTopBar />));
     expect(container.querySelector('[data-testid="topbar-sidebar-toggle"]')).toBeNull();
 
     mocks.sidebarCollapsed = true;
-    await act(async () => root.render(<StudioTopBar />));
-    const toggle = container.querySelector<HTMLButtonElement>('[data-testid="topbar-sidebar-toggle"]');
-    expect(toggle?.getAttribute("aria-expanded")).toBe("false");
-    expect(toggle?.getAttribute("aria-label")).toBe("Expand space navigation");
-    await act(async () => toggle?.click());
-    expect(mocks.toggleSidebar).toHaveBeenCalledOnce();
-
-    mocks.sidebarCollapsed = false;
     await act(async () => root.render(<StudioTopBar />));
     expect(container.querySelector('[data-testid="topbar-sidebar-toggle"]')).toBeNull();
   });

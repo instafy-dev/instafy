@@ -72,7 +72,6 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
     onStartNewConversation,
     showChatActions = false,
     onToggleSidebar,
-    sidebarCollapsed,
     sidebarOpen,
     onOpenProjectSettings,
     onOpenProfileSettings,
@@ -362,20 +361,6 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
       <NavArrowUp className="h-5 w-5" aria-hidden="true" />
     </IconButton>
   ) : null;
-  const desktopSidebarButton = onToggleSidebar && sidebarCollapsed && navigationPage !== "home" && navigationPage !== "account" ? (
-    <IconButton
-      onPress={onToggleSidebar}
-      variant="ghost"
-      radius="none"
-      size="sm"
-      aria-label="Expand space navigation"
-      aria-expanded={false}
-      data-testid="topbar-sidebar-toggle"
-      className={desktopTabActionButtonClassName}
-    >
-      <SidebarExpand className="h-5 w-5" aria-hidden="true" />
-    </IconButton>
-  ) : null;
   const mobileBackButton = (
     <IconButton
       onPress={onNavigateBack}
@@ -439,7 +424,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
       </Text>
       {useDesktopTabChrome ? (
         <WorkspaceTabs
-          leading={<><StudioHistoryControls />{desktopSidebarButton}{desktopParentConversationButton}</>}
+          leading={<><StudioHistoryControls />{desktopParentConversationButton}</>}
           className="bg-transparent pr-0 pt-0 dark:bg-transparent"
           emptyStateContent={!hasDesktopTabs ? desktopEmptyStateTab : undefined}
           tabStripActions={
@@ -479,7 +464,6 @@ export function StudioTopBar({ notificationBell, mobileNavigation }: StudioTopBa
       ) : isLargeScreen ? (
         <div className="flex items-center gap-2 px-4 py-2 sm:px-5">
           <StudioHistoryControls />
-          {desktopSidebarButton}
           {parentConversationButton}
           <div className="min-w-0 flex-1">{projectNameLabel}</div>
           {shouldShowNewChat ? <StudioNewChatButton /> : null}

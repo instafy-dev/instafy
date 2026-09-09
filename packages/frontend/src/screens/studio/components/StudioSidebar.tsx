@@ -16,6 +16,8 @@ import {
   Xmark,
   Group,
   Settings,
+  Folder,
+  Plus,
 } from "iconoir-react";
 import { ChatsIcon, HomeIcon } from "../../../components/AppIcons";
 import { AttentionBadge } from "../../../components/AttentionBadge";
@@ -241,7 +243,7 @@ export function StudioSidebar({
     useAppLogs();
   const isLargeScreen = useStudioDesktopLayout();
   const desktopRail = isLargeScreen && !mobileOverlay;
-  const showContext = !desktopRail || (!collapsed && activePanel !== "home" && !hideContext);
+  const showContext = !desktopRail || (activePanel !== "home" && !hideContext);
   const workspaceSwitcherOpen = isLargeScreen
     ? desktopWorkspaceSwitcherOpen
     : mobileNavigation ? mobileNavigation.view === "workspace" : desktopWorkspaceSwitcherOpen || localWorkspaceMobileViewOpen;
@@ -300,14 +302,14 @@ export function StudioSidebar({
   );
   const alwaysCollapsedMoreItemIds = useMemo(() => new Set<StudioPanel>(["secrets"]), []);
   const hasRecentChats = Boolean(onSelectConversation);
-  // Team header, Home, Team, space selector and Settings; a collapsed rail
-  // also keeps an independent expand control.
-  const fixedEntryCount = (showLabels ? 5 : 6) + items.length + (onOpenConversationHistory && !hasRecentChats ? 1 : 0);
+  // Desktop keeps its header, Team, Settings and space selector in this
+  // column; Home and account controls live in the separate global rail.
+  const fixedEntryCount = (desktopRail ? 4 : showLabels ? 5 : 6) + items.length + (onOpenConversationHistory && !hasRecentChats ? 1 : 0);
   const recentChatsReservePx = hasRecentChats && showLabels && recentChatsExpanded
     ? Math.max(1, Math.min(recentConversations.length, SIDEBAR_RECENT_CHAT_LIMIT)) * 40 + 56
     : 0;
   const estimatedChromeReservePx = 24;
-  const effectiveFooterReservePx = Math.max(estimatedFooterReservePx, footerHeight);
+  const effectiveFooterReservePx = desktopRail ? 0 : Math.max(estimatedFooterReservePx, footerHeight);
   const desktopSecondaryRowCapacity =
     isLargeScreen
       ? Math.max(
@@ -417,6 +419,12 @@ export function StudioSidebar({
       setRecentChatsExpanded(true);
     }
   }, [isLargeScreen, sidebarOpen]);
+
+  useEffect(() => {
+    // Resizing the rail can move secondary tools between inline rows and
+    // More. An old popover must not reappear on the next width change.
+    setMoreMenuOpen(false);
+  }, [isExpanded]);
 
   useEffect(() => {
     if (!showInlineMoreItems) {
@@ -1449,18 +1457,24 @@ export function StudioSidebar({
             style={{ top: `${DESKTOP_TITLE_BAR_HEIGHT_PX}px` }}
           />
         ) : null}
-        <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto overflow-x-hidden pb-2">
-          {desktopRail ? <li className="flex items-center gap-1" data-testid="sidebar-team-header">
-            <Button variant="ghost" size="sm" radius="lg" onPress={openSelectedTeam}
+        {desktopRail ? <div
+          className={`flex min-h-11 shrink-0 items-center gap-1 ${showLabels ? "" : "justify-center"}`}
+          data-testid="sidebar-team-header">
+            {showLabels ? <Button variant="ghost" size="sm" radius="lg" onPress={openSelectedTeam}
               aria-label={`Open ${activeOrgName} overview`} className="min-w-0 flex-1 justify-start px-3 py-2">
               <Text as="span" variant="bodyStrong" className="truncate">{activeOrgName}</Text>
-            </Button>
-            <IconButton variant="ghost" size="sm" aria-label="Collapse sidebar"
+            </Button> : null}
+            <IconButton variant="ghost" size="sm"
+              aria-label={showLabels ? "Collapse sidebar" : "Expand sidebar"}
+              title={showLabels ? "Collapse sidebar" : "Expand sidebar"}
+              aria-expanded={showLabels}
               data-testid="sidebar-drawer-toggle" onPress={onToggleSidebar}
-              isDisabled={!onToggleSidebar} className="mr-1 shrink-0">
-              <SidebarCollapse className="h-4 w-4" />
+              isDisabled={!onToggleSidebar} className={showLabels ? "mr-1 shrink-0" : "shrink-0"}>
+              {showLabels ? <SidebarCollapse className="h-4 w-4" /> : <SidebarExpand className="h-4 w-4" />}
             </IconButton>
-          </li> : <li className="flex items-center gap-1" data-testid="sidebar-team-header">
+        </div> : null}
+        <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto overflow-x-hidden pb-2" data-testid="sidebar-context-scroll">
+          {!desktopRail ? <li className="flex items-center gap-1" data-testid="sidebar-team-header">
             <Button
               ref={workspaceTriggerRef}
               variant="ghost"
@@ -1514,7 +1528,7 @@ export function StudioSidebar({
               isDisabled={!onRequestClose && !onToggleSidebar} className="mr-1 shrink-0">
               {onRequestClose ? <Xmark className="h-4 w-4" /> : <SidebarCollapse className="h-4 w-4" />}
             </IconButton> : null}
-          </li>}
+          </li> : null}
 
           {!showLabels && !desktopRail ? <li className="flex justify-center"><IconButton variant="ghost" size="sm"
             aria-label="Expand sidebar" data-testid="sidebar-drawer-toggle" onPress={onToggleSidebar}
@@ -1559,6 +1573,7 @@ export function StudioSidebar({
           <li>
             <Button variant="ghost" size="sm" radius="lg" fullWidth data-testid="sidebar-nav-team"
               aria-label="Open team" aria-current={activePanel === "team" ? "page" : undefined}
+              title={showLabels ? undefined : `${activeOrgName} overview`}
               className={`${sidebarRowLayoutClass} ${getSidebarRowToneClass(activePanel === "team")}`}
               onPress={openSelectedTeam}>
               <span className={getSidebarNavIconClass(activePanel === "team")}><Group className="h-5 w-5" aria-hidden="true" /></span>
@@ -1567,10 +1582,11 @@ export function StudioSidebar({
           </li>
           {activeOrgKey !== "personal" ? <li>
             <Button variant="ghost" size="sm" radius="lg" fullWidth aria-label="Team settings" data-testid="sidebar-settings"
+              title={showLabels ? undefined : "Team settings"}
               className={`${sidebarRowLayoutClass} ${getSidebarRowToneClass(activePanel === "settings")}`}
               onPress={() => { resetWorkspaceSwitcher(); closeMoreMenu(); runDestination(() => onOpenOrgSettings?.(activeOrgKey)); }}
               isDisabled={!onOpenOrgSettings}>
-              <span className={getSidebarNavIconClass(false)}><Settings className="h-5 w-5" aria-hidden="true" /></span>
+              <span className={getSidebarNavIconClass(activePanel === "settings")}><Settings className="h-5 w-5" aria-hidden="true" /></span>
               {showLabels ? <span className="text-sm font-medium">Team settings</span> : null}
             </Button>
           </li> : null}
@@ -1579,6 +1595,8 @@ export function StudioSidebar({
             <Button variant="ghost" size="sm" radius="lg" fullWidth data-testid="sidebar-space-button"
               ref={spaceTriggerRef}
               aria-label={`Choose space: ${activeProjectName}`} onPress={() => openWorkspaceSwitcher(desktopRail ? "spaces" : "teams-and-spaces")}
+              title={showLabels ? undefined : `Choose space: ${activeProjectName}`}
+              aria-expanded={workspaceSwitcherOpen && workspaceSwitcherMode === (desktopRail ? "spaces" : "teams-and-spaces")}
               className={`${sidebarRowLayoutClass} ${getSidebarRowToneClass(workspaceSwitcherOpen)}`}>
               <span className={getSidebarNavIconClass(false)}><SpaceIdentity name={activeProjectName}
                 icon={activeProject?.projectIcon} color={activeProject?.projectColor} className="h-7 w-7" /></span>
@@ -1631,6 +1649,7 @@ export function StudioSidebar({
                   ].join(" ")}
                   aria-current={isActive ? "page" : undefined}
                   aria-label={item.label}
+                  title={showLabels ? undefined : item.label}
                 >
                   <span className={getSidebarNavIconClass(isActive, item.accent)}>
                     <IconComponent className="text-base" aria-hidden="true" />
@@ -1690,6 +1709,7 @@ export function StudioSidebar({
                     ].join(" ")}
                     aria-current={isConversationHistoryActive ? "page" : undefined}
                     aria-label="Open chats"
+                    title={showLabels ? undefined : "Open chats"}
                   >
                     <span className={getSidebarNavIconClass(isConversationHistoryActive)}>
                       <ChatsIcon className="text-base" aria-hidden="true" />
@@ -1739,13 +1759,20 @@ export function StudioSidebar({
             moreIndicator={moreIndicator}
             selectedMoreKeys={selectedMoreKeys}
           />
-          </> : <li className="mx-3 mt-3 border-t border-slate-200/70 pt-3 dark:border-[color:var(--color-studio-dark-divider)]" data-testid="sidebar-no-selected-space">
-            <Text as="p" variant="caption" tone="muted">Choose a space in this team to open its tools.</Text>
-            <Button variant="ghost" size="sm" onPress={() => openWorkspaceSwitcher(desktopRail ? "spaces" : "teams-and-spaces")}
-              ref={spaceTriggerRef} className="mt-2" data-testid="sidebar-choose-space">Browse spaces</Button>
-            {onStartNewProject && canCreateSelectedTeamSpace ? <Button variant="ghost" size="sm" className="mt-1"
+          </> : <li className={`${showLabels ? "mx-3" : ""} mt-3 border-t border-slate-200/70 pt-3 dark:border-[color:var(--color-studio-dark-divider)]`} data-testid="sidebar-no-selected-space">
+            {showLabels ? <Text as="p" variant="caption" tone="muted">Choose a space in this team to open its tools.</Text> : null}
+            <Button variant="ghost" size="sm" fullWidth={!showLabels}
+              onPress={() => openWorkspaceSwitcher(desktopRail ? "spaces" : "teams-and-spaces")}
+              aria-label="Browse spaces" title={showLabels ? undefined : "Browse spaces"}
+              aria-expanded={workspaceSwitcherOpen && workspaceSwitcherMode === (desktopRail ? "spaces" : "teams-and-spaces")}
+              ref={spaceTriggerRef} className={showLabels ? "mt-2" : sidebarRowLayoutClass} data-testid="sidebar-choose-space">
+              {showLabels ? "Browse spaces" : <span className={getSidebarNavIconClass(workspaceSwitcherOpen)}><Folder className="h-5 w-5" aria-hidden="true" /></span>}
+            </Button>
+            {onStartNewProject && canCreateSelectedTeamSpace ? <Button variant="ghost" size="sm" fullWidth={!showLabels}
+              className={showLabels ? "mt-1" : `mt-1 ${sidebarRowLayoutClass}`}
+              aria-label="New space" title={showLabels ? undefined : "New space"} data-testid="sidebar-new-space"
               onPress={() => runDestination(() => onStartNewProject(activeOrgKey === "personal" ? null : activeOrgKey))}>
-              New space
+              {showLabels ? "New space" : <span className={getSidebarNavIconClass(false)}><Plus className="h-5 w-5" aria-hidden="true" /></span>}
             </Button> : null}
           </li>}
       </ul>

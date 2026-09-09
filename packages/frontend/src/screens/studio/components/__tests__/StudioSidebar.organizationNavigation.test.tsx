@@ -15,6 +15,8 @@ const fixture = vi.hoisted(() => ({
     { id: "org-c", name: "Charlie", slug: "charlie", role: "builder", avatarUrl: null as string | null },
   ],
   userEmail: "member@example.test",
+  desktop: true,
+  onToggleSidebar: vi.fn(),
   switchProject: vi.fn(), createProject: vi.fn(), onSettings: vi.fn(), onNewSpace: vi.fn(),
   copyTunnelDetails: vi.fn(), showStatus: vi.fn(), refresh: vi.fn(), retry: vi.fn(),
   discoveryError: null as string | null, discoveryResolved: true, discoveryRefreshing: false,
@@ -36,8 +38,9 @@ vi.mock("../../../../sdk/instafy", async () => {
 vi.mock("../../workspaceControls", () => ({ useWorkspaceControls: () => ({
   userEmail: fixture.userEmail, hasLogs: false, sidebarOpen: true,
   onOpenOrgSettings: fixture.onSettings, onStartNewProject: fixture.onNewSpace,
+  onToggleSidebar: fixture.onToggleSidebar,
 }) }));
-vi.mock("../../useStudioDesktopLayout", () => ({ useStudioDesktopLayout: () => true }));
+vi.mock("../../useStudioDesktopLayout", () => ({ useStudioDesktopLayout: () => fixture.desktop }));
 vi.mock("../../../../runtime/useRuntimeMenu", () => ({ useRuntimeMenuOptions: () => ({
   runtime: { copyTunnelDetails: fixture.copyTunnelDetails }, runtimeOptions: [],
 }) }));
@@ -75,6 +78,7 @@ describe("StudioSidebar organization navigation", () => {
     localStorage.clear();
     vi.clearAllMocks();
     fixture.userEmail = "member@example.test";
+    fixture.desktop = true;
     fixture.orgs = fixture.orgs.map((org) => ({ ...org, avatarUrl: null }));
     fixture.discoveryError = null;
     fixture.discoveryResolved = true;
@@ -88,19 +92,157 @@ describe("StudioSidebar organization navigation", () => {
     await act(async () => root.unmount());
     container.remove();
     portal.remove();
+    vi.restoreAllMocks();
   });
 
-  it("keeps the global rail and account while Home or collapse hides context", async () => {
+  it("keeps the global rail and account while Home and account pages hide context", async () => {
     await render({ activePanel: "home" });
     expect(container.querySelector('[data-testid="sidebar-organization-rail"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="sidebar-profile-menu"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="sidebar-context-navigation"]')).toBeNull();
-    await render({ collapsed: true });
-    expect(container.querySelector('[data-testid="sidebar-organization-rail"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="sidebar-context-navigation"]')).toBeNull();
     await render({ activePanel: "settings", hideContext: true });
     expect(container.querySelector('[data-testid="sidebar-context-navigation"]')).toBeNull();
     expect(container.querySelectorAll('[data-testid="sidebar-profile-menu"]')).toHaveLength(1);
+  });
+
+  it("retains the compact inner navigation and the same focused toggle across both widths", async () => {
+    await render();
+    const nav = container.querySelector('[data-testid="sidebar-context-navigation"]');
+    const header = container.querySelector('[data-testid="sidebar-team-header"]');
+    const toggle = container.querySelector<HTMLButtonElement>('[data-testid="sidebar-drawer-toggle"]')!;
+    expect(nav?.classList.contains("w-56")).toBe(true);
+    // Header stays outside the scrolling tools in both states.
+    expect(header?.parentElement).toBe(nav);
+    expect(header?.closest('[data-testid="sidebar-context-scroll"]')).toBeNull();
+    expect(toggle.getAttribute("aria-label")).toBe("Collapse sidebar");
+    await act(async () => toggle.focus());
+    await click("sidebar-drawer-toggle");
+    expect(fixture.onToggleSidebar).toHaveBeenCalledOnce();
+    await render({ collapsed: true });
+    expect(container.querySelector('[data-testid="sidebar-context-navigation"]')).toBe(nav);
+    expect(nav?.classList.contains("w-[4rem]")).toBe(true);
+    expect(container.querySelector('[data-testid="sidebar-organization-rail"]')).not.toBeNull();
+    expect(container.querySelectorAll('[data-testid="sidebar-drawer-toggle"]')).toHaveLength(1);
+    expect(container.querySelector('[data-testid="sidebar-drawer-toggle"]')).toBe(toggle);
+    expect(document.activeElement).toBe(toggle);
+    expect(toggle.getAttribute("aria-label")).toBe("Expand sidebar");
+    expect(toggle.getAttribute("title")).toBe("Expand sidebar");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelector('[aria-label="Open Alpha overview"]')).toBeNull();
+    await render();
+    expect(container.querySelector('[data-testid="sidebar-drawer-toggle"]')).toBe(toggle);
+    expect(document.activeElement).toBe(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("keeps icon tools, chats and More usable with accessible names and tooltips", async () => {
+    const onBrowseAll = vi.fn();
+    const props: Partial<ComponentProps<typeof StudioSidebar>> = {
+      collapsed: true,
+      onSelectConversation: vi.fn(),
+      onOpenConversationHistory: onBrowseAll,
+      items: [
+        { id: "chat", label: "Chats", icon: () => <span />, accent: "" },
+        { id: "automations", label: "Automations", icon: () => <span />, accent: "" },
+        { id: "code", label: "Files", icon: () => <span />, accent: "" },
+        { id: "sourceControl", label: "Changes", icon: () => <span />, accent: "" },
+      ],
+      moreItems: [{ id: "secrets", label: "Secrets", icon: () => <span />, accent: "" }],
+    };
+    await render(props);
+    for (const [id, label] of [["automations", "Automations"], ["code", "Files"], ["sourceControl", "Changes"]]) {
+      const tool = container.querySelector(`[data-testid="sidebar-nav-${id}"]`);
+      expect(tool?.getAttribute("aria-label")).toBe(label);
+      expect(tool?.getAttribute("title")).toBe(label);
+      expect(tool?.textContent).toBe("");
+      await click(`sidebar-nav-${id}`);
+      expect(onSelect).toHaveBeenLastCalledWith(id);
+    }
+    await click("sidebar-nav-history");
+    expect(document.querySelector('[data-testid="sidebar-recent-chats-popover"]')).not.toBeNull();
+    await act(async () => document.querySelector<HTMLButtonElement>('[data-testid="sidebar-browse-all-chats"]')?.click());
+    expect(onBrowseAll).toHaveBeenCalledOnce();
+    const more = container.querySelector('[data-testid="sidebar-nav-more"]');
+    expect(more?.getAttribute("aria-label")).toBe("More");
+    expect(more?.getAttribute("title")).toBe("More");
+    await click("sidebar-nav-more");
+    expect(document.querySelector('[data-testid="sidebar-more-menu"]')).not.toBeNull();
+    await render({ ...props, collapsed: false });
+    await render(props);
+    expect(document.querySelector('[data-testid="sidebar-more-menu"]')).toBeNull();
+    await click("sidebar-nav-more");
+    await act(async () => document.querySelector<HTMLElement>('[data-testid="sidebar-more-item-secrets"]')?.click());
+    expect(onSelect).toHaveBeenLastCalledWith("secrets");
+    await click("sidebar-space-button");
+    await render({ ...props, workspaceSwitcherOpen: true });
+    expect(portal.querySelector('[data-testid="sidebar-org-selector"]')).toBeNull();
+    expect(portal.textContent).toContain("Spaces");
+  });
+
+  it("keeps empty-team browse and create actions compact and scoped", async () => {
+    const props = { collapsed: true, activePanel: "team" as const, selectedOrgKey: "org-b" };
+    await render(props);
+    const fallback = container.querySelector('[data-testid="sidebar-no-selected-space"]');
+    expect(fallback?.textContent).toBe("");
+    expect(container.querySelector('[data-testid="sidebar-nav-chat"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-space-button"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-choose-space"]')?.getAttribute("title")).toBe("Browse spaces");
+    expect(container.querySelector('[data-testid="sidebar-new-space"]')?.getAttribute("title")).toBe("New space");
+    await click("sidebar-nav-team");
+    expect(onOpenTeam).toHaveBeenCalledWith("org-b");
+    await click("sidebar-settings");
+    expect(fixture.onSettings).toHaveBeenCalledWith("org-b");
+    await click("sidebar-new-space");
+    expect(fixture.onNewSpace).toHaveBeenCalledWith("org-b");
+    await click("sidebar-choose-space");
+    await render({ ...props, workspaceSwitcherOpen: true });
+    expect(portal.querySelector('[data-testid="sidebar-org-selector"]')).toBeNull();
+    expect(portal.textContent).not.toContain("Core");
+    await render({ ...props, activePanel: "settings" });
+    expect(container.querySelector('[data-testid="sidebar-settings"] > span')?.className).toContain("border-primary-200");
+  });
+
+  it("uses the inner rail's height for overflow without reserving the outer account footer", async () => {
+    let navHeight = 500;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      const height = this.dataset.testid === "sidebar-context-navigation" ? navHeight : 400;
+      return { x: 0, y: 0, top: 0, left: 0, width: 64, height, right: 64, bottom: height, toJSON: () => ({}) };
+    });
+    await render({ collapsed: true, moreItems: [
+      { id: "skills", label: "Skills", icon: () => <span />, accent: "" },
+      { id: "machines", label: "Machines", icon: () => <span />, accent: "" },
+      { id: "secrets", label: "Secrets", icon: () => <span />, accent: "" },
+    ] });
+    expect(container.querySelector('[data-testid="sidebar-more-item-skills"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-more-item-machines"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-nav-more"]')).not.toBeNull();
+    navHeight = 180;
+    await act(async () => window.dispatchEvent(new Event("resize")));
+    expect(container.querySelector('[data-testid="sidebar-more-item-skills"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-more-item-machines"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-nav-more"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-context-scroll"]')?.classList.contains("overflow-y-auto")).toBe(true);
+    expect(container.querySelector('[data-testid="sidebar-team-header"]')?.closest('[data-testid="sidebar-context-scroll"]')).toBeNull();
+  });
+
+  it("does not reveal old-team tools or create permissions in an unavailable compact team", async () => {
+    await render({ collapsed: true, activePanel: "team", selectedOrgKey: "unavailable-team" });
+    expect(container.querySelector('[data-testid="sidebar-no-selected-space"]')?.textContent).toBe("");
+    expect(container.querySelector('[data-testid="sidebar-nav-chat"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-new-space"]')).toBeNull();
+    await click("sidebar-settings");
+    expect(fixture.onSettings).toHaveBeenCalledWith("unavailable-team");
+  });
+
+  it("keeps the narrow layout as a labeled closeable drawer", async () => {
+    fixture.desktop = false;
+    await render({ mobileOverlay: true });
+    expect(container.querySelector('[data-testid="sidebar-organization-rail"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-context-navigation"]')?.textContent).toContain("Team overview");
+    expect(container.querySelector('[data-testid="sidebar-drawer-toggle"]')?.getAttribute("aria-label")).toBe("Close navigation");
+    await click("sidebar-drawer-toggle");
+    expect(onRequestClose).toHaveBeenCalledOnce();
+    expect(fixture.onToggleSidebar).not.toHaveBeenCalled();
   });
 
   it("returns to the same team's remembered work from Home without switching projects", async () => {

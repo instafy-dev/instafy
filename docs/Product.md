@@ -72,11 +72,12 @@ their source whitespace and scroll horizontally when needed.
 
 ## Header
 On wide screens, a slim global rail selects Home or a team. The adjacent sidebar
-navigates that team and its selected space. Both remain visible inside a project;
-the space navigation can be collapsed while the global rail stays available.
-The sidebar header provides the collapse button. The workspace header shows a
-reopen button only while the sidebar is collapsed. New users start with the
-context sidebar expanded; existing saved collapse preferences are preserved.
+navigates that team and its selected space. Both remain visible inside a project.
+Collapsing the inner sidebar leaves a narrow icon rail with tooltips, the space
+selector and direct access to its tools. Its expand/collapse button stays at the
+top of that rail; the workspace header has no duplicate control. Expanding
+reveals labels and recent chats. New users start with the context sidebar
+expanded; existing saved collapse preferences are preserved.
 
 On narrow Home, team and account pages, the header keeps Home immediately left of
 the compact team avatar and name, with the profile action at the right. The team's
