@@ -24,7 +24,7 @@ jobs:
               || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{3}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-browser-personal","instafy-ci-trust-{3}"]}}', github.repository_id, github.run_id, github.run_attempt, github.event_name == 'push' && 'main' || 'pr'))
           || 'ubuntu-24.04' }}
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Qualify isolated browser CI runner
         if: runner.environment == 'self-hosted'
@@ -63,6 +63,9 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Install browser and display dependencies
         run: pnpm --filter @instafy/frontend exec playwright install --with-deps chromium
+      - name: Install Linux Electron runtime dependency
+        if: runner.environment == 'self-hosted'
+        run: sudo -n env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libgtk-3-0t64
       - name: Build the native fixture app
         run: |
           pnpm --filter @instafy/desktop-runtime-agent build
@@ -97,7 +100,7 @@ jobs:
               || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{3}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-browser-ui","instafy-ci-trust-{3}"]}}', github.repository_id, github.run_id, github.run_attempt, github.event_name == 'push' && 'main' || 'pr'))
           || 'ubuntu-24.04' }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - name: Qualify isolated browser CI runner
         if: runner.environment == 'self-hosted'

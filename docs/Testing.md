@@ -321,13 +321,17 @@ The privacy check verifies owner isolation, operator boundaries, and account mis
 ## Secret-free browser CI lanes
 
 The independent, default-off `CI_BROWSER_SELF_HOSTED=true` switch covers only
-`Browser verification / Browser UI rendering` (15 minutes) and
-`Browser verification / Personal Browser E2E` (20 minutes), called by Public
+`Browser verification / Browser UI rendering` and
+`Browser verification / Personal Browser E2E`, called by Public
 Build. It requires private visibility, a same-repository PR to `main` or a
 protected-main push, and the exact `build.yml` caller. Forks, public visibility,
 manual runs and other callers retain `ubuntu-24.04`; the 60-minute Shared
-Browser profile job remains hosted. Existing checks, permissions, locked
-installations, reports and timeout limits are unchanged.
+Browser profile job remains hosted. Both short browser jobs have a 30-minute
+limit, including their hosted fallback, to leave room for cold workspace,
+browser and system-package installation. This is a conservative capacity bound,
+not a measured completion claim. The worker lifecycle remains bounded to
+35 minutes with its existing cleanup reserve; browser test-level timeouts,
+commands, permissions, locked installations and required reports are unchanged.
 
 The two label suffixes are `public-browser-ui` and `public-browser-personal`,
 using the same trust-specific groups and per-run/attempt labels described
@@ -337,7 +341,9 @@ metadata. A caller-supplied input or matching label is not source authority.
 Initially enable this switch only for supervised cold ARM64 qualification;
 require both jobs and their cleanup to pass before routine use. Workers require
 Node22, Xvfb and xauth before checkout; the unchanged
-Playwright installation obtains Chromium and system libraries. Restricted
+Playwright installation obtains Chromium and system libraries. The self-hosted
+Personal job also explicitly installs Ubuntu24.04's GTK3 runtime package for
+Electron before building its fixture. Restricted
 workers must configure the disposable guest's APT proxy too: sudo does not
 preserve the browser installer's proxy environment. Keep TLS and browser
 sandbox protections intact. No template, host paths or proxy credentials belong
