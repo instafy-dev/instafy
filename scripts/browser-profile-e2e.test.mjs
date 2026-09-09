@@ -5,7 +5,7 @@ import { link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "no
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { cargoTestArtifact, chromiumStartupDiagnostics, copyFixtureEntrypoint, fixtureChildEnvironment, installCancellationSignalHandlers, preflightFixtureDisplay, runOwnedProcess, validateBrowserFixtureEnvironment, validateFixtureEnvironment } from "./browser-profile-e2e.mjs";
+import { cargoTestArtifact, chromiumStartupDiagnostics, copyFixtureEntrypoint, fixtureChildEnvironment, fixtureCompilerEnvironment, installCancellationSignalHandlers, preflightFixtureDisplay, runOwnedProcess, validateBrowserFixtureEnvironment, validateFixtureEnvironment } from "./browser-profile-e2e.mjs";
 
 async function diagnosticFixture(t) {
   const directory = await mkdtemp(path.join(tmpdir(), "profile-diagnostics-test-"));
@@ -143,6 +143,55 @@ test("profile lifecycle requires explicit Linux loopback fixture and display", (
 
 test("fixture child environment never inherits credentials or policy overrides", () => {
   assert.deepEqual(fixtureChildEnvironment({ PATH: "/bin", HOME: "/tmp/inert", OPENAI_API_KEY: "must-not-copy", DATABASE_URL: "must-not-copy", INSTAFY_BROWSER_EGRESS_ALLOW_UNSAFE_DEV: "1", INSTAFY_ENV_DIR: "/private" }), { PATH: "/bin", HOME: "/tmp/inert" });
+});
+
+const compilerProxyFixture = () => ({ PATH: "/bin", HOME: "/tmp/inert", CARGO_BUILD_JOBS: "2",
+  CI: "true", GITHUB_ACTIONS: "true", INSTAFY_CI_JOB_ISOLATION: "ephemeral", INSTAFY_SHARED_BROWSER_COMPILER_PROXY: "1",
+  HTTP_PROXY: "http://proxy.example:3128", HTTPS_PROXY: "https://proxy.example:8443",
+  http_proxy: "http://must-not-copy.invalid", https_proxy: "http://must-not-copy.invalid", NO_PROXY: "*", ALL_PROXY: "must-not-copy",
+  GH_TOKEN: "must-not-copy", NODE_OPTIONS: "must-not-copy", NODE_TLS_REJECT_UNAUTHORIZED: "0", CARGO_HTTP_SSL_VERIFY: "false",
+  DATABASE_URL: "must-not-copy", INSTAFY_ENV_DIR: "/private", INSTAFY_BROWSER_EGRESS_ALLOW_UNSAFE_DEV: "1" });
+
+test("compiler proxy is explicitly gated and copies only validated origins with derived tool aliases", () => {
+  const source = compilerProxyFixture(), before = structuredClone(source);
+  const ordinary = { PATH: source.PATH, HOME: source.HOME, CARGO_BUILD_JOBS: "2" };
+  for (const toggle of [undefined, "", "0"]) assert.deepEqual(fixtureCompilerEnvironment({ ...source, INSTAFY_SHARED_BROWSER_COMPILER_PROXY: toggle }), ordinary);
+  assert.deepEqual(fixtureCompilerEnvironment(source), { ...ordinary,
+    HTTP_PROXY: source.HTTP_PROXY, http_proxy: source.HTTP_PROXY, HTTPS_PROXY: source.HTTPS_PROXY, https_proxy: source.HTTPS_PROXY });
+  assert.deepEqual(fixtureChildEnvironment(source), ordinary, "runtime and browser environments stay proxy-free even when compilation opts in");
+  assert.deepEqual(source, before);
+  for (const patch of [{ INSTAFY_SHARED_BROWSER_COMPILER_PROXY: "true" }, { CI: "false" }, { GITHUB_ACTIONS: undefined },
+    { INSTAFY_CI_JOB_ISOLATION: undefined }, { HTTP_PROXY: undefined }, { HTTPS_PROXY: undefined }]) {
+    assert.throws(() => fixtureCompilerEnvironment({ ...source, ...patch }));
+  }
+  for (const key of ["HTTP_PROXY", "HTTPS_PROXY"]) for (const value of ["", "invalid", "socks5://proxy.example:1080",
+    "http://user:inert-secret@proxy.example", "http://proxy.example/path", "http://proxy.example?override=1",
+    "http://proxy.example#override", "http://proxy.example/\n", "http://" + "a".repeat(2048)]) {
+    assert.throws(() => fixtureCompilerEnvironment({ ...source, [key]: value }), error => {
+      assert.equal(error.message, "credential-free compiler proxy origin required");
+      if (value) assert.ok(!error.message.includes(value)); return true;
+    });
+  }
+});
+
+test("only the six real Go and Cargo build callsites use the explicit compiler environment", async () => {
+  for (const file of ["browser-profile-e2e.mjs", "shared-browser-studio-e2e.mjs"]) {
+    const source = await readFile(new URL(file, import.meta.url), "utf8");
+    assert.match(source, /const compilerEnv = fixtureCompilerEnvironment\(process\.env\);/);
+    assert.equal((source.match(/env: compilerEnv/g) ?? []).length, 3);
+    assert.equal((source.match(/await run\("(?:go|cargo)",[^\n]+env: compilerEnv/g) ?? []).length, 3);
+    assert.doesNotMatch(source, /\.\.\.compilerEnv|studioProcessEnvironment\(compilerEnv|preflightFixtureDisplay\(compilerEnv/);
+  }
+});
+
+test("a real compiler-shaped child receives no credentials, policy overrides or proxy bypass environment", async () => {
+  const env = fixtureCompilerEnvironment({ ...compilerProxyFixture(), PATH: process.env.PATH });
+  const output = await runOwnedProcess(process.execPath, ["-e", "console.log(JSON.stringify(process.env))"], { env, timeoutMs: 5_000 });
+  const observed = JSON.parse(output);
+  // macOS adds this text-encoding marker at process startup, independently of
+  // the explicitly supplied environment. Linux CI does not receive it.
+  if (process.platform === "darwin") delete observed.__CF_USER_TEXT_ENCODING;
+  assert.deepEqual(observed, env);
 });
 
 test("native fixture copies identical entrypoint bytes with executable mode without modifying the checkout", async () => {
