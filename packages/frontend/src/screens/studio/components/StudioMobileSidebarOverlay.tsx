@@ -2,6 +2,7 @@ import { Capacitor } from "@capacitor/core";
 import { useEffect, type ReactNode } from "react";
 import { useMobileSidebarViewport } from "./useMobileSidebarViewport";
 import { Dialog, Modal, ModalOverlay } from "react-aria-components";
+import { DARK_RAIL_SURFACE_CLASS } from "../../../theme/darkSurfaces";
 
 interface SidebarStatusBarSession {
   users: number;
@@ -112,7 +113,7 @@ export function StudioMobileSidebarOverlay({
       data-testid="mobile-sidebar-overlay"
     >
       <Modal
-        className="absolute inset-y-0 left-0 max-w-[calc(100vw-2rem)] border-r border-slate-200/70 bg-slate-50/80 outline-none dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-rail)]"
+        className={`absolute inset-y-0 left-0 max-w-[calc(100vw-2rem)] border-r border-slate-200/70 bg-slate-50 outline-none ${DARK_RAIL_SURFACE_CLASS}`}
         data-testid="mobile-sidebar-surface"
         style={{
           // Inset controls, never the painted surface (including the home-indicator area).

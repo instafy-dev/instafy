@@ -95,6 +95,11 @@ Back returns to navigation, then dismisses it. Home always navigates to the glob
 page, including from a workspace; opening navigation does not change the page behind it.
 Team overview and team settings do not replace a space's remembered workspace destination.
 
+Navigation uses a solid warm off-white surface in light mode and the dark rail
+surface in dark mode. The drawer and its team/space directory or More view keep
+the same background; dimming and blur belong to the backdrop. Content panels and
+floating menus retain their separate surface colours and elevation.
+
 In wide desktop browsers, **Get desktop app** sits above the rail profile as
 an icon with a tooltip. Compact desktop browser windows keep
 the action in the profile menu. It appears only when a verified desktop release is available.

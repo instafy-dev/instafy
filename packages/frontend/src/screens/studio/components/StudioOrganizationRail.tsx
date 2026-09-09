@@ -5,6 +5,7 @@ import { IconButton } from "../../../components/Button";
 import { OctoMark } from "../../../components/OctoMark";
 import { DESKTOP_TITLE_BAR_HEIGHT_PX } from "../../../lib/desktopShell";
 import { getOrgInitials } from "../../../org/orgNaming";
+import { DARK_RAIL_SURFACE_CLASS } from "../../../theme/darkSurfaces";
 import type { SidebarWorkspaceOrgOption } from "./StudioSidebarWorkspaceSwitcher";
 
 const SELECTION_MARKER_CLASS = "pointer-events-none absolute -left-2 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r-full bg-primary-600 dark:bg-primary-400";
@@ -65,12 +66,12 @@ export function StudioOrganizationRail({
         "relative flex h-full min-h-0 w-16 shrink-0 flex-col items-center pb-4 text-slate-600 dark:text-slate-300",
         titleBarFree
           ? "[&>*:not([data-rail-surface])]:relative [&>*:not([data-rail-surface])]:z-[1]"
-          : "border-r border-slate-200/70 bg-slate-50/80 pt-[var(--instafy-safe-area-inset-top)] dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-rail)]",
+          : `border-r border-slate-200/70 bg-slate-50 pt-[var(--instafy-safe-area-inset-top)] ${DARK_RAIL_SURFACE_CLASS}`,
       ].join(" ")}
       style={titleBarFree ? { paddingTop: `${DESKTOP_TITLE_BAR_HEIGHT_PX}px` } : undefined}
     >
       {titleBarFree ? <div aria-hidden="true" data-rail-surface=""
-        className="absolute inset-x-0 bottom-0 z-0 border-r border-slate-200/70 bg-slate-50/80 dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-rail)]"
+        className={`absolute inset-x-0 bottom-0 z-0 border-r border-slate-200/70 bg-slate-50 ${DARK_RAIL_SURFACE_CLASS}`}
         style={{ top: `${DESKTOP_TITLE_BAR_HEIGHT_PX}px` }} /> : null}
       <div className="shrink-0 py-2">
         <IconButton variant="ghost" size="sm" radius="lg" onPress={onHome}

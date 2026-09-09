@@ -34,6 +34,7 @@ import { mostRecentProjectId } from "../../../projects/projectRecency";
 import { useProjectRecency } from "../../../projects/useProjectRecency";
 import { useRuntimeMenuOptions } from "../../../runtime/useRuntimeMenu";
 import { useTheme } from "../../../theme/ThemeProvider";
+import { DARK_RAIL_SURFACE_CLASS } from "../../../theme/darkSurfaces";
 import {
   areMessageNotificationsEnabled,
   disableMessageNotifications,
@@ -1449,7 +1450,7 @@ export function StudioSidebar({
               // tagging each one: a control added to the rail later would
               // otherwise render behind the background and simply vanish.
               ? "overflow-visible [&>*:not([data-rail-surface])]:relative [&>*:not([data-rail-surface])]:z-[1]"
-              : "overflow-hidden border-r border-slate-200/70 bg-slate-50/80 pt-[var(--instafy-safe-area-inset-top)] dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-rail)]",
+              : `overflow-hidden border-r border-slate-200/70 bg-slate-50 pt-[var(--instafy-safe-area-inset-top)] ${DARK_RAIL_SURFACE_CLASS}`,
         ]
           .filter(Boolean)
           .join(" ")}
@@ -1459,7 +1460,7 @@ export function StudioSidebar({
           <div
             aria-hidden="true"
             data-rail-surface=""
-            className="absolute inset-x-0 bottom-0 z-0 border-r border-slate-200/70 bg-slate-50/80 dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-rail)]"
+            className={`absolute inset-x-0 bottom-0 z-0 border-r border-slate-200/70 bg-slate-50 ${DARK_RAIL_SURFACE_CLASS}`}
             style={{ top: `${DESKTOP_TITLE_BAR_HEIGHT_PX}px` }}
           />
         ) : null}

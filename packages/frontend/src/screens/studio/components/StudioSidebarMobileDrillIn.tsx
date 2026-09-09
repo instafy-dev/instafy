@@ -3,6 +3,7 @@ import { useId, useLayoutEffect, useRef, type ReactNode, type RefObject } from "
 import { IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import { DRAWER_ICON_BUTTON_TONE_CLASS } from "../../../components/listRowStyles";
+import { DARK_RAIL_SURFACE_CLASS } from "../../../theme/darkSurfaces";
 
 type StudioSidebarMobileDrillInProps = {
   open: boolean;
@@ -71,7 +72,7 @@ export function StudioSidebarMobileDrillIn({
         event.stopPropagation();
         goBack();
       }}
-      className="absolute inset-0 z-30 flex flex-col border-r border-slate-200/70 bg-slate-50/95 px-3 pb-4 pt-2 outline-none backdrop-blur-sm dark:border-[color:var(--color-studio-dark-divider)] dark:bg-[var(--color-studio-dark-rail-muted)]"
+      className={`absolute inset-0 z-30 flex flex-col border-r border-slate-200/70 bg-slate-50 px-3 pb-4 pt-2 outline-none ${DARK_RAIL_SURFACE_CLASS}`}
       data-testid={testId}
     >
       <div className="flex shrink-0 items-center gap-2 pb-2">
