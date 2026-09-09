@@ -6,6 +6,7 @@ on:
       - "packages/runtime-controller/**"
       - "supabase/**"
       - "scripts/test-controller.mjs"
+      - "scripts/check-database-ci-routing.test.mjs"
       - "scripts/supabase-stack.mjs"
       - "scripts/lib/localSupabaseEnv.mjs"
       - "scripts/lib/supabaseStartMode.mjs"
@@ -26,9 +27,21 @@ permissions:
 jobs:
   controller-db-tests:
     name: Controller database tests
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ vars.CI_DATABASE_SELF_HOSTED == 'true'
+          && github.repository == 'instafy-dev/instafy'
+          && github.event.repository.private == true
+          && ((github.event_name == 'pull_request'
+               && github.event.pull_request.base.ref == 'main'
+               && github.event.pull_request.base.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.full_name == github.repository
+               && github.event.pull_request.head.repo.fork == false)
+              || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
+          && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-controller-db","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
+      CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: "0"
       # scripts/test-controller.mjs prefers an explicit TEST_DATABASE_URL and
@@ -37,11 +50,40 @@ jobs:
       TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
 
     steps:
+      - name: Qualify isolated database CI runner
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const { execFileSync } = require('node:child_process');
+          assert.equal(process.platform, 'linux');
+          assert.equal(process.arch, 'arm64');
+          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
+          assert.equal(process.versions.node.split('.')[0], '22');
+          assert.equal(process.env.RUNNER_OS, 'Linux');
+          assert.equal(process.env.RUNNER_ARCH, 'ARM64');
+          assert.equal(process.env.INSTAFY_CI_JOB_ISOLATION, 'ephemeral');
+          assert.ok(!process.env.INSTAFY_ENV_DIR);
+          for (const tool of ['bash', 'git', 'curl', 'tar', 'sha256sum', 'unzip', 'docker', 'rustup', 'cc', 'c++', 'make', 'pkg-config']) {
+            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'database-ci-preflight', tool], { timeout: 1000, stdio: 'ignore' });
+          }
+          execFileSync('pkg-config', ['--exists', 'openssl'], { timeout: 1000, stdio: 'ignore' });
+          const engine = JSON.parse(execFileSync('docker', ['info', '--format', '{{json .}}'], { timeout: 10000, encoding: 'utf8' }));
+          assert.equal(engine.OSType, 'linux');
+          assert.ok(['aarch64', 'arm64'].includes(engine.Architecture));
+          NODE
+
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 1
           submodules: recursive
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Verify database CI routing contracts
+        run: node --test scripts/check-database-ci-routing.test.mjs
 
       - name: Set up pnpm
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
@@ -58,6 +100,15 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+
+      - name: Cache controller Cargo dependencies and build
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/runtime-controller/target
+          key: controller-db-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/runtime-controller/Cargo.lock') }}
 
       # The lockfile pins the supabase CLI (devDependency), so the stack
       # helper below always runs the reviewed CLI version.
@@ -78,3 +129,7 @@ jobs:
       # sleeps ~90s by design, so no per-step timeout is set here.
       - name: Run controller test suite
         run: pnpm test:controller
+
+      - name: Stop local Supabase
+        if: always()
+        run: pnpm supabase:down || true
