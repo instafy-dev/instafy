@@ -155,6 +155,27 @@ test('ten bounded children independently check out exact source and retain nativ
   }
 });
 
+test('only self-hosted Rust children install the fixed missing native packages within the original thirty-minute job', () => {
+  assert.equal((source.match(/      - name: Install scoped Rust native prerequisites/g) ?? []).length,10);
+  const commands=[];
+  for(const item of children){
+    const text=job(item.key),install=step(item.key,'Install scoped Rust native prerequisites');
+    assert.match(install,/^        if: runner\.environment == 'self-hosted'$/mu);
+    assert.match(install,/^        timeout-minutes: 5$/mu);assert.match(text,/^    timeout-minutes: 30$/mu);
+    assert.match(install,/^        shell: bash$/mu);assert.match(install,/set -euo pipefail/u);
+    assert.match(install,/sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update/u);
+    assert.match(install,/sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler/u);
+    assert.match(install,/for package in clang lld cmake libcap-dev protobuf-compiler; do/u);
+    assert.match(install,/dpkg-query --show --showformat='\$\{Status\}'/u);assert.match(install,/pkg-config --exists libcap/u);
+    for(const tool of ['clang','ld.lld','cmake','protoc'])assert(install.includes(`          ${tool} --version\n`));
+    assert.doesNotMatch(install,/continue-on-error|\|\| true|AllowUnauthenticated|Verify-Peer|Verify-Host|apt-key|add-apt-repository|curl|https?:\/\//u);
+    assert(text.indexOf('Install scoped Rust native prerequisites')<text.indexOf('Set up stable Rust'));
+    commands.push(install);
+  }
+  assert.equal(new Set(commands).size,1);
+  for(const item of aggregates)assert.doesNotMatch(job(item.key),/apt-get|Install scoped Rust native prerequisites/u);
+});
+
 test('the full original five check and six test commands and working directories are hash-bound', () => {
   // Exact normalized command order + working-directory from build.yml at f20002b.
   // Commands are literal steps, not a matrix/shell fragment that can drop a crate.
