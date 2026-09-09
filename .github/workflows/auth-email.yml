@@ -1,8 +1,8 @@
 name: Auth Email E2E
 
 # Guards the signup -> confirmation-email -> activate flow and our custom auth
-# email templates. Boots the local Supabase stack (via `supabase start`, which
-# includes GoTrue + the mail catcher) — no runtime controller/agent images — so
+# email templates. Boots the explicit five-service Auth-only Supabase profile
+# (Postgres, GoTrue, PostgREST, Kong and Mailpit) — no runtime controller/agent images — so
 # it stays far cheaper than the full e2e stack. Path-triggered so a broken
 # template or a changed OTP/config knob fails here instead of in a stranger's
 # inbox. The supabase CLI version (package.json/lockfile) is included because it
@@ -16,6 +16,10 @@ on:
       - "scripts/check-database-ci-routing.test.mjs"
       - "scripts/supabase-stack.mjs"
       - "scripts/lib/localSupabaseEnv.mjs"
+      - "scripts/lib/supabaseStartMode.mjs"
+      - "scripts/lib/supabaseStartMode.test.mjs"
+      - "scripts/lib/supabaseSerialPull.mjs"
+      - "scripts/lib/supabaseSerialPull.test.mjs"
       - "supabase/supabase/templates/**"
       - "supabase/supabase/config.toml"
       - "package.json"
@@ -29,6 +33,10 @@ on:
       - "scripts/check-database-ci-routing.test.mjs"
       - "scripts/supabase-stack.mjs"
       - "scripts/lib/localSupabaseEnv.mjs"
+      - "scripts/lib/supabaseStartMode.mjs"
+      - "scripts/lib/supabaseStartMode.test.mjs"
+      - "scripts/lib/supabaseSerialPull.mjs"
+      - "scripts/lib/supabaseSerialPull.test.mjs"
       - "supabase/supabase/templates/**"
       - "supabase/supabase/config.toml"
       - "package.json"
@@ -120,6 +128,8 @@ jobs:
         run: pnpm supabase:down || true
 
       - name: Start local Supabase (GoTrue + mail catcher)
+        env:
+          SUPABASE_AUTH_ONLY: "1"
         run: pnpm supabase:up
 
       - name: Run auth email smoke (signup -> email -> activate)
