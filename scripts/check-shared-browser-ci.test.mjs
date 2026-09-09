@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import test from "node:test";
 import vm from "node:vm";
@@ -87,6 +88,40 @@ test("each Shared child preserves a complete independent dependency, migrated au
     assert.doesNotMatch(source, /SUPABASE_DATABASE_ONLY|--ignore-scripts|--no-sandbox|--allow-unauthenticated|continue-on-error|--grep|--retries=|--pass-with-no-tests/u);
   }
   assert.doesNotMatch(workflow, /secrets:|secrets\.|NODE_OPTIONS|NODE_TLS_REJECT_UNAUTHORIZED|HTTP_PROXY:|HTTPS_PROXY:/u);
+});
+test("only the two Shared startup steps select the browser-test profile; all previous workflow bytes remain", () => {
+  const originalStartup = "      - name: Start disposable migrated Supabase and local authentication\n";
+  const selectedStartup = `${originalStartup}        env:\n          SUPABASE_BROWSER_TEST: "1"\n`;
+  assert.equal(workflow.split(selectedStartup).length - 1, 2);
+  assert.equal((workflow.match(/SUPABASE_BROWSER_TEST/g) ?? []).length, 2);
+  for (const job of jobs) {
+    if (job.script) assert.ok(section(job.key).includes(`${selectedStartup}        run: |\n          node scripts/ensure-supabase-postgres-image.mjs\n          pnpm supabase:up\n`));
+    else assert.doesNotMatch(section(job.key), /SUPABASE_BROWSER_TEST/u);
+  }
+  // Normalize only the explicit profile opt-ins. All commands, permissions,
+  // selectors, timeouts, assertions, cleanup and aggregate bytes stay intact.
+  const original = workflow.replaceAll(selectedStartup, originalStartup);
+  assert.equal(createHash("sha256").update(original).digest("hex"),
+    "39492b8b3c32d931444180ac4e7e52d77b6aa8eed9937b55d6d5bad7ee8aa0ec");
+});
+test("the reviewed fixtures need no Edge Functions and retain their exact assertions and global stack configuration", () => {
+  const reviewed = {
+    "scripts/browser-profile-e2e.mjs": "4670ec7470180cc3c4e35834ecc202275fd57582c51740608ca3e06430b575c6",
+    "scripts/shared-browser-studio-e2e.mjs": "ceb744e4423e6c26b83659b59085626ebfcc5755834eb6daa7b1c5339deb072a",
+    "supabase/supabase/config.toml": "662c532ac3c7ad8674b2a716ca4d55d2e67f7593b143a7b38c9073737b4647f4",
+  };
+  for (const [relative, hash] of Object.entries(reviewed)) {
+    const source = fs.readFileSync(path.join(root, relative), "utf8");
+    assert.equal(createHash("sha256").update(source).digest("hex"), hash, `re-review browser service dependencies when changing ${relative}`);
+    assert.doesNotMatch(source, /functions\.invoke|\/functions\/v1|^\[functions\./mu);
+  }
+  for (const relative of ["supabase/functions", "supabase/supabase/functions"]) {
+    assert.equal(fs.existsSync(path.join(root, relative)), false, "new Edge Functions require reviewing this browser-test profile");
+  }
+  const config = fs.readFileSync(path.join(root, "supabase/supabase/config.toml"), "utf8");
+  for (const service of ["auth", "realtime", "storage", "edge_runtime"]) {
+    assert.match(config, new RegExp(`^\\[${service}\\]\\nenabled = true$`, "m"));
+  }
 });
 test("Shared caches isolate operating system, architecture and child compiler targets without fallback keys", () => {
   for (const job of jobs.filter(job => job.script)) {
