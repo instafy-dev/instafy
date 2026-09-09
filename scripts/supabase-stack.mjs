@@ -19,6 +19,7 @@ import {
   resolveLocalSupabaseServiceRoleKey,
 } from "./lib/localSupabaseEnv.mjs";
 import { ensureSupabaseEmailTemplateMounts } from "./lib/supabaseEmailTemplateMounts.mjs";
+import { prepareSupabaseSerialPull } from "./lib/supabaseSerialPull.mjs";
 import {
   buildSupabaseStartArgs,
   parseSupabaseDatabaseOnly,
@@ -98,6 +99,8 @@ function startSupabase() {
   syncSupabaseMigrationsDir();
   const databaseOnly = parseSupabaseDatabaseOnly(process.env.SUPABASE_DATABASE_ONLY);
   const startArgs = buildSupabaseStartArgs(process.env.SUPABASE_DATABASE_ONLY);
+  // Preparation failures must not enter the existing startup retry fallback.
+  prepareSupabaseSerialPull({ repoRoot, databaseOnly });
   console.log(
     databaseOnly
       ? "[supabase-stack] Starting database-only Supabase..."
