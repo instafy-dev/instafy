@@ -1,0 +1,207 @@
+import { useEffect, useId, useState, type RefObject } from "react";
+import { DialogTrigger, Heading } from "react-aria-components";
+import { Folder } from "iconoir-react";
+import { AttentionBadge } from "../../../components/AttentionBadge";
+import { Button } from "../../../components/Button";
+import { ControlChevron } from "../../../components/ControlChevron";
+import { SpaceIdentity } from "../../../components/SpaceIdentity";
+import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
+import type { ProjectRecencyMap } from "../../../projects/projectRecency";
+
+export const SIDEBAR_RECENT_SPACE_LIMIT = 6;
+
+export interface RecentSpace {
+  id: string;
+  name: string;
+  icon?: string | null;
+  color?: string | null;
+}
+
+const spaceName = (space: RecentSpace) => space.name.trim() || "Untitled space";
+const compareSpaceNames = (a: RecentSpace, b: RecentSpace) =>
+  spaceName(a).localeCompare(spaceName(b)) || a.id.localeCompare(b.id);
+
+/** Recency selects the shortcuts; alphabetical order keeps their positions predictable. */
+export function selectRecentSpaces(
+  spaces: readonly RecentSpace[],
+  recency: Readonly<ProjectRecencyMap>,
+  activeProjectId: string | null,
+): RecentSpace[] {
+  const visitedAt = (id: string) => {
+    const at = recency[id];
+    return Number.isFinite(at) && at > 0 ? at : 0;
+  };
+  return spaces
+    .filter((space) => space.id === activeProjectId || visitedAt(space.id) > 0)
+    .sort((a, b) => Number(b.id === activeProjectId) - Number(a.id === activeProjectId)
+      || visitedAt(b.id) - visitedAt(a.id)
+      || compareSpaceNames(a, b))
+    .slice(0, SIDEBAR_RECENT_SPACE_LIMIT)
+    .sort(compareSpaceNames);
+}
+
+const unreadDescription = (count: number) => `${count} ${count === 1 ? "chat" : "chats"} with unread replies`;
+
+export interface StudioRecentSpacesProps {
+  spaces: readonly RecentSpace[];
+  recency: Readonly<ProjectRecencyMap>;
+  activeProjectId: string | null;
+  attentionCounts?: Readonly<Record<string, number>>;
+  onSelectSpace: (id: string) => void;
+  onBrowseAll: () => void;
+  collapsed: boolean;
+  expanded: boolean;
+  onExpandedChange: (expanded: boolean) => void;
+  rowClassName: string;
+  iconClassName: string;
+  triggerRef?: RefObject<HTMLButtonElement | null>;
+}
+
+export function StudioRecentSpaces({
+  spaces,
+  recency,
+  activeProjectId,
+  attentionCounts,
+  onSelectSpace,
+  onBrowseAll,
+  collapsed,
+  expanded,
+  onExpandedChange,
+  rowClassName,
+  iconClassName,
+  triggerRef,
+}: StudioRecentSpacesProps) {
+  const listId = useId();
+  const [popoverOpen, setPopoverOpen] = useState(false);
+  useEffect(() => {
+    // Width changes move the anchor; external project changes replace its context.
+    setPopoverOpen(false);
+  }, [collapsed, activeProjectId]);
+  const currentSpace = spaces.find((space) => space.id === activeProjectId);
+  const attentionFor = (id: string) => {
+    const count = attentionCounts?.[id] ?? 0;
+    return Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
+  };
+  const currentAttention = currentSpace ? attentionFor(currentSpace.id) : 0;
+  const triggerLabel = [
+    currentSpace ? `Choose space: ${spaceName(currentSpace)}` : "Choose space",
+    currentAttention > 0 ? unreadDescription(currentAttention) : null,
+  ].filter(Boolean).join(", ");
+  const visibleSpaces = selectRecentSpaces(spaces, recency, activeProjectId);
+
+  const recentList = (
+    <div id={listId} data-testid="sidebar-recent-spaces-list">
+      {visibleSpaces.length > 0 ? (
+        <ul aria-label="Recent spaces" className="grid grid-cols-3 gap-1">
+          {visibleSpaces.map((space) => {
+            const selected = space.id === activeProjectId;
+            const name = spaceName(space);
+            const attention = attentionFor(space.id);
+            const details = [name, selected ? "Current" : null, attention > 0 ? unreadDescription(attention) : null].filter(Boolean);
+            return (
+              <li key={space.id} className="min-w-0">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  radius="lg"
+                  fullWidth
+                  data-testid={`sidebar-recent-space-${space.id}`}
+                  aria-label={details.join(", ")}
+                  aria-current={selected ? "page" : undefined}
+                  title={details.join(" · ")}
+                  onPress={() => {
+                    setPopoverOpen(false);
+                    onSelectSpace(space.id);
+                  }}
+                  className="min-h-[88px] min-w-0 flex-col !justify-start gap-1.5 px-1 pb-1.5 pt-2.5 focus-visible:ring-offset-0 data-[pressed]:!translate-y-0 data-[pressed]:!scale-100 aria-[current=page]:bg-primary-50 dark:aria-[current=page]:bg-primary-500/10"
+                >
+                  <span className="relative inline-flex shrink-0">
+                    <SpaceIdentity name={name} icon={space.icon} color={space.color} className="!h-8 !w-8" />
+                    <AttentionBadge count={attention} aria-hidden testId={`sidebar-recent-space-attention-${space.id}`}
+                      title={unreadDescription(attention)} className="absolute -right-1.5 -top-1.5" />
+                  </span>
+                  <span className={`line-clamp-2 min-h-8 w-full min-w-0 text-center text-xs leading-4 [overflow-wrap:anywhere] ${selected ? "font-medium text-primary-700 dark:text-primary-300" : "font-normal text-slate-700 dark:text-slate-300"}`}>{name}</span>
+                </Button>
+              </li>
+            );
+          })}
+        </ul>
+      ) : (
+        <p className="px-2.5 py-3 text-xs text-slate-500 dark:text-slate-400">No recent spaces in this team.</p>
+      )}
+      <Button
+        variant="ghost"
+        size="sm"
+        radius="lg"
+        fullWidth
+        data-testid="sidebar-browse-all-spaces"
+        className="mt-1 min-h-9 px-2.5 text-left focus-visible:ring-offset-0"
+        onPress={() => {
+          setPopoverOpen(false);
+          onBrowseAll();
+        }}
+      >
+        <span className="flex w-full min-w-0 items-center justify-between gap-2 text-sm font-normal text-slate-600 dark:text-slate-400">
+          <span className="truncate">Browse all spaces</span>
+          <ControlChevron direction="right" />
+        </span>
+      </Button>
+    </div>
+  );
+
+  const trigger = (
+    <Button
+      ref={triggerRef}
+      variant="ghost"
+      size="sm"
+      radius="lg"
+      fullWidth
+      data-testid="sidebar-space-button"
+      aria-label={triggerLabel}
+      title={triggerLabel}
+      aria-expanded={collapsed ? popoverOpen : expanded}
+      aria-controls={!collapsed && expanded ? listId : undefined}
+      onPress={collapsed ? undefined : () => onExpandedChange(!expanded)}
+      className={`group/item relative min-w-0 py-1.5 transition focus-visible:ring-offset-0 data-[pressed]:!translate-y-0 data-[pressed]:!scale-100 ${rowClassName}`}
+    >
+      <span className={`relative ${iconClassName}`}>
+        {currentSpace ? <SpaceIdentity name={spaceName(currentSpace)} icon={currentSpace.icon} color={currentSpace.color} />
+          : <Folder className="h-5 w-5" aria-hidden="true" />}
+        <AttentionBadge count={currentAttention} aria-hidden testId="sidebar-current-space-attention"
+          title={unreadDescription(currentAttention)} className="absolute -right-1 -top-1" />
+      </span>
+      {!collapsed ? (
+        <span className="flex min-w-0 flex-1 items-center justify-between gap-2 text-sm font-medium">
+          <span className="truncate">{currentSpace ? spaceName(currentSpace) : "Choose space"}</span>
+          <ControlChevron direction={expanded ? "down" : "right"} />
+        </span>
+      ) : null}
+    </Button>
+  );
+
+  if (collapsed) {
+    return (
+      <DialogTrigger isOpen={popoverOpen} onOpenChange={setPopoverOpen}>
+        {trigger}
+        <StudioDialogPopover
+          placement="right top"
+          offset={8}
+          className="w-72 max-w-[calc(100vw-1rem)] p-2"
+          data-testid="sidebar-recent-spaces-popover"
+        >
+          <div className="mb-2 px-2.5 py-1">
+            <Heading slot="title" className="text-sm font-semibold text-slate-900 dark:text-slate-100">Recent spaces</Heading>
+          </div>
+          {recentList}
+        </StudioDialogPopover>
+      </DialogTrigger>
+    );
+  }
+
+  return (
+    <>
+      {trigger}
+      {expanded ? <div className="px-1 py-2">{recentList}</div> : null}
+    </>
+  );
+}

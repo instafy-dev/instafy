@@ -9,6 +9,8 @@ const fixture = vi.hoisted(() => ({
     { id: "space-a", name: "Core", orgId: "org-a", orgName: "Alpha", state: null, isRemoteOnly: false },
     { id: "space-c", name: "Design", orgId: "org-c", orgName: "Charlie", state: null, isRemoteOnly: false },
   ],
+  activeProjectId: "space-a",
+  homeAttentionByProject: {} as Record<string, number>,
   orgs: [
     { id: "org-a", name: "Alpha", slug: "alpha", role: "builder", avatarUrl: null as string | null },
     { id: "org-b", name: "Empty team", slug: "empty", role: "owner", avatarUrl: null as string | null },
@@ -23,7 +25,7 @@ const fixture = vi.hoisted(() => ({
   discoveryError: null as string | null, discoveryResolved: true, discoveryRefreshing: false,
 }));
 vi.mock("../../../../projects/useProjects", () => ({ useProjects: () => ({
-  projectList: fixture.projects, activeProjectId: "space-a", switchProject: fixture.switchProject, createProject: fixture.createProject,
+  projectList: fixture.projects, activeProjectId: fixture.activeProjectId, switchProject: fixture.switchProject, createProject: fixture.createProject,
 }) }));
 vi.mock("../../../../projects/useMergedControllerProjects", () => ({ useMergedControllerProjects: ({ orgId }: { orgId: string | null }) => ({
   mergedProjects: fixture.projects, remoteLoading: false, remoteLoadedScope: fixture.discoveryResolved ? orgId : null,
@@ -38,6 +40,7 @@ vi.mock("../../../../sdk/instafy", async () => {
 });
 vi.mock("../../workspaceControls", () => ({ useWorkspaceControls: () => ({
   userEmail: fixture.userEmail, hasLogs: false, sidebarOpen: true,
+  homeAttentionByProject: fixture.homeAttentionByProject,
   onOpenOrgSettings: fixture.settingsAvailable ? fixture.onSettings : undefined, onStartNewProject: fixture.onNewSpace,
   onToggleSidebar: fixture.onToggleSidebar,
 }) }));
@@ -53,6 +56,7 @@ vi.mock("../../../../updates/useAppUpdateMetadata", () => ({ useAppUpdateMetadat
 vi.mock("../../../../updates/useDesktopReleaseLookup", () => ({ useDesktopReleaseLookup: () => ({ lookup: { status: "unavailable" } }) }));
 
 import { StudioSidebar } from "../StudioSidebar";
+import { recordProjectOpened } from "../../../../projects/projectRecency";
 
 describe("StudioSidebar organization navigation", () => {
   let container: HTMLDivElement;
@@ -92,6 +96,12 @@ describe("StudioSidebar organization navigation", () => {
     fixture.userEmail = "member@example.test";
     fixture.desktop = true;
     fixture.settingsAvailable = true;
+    fixture.activeProjectId = "space-a";
+    fixture.homeAttentionByProject = {};
+    fixture.projects = [
+      { id: "space-a", name: "Core", orgId: "org-a", orgName: "Alpha", state: null, isRemoteOnly: false },
+      { id: "space-c", name: "Design", orgId: "org-c", orgName: "Charlie", state: null, isRemoteOnly: false },
+    ];
     fixture.orgs = fixture.orgs.map((org) => ({ ...org, avatarUrl: null }));
     fixture.discoveryError = null;
     fixture.discoveryResolved = true;
@@ -188,6 +198,8 @@ describe("StudioSidebar organization navigation", () => {
     await act(async () => document.querySelector<HTMLElement>('[data-testid="sidebar-more-item-secrets"]')?.click());
     expect(onSelect).toHaveBeenLastCalledWith("secrets");
     await click("sidebar-space-button");
+    expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')).not.toBeNull();
+    await click("sidebar-browse-all-spaces");
     await render({ ...props, workspaceSwitcherOpen: true });
     expect(portal.querySelector('[data-testid="sidebar-org-selector"]')).toBeNull();
     expect(portal.textContent).toContain("Spaces");
@@ -199,8 +211,8 @@ describe("StudioSidebar organization navigation", () => {
     const fallback = container.querySelector('[data-testid="sidebar-no-selected-space"]');
     expect(fallback?.textContent).toBe("");
     expect(container.querySelector('[data-testid="sidebar-nav-chat"]')).toBeNull();
-    expect(container.querySelector('[data-testid="sidebar-space-button"]')).toBeNull();
-    expect(container.querySelector('[data-testid="sidebar-choose-space"]')?.getAttribute("title")).toBe("Browse spaces");
+    expect(container.querySelector('[data-testid="sidebar-recent-space-space-a"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-space-button"]')?.getAttribute("title")).toBe("Choose space");
     expect(container.querySelector('[data-testid="sidebar-new-space"]')?.getAttribute("title")).toBe("New space");
     await chooseTeamAction("overview");
     expect(onOpenTeam).toHaveBeenCalledWith("org-b");
@@ -208,7 +220,8 @@ describe("StudioSidebar organization navigation", () => {
     expect(fixture.onSettings).toHaveBeenCalledWith("org-b");
     await click("sidebar-new-space");
     expect(fixture.onNewSpace).toHaveBeenCalledWith("org-b");
-    await click("sidebar-choose-space");
+    await click("sidebar-space-button");
+    await click("sidebar-browse-all-spaces");
     await render({ ...props, workspaceSwitcherOpen: true });
     expect(portal.querySelector('[data-testid="sidebar-org-selector"]')).toBeNull();
     expect(portal.textContent).not.toContain("Core");
@@ -281,7 +294,7 @@ describe("StudioSidebar organization navigation", () => {
     expect(fixture.switchProject).not.toHaveBeenCalled();
     await render({ activePanel: "team", selectedOrgKey: "org-b" });
     expect(container.querySelector('[data-testid="sidebar-nav-chat"]')).toBeNull();
-    expect(container.querySelector('[data-testid="sidebar-space-button"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-recent-space-space-a"]')).toBeNull();
     expect(container.querySelector('[data-testid="sidebar-no-selected-space"]')).not.toBeNull();
     await chooseTeamAction("settings");
     expect(fixture.onSettings).toHaveBeenCalledWith("org-b");
@@ -310,7 +323,7 @@ describe("StudioSidebar organization navigation", () => {
     expect(onOpenTeam).toHaveBeenCalledWith("org-a");
     await chooseTeamAction("settings");
     expect(fixture.onSettings).toHaveBeenCalledWith("org-a");
-    await click("sidebar-space-button");
+    await click("sidebar-browse-all-spaces");
     await render({ workspaceSwitcherOpen: true });
     expect(portal.querySelector('[data-testid="sidebar-org-selector"]')).toBeNull();
     expect(portal.textContent).toContain("Spaces");
@@ -318,6 +331,136 @@ describe("StudioSidebar organization navigation", () => {
     await click("sidebar-browse-teams");
     await render({ workspaceSwitcherOpen: true });
     expect(portal.querySelector('[data-testid="sidebar-org-selector"]')).not.toBeNull();
+  });
+
+  it("keeps the current space above an inline grid and toggles it without navigating", async () => {
+    await render();
+    const trigger = container.querySelector('[data-testid="sidebar-space-button"]');
+    expect(trigger?.textContent).toContain("Core");
+    expect(trigger?.getAttribute("aria-expanded")).toBe("true");
+    expect(container.querySelector('[data-testid="sidebar-recent-spaces-list"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-recent-space-space-a"]')?.getAttribute("aria-current")).toBe("page");
+    expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')).toBeNull();
+    const search = window.location.search;
+    const historyState = window.history.state;
+    await click("sidebar-space-button");
+    expect(trigger?.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelector('[data-testid="sidebar-recent-spaces-list"]')).toBeNull();
+    await click("sidebar-space-button");
+    expect(container.querySelector('[data-testid="sidebar-recent-spaces-list"]')).not.toBeNull();
+    expect(onSwitcherChange).not.toHaveBeenCalled();
+    expect(onActivateProject).not.toHaveBeenCalled();
+    expect(onRequestClose).not.toHaveBeenCalled();
+    expect(window.location.search).toBe(search);
+    expect(window.history.state).toBe(historyState);
+    await click("sidebar-browse-all-spaces");
+    expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')).toBeNull();
+    expect(onSwitcherChange).toHaveBeenCalledWith(true);
+  });
+
+  it("scopes recent spaces to the selected team and activates through the existing destination owner", async () => {
+    recordProjectOpened("space-c", 100, fixture.userEmail);
+    await render();
+    expect(container.querySelector('[data-testid="sidebar-recent-space-space-c"]')).toBeNull();
+    await render({ activePanel: "team", selectedOrgKey: "org-c" });
+    expect(document.querySelector('[data-testid="sidebar-recent-space-space-a"]')).toBeNull();
+    expect(document.querySelector('[data-testid="sidebar-recent-space-space-c"]')).not.toBeNull();
+    await click("sidebar-recent-space-space-c");
+    expect(onActivateProject).toHaveBeenCalledWith("space-c", "org-c");
+    expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(onActivateProject.mock.invocationCallOrder[0]);
+    expect(onSwitcherChange).not.toHaveBeenCalled();
+  });
+
+  it("keeps recent space tiles in alphabetical order after switching and exposes scoped unread chat counts", async () => {
+    fixture.projects.push(
+      { id: "space-z", name: "Zebra", orgId: "org-a", orgName: "Alpha", state: null, isRemoteOnly: false },
+      { id: "space-apps", name: "Apps", orgId: "org-a", orgName: "Alpha", state: null, isRemoteOnly: false },
+    );
+    fixture.homeAttentionByProject = { "space-a": 2, "space-z": 12, "space-apps": 0, "space-c": 7 };
+    recordProjectOpened("space-a", 200, fixture.userEmail);
+    recordProjectOpened("space-z", 300, fixture.userEmail);
+    recordProjectOpened("space-apps", 100, fixture.userEmail);
+    recordProjectOpened("space-c", 400, fixture.userEmail);
+    const visibleTileIds = () => Array.from(container.querySelectorAll('[data-testid="sidebar-recent-spaces-list"] button[data-testid^="sidebar-recent-space-"]'))
+      .map((button) => button.getAttribute("data-testid"));
+    const expectedOrder = ["sidebar-recent-space-space-apps", "sidebar-recent-space-space-a", "sidebar-recent-space-space-z"];
+
+    await render();
+    expect(visibleTileIds()).toEqual(expectedOrder);
+    expect(container.querySelector('[data-testid="sidebar-recent-space-space-a"]')?.getAttribute("aria-label")).toBe("Core, Current, 2 chats with unread replies");
+    expect(container.querySelector('[data-testid="sidebar-recent-space-attention-space-a"]')?.textContent).toBe("2");
+    expect(container.querySelector('[data-testid="sidebar-current-space-attention"]')?.textContent).toBe("2");
+    expect(container.querySelector('[data-testid="sidebar-recent-space-space-z"]')?.getAttribute("aria-label")).toBe("Zebra, 12 chats with unread replies");
+    expect(container.querySelector('[data-testid="sidebar-recent-space-attention-space-z"]')?.textContent).toBe("9+");
+    expect(container.querySelector('[data-testid="sidebar-recent-space-attention-space-apps"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-recent-space-space-c"]')).toBeNull();
+
+    await click("sidebar-recent-space-space-z");
+    expect(onActivateProject).toHaveBeenCalledExactlyOnceWith("space-z", "org-a");
+    fixture.activeProjectId = "space-z";
+    await act(async () => recordProjectOpened("space-z", 500, fixture.userEmail));
+    await render();
+    expect(visibleTileIds()).toEqual(expectedOrder);
+    expect(container.querySelector('[data-testid="sidebar-recent-space-space-z"]')?.getAttribute("aria-current")).toBe("page");
+    expect(container.querySelector('[data-testid="sidebar-recent-space-space-a"]')?.getAttribute("aria-current")).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-space-button"]')?.textContent).toContain("Zebra");
+    expect(container.querySelector('[data-testid="sidebar-current-space-attention"]')?.textContent).toBe("9+");
+    expect(onSwitcherChange).not.toHaveBeenCalled();
+  });
+
+  it("offers Browse all spaces directly for an empty selected team without old-space tools or counts", async () => {
+    fixture.homeAttentionByProject = { "space-a": 5 };
+    await render({ activePanel: "team", selectedOrgKey: "org-b" });
+    expect(container.querySelector('[data-testid="sidebar-recent-spaces-list"]')?.textContent).toContain("No recent spaces in this team");
+    expect(container.querySelector('[data-testid="sidebar-recent-space-space-a"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-current-space-attention"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-nav-chat"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-no-selected-space"]')).not.toBeNull();
+    await click("sidebar-browse-all-spaces");
+    expect(onSwitcherChange).toHaveBeenCalledWith(true);
+    expect(onActivateProject).not.toHaveBeenCalled();
+    await render({ activePanel: "team", selectedOrgKey: "org-b", workspaceSwitcherOpen: true });
+    expect(portal.querySelector('[data-testid="sidebar-org-selector"]')).toBeNull();
+    expect(portal.textContent).not.toContain("Core");
+  });
+
+  it("refreshes recent Spaces while mounted and drops history from the previous account", async () => {
+    await render({ activePanel: "team", selectedOrgKey: "org-c" });
+    expect(document.querySelector('[data-testid="sidebar-recent-space-space-c"]')).toBeNull();
+    await act(async () => recordProjectOpened("space-c", 100, fixture.userEmail));
+    expect(document.querySelector('[data-testid="sidebar-recent-space-space-c"]')).not.toBeNull();
+    fixture.userEmail = "different@example.test";
+    await render({ activePanel: "team", selectedOrgKey: "org-c" });
+    expect(container.querySelector('[data-testid="sidebar-recent-space-space-c"]')).toBeNull();
+  });
+
+  it("resets a compact Spaces popover when the team changes", async () => {
+    await render({ collapsed: true });
+    await click("sidebar-space-button");
+    expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')).not.toBeNull();
+    await render({ collapsed: true, selectedOrgKey: "org-b", activePanel: "team" });
+    expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')).toBeNull();
+    await click("sidebar-space-button");
+    expect(document.querySelector('[data-testid="sidebar-recent-spaces-popover"]')?.textContent).toContain("No recent spaces in this team");
+    expect(document.querySelector('[data-testid="sidebar-recent-space-space-a"]')).toBeNull();
+  });
+
+  it("uses the mobile drawer's existing browse transition and closes before a recent destination", async () => {
+    fixture.desktop = false;
+    const navigation = { view: "root", openView: vi.fn(), back: vi.fn() };
+    await render({ mobileOverlay: true, mobileNavigation: navigation as never });
+    await click("sidebar-browse-all-spaces");
+    expect(navigation.openView).toHaveBeenCalledWith("workspace");
+    navigation.view = "workspace";
+    await render({ mobileOverlay: true, mobileNavigation: navigation as never });
+    expect(document.querySelector('[data-testid="sidebar-org-selector"]')).toBeNull();
+    expect(document.querySelector('[data-testid="sidebar-project-switcher-menu"]')?.textContent).toContain("Spaces");
+    navigation.view = "root";
+    await render({ mobileOverlay: true, mobileNavigation: navigation as never });
+    expect(onSwitcherChange).not.toHaveBeenCalled();
+    await click("sidebar-recent-space-space-a");
+    expect(onActivateProject).toHaveBeenCalledWith("space-a", "org-a");
+    expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(onActivateProject.mock.invocationCallOrder[0]);
   });
 
   it("does not expose the previous team's settings or tools in Personal scope", async () => {

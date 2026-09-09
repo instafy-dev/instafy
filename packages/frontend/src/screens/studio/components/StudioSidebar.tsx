@@ -16,7 +16,6 @@ import {
   Xmark,
   Group,
   Settings,
-  Folder,
   Plus,
 } from "iconoir-react";
 import { ChatsIcon, HomeIcon } from "../../../components/AppIcons";
@@ -26,7 +25,6 @@ import { ControlChevron } from "../../../components/ControlChevron";
 import { Text } from "../../../components/Text";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 
-import { SpaceIdentity } from "../../../components/SpaceIdentity";
 import { NewTeamDialog } from "./NewTeamDialog";
 import { useStatus } from "../../../status/useStatus";
 import { useStudioNavigation } from "../../../navigation/useStudioNavigation";
@@ -34,7 +32,8 @@ import { studioPerformance } from "../../../telemetry/studioPerformance";
 import { useProfile } from "../../../profile/ProfileProvider";
 import { useProjects } from "../../../projects/useProjects";
 import { useMergedControllerProjects } from "../../../projects/useMergedControllerProjects";
-import { mostRecentProjectId, readProjectRecency } from "../../../projects/projectRecency";
+import { mostRecentProjectId } from "../../../projects/projectRecency";
+import { useProjectRecency } from "../../../projects/useProjectRecency";
 import { useRuntimeMenuOptions } from "../../../runtime/useRuntimeMenu";
 import { useTheme } from "../../../theme/ThemeProvider";
 import {
@@ -86,6 +85,7 @@ import { StudioSidebarWorkspaceSwitcher } from "./StudioSidebarWorkspaceSwitcher
 import { StudioSidebarWorkspacePanel } from "./StudioSidebarWorkspacePanel";
 import { StudioOrganizationRail } from "./StudioOrganizationRail";
 import { SIDEBAR_RECENT_CHAT_LIMIT, StudioRecentChats } from "./StudioRecentChats";
+import { SIDEBAR_RECENT_SPACE_LIMIT, StudioRecentSpaces } from "./StudioRecentSpaces";
 import type { ConversationState } from "../../../conversations/conversationState";
 import {
   normalizeSidebarOrgUser,
@@ -233,6 +233,8 @@ export function StudioSidebar({
     }
   }, [onRequestClose, runSidebarAction]);
   const [recentChatsExpanded, setRecentChatsExpanded] = useState(true);
+  const [recentSpacesExpanded, setRecentSpacesExpanded] = useState(true);
+  const projectRecency = useProjectRecency(userEmail);
   const [appLogsOverlayOpen, setAppLogsOverlayOpen] = useState(false);
   const navRef = useRef<HTMLElement | null>(null);
   const footerRef = useRef<HTMLDivElement | null>(null);
@@ -309,6 +311,10 @@ export function StudioSidebar({
   const recentChatsReservePx = hasRecentChats && showLabels && recentChatsExpanded
     ? Math.max(1, Math.min(recentConversations.length, SIDEBAR_RECENT_CHAT_LIMIT)) * 40 + 56
     : 0;
+  // Reserve the bounded two-row space grid before placing secondary tools.
+  const recentSpacesReservePx = showLabels && recentSpacesExpanded
+    ? Math.ceil(SIDEBAR_RECENT_SPACE_LIMIT / 3) * 96 + 48
+    : 0;
   const estimatedChromeReservePx = 24;
   const effectiveFooterReservePx = desktopRail ? 0 : Math.max(estimatedFooterReservePx, footerHeight);
   const desktopSecondaryRowCapacity =
@@ -316,7 +322,7 @@ export function StudioSidebar({
       ? Math.max(
           0,
           Math.floor(
-            (navHeight - effectiveFooterReservePx - estimatedChromeReservePx - recentChatsReservePx - fixedEntryCount * estimatedRowHeightPx) /
+            (navHeight - effectiveFooterReservePx - estimatedChromeReservePx - recentChatsReservePx - recentSpacesReservePx - fixedEntryCount * estimatedRowHeightPx) /
               estimatedRowHeightPx,
           ),
         )
@@ -938,7 +944,6 @@ export function StudioSidebar({
     }
     writeSidebarOrgSnapshot(userEmail, controllerOrgs, orgDeckTeams.length);
   }, [controllerOrgs, orgDeckTeams.length, orgsFetchState, userEmail]);
-  const activeProjectName = activeProject?.name?.trim() || "Untitled space";
   const selectedWorkspaceOrg = useMemo(
     () => orgOptions.find((org) => org.key === workspaceOrgKey) ?? null,
     [orgOptions, workspaceOrgKey],
@@ -950,13 +955,13 @@ export function StudioSidebar({
         : mergedProjects.filter((project) => (project.orgId ?? "personal") === workspaceOrgKey),
     [mergedProjects, workspaceOrgKey],
   );
-  // Re-read recency whenever the switcher opens so the ordering reflects this
-  // session's switches without subscribing to storage events.
-  const projectRecency = useMemo(
-    () => readProjectRecency(),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [workspaceSwitcherOpen],
-  );
+  // Quick switching follows the selected team, independent of directory search
+  // or a temporarily browsed team. Recency contains IDs only; access comes from
+  // the authenticated project snapshot.
+  const recentSpaceCandidates = useMemo(() => activeTeamMetadataReady
+    ? mergedProjects.filter((project) => (project.orgId ?? "personal") === activeOrgKey)
+      .map((project) => ({ id: project.id, name: project.name, icon: project.projectIcon, color: project.projectColor }))
+    : [], [activeOrgKey, activeTeamMetadataReady, mergedProjects]);
   const filteredOrgProjects = useMemo(() => {
     const needle = workspaceProjectQuery.trim().toLowerCase();
     const filtered =
@@ -1142,13 +1147,13 @@ export function StudioSidebar({
       return;
     }
     const targetId =
-      mostRecentProjectId(orgProjects.map((project) => project.id)) ??
+      mostRecentProjectId(orgProjects.map((project) => project.id), projectRecency) ??
       [...orgProjects].sort((a, b) =>
         (a.name || "Untitled space").localeCompare(b.name || "Untitled space"),
       )[0].id;
     resetWorkspaceSwitcher();
     runDestination(() => performProjectSwitch(targetId));
-  }, [activeProject?.orgId, mergedProjects, mergedProjectsLoading, onOpenTeam, performProjectSwitch, remoteDiscoveryResolved, remoteLoadedScope, resetWorkspaceSwitcher, runDestination, showStatus, workspaceOrgKey]);
+  }, [activeProject?.orgId, mergedProjects, mergedProjectsLoading, onOpenTeam, performProjectSwitch, projectRecency, remoteDiscoveryResolved, remoteLoadedScope, resetWorkspaceSwitcher, runDestination, showStatus, workspaceOrgKey]);
 
   const handleProjectSwitch = useCallback(
     (projectId: string) => {
@@ -1307,7 +1312,7 @@ export function StudioSidebar({
 
   const workspaceSwitcherSections = (
     <StudioSidebarWorkspaceSwitcher
-      mode={desktopRail ? workspaceSwitcherMode : "teams-and-spaces"}
+      mode={workspaceSwitcherMode}
       orgOptions={orgOptions}
       workspaceOrgKey={workspaceOrgKey}
       activeOrgKey={activeOrgKey}
@@ -1410,10 +1415,10 @@ export function StudioSidebar({
   const workspacePanel = (
     <StudioSidebarWorkspacePanel
         open={workspaceSwitcherOpen}
-        mode={desktopRail ? workspaceSwitcherMode : "teams-and-spaces"}
+        mode={workspaceSwitcherMode}
         desktop={isLargeScreen}
         portalTarget={workspaceSwitcherPortalTarget}
-        triggerRef={desktopRail ? workspaceSwitcherMode === "spaces" ? spaceTriggerRef : browseTriggerRef : workspaceTriggerRef}
+        triggerRef={workspaceSwitcherMode === "spaces" ? spaceTriggerRef : desktopRail ? browseTriggerRef : workspaceTriggerRef}
         onClose={dismissWorkspaceSwitcher}
       >
         {workspaceSwitcherSections}
@@ -1607,25 +1612,34 @@ export function StudioSidebar({
               {showLabels ? <span className="text-sm font-medium">Team settings</span> : null}
             </Button>
           </li> : null}
-          {selectedTeamHasActiveSpace ? <>
           <li className={`${desktopRail ? "pt-1" : "mt-3 pt-2"} border-t border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]`}>
-            <Button variant="ghost" size="sm" radius="lg" fullWidth data-testid="sidebar-space-button"
-              ref={spaceTriggerRef}
-              aria-label={`Choose space: ${activeProjectName}`} onPress={() => openWorkspaceSwitcher(desktopRail ? "spaces" : "teams-and-spaces")}
-              title={showLabels ? undefined : `Choose space: ${activeProjectName}`}
-              aria-expanded={workspaceSwitcherOpen && workspaceSwitcherMode === (desktopRail ? "spaces" : "teams-and-spaces")}
-              className={`${sidebarRowLayoutClass} ${getSidebarRowToneClass(workspaceSwitcherOpen)}`}>
-              <span className={getSidebarNavIconClass(false)}><SpaceIdentity name={activeProjectName}
-                icon={activeProject?.projectIcon} color={activeProject?.projectColor} className="h-7 w-7" /></span>
-              {showLabels ? <span className="flex min-w-0 flex-1 items-center justify-between gap-2 text-sm"><span className="truncate">{activeProjectName}</span><ControlChevron direction="right" /></span> : null}
-            </Button>
+            <StudioRecentSpaces
+              key={JSON.stringify([activeTeamUserKey, activeOrgKey, activePanel])}
+              spaces={recentSpaceCandidates}
+              recency={projectRecency}
+              attentionCounts={homeAttentionByProject}
+              activeProjectId={selectedTeamHasActiveSpace ? activeProjectId : null}
+              onSelectSpace={(id) => {
+                if (!recentSpaceCandidates.some((space) => space.id === id)) return;
+                resetWorkspaceSwitcher();
+                runDestination(() => performProjectSwitch(id));
+              }}
+              onBrowseAll={() => openWorkspaceSwitcher("spaces")}
+              collapsed={!showLabels}
+              expanded={recentSpacesExpanded}
+              onExpandedChange={setRecentSpacesExpanded}
+              rowClassName={`${sidebarRowLayoutClass} ${getSidebarRowToneClass(workspaceSwitcherOpen && workspaceSwitcherMode === "spaces")}`}
+              iconClassName={getSidebarNavIconClass(workspaceSwitcherOpen && workspaceSwitcherMode === "spaces")}
+              triggerRef={spaceTriggerRef}
+            />
           </li>
-
+          {selectedTeamHasActiveSpace ? <>
           {items.map((item) => {
           if (item.id === "chat" && onSelectConversation) {
             return (
               <li key={item.id}>
                 <StudioRecentChats
+                  key={JSON.stringify([activeTeamUserKey, activeProjectId])}
                   conversations={recentConversations}
                   activeConversationId={activeConversationId}
                   openConversationIds={openConversationIds}
@@ -1778,13 +1792,6 @@ export function StudioSidebar({
           />
           </> : <li className={`${showLabels ? "mx-3" : ""} ${desktopRail ? "pt-2" : "mt-3 pt-3"} border-t border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]`} data-testid="sidebar-no-selected-space">
             {showLabels ? <Text as="p" variant="caption" tone="muted">Choose a space in this team to open its tools.</Text> : null}
-            <Button variant="ghost" size="sm" fullWidth={!showLabels}
-              onPress={() => openWorkspaceSwitcher(desktopRail ? "spaces" : "teams-and-spaces")}
-              aria-label="Browse spaces" title={showLabels ? undefined : "Browse spaces"}
-              aria-expanded={workspaceSwitcherOpen && workspaceSwitcherMode === (desktopRail ? "spaces" : "teams-and-spaces")}
-              ref={spaceTriggerRef} className={showLabels ? "mt-2" : sidebarRowLayoutClass} data-testid="sidebar-choose-space">
-              {showLabels ? "Browse spaces" : <span className={getSidebarNavIconClass(workspaceSwitcherOpen)}><Folder className="h-5 w-5" aria-hidden="true" /></span>}
-            </Button>
             {onStartNewProject && canCreateSelectedTeamSpace ? <Button variant="ghost" size="sm" fullWidth={!showLabels}
               className={showLabels ? "mt-1" : `mt-1 ${sidebarRowLayoutClass}`}
               aria-label="New space" title={showLabels ? undefined : "New space"} data-testid="sidebar-new-space"

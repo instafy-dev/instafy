@@ -165,10 +165,13 @@ export function ProjectAccessProvider({ children }: { children: ReactNode }) {
   }, [projects]);
 
   useEffect(() => {
+    // The account-reset effect below clears old workspace state. Do not copy
+    // its active space into a newly signed-in account before that reset runs.
+    if (lastUserIdRef.current !== (user?.id ?? null) || (hasSupabaseConfig && !projectInitialized)) return;
     if (activeProjectId && isUUID(activeProjectId)) {
-      recordProjectOpened(activeProjectId);
+      recordProjectOpened(activeProjectId, undefined, user?.email ?? null);
     }
-  }, [activeProjectId]);
+  }, [activeProjectId, projectInitialized, user?.email, user?.id]);
 
   useEffect(() => {
     projectAccessPendingRef.current = projectAccessPending;

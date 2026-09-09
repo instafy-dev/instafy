@@ -95,6 +95,20 @@ Mobile browsers show **Get the app · Soon** in the profile menu, linking to the
 availability section; iOS and Android downloads are marked coming soon. Native apps hide
 these acquisition actions and retain their existing update controls.
 
+The current space sits directly below the team header. Its chevron expands or collapses
+an inline grid of up to six named space icons, followed by **Browse all spaces**. Recent
+visits choose which accessible spaces appear; the selected set is displayed alphabetically
+by name, with the current space highlighted in its alphabetical position. Selecting a
+space already in that set does not move it to the front. Visiting a space outside the set
+can replace the oldest shortcut. Recent visits are remembered per account on this device
+and update automatically. The compact rail opens the same grid beside the current-space
+icon. Chats retains its inline collapsible recent list scoped to the current space.
+
+Space icons use the same numbered unread badges as Home and the full space directory:
+chats with unread assistant replies for the signed-in user, excluding the visible chat.
+Zero is hidden and counts over nine display as **9+**. These badges describe personal unread
+activity, not all unfinished jobs or decisions needing approval.
+
 ## Team experience
 
 The global rail keeps Home fixed above a scrollable team list, with New team,
