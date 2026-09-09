@@ -10,6 +10,7 @@ import { NOTIFICATION_CATEGORIES, NOTIFICATION_CHANNELS, type NotificationPage, 
 import { claimNotificationPresentation, NOTIFICATION_RECEIVED_EVENT } from "./notificationPresentation";
 import { areMessageNotificationsEnabled, enableMessageNotifications, isAppInForeground, notifyAssistantMessage } from "./assistantMessageNotifications";
 import { subscribeAppForeground } from "../native/appForeground";
+import { useNativeBackButtonAction } from "../native/useNativeBackButtonAction";
 
 const CATEGORY_LABELS = { support: "Support", conversations: "Conversations", runs: "Runs", automations: "Automations" };
 const CHANNEL_LABELS = { web_push: "Browser push", apns: "iPhone push", local: "In-app and desktop alerts" };
@@ -17,6 +18,7 @@ const EMPTY_PAGE: NotificationPage = { items: [], nextCursor: null, unreadCount:
 
 export function useNotificationCenter({ userId, accessToken, navigate }: { userId: string | null; accessToken: string | null; navigate: (url: string) => void }) {
   const [open, setOpen] = useState(false);
+  useNativeBackButtonAction(open && Boolean(userId), () => setOpen(false));
   const [view, setView] = useState<"all" | "unread">("all");
   const [pageSnapshot, setPageSnapshot] = useState<{ userId: string | null; page: NotificationPage }>({ userId: null, page: EMPTY_PAGE });
   const page = pageSnapshot.userId === userId ? pageSnapshot.page : EMPTY_PAGE;

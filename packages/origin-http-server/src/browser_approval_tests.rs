@@ -342,6 +342,54 @@ async fn origin_and_action_decisions_are_kind_bound_and_written_privately() {
     ));
 }
 
+#[tokio::test]
+async fn routine_policy_requires_an_exact_origin_prompt_and_cannot_be_granted_by_another_user() {
+    let origin = ApprovalFixture::origin();
+    origin
+        .bridge
+        .submit_decision(
+            &origin.claims(&["browser.control"]),
+            origin.decision(ApprovalDecision::AllowRoutine),
+        )
+        .await
+        .expect("explicit routine origin grant");
+    assert_stored_decision(&origin, "allow_routine");
+    assert_conflict(
+        origin
+            .bridge
+            .submit_decision(
+                &origin.claims(&["browser.control"]),
+                origin.decision(ApprovalDecision::AllowRoutine),
+            )
+            .await,
+    );
+
+    let action = ApprovalFixture::action();
+    assert!(matches!(
+        action
+            .bridge
+            .submit_decision(
+                &action.claims(&["browser.control"]),
+                action.decision(ApprovalDecision::AllowRoutine),
+            )
+            .await,
+        Err(OriginError::BadRequest(_))
+    ));
+
+    let unapproved = ApprovalFixture::origin();
+    let mut teammate = unapproved.claims(&["browser.control"]);
+    teammate.sub = Uuid::new_v4().to_string();
+    assert_not_found(
+        unapproved
+            .bridge
+            .submit_decision(
+                &teammate,
+                unapproved.decision(ApprovalDecision::AllowRoutine),
+            )
+            .await,
+    );
+}
+
 fn assert_stored_decision(fixture: &ApprovalFixture, expected: &str) {
     let decision_path = fixture.approval_dir.join("decision.json");
     let raw = fs::read(&decision_path).expect("stored decision");
@@ -365,6 +413,53 @@ fn assert_stored_decision(fixture: &ApprovalFixture, expected: &str) {
             & 0o777,
         APPROVAL_FILE_MODE
     );
+}
+
+#[tokio::test]
+async fn routine_state_is_additive_and_keeps_consequential_decisions_bound() {
+    for routine in [
+        None,
+        Some(json!(false)),
+        Some(json!(true)),
+        Some(json!("true")),
+    ] {
+        let fixture = ApprovalFixture::action();
+        let mut state = json!({
+            "version": 1,
+            "ownerId": fixture.marker.owner_id,
+            "runId": fixture.marker.run_id,
+            "initiatorUserId": fixture.marker.initiator_user_id,
+            "browserPageId": fixture.marker.browser_page_id,
+            "approvedOrigins": [],
+            "consumedApprovalIds": [],
+        });
+        if let Some(value) = routine.as_ref() {
+            state["routineBrowsingAllowed"] = value.clone();
+        }
+        write_private_json(&fixture.approval_dir.join("state.json"), &state);
+        let observed = fixture
+            .bridge
+            .observe_pending(&fixture.claims(&["browser.view"]), fixture.query())
+            .await;
+        let decided = fixture
+            .bridge
+            .submit_decision(
+                &fixture.claims(&["browser.control"]),
+                fixture.decision(ApprovalDecision::AllowOnce),
+            )
+            .await;
+        if routine.as_ref().is_some_and(JsonValue::is_string) {
+            assert_unavailable(observed);
+            assert_unavailable(decided);
+        } else {
+            assert!(observed
+                .expect("bounded consequential request")
+                .pending
+                .is_some());
+            assert!(decided.is_ok());
+            assert_stored_decision(&fixture, "allow_once");
+        }
+    }
 }
 
 #[test]

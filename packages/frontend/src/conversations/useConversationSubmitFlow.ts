@@ -331,12 +331,26 @@ export function useConversationSubmitFlow({
     ],
   );
 
-  const handleSubmit = useCallback(
+  const submitConversation = useCallback(
     async (
       conversationId: string | null,
       rawInput: string,
       options?: SubmitConversationOptions,
+      receipt?: { accepted: boolean; errorMessage?: string },
     ): Promise<SubmitConversationResult> => {
+      const requiredBrowserDispatch = Boolean(receipt &&
+        (options?.metadata?.browserTransport === "shared" || options?.metadata?.browserTransport === "desktop-personal"));
+      const dispatch = async (...args: Parameters<typeof sendPromptToController>) => {
+        const result = receipt ? await sendPromptToController(
+          args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+          { requireRun: true, assertCurrent: options?.assertDispatchCurrent },
+        ) : await sendPromptToController(...args);
+        if (receipt) {
+          if (result.ok) receipt.accepted = true;
+          else receipt.errorMessage = result.errorMessage;
+        }
+        return result;
+      };
       const trimmed = rawInput.trim();
       const dispatchTrimmed =
         typeof options?.dispatchInput === "string" && options.dispatchInput.trim().length > 0
@@ -430,7 +444,7 @@ export function useConversationSubmitFlow({
               });
             }
             if (goalCommandDispatchInput) {
-              const dispatchResult = await sendPromptToController(
+              const dispatchResult = await dispatch(
                 sourceConversation.localId,
                 goalCommandDispatchInput,
                 {
@@ -730,7 +744,7 @@ export function useConversationSubmitFlow({
           threadKind: sourceConversation.threadKind,
           ownerAgentHandle: sourceConversation.ownerAgent?.handle ?? null,
           hasTerminalCommand: Boolean(terminalRequest),
-          hasBrowserTask: false,
+          hasBrowserTask: requiredBrowserDispatch,
           hasExplicitAssistantOverride: aiOverride,
           replyToOcto,
           isAmbientTurn: displayConversationId === targetConversationId,
@@ -848,7 +862,7 @@ export function useConversationSubmitFlow({
       }
 
       const localBuiltInCapabilityHandle =
-        !terminalRequest && !deferGroupParticipationToController
+        !terminalRequest && !deferGroupParticipationToController && !requiredBrowserDispatch
           ? resolveSingleLocalCapabilityHandleForPrompt({
             targetHandles: effectiveAgentSelection.targetHandles,
             prompt: trimmed,
@@ -947,7 +961,7 @@ export function useConversationSubmitFlow({
               sourceConversationId: sourceConversation.controllerId ?? parentControllerId,
             },
           };
-          await sendPromptToController(
+          await dispatch(
             threadConversation.localId,
             dispatchTrimmed,
             threadPromptMetadata,
@@ -1224,7 +1238,7 @@ export function useConversationSubmitFlow({
           }).catch(() => null);
         }
 
-        await sendPromptToController(
+        await dispatch(
           targetConversationId,
           dispatchTrimmed,
           promptMetadata,
@@ -1262,6 +1276,20 @@ export function useConversationSubmitFlow({
       updateMessage,
     ],
   );
+
+  const handleSubmit = useCallback(async (
+    conversationId: string | null,
+    rawInput: string,
+    options?: SubmitConversationOptions,
+  ): Promise<SubmitConversationResult> => {
+    const receipt = options?.requireDispatch ? { accepted: false, errorMessage: undefined as string | undefined } : undefined;
+    options?.assertDispatchCurrent?.();
+    const result = await submitConversation(conversationId, rawInput, options, receipt);
+    if (receipt && !receipt.accepted) {
+      throw new Error(receipt.errorMessage ?? "The browser task was not dispatched. Your manual input remains on the page; try again when ready.");
+    }
+    return result;
+  }, [submitConversation]);
 
   return {
     ensureConversation,

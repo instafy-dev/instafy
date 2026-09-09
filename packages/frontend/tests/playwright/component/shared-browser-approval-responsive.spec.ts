@@ -5,7 +5,7 @@ import { resolveViteReactDependencies } from "./viteComponentDependencies.js";
 const FIXTURE_PATH = "/__shared-browser-approval-responsive_fixture__";
 const LIFECYCLE_FIXTURE_PATH = "/__shared-browser-approval-lifecycle_fixture__";
 
-async function mountApprovalPrompt(page: Page): Promise<void> {
+async function mountApprovalPrompt(page: Page, routineApprovalAvailable = false): Promise<void> {
   const deps = await resolveViteReactDependencies(page);
   const main = `
     import "/src/styles/tailwind.css";
@@ -30,6 +30,7 @@ async function mountApprovalPrompt(page: Page): Promise<void> {
     createRoot(document.getElementById("root")).render(
       h("main", { className: "relative h-dvh w-screen overflow-hidden bg-slate-950" },
         h(SharedBrowserApprovalPrompt, {
+          routineApprovalAvailable: ${routineApprovalAvailable},
           request,
           submitting: false,
           error: null,
@@ -69,6 +70,36 @@ for (const viewport of [
   { name: "phone", width: 360, height: 800 },
   { name: "short-landscape", width: 667, height: 375 },
 ]) {
+  test(`offers early routine approval on ${viewport.name}`, async ({ page }, testInfo) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await mountApprovalPrompt(page, true);
+    const routine = page.getByTestId("shared-browser-approval-routine");
+    await expect(routine).not.toBeChecked();
+    await expect(page.getByTestId("shared-browser-approval-deny")).toBeFocused();
+    const prompt = page.getByTestId("shared-browser-approval-prompt");
+    const bounds = await prompt.boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.y).toBeGreaterThanOrEqual(0);
+    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(viewport.height);
+    await page.getByTestId("shared-browser-approval-content").evaluate((element) => { element.scrollTop = 0; });
+    await expect(page.getByRole("heading", { name: "Allow the AI agent to use this site?" })).toBeInViewport();
+    await expect(page.getByTestId("shared-browser-approval-allow")).toBeInViewport();
+    await routine.check();
+    await expect(page.getByTestId("shared-browser-approval-deny")).toBeInViewport();
+    await routine.focus();
+    await page.keyboard.press("Shift+Tab");
+    await expect(page.getByTestId("shared-browser-approval-allow")).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(routine).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(page.getByTestId("shared-browser-approval-deny")).toBeFocused();
+    const screenshotPath = testInfo.outputPath(`routine-browsing-${viewport.name}.png`);
+    await page.screenshot({ animations: "disabled", path: screenshotPath });
+    await testInfo.attach(`Routine browsing ${viewport.name}`, { contentType: "image/png", path: screenshotPath });
+    await page.getByTestId("shared-browser-approval-allow").click();
+    await expect.poll(() => page.evaluate(() => (window as { __decision?: string }).__decision)).toBe("allow_routine");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
+  });
   test(`keeps Shared Browser approval usable on ${viewport.name}`, async ({ page }, testInfo) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await mountApprovalPrompt(page);

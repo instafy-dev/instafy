@@ -45,6 +45,7 @@ import { parseInviteCommandRequest } from "../../../conversations/inviteCommand"
 import { resolveGroupParticipationReplyTargets } from "../../../conversations/groupParticipation";
 import { getChatClientSessionId } from "../../../conversations/chatClientIdentity";
 import { generateUUID } from "../../../utils/uuid";
+import { useSharedBrowserResume, useSharedBrowserResumeSearchReplacement } from "./useSharedBrowserResume";
 import { useConversations } from "../../../conversations/ConversationsProvider";
 import { useConversationParticipants } from "../../../conversations/useConversationParticipants";
 import {
@@ -256,6 +257,8 @@ import {
 } from "../../../utils/aiProviderModels";
 import { useChatComposerLayoutState } from "./useChatComposerLayoutState";
 import { useChatAutoScrollSync, useChatScrollController } from "./useChatScrollOrchestration";
+import { ChatScrollSnapshotBoundary } from "./ChatScrollSnapshotBoundary";
+import { resolveChatScrollHistoryVisit } from "./chatScrollHistory";
 import {
   buildMessageSelectionReplyContext,
   formatSelectionReplyComposerText,
@@ -329,6 +332,8 @@ import {
 import { ChatSpeakerStickyOverlay, ChatTranscriptViewport } from "./ChatTranscriptViewport";
 import { resolveSharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import { useSharedBrowserApprovalTransport } from "./useSharedBrowserApprovalTransport";
+import { useChatBrowserHandoff } from "./useChatBrowserHandoff";
+import { sharedBrowserConversationRunIds } from "./browserHandoffRouting";
 
 const { enabled: runtimeControllerEnabled } = controllerClient.core;
 const {
@@ -446,6 +451,8 @@ function hasVisibleConversationAnchor(messages: ChatMessage[]): boolean {
 export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null } = {}) {
   const location = useLocation();
   const navigate = useNavigate();
+  const { user } = useAuth();
+  const currentUserId = user?.id ?? null;
   const runtimeMenu = useRuntimeMenuOptions();
   const rootRef = useRef<HTMLDivElement>(null);
   const {
@@ -604,6 +611,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   }, [activeConversationId, conversations]);
   const {
     browserSessionOpen,
+    browserSessionStateHydrated,
+    exactBrowserRuntimeId,
     browserSessionExpandRequestToken,
     handleBrowserRuntimeIdResolved,
     handleBrowserSessionOpenChange,
@@ -611,10 +620,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     handleToggleBrowserSession,
     hasHiddenBrowserSession,
     openBrowserSession,
+    resumeBrowserSession,
     preferredBrowserRuntimeId,
     requestBrowserSessionExpand,
     resolvedBrowserRuntimeId,
   } = useChatBrowserSessionState({
+    currentUserId,
     activeConversationControllerId,
     activeConversationId,
     activeProjectId: activeProjectId ?? null,
@@ -810,8 +821,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const projectMemberContextLoading = Boolean(
     activeProjectId && projectMembersResolvedProjectId !== activeProjectId,
   );
-  const { user } = useAuth();
-  const currentUserId = user?.id ?? null;
   const {
     participants: conversationParticipants,
     loading: conversationParticipantsLoading,
@@ -827,6 +836,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       browserTransport === "personal",
     profileUserId: currentUserId,
     projectId: activeProjectId ?? null,
+    conversationBindingKey: activeConversationId ?? null,
   });
   useEffect(() => {
     browserTransportInitializedUserRef.current = null;
@@ -894,6 +904,24 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     setSharedBrowserActivated(true);
     setBrowserTransport("shared");
   }, []);
+  const resumeSharedBrowser = useCallback((runtimeId: string) => {
+    revealSharedBrowserApproval();
+    resumeBrowserSession(runtimeId);
+  }, [resumeBrowserSession, revealSharedBrowserApproval]);
+  const replaceSharedBrowserResumeSearch = useSharedBrowserResumeSearchReplacement();
+  const { runtimeId: requestedSharedBrowserRuntimeId, acknowledgeRuntimeResolved } = useSharedBrowserResume({
+    search: location.search,
+    projectId: activeProjectId ?? null,
+    userId: currentUserId,
+    ready: browserTransportPreferenceResolved && browserSessionStateHydrated &&
+      conversationsProjectKey === activeProjectId && Boolean(activeConversationId),
+    onResume: resumeSharedBrowser,
+    onReplaceSearch: replaceSharedBrowserResumeSearch,
+  });
+  const handleSharedBrowserRuntimeResolved = useCallback((runtimeId: string | null) => {
+    acknowledgeRuntimeResolved(runtimeId);
+    handleBrowserRuntimeIdResolved(runtimeId);
+  }, [acknowledgeRuntimeResolved, handleBrowserRuntimeIdResolved]);
   useSharedBrowserApprovalTransport({
     pending: sharedBrowserApprovalPending,
     transport: browserTransport,
@@ -1892,6 +1920,19 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       showStatus(error instanceof Error ? error.message : "Unable to restore the original image.", "error", 4000);
     }
   } : undefined;
+  const chatScrollHistoryVisit = resolveChatScrollHistoryVisit({
+    location,
+    userId: currentUserId,
+    projectId: activeProjectId ?? null,
+    conversationsProjectKey,
+    conversationId: activeConversationId,
+    conversationControllerId: activeConversationEntry?.controllerId ?? null,
+    jobThread,
+  });
+  const chatScrollMutationIdentity = JSON.stringify([
+    location.key, currentUserId, activeProjectId, conversationsProjectKey,
+    activeConversationId, jobThread?.jobId ?? null, browserSubtab,
+  ]);
 
   const activeConversation = useMemo(
     () => conversations.find((conversation) => conversation.localId === activeConversationId) ?? null,
@@ -2643,6 +2684,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     jumpToLatest,
     lastComposerScrollTopRef,
     lastScrollHeightRef,
+    recordScrollPosition,
+    scrollSnapshotKey,
     requestOlderMessages,
     scrollContainerRef,
     scrollToBottom,
@@ -2652,6 +2695,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     showJumpToLatest,
   } = useChatScrollController({
     activeConversationId,
+    historyVisit: chatScrollHistoryVisit,
     hasMoreHistory,
     isHistoryLoading,
     isInitialHistoryLoading,
@@ -4157,6 +4201,28 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   });
   submitMessageRef.current = submitMessage;
 
+  const browserHandoffPage = sharedBrowserChrome?.pages.find((page) => page.isActive) ?? sharedBrowserChrome?.pages[0] ?? null;
+  const browserHumanInputRunIds = useMemo(() => sharedBrowserConversationRunIds(Object.values(runs ?? {}), {
+    projectId: activeProjectId ?? null,
+    conversationId: activeConversationEntry?.controllerId ?? null,
+    runtimeId: resolvedBrowserRuntimeId,
+    pageId: browserHandoffPage?.id ?? null,
+  }), [runs, activeProjectId, activeConversationEntry?.controllerId, resolvedBrowserRuntimeId, browserHandoffPage?.id]);
+  const browserHandoff = useChatBrowserHandoff({
+    userId: currentUserId,
+    projectId: activeProjectId ?? null,
+    conversationId: activeConversationId,
+    transport: browserTransport,
+    open: browserSessionOpen,
+    canWrite: canWriteProject,
+    runtimeId: resolvedBrowserRuntimeId,
+    page: browserHandoffPage,
+    runs: activeConversationRuns,
+    personal: personalBrowser,
+    agentHandle: typingAgentHandle,
+    onSubmit,
+  });
+
   const handleStashDraft = useCallback(async (): Promise<boolean> => {
     if (!ensureProjectWriteAccess()) {
       return false;
@@ -5088,6 +5154,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           ];
 
         return (
+          <ChatScrollSnapshotBoundary identity={chatScrollMutationIdentity} messages={messages} capture={recordScrollPosition}>
           <div ref={rootRef} className="flex h-full min-h-0 flex-col overflow-hidden">
             <div
               className="flex-1 min-h-0 overflow-x-hidden overflow-y-auto px-3 pb-4 pt-2 sm:px-4 sm:pb-2"
@@ -5305,6 +5372,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           </Button>
         </div>
       </div>
+      </ChatScrollSnapshotBoundary>
     );
   }
 
@@ -5363,6 +5431,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 active={browserTransport === "personal" && browserSubtab === "browser"}
                 compactChrome={compactBrowserBar}
                 model={personalBrowser}
+                humanInputIdentityKey={browserHandoff.identityKey}
+                onContinueAfterHumanInput={browserHandoff.continuePersonal}
                 transportSelector={browserTransport === "personal" ? browserTransportSelector : null}
               />
               {sharedBrowserActivated ? (
@@ -5373,6 +5443,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     projectId={activeProjectId ?? null}
                     browserSessionId={sharedBrowserSurfaceSessionId}
                     preferRuntimeId={preferredBrowserRuntimeId}
+                    resumeRuntimeId={requestedSharedBrowserRuntimeId ?? exactBrowserRuntimeId}
                     expandRequestToken={browserSessionExpandRequestToken}
                     presentation="docked"
                     fillContainer
@@ -5385,10 +5456,19 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     canControlBrowser={canWriteProject}
                     canClearBrowserData={canWriteProject}
                     controlOwner={sharedBrowserControlOwner}
+                    currentUserId={currentUserId}
+                    humanInputIdentityKey={browserHandoff.identityKey}
+                    humanInputRunIds={browserHumanInputRunIds}
+                    activeBrowserRunId={browserHandoff.sharedJob?.runId ?? null}
+                    onTakeOverAgent={browserHandoff.sharedJob ? browserHandoff.takeOverShared : null}
+                    onContinueAfterHumanInput={browserHandoff.continueShared}
                     sharedBrowserChrome={sharedBrowserChrome}
                     sharedBrowserViewerKind={sharedBrowserViewerKind}
                     sharedBrowserCapabilitiesResolved={sharedBrowserCapabilitiesResolved}
                     sharedBrowserCapabilitiesAvailable={Boolean(sharedBrowserCapabilities)}
+                    sharedBrowserRoutineApprovalAvailable={
+                      sharedBrowserCapabilities?.approvalModes?.includes("routine") === true
+                    }
                     sharedBrowserAvailableViewerKinds={
                       sharedBrowserCapabilities?.viewerKinds
                     }
@@ -5396,7 +5476,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                     sharedBrowserWebRtcCapabilities={
                       sharedBrowserCapabilities?.webrtc ?? null
                     }
-                    onRuntimeIdResolved={handleBrowserRuntimeIdResolved}
+                    onRuntimeIdResolved={handleSharedBrowserRuntimeResolved}
                     onStatus={showStatus}
                   />
                 </div>
@@ -5437,6 +5517,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           />
         </ChatColumn>
       </div>
+      <ChatScrollSnapshotBoundary identity={chatScrollMutationIdentity} messages={messages} capture={recordScrollPosition}>
       <ChatTranscriptViewport
         ariaLabel={conversationLabel}
         onJumpToLatest={showJumpToLatest ? jumpToLatest : undefined}
@@ -5557,6 +5638,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
               rows.push(
                 <ConversationMessageRows
+                  scrollSnapshotKey={scrollSnapshotKey}
                   key="conversation-message-rows"
                   messages={displayedMessages}
                   allConversationMessages={collapsedConversationMessages}
@@ -5636,6 +5718,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           </div>
         </OctoScrollMotionScope>
       </ChatTranscriptViewport>
+      </ChatScrollSnapshotBoundary>
       </div>
 
       <ChatMessageMenuOverlay

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import type { WorkspaceGitReviewSource } from "../workspace/gitReviewTypes";
+import { useMobileSidebarHistory } from "./useMobileSidebarHistory";
+import { useNativeBackButtonAction } from "../native/useNativeBackButtonAction";
 
 export type LeftDrawerPanel = "history" | "files" | "sourceControl" | "workspaces";
 
@@ -49,6 +51,7 @@ function clampLeftDrawerWidth(value: number): number {
 
 interface UseStudioLayoutChromeStateParams {
   isLargeScreen: boolean;
+  scopeKey?: string | null;
 }
 
 export function shouldDismissLeftDrawerForKeydown(
@@ -59,7 +62,12 @@ export function shouldDismissLeftDrawerForKeydown(
 
 export function useStudioLayoutChromeState({
   isLargeScreen,
+  scopeKey = null,
 }: UseStudioLayoutChromeStateParams) {
+  const { mobileSidebarOpen, setMobileSidebarOpen, mobileSidebarNavigation, runAfterSidebarClose } =
+    useMobileSidebarHistory({ enabled: !isLargeScreen, scopeKey });
+  const backMobileSidebar = mobileSidebarNavigation.back;
+  useNativeBackButtonAction(mobileSidebarOpen, backMobileSidebar, 10);
   const [sidebarCollapsed, setSidebarCollapsedState] = useState(() =>
     readStoredSidebarCollapsed(),
   );
@@ -75,7 +83,6 @@ export function useStudioLayoutChromeState({
     },
     [],
   );
-  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [leftDrawer, setLeftDrawer] = useState<null | LeftDrawerPanel>(null);
   const [mobileGitReviewSheet, setMobileGitReviewSheet] = useState<WorkspaceGitReviewSource | null>(null);
   const [sourceControlOpenRequest, setSourceControlOpenRequest] = useState<SourceControlOpenRequest | null>(null);
@@ -198,32 +205,24 @@ export function useStudioLayoutChromeState({
   );
 
   useEffect(() => {
-    if (isLargeScreen) {
-      setMobileSidebarOpen(false);
-    } else if (leftDrawer === "workspaces") {
-      setMobileSidebarOpen(true);
-    } else if (leftDrawer) {
-      setMobileSidebarOpen(false);
-    }
-  }, [isLargeScreen, leftDrawer]);
-
-  useEffect(() => {
     if (!mobileSidebarOpen) {
       return;
     }
     const handleKeyDown = (event: KeyboardEvent) => {
       if (shouldDismissLeftDrawerForKeydown(event)) {
-        setMobileSidebarOpen(false);
+        backMobileSidebar();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [mobileSidebarOpen]);
+  }, [backMobileSidebar, mobileSidebarOpen]);
 
   useEffect(() => {
-    if (!leftDrawer) {
+    // A mobile workspace URL has its own route-aware dismissal owner. Let it
+    // pop/replace the visit rather than clearing UI state beneath the route.
+    if (!leftDrawer || (!isLargeScreen && leftDrawer === "workspaces")) {
       return;
     }
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -235,7 +234,7 @@ export function useStudioLayoutChromeState({
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [leftDrawer]);
+  }, [isLargeScreen, leftDrawer]);
 
   return {
     filesExplorerPortalTarget,
@@ -247,6 +246,8 @@ export function useStudioLayoutChromeState({
     leftDrawerWidth,
     mobileGitReviewSheet,
     mobileSidebarOpen,
+    mobileSidebarNavigation,
+    runAfterSidebarClose,
     setLeftDrawer,
     setMobileGitReviewSheet,
     setMobileSidebarOpen,

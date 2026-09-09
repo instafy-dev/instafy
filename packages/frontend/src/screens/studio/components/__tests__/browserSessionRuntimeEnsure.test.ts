@@ -6,6 +6,7 @@ import {
   resolveAutoRecyclableBrowserRuntimeIdentity,
   resolveAutoRecyclableBrowserRuntimeId,
   resolveBrowserRuntimeCandidate,
+  resolveBrowserRuntimeSelection,
   waitForBrowserRuntimeOrigin,
 } from "../browserSessionRuntimeEnsure";
 
@@ -43,6 +44,24 @@ function resolveCandidate(
 }
 
 describe("resolveBrowserRuntimeCandidate", () => {
+  const liveBrowser = (runtimeId: string) => createRuntimeEntry({ runtimeId, displayName: "Browser session", lastSeenAt: null,
+    origin: { originId: `origin-${runtimeId}`, endpoint: "https://origin.test", protocols: ["http"] } });
+
+  it("requires an explicit choice when multiple eligible sessions have no matching preference", () => {
+    const entries = [liveBrowser("first"), liveBrowser("second")];
+    expect(resolveBrowserRuntimeCandidate(entries, null)).toBeNull();
+    expect(resolveBrowserRuntimeSelection(entries, null).kind).toBe("choose");
+    expect(resolveBrowserRuntimeSelection(entries, "second")).toMatchObject({ kind: "selected", candidate: { runtimeId: "second" } });
+  });
+  it("never falls back from an exact missing target to another live session or new allocation", () => {
+    expect(resolveBrowserRuntimeSelection([liveBrowser("other")], "missing")).toMatchObject({ kind: "missing", runtimeId: "missing" });
+    expect(resolveBrowserRuntimeSelection([], "missing")).toEqual({ kind: "missing", runtimeId: "missing", candidates: [] });
+  });
+  it("selects a unique session or the exact explicit session", () => {
+    expect(resolveBrowserRuntimeSelection([liveBrowser("only")], null)).toMatchObject({ kind: "selected", candidate: { runtimeId: "only" } });
+    expect(resolveBrowserRuntimeSelection([liveBrowser("first"), liveBrowser("second")], "second")).toMatchObject({ kind: "selected", candidate: { runtimeId: "second" } });
+    expect(resolveBrowserRuntimeSelection([], null)).toEqual({ kind: "new", candidates: [] });
+  });
   it.each(["instafy-cloud", "instafy_cloud", " Instafy Cloud "])(
     "accepts the exact managed provider id %s",
     (provider) => {

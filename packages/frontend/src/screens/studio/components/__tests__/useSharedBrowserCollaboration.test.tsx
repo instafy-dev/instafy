@@ -84,6 +84,7 @@ describe("useSharedBrowserCollaboration", () => {
 
   afterEach(async () => {
     await act(async () => root.unmount());
+    vi.useRealTimers();
     container.remove();
     vi.unstubAllGlobals();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
@@ -181,5 +182,65 @@ describe("useSharedBrowserCollaboration", () => {
     expect(firstSocket.sent.map((value) => JSON.parse(value))).not.toContainEqual({
       type: "leave",
     });
+  });
+
+  it("clears local authority while reconnecting, then releases and leaves using the current socket", async () => {
+    vi.useFakeTimers();
+    const participants = [
+      { id: "self", displayName: "Taylor", canControl: true },
+      { id: "same-account-device", displayName: "Taylor", canControl: true },
+      { id: "viewer", displayName: "Anna", canControl: false },
+    ].map((participant) => ({
+      ...participant,
+      color: "#0ea5e9",
+      pageId: "page-1",
+      cursor: null,
+    }));
+    const state = (revision: number, owner: string | null) => ({
+      type: "state",
+      revision,
+      participants,
+      controlOwner: owner ? { kind: "human", participantId: owner } : null,
+      requests: [],
+    });
+    await act(async () => root.render(<Harness pageId="page-1" />));
+    const first = FakeWebSocket.instances[0];
+    await act(async () => {
+      first.emit("open");
+      first.emit("message", JSON.stringify({ type: "welcome", participantId: "self" }));
+      first.emit("message", JSON.stringify(state(1, "self")));
+    });
+    expect(collaborationSelfOwnsControl(latest!.client)).toBe(true);
+
+    await act(async () => first.close());
+    expect(latest!.client.connectionStatus).toBe("connecting");
+    expect(latest!.client.participantId).toBeNull();
+    expect(latest!.client.state).toBeNull();
+    expect(collaborationSelfOwnsControl(latest!.client)).toBe(false);
+    await act(async () => vi.advanceTimersByTime(1_000));
+    const replacement = FakeWebSocket.instances[1];
+    await act(async () => replacement.emit("open"));
+    expect(replacement.sent.map((value) => JSON.parse(value))).toContainEqual({
+      type: "join", sessionId: "session-1", pageId: "page-1",
+    });
+    await act(async () => {
+      replacement.emit("message", JSON.stringify({ type: "welcome", participantId: "self" }));
+    });
+    // A welcome alone does not restore authority, even for the same device.
+    expect(collaborationSelfOwnsControl(latest!.client)).toBe(false);
+    await act(async () => replacement.emit("message", JSON.stringify(state(2, "self"))));
+    expect(collaborationSelfOwnsControl(latest!.client)).toBe(true);
+
+    await act(async () => latest!.releaseControl());
+    expect(replacement.sent.map((value) => JSON.parse(value))).toContainEqual({ type: "releaseControl" });
+    expect(first.sent.map((value) => JSON.parse(value))).not.toContainEqual({ type: "releaseControl" });
+    await act(async () => replacement.emit("message", JSON.stringify(state(3, "same-account-device"))));
+    expect(collaborationSelfOwnsControl(latest!.client)).toBe(false);
+
+    await act(async () => root.render(null));
+    expect(replacement.sent.map((value) => JSON.parse(value))).toContainEqual({ type: "leave" });
+    expect(replacement.readyState).toBe(3);
+    await act(async () => vi.advanceTimersByTime(10_000));
+    expect(FakeWebSocket.instances).toHaveLength(2);
   });
 });

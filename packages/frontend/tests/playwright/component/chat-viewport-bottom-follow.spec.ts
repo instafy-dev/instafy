@@ -21,7 +21,7 @@ async function mount(page: Page) {
     const h = React.createElement;
     const messages = Array.from({length:12}, (_, index) => ({id:"row-"+index,content:"Fixture message "+index,role:"assistant",timestamp:index}));
     function Fixture() {
-      const controller = useChatScrollController({activeConversationId:"viewport-fixture",hasMoreHistory:false,isHistoryLoading:false,loadOlderMessages:()=>{},messages});
+      const controller = useChatScrollController({activeConversationId:"viewport-fixture",historyVisit:{key:"viewport-visit",userId:"viewport-user",projectId:"viewport-project",conversationId:"viewport-fixture"},hasMoreHistory:false,isHistoryLoading:false,loadOlderMessages:()=>{},messages});
       const rootRef = React.useRef(null);
       const composerOverlayRef = React.useRef(null);
       const layout = useChatComposerLayoutState({...controller,activeConversationId:"viewport-fixture",rootRef,composerOverlayRef,

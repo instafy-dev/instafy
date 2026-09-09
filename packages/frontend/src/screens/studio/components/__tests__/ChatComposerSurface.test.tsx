@@ -433,6 +433,24 @@ describe("ChatComposerSurface", () => {
     expect(onOpenImagePicker).toHaveBeenCalledTimes(1);
   });
 
+  it("owns the chat safe area and retains composer controls across keyboard transitions", async () => {
+    await act(async () => renderLayout({ compactBrowserViewport: true }));
+    const before = layoutNodes();
+    const input = container.querySelector('[data-testid="chat-input"]');
+    const editorWrapper = input?.parentElement;
+    const surface = layoutNodes().textRow!.closest("form")!;
+    expect(surface.style.paddingBottom).toContain("--instafy-safe-area-inset-bottom");
+    await act(async () => renderLayout({ compactBrowserViewport: true, nativeKeyboardOpen: true }));
+    expect(layoutNodes().textRow!.closest("form")).toBe(surface);
+    expect(surface.style.paddingBottom).toBe("0.5rem");
+    expect(layoutNodes()).toEqual(before);
+    expect(container.querySelector('[data-testid="chat-input"]')).toBe(input);
+    expect(input?.parentElement).toBe(editorWrapper);
+    await act(async () => renderLayout({ compactBrowserViewport: true, nativeKeyboardOpen: false }));
+    expect(surface.style.paddingBottom).toContain("--instafy-safe-area-inset-bottom");
+    expect(layoutNodes()).toEqual(before);
+  });
+
   describe.each([
     { client: "a voice-capable client", voiceInputSupported: true },
     { client: "a client without voice", voiceInputSupported: false },

@@ -28,6 +28,7 @@ import { isUUID } from "../../../utils/uuid";
 import { useWorkspaceControls } from "../workspaceControls";
 import { dispatchOpenBugReport } from "./bugReportEvents";
 import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
+import { useStudioNavigation } from "../../../navigation/useStudioNavigation";
 
 interface ProjectPickerPanelProps {
   onCreateProject: (
@@ -91,6 +92,7 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
   const { onOpenProjectSettings } = useWorkspaceControls();
   const controllerProjectMissing = runtime.controllerProjectMissing || projectAccessBlocked;
   const navigate = useNavigate();
+  const navigateToDestination = useStudioNavigation();
   const location = useLocation();
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const [newProjectName, setNewProjectName] = useState("");
@@ -262,20 +264,11 @@ export function ProjectPickerPanel({ onCreateProject, searchTerm, onSearchTermCh
       if (!projectId) {
         return;
       }
-      syncProjectQueryParam(projectId);
-      if (!projectList.some((project) => project.id === projectId)) {
-        const project = mergedProjects.find((entry) => entry.id === projectId);
-        createProject({
-          projectId,
-          projectName: project?.name ?? "Untitled space",
-          orgId: project?.orgId ?? null,
-          orgName: getOrgDisplayName(project?.orgName),
-        });
-      }
-      switchProject(projectId);
-      openPanelTab("chat");
+      // Selecting a row leaves a real overview visit to return to. URL-driven
+      // access hydration owns local creation, even for a newly discovered space.
+      navigateToDestination({ kind: "conversation", projectId });
     },
-    [createProject, mergedProjects, openPanelTab, projectList, switchProject, syncProjectQueryParam],
+    [navigateToDestination],
   );
 
   const handleOpenProjectSettingsFor = useCallback(

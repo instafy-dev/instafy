@@ -52,6 +52,7 @@ function Harness({
   metrics.current = { scrollHeight: scrollHeight ?? displayedMessages.length * ROW_HEIGHT, clientHeight };
   const controller = useChatScrollController({
     activeConversationId: conversationId,
+    historyVisit: { key: "indicator-visit", userId: "indicator-user", projectId: "indicator-project", conversationId },
     messages,
     displayedMessages,
     isInitialHistoryLoading: initialLoading,

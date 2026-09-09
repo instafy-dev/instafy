@@ -19,6 +19,10 @@ const BROWSER_ACTIONS_BUFFER_LIMIT = 30;
  */
 export function useBrowserSessionActions(params: {
   enabled: boolean;
+  /** False when the mounted Shared Browser surface is hidden. */
+  transportActive?: boolean;
+  /** Omitted for legacy consumers; null means no selected page, not all pages. */
+  pageId?: string | null;
   browserSessionId: string;
   projectId: string | null;
   preferRuntimeId: string | null;
@@ -27,15 +31,20 @@ export function useBrowserSessionActions(params: {
 }) {
   const {
     enabled,
+    transportActive = true,
+    pageId,
     browserSessionId,
     projectId,
     preferRuntimeId,
     onUnavailable = null,
     suspendOnUnavailable = false,
   } = params;
+  const pollingEnabled = enabled && transportActive;
   const [actions, setActions] = useState<RuntimeBrowserSessionAction[]>([]);
   const cursorRef = useRef<number>(0);
   const unavailableSuspendedRef = useRef(false);
+  const generationRef = useRef(0);
+  const inFlightGenerationRef = useRef<number | null>(null);
 
   const handleUnavailable = useCallback((): boolean => {
     unavailableSuspendedRef.current = suspendOnUnavailable;
@@ -46,7 +55,7 @@ export function useBrowserSessionActions(params: {
   }, [onUnavailable, suspendOnUnavailable]);
 
   const refresh = useCallback(async (): Promise<boolean> => {
-    if (!enabled || !projectId) {
+    if (!pollingEnabled || !projectId) {
       cursorRef.current = 0;
       unavailableSuspendedRef.current = false;
       setActions([]);
@@ -55,6 +64,12 @@ export function useBrowserSessionActions(params: {
     if (unavailableSuspendedRef.current) {
       return false;
     }
+    const generation = generationRef.current;
+    // A slow endpoint must not create overlapping polls with the same cursor.
+    if (inFlightGenerationRef.current === generation) {
+      return false;
+    }
+    inFlightGenerationRef.current = generation;
 
     let result;
     try {
@@ -65,13 +80,22 @@ export function useBrowserSessionActions(params: {
         sinceCursor: cursorRef.current,
       });
     } catch (error) {
+      if (generation !== generationRef.current) {
+        return false;
+      }
       if (controllerClient.browserSessions.isUnavailableError(error)) {
         return handleUnavailable();
       }
       throw error;
+    } finally {
+      if (inFlightGenerationRef.current === generation) {
+        inFlightGenerationRef.current = null;
+      }
     }
 
-    if (result === null) {
+    // A late response from a hidden surface or a replaced runtime cannot
+    // repopulate the ticker or advance the new session's byte cursor.
+    if (generation !== generationRef.current || result === null) {
       return false;
     }
     unavailableSuspendedRef.current = false;
@@ -96,22 +120,26 @@ export function useBrowserSessionActions(params: {
         : merged;
     });
     return true;
-  }, [browserSessionId, enabled, handleUnavailable, preferRuntimeId, projectId]);
+  }, [browserSessionId, pollingEnabled, handleUnavailable, preferRuntimeId, projectId]);
 
   useEffect(() => {
     unavailableSuspendedRef.current = false;
-  }, [browserSessionId, enabled, projectId, preferRuntimeId, suspendOnUnavailable]);
+  }, [browserSessionId, pollingEnabled, projectId, preferRuntimeId, suspendOnUnavailable]);
 
   // Byte offsets are per-runtime: a different project or runtime is a different
   // actions log, so re-sync from the start instead of tailing at a stale offset.
   // Defined before the poll effect so the reset lands before the next fetch.
   useEffect(() => {
+    generationRef.current += 1;
     cursorRef.current = 0;
     setActions([]);
-  }, [browserSessionId, projectId, preferRuntimeId]);
+    return () => {
+      generationRef.current += 1;
+    };
+  }, [browserSessionId, pollingEnabled, projectId, preferRuntimeId]);
 
   useEffect(() => {
-    if (!enabled || !projectId) {
+    if (!pollingEnabled || !projectId) {
       cursorRef.current = 0;
       setActions([]);
       return;
@@ -137,18 +165,32 @@ export function useBrowserSessionActions(params: {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [enabled, projectId, refresh]);
+  }, [pollingEnabled, projectId, refresh]);
+
+  // The log is runtime-wide, but pixels are page-scoped. Filter at render time
+  // so switching tabs immediately removes the old page's cursor and captions
+  // without resetting the byte cursor or refetching the log. Older unscoped
+  // telemetry is hidden whenever this surface supplies a page selection.
+  const visibleActions = useMemo(() => {
+    if (!pollingEnabled || !projectId) {
+      return [];
+    }
+    if (pageId === undefined) {
+      return actions;
+    }
+    return pageId ? actions.filter((action) => action.pageId === pageId) : [];
+  }, [actions, pageId, pollingEnabled, projectId]);
 
   // The most recent action that carries a click position, for the cursor overlay.
   const latestClick = useMemo(() => {
-    for (let index = actions.length - 1; index >= 0; index -= 1) {
-      const action = actions[index];
+    for (let index = visibleActions.length - 1; index >= 0; index -= 1) {
+      const action = visibleActions[index];
       if (action.type === "click" && action.x !== null && action.y !== null) {
         return action;
       }
     }
     return null;
-  }, [actions]);
+  }, [visibleActions]);
 
-  return { actions, latestClick, refresh };
+  return { actions: visibleActions, latestClick, refresh };
 }

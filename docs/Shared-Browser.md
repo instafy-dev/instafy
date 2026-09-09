@@ -37,6 +37,27 @@ the authorization boundary.
 
 There is no Team runtime mode. Adding one later requires host-local consent, separate browser/workspace/shell/network/hardware grants, visible viewer/controller identity, expirations, an immediate kill switch, audit events, live socket revocation, and an OS sandbox. See [Self-Hosted-Runtime-Security.md](./Self-Hosted-Runtime-Security.md).
 
+## Resume on another device
+
+**Sessions & resume** shows the current runtime identity and a **Copy resume link**
+action. The link contains only the space and runtime UUIDs; it grants no access
+and transfers no cookies, webpage URL, field values or browser-control token.
+Open it while signed in on another device to request that exact live Shared
+session. The new device is a separate participant and must acquire input control
+through the existing collaboration controls.
+
+Without an exact resume target, one eligible live Shared session is reused;
+multiple sessions require an explicit choice. A missing target and failed
+discovery never silently allocate or select a different browser. Reconnects stay
+pinned to the resolved session, and **Start new session** is an explicit
+Builder-or-higher action. Choosing or starting another session updates an incoming
+resume link once that session resolves, so closing, reopening or reloading keeps
+the new selection without replaying the original link. This resumes the runtime's currently focused live tab,
+not a per-device tab selection or a saved browsing-history record. If a runtime
+has ended, profile recovery and its limitations below still apply.
+Local resume preferences are scoped to the signed-in account, space and conversation;
+an account switch does not inherit another account's saved session choice.
+
 ## One browser shell, three pixel transports
 
 The Studio always owns the address bar, Go/history controls, status, errors, action ticker, and AI cursor. The runtime owns the page and profile.
@@ -200,13 +221,13 @@ browser path.
 
 ## Human approval policy
 
-Shared Browser uses confirmation, rather than a site denylist, as its
+Shared Browser defaults to confirmation, rather than a site denylist, as its
 sensitive-site policy. Before the agent can observe a page, the user who
 started the run must approve that exact normalized origin for the current run.
 Cross-origin navigation or controls require a separate origin approval before
 the destination can be read. Origin approval does not authorize an action.
 
-Every navigation, click, type, form submission, and key press then receives a
+In the default **Ask** mode, every navigation, click, type, form submission, and key press receives a
 separate one-shot action prompt bound to the run, runtime generation, page,
 fresh snapshot/target where applicable, destination, and payload fingerprint.
 The default-focused action is **Deny**. Only the initiating user with live
@@ -215,6 +236,35 @@ expired request, or a replay cannot satisfy it. Scroll is allowed only after
 the page origin has been approved because it changes no remote state. Typing
 authentication, payment, or identity secrets remains blocked outright and is
 not made possible by approval.
+
+The first site prompt also offers **Always allow routine browsing for this turn**
+when the runtime advertises `approvalModes: ["ask", "routine"]`. This is an
+explicit grant across HTTP(S) sites for the exact current run, initiating user,
+runtime generation and selected page—not permanent site trust, a project-wide
+default, or permission inherited by the next turn. Ordinary navigation, clicks,
+non-sensitive field filling and non-activation keys then proceed without another
+site/action prompt. Recognized consequential controls or URLs, form submissions,
+and Enter/Space activation still require one-shot confirmation. Secret entry,
+fresh-target checks, exact authority, denial and cancellation boundaries are
+unchanged. Stopping or completing the turn ends the grant.
+
+Button descriptors retain the browser's normalized type. An ordinary
+non-submitting button inside a form can therefore use the routine grant, while
+submission controls still ask. Consequential-action checks remain in force for
+both kinds of controls.
+
+Routine mode deliberately relaxes universal confirmation. Its consequence
+classifier uses page descriptors and URL text; it cannot prove that arbitrary
+website JavaScript has no side effects or recognize every language/custom control.
+Use **Ask** when reviewing every state-changing interaction is important.
+
+This is an additive runtime-origin policy choice, not caller-authored job metadata.
+Consent version `1` continues to attest the bounded browser lane and its default
+one-shot policy. The authenticated origin bridge accepts the new `allow_routine`
+decision only on an exact pending origin prompt, and the runtime stores it only
+inside that run's protected approval state. Older runtimes do not advertise it
+and reject that decision; older clients retain the existing Ask-only choices.
+No database migration, cookie copy or broader controller/workspace grant is added.
 
 A denial, timeout, stale request, revocation, storage failure, or malformed
 approval protocol is terminal for that browser run. The runtime latches the
@@ -232,6 +282,7 @@ The agent controls the page through one runtime-owned, required MCP server:
 instafy_shared_browser.status
 instafy_shared_browser.snapshot
 instafy_shared_browser.navigate / click / type / press / scroll
+instafy_shared_browser.request_human_input
 ```
 
 It exposes only status, bounded snapshots, navigation, click, type, key press,
@@ -273,6 +324,55 @@ defense-in-depth step against a deliberately hostile workspace process.
 At normal desktop widths Studio follows the runtime preference, so WebRTC is the primary low-latency lane when it is available. At compact widths Studio deliberately selects CDP screencast when advertised: CDP resizes the actual Chromium viewport and lets the page reflow, while a fixed-aspect video would otherwise be scaled or letterboxed. Returning to a wide layout restores the preferred WebRTC viewer without changing the Shared profile or page state.
 
 ## Responsive and touch behavior
+
+Expanded Shared Browser keeps its toolbar and viewport inside the device's
+safe-area insets, including macOS window controls and mobile cutouts. The
+background still fills the screen; ordinary web browsers with zero insets
+retain the full viewport. Insets update when a device rotates.
+
+The expanded portal also follows the visual viewport when a mobile keyboard
+shrinks only the visible area. The app's open Keyboard input bar reserves its
+own space above that keyboard, so it does not cover the remote page. These
+layout changes keep the same session, control lease, and focused app input;
+they do not automatically expand or reopen a browser.
+
+After a driver-authorized viewport shrink, the origin waits for Chromium to
+acknowledge the resize, rechecks input control, and scrolls an already-focused
+editable into view without changing focus or reading its value. This adjustment
+covers the main document and open shadow roots, not fields inside iframes.
+
+Navigation and expansion use the common icon-button styling; the address Go
+control also keeps a 44px minimum touch target on coarse-pointer devices.
+
+### Manual input handoff
+
+The browser bar exposes **Take over** for a manual step. Agent-requested handoff
+uses `request_human_input` with one to eight indices from a fresh snapshot. The
+trusted helper highlights those exact editable elements with fixed amber outlines
+and emits bounded, page/initiator-bound guidance through the existing action feed.
+The guidance contains generic labels, not field values or page text. Highlights
+follow the actual elements through scrolling/reflow and are removed by the next
+fresh agent snapshot; a replacement element does not inherit a stale highlight.
+
+The tool latches later agent observation and action for that turn. It does not
+remove the agent-control marker: manual input remains locked until the existing
+confirmed-shutdown path restores the human driver. A canceled controller run alone
+is not release proof. **Done, continue** explicitly starts a new turn on the same
+runtime/page with a fresh observation. It sends only a fixed continuation message,
+never the user's entered values. Account, conversation, runtime or page changes
+invalidate the continuation. Manual navigation drops stale field guidance but
+keeps the manual-step controls, so login redirects can finish before Done starts
+a fresh turn. A target change during asynchronous continuation aborts it; no
+hidden or stale completion may send it automatically.
+
+Action/cursor polling runs only while Shared is visible and filters the selected
+page. If the agent requests input while Chat is visible, the field guidance is
+loaded when Browser is reopened; there is not yet a separate conversation badge
+for manual-input requests. Site/action approval attention remains independent.
+
+This is stop-and-continue, not simultaneous human/agent editing or a paused live
+tool lending away control. Other teammates retain the ordinary Shared Browser
+visibility boundary; manual entry here is not a private Personal Browser session.
 
 There is one canonical Chromium viewport per Shared Browser runtime. The current
 human driver owns viewport resize; differently sized spectators do not fight it.
@@ -487,6 +587,23 @@ otherwise public sites; a future denylist may reduce prompt volume but is not
 an authorization substitute.
 
 ## Shared profile persistence and clearing
+
+The **Sessions & resume** panel reports controller-owned save metadata. **Login
+recovery off** means the project's persistence policy is disabled, not that its
+current remote browser cannot be shared. When enabled, a missing snapshot is
+shown as not ready; otherwise the panel shows the last acknowledged save time
+and whether that snapshot came from the currently selected runtime. An older
+snapshot may remain stored after policy is disabled. A failed or incompatible
+status request is **unknown**, never assumed to mean enabled or disabled.
+
+`GET /projects/:project_id/browser-profile/status` requires an authenticated
+user with project read access, including viewers. It returns only `enabled`,
+`lastSavedAt`, and `savedByRuntimeId`, with `Cache-Control: no-store`; it never
+reads or decrypts the archive and grants no runtime or input authority. The
+panel refreshes while open and visible, suppresses overlapping requests, and
+discards responses belonging to a previous account or project. This is a record
+of successful stored snapshots, not a live health check of every runtime's
+snapshot writer or a guarantee that the latest page changes were saved.
 
 Durable Shared Browser state reuses the Project Secrets security boundary
 rather than introducing another vault. The controller encrypts the pruned

@@ -81,7 +81,7 @@ impl ShutdownSignal {
 }
 
 struct HeartbeatTask {
-    stop_signal: Arc<Notify>,
+    stop_signal: ShutdownSignal,
     handle: JoinHandle<()>,
 }
 
@@ -93,7 +93,7 @@ impl HeartbeatTask {
         interval_seconds: u64,
         lease_lost_signal: Option<JobCancelSignal>,
     ) -> Self {
-        let stop_signal = Arc::new(Notify::new());
+        let stop_signal = ShutdownSignal::new();
         let stop_listener = stop_signal.clone();
         let lease_lost_signal = lease_lost_signal.clone();
         let handle = tokio::spawn(async move {
@@ -107,7 +107,8 @@ impl HeartbeatTask {
             let mut skip_first = true;
             loop {
                 tokio::select! {
-                    _ = stop_listener.notified() => {
+                    biased;
+                    _ = stop_listener.cancelled() => {
                         break;
                     }
                     _ = ticker.tick() => {
@@ -116,7 +117,12 @@ impl HeartbeatTask {
                             continue;
                         }
 
-                        if let Err(error) = client.heartbeat(&registration, job_id).await {
+                        let heartbeat = tokio::select! {
+                            biased;
+                            _ = stop_listener.cancelled() => break,
+                            result = client.heartbeat(&registration, job_id) => result,
+                        };
+                        if let Err(error) = heartbeat {
                             let message = error.to_string();
                             if message.contains("heartbeat lease lost") {
                                 warn!(job_id = %job_id, %message, "job lease lost during heartbeat; stopping job");
@@ -139,7 +145,7 @@ impl HeartbeatTask {
     }
 
     async fn shutdown(self) {
-        self.stop_signal.notify_waiters();
+        self.stop_signal.cancel();
         if let Err(error) = self.handle.await {
             if !error.is_cancelled() {
                 warn!(?error, "heartbeat task ended unexpectedly");
@@ -149,9 +155,13 @@ impl HeartbeatTask {
 }
 
 struct SecretsRefreshTask {
-    stop_signal: Arc<Notify>,
+    stop_signal: ShutdownSignal,
     handle: JoinHandle<()>,
 }
+
+#[cfg(test)]
+#[path = "agent_task_shutdown_tests.rs"]
+mod task_shutdown_tests;
 
 struct JobInputTask {
     stop_signal: ShutdownSignal,
@@ -366,7 +376,7 @@ impl SecretsRefreshTask {
         interval_seconds: u64,
         secret_env_keys: Arc<Mutex<HashSet<String>>>,
     ) -> Self {
-        let stop_signal = Arc::new(Notify::new());
+        let stop_signal = ShutdownSignal::new();
         let stop_listener = stop_signal.clone();
         let handle = tokio::spawn(async move {
             if interval_seconds == 0 {
@@ -380,7 +390,8 @@ impl SecretsRefreshTask {
             let mut skip_first = true;
             loop {
                 tokio::select! {
-                    _ = stop_listener.notified() => {
+                    biased;
+                    _ = stop_listener.cancelled() => {
                         break;
                     }
                     _ = ticker.tick() => {
@@ -389,7 +400,12 @@ impl SecretsRefreshTask {
                             continue;
                         }
 
-                        match client.fetch_job_secrets(&registration, job_id, false).await {
+                        let secrets = tokio::select! {
+                            biased;
+                            _ = stop_listener.cancelled() => break,
+                            result = client.fetch_job_secrets(&registration, job_id, false) => result,
+                        };
+                        match secrets {
                             Ok(secrets) => {
                                 apply_job_secrets(&secret_env_keys, &secrets);
                                 debug!(
@@ -415,7 +431,7 @@ impl SecretsRefreshTask {
     }
 
     async fn shutdown(self) {
-        self.stop_signal.notify_waiters();
+        self.stop_signal.cancel();
         if let Err(error) = self.handle.await {
             if !error.is_cancelled() {
                 warn!(?error, "secrets refresh task ended unexpectedly");

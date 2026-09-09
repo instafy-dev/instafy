@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
-import { act, StrictMode } from "react";
+import { act, StrictMode, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { BrowserRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { getPlatform, getInfo, setOverlaysWebView, addListener, removeListener } = vi.hoisted(() => ({
@@ -16,6 +17,17 @@ vi.mock("@capacitor/status-bar", () => ({ StatusBar: { getInfo, setOverlaysWebVi
 vi.mock("@capacitor/app", () => ({ App: { addListener } }));
 
 import { StudioMobileSidebarOverlay } from "../StudioMobileSidebarOverlay";
+import { useStudioLayoutChromeState } from "../../../useStudioLayoutChromeState";
+
+function RouteOwnedSidebar() {
+  const { mobileSidebarOpen, setMobileSidebarOpen } = useStudioLayoutChromeState({
+    isLargeScreen: false, scopeKey: "fixture-user:fixture-project",
+  });
+  useEffect(() => { setMobileSidebarOpen(true); }, [setMobileSidebarOpen]);
+  return mobileSidebarOpen
+    ? <StudioMobileSidebarOverlay onClose={() => setMobileSidebarOpen(false)}>Sidebar</StudioMobileSidebarOverlay>
+    : null;
+}
 
 let container: HTMLDivElement;
 let root: Root;
@@ -30,6 +42,7 @@ beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   vi.resetAllMocks();
   getPlatform.mockReturnValue("ios");
+  window.history.replaceState({ idx: 0, key: "chat-base", usr: null }, "", "/studio?panel=chat");
   getInfo.mockResolvedValue({ overlays: false });
   setOverlaysWebView.mockResolvedValue(undefined);
   removeListener.mockResolvedValue(undefined);
@@ -152,7 +165,12 @@ describe("mobile sidebar status-bar coverage", () => {
 
   it.each(["web", "android"])("does not change native chrome on %s", async (platform) => {
     getPlatform.mockReturnValue(platform);
-    await renderOverlay();
+    if (platform === "android") {
+      await act(async () => root.render(<BrowserRouter><RouteOwnedSidebar /></BrowserRouter>));
+      expect(document.querySelector('[data-testid="mobile-sidebar-overlay"]')).not.toBeNull();
+    } else {
+      await renderOverlay();
+    }
     expect(setOverlaysWebView).not.toHaveBeenCalled();
     if (platform === "android") {
       expect(addListener).toHaveBeenCalledWith("backButton", expect.any(Function));

@@ -1,5 +1,6 @@
 import { Capacitor } from "@capacitor/core";
 import { useEffect, useRef, type ReactNode } from "react";
+import { useMobileSidebarViewport } from "./useMobileSidebarViewport";
 import { Dialog, Modal, ModalOverlay } from "react-aria-components";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 
@@ -101,16 +102,17 @@ export function StudioMobileSidebarOverlay({
   onClose: () => void;
 }) {
   useSidebarStatusBarOverlay();
+  const { controlsRef, style } = useMobileSidebarViewport();
   const dialogRef = useRef<HTMLDivElement | null>(null);
   useNativeBackButtonAction(true, () => {
-    // Use the same dismissal path as Escape: a focused Team & spaces drill-in
-    // consumes it first, and React Aria dismisses only the topmost modal. Native
-    // Back must not fall through to WebView history while navigation is open.
+    // Let a focused drill-in or React Aria's topmost modal consume Escape before
+    // its existing dismissal callback changes the route. Keep this above route
+    // owners (10), but below explicit native dialog actions (100).
     const target = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
       ? document.activeElement
       : dialogRef.current;
     target?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
-  });
+  }, 20);
 
   return (
     <ModalOverlay
@@ -131,7 +133,9 @@ export function StudioMobileSidebarOverlay({
         }}
       >
         <Dialog ref={dialogRef} aria-label="Navigation and recent chats" className="h-full outline-none">
-          {children}
+          <div ref={controlsRef} className="relative h-full min-h-0" style={style} data-testid="mobile-sidebar-controls">
+            {children}
+          </div>
         </Dialog>
       </Modal>
     </ModalOverlay>

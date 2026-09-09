@@ -636,6 +636,11 @@ export function WorkspaceTabs({
       <div
         className={[
           `relative flex max-w-full flex-none items-end gap-2 bg-white pr-2 pb-0 pt-0 ${DARK_CANVAS_CLASS}`,
+          // Offset every interactive child, including leading Back/Forward and
+          // overflow controls, past the integrated macOS drag corner. Padding
+          // only the scrolling tab content leaves leading controls underneath it.
+          // pl-6 equals DESKTOP_TITLE_BAR_TAB_OFFSET_PX (24px).
+          titleBarFree ? "pl-6" : "",
           className ?? "",
         ]
           .filter(Boolean)
@@ -649,14 +654,6 @@ export function WorkspaceTabs({
         {leading ? <div className="relative z-10 flex flex-none items-end">{leading}</div> : null}
         <HorizontalTabStrip
           className="relative z-10"
-          // The integrated macOS title bar puts this strip on row zero, where
-          // the traffic lights live. Offset the content so the first tab
-          // starts clear of them; the shell's drag corner is sized to stop
-          // short of exactly this position.
-          // pl-6 is 24px: a literal, because Tailwind scans source text and
-          // would never emit a class built from a runtime value. The constant
-          // it must equal is asserted in the tests.
-          contentClassName={titleBarFree ? "flex w-max items-end pr-1 pl-6" : undefined}
           testId="workspace-tabs-strip"
           overflowActions={tabStripActions}
           inlineOverflowActionsTestId="workspace-tabs-inline-actions"

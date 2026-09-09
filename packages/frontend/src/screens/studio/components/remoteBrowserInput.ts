@@ -133,7 +133,24 @@ export function attachRemoteBrowserInput(
   let pressedButton: RemoteBrowserMouseButton = "none";
   let lastRemotePoint: { x: number; y: number } | null = null;
   let touchGesture: RemoteBrowserTouchGesture | null = null;
+  let pendingBeforeInputText: string | null = null;
+  let beforeInputTimer: number | null = null;
   const enabled = () => !disposed && (options.enabled?.() ?? true);
+
+  const clearPendingBeforeInput = () => {
+    pendingBeforeInputText = null;
+    if (beforeInputTimer !== null) {
+      window.clearTimeout(beforeInputTimer);
+      beforeInputTimer = null;
+    }
+  };
+  const suppressPairedBeforeInput = (text: string) => {
+    clearPendingBeforeInput();
+    pendingBeforeInputText = text;
+    // Some input methods emit a final insertText after compositionend. Do not
+    // suppress a later, independent insertion of the same character.
+    beforeInputTimer = window.setTimeout(clearPendingBeforeInput, 0);
+  };
 
   const remotePoint = (event: Pick<PointerEvent | WheelEvent, "clientX" | "clientY">) => {
     const viewport = options.getViewport();
@@ -378,6 +395,9 @@ export function attachRemoteBrowserInput(
           }),
     });
     event.preventDefault();
+    if (text) {
+      suppressPairedBeforeInput(text);
+    }
   };
   const onKeyUp = (event: KeyboardEvent) => {
     if (!enabled() || event.isComposing || event.key === "Process") {
@@ -400,7 +420,35 @@ export function attachRemoteBrowserInput(
     });
     event.preventDefault();
   };
+  const onBeforeInput = (event: InputEvent) => {
+    if (event.target !== element) {
+      return;
+    }
+    // A focused canvas/video can retain a selection in a previously focused
+    // local editor. Chromium's default text insertion would then edit that
+    // editor and move focus out of the remote page. Cancel that default where
+    // supported, including after this participant loses input authority.
+    event.preventDefault();
+    if (
+      !enabled() ||
+      !event.cancelable ||
+      event.isComposing ||
+      (event.inputType !== "insertText" && event.inputType !== "insertReplacementText")
+    ) {
+      return;
+    }
+    const text = boundedCdpScreencastText(event.data ?? "");
+    if (!text) {
+      return;
+    }
+    if (text === pendingBeforeInputText) {
+      clearPendingBeforeInput();
+      return;
+    }
+    options.send({ type: "text", text });
+  };
   const onPaste = (event: ClipboardEvent) => {
+    event.preventDefault();
     if (!enabled()) {
       return;
     }
@@ -409,8 +457,9 @@ export function attachRemoteBrowserInput(
       return;
     }
     options.send({ type: "text", text });
-    event.preventDefault();
+    suppressPairedBeforeInput(text);
   };
+  const onCompositionStart = () => clearPendingBeforeInput();
   const onCompositionEnd = (event: CompositionEvent) => {
     if (!enabled()) {
       return;
@@ -418,6 +467,7 @@ export function attachRemoteBrowserInput(
     const text = boundedCdpScreencastText(event.data);
     if (text) {
       options.send({ type: "text", text });
+      suppressPairedBeforeInput(text);
     }
   };
   const onVirtualInput = (event: Event) => {
@@ -497,7 +547,9 @@ export function attachRemoteBrowserInput(
   element.addEventListener("wheel", onWheel, { passive: false });
   element.addEventListener("keydown", onKeyDown);
   element.addEventListener("keyup", onKeyUp);
+  element.addEventListener("beforeinput", onBeforeInput);
   element.addEventListener("paste", onPaste);
+  element.addEventListener("compositionstart", onCompositionStart);
   element.addEventListener("compositionend", onCompositionEnd);
   element.addEventListener(REMOTE_BROWSER_VIRTUAL_INPUT_EVENT, onVirtualInput);
   element.addEventListener("contextmenu", onContextMenu);
@@ -505,6 +557,7 @@ export function attachRemoteBrowserInput(
   return {
     dispose: () => {
       disposed = true;
+      clearPendingBeforeInput();
       if (pointerMoveFrame !== null) {
         window.cancelAnimationFrame(pointerMoveFrame);
       }
@@ -516,7 +569,9 @@ export function attachRemoteBrowserInput(
       element.removeEventListener("wheel", onWheel);
       element.removeEventListener("keydown", onKeyDown);
       element.removeEventListener("keyup", onKeyUp);
+      element.removeEventListener("beforeinput", onBeforeInput);
       element.removeEventListener("paste", onPaste);
+      element.removeEventListener("compositionstart", onCompositionStart);
       element.removeEventListener("compositionend", onCompositionEnd);
       element.removeEventListener(REMOTE_BROWSER_VIRTUAL_INPUT_EVENT, onVirtualInput);
       element.removeEventListener("contextmenu", onContextMenu);

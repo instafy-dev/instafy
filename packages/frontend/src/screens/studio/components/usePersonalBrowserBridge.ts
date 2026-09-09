@@ -109,10 +109,13 @@ export function usePersonalBrowserBridge({
   active,
   profileUserId,
   projectId,
+  conversationBindingKey,
 }: {
   active: boolean;
   profileUserId: string | null;
   projectId: string | null;
+  /** Undefined preserves standalone use; null means no conversation may own control. */
+  conversationBindingKey?: string | null;
 }) {
   const [checked, setChecked] = useState(false);
   const [status, setStatus] = useState<InstafyDesktopPersonalBrowserStatus | null>(null);
@@ -135,6 +138,7 @@ export function usePersonalBrowserBridge({
   const openedIdentityScopeRef = useRef<string | null>(null);
   const personalBrowserOwnerIdRef = useRef<string | null>(null);
   const retiredPersonalBrowserOwnerIdRef = useRef<string | null>(null);
+  const retiredOwnerDispositionRef = useRef<"close" | "release">("close");
   const desiredIdentityScopeRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
   const runtimeStartIdentityScopeRef = useRef<string | null>(null);
@@ -142,14 +146,27 @@ export function usePersonalBrowserBridge({
   const agentControlMutationEpochRef = useRef(0);
   const clearDataMutationEpochRef = useRef(0);
   const observedHostRuntimeIdRef = useRef<string | null>(null);
-  const identityScope = personalBrowserIdentityScope(projectId, profileUserId);
+  const profileIdentityScope = personalBrowserIdentityScope(projectId, profileUserId);
+  const identityScope = !profileIdentityScope || conversationBindingKey === null
+    ? null
+    : conversationBindingKey === undefined
+      ? profileIdentityScope
+      : JSON.stringify([profileIdentityScope, conversationBindingKey]);
   const previousIdentityScopeRef = useRef(identityScope);
+  const previousProfileIdentityScopeRef = useRef(profileIdentityScope);
   desiredIdentityScopeRef.current = identityScope;
 
   useLayoutEffect(() => {
     if (previousIdentityScopeRef.current !== identityScope) {
       previousIdentityScopeRef.current = identityScope;
-      retiredPersonalBrowserOwnerIdRef.current = personalBrowserOwnerIdRef.current;
+      const disposition = profileIdentityScope !== null && previousProfileIdentityScopeRef.current === profileIdentityScope
+        ? "release" : "close";
+      if (personalBrowserOwnerIdRef.current) {
+        retiredPersonalBrowserOwnerIdRef.current = personalBrowserOwnerIdRef.current;
+        retiredOwnerDispositionRef.current = disposition;
+      } else if (disposition === "close") {
+        retiredOwnerDispositionRef.current = "close";
+      }
       personalBrowserOwnerIdRef.current = null;
       openAttemptEpochRef.current += 1;
       runtimeStartAttemptEpochRef.current += 1;
@@ -161,6 +178,7 @@ export function usePersonalBrowserBridge({
       setClearDataState("idle");
       setClearDataError(null);
     }
+    previousProfileIdentityScopeRef.current = profileIdentityScope;
     if (runtimeStartIdentityScopeRef.current !== identityScope) {
       runtimeStartIdentityScopeRef.current = identityScope;
       setRuntimeStartState("idle");
@@ -170,7 +188,7 @@ export function usePersonalBrowserBridge({
       setAgentError(null);
       observedHostRuntimeIdRef.current = null;
     }
-  }, [identityScope]);
+  }, [identityScope, profileIdentityScope]);
 
   const updateStatus = useCallback((next: InstafyDesktopPersonalBrowserStatus) => {
     if (!next.agentControlEnabled) {
@@ -217,6 +235,7 @@ export function usePersonalBrowserBridge({
     checked &&
       status?.supported &&
       status.enabled &&
+      identityScope !== null &&
       projectId &&
       profileUserId &&
       typeof browserBridge()?.personalBrowserOpen === "function" &&
@@ -243,7 +262,11 @@ export function usePersonalBrowserBridge({
     openedIdentityScopeRef.current = null;
     const bridge = browserBridge();
     if (bridge && ownerId) {
-      void closePersonalBrowserOwnership(bridge, ownerId);
+      // A conversation owns the opaque control lease, not the persistent
+      // profile. Reclaim the same DOM/cookies with a fresh owner after release.
+      void (retiredOwnerDispositionRef.current === "release"
+        ? releasePersonalBrowserOwnership(bridge, ownerId)
+        : closePersonalBrowserOwnership(bridge, ownerId));
     }
   }, [identityScope]);
 
@@ -622,7 +645,7 @@ export function usePersonalBrowserBridge({
     [invoke],
   );
   const setAgentControlEnabled = useCallback(
-    async (enabled: boolean) => {
+    async (enabled: boolean, approvalMode?: "ask" | "routine") => {
       const bridge = browserBridge();
       const ownerId = personalBrowserOwnerIdRef.current;
       if (
@@ -636,6 +659,7 @@ export function usePersonalBrowserBridge({
         const next = await bridge.personalBrowserSetAgentControlEnabled({
           enabled,
           ownerId,
+          ...(approvalMode ? { approvalMode } : {}),
         });
         if (
           !mountedRef.current ||
@@ -756,6 +780,7 @@ export function usePersonalBrowserBridge({
 
   const runtimeOverride = useMemo<SubmitConversationRuntimeOverride | null>(() => {
     const statusOwnedByHook =
+      identityScope !== null && openedIdentityScopeRef.current === identityScope &&
       Boolean(personalBrowserOwnerIdRef.current) &&
       status?.ownerId === personalBrowserOwnerIdRef.current;
     return resolvePersonalBrowserRuntimeOverride({
@@ -764,7 +789,7 @@ export function usePersonalBrowserBridge({
       browserState: statusOwnedByHook ? status?.state ?? null : null,
       runtimeId,
     });
-  }, [agentPhase, runtimeId, status?.agentControlEnabled, status?.ownerId, status?.state]);
+  }, [agentPhase, identityScope, runtimeId, status?.agentControlEnabled, status?.ownerId, status?.state]);
 
   return {
     agentError,
@@ -781,7 +806,7 @@ export function usePersonalBrowserBridge({
     navigate,
     navigationError,
     ownerId:
-      status?.ownerId === personalBrowserOwnerIdRef.current
+      identityScope !== null && openedIdentityScopeRef.current === identityScope && status?.ownerId === personalBrowserOwnerIdRef.current
         ? status.ownerId
         : null,
     reload,
