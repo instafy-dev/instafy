@@ -297,8 +297,9 @@ requires the locked Supabase CLI 2.92.0: its ten-image `services --output json`
 inventory is supplemented with the four ancillary images from that exact CLI.
 Full-stack mode prepares all 14 images, including disabled extras (an intentional
 download/disk cost); database-only mode prepares only its resolved Postgres image.
-The explicit Auth-only profile prepares five images after validating the same
-complete pinned inventory. Serial preparation itself does not change the selected
+The explicit Auth-only profile prepares seven images after validating the same
+complete pinned inventory: five persistent services plus Realtime and Storage
+images for the CLI's one-shot schema initialization. Serial preparation itself does not change the selected
 startup profile, skip tests, alter TLS, or increase runner limits.
 
 Preparation uses an empty temporary CLI/Docker home and anonymous public-ECR
@@ -325,6 +326,10 @@ status reader to report `API_URL`. Both initial startup and its existing retry
 exclude Realtime, Storage, imgproxy, Edge Runtime, Postgres Meta, Studio,
 Logflare, Vector and Supavisor. Template-mount verification, every migration,
 status resolution and all signup/email/OTP/activation assertions remain intact.
+With the pinned CLI 2.92.0 and Postgres 17, enabled Realtime and Storage still run
+their sequential initialization containers before service exclusions apply.
+Their images are therefore prepared too; configuration and schema initialization
+are not disabled merely because those persistent services are unnecessary here.
 
 For the same local profile, run `SUPABASE_AUTH_ONLY=1 pnpm supabase:up`, optionally
 with `SUPABASE_SERIAL_PULL=true`. Auth-only accepts only unset, `0` or `1`, and

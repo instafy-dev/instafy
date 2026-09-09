@@ -21,6 +21,10 @@ const SERVICE_NAMES = Object.freeze([
   "supabase/realtime", "supabase/storage-api", "supabase/edge-runtime",
   "supabase/studio", "supabase/postgres-meta", "supabase/logflare", "supabase/supavisor",
 ]);
+// PG17 cold initialization runs these enabled services' one-shot migrations
+// before persistent-service exclusions apply. Do not disable their schemas:
+// https://github.com/supabase/cli/blob/v2.92.0/internal/db/start/start.go#L317-L338
+const AUTH_SCHEMA_INITIALIZATION_IMAGES = Object.freeze(["realtime", "storage-api"]);
 
 export function parseSupabaseSerialPull(value) {
   if (value == null || value === "" || value === "false") return false;
@@ -56,7 +60,10 @@ export function serialPullImages(output, { databaseOnly = false, authOnly = fals
   if (!databaseOnly) images.push(...ANCILLARY_IMAGES);
   // Same default mapping as v2.92.0 internal/utils/docker.go GetRegistryImageUrl.
   return images.map((ref) => `public.ecr.aws/supabase/${ref.split("/").at(-1)}`)
-    .filter((ref) => !authOnly || !AUTH_ONLY_EXCLUDED_CONTAINERS.includes(ref.split("/").at(-1).split(":")[0]));
+    .filter((ref) => {
+      const name = ref.split("/").at(-1).split(":")[0];
+      return !authOnly || !AUTH_ONLY_EXCLUDED_CONTAINERS.includes(name) || AUTH_SCHEMA_INITIALIZATION_IMAGES.includes(name);
+    });
 }
 
 function optionalStat(target) {
