@@ -1458,20 +1458,22 @@ export function StudioSidebar({
           />
         ) : null}
         {desktopRail ? <div
-          className={`flex min-h-11 shrink-0 items-center gap-1 ${showLabels ? "" : "justify-center"}`}
+          className="flex min-h-11 shrink-0 items-center gap-1"
           data-testid="sidebar-team-header">
-            {showLabels ? <Button variant="ghost" size="sm" radius="lg" onPress={openSelectedTeam}
-              aria-label={`Open ${activeOrgName} overview`} className="min-w-0 flex-1 justify-start px-3 py-2">
-              <Text as="span" variant="bodyStrong" className="truncate">{activeOrgName}</Text>
-            </Button> : null}
+          <div className="flex w-[calc(4rem-1px)] shrink-0 items-center justify-center">
             <IconButton variant="ghost" size="sm"
               aria-label={showLabels ? "Collapse sidebar" : "Expand sidebar"}
               title={showLabels ? "Collapse sidebar" : "Expand sidebar"}
               aria-expanded={showLabels}
               data-testid="sidebar-drawer-toggle" onPress={onToggleSidebar}
-              isDisabled={!onToggleSidebar} className={showLabels ? "mr-1 shrink-0" : "shrink-0"}>
+              isDisabled={!onToggleSidebar} className="shrink-0">
               {showLabels ? <SidebarCollapse className="h-4 w-4" /> : <SidebarExpand className="h-4 w-4" />}
             </IconButton>
+          </div>
+            {showLabels ? <Button variant="ghost" size="sm" radius="lg" onPress={openSelectedTeam}
+              aria-label={`Open ${activeOrgName} overview`} className="min-w-0 flex-1 justify-start py-2 pl-2 pr-3">
+              <Text as="span" variant="bodyStrong" className="truncate">{activeOrgName}</Text>
+            </Button> : null}
         </div> : null}
         <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto overflow-x-hidden pb-2" data-testid="sidebar-context-scroll">
           {!desktopRail ? <li className="flex items-center gap-1" data-testid="sidebar-team-header">
