@@ -98,6 +98,19 @@ You can override the URL Electron loads:
 INSTAFY_APP_URL=https://prod.instafy.dev pnpm --filter @instafy/desktop-app start
 ```
 
+## Building behind a proxy
+
+Desktop builds download the bundled speech bootstrap installers through `HTTP_PROXY`,
+`HTTPS_PROXY`, and `NO_PROXY` when configured (lowercase names take precedence).
+Without proxy configuration they connect directly. This works on Node 20 without a
+global fetch override or Node startup flags; normal TLS verification and the checked-in
+installer SHA-256 trust anchors remain required. The downloader closes its own connections
+on success or failure and does not change networking for the running Desktop app.
+
+The focused downloader tests run with `node --test test/speech-bootstrap-proxy.test.mjs`
+from this package. They need OpenSSL to generate an ephemeral local HTTPS certificate;
+all proxy fixtures use loopback connections and need no external service or credentials.
+
 ## Building the runtime binary (dev)
 
 The desktop runtime launcher expects a locally-built `runtime-agent` binary:
