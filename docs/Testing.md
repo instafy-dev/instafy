@@ -63,6 +63,25 @@ Gitleaks gates without secrets or write permission. This gives release tooling
 an exact-main attestation while the pull-request lane remains base-owned and
 continues to treat candidate bytes only as unexecuted data.
 
+The boundary job alone has a temporary, default-off runner bootstrap switch:
+`CI_BOOTSTRAP_SELF_HOSTED=true`. It selects a disposable Linux ARM64 runner only
+while this repository is private, for same-repository `pull_request_target`
+events targeting `main` or pushes to protected `main`. Public repositories,
+fork pull requests, other events, and an unset or disabled switch retain
+`ubuntu-latest`. The respective organization runner groups are `instafy-ci-pr`
+and `instafy-ci-main`. A unique
+`instafy-ci-bootstrap-<repository-id>-<run-id>-<attempt>-boundary` label replaces
+the ordinary role label, so the bootstrap runner is scoped to this job and
+attempt. Runner provisioning must independently authenticate that exact job
+and destroy the disposable guest after it finishes. This switch does not
+enable other CI jobs, change protection, or authorize release work.
+
+Routing preserves the existing read-only permissions, trusted checkouts,
+candidate-as-data boundary, scanner version and scans. The installer verifies
+the pinned Gitleaks 8.30.1 archive for either Linux x64 or ARM64 and rejects
+unsupported architectures. Remove or disable the switch to restore hosted
+routing; no runner credentials or host configuration belong in this tree.
+
 The trusted gate rejects unreviewed environment templates, live
 environment/auth files, private-only package/product markers, personal paths,
 private hosts/networks, browser-exposed service-role names, token prefixes,

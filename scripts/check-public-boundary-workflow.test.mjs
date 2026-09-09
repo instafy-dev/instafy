@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import vm from "node:vm";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const workflowRoot = path.join(repositoryRoot, ".github", "workflows");
@@ -76,6 +77,102 @@ test("trusted boundary is restricted to main PR targets and protected-main pushe
     source,
     /group: trusted-public-boundary-\$\{\{ github\.event_name \}\}-\$\{\{ github\.event\.pull_request\.number \|\| github\.sha \}\}/u,
   );
+});
+
+function bootstrapRunner(github, toggle = "true") {
+  const source = readWorkflow("public-boundary.yml");
+  const match = source.match(/^    runs-on: >-\n((?:      .*\n)+)/mu);
+  assert.ok(match, "missing boundary bootstrap selector");
+  const expression = match[1].trim().replace(/^\$\{\{\s*|\s*\}\}$/gu, "");
+  assert.doesNotMatch(expression, /github\.job\b/u);
+  const result = vm.runInNewContext(expression, {
+    github,
+    vars: { CI_BOOTSTRAP_SELF_HOSTED: toggle },
+    fromJSON: JSON.parse,
+    format: (template, ...values) => template.replace(
+      /\{\{|\}\}|\{(\d+)\}/gu,
+      (match, index) => match === "{{" ? "{" : match === "}}" ? "}" : String(values[index]),
+    ),
+  }, { timeout: 1000 });
+  return JSON.parse(JSON.stringify(result));
+}
+
+function bootstrapContext(eventName = "pull_request_target") {
+  return {
+    repository: "instafy-dev/instafy",
+    repository_id: "1001",
+    run_id: "2002",
+    run_attempt: "1",
+    event_name: eventName,
+    ref: "refs/heads/main",
+    ref_protected: true,
+    event: {
+      repository: { private: true },
+      pull_request: {
+        base: { ref: "main", repo: { full_name: "instafy-dev/instafy" } },
+        head: { repo: { full_name: "instafy-dev/instafy", fork: false } },
+      },
+    },
+  };
+}
+
+test("bootstrap runner selection is default-off and refuses public, fork, or other events", () => {
+  for (const toggle of [undefined, "", "false", "0"]) {
+    // Missing repository variables resolve to an empty string in Actions.
+    assert.equal(bootstrapRunner(bootstrapContext(), toggle ?? ""), "ubuntu-latest");
+  }
+  const mutations = [
+    context => { context.event.repository.private = false; },
+    context => { context.repository = "someone/instafy"; },
+    context => { context.event.pull_request.base.ref = "topic"; },
+    context => { context.event.pull_request.base.repo.full_name = "someone/instafy"; },
+    context => { context.event.pull_request.head.repo.full_name = "someone/instafy"; },
+    context => { context.event.pull_request.head.repo.fork = true; },
+    context => { context.event_name = "pull_request"; },
+    context => { context.event_name = "workflow_dispatch"; },
+  ];
+  for (const mutate of mutations) {
+    const context = bootstrapContext();
+    mutate(context);
+    assert.equal(bootstrapRunner(context), "ubuntu-latest");
+  }
+  for (const mutate of [
+    context => { context.ref = "refs/heads/topic"; },
+    context => { context.ref_protected = false; },
+    context => { context.event.repository.private = false; },
+  ]) {
+    const context = bootstrapContext("push");
+    delete context.event.pull_request;
+    mutate(context);
+    assert.equal(bootstrapRunner(context), "ubuntu-latest");
+  }
+});
+
+test("bootstrap selection binds groups and the literal boundary key to each repository/run/attempt", () => {
+  for (const [eventName, trust] of [["pull_request_target", "pr"], ["push", "main"]]) {
+    const context = bootstrapContext(eventName);
+    if (eventName === "push") delete context.event.pull_request;
+    assert.deepEqual(bootstrapRunner(context), {
+      group: `org/instafy-ci-${trust}`,
+      labels: ["self-hosted", "Linux", "ARM64", "instafy-ci-bootstrap-1001-2002-1-boundary", `instafy-ci-trust-${trust}`],
+    });
+    for (const key of ["repository_id", "run_id", "run_attempt"]) {
+      const other = structuredClone(context);
+      other[key] = "9009";
+      assert.notEqual(bootstrapRunner(other).labels[3], bootstrapRunner(context).labels[3]);
+    }
+    assert.ok(!bootstrapRunner(context).labels.includes("instafy-ci-control"));
+  }
+});
+
+test("bootstrap routing leaves job identity, permissions, timeout and check inventory unchanged", () => {
+  const source = readWorkflow("public-boundary.yml");
+  assert.equal((source.match(/^    runs-on:/gmu) ?? []).length, 1);
+  assert.match(source, /^  boundary:\n    name: Public boundary \(trusted base\)$/mu);
+  assert.match(source, /^    timeout-minutes: 20$/mu);
+  assert.match(source, /^    permissions:\n      contents: read\n      pull-requests: read$/mu);
+  assert.doesNotMatch(source, /secrets\.|instafy-ci-(?:control|build)|CI_SELF_HOSTED/u);
+  assert.equal((source.match(/^      - name:/gmu) ?? []).length, 12);
 });
 
 test("protected-main boundary binds and scans the exact pushed commit", () => {
@@ -463,7 +560,10 @@ test("trusted boundary checkouts are separate, pinned, and non-persistent", () =
   assert.match(candidateCheckout, /submodules: false/u);
   assert.match(candidateCheckout, /lfs: false/u);
   assert.match(candidateCheckout, /allow-unsafe-pr-checkout: true/u);
-  assert.doesNotMatch(source, /pull_request\.head\.repo|github\.head_ref/iu);
+  // Head repository metadata is allowed only in the runner eligibility check,
+  // never in a checkout or any execution step.
+  const executionSource = source.replace(/^    runs-on: >-\n(?:      .*\n)+/mu, "");
+  assert.doesNotMatch(executionSource, /pull_request\.head\.repo|github\.head_ref/iu);
 });
 
 test("trusted boundary binds the server merge ref to both event parents", () => {
@@ -594,6 +694,12 @@ test("pinned Gitleaks scans paths and a path-independent tracked-file stream", (
     source,
     /GITLEAKS_LINUX_X64_SHA256: "[0-9a-f]{64}"/u,
   );
+  assert.match(source, /GITLEAKS_LINUX_ARM64_SHA256: "e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080"/u);
+  assert.match(source, /x86_64\) asset=linux_x64; checksum="\$GITLEAKS_LINUX_X64_SHA256"/u);
+  assert.match(source, /aarch64\) asset=linux_arm64; checksum="\$GITLEAKS_LINUX_ARM64_SHA256"/u);
+  assert.match(source, /\*\) echo "::error::Unsupported Linux scanner architecture\."; exit 1/u);
+  assert.match(source, /gitleaks_\$\{GITLEAKS_VERSION\}_\$\{asset\}\.tar\.gz/u);
+  assert.match(source, /printf '%s  %s\\n' "\$checksum" "\$archive" \| sha256sum --check --status/u);
   assert.match(source, /sha256sum --check --status/u);
   assert.match(encodedMarkerProbe, /printf '%s' 'inter''nal\.instafy\.dev'/u);
   assert.match(encodedMarkerProbe, /\| base64 \| tr -d '\\n'/u);
