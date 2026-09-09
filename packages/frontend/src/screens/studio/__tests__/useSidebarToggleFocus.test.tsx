@@ -74,7 +74,7 @@ describe("desktop sidebar toggle focus", () => {
     expect(document.activeElement).toBe(other);
   });
 
-  it.each(["sidebar-recent-chats-popover", "sidebar-more-menu"])("restores focus from %s removed when expanding", async (testId) => {
+  it.each(["sidebar-recent-chats-popover", "sidebar-more-menu", "sidebar-team-menu"])("restores focus from %s removed when expanding", async (testId) => {
     popoverTestId = testId;
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="sidebar-drawer-toggle"]')!.click());
     const detail = document.querySelector<HTMLButtonElement>('[data-testid="popover-detail"]')!;

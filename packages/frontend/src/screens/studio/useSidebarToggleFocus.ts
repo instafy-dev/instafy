@@ -1,7 +1,7 @@
 import { useCallback, useLayoutEffect, useRef } from "react";
 
 const CONTEXT = '[data-testid="sidebar-context-navigation"]';
-const FOCUS_SOURCE = `${CONTEXT}, [data-testid="sidebar-recent-chats-popover"], [data-testid="sidebar-more-menu"]`;
+const FOCUS_SOURCE = `${CONTEXT}, [data-testid="sidebar-recent-chats-popover"], [data-testid="sidebar-more-menu"], [data-testid="sidebar-team-menu"]`;
 /** Keep focus in the desktop rail if changing width removes its focused detail. */
 export function useSidebarToggleFocus(isLargeScreen: boolean, sidebarCollapsed: boolean) {
   const sourceRef = useRef<Element | null>(null);

@@ -102,9 +102,12 @@ Browse teams and the account controls below it. Browse teams shows the signed-in
 account's accessible teams and spaces; it is not a public team directory.
 Invitation links continue to use the existing invitation acceptance flow.
 
-The context sidebar names the selected team and opens its overview from that
-heading. Team overview and Team settings precede the space selector, which groups
-Chats, Automations, Files and Changes. Less frequent tools, personal AI connections
+On desktop, clicking the selected team name in the context header opens an
+anchored menu for Team overview and Team settings. The space selector sits
+immediately below that header and groups Chats, Automations, Files and Changes.
+The compact rail provides the same menu through a single team icon. On mobile,
+Team overview and Team settings remain direct actions in the navigation drawer.
+Less frequent tools, personal AI connections
 and Credits remain available through More. The desktop space picker shows only
 the selected team's spaces; Browse teams retains the full team-and-space picker.
 Home and account pages hide the team-specific desktop sidebar.

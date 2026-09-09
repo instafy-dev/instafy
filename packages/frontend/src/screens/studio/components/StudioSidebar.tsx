@@ -81,6 +81,7 @@ import { useDesktopReleaseLookup } from "../../../updates/useDesktopReleaseLooku
 import { StudioSidebarAccountSection } from "./StudioSidebarAccountSection";
 import { StudioSidebarMobileDrillIn } from "./StudioSidebarMobileDrillIn";
 import { StudioSidebarMorePanels } from "./StudioSidebarMorePanels";
+import { StudioSidebarTeamMenu } from "./StudioSidebarTeamMenu";
 import { StudioSidebarWorkspaceSwitcher } from "./StudioSidebarWorkspaceSwitcher";
 import { StudioSidebarWorkspacePanel } from "./StudioSidebarWorkspacePanel";
 import { StudioOrganizationRail } from "./StudioOrganizationRail";
@@ -302,9 +303,9 @@ export function StudioSidebar({
   );
   const alwaysCollapsedMoreItemIds = useMemo(() => new Set<StudioPanel>(["secrets"]), []);
   const hasRecentChats = Boolean(onSelectConversation);
-  // Desktop keeps its header, Team, Settings and space selector in this
-  // column; Home and account controls live in the separate global rail.
-  const fixedEntryCount = (desktopRail ? 4 : showLabels ? 5 : 6) + items.length + (onOpenConversationHistory && !hasRecentChats ? 1 : 0);
+  // Desktop has a header and space selector, plus a team-menu icon when
+  // compact. Home/account controls live in the separate global rail.
+  const fixedEntryCount = (desktopRail ? showLabels ? 2 : 3 : showLabels ? 5 : 6) + items.length + (onOpenConversationHistory && !hasRecentChats ? 1 : 0);
   const recentChatsReservePx = hasRecentChats && showLabels && recentChatsExpanded
     ? Math.max(1, Math.min(recentConversations.length, SIDEBAR_RECENT_CHAT_LIMIT)) * 40 + 56
     : 0;
@@ -1285,6 +1286,22 @@ export function StudioSidebar({
       else onSelect("team");
     });
   };
+  const openSelectedTeamSettings = () => {
+    resetWorkspaceSwitcher();
+    closeMoreMenu();
+    runDestination(() => onOpenOrgSettings?.(activeOrgKey));
+  };
+  // A selected-team/account/page change discards any open menu, including
+  // changes that retain the same loaded project behind a global panel.
+  const teamMenu = <StudioSidebarTeamMenu
+    key={JSON.stringify([activeTeamUserKey, activeOrgKey, activeProjectId, activePanel])}
+    teamName={activeOrgName} compact={!showLabels}
+    active={activePanel === "team" || activePanel === "settings"}
+    rowClassName={`${sidebarRowLayoutClass} ${getSidebarRowToneClass(activePanel === "team" || activePanel === "settings")}`}
+    iconClassName={getSidebarNavIconClass(activePanel === "team" || activePanel === "settings")}
+    onOpenOverview={openSelectedTeam}
+    onOpenSettings={activeOrgKey !== "personal" && onOpenOrgSettings ? openSelectedTeamSettings : undefined}
+  />;
   const selectedTeamRole = controllerOrgs.find((org) => org.id === activeOrgKey)?.role;
   const canCreateSelectedTeamSpace = activeOrgKey === "personal" || ["owner", "admin", "builder"].includes(selectedTeamRole ?? "");
 
@@ -1470,10 +1487,7 @@ export function StudioSidebar({
               {showLabels ? <SidebarCollapse className="h-4 w-4" /> : <SidebarExpand className="h-4 w-4" />}
             </IconButton>
           </div>
-            {showLabels ? <Button variant="ghost" size="sm" radius="lg" onPress={openSelectedTeam}
-              aria-label={`Open ${activeOrgName} overview`} className="min-w-0 flex-1 justify-start py-2 pl-2 pr-3">
-              <Text as="span" variant="bodyStrong" className="truncate">{activeOrgName}</Text>
-            </Button> : null}
+          {showLabels ? teamMenu : null}
         </div> : null}
         <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto overflow-x-hidden pb-2" data-testid="sidebar-context-scroll">
           {!desktopRail ? <li className="flex items-center gap-1" data-testid="sidebar-team-header">
@@ -1572,7 +1586,8 @@ export function StudioSidebar({
             </Button>
           </li> : null}
 
-          <li>
+          {desktopRail && !showLabels ? <li>{teamMenu}</li> : null}
+          {!desktopRail ? <li>
             <Button variant="ghost" size="sm" radius="lg" fullWidth data-testid="sidebar-nav-team"
               aria-label="Open team" aria-current={activePanel === "team" ? "page" : undefined}
               title={showLabels ? undefined : `${activeOrgName} overview`}
@@ -1581,19 +1596,19 @@ export function StudioSidebar({
               <span className={getSidebarNavIconClass(activePanel === "team")}><Group className="h-5 w-5" aria-hidden="true" /></span>
               {showLabels ? <span className="text-sm font-medium">Team overview</span> : null}
             </Button>
-          </li>
-          {activeOrgKey !== "personal" ? <li>
+          </li> : null}
+          {!desktopRail && activeOrgKey !== "personal" ? <li>
             <Button variant="ghost" size="sm" radius="lg" fullWidth aria-label="Team settings" data-testid="sidebar-settings"
               title={showLabels ? undefined : "Team settings"}
               className={`${sidebarRowLayoutClass} ${getSidebarRowToneClass(activePanel === "settings")}`}
-              onPress={() => { resetWorkspaceSwitcher(); closeMoreMenu(); runDestination(() => onOpenOrgSettings?.(activeOrgKey)); }}
+              onPress={openSelectedTeamSettings}
               isDisabled={!onOpenOrgSettings}>
               <span className={getSidebarNavIconClass(activePanel === "settings")}><Settings className="h-5 w-5" aria-hidden="true" /></span>
               {showLabels ? <span className="text-sm font-medium">Team settings</span> : null}
             </Button>
           </li> : null}
           {selectedTeamHasActiveSpace ? <>
-          <li className="mt-3 border-t border-slate-200/70 pt-2 dark:border-[color:var(--color-studio-dark-divider)]">
+          <li className={`${desktopRail ? "pt-1" : "mt-3 pt-2"} border-t border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]`}>
             <Button variant="ghost" size="sm" radius="lg" fullWidth data-testid="sidebar-space-button"
               ref={spaceTriggerRef}
               aria-label={`Choose space: ${activeProjectName}`} onPress={() => openWorkspaceSwitcher(desktopRail ? "spaces" : "teams-and-spaces")}
@@ -1761,7 +1776,7 @@ export function StudioSidebar({
             moreIndicator={moreIndicator}
             selectedMoreKeys={selectedMoreKeys}
           />
-          </> : <li className={`${showLabels ? "mx-3" : ""} mt-3 border-t border-slate-200/70 pt-3 dark:border-[color:var(--color-studio-dark-divider)]`} data-testid="sidebar-no-selected-space">
+          </> : <li className={`${showLabels ? "mx-3" : ""} ${desktopRail ? "pt-2" : "mt-3 pt-3"} border-t border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]`} data-testid="sidebar-no-selected-space">
             {showLabels ? <Text as="p" variant="caption" tone="muted">Choose a space in this team to open its tools.</Text> : null}
             <Button variant="ghost" size="sm" fullWidth={!showLabels}
               onPress={() => openWorkspaceSwitcher(desktopRail ? "spaces" : "teams-and-spaces")}
