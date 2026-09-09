@@ -288,6 +288,42 @@ For the full-stack suites, run the local stack first:
 - `pnpm stack:up`
 - `pnpm stack:down` when finished.
 
+## Disposable database and auth-email CI
+
+The independent, default-off `CI_DATABASE_SELF_HOSTED=true` switch covers only
+`Controller database tests` (30 minutes) and `signup -> email -> activate`
+(25 minutes). Both preserve their complete existing commands, frozen Node20
+workspace installation, and read-only checkout. Controller tests use the local
+Postgres-only stack and all public migrations; auth-email starts the full local
+Supabase stack, including GoTrue and its mail catcher. Neither lane needs
+production credentials, an external mailbox, a deployment, or released images.
+
+Only private, same-repository PRs to `main` and protected-main pushes may use
+native Linux ARM64 guests in the corresponding `instafy-ci-pr` or
+`instafy-ci-main` group. Forks, public visibility, manual dispatches and disabled
+switches retain hosted Ubuntu. Exclusive label suffixes are
+`public-controller-db` and `public-auth-email`, prefixed with the repository ID,
+run ID and attempt as in the other bounded lanes. Separate source authentication,
+exact job assignment, complete guest destruction and credential revocation are
+still provisioning requirements; the inline prerequisite check cannot prove them.
+
+The controller needs native Rust, a C/C++ compiler, Make, pkg-config and OpenSSL
+development files. Its protobuf compiler is vendored by the locked Rust build,
+not a host installation. Cargo uses two compile jobs and an OS/architecture/lock-
+specific cache. Auth-email does not compile Rust. Both need a real ARM64 Linux
+Docker daemon, with its own restricted download proxy and loopback bypass for
+the disposable stack. No cross-architecture Docker cache is introduced. Keep
+TLS verification enabled. Both workflows stop their local stack on exit; failed
+or interrupted cleanup still requires destruction of the whole guest.
+
+Run `node --test scripts/check-database-ci-routing.test.mjs` for selector,
+command-parity, prerequisite and cache regressions. These are not real cold ARM
+workload qualification. Before enabling the switch, the manager must admit both
+exact workflow identities, all four PR/push tuples and the 25-minute Listener
+budget, then prove both complete workloads and cleanup within the unchanged
+bounded worker lifecycle. Disable the switch for hosted routing of new runs;
+already queued runs do not move pools automatically.
+
 ## Support workflow simulation
 
 The support component browser suite exercises the production profile menu, report composer,
