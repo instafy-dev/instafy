@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { AUTH_ONLY_EXCLUDED_CONTAINERS } from "./supabaseStartMode.mjs";
+import { AUTH_ONLY_EXCLUDED_CONTAINERS, BROWSER_TEST_EXCLUDED_CONTAINERS } from "./supabaseStartMode.mjs";
 import {
   SERIAL_PULL_CLI_VERSION, SERIAL_PULL_BUDGET_MS, parseSupabaseSerialPull,
   serialPullImages, serialPullEnvironment, prepareSupabaseSerialPull,
@@ -115,14 +115,50 @@ test("Auth-only preparation pulls exactly seven images with the same finite budg
   assert.equal(h.calls.length, 9);
 });
 
+test("browser-test selection validates every service before excluding only the Edge Runtime image", () => {
+  const full = serialPullImages(JSON.stringify(inventory()));
+  const selected = serialPullImages(JSON.stringify(inventory().reverse()), { browserTest: true });
+  assert.equal(selected.length, 13);
+  assert.deepEqual(full.filter((image) => !selected.includes(image)), ["public.ecr.aws/supabase/edge-runtime:v1.73.3"]);
+  assert.deepEqual(selected, full.filter((image) => !image.includes("/edge-runtime:")));
+  assert.deepEqual(BROWSER_TEST_EXCLUDED_CONTAINERS, ["edge-runtime"]);
+  for (const mutate of [r => r.pop(), r => { r[5].local = "latest"; }, r => { r[5].name = r[6].name; },
+    r => { r[5].remote = "v1"; }, r => { r[5].unexpected = "inert"; }]) {
+    const invalid = inventory(); mutate(invalid);
+    assert.throws(() => serialPullImages(JSON.stringify(invalid), { browserTest: true }), /inventory-invalid/);
+  }
+});
+
+test("browser-test preparation pulls thirteen images sequentially with unchanged budgets and private cleanup", (t) => {
+  const h = harness(t);
+  assert.deepEqual(h.run({ env: { PATH: "/usr/bin:/bin", SUPABASE_SERIAL_PULL: "true", SUPABASE_BROWSER_TEST: "1" } }),
+    { enabled: true, images: 13, pulled: 13 });
+  const images = serialPullImages(JSON.stringify(inventory()), { browserTest: true });
+  assert.equal(h.calls.length, 41);
+  for (let index = 0; index < images.length; index += 1) {
+    const group = h.calls.slice(2 + index * 3, 5 + index * 3);
+    assert.deepEqual(group.map(({ args }) => args[0]), ["image", "pull", "image"]);
+    assert.ok(group.every(({ args }) => args.at(-1) === images[index]));
+  }
+  assert.ok(h.calls.every(({ options }) => options.timeout <= 180_000 && options.killSignal === "SIGKILL"));
+  assert.ok(h.calls.every(({ options }) => options.env.SUPABASE_BROWSER_TEST === undefined));
+  assert.equal(fs.existsSync(h.calls[0].options.env.HOME), false);
+  h.calls.length = 0;
+  assert.deepEqual(h.run({ browserTest: true }), { enabled: true, images: 13, pulled: 0 });
+  assert.equal(h.calls.length, 15);
+});
+
 test("serial image profiles reject ambiguous booleans and conflicting flags before commands", (t) => {
-  for (const options of [{ databaseOnly: true, authOnly: true }, { authOnly: "1" }, { databaseOnly: "1" }]) {
+  for (const options of [{ databaseOnly: true, authOnly: true }, { authOnly: "1" }, { databaseOnly: "1" },
+    { browserTest: "1" }, { browserTest: true, databaseOnly: true }, { browserTest: true, authOnly: true }]) {
     const h = harness(t);
     assert.throws(() => serialPullImages(JSON.stringify(inventory()), options), /start-mode-invalid/);
     assert.throws(() => h.run(options), /start-mode-invalid/);
     assert.equal(h.calls.length, 0);
   }
-  for (const flags of [{ SUPABASE_AUTH_ONLY: "true" }, { SUPABASE_DATABASE_ONLY: "1", SUPABASE_AUTH_ONLY: "1" }]) {
+  for (const flags of [{ SUPABASE_AUTH_ONLY: "true" }, { SUPABASE_DATABASE_ONLY: "1", SUPABASE_AUTH_ONLY: "1" },
+    { SUPABASE_BROWSER_TEST: "true" }, { SUPABASE_BROWSER_TEST: "1", SUPABASE_AUTH_ONLY: "1" },
+    { SUPABASE_BROWSER_TEST: "1", SUPABASE_DATABASE_ONLY: "1" }]) {
     const h = harness(t);
     assert.throws(() => h.run({ env: { SUPABASE_SERIAL_PULL: "true", ...flags } }), /must be unset|start-mode-invalid/);
     assert.equal(h.calls.length, 0);
@@ -234,7 +270,7 @@ test("total preparation budget is finite and cannot reset between images", (t) =
 
 test("startup integration preserves commands and keeps preparation outside the retry catch", () => {
   const source = fs.readFileSync(new URL("../supabase-stack.mjs", import.meta.url), "utf8");
-  assert.match(source, /prepareSupabaseSerialPull\(\{ repoRoot, databaseOnly, authOnly \}\);[\s\S]*?try \{\n    runSupabase\(startArgs\);/);
+  assert.match(source, /prepareSupabaseSerialPull\(\{ repoRoot, databaseOnly, authOnly, browserTest \}\);[\s\S]*?try \{\n    runSupabase\(startArgs\);/);
   assert.equal((source.match(/prepareSupabaseSerialPull\(\{/g) ?? []).length, 1);
   assert.match(source, /function ensureSupabase\(\)[\s\S]*?if \(existingEnv\)[\s\S]*?return \{ env: existingEnv, started: false \};/);
 });

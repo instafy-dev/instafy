@@ -323,6 +323,8 @@ jobs:
             .cargo-target
           key: shared-browser-cargo-v1-${{ runner.os }}-${{ runner.arch }}-public-shared-browser-profile-${{ hashFiles('packages/*/Cargo.lock') }}
       - name: Start disposable migrated Supabase and local authentication
+        env:
+          SUPABASE_BROWSER_TEST: "1"
         run: |
           node scripts/ensure-supabase-postgres-image.mjs
           pnpm supabase:up
@@ -456,6 +458,8 @@ jobs:
             .cargo-target
           key: shared-browser-cargo-v1-${{ runner.os }}-${{ runner.arch }}-public-shared-browser-studio-${{ hashFiles('packages/*/Cargo.lock') }}
       - name: Start disposable migrated Supabase and local authentication
+        env:
+          SUPABASE_BROWSER_TEST: "1"
         run: |
           node scripts/ensure-supabase-postgres-image.mjs
           pnpm supabase:up

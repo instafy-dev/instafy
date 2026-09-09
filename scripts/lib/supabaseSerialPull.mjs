@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
 import {
-  AUTH_ONLY_EXCLUDED_CONTAINERS, parseSupabaseAuthOnly, parseSupabaseDatabaseOnly,
+  AUTH_ONLY_EXCLUDED_CONTAINERS, BROWSER_TEST_EXCLUDED_CONTAINERS,
+  parseSupabaseAuthOnly, parseSupabaseBrowserTest, parseSupabaseDatabaseOnly,
 } from "./supabaseStartMode.mjs";
 
 export const SERIAL_PULL_CLI_VERSION = "2.92.0";
@@ -32,14 +33,15 @@ export function parseSupabaseSerialPull(value) {
   throw new Error("SUPABASE_SERIAL_PULL must be unset, false, or true");
 }
 
-function assertModes(databaseOnly, authOnly) {
-  if (typeof databaseOnly !== "boolean" || typeof authOnly !== "boolean" || (databaseOnly && authOnly)) {
+function assertModes(databaseOnly, authOnly, browserTest) {
+  if ([databaseOnly, authOnly, browserTest].some((value) => typeof value !== "boolean")
+    || [databaseOnly, authOnly, browserTest].filter(Boolean).length > 1) {
     throw new Error("supabase-serial-start-mode-invalid");
   }
 }
 
-export function serialPullImages(output, { databaseOnly = false, authOnly = false } = {}) {
-  assertModes(databaseOnly, authOnly);
+export function serialPullImages(output, { databaseOnly = false, authOnly = false, browserTest = false } = {}) {
+  assertModes(databaseOnly, authOnly, browserTest);
   let rows;
   try { rows = JSON.parse(output); } catch { throw new Error("supabase-serial-inventory-invalid"); }
   if (!Array.isArray(rows) || rows.length !== SERVICE_NAMES.length) {
@@ -62,6 +64,7 @@ export function serialPullImages(output, { databaseOnly = false, authOnly = fals
   return images.map((ref) => `public.ecr.aws/supabase/${ref.split("/").at(-1)}`)
     .filter((ref) => {
       const name = ref.split("/").at(-1).split(":")[0];
+      if (browserTest) return !BROWSER_TEST_EXCLUDED_CONTAINERS.includes(name);
       return !authOnly || !AUTH_ONLY_EXCLUDED_CONTAINERS.includes(name) || AUTH_SCHEMA_INITIALIZATION_IMAGES.includes(name);
     });
 }
@@ -95,7 +98,7 @@ export function assertSerialPullProject(repoRoot, env) {
   if (optionalStat(path.join(temporary, "project-ref"))) throw new Error("supabase-serial-requires-unlinked-project");
   for (const [key, value] of Object.entries(env)) {
     if (!value) continue;
-    if ((key.startsWith("SUPABASE_") && !["SUPABASE_SERIAL_PULL", "SUPABASE_DATABASE_ONLY", "SUPABASE_AUTH_ONLY"].includes(key))
+    if ((key.startsWith("SUPABASE_") && !["SUPABASE_SERIAL_PULL", "SUPABASE_DATABASE_ONLY", "SUPABASE_AUTH_ONLY", "SUPABASE_BROWSER_TEST"].includes(key))
       || ["DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_AUTH_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"].includes(key)) {
       throw new Error("supabase-serial-unsupported-override");
     }
@@ -151,9 +154,10 @@ export function prepareSupabaseSerialPull({
   repoRoot, env = process.env,
   databaseOnly = parseSupabaseDatabaseOnly(env.SUPABASE_DATABASE_ONLY),
   authOnly = parseSupabaseAuthOnly(env.SUPABASE_AUTH_ONLY),
+  browserTest = parseSupabaseBrowserTest(env.SUPABASE_BROWSER_TEST),
   execute = spawnSync, now = () => performance.now(), log = console.log,
 }) {
-  assertModes(databaseOnly, authOnly);
+  assertModes(databaseOnly, authOnly, browserTest);
   if (!parseSupabaseSerialPull(env.SUPABASE_SERIAL_PULL)) return { enabled: false, images: 0, pulled: 0 };
   assertSerialPullProject(repoRoot, env);
   const temporaryHome = fs.mkdtempSync(path.join(os.tmpdir(), "supabase-serial-pull-"));
@@ -183,7 +187,7 @@ export function prepareSupabaseSerialPull({
     const version = command("pnpm", ["exec", "supabase", "--version"], 30_000, "version", { cli: true });
     if (version.stdout.trim() !== SERIAL_PULL_CLI_VERSION) throw new Error("supabase-serial-cli-version-mismatch");
     const inventory = command("pnpm", ["exec", "supabase", "--workdir", "supabase", "services", "--output", "json"], 30_000, "inventory", { cli: true });
-    const images = serialPullImages(inventory.stdout, { databaseOnly, authOnly });
+    const images = serialPullImages(inventory.stdout, { databaseOnly, authOnly, browserTest });
     let pulled = 0;
     for (const [index, image] of images.entries()) {
       const inspectArgs = ["image", "inspect", "--format", "{{.Id}}", image];
