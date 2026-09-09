@@ -290,6 +290,28 @@ For the full-stack suites, run the local stack first:
 
 ## Disposable database and auth-email CI
 
+For a clean, unlinked local stack on a connection-constrained Docker host,
+`SUPABASE_SERIAL_PULL=true pnpm supabase:up` prepares image references one at a
+time before the unchanged startup command. The default is unchanged. The option
+requires the locked Supabase CLI 2.92.0: its ten-image `services --output json`
+inventory is supplemented with the four ancillary images from that exact CLI.
+Full-stack mode prepares all 14 images, including disabled extras (an intentional
+download/disk cost); database-only mode prepares only its resolved Postgres image.
+It does not exclude services, skip tests, alter TLS, or increase runner limits.
+
+Preparation uses an empty temporary CLI/Docker home and anonymous public-ECR
+pulls against the default local Docker daemon. Linked projects, local dotenv
+files, registry/Docker/configuration overrides and credential-bearing proxies
+are refused on this opt-in path. Only validated HTTP(S) proxy origins are copied;
+existing developer homes and credentials are not loaded. A fixed invalid token
+sentinel also prevents the CLI from consulting the operating-system keychain.
+Each pull is bounded to three minutes and total preparation to ten minutes inside the existing job
+timeout. Exact-ref local inspection must succeed before startup; failures stop
+without entering the normal startup retry. CLI upgrades require updating and
+testing the pinned ancillary inventory. Run
+`node --test scripts/lib/supabaseSerialPull.test.mjs` for offline regression tests.
+These do not qualify real cold downloads or concurrent connection usage.
+
 The independent, default-off `CI_DATABASE_SELF_HOSTED=true` switch covers only
 `Controller database tests` (30 minutes) and `signup -> email -> activate`
 (25 minutes). Both preserve their complete existing commands, frozen Node20
