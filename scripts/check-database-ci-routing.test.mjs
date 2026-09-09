@@ -120,6 +120,19 @@ test('all original workload commands retain exact bytes, full test coverage and 
   assert.doesNotMatch(source(jobs[1]), /SUPABASE_DATABASE_ONLY|--exclude|--ignore-health-check/u);
 });
 
+test('Auth opts into only the fixed five-service profile and changes to either helper trigger its complete workload', () => {
+  assert.match(step(jobs[1], 'Start local Supabase (GoTrue + mail catcher)'), /env:\n          SUPABASE_AUTH_ONLY: "1"\n        run: pnpm supabase:up/u);
+  assert.equal((source(jobs[1]).match(/SUPABASE_AUTH_ONLY/g) ?? []).length, 1);
+  assert.doesNotMatch(source(jobs[0]), /SUPABASE_AUTH_ONLY/u);
+  for (const file of ['scripts/lib/supabaseStartMode.mjs', 'scripts/lib/supabaseStartMode.test.mjs',
+    'scripts/lib/supabaseSerialPull.mjs', 'scripts/lib/supabaseSerialPull.test.mjs']) {
+    for (const trigger of ['pull_request', 'push']) {
+      const block = source(jobs[1]).split(`  ${trigger}:\n`)[1].split(/^  \w/mu)[0];
+      assert.ok(block.includes(`      - "${file}"`), `${trigger} must include ${file}`);
+    }
+  }
+});
+
 function preflight(job, mutate = () => {}, missing) {
   const text = step(job, 'Qualify isolated database CI runner');
   assert.match(text, /if: runner.environment == 'self-hosted'\n        shell: bash/u);
