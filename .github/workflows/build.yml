@@ -1559,6 +1559,9 @@ jobs:
 
       - name: Run database-free Rust test suite
         run: |
+          if [[ '${{ runner.environment == 'self-hosted' && runner.os == 'Linux' }}' == true && "${RUSTFLAGS+x}" != x ]]; then
+            export RUSTFLAGS='-C link-arg=-fuse-ld=lld'
+          fi
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --no-run
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --lib --test controller_client -- --test-threads=1
 
