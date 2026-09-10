@@ -344,7 +344,14 @@ existing developer homes and credentials are not loaded. A fixed invalid token
 sentinel also prevents the CLI from consulting the operating-system keychain.
 Each pull is bounded to three minutes and total preparation to ten minutes inside the existing job
 timeout. Exact-ref local inspection must succeed before startup; failures stop
-without entering the normal startup retry. CLI upgrades require updating and
+without entering the normal startup retry. Failed Docker commands report only
+the fixed preparation stage/image name, bounded exit/signal/error-code fields,
+and fixed hints derived from at most 32 KiB of stderr. Raw output, image tags,
+URLs, paths and credentials are not logged. Hints are Docker-reported symptoms,
+not proof of the underlying cause; a signal is not proof of an out-of-memory
+failure. Missing/oversized/unrecognized diagnostics remain unclassified. This
+does not retry a failed pull, skip an image or change the failure result.
+CLI upgrades require updating and
 testing the pinned ancillary inventory. Run
 `node --test scripts/lib/supabaseSerialPull.test.mjs` for offline regression tests.
 These do not qualify real cold downloads or concurrent connection usage.
