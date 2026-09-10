@@ -162,6 +162,48 @@ export function cargoTestArtifact(output, targetName, kind) {
 // Opt-in for the secret-free fixture compiler calls only, never arbitrary child
 // stdout. Cargo's JSON stdout also contains build-script env and artifact paths.
 // Retain only bounded error headings/locations, not snippets or linker argv.
+function compilerFailureContext(diagnostic, heading) {
+  const categories = new Set();
+  const classify = line => {
+    // Ignore command/environment/credential-shaped text even when it contains a
+    // known phrase. Matches are observations; never retain the matching line.
+    line = line.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").trim();
+    if (/[^\x20-\x7e]|token|secret|password|authorization|cookie|api.?key|[a-z][a-z0-9+.-]*:\/\/|\b[A-Z][A-Z0-9_]*\s*=|^["'`]|^::|^[0-9]+\s*\|/i.test(line)) return false;
+    let matched = false;
+    const observe = category => { categories.add(category); matched = true; };
+    if (/^linking with [`"'][^`"']+[`"'] failed: exit status: [1-9][0-9]*$/.test(line)) observe("linker-failed");
+    if (/^(?:(?:[^\s:]+\/)?(?:collect2|ld(?:\.lld|\.bfd|\.gold)?|rust-lld|clang|cc|gcc):\s*)?(?:fatal error: )?(?:ld|linker) terminated with signal 9(?: \[Killed\])?\.?$/i.test(line)) observe("linker-killed");
+    if (/^(?:[^\s:]+\/)?(?:ld(?:\.lld|\.bfd|\.gold)?|rust-lld):\s*(?:error: )?(?:cannot find -l\S+|unable to find library -l\S+|library not found for -l\S+)(?:: .*)?$/i.test(line)) observe("missing-library");
+    if (/^(?:(?:[^\s:]+\/)?(?:ld(?:\.lld|\.bfd|\.gold)?|rust-lld):\s*(?:error: )?)?(?:undefined symbol:|Undefined symbols for architecture )/.test(line)
+      || /^(?:[^\s]+:\s*)?undefined reference to [`'"]/.test(line)) observe("undefined-symbol");
+    if (/^(?:(?:[^\s:]+\/)?(?:ld(?:\.lld|\.bfd|\.gold)?|rust-lld|collect2):\s*(?:fatal error: |error: )?)?(?:No space left on device|final link failed: No space left on device|LLVM ERROR: IO failure on output stream: No space left on device)[.!]?$/i.test(line)) observe("disk-full");
+    if (/^(?:(?:[^\s:]+\/)?(?:ld(?:\.lld|\.bfd|\.gold)?|rust-lld|collect2):\s*(?:fatal error: |error: )?)?(?:Cannot allocate memory|LLVM ERROR: out of memory|memory allocation of [0-9]+ bytes failed)[.!]?$/i.test(line)) observe("allocation-failed");
+    return matched;
+  };
+  classify(heading.replace(/^error(?:\[E[0-9]{4}\])?: /, "").slice(0, 2048));
+  const children = diagnostic.children;
+  let notes = "absent";
+  if (children != null && !Array.isArray(children)) notes = "invalid";
+  else if (children?.length) {
+    let limited = children.length > 16, invalid = false, matched = false;
+    for (const child of children.slice(0, 16)) {
+      // rustc documents flat children. Do not recurse into unknown structures.
+      if (!child || typeof child !== "object" || typeof child.message !== "string"
+        || (child.children != null && (!Array.isArray(child.children) || child.children.length > 0))) { invalid = true; continue; }
+      if (!["note", "failure-note"].includes(child.level)) continue;
+      if (child.message.length > 64 * 1024 || Buffer.byteLength(child.message, "utf8") > 64 * 1024) { limited = true; continue; }
+      const lines = child.message.split(/\r?\n/);
+      if (lines.length > 128) limited = true;
+      for (const line of lines.slice(0, 128)) {
+        if (line.length > 2048 || Buffer.byteLength(line, "utf8") > 2048) { limited = true; continue; }
+        matched = classify(line) || matched;
+      }
+    }
+    notes = invalid ? "invalid" : limited ? "limited" : matched ? "matched" : "unclassified";
+  }
+  return { categories: [...categories].sort(), notes };
+}
+
 export function reportCargoCompilerErrors(output, crateDirectory, write = text => process.stderr.write(text)) {
   assert.ok(["packages/runtime-agent", "packages/runtime-controller"].includes(crateDirectory), "fixed fixture compiler crate required");
   let offset = 0, reported = 0;
@@ -190,6 +232,8 @@ export function reportCargoCompilerErrors(output, crateDirectory, write = text =
       safe = `${heading.match(/^error(?:\[E[0-9]{4}\])?/)[0]}: [sensitive heading omitted]`;
     }
     write(`[cargo-compiler] ${safe.slice(0, 512)}\n`);
+    const context = compilerFailureContext(diagnostic, heading);
+    write(`[cargo-compiler] categories=${context.categories.join(",") || "none"}; notes=${context.notes}\n`);
     // Span text, labels, expansions and absolute dependency paths are private.
     const span = Array.isArray(diagnostic.spans) && diagnostic.spans.find(item => item?.is_primary);
     const file = span?.file_name;

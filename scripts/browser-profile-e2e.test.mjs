@@ -22,6 +22,7 @@ test("compiler diagnostics select only error headings and source locations, not 
     JSON.stringify({ reason: "compiler-artifact", executable: "/private/artifact", message: { level: "error", rendered: "error: private artifact" } }),
     compilerError({ level: "warning", rendered: "warning: private warning" }), compilerError()].join("\n");
   assert.equal(compilerReport(output), "[cargo-compiler] error[E0063]: missing field [quoted] in initializer of [quoted]\n"
+    + "[cargo-compiler] categories=none; notes=absent\n"
     + "[cargo-compiler] at packages/runtime-agent/tests/browser_profile_e2e.rs:27:3\n");
 });
 
@@ -30,6 +31,7 @@ test("compiler errors redact payloads and never print rendered source, notes, li
     + "  = note: PRIVATE_TOKEN=must-not-print /private/toolchain https://user:password@private.invalid\n"
     + "  = note: ::warning::must-not-print\n";
   assert.equal(compilerReport(compilerError({ rendered })), "[cargo-compiler] error: linking with [quoted] failed: exit status: 1\n"
+    + "[cargo-compiler] categories=linker-failed; notes=absent\n"
     + "[cargo-compiler] at packages/runtime-agent/tests/browser_profile_e2e.rs:27:3\n");
   for (const rendered of ["error: PRIVATE_TOKEN=must-not-print", "error: Authorization Bearer must-not-print", "error: password must-not-print"]) {
     assert.match(compilerReport(compilerError({ rendered })), /error: \[sensitive heading omitted\]/);
@@ -38,6 +40,77 @@ test("compiler errors redact payloads and never print rendered source, notes, li
   const result = compilerReport(compilerError({ rendered: 'error: failed "private value" at https://user:inert@private.invalid/file /private/file abcdefghijklmnopqrstuvwxyz1234' }));
   assert.match(result, /failed \[quoted\] at \[url\] \[path\] \[opaque\]/);
   assert.doesNotMatch(result, /private value|user:|inert|private.invalid|private\/file|abcdefghijklmnopqrstuvwxyz/);
+});
+
+const linkerDiagnostic = children => compilerError({ rendered: "error: linking with `cc` failed: exit status: 1\n", children });
+const compilerNote = message => ({ level: "note", message, children: [], spans: [] });
+
+test("compiler child notes yield fixed categories for known linker failures, never the matched text", () => {
+  const result = compilerReport(linkerDiagnostic([
+    compilerNote("collect2: fatal error: ld terminated with signal 9 [Killed]"),
+    compilerNote("/usr/bin/ld: cannot find -linert_private_library: No such file or directory"),
+    compilerNote("ld.lld: error: undefined symbol: inert_private_symbol"),
+    compilerNote("LLVM ERROR: IO failure on output stream: No space left on device"),
+    compilerNote("memory allocation of 123456 bytes failed"),
+  ]));
+  assert.match(result, /categories=allocation-failed,disk-full,linker-failed,linker-killed,missing-library,undefined-symbol; notes=matched/);
+  assert.doesNotMatch(result, /inert_private|collect2|\/usr\/bin|123456|LLVM|signal 9|\[Killed\]|OOM|out.of.memory/i);
+  for (const [message, category] of [
+    ["ld.lld: error: unable to find library -linert", "missing-library"],
+    ["ld: library not found for -linert", "missing-library"],
+    ["/fixture/lib.o:(.text+0x17): undefined reference to `inert_symbol'", "undefined-symbol"],
+    ["Undefined symbols for architecture arm64:", "undefined-symbol"],
+    ["ld: final link failed: No space left on device", "disk-full"],
+    ["ld.lld: error: Cannot allocate memory", "allocation-failed"],
+  ]) assert.match(compilerReport(linkerDiagnostic([compilerNote(message)])), new RegExp(`categories=[^\\n]*${category}[^\\n]*; notes=matched`));
+});
+
+test("missing and unrecognized compiler note evidence stays explicit without inventing a cause", () => {
+  for (const children of [undefined, null, []]) assert.match(compilerReport(linkerDiagnostic(children)), /categories=linker-failed; notes=absent/);
+  for (const message of ["unrecognized diagnostic", "collect2: fatal error: ld terminated with signal 15", "Killed", "possible OOM", "ordinary help text"]) {
+    assert.match(compilerReport(linkerDiagnostic([compilerNote(message)])), /categories=linker-failed; notes=unclassified/);
+  }
+  assert.match(compilerReport(linkerDiagnostic({ message: "not an array" })), /notes=invalid/);
+  assert.match(compilerReport(linkerDiagnostic([compilerNote("linking with `cc` failed: exit status: 1")])),
+    /categories=linker-failed; notes=matched/, "a matching note is classified even if its category was already observed in the heading");
+});
+
+test("note classifier ignores credential, URL, command, source and malformed or recursive payloads", () => {
+  for (const message of [
+    "PRIVATE_TOKEN=fixture ld.lld: error: undefined symbol: private_symbol",
+    "Authorization: Bearer fixture\nhttps://private.invalid/ld: cannot find -linert",
+    '"cc" "-Wl,undefined symbol: private_symbol"',
+    "::warning:: undefined reference to `private_symbol'",
+    "12 | undefined reference to `private_symbol'",
+    "ld: cannot find -ltoken_value", "ld: cannot find -linert https://private.invalid/value",
+  ]) {
+    const output = compilerReport(linkerDiagnostic([compilerNote(message)]));
+    assert.match(output, /categories=linker-failed; notes=unclassified/);
+    assert.doesNotMatch(output, /PRIVATE_TOKEN|private_symbol|Bearer|private.invalid|token_value/);
+  }
+  const nested = { ...compilerNote("unknown parent"), children: [compilerNote("ld: Cannot allocate memory")] };
+  for (const children of [[nested], [null], [{ level: "note", message: {} }], [{ ...compilerNote("unknown"), children: {} }]]) {
+    assert.match(compilerReport(linkerDiagnostic(children)), /categories=linker-failed; notes=invalid/);
+  }
+  const ignored = { level: "help", message: "ld: Cannot allocate memory", spans: [{ text: [{ text: "ld: Cannot allocate memory" }] }] };
+  assert.match(compilerReport(linkerDiagnostic([ignored])), /categories=linker-failed; notes=unclassified/);
+  assert.equal(compilerReport(compilerError({ level: "warning", children: [compilerNote("ld: Cannot allocate memory")] })), "");
+});
+
+test("compiler note count, UTF-8 bytes, lines, line size and total output are bounded", () => {
+  const cause = compilerNote("ld: Cannot allocate memory");
+  for (const children of [
+    [...Array(16).fill(compilerNote("unknown")), cause],
+    [compilerNote("界".repeat(22_000) + "\nld: Cannot allocate memory")],
+    [compilerNote("unknown\n".repeat(128) + "ld: Cannot allocate memory")],
+    [compilerNote("ld: Cannot allocate memory" + " ".repeat(2048))],
+  ]) assert.match(compilerReport(linkerDiagnostic(children)), /categories=linker-failed; notes=limited/);
+  const many = Array(100).fill(linkerDiagnostic([cause])).join("\n");
+  const output = compilerReport(many);
+  assert.equal((output.match(/categories=/g) ?? []).length, 8);
+  assert.ok(Buffer.byteLength(output) < 8 * 1024);
+  assert.match(output, /diagnostic limit reached \(8 errors\)/);
+  assert.equal(compilerReport(linkerDiagnostic([compilerNote("x".repeat(256 * 1024))])), "", "the existing whole-record byte limit applies before notes");
 });
 
 test("compiler diagnostics refuse malformed locations and unknown rendered formats", () => {

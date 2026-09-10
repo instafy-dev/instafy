@@ -704,6 +704,16 @@ Absolute, Windows and escaping span paths are refused. Reproduce
 the complete fixture on disposable Linux to obtain the real compiler error;
 passing parser tests alone does not qualify the browser workload.
 
+Compiler child notes can add only fixed observed categories: `linker-failed`,
+`linker-killed`, `missing-library`, `undefined-symbol`, `disk-full`, or
+`allocation-failed`. No matched note, command, environment, symbol or library
+name is printed. Notes are explicitly `absent`, `unclassified`, `matched`,
+`limited`, or `invalid`. The reader examines at most 16 direct notes, each at
+most 64 KiB UTF-8, 128 lines and 2048 bytes per line; it never recurses. The
+existing eight-error/256-KiB-record limits remain. Credential/URL/command-shaped
+lines are ignored. These categories report compiler text, not proven causes:
+in particular, linker SIGKILL is **not proof of an out-of-memory kill**.
+
 The standard hosted workflow uses Docker to provision disposable migrated
 Supabase (Postgres and local authentication); Chromium and runtime/controller
 processes run natively on Linux. The profile-only command also accepts a
