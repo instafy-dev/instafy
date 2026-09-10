@@ -205,7 +205,8 @@ jobs:
           set -euo pipefail
           available_kib="$(df -Pk / | awk 'NR == 2 { print $4 }')"
           echo "Free disk for image build: ${available_kib} KiB"
-          if [[ ! "$available_kib" =~ ^[0-9]+$ ]] ||
+          # Canonical bounded decimal avoids Bash octal parsing and integer overflow.
+          if [[ ! "$available_kib" =~ ^(0|[1-9][0-9]{0,17})$ ]] ||
             (( available_kib < 20 * 1024 * 1024 )); then
             echo "::error::Runtime image publication requires at least 20 GiB of free disk (have ${available_kib} KiB)."
             exit 1
