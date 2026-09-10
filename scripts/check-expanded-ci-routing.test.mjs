@@ -138,7 +138,9 @@ test("only the four short jobs use the expanded switch and existing identities s
   }
   assert.match(section("build.yml", "javascript"), /vars\.CI_JAVASCRIPT_SELF_HOSTED == 'true'/u);
   assert.doesNotMatch(section("build.yml", "javascript"), /CI_EXPANDED_SELF_HOSTED/u);
-  for (const key of ["select", "version", "pack", "publish"]) assert.match(section("npm-release.yml", key), /^    runs-on: ubuntu-24\.04$/mu);
+  for (const key of ["version", "pack", "publish"]) assert.match(section("npm-release.yml", key), /^    runs-on: ubuntu-24\.04$/mu);
+  assert.match(section("npm-release.yml", "select"), /vars\.CI_PUBLIC_CONTROL_SELF_HOSTED == 'true'/u);
+  assert.doesNotMatch(section("npm-release.yml", "select"), /CI_EXPANDED_SELF_HOSTED/u);
   assert.match(read("public-boundary.yml"), /vars\.CI_BOOTSTRAP_SELF_HOSTED == 'true'/u);
   assert.doesNotMatch(read("public-boundary.yml"), /CI_EXPANDED_SELF_HOSTED|public-secret-scan|public-go|public-npm-policy|public-rust-fmt/u);
   assert.doesNotMatch(read("browser-e2e.yml"), /CI_EXPANDED_SELF_HOSTED/u);

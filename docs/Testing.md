@@ -122,6 +122,34 @@ do not automatically move pools. Run `node --test scripts/check-expanded-ci-rout
 for routing regressions. These tests are not real ARM64 workload or teardown
 qualification, which is required before enabling the switch.
 
+The separate, default-off `CI_PUBLIC_CONTROL_SELF_HOSTED=true` switch covers
+only two protected-`main` **push** jobs: npm `select` (15 minutes, suffix
+`public-npm-select`) and the image coordinator (5 minutes, suffix
+`public-image-coordinator`). Both require the canonical private repository and
+repository ID, a protected main ref and their exact main workflow ref. They use
+the disposable Linux ARM64 main group and per-run/attempt labels above. Public
+visibility, PRs, forks, schedules, manual dispatches and other events retain
+`ubuntu-24.04`. Existing CI switches cannot enable these routes.
+
+This source routing is not runner admission or a successful publication proof.
+Before enabling it, provisioning must independently authenticate both exact
+workflow/job/event tuples, install and qualify their baseline tools (including
+`gh`; the coordinator also requires `jq` and GNU `date -d`), and prove cold job
+execution and teardown. The first steps fail closed on missing tools, wrong
+source identity or a nonisolated runner; they do not install dependencies.
+The npm selector retains read-only repository access. The coordinator retains
+its existing GitHub-token `actions: write` permission to dispatch the two fixed
+publishers, without receiving package, registry or production credentials.
+Version, pack, npm publish and image-building/publishing jobs remain unchanged
+and hosted. A push coordinator can defer while Build is incomplete; its next
+six-hour scheduled or manual reconciliation remains hosted, so these push-only
+routes do not solve follow-up publication capacity. No `workflow_run` trigger
+is added. Run the source/fixture regressions with:
+
+```bash
+node --test scripts/check-public-release-workflows.test.mjs scripts/check-expanded-ci-routing.test.mjs
+```
+
 The path-filtered `Public Git Conflict Contract` has its own default-off
 `CI_GIT_CONFLICT_SELF_HOSTED=true` switch. Only same-repository, non-fork PRs to
 `main` and protected `main` pushes while this repository is private may select
