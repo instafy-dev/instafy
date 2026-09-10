@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { cargoTestArtifact, chromiumStartupDiagnostics, copyFixtureEntrypoint, fixtureChildEnvironment, fixtureCompilerEnvironment, installCancellationSignalHandlers, preflightFixtureDisplay, reportCargoCompilerErrors, runOwnedProcess, validateBrowserFixtureEnvironment, validateFixtureEnvironment } from "./browser-profile-e2e.mjs";
+import { cargoTestArtifact, chromiumStartupDiagnostics, copyFixtureEntrypoint, fixtureChildEnvironment, fixtureCompilerEnvironment, fixtureCargoEnvironment, installCancellationSignalHandlers, preflightFixtureDisplay, reportCargoCompilerErrors, runOwnedProcess, validateBrowserFixtureEnvironment, validateFixtureEnvironment } from "./browser-profile-e2e.mjs";
 
 const agentManifest = fileURLToPath(new URL("../packages/runtime-agent/Cargo.toml", import.meta.url));
 const compilerError = (patch = {}) => JSON.stringify({ reason: "compiler-message", manifest_path: agentManifest, message: {
@@ -182,7 +182,7 @@ test("only four fixed JSON Cargo compilation calls opt into failure diagnostics"
     assert.equal((source.match(/onFailure: output => reportCargoCompilerErrors/g) ?? []).length, 2);
     for (const crate of ["runtime-agent", "runtime-controller"]) {
       const line = source.split("\n").find(line => line.includes('await run("cargo"') && line.includes(`"packages/${crate}/Cargo.toml"`));
-      assert.ok(line.includes(`"--message-format=json"], { env: compilerEnv, onFailure: output => reportCargoCompilerErrors(output, "packages/${crate}") }`));
+      assert.ok(line.includes(`"--message-format=json"], { env: cargoEnv, onFailure: output => reportCargoCompilerErrors(output, "packages/${crate}") }`));
     }
   }
 });
@@ -354,13 +354,39 @@ test("compiler proxy is explicitly gated and copies only validated origins with 
   }
 });
 
-test("only the six real Go and Cargo build callsites use the explicit compiler environment", async () => {
+test("Cargo defaults to LLD only on Linux with unset RUSTFLAGS and preserves explicit choices", () => {
+  const source = { PATH: "/bin", CARGO_BUILD_JOBS: "2", RUSTFLAGS: undefined }, before = structuredClone(source);
+  assert.deepEqual(fixtureCargoEnvironment(source, "linux"), { PATH: "/bin", CARGO_BUILD_JOBS: "2", RUSTFLAGS: "-C link-arg=-fuse-ld=lld" });
+  assert.deepEqual(fixtureCargoEnvironment({}, "linux"), { RUSTFLAGS: "-C link-arg=-fuse-ld=lld" });
+  for (const platform of ["darwin", "win32", "freebsd"]) assert.deepEqual(fixtureCargoEnvironment(source, platform), fixtureCompilerEnvironment(source));
+  for (const value of ["", " ", "-C debuginfo=0", "-C linker=clang -C link-arg=-fuse-ld=gold", "--cfg=fixture\n-C opt-level=1"]) {
+    for (const platform of ["linux", "darwin", "win32"]) assert.deepEqual(fixtureCargoEnvironment({ ...source, RUSTFLAGS: value }, platform), { PATH: "/bin", CARGO_BUILD_JOBS: "2", RUSTFLAGS: value });
+  }
+  assert.deepEqual(fixtureCompilerEnvironment(source), { PATH: "/bin", CARGO_BUILD_JOBS: "2" }, "Go retains the original environment");
+  assert.deepEqual(source, before);
+});
+
+test("a real Cargo-shaped child retains only the existing compiler allowlist plus the fixed default", async () => {
+  const source = { ...compilerProxyFixture(), PATH: process.env.PATH, CARGO_ENCODED_RUSTFLAGS: "must-not-copy", CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: "must-not-copy", CC: "must-not-copy", LD: "must-not-copy" };
+  const before = structuredClone(source), env = fixtureCargoEnvironment(source, "linux");
+  assert.deepEqual(env, { ...fixtureCompilerEnvironment(source), RUSTFLAGS: "-C link-arg=-fuse-ld=lld" });
+  const observed = JSON.parse(await runOwnedProcess(process.execPath, ["-e", "console.log(JSON.stringify(process.env))"], { env, timeoutMs: 5_000 }));
+  if (process.platform === "darwin") delete observed.__CF_USER_TEXT_ENCODING;
+  assert.deepEqual(observed, env);
+  assert.deepEqual(source, before);
+  assert.throws(() => fixtureCargoEnvironment({ ...source, HTTPS_PROXY: "https://user:inert-secret@proxy.example" }, "linux"), /credential-free compiler proxy origin required/);
+});
+
+test("only four Cargo builds use the Cargo default and two Go builds retain the compiler environment", async () => {
   for (const file of ["browser-profile-e2e.mjs", "shared-browser-studio-e2e.mjs"]) {
     const source = await readFile(new URL(file, import.meta.url), "utf8");
     assert.match(source, /const compilerEnv = fixtureCompilerEnvironment\(process\.env\);/);
-    assert.equal((source.match(/env: compilerEnv/g) ?? []).length, 3);
-    assert.equal((source.match(/await run\("(?:go|cargo)",[^\n]+env: compilerEnv/g) ?? []).length, 3);
-    assert.doesNotMatch(source, /\.\.\.compilerEnv|studioProcessEnvironment\(compilerEnv|preflightFixtureDisplay\(compilerEnv/);
+    assert.match(source, /const cargoEnv = fixtureCargoEnvironment\(process\.env\);/);
+    assert.equal((source.match(/env: compilerEnv/g) ?? []).length, 1);
+    assert.equal((source.match(/await run\("go",[^\n]+env: compilerEnv/g) ?? []).length, 1);
+    assert.equal((source.match(/env: cargoEnv/g) ?? []).length, 2);
+    assert.equal((source.match(/await run\("cargo",[^\n]+env: cargoEnv/g) ?? []).length, 2);
+    assert.doesNotMatch(source, /\.\.\.(?:compilerEnv|cargoEnv)|studioProcessEnvironment\((?:compilerEnv|cargoEnv)|preflightFixtureDisplay\((?:compilerEnv|cargoEnv)/);
   }
 });
 
