@@ -248,6 +248,17 @@ keys and paths. No test failure, cancellation or aggregate failure is ignored.
 The existing unused-toolchain disk cleanup runs only on
 GitHub-hosted images, never against a self-hosted host or guest image.
 
+Only the self-hosted Linux `Rust test runtime agent` Cargo step defaults unset
+`RUSTFLAGS` to `-C link-arg=-fuse-ld=lld`; its scoped prerequisites already install
+and verify `lld`. Explicit flags, including an empty opt-out, are preserved.
+Hosted and non-Linux execution and other Rust children are unchanged. The default
+retains the existing compiler driver and both full Cargo commands, including
+compilation of every integration target before the database-free tests run.
+It addresses a separately observed default-linker signal9 failure in that broad
+compile path, which does not use the Shared fixture's JavaScript compiler helper.
+Signal9 alone does not prove an out-of-memory cause. Cold completion and memory
+use still require the real job; source regressions are not that qualification.
+
 All twelve jobs default to `ubuntu-latest`. Only the independent
 `CI_RUST_SELF_HOSTED=true` switch may select isolated Linux ARM64 workers, for
 private same-repository PRs to `main` and protected-main pushes. It uses the
