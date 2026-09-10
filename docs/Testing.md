@@ -123,25 +123,37 @@ for routing regressions. These tests are not real ARM64 workload or teardown
 qualification, which is required before enabling the switch.
 
 The separate, default-off `CI_PUBLIC_CONTROL_SELF_HOSTED=true` switch covers
-only two protected-`main` **push** jobs: npm `select` (15 minutes, suffix
-`public-npm-select`) and the image coordinator (5 minutes, suffix
-`public-image-coordinator`). Both require the canonical private repository and
-repository ID, a protected main ref and their exact main workflow ref. They use
+only four protected-`main` **push** jobs: npm `select` (15 minutes, suffix
+`public-npm-select`), npm `version` (15 minutes, suffix `public-npm-version`),
+npm `pack` (25 minutes, suffix `public-npm-pack`) and the
+image coordinator (5 minutes, suffix `public-image-coordinator`). All require the
+canonical private repository and repository ID, a protected main ref and their exact main workflow ref. They use
 the disposable Linux ARM64 main group and per-run/attempt labels above. Public
 visibility, PRs, forks, schedules, manual dispatches and other events retain
 `ubuntu-24.04`. Existing CI switches cannot enable these routes.
 
 This source routing is not runner admission or a successful publication proof.
-Before enabling it, provisioning must independently authenticate both exact
-workflow/job/event tuples, install and qualify their baseline tools (including
-`gh`; the coordinator also requires `jq` and GNU `date -d`), and prove cold job
+Before enabling it, provisioning must independently authenticate each exact
+workflow/job/event tuple, install and qualify its baseline tools (`gh` for
+Select, Version and the coordinator, plus `jq` and GNU `date -d` for the coordinator), and prove cold job
 execution and teardown. The first steps fail closed on missing tools, wrong
 source identity or a nonisolated runner; they do not install dependencies.
 The npm selector retains read-only repository access. The coordinator retains
 its existing GitHub-token `actions: write` permission to dispatch the two fixed
 publishers, without receiving package, registry or production credentials.
-Version, pack, npm publish and image-building/publishing jobs remain unchanged
-and hosted. A push coordinator can defer while Build is incomplete; its next
+Pack retains read-only actions/repository permissions and its exact selected
+publish plan, package tests, pack verification and immutable artifact upload.
+Its non-root Node22 preflight requires only the existing baseline tools; the
+unchanged setup step then selects Node24 for the pack commands. It does not
+receive npm OIDC or the version bot's credential. Version retains its existing
+bot credential only in its two original steps, so this lane is not credential-free.
+Before those steps, a fresh read must prove the event SHA is still protected main
+and the checkout is exactly that SHA. API failure, source drift or failed runner
+qualification prevents bot exposure. The original hosted/manual path is unchanged.
+This source-only route still needs exact runner admission and real cold
+execution/cleanup qualification. npm publish and image-building/publishing jobs
+remain unchanged and hosted. A push coordinator
+can defer while Build is incomplete; its next
 six-hour scheduled or manual reconciliation remains hosted, so these push-only
 routes do not solve follow-up publication capacity. No `workflow_run` trigger
 is added. Run the source/fixture regressions with:
@@ -149,6 +161,9 @@ is added. Run the source/fixture regressions with:
 ```bash
 node --test scripts/check-public-release-workflows.test.mjs scripts/check-expanded-ci-routing.test.mjs
 ```
+
+The version freshness regressions use credential-free Bash fixtures and an offline
+`jq` projection of inert branch responses; both tools must be installed locally.
 
 The path-filtered `Public Git Conflict Contract` has its own default-off
 `CI_GIT_CONFLICT_SELF_HOSTED=true` switch. Only same-repository, non-fork PRs to
