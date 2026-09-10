@@ -188,7 +188,7 @@ function AnchorHarness({
     }} data-testid="anchor-scroll" data-highlighted-message={controller.highlightedMessageId ?? undefined}>
       <div ref={controller.handleScrollContentRef}>
         {rows.map((row) => (
-          <div key={row.id} data-chat-scroll-message-id={row.id} ref={(node) => {
+          <div key={row.id} tabIndex={historyVisit?.messageId === row.id ? -1 : undefined} data-chat-scroll-message-id={row.id} ref={(node) => {
             if (!node) return;
             node.getBoundingClientRect = () => {
               const top = row.top - (controller.scrollContainerRef.current?.scrollTop ?? 0);
@@ -296,6 +296,52 @@ describe("useChatScrollController", () => {
     const node = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
     expect(node.scrollTop).toBe(1000);
     expect(node.dataset.highlightedMessage).toBeUndefined();
+  });
+
+  it("focuses the revealed target without scrolling again after its search result unmounts", async () => {
+    const historyVisit = { ...visit("focus-target", "focus-visit"), messageId: "matched" };
+    await act(async () => root.render(<>
+      <button type="button" data-testid="search-result">Open matched message</button>
+      <AnchorHarness conversationId="focus-target" historyVisit={historyVisit} loading rows={[]} scrollHeight={200} />
+    </>));
+    (container.querySelector('[data-testid="search-result"]') as HTMLButtonElement).focus();
+    await act(async () => root.render(<>
+      {null}
+      <AnchorHarness conversationId="focus-target" historyVisit={historyVisit} loading rows={[]} scrollHeight={200} />
+    </>));
+    expect(document.activeElement).toBe(document.body);
+    const focus = vi.spyOn(HTMLElement.prototype, "focus");
+    await act(async () => root.render(<>
+      {null}
+      <AnchorHarness conversationId="focus-target" historyVisit={historyVisit} rows={[
+        { id: "before", top: 0, height: 600 }, { id: "matched", top: 600, height: 200 }, { id: "after", top: 800, height: 600 },
+      ]} scrollHeight={1400} />
+    </>));
+    const target = container.querySelector('[data-chat-scroll-message-id="matched"]');
+    expect(document.activeElement).toBe(target);
+    expect(focus).toHaveBeenCalledExactlyOnceWith({ preventScroll: true });
+    expect((container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement).scrollTop).toBe(576);
+  });
+
+  it.each(["textarea", "button"] as const)("preserves a %s focused while the exact message is loading", async (tag) => {
+    const control = document.createElement(tag);
+    document.body.appendChild(control);
+    try {
+      const historyVisit = { ...visit(`focused-${tag}`, `focus-${tag}-visit`), messageId: "matched" };
+      await act(async () => root.render(<AnchorHarness conversationId={`focused-${tag}`} historyVisit={historyVisit} loading rows={[]} scrollHeight={200} />));
+      control.focus();
+      const focus = vi.spyOn(HTMLElement.prototype, "focus");
+      await act(async () => root.render(<AnchorHarness conversationId={`focused-${tag}`} historyVisit={historyVisit} rows={[
+        { id: "before", top: 0, height: 600 }, { id: "matched", top: 600, height: 200 }, { id: "after", top: 800, height: 600 },
+      ]} scrollHeight={1400} />));
+      expect(document.activeElement).toBe(control);
+      expect(focus).not.toHaveBeenCalled();
+      const node = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
+      expect(node.scrollTop).toBe(576);
+      expect(node.dataset.highlightedMessage).toBe("matched");
+    } finally {
+      control.remove();
+    }
   });
 
   it("does not let mobile onboarding release capture placeholder bottom geometry before a cross-space target loads", async () => {

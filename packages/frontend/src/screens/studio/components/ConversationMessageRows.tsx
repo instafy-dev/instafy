@@ -536,6 +536,7 @@ export function ConversationMessageRows({
           <DeferredChatMessageRow
             key={message.id}
             message={message}
+            targeted={message.id === targetedMessageId}
             highlighted={message.id === highlightedMessageId}
             layoutKey={`${isLeftAligned}:${Boolean(speakerIdentity)}:${Boolean(narrowSpeakerIdentity)}`}
             eager={anchorIndex >= 0 ? Math.abs(messageIndex - anchorIndex) <= 10 : messageIndex >= messages.length - 20}

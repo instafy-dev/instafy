@@ -441,6 +441,14 @@ export function useChatScrollController({
       saveCurrentConversationScrollSnapshot();
       setHighlightedMessageId(targetMessageId);
       highlightTimerRef.current = setTimeout(() => setHighlightedMessageId(null), 3_000);
+      // Selecting a search result unmounts its focused button. Give that empty
+      // focus position a destination without overriding a control the reader
+      // deliberately focused while this message's context was loading.
+      const ownerDocument = row.ownerDocument;
+      const focusedElement = ownerDocument.activeElement;
+      if (!focusedElement || focusedElement === ownerDocument.body || focusedElement === ownerDocument.documentElement) {
+        row.focus({ preventScroll: true });
+      }
       return;
     }
     if (!conversationChanged && !restoringInitialHistoryRef.current) {

@@ -117,13 +117,13 @@ describe("ConversationMessageRows", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  async function renderSpeakerBoundaryMessages(messages: ChatMessage[], target?: string) {
+  async function renderSpeakerBoundaryMessages(messages: ChatMessage[], target?: string, highlight: string | undefined = target) {
     await act(async () => {
       root.render(
         <ConversationMessageRows
           messages={messages}
           targetedMessageId={target}
-          highlightedMessageId={target}
+          highlightedMessageId={highlight}
           currentUserId="user-1"
           chatClientSessionId="session-1"
           projectId="project-1"
@@ -153,6 +153,20 @@ describe("ConversationMessageRows", () => {
     expect(container.querySelector('[data-chat-message-target="true"]')?.getAttribute("data-chat-scroll-message-id")).toBe(target.id);
     expect(container.querySelector(CHAT_SPEAKER_MARKER_SELECTOR)).not.toBeNull();
     expect(container.querySelector("time")).not.toBeNull();
+  });
+
+  it("keeps the search destination focusable after its temporary highlight clears", async () => {
+    const target = createMessage({ id: "search-destination", content: "Matched history" });
+    await renderSpeakerBoundaryMessages([target], target.id);
+    const row = container.querySelector<HTMLElement>('[data-chat-scroll-message-id="search-destination"]')!;
+    expect(row.tabIndex).toBe(-1);
+    expect(row.getAttribute("role")).toBe("article");
+    expect(row.getAttribute("aria-label")).toBe("Search result");
+    row.focus();
+    await renderSpeakerBoundaryMessages([target], target.id, "");
+    expect(document.activeElement).toBe(row);
+    expect(row.getAttribute("data-chat-message-target")).toBeNull();
+    expect(row.getAttribute("aria-label")).toBe("Search result");
   });
 
   async function renderWithNoticeActions(

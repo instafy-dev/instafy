@@ -22,7 +22,12 @@ ranking yet.
 Each message result shows its chat, organization/space, role, date and a plain-text
 excerpt with highlighted matches. Selecting it opens a contiguous history window
 around that exact message and briefly highlights the message. Earlier and later
-history can be loaded from that window; **Return to latest** returns to ordinary
+history can be loaded from that window. When result selection leaves keyboard
+focus empty, the message becomes the focus destination; an already focused
+composer or other control is preserved. The temporary tint fades after three
+seconds, while keyboard focus remains visible until it moves. The outline has
+space around the text, supports forced colors and respects reduced motion.
+**Return to latest** returns to ordinary
 live chat history. Browser Back restores the query, scope and result position;
 Forward reopens the selected destination. These search checkpoints live only in
 the current Studio session and are cleared when accounts change. Results are

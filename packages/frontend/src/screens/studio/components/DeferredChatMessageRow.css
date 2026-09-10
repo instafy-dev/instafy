@@ -1,0 +1,31 @@
+.chat-message-row[data-chat-message-target="true"] {
+  --message-target-background: color-mix(in srgb, var(--color-primary-100) 70%, transparent);
+  background-color: var(--message-target-background);
+  box-shadow: 0 0 0 6px var(--message-target-background);
+  outline: 2px solid color-mix(in srgb, var(--color-primary-400) 60%, transparent);
+  outline-offset: 4px;
+}
+
+.dark .chat-message-row[data-chat-message-target="true"] {
+  --message-target-background: color-mix(in srgb, var(--color-primary-500) 20%, transparent);
+}
+
+.chat-message-row:focus-visible {
+  outline: 2px solid var(--color-primary-500);
+  outline-offset: 4px;
+}
+
+@media (forced-colors: active) {
+  .chat-message-row[data-chat-message-target="true"],
+  .chat-message-row:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 4px;
+    box-shadow: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-message-row {
+    transition: none;
+  }
+}
