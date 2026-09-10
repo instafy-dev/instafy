@@ -146,6 +146,38 @@ function assertCliDiagnostics(stderr) {
   }
 }
 
+// Only fixed categories and bounded process metadata may leave a failed Docker
+// invocation. Never echo stderr, URLs, paths, arbitrary error messages or tags.
+function reportDockerFailure(log, stage, image, result, thrown) {
+  const knownNames = [...SERVICE_NAMES, ...ANCILLARY_IMAGES].map((ref) => ref.split("/").at(-1).split(":")[0]);
+  const name = typeof image === "string" ? image.split("/").at(-1).split(":")[0] : "unknown";
+  const exit = Number.isInteger(result?.status) && result.status >= 0 && result.status <= 255 ? result.status : "unknown";
+  const signal = ["SIGKILL", "SIGTERM", "SIGABRT", "SIGSEGV", "SIGINT"].includes(result?.signal) ? result.signal : "none-or-unknown";
+  const code = result?.error?.code ?? thrown?.code;
+  const error = ["ETIMEDOUT", "ENOBUFS", "ENOENT", "EACCES", "ENOMEM", "EIO"].includes(code) ? code : "none-or-unknown";
+  const stderr = result?.stderr;
+  const hints = [];
+  if (typeof stderr === "string" && Buffer.byteLength(stderr, "utf8") <= 32_768) {
+    for (const [hint, pattern] of [
+      ["rate-limit", /too many requests|toomanyrequests|(?:status code|http)[: ]+429/i],
+      ["registry-auth", /unauthorized|authentication required|pull access denied/i],
+      ["manifest-missing", /manifest unknown|manifest not found/i],
+      ["platform-missing", /no matching manifest for/i],
+      ["proxy-denied", /proxyconnect[^\r\n]*forbidden|proxy authentication required/i],
+      ["tls", /x509:|tls handshake|certificate verify failed/i],
+      ["dns", /no such host|temporary failure in name resolution/i],
+      ["network-timeout", /i\/o timeout|context deadline exceeded|client\.timeout exceeded/i],
+      ["network-reset", /connection reset by peer|unexpected eof/i],
+      ["disk-full", /no space left on device/i],
+      ["daemon-unavailable", /cannot connect to the docker daemon|is the docker daemon running/i],
+    ]) if (pattern.test(stderr)) hints.push(hint);
+  }
+  // Hints describe text reported by Docker, not a verified underlying cause.
+  try {
+    log(`[supabase-stack] Docker preparation failed stage=${stage} image=${knownNames.includes(name) ? name : "unknown"} exit=${exit} signal=${signal} error=${error} hints=${hints.join(",") || "unclassified"}`);
+  } catch { /* Diagnostics must not mask the original preparation failure. */ }
+}
+
 // Synchronous calls deliberately allow only one image request at a time. The
 // embedded Compose client pulls images concurrently despite Docker's separate
 // max-concurrent-downloads layer limit. Cached exact refs use PullPolicyMissing:
@@ -176,9 +208,13 @@ export function prepareSupabaseSerialPull({
           cwd: repoRoot, env: childEnv, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
           timeout: Math.max(1, Math.floor(Math.min(budget, remaining))), killSignal: "SIGKILL", maxBuffer: 262_144,
         });
-      } catch { throw new Error(`supabase-serial-${stage}-failed`); }
+      } catch (error) {
+        if (binary === "docker") reportDockerFailure(log, stage, args.at(-1), undefined, error);
+        throw new Error(`supabase-serial-${stage}-failed`);
+      }
       if (now() - started >= SERIAL_PULL_BUDGET_MS) throw new Error("supabase-serial-deadline");
       if (!result || result.error || result.signal || (result.status !== 0 && !(mayBeMissing && result.status === 1))) {
+        if (binary === "docker") reportDockerFailure(log, stage, args.at(-1), result);
         throw new Error(`supabase-serial-${stage}-failed`);
       }
       if (cli) assertCliDiagnostics(result.stderr);

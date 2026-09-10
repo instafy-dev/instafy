@@ -8,7 +8,7 @@ import { createRequire } from "node:module";
 import { cargoBinaryArtifact, closeStudioConnections, createStudioGenerationBridge, fixtureHTML, fixtureOrigin, startDaemon,
   resolvePlaywrightChromiumExecutable, studioProcessEnvironment, validateStudioStack,
   viteCliPath } from "./shared-browser-studio-e2e.mjs";
-import { fixtureChildEnvironment, fixtureCompilerEnvironment } from "./browser-profile-e2e.mjs";
+import { fixtureChildEnvironment, fixtureCompilerEnvironment, fixtureCargoEnvironment } from "./browser-profile-e2e.mjs";
 
 const jwt = claims => `fixture.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.fixture`;
 const localStack = () => ({
@@ -74,7 +74,7 @@ test("builds retain scrubbed toolchain locations without passing them to isolate
   const runner = await readFile(new URL("./shared-browser-studio-e2e.mjs", import.meta.url), "utf8");
   assert.match(runner, /const buildEnv = fixtureChildEnvironment\(process\.env\)/);
   assert.match(runner, /const run = \(command, args, options = \{\}\) => runOwnedProcess\(command, args,\s*\{ env: buildEnv, signal, \.\.\.options \}\)/);
-  assert.equal((runner.match(/await run\("cargo", \["build", [^\n]+?"--message-format=json"\], \{ env: compilerEnv \}\)/g) ?? []).length, 2);
+  assert.equal((runner.match(/await run\("cargo", \["build", [^\n]+?"--message-format=json"\], \{ env: cargoEnv, onFailure: output => reportCargoCompilerErrors\(output, "packages\/runtime-(?:agent|controller)"\) \}\)/g) ?? []).length, 2);
 });
 
 test("compiler opt-in cannot leak proxy routing into Studio services or its empty browser home", () => {
@@ -83,7 +83,9 @@ test("compiler opt-in cannot leak proxy routing into Studio services or its empt
     HTTP_PROXY: "http://proxy.example:3128", HTTPS_PROXY: "http://proxy.example:3128", NO_PROXY: "*", NODE_OPTIONS: "must-not-copy" };
   const compiler = fixtureCompilerEnvironment(input);
   assert.equal(compiler.http_proxy, input.HTTP_PROXY);
-  for (const source of [input, compiler]) assert.deepEqual(studioProcessEnvironment(source, "/fixture/home"), {
+  const cargo = fixtureCargoEnvironment(input, "linux");
+  assert.deepEqual(cargo, { ...compiler, RUSTFLAGS: "-C link-arg=-fuse-ld=lld" });
+  for (const source of [input, compiler, cargo]) assert.deepEqual(studioProcessEnvironment(source, "/fixture/home"), {
     PATH: input.PATH, HOME: "/fixture/home", CODEX_HOME: "/fixture/home/.codex",
     INSTAFY_ENV_DIR: "/fixture/home/empty-env", CODEX_DISABLED: "1",
   });

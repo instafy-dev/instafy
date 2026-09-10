@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
@@ -7,6 +8,10 @@ import vm from 'node:vm';
 
 const root = path.resolve(import.meta.dirname, '..');
 const source = fs.readFileSync(path.join(root, '.github/workflows/build.yml'), 'utf8');
+const agentLinkerDefault = `          if [[ '\${{ runner.environment == 'self-hosted' && runner.os == 'Linux' }}' == true && "\${RUSTFLAGS+x}" != x ]]; then
+            export RUSTFLAGS='-C link-arg=-fuse-ld=lld'
+          fi
+`;
 const checks = [
   ['controller', 'runtime controller', 'runtime-controller'],
   ['agent', 'runtime agent', 'runtime-agent'],
@@ -164,7 +169,9 @@ test('only self-hosted Rust children install the fixed missing native packages w
     assert.match(install,/^        timeout-minutes: 5$/mu);assert.match(text,/^    timeout-minutes: 30$/mu);
     assert.match(install,/^        shell: bash$/mu);assert.match(install,/set -euo pipefail/u);
     assert.match(install,/sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update/u);
-    assert.match(install,/sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler/u);
+    assert.match(install,/sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler/u);
+    assert.equal((install.match(/DPkg::Lock::Timeout=120/g) ?? []).length,1);
+    assert.doesNotMatch(install,/kill|systemctl|rm .*lock|DPkg::Lock::Timeout=-1/u);
     assert.match(install,/for package in clang lld cmake libcap-dev protobuf-compiler; do/u);
     assert.match(install,/dpkg-query --show --showformat='\$\{Status\}'/u);assert.match(install,/pkg-config --exists libcap/u);
     for(const tool of ['clang','ld.lld','cmake','protoc'])assert(install.includes(`          ${tool} --version\n`));
@@ -187,7 +194,7 @@ test('the full original five check and six test commands and working directories
       const part = step(item.key, stepName);
       assert.doesNotMatch(part, /^        (?:if|continue-on-error|timeout-minutes|env|shell):/mu);
       assert.match(part, /        run: \|\n/u);
-      const afterRun = part.split('        run: |\n')[1];
+      const afterRun = part.replace(agentLinkerDefault, '').split('        run: |\n')[1];
       const block = afterRun.match(/^(?:          .*(?:\n|$))+/u)?.[0];
       assert.ok(block);
       // A following job's top-level comment is not part of this YAML block.
@@ -218,6 +225,44 @@ test('test children preserve unfiltered frozen Node20 installation and host-only
     assert.match(disk, /sudo rm -rf \/usr\/share\/dotnet \/usr\/local\/lib\/android \/opt\/ghc \/opt\/hostedtoolcache\/CodeQL\n          df -h \//u);
   }
   for (const item of checks) assert.doesNotMatch(job(item.key), /pnpm install|Free runner disk space/u);
+});
+
+test('only the runtime-agent Cargo step defaults self-hosted Linux linking, with no job-wide environment mutation', () => {
+  const agent = step('rust-test-agent', 'Run database-free Rust test suite');
+  assert.equal(source.split(agentLinkerDefault).length, 2);
+  assert.ok(agent.includes(agentLinkerDefault));
+  assert.doesNotMatch(agent, /GITHUB_ENV|GITHUB_OUTPUT|continue-on-error|linker=clang|\|\| true/u);
+  for (const item of children.filter(item => item.key !== 'rust-test-agent')) assert.ok(!job(item.key).includes(agentLinkerDefault));
+  assert.ok(step('rust-test-agent', 'Install scoped Rust native prerequisites').includes('ld.lld --version'));
+});
+
+test('actual runtime-agent Bash defaults only unset flags on self-hosted Linux and preserves both Cargo invocations', () => {
+  const script = step('rust-test-agent', 'Run database-free Rust test suite').split('        run: |\n')[1]
+    .trimEnd().split('\n').map(line => line.slice(10)).join('\n');
+  const expression = "${{ runner.environment == 'self-hosted' && runner.os == 'Linux' }}";
+  assert.equal(script.split(expression).length, 2);
+  const commands = [
+    ['test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--no-run'],
+    ['test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--lib', '--test', 'controller_client', '--', '--test-threads=1'],
+  ];
+  const fixture = `cargo() { printf 'CALL\\0%s\\0%s\\0' "\${RUSTFLAGS+x}" "\${RUSTFLAGS-}"; printf '%s\\0' "$@"; return "\${CARGO_FIXTURE_STATUS:-0}"; }\n`;
+  for (const environment of ['self-hosted', 'github-hosted', '', 'unknown']) for (const os of ['Linux', 'macOS', 'Windows', '']) {
+    const selected = vm.runInNewContext("runner.environment == 'self-hosted' && runner.os == 'Linux'", { runner: { environment, os } });
+    for (const flags of [undefined, '', '-C opt-level=1', '  -C target-cpu=native  ', '$(false);\nINERT_CHOICE']) {
+      const env = { PATH: '/usr/bin:/bin', ...(flags === undefined ? {} : { RUSTFLAGS: flags }) };
+      const result = spawnSync('/bin/bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', fixture + script.replace(expression, String(selected))], { env, timeout:5000 });
+      assert.equal(result.status,0);assert.equal(result.stderr.toString(),'');
+      const expected = flags === undefined && selected ? '-C link-arg=-fuse-ld=lld' : flags;
+      const tokens = result.stdout.toString().split('\0');tokens.pop();
+      assert.deepEqual(tokens, commands.flatMap(args => ['CALL', expected === undefined ? '' : 'x', expected ?? '', ...args]));
+      assert.deepEqual(env, { PATH: '/usr/bin:/bin', ...(flags === undefined ? {} : { RUSTFLAGS: flags }) });
+    }
+  }
+  const failed = spawnSync('/bin/bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', fixture + script.replace(expression, 'true')], {
+    env: { PATH: '/usr/bin:/bin', CARGO_FIXTURE_STATUS: '7' }, timeout:5000,
+  });
+  assert.equal(failed.status,7);assert.equal(failed.stderr.toString(),'');
+  assert.equal(failed.stdout.toString().split('CALL').length,2);
 });
 
 test('cargo caches cannot cross OS, CPU architecture, crate lane or lockfile inventory', () => {
@@ -256,7 +301,8 @@ test('only self-hosted Rust children use restore-only caches while hosted saves 
 });
 
 test('the restore-only mitigation preserves every other byte of the reviewed Build workflow', () => {
-  let normalized = source;
+  assert.equal((source.match(/ -o DPkg::Lock::Timeout=120/g) ?? []).length,10);
+  let normalized = source.replaceAll(' -o DPkg::Lock::Timeout=120','').replace(agentLinkerDefault, '');
   for (const item of children) {
     const restore = step(item.key, 'Restore cargo cache without saving');
     const hosted = step(item.key, 'Restore cargo cache');
