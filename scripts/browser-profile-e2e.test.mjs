@@ -5,7 +5,114 @@ import { link, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "no
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { cargoTestArtifact, chromiumStartupDiagnostics, copyFixtureEntrypoint, fixtureChildEnvironment, fixtureCompilerEnvironment, installCancellationSignalHandlers, preflightFixtureDisplay, runOwnedProcess, validateBrowserFixtureEnvironment, validateFixtureEnvironment } from "./browser-profile-e2e.mjs";
+import { fileURLToPath } from "node:url";
+import { cargoTestArtifact, chromiumStartupDiagnostics, copyFixtureEntrypoint, fixtureChildEnvironment, fixtureCompilerEnvironment, installCancellationSignalHandlers, preflightFixtureDisplay, reportCargoCompilerErrors, runOwnedProcess, validateBrowserFixtureEnvironment, validateFixtureEnvironment } from "./browser-profile-e2e.mjs";
+
+const agentManifest = fileURLToPath(new URL("../packages/runtime-agent/Cargo.toml", import.meta.url));
+const compilerError = (patch = {}) => JSON.stringify({ reason: "compiler-message", manifest_path: agentManifest, message: {
+  level: "error", rendered: "error[E0063]: missing field `fixture_field` in initializer of `Config`\n --> packages/runtime-agent/tests/browser_profile_e2e.rs:27:3\n  | source snippet must not be printed\n",
+  spans: [{ is_primary: true, file_name: "tests/browser_profile_e2e.rs", line_start: 27, column_start: 3,
+    text: [{ text: "private source snippet" }], label: "private label" }], ...patch,
+} });
+const compilerReport = (output, crate = "packages/runtime-agent") => { let text = ""; reportCargoCompilerErrors(output, crate, part => { text += part; }); return text; };
+
+test("compiler diagnostics select only error headings and source locations, not Cargo or child stdout", () => {
+  const output = ["private arbitrary stdout", "{malformed private data", "null", "42",
+    JSON.stringify({ reason: "build-script-executed", env: [["PRIVATE_TOKEN", "must-not-print"]] }),
+    JSON.stringify({ reason: "compiler-artifact", executable: "/private/artifact", message: { level: "error", rendered: "error: private artifact" } }),
+    compilerError({ level: "warning", rendered: "warning: private warning" }), compilerError()].join("\n");
+  assert.equal(compilerReport(output), "[cargo-compiler] error[E0063]: missing field [quoted] in initializer of [quoted]\n"
+    + "[cargo-compiler] at packages/runtime-agent/tests/browser_profile_e2e.rs:27:3\n");
+});
+
+test("compiler errors redact payloads and never print rendered source, notes, linker argv or terminal commands", () => {
+  const rendered = "\u001b[31merror: linking with `private-linker` failed: exit status: 1\u001b[0m\n"
+    + "  = note: PRIVATE_TOKEN=must-not-print /private/toolchain https://user:password@private.invalid\n"
+    + "  = note: ::warning::must-not-print\n";
+  assert.equal(compilerReport(compilerError({ rendered })), "[cargo-compiler] error: linking with [quoted] failed: exit status: 1\n"
+    + "[cargo-compiler] at packages/runtime-agent/tests/browser_profile_e2e.rs:27:3\n");
+  for (const rendered of ["error: PRIVATE_TOKEN=must-not-print", "error: Authorization Bearer must-not-print", "error: password must-not-print"]) {
+    assert.match(compilerReport(compilerError({ rendered })), /error: \[sensitive heading omitted\]/);
+    assert.doesNotMatch(compilerReport(compilerError({ rendered })), /must-not-print|Bearer/);
+  }
+  const result = compilerReport(compilerError({ rendered: 'error: failed "private value" at https://user:inert@private.invalid/file /private/file abcdefghijklmnopqrstuvwxyz1234' }));
+  assert.match(result, /failed \[quoted\] at \[url\] \[path\] \[opaque\]/);
+  assert.doesNotMatch(result, /private value|user:|inert|private.invalid|private\/file|abcdefghijklmnopqrstuvwxyz/);
+});
+
+test("compiler diagnostics refuse malformed locations and unknown rendered formats", () => {
+  for (const file_name of ["/private/source.rs", "../private.rs", "src/../private.rs", "src/./private.rs", "src//file.rs", "https://private.invalid/file.rs", "src/private\n::warning::.rs", "C:\\private\\source.rs", "C:/private/source.rs", "src\\file.rs"]) {
+    const result = compilerReport(compilerError({ spans: [{ is_primary: true, file_name, line_start: 1, column_start: 1 }] }));
+    assert.doesNotMatch(result, /\[cargo-compiler\] at /);
+  }
+  for (const patch of [{ spans: {} }, { spans: [null] }, { spans: [{ is_primary: true, file_name: "packages/test.rs", line_start: -1, column_start: 1 }] }]) {
+    assert.doesNotMatch(compilerReport(compilerError(patch)), /\[cargo-compiler\] at /);
+  }
+  for (const patch of [{ rendered: null }, { rendered: "private output\nerror: too late" }, { rendered: "::warning::private data" }, { level: "note" }]) {
+    assert.equal(compilerReport(compilerError(patch)), "");
+  }
+});
+
+test("crate-relative locations bind the fixed Cargo callsite and exact manifest, never a dependency or override", () => {
+  const record = JSON.parse(compilerError({ spans: [{ is_primary: true, file_name: "src/main.rs", line_start: 100, column_start: 8 }] }));
+  record.manifest_path = fileURLToPath(new URL("../packages/runtime-controller/Cargo.toml", import.meta.url));
+  assert.match(compilerReport(JSON.stringify(record), "packages/runtime-controller"), /at packages\/runtime-controller\/src\/main.rs:100:8/);
+  assert.doesNotMatch(compilerReport(JSON.stringify(record)), /\[cargo-compiler\] at /);
+  for (const manifest of [undefined, "/private/dependency/Cargo.toml", agentManifest + "/../Cargo.toml"]) {
+    assert.doesNotMatch(compilerReport(JSON.stringify({ ...record, manifest_path: manifest })), /\[cargo-compiler\] at /);
+  }
+  for (const crate of [undefined, "packages/other", "packages/../private", "/private", "packages\\runtime-agent"]) {
+    assert.throws(() => reportCargoCompilerErrors(compilerError(), crate), /fixed fixture compiler crate required/);
+  }
+});
+
+test("compiler diagnostic input records, headings and aggregate output remain bounded", () => {
+  const oversized = compilerError({ rendered: "error: " + "x".repeat(256 * 1024) });
+  assert.equal(compilerReport(oversized + "\n" + compilerError()), compilerReport(compilerError()));
+  const multibyte = compilerError({ rendered: "error: " + "界".repeat(100_000) });
+  assert.ok(multibyte.length < 256 * 1024 && Buffer.byteLength(multibyte) > 256 * 1024);
+  assert.equal(compilerReport(multibyte + "\n" + compilerError()), compilerReport(compilerError()));
+  const text = compilerReport(Array(100).fill(compilerError({ rendered: "error: " + "word ".repeat(1000) })).join("\n"));
+  assert.equal((text.match(/\[cargo-compiler\] error:/g) ?? []).length, 8);
+  assert.match(text, /diagnostic limit reached \(8 errors\)/);
+  assert.ok(Buffer.byteLength(text) < 8 * 1024);
+  assert.ok(text.split("\n").every(line => line.length <= 530));
+});
+
+test("a failed compiler-shaped process reports once but retains its nonzero failure", async () => {
+  let diagnostics = "", calls = 0;
+  await assert.rejects(runOwnedProcess(process.execPath, ["-e", "process.stdout.write(process.argv[1],()=>process.exit(1))", compilerError()], {
+    env: fixtureChildEnvironment(process.env), timeoutMs: 5_000,
+    onFailure(output) { calls++; reportCargoCompilerErrors(output, "packages/runtime-agent", text => { diagnostics += text; }); },
+  }), error => { assert.match(error.message, /failed/); assert.equal(error.actual, 1); return true; });
+  assert.equal(calls, 1);
+  assert.match(diagnostics, /error\[E0063\]: missing field/);
+  assert.match(diagnostics, /browser_profile_e2e.rs:27:3/);
+  assert.doesNotMatch(diagnostics, /private|snippet|fixture_field/);
+});
+
+test("successful compiler output and artifact selection remain unchanged; generic failures disclose no stdout", async () => {
+  const artifact = JSON.stringify({ reason: "compiler-artifact", profile: { test: true }, target: { name: "browser_profile_e2e", kind: ["test"] }, executable: "/tmp/inert-test" });
+  const result = await runOwnedProcess(process.execPath, ["-e", "process.stdout.write(process.argv[1])", artifact], {
+    env: fixtureChildEnvironment(process.env), timeoutMs: 5_000, onFailure() { assert.fail("success cannot report failure"); },
+  });
+  assert.equal(result, artifact);
+  assert.equal(cargoTestArtifact(result, "browser_profile_e2e", "test"), "/tmp/inert-test");
+  await assert.rejects(runOwnedProcess(process.execPath, ["-e", "process.stdout.write('private-child-output',()=>process.exit(1))"], {
+    env: fixtureChildEnvironment(process.env), timeoutMs: 5_000,
+  }), error => { assert.doesNotMatch(error.message, /private-child-output/); return true; });
+});
+
+test("only four fixed JSON Cargo compilation calls opt into failure diagnostics", async () => {
+  for (const file of ["browser-profile-e2e.mjs", "shared-browser-studio-e2e.mjs"]) {
+    const source = await readFile(new URL(file, import.meta.url), "utf8");
+    assert.equal((source.match(/onFailure: output => reportCargoCompilerErrors/g) ?? []).length, 2);
+    for (const crate of ["runtime-agent", "runtime-controller"]) {
+      const line = source.split("\n").find(line => line.includes('await run("cargo"') && line.includes(`"packages/${crate}/Cargo.toml"`));
+      assert.ok(line.includes(`"--message-format=json"], { env: compilerEnv, onFailure: output => reportCargoCompilerErrors(output, "packages/${crate}") }`));
+    }
+  }
+});
 
 async function diagnosticFixture(t) {
   const directory = await mkdtemp(path.join(tmpdir(), "profile-diagnostics-test-"));

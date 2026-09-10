@@ -690,6 +690,20 @@ retains only fixed diagnostic categories from at most the last 64 KiB of its
 owned Chromium log, never raw log lines. Categories are observations, not a
 root-cause diagnosis; missing or unrecognized evidence remains explicit.
 
+The four Shared fixture Cargo builds keep JSON artifact discovery unchanged.
+On a failed build they report at most eight compiler-error headings and bounded
+repository-relative Rust source locations. Quoted payloads, URLs, absolute
+paths and credential-like headings are redacted; source snippets, linker
+arguments, build-script environment, other JSON records and arbitrary child
+stdout are not printed. Each JSON record is limited to 256 KiB for diagnostics;
+oversized or unrecognized records are omitted, not inferred. This diagnostic
+path does not make a failing compiler or missing executable pass. Crate-relative
+locations use the fixed agent/controller callsite context only when Cargo's
+manifest matches that exact checkout crate; dependency locations are omitted.
+Absolute, Windows and escaping span paths are refused. Reproduce
+the complete fixture on disposable Linux to obtain the real compiler error;
+passing parser tests alone does not qualify the browser workload.
+
 The standard hosted workflow uses Docker to provision disposable migrated
 Supabase (Postgres and local authentication); Chromium and runtime/controller
 processes run natively on Linux. The profile-only command also accepts a

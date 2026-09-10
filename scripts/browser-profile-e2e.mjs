@@ -159,6 +159,52 @@ export function cargoTestArtifact(output, targetName, kind) {
   return artifacts[0].executable;
 }
 
+// Opt-in for the secret-free fixture compiler calls only, never arbitrary child
+// stdout. Cargo's JSON stdout also contains build-script env and artifact paths.
+// Retain only bounded error headings/locations, not snippets or linker argv.
+export function reportCargoCompilerErrors(output, crateDirectory, write = text => process.stderr.write(text)) {
+  assert.ok(["packages/runtime-agent", "packages/runtime-controller"].includes(crateDirectory), "fixed fixture compiler crate required");
+  let offset = 0, reported = 0;
+  while (offset < output.length && reported < 8) {
+    const newline = output.indexOf("\n", offset);
+    const end = newline < 0 ? output.length : newline;
+    const start = offset;
+    offset = end + 1;
+    if (end - start > 256 * 1024 || output[start] !== "{") continue;
+    const recordText = output.slice(start, end);
+    if (Buffer.byteLength(recordText, "utf8") > 256 * 1024) continue;
+    let record;
+    try { record = JSON.parse(recordText); } catch { continue; }
+    const diagnostic = record?.message;
+    if (record?.reason !== "compiler-message" || diagnostic?.level !== "error"
+      || typeof diagnostic.rendered !== "string") continue;
+    const heading = diagnostic.rendered.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").split(/\r?\n/, 1)[0];
+    if (!/^error(?:\[E[0-9]{4}\])?: /.test(heading)) continue;
+    let safe = heading
+      .replace(/`[^`]*`|"[^"\r\n]*"|'[^'\r\n]*'/g, "[quoted]")
+      .replace(/[a-z][a-z0-9+.-]*:\/\/[^\s]+/gi, "[url]")
+      .replace(/(?:[A-Za-z]:[\\/]|\/)[^\s]+/g, "[path]")
+      .replace(/[A-Za-z0-9_+/.=-]{24,}/g, "[opaque]")
+      .replace(/[^\x20-\x7e]/g, "");
+    if (/token|secret|password|authorization|cookie|api.?key|\b[A-Z][A-Z0-9_]*\s*=/i.test(heading)) {
+      safe = `${heading.match(/^error(?:\[E[0-9]{4}\])?/)[0]}: [sensitive heading omitted]`;
+    }
+    write(`[cargo-compiler] ${safe.slice(0, 512)}\n`);
+    // Span text, labels, expansions and absolute dependency paths are private.
+    const span = Array.isArray(diagnostic.spans) && diagnostic.spans.find(item => item?.is_primary);
+    const file = span?.file_name;
+    if (record.manifest_path === path.join(root, crateDirectory, "Cargo.toml")
+      && typeof file === "string" && /^(?:(?:src|tests|benches|examples)\/[A-Za-z0-9_./-]+\.rs|build\.rs)$/.test(file)
+      && file.length <= 240 && !file.split("/").some(part => !part || part === "." || part === "..")
+      && Number.isSafeInteger(span.line_start) && span.line_start > 0 && span.line_start <= 1_000_000
+      && Number.isSafeInteger(span.column_start) && span.column_start > 0 && span.column_start <= 1_000_000) {
+      write(`[cargo-compiler] at ${crateDirectory}/${file}:${span.line_start}:${span.column_start}\n`);
+    }
+    reported++;
+  }
+  if (reported === 8) write("[cargo-compiler] diagnostic limit reached (8 errors)\n");
+}
+
 export function fixtureChildEnvironment(env) {
   const allowed = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPDIR", "TMP", "TEMP",
     "CARGO_HOME", "RUSTUP_HOME", "CARGO_TARGET_DIR", "CARGO_INCREMENTAL", "CARGO_PROFILE_DEV_DEBUG", "CARGO_BUILD_JOBS",
@@ -229,7 +275,7 @@ export function installCancellationSignalHandlers(cancellation, emitter = proces
 // Builds and browser fixtures use the same cancellable, privately owned process
 // group mechanism. No synchronous build can postpone SIGINT/SIGTERM cleanup.
 export async function runOwnedProcess(command, args, { env, cwd = root, signal,
-  timeoutMs = 25 * 60_000, onOutput } = {}) {
+  timeoutMs = 25 * 60_000, onOutput, onFailure } = {}) {
   const child = spawn(command, args, { cwd, env, signal, detached: true,
     stdio: ["ignore", "pipe", "inherit"] });
   let output = "";
@@ -248,6 +294,7 @@ export async function runOwnedProcess(command, args, { env, cwd = root, signal,
       child.once("exit", resolve);
     });
     assert.ok(!overflow, `${command} exceeded bounded output`);
+    if (status !== 0) onFailure?.(output);
     assert.equal(status, 0, `${command} failed`);
     return output;
   } finally {
@@ -393,9 +440,9 @@ async function lifecycle() {
     }
     assert.ok(found, "existing production launch helper requires /usr/bin/chromium or /usr/bin/google-chrome (runner-only symlink to Playwright Chromium is supported)");
     stage = "build-runtime-fixture";
-    const agent = cargoTestArtifact(await run("cargo", ["test", "--locked", "--manifest-path", "packages/runtime-agent/Cargo.toml", "--test", "browser_profile_e2e", "--no-run", "--message-format=json"], { env: compilerEnv }), "browser_profile_e2e", "test");
+    const agent = cargoTestArtifact(await run("cargo", ["test", "--locked", "--manifest-path", "packages/runtime-agent/Cargo.toml", "--test", "browser_profile_e2e", "--no-run", "--message-format=json"], { env: compilerEnv, onFailure: output => reportCargoCompilerErrors(output, "packages/runtime-agent") }), "browser_profile_e2e", "test");
     stage = "build-controller-fixture";
-    const controller = cargoTestArtifact(await run("cargo", ["test", "--locked", "--manifest-path", "packages/runtime-controller/Cargo.toml", "--bin", "runtime-controller", "--no-run", "--message-format=json"], { env: compilerEnv }), "runtime-controller", "bin");
+    const controller = cargoTestArtifact(await run("cargo", ["test", "--locked", "--manifest-path", "packages/runtime-controller/Cargo.toml", "--bin", "runtime-controller", "--no-run", "--message-format=json"], { env: compilerEnv, onFailure: output => reportCargoCompilerErrors(output, "packages/runtime-controller") }), "runtime-controller", "bin");
     const runEnv = { ...env,
       PATH: `${bin}:${env.PATH}`,
       TEST_DATABASE_URL: process.env.TEST_DATABASE_URL,
