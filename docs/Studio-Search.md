@@ -53,6 +53,13 @@ return to. These checkpoints live only in the current Studio session and are
 cleared on reload or account change. Results are fetched again when returning,
 so a checkpoint does not bypass authorization.
 
+When another participant adds a message while you are reading above the live
+bottom, **New messages ↓** appears above the composer without moving the
+transcript. It returns to live messages and clears once you catch up. Historical
+search views use the same action and retain **Results**; the duplicate **Latest**
+action is hidden while it is shown. Loading existing history or sending your own
+message does not count as a new incoming message for this indicator.
+
 The conversation's presence controls stay fixed while message content fades
 beneath them. Exact-message reveals land below that fade, with room around the
 highlight. Forced-colors mode uses a solid system-color header instead.

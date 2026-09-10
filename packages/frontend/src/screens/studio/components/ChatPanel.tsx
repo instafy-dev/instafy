@@ -262,6 +262,8 @@ import {
 import { useChatComposerLayoutState } from "./useChatComposerLayoutState";
 import { useChatAutoScrollSync, useChatScrollController } from "./useChatScrollOrchestration";
 import { useChatNewerHistoryPaging } from "./useChatNewerHistoryPaging";
+import { useChatNewMessages } from "./useChatNewMessages";
+import { ChatNewMessagesButton } from "./ChatNewMessagesButton";
 import { useMessageContext } from "../../../conversations/useMessageContext";
 import { useStudioNavigation } from "../../../navigation/useStudioNavigation";
 import { revealCanonicalMessageTarget } from "./messageContextPresentation";
@@ -506,6 +508,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     hasMoreHistory: hasMoreRecentHistory,
     isHistoryLoading: isRecentHistoryLoading,
     isInitialHistoryLoading: isInitialRecentHistoryLoading,
+    hasResolvedHistory: hasResolvedRecentHistory,
+    latestArrivalMessages,
     initialHistoryError: recentHistoryError,
     retryInitialHistory: retryRecentHistory,
     loadOlderMessages: loadOlderRecentMessages,
@@ -1967,6 +1971,26 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     isReadingReady: isHistoryReadingReady,
     loadNewer: messageContext.loadNewer,
     onReachLatest: returnToLatestMessages,
+  });
+
+  const { hasNewMessages, jumpToLatest: jumpToNewMessages } = useChatNewMessages({
+    visitKey: scrollSnapshotKey,
+    routeKey: location.key,
+    currentUserId,
+    enabled: Boolean(chatScrollHistoryVisit) && browserSubtab === "chat" && !jobThread,
+    hasResolvedHistory: hasResolvedRecentHistory,
+    arrivalMessages: latestArrivalMessages,
+    messageTargetActive,
+    scrollContainerRef,
+    shouldAutoScrollRef,
+    isReadingReady: isHistoryReadingReady,
+    onJumpToLatest: () => {
+      if (messageTargetActive) returnToLatestMessages();
+      else {
+        shouldAutoScrollRef.current = true;
+        scrollToBottom({ behavior: "auto" });
+      }
+    },
   });
 
   useConversationNotificationRead({
@@ -5688,6 +5712,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               canReturnToLatest={Boolean(chatScrollHistoryVisit)}
               onLoadNewer={() => void messageContext.loadNewer()}
               onReturnToLatest={returnToLatestMessages}
+              hideLatest={hasNewMessages}
             />
             <ChatPostTranscriptAuxiliaryRows
               jobThreadPresent={Boolean(jobThread)}
@@ -5780,6 +5805,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       <CredentialsConnectModal {...gettingStartedConnectModalProps} />
 
       <ChatComposerSurface
+        aboveComposer={hasNewMessages ? <ChatNewMessagesButton onPress={jumpToNewMessages} /> : null}
         mutationDisabled={projectWriteDisabled}
         silenceHintProps={
           octoSilenceHint.visible ? { onDismiss: octoSilenceHint.dismiss } : null

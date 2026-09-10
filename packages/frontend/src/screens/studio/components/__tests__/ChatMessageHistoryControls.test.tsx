@@ -81,4 +81,15 @@ describe("historical message paging controls", () => {
     expect(container.textContent).toBe("");
     expect(container.querySelector("button")).toBeNull();
   });
+
+  it("hides the duplicate Latest without changing its space or hiding paging errors", async () => {
+    await render({ hideLatest: true, newerError: "Retry this page." });
+    expect(latest()?.parentElement?.className).toContain("invisible");
+    expect(latest()?.parentElement?.getAttribute("aria-hidden")).toBe("true");
+    expect(latest()?.disabled).toBe(true);
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe("Retry this page.");
+    await act(async () => retry()!.click());
+    expect(onLoadNewer).toHaveBeenCalledOnce();
+    expect(onReturnToLatest).not.toHaveBeenCalled();
+  });
 });

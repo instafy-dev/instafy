@@ -199,6 +199,26 @@ export function useConversationHistoryState({
     currentUserId,
   ]);
 
+  const firstHistoryPageMessages = controllerMessagesQuery.data?.pages[0]?.messages;
+  const latestArrivalMessages = useMemo<readonly ChatMessage[]>(() => {
+    if (controllerHistoryAccessDenied || controllerHistoryNotFound || (controllerConversationId && !currentUserId)) {
+      return [];
+    }
+    // Keep arrival detection separate from paginated transcript history: older
+    // rows can share the newest timestamp after timestamp precision is reduced.
+    const newestMessages = latestMessagesQuery.data?.messages ?? firstHistoryPageMessages ?? [];
+    const localMessages = activeConversation?.messages ?? [];
+    return mergeAndSortMessages([...newestMessages, ...localMessages]);
+  }, [
+    activeConversation?.messages,
+    controllerConversationId,
+    controllerHistoryAccessDenied,
+    controllerHistoryNotFound,
+    currentUserId,
+    firstHistoryPageMessages,
+    latestMessagesQuery.data?.messages,
+  ]);
+
   const refetchInitial = controllerMessagesQuery.refetch;
   const refetchLatest = latestMessagesQuery.refetch;
   const hasLoadedHistory = Boolean(controllerMessagesQuery.data?.pages.length);
@@ -271,6 +291,11 @@ export function useConversationHistoryState({
   }, [controllerConversationId, refreshHistory, runs]);
 
   const hasMoreHistory = Boolean(controllerMessagesQuery.hasNextPage);
+  // Local/SSE rows can arrive before the controller's first history response.
+  // Only an authorized page establishes the remote baseline, including an empty page.
+  const hasResolvedHistory = Boolean(activeConversation && currentUserId
+    && !controllerHistoryNotFound && !controllerHistoryAccessDenied
+    && (!runtimeControllerEnabled || (controllerConversationId && hasLoadedHistory)));
   const isHistoryLoading = controllerMessagesQuery.isFetchingNextPage;
   const needsInitialHistory =
     runtimeControllerEnabled &&
@@ -306,7 +331,9 @@ export function useConversationHistoryState({
 
   return {
     messages,
+    latestArrivalMessages,
     hasMoreHistory,
+    hasResolvedHistory,
     isHistoryLoading,
     isInitialHistoryLoading,
     initialHistoryError,

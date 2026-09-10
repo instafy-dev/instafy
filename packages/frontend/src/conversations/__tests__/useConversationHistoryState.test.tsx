@@ -76,11 +76,13 @@ let latestHistoryState: ReturnType<typeof useConversationHistoryState>;
 
 function Probe({
   conversationId,
+  controllerId = conversationId,
   currentUserId,
   localContent,
   runs = {},
 }: {
   conversationId: string;
+  controllerId?: string | null;
   currentUserId: string | null;
   localContent?: string;
   runs?: Record<string, RunRecord>;
@@ -88,7 +90,7 @@ function Probe({
   latestHistoryState = useConversationHistoryState({
     activeConversation: {
       ...createInitialConversation({ localId: `local-${conversationId}` }),
-      controllerId: conversationId,
+      controllerId,
       messages: localContent
         ? [{ id: "local-message", role: "assistant", content: localContent, timestamp: 1 }]
         : [],
@@ -121,14 +123,14 @@ describe("useConversationHistoryState", () => {
     conversationId: string,
     currentUserId: string | null = "user-1",
     localContent?: string,
-    options: { copies?: number; runs?: Record<string, RunRecord> } = {},
+    options: { copies?: number; runs?: Record<string, RunRecord>; controllerId?: string | null } = {},
   ) {
     await act(async () => {
       root.render(
         <QueryClientProvider client={queryClient}>
           {Array.from({ length: options.copies ?? 1 }, (_, index) => (
             <Probe key={index} conversationId={conversationId} currentUserId={currentUserId}
-              localContent={localContent} runs={options.runs} />
+              controllerId={options.controllerId} localContent={localContent} runs={options.runs} />
           ))}
         </QueryClientProvider>,
       );
@@ -166,6 +168,7 @@ describe("useConversationHistoryState", () => {
 
     await select("conversation-a");
     expect(mocks.listMessages).toHaveBeenCalledTimes(1);
+    expect(latestHistoryState.hasResolvedHistory).toBe(false);
     expect(container.firstElementChild?.getAttribute("data-loading")).toBe("true");
     expect(queryClient.getQueryData(["conversation-messages", "user-1", "conversation-a"])).toBeUndefined();
 
@@ -173,8 +176,62 @@ describe("useConversationHistoryState", () => {
 
     expect(mocks.listMessages).toHaveBeenCalledTimes(2);
     expect(container.textContent).toBe("Recovered history");
+    expect(latestHistoryState.hasResolvedHistory).toBe(true);
     expect(container.firstElementChild?.getAttribute("data-loading")).toBe("false");
     expect(mocks.setConversationControllerId).not.toHaveBeenCalled();
+  });
+
+  it("waits for the first controller page even when local and SSE messages are already visible", async () => {
+    const firstPage = deferredPage();
+    mocks.listMessages.mockImplementation(() => firstPage.promise);
+
+    await select("conversation-a", "user-1", "Local message before history");
+    expect(container.textContent).toBe("Local message before history");
+    expect(latestHistoryState.latestArrivalMessages.map(message => message.content)).toEqual(["Local message before history"]);
+    expect(latestHistoryState.isInitialHistoryLoading).toBe(false);
+    expect(latestHistoryState.hasResolvedHistory).toBe(false);
+
+    await select("conversation-a", "user-1", "SSE update before history");
+    expect(container.textContent).toBe("SSE update before history");
+    expect(latestHistoryState.latestArrivalMessages.map(message => message.content)).toEqual(["SSE update before history"]);
+    expect(latestHistoryState.hasResolvedHistory).toBe(false);
+    expect(mocks.listMessages).toHaveBeenCalledTimes(1);
+
+    await act(async () => { firstPage.resolve({ messages: [], nextCursor: null, hasMore: false }); });
+    await advance(1);
+    expect(latestHistoryState.hasResolvedHistory).toBe(true);
+    expect(container.textContent).toBe("SSE update before history");
+  });
+
+  it("does not resolve a controller-backed conversation before its controller identity is known", async () => {
+    await select("conversation-a", "user-1", "Local draft", { controllerId: null });
+    expect(container.textContent).toBe("Local draft");
+    expect(latestHistoryState.hasResolvedHistory).toBe(false);
+    expect(mocks.listMessages).not.toHaveBeenCalled();
+  });
+
+  it("keeps equally timestamped older pages out of arrival candidates while accepting a newest-page arrival", async () => {
+    const initialMessage = historyPage("conversation-a", "Original newest message").messages[0];
+    const olderMessage = { ...initialMessage, id: "older-message", content: "Older pagination row" };
+    const arrivedMessage = { ...initialMessage, id: "arrived-message", content: "Newly arrived message" };
+    mocks.listMessages
+      .mockResolvedValueOnce({ messages: [initialMessage], nextCursor: initialMessage.id, hasMore: true })
+      .mockResolvedValueOnce({ messages: [olderMessage], nextCursor: null, hasMore: false })
+      .mockResolvedValueOnce({ messages: [arrivedMessage, initialMessage], nextCursor: initialMessage.id, hasMore: true });
+
+    await select("conversation-a");
+    expect(latestHistoryState.latestArrivalMessages.map(message => message.id)).toEqual([initialMessage.id]);
+    await act(async () => { await latestHistoryState.loadOlderMessages(); });
+    await advance(1);
+    expect(latestHistoryState.messages.map(message => message.id)).toContain(olderMessage.id);
+    expect(latestHistoryState.latestArrivalMessages.map(message => message.id)).toEqual([initialMessage.id]);
+
+    await act(async () => { window.dispatchEvent(new Event("instafy:controller-stream-reconnected")); });
+    await advance(1);
+    expect(latestHistoryState.messages.map(message => message.id)).toContain(olderMessage.id);
+    expect(latestHistoryState.latestArrivalMessages.map(message => message.id)).toEqual([arrivedMessage.id, initialMessage.id]);
+    expect(new Set(latestHistoryState.messages.map(message => message.timestamp)).size).toBe(1);
+    expect(mocks.listMessages).toHaveBeenCalledTimes(3);
   });
 
   it("keeps warm history visible when switching back triggers a failed refresh", async () => {
@@ -201,6 +258,7 @@ describe("useConversationHistoryState", () => {
     expect(container.textContent).toBe("First conversation");
     expect(container.firstElementChild?.getAttribute("data-loading")).toBe("false");
     expect(latestHistoryState.initialHistoryError).toBeNull();
+    expect(latestHistoryState.hasResolvedHistory).toBe(true);
     expect(mocks.setConversationControllerId).not.toHaveBeenCalled();
   });
 
@@ -215,6 +273,7 @@ describe("useConversationHistoryState", () => {
     expect(mocks.listMessages).toHaveBeenCalledTimes(2);
     expect(latestHistoryState.isInitialHistoryLoading).toBe(false);
     expect(latestHistoryState.initialHistoryError).toBe("Couldn't load messages.");
+    expect(latestHistoryState.hasResolvedHistory).toBe(false);
     expect(mocks.setConversationControllerId).not.toHaveBeenCalled();
 
     let resolveRetry!: (page: ControllerConversationMessagesPage) => void;
@@ -262,6 +321,7 @@ describe("useConversationHistoryState", () => {
 
     expect(mocks.listMessages).toHaveBeenCalledTimes(1);
     expect(queryClient.getQueryState(["conversation-messages", "user-1", "conversation-a"])?.status).toBe("success");
+    expect(latestHistoryState.hasResolvedHistory).toBe(true);
     expect(container.textContent).toBe("");
     expect(container.firstElementChild?.getAttribute("data-loading")).toBe("false");
     expect(mocks.setConversationControllerId).not.toHaveBeenCalled();
@@ -275,6 +335,8 @@ describe("useConversationHistoryState", () => {
 
     expect(mocks.listMessages).toHaveBeenCalledTimes(1);
     expect(mocks.setConversationControllerId).toHaveBeenCalledWith("local-conversation-a", null);
+    expect(latestHistoryState.hasResolvedHistory).toBe(false);
+    expect(latestHistoryState.latestArrivalMessages).toEqual([]);
     expect(container.firstElementChild?.getAttribute("data-loading")).toBe("false");
     expect(latestHistoryState.initialHistoryError).toBeNull();
     await act(async () => { await latestHistoryState.retryInitialHistory(); });
@@ -289,12 +351,15 @@ describe("useConversationHistoryState", () => {
     await select("conversation-a", "user-1", "Private SSE message");
     expect(container.textContent).toContain("Private server history");
     expect(container.textContent).toContain("Private SSE message");
+    expect(latestHistoryState.hasResolvedHistory).toBe(true);
     await act(async () => {
       window.dispatchEvent(new Event("instafy:controller-stream-reconnected"));
     });
     await advance(1);
 
     expect(container.textContent).toBe("");
+    expect(latestHistoryState.hasResolvedHistory).toBe(false);
+    expect(latestHistoryState.latestArrivalMessages).toEqual([]);
     expect(queryClient.getQueryData(["conversation-messages", "user-1", "conversation-a"])).toBeUndefined();
     expect(mocks.replaceMessages).toHaveBeenCalledWith("local-conversation-a", []);
     expect(mocks.setConversationControllerId).toHaveBeenCalledWith("local-conversation-a", null);
@@ -314,12 +379,15 @@ describe("useConversationHistoryState", () => {
     expect(container.textContent).toBe("User one's private history");
     await select("conversation-a", null);
     expect(container.textContent).toBe("");
+    expect(latestHistoryState.hasResolvedHistory).toBe(false);
+    expect(latestHistoryState.latestArrivalMessages).toEqual([]);
     expect(mocks.listMessages).toHaveBeenCalledTimes(1);
 
     await select("conversation-a", "user-2");
     await advance(1_001);
     expect(container.textContent).toBe("");
     expect(queryClient.getQueryData(["conversation-messages", "user-2", "conversation-a"])).toBeUndefined();
+    expect(latestHistoryState.hasResolvedHistory).toBe(false);
     expect(mocks.listMessages).toHaveBeenCalledTimes(3);
   });
 
@@ -461,6 +529,7 @@ describe("useConversationHistoryState", () => {
     }
     const pendingSignal = mocks.listMessages.mock.calls.at(-1)?.[0].signal as AbortSignal;
     expect(pendingSignal.aborted).toBe(false);
+    expect(latestHistoryState.hasResolvedHistory).toBe(stage !== "initial");
 
     await select("conversation-b");
 
