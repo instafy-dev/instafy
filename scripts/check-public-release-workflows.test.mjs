@@ -176,6 +176,15 @@ test("Changesets separates pull-request, version, pack, and npm publish authorit
   assert.doesNotMatch(version, /id-token: write/u);
   assert.doesNotMatch(version, /NPM_TOKEN|NODE_AUTH_TOKEN/u);
   assert.doesNotMatch(version, /cache:/u);
+  assertOrdered(
+    version,
+    "Qualify isolated protected-main control runner",
+    "Checkout the exact protected-main event commit",
+    "Install the exact dependency graph without lifecycle scripts",
+    "Require exact current protected main before bot authorization",
+    "Require the dedicated instafy-bot credential",
+    "Create or update the Changesets version pull request",
+  );
 
   assert.match(pack, /needs\.select\.outputs\.publish-plan-artifact-id/u);
   assert.match(pack, /pnpm --filter @instafy\/cli test:package/u);
