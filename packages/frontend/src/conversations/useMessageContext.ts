@@ -9,7 +9,16 @@ export type MessageContextTarget = {
   messageId: string;
   visitKey: string;
 };
-type WindowState = { key: string; page: MessageContextPage | null; loading: boolean; error: string | null; unavailable: boolean; accessDenied?: boolean };
+type WindowState = {
+  key: string;
+  page: MessageContextPage | null;
+  loading: boolean;
+  error: string | null;
+  unavailable: boolean;
+  accessDenied?: boolean;
+  loadingDirection?: "older" | "newer";
+  errorDirection?: "older" | "newer";
+};
 
 /** A contiguous window around a target; never splice disjoint recent history into it. */
 export function useMessageContext(target: MessageContextTarget | null) {
@@ -49,7 +58,7 @@ export function useMessageContext(target: MessageContextTarget | null) {
     const cursor = direction === "older" ? page.olderCursor : page.newerCursor;
     if (!cursor || !(direction === "older" ? page.hasOlder : page.hasNewer)) return;
     request.busy = true;
-    setState({ ...current, loading: true, error: null });
+    setState({ ...current, loading: true, error: null, loadingDirection: direction, errorDirection: undefined });
     try {
       const next = await fetchMessageContext({ ...selected, messageId: cursor,
         before: direction === "older" ? 40 : 0, after: direction === "newer" ? 40 : 0,
@@ -66,7 +75,7 @@ export function useMessageContext(target: MessageContextTarget | null) {
     } catch (error) {
       if (request.controller.signal.aborted || latestRef.current.key !== currentKey) return;
       const unavailable = error instanceof MessageContextUnavailableError;
-      setState({ ...current, page: unavailable ? null : current.page, loading: false, unavailable,
+      setState({ ...current, page: unavailable ? null : current.page, loading: false, loadingDirection: undefined, errorDirection: direction, unavailable,
         accessDenied: error instanceof MessageContextUnavailableError && error.accessDenied,
         error: error instanceof Error ? error.message : "Unable to load messages." });
     } finally { request.busy = false; }
@@ -77,7 +86,9 @@ export function useMessageContext(target: MessageContextTarget | null) {
   return {
     messages,
     loading: Boolean(key && (!current || current.loading)),
+    loadingNewer: Boolean(current?.loading && current.loadingDirection === "newer"),
     error: current?.error ?? null,
+    newerError: current?.errorDirection === "newer" && !current.unavailable ? current.error : null,
     unavailable: current?.unavailable ?? false,
     accessDenied: current?.accessDenied ?? false,
     hasOlder: current?.page?.hasOlder ?? false,

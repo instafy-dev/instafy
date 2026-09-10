@@ -15,7 +15,12 @@ function page(ids: string[], overrides: Partial<MessageContextPage> = {}): Messa
     role: "user", content: id, metadata: null, createdAt: "2026-09-10T10:00:00Z",
   })), olderCursor: ids.at(-1) ?? null, newerCursor: ids[0] ?? null, hasOlder: true, hasNewer: true, ...overrides };
 }
-function deferred<T>() { let resolve!: (value: T) => void; const promise = new Promise<T>((done) => { resolve = done; }); return { promise, resolve }; }
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+}
 
 describe("targeted message context", () => {
   let root: Root;
@@ -80,8 +85,63 @@ describe("targeted message context", () => {
     await act(async () => api.loadOlder());
     expect(api.messages.map((message) => message.id)).toEqual(["old", "middle"]);
     expect(api.error).toBe("Try again");
+    expect(api.newerError).toBeNull();
     await act(async () => api.loadOlder());
     expect(api.messages.map((message) => message.id)).toEqual(["older", "old", "middle"]);
     expect(api.error).toBeNull();
+  });
+
+  it("keeps newer-page failure and retry scoped to the boundary without discarding loaded history", async () => {
+    const pending = deferred<MessageContextPage>();
+    vi.mocked(fetchMessageContext).mockResolvedValueOnce(page(["new", "middle", "old"]))
+      .mockResolvedValueOnce(page(["old", "older"], { hasOlder: false }))
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValueOnce(page(["newest", "new"], { hasNewer: false }));
+    await render();
+    await act(async () => api.loadOlder());
+    let request!: Promise<void>;
+    await act(async () => { request = api.loadNewer(); });
+    expect(api.loadingNewer).toBe(true);
+    expect(api.newerError).toBeNull();
+    await act(async () => api.loadNewer());
+    expect(fetchMessageContext).toHaveBeenCalledTimes(3);
+    await act(async () => { pending.reject(new Error("Could not load newer messages.")); await request; });
+    expect(api.loadingNewer).toBe(false);
+    expect(api.newerError).toBe("Could not load newer messages.");
+    expect(api.messages.map(message => message.id)).toEqual(["older", "old", "middle", "new"]);
+    await act(async () => api.loadNewer());
+    expect(fetchMessageContext).toHaveBeenNthCalledWith(4, expect.objectContaining({ messageId: "new", before: 0, after: 40 }));
+    expect(api.messages.map(message => message.id)).toEqual(["older", "old", "middle", "new", "newest"]);
+    expect(api.newerError).toBeNull();
+    expect(api.loadingNewer).toBe(false);
+  });
+
+  it("does not expose access failures as a retryable newer-page error", async () => {
+    vi.mocked(fetchMessageContext).mockResolvedValueOnce(page(["middle", "old"]))
+      .mockRejectedValueOnce(new MessageContextUnavailableError("Access revoked", true));
+    await render();
+    await act(async () => api.loadNewer());
+    expect(api.accessDenied).toBe(true);
+    expect(api.messages).toEqual([]);
+    expect(api.error).toBe("Access revoked");
+    expect(api.newerError).toBeNull();
+    expect(api.loadingNewer).toBe(false);
+  });
+
+  it("discards a newer-page failure after navigating to another message", async () => {
+    const pending = deferred<MessageContextPage>();
+    vi.mocked(fetchMessageContext).mockResolvedValueOnce(page(["middle", "old"]))
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValueOnce(page(["second"]));
+    await render();
+    let request!: Promise<void>;
+    await act(async () => { request = api.loadNewer(); });
+    const signal = vi.mocked(fetchMessageContext).mock.calls[1][0].signal;
+    await render({ ...target, messageId: "second", visitKey: "visit-b" });
+    expect(signal.aborted).toBe(true);
+    await act(async () => { pending.reject(new Error("Old request failed")); await request; });
+    expect(api.messages.map(message => message.id)).toEqual(["second"]);
+    expect(api.newerError).toBeNull();
+    expect(api.loadingNewer).toBe(false);
   });
 });

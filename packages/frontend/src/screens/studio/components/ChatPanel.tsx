@@ -261,6 +261,7 @@ import {
 } from "../../../utils/aiProviderModels";
 import { useChatComposerLayoutState } from "./useChatComposerLayoutState";
 import { useChatAutoScrollSync, useChatScrollController } from "./useChatScrollOrchestration";
+import { useChatNewerHistoryPaging } from "./useChatNewerHistoryPaging";
 import { useMessageContext } from "../../../conversations/useMessageContext";
 import { useStudioNavigation } from "../../../navigation/useStudioNavigation";
 import { revealCanonicalMessageTarget } from "./messageContextPresentation";
@@ -636,6 +637,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     ? !chatScrollHistoryVisit || (messageContext.loading && !messages.length)
     : isInitialRecentHistoryLoading;
   const initialHistoryError = messageTargetActive ? messageContext.error : recentHistoryError;
+  const displayedHistoryError = messageTargetActive && messageContext.newerError ? null : initialHistoryError;
   const retryInitialHistory = messageTargetActive ? messageContext.retry : retryRecentHistory;
   const loadOlderMessages = messageTargetActive ? messageContext.loadOlder : loadOlderRecentMessages;
   useEffect(() => {
@@ -770,7 +772,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       ? browserPanelSize.width < ADAPTIVE_SHARED_BROWSER_WIDTH_PX
       : compactBrowserViewport;
   const homeAttentionBadge = homeAttentionCount > 9 ? "9+" : homeAttentionCount.toString();
-  const pinChatMessagesToBottom = shouldPinChatMessagesToBottom({
+  const pinChatMessagesToBottom = !messageTargetActive && shouldPinChatMessagesToBottom({
     hasMoreHistory,
     smallViewport: compactBrowserViewport,
   });
@@ -1933,6 +1935,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     autoScrollPendingRef,
     handleScrollContentRef,
     highlightedMessageId,
+    isHistoryReadingReady,
     lastComposerScrollTopRef,
     lastScrollHeightRef,
     recordScrollPosition,
@@ -1951,6 +1954,18 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     isInitialHistoryLoading,
     loadOlderMessages,
     messages,
+  });
+
+  useChatNewerHistoryPaging({
+    visitKey: scrollSnapshotKey,
+    routeKey: location.key,
+    enabled: messageTargetActive && browserSubtab === "chat",
+    hasNewer: messageContext.hasNewer,
+    loading: messageContext.loading,
+    error: messageContext.error,
+    scrollContainerRef,
+    isReadingReady: isHistoryReadingReady,
+    loadNewer: messageContext.loadNewer,
   });
 
   useConversationNotificationRead({
@@ -4752,6 +4767,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   ]);
 
   useChatAutoScrollSync({
+    followLatest: !messageTargetActive,
     aiOnboardingOpen,
     autoScrollSuspendedRef,
     autoScrollPendingRef,
@@ -5594,14 +5610,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 </div>
               </div>
             ) : null}
-            {initialHistoryError || remoteConversationHistoryError ? (
+            {displayedHistoryError || remoteConversationHistoryError ? (
               <div className="flex justify-center px-2 py-1" role="alert" data-testid="chat-history-error">
                 <div className="flex flex-wrap items-center justify-center gap-3 text-sm text-slate-600 dark:text-slate-300">
-                  <span>{initialHistoryError ?? remoteConversationHistoryError}</span>
+                  <span>{displayedHistoryError ?? remoteConversationHistoryError}</span>
                   <Button
                     onPress={() => {
                       beginHistoryRetry();
-                      if (initialHistoryError) void retryInitialHistory();
+                      if (displayedHistoryError) void retryInitialHistory();
                       else retryRemoteConversationHistory();
                     }}
                     variant="outline"
@@ -5666,8 +5682,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             })()}
             <ChatMessageHistoryControls
               messageTargetActive={messageTargetActive}
-              hasNewer={messageContext.hasNewer}
-              loading={messageContext.loading}
+              loadingNewer={messageContext.loadingNewer}
+              newerError={messageContext.newerError}
               canReturnToLatest={Boolean(chatScrollHistoryVisit)}
               onLoadNewer={() => void messageContext.loadNewer()}
               onReturnToLatest={returnToLatestMessages}

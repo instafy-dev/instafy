@@ -134,6 +134,10 @@ function AnchorHarness({
   clientHeight = 200,
   mobileAnchor = false,
   scrollPaddingTop = 0,
+  hasMoreHistory = false,
+  isHistoryLoading = false,
+  loadOlderMessages = () => undefined,
+  onController,
 }: {
   conversationId: string;
   rows: AnchorRow[];
@@ -143,17 +147,22 @@ function AnchorHarness({
   clientHeight?: number | (() => number);
   mobileAnchor?: boolean;
   scrollPaddingTop?: number;
+  hasMoreHistory?: boolean;
+  isHistoryLoading?: boolean;
+  loadOlderMessages?: () => void;
+  onController?: (controller: ReturnType<typeof useChatScrollController>) => void;
 }) {
   const messages = rows.map(({ id }) => createMessage(id));
   const controller = useChatScrollController({
     activeConversationId: conversationId,
     historyVisit,
-    hasMoreHistory: false,
-    isHistoryLoading: false,
+    hasMoreHistory,
+    isHistoryLoading,
     isInitialHistoryLoading: loading,
-    loadOlderMessages: () => undefined,
+    loadOlderMessages,
     messages,
   });
+  onController?.(controller);
   const wasMobileAnchored = useRef(false);
   useLayoutEffect(() => {
     controller.setAutoScrollSuspended(mobileAnchor);
@@ -298,6 +307,62 @@ describe("useChatScrollController", () => {
     const node = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
     expect(node.scrollTop).toBe(1000);
     expect(node.dataset.highlightedMessage).toBeUndefined();
+  });
+
+  it("preserves the reader's current position when newer history appends at the old bottom", async () => {
+    const historyVisit = { ...visit("append-target", "append-target-visit"), messageId: "matched" };
+    const rows = [{ id: "first", top: 0, height: 400 }, { id: "matched", top: 400, height: 200 }, { id: "last", top: 600, height: 200 }];
+    let controller: ReturnType<typeof useChatScrollController> | null = null;
+    const onController = (value: ReturnType<typeof useChatScrollController>) => { controller = value; };
+    const render = async (nextRows = rows, scrollHeight = 800, isHistoryLoading = false) => {
+      await act(async () => root.render(<AnchorHarness conversationId="append-target" historyVisit={historyVisit}
+        rows={nextRows} scrollHeight={scrollHeight} isHistoryLoading={isHistoryLoading} onController={onController} />));
+    };
+    await render();
+    const node = container.querySelector<HTMLDivElement>('[data-testid="anchor-scroll"]')!;
+    node.scrollTop = 600;
+    await act(async () => node.dispatchEvent(new Event("scroll")));
+    await render(rows, 800, true);
+    // The reader moves back while the network request is pending. No scroll
+    // event is needed: the snapshot boundary reads the position before commit.
+    node.scrollTop = 520;
+    await render([...rows, { id: "newer", top: 800, height: 500 }], 1300);
+    expect(node.scrollTop).toBe(520);
+    expect(node.querySelector('[data-chat-scroll-message-id="matched"]')!.getBoundingClientRect().top).toBe(-120);
+    await act(async () => {
+      resizeCallback?.([], {} as ResizeObserver);
+      controller!.shouldAutoScrollRef.current = true;
+      controller!.scrollToBottom();
+    });
+    expect(node.scrollTop).toBe(520);
+    expect(controller!.isHistoryReadingReady()).toBe(true);
+  });
+
+  it("does not reinterpret a newer append as prepend settling after loading older history", async () => {
+    const historyVisit = { ...visit("both-directions", "both-directions-visit"), messageId: "matched" };
+    const originalRows = [{ id: "matched", top: 0, height: 300 }, { id: "later", top: 300, height: 300 }];
+    const loadOlder = vi.fn();
+    let controller: ReturnType<typeof useChatScrollController> | null = null;
+    const onController = (value: ReturnType<typeof useChatScrollController>) => { controller = value; };
+    const render = async (rows: AnchorRow[], scrollHeight: number, isHistoryLoading = false) => {
+      await act(async () => root.render(<AnchorHarness conversationId="both-directions" historyVisit={historyVisit}
+        rows={rows} scrollHeight={scrollHeight} hasMoreHistory isHistoryLoading={isHistoryLoading}
+        loadOlderMessages={loadOlder} onController={onController} />));
+    };
+    await render(originalRows, 600);
+    const node = container.querySelector<HTMLDivElement>('[data-testid="anchor-scroll"]')!;
+    node.scrollTop = 100;
+    await act(async () => controller!.requestOlderMessages());
+    expect(loadOlder).toHaveBeenCalledOnce();
+    await render(originalRows, 600, true);
+    const olderRows = [{ id: "older", top: 0, height: 400 }, ...originalRows.map(row => ({ ...row, top: row.top + 400 }))];
+    await render(olderRows, 1000);
+    expect(node.scrollTop).toBe(500);
+    // Append before the older-page settle timeout expires; the message under
+    // the reader stays put instead of receiving another full-height delta.
+    await render([...olderRows, { id: "newer", top: 1000, height: 500 }], 1500);
+    await act(async () => resizeCallback?.([], {} as ResizeObserver));
+    expect(node.scrollTop).toBe(500);
   });
 
   it("focuses the revealed target without scrolling again after its search result unmounts", async () => {
