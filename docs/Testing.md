@@ -542,6 +542,16 @@ helpers, controller services and browser processes retain their existing
 proxy/credential scrubbing. No general inherited environment, bypass list,
 private endpoint, credential or TLS override is added to the public source.
 
+On Linux, the four Cargo fixture builds default to `RUSTFLAGS=-C link-arg=-fuse-ld=lld`
+only when `RUSTFLAGS` is unset. This keeps the existing compiler driver and
+requires `lld` on the build host; both Shared workflow children already install
+it. Every explicit `RUSTFLAGS` string, including an empty opt-out, is preserved
+byte-for-byte. Other platforms and the two Go builds retain their existing
+compiler environment. The default aims to reduce peak linker memory without
+changing Cargo arguments, features, fixture assertions or runtime environments.
+A warm final-link result alone does not qualify cold end-to-end CI or its memory
+and time budgets.
+
 Cold ARM64 completion within 30 minutes is unproven: prior hosted timings or
 warm caches do not qualify these split jobs. Keep activation supervised until
 both full jobs and guest teardown pass; do not shorten scenarios or ignore

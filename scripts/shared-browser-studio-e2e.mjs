@@ -13,7 +13,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { copyFixtureEntrypoint, fixtureChildEnvironment, fixtureCompilerEnvironment, installCancellationSignalHandlers,
+import { copyFixtureEntrypoint, fixtureChildEnvironment, fixtureCompilerEnvironment, fixtureCargoEnvironment, installCancellationSignalHandlers,
   preflightFixtureDisplay, reportCargoCompilerErrors, runOwnedProcess } from "./browser-profile-e2e.mjs";
 import { parseShellEnv } from "./lib/localSupabaseEnv.mjs";
 import { assertTargetAllowed, decodeJwtClaims } from "./mint-test-user.mjs";
@@ -276,6 +276,7 @@ async function lifecycle() {
   assert.ok(process.env.DISPLAY, "run this fixture through xvfb-run");
   const buildEnv = fixtureChildEnvironment(process.env);
   const compilerEnv = fixtureCompilerEnvironment(process.env);
+  const cargoEnv = fixtureCargoEnvironment(process.env);
   const cancellation = new AbortController();
   const signal = cancellation.signal;
   const removeSignals = installCancellationSignalHandlers(cancellation);
@@ -320,9 +321,9 @@ async function lifecycle() {
     stage = "build-egress-helper";
     await run("go", ["build", "-o", path.join(bin, "browser-egress-proxy"), "."], { cwd: path.join(root, "packages/browser-egress-proxy"), env: compilerEnv });
     stage = "build-runtime";
-    const agentBinary = cargoBinaryArtifact(await run("cargo", ["build", "--locked", "--manifest-path", "packages/runtime-agent/Cargo.toml", "--bin", "runtime-agent", "--message-format=json"], { env: compilerEnv, onFailure: output => reportCargoCompilerErrors(output, "packages/runtime-agent") }), "runtime-agent");
+    const agentBinary = cargoBinaryArtifact(await run("cargo", ["build", "--locked", "--manifest-path", "packages/runtime-agent/Cargo.toml", "--bin", "runtime-agent", "--message-format=json"], { env: cargoEnv, onFailure: output => reportCargoCompilerErrors(output, "packages/runtime-agent") }), "runtime-agent");
     stage = "build-controller";
-    const controllerBinary = cargoBinaryArtifact(await run("cargo", ["build", "--locked", "--manifest-path", "packages/runtime-controller/Cargo.toml", "--bin", "runtime-controller", "--message-format=json"], { env: compilerEnv, onFailure: output => reportCargoCompilerErrors(output, "packages/runtime-controller") }), "runtime-controller");
+    const controllerBinary = cargoBinaryArtifact(await run("cargo", ["build", "--locked", "--manifest-path", "packages/runtime-controller/Cargo.toml", "--bin", "runtime-controller", "--message-format=json"], { env: cargoEnv, onFailure: output => reportCargoCompilerErrors(output, "packages/runtime-controller") }), "runtime-controller");
     stage = "display-preflight";
     assert.equal(await preflightFixtureDisplay(env, { signal }), "ready", "Shared Studio X-display preflight failed");
     const controllerURL = `http://127.0.0.1:${await freePort()}`;

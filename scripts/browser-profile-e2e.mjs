@@ -286,6 +286,14 @@ export function fixtureCompilerEnvironment(env) {
   return compiler;
 }
 
+// Linux fixture Cargo builds default to LLD through the existing compiler
+// driver. Preserve every explicit RUSTFLAGS value, including an empty opt-out.
+export function fixtureCargoEnvironment(env, platform = process.platform) {
+  const compiler = fixtureCompilerEnvironment(env);
+  if (platform === "linux" && compiler.RUSTFLAGS === undefined) compiler.RUSTFLAGS = "-C link-arg=-fuse-ld=lld";
+  return compiler;
+}
+
 export async function copyFixtureEntrypoint(binDirectory) {
   const destination = path.join(binDirectory, "runtime-entrypoint");
   // Docker makes the checked-in 0644 script executable while copying it into
@@ -450,6 +458,7 @@ async function lifecycle() {
   validateFixtureEnvironment(process.env);
   const env = fixtureChildEnvironment(process.env);
   const compilerEnv = fixtureCompilerEnvironment(process.env);
+  const cargoEnv = fixtureCargoEnvironment(process.env);
   const playwright = playwrightPackage();
   const temporary = await mkdtemp(path.join(tmpdir(), "instafy-profile-e2e-"));
   let claimedFixedDirectory = false;
@@ -484,9 +493,9 @@ async function lifecycle() {
     }
     assert.ok(found, "existing production launch helper requires /usr/bin/chromium or /usr/bin/google-chrome (runner-only symlink to Playwright Chromium is supported)");
     stage = "build-runtime-fixture";
-    const agent = cargoTestArtifact(await run("cargo", ["test", "--locked", "--manifest-path", "packages/runtime-agent/Cargo.toml", "--test", "browser_profile_e2e", "--no-run", "--message-format=json"], { env: compilerEnv, onFailure: output => reportCargoCompilerErrors(output, "packages/runtime-agent") }), "browser_profile_e2e", "test");
+    const agent = cargoTestArtifact(await run("cargo", ["test", "--locked", "--manifest-path", "packages/runtime-agent/Cargo.toml", "--test", "browser_profile_e2e", "--no-run", "--message-format=json"], { env: cargoEnv, onFailure: output => reportCargoCompilerErrors(output, "packages/runtime-agent") }), "browser_profile_e2e", "test");
     stage = "build-controller-fixture";
-    const controller = cargoTestArtifact(await run("cargo", ["test", "--locked", "--manifest-path", "packages/runtime-controller/Cargo.toml", "--bin", "runtime-controller", "--no-run", "--message-format=json"], { env: compilerEnv, onFailure: output => reportCargoCompilerErrors(output, "packages/runtime-controller") }), "runtime-controller", "bin");
+    const controller = cargoTestArtifact(await run("cargo", ["test", "--locked", "--manifest-path", "packages/runtime-controller/Cargo.toml", "--bin", "runtime-controller", "--no-run", "--message-format=json"], { env: cargoEnv, onFailure: output => reportCargoCompilerErrors(output, "packages/runtime-controller") }), "runtime-controller", "bin");
     const runEnv = { ...env,
       PATH: `${bin}:${env.PATH}`,
       TEST_DATABASE_URL: process.env.TEST_DATABASE_URL,

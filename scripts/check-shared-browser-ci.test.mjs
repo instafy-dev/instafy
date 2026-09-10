@@ -28,6 +28,21 @@ function withoutRestoreOnlyCaches(text) {
   }
   return text;
 }
+function withoutCargoLinkerDefault(source) {
+  const helper = [
+    "// Linux fixture Cargo builds default to LLD through the existing compiler",
+    "// driver. Preserve every explicit RUSTFLAGS value, including an empty opt-out.",
+    "export function fixtureCargoEnvironment(env, platform = process.platform) {",
+    "  const compiler = fixtureCompilerEnvironment(env);",
+    '  if (platform === "linux" && compiler.RUSTFLAGS === undefined) compiler.RUSTFLAGS = "-C link-arg=-fuse-ld=lld";',
+    "  return compiler;",
+    "}", "", "",
+  ].join("\n");
+  return source.replace(helper, "")
+    .replace("fixtureCompilerEnvironment, fixtureCargoEnvironment,", "fixtureCompilerEnvironment,")
+    .replace("  const cargoEnv = fixtureCargoEnvironment(process.env);\n", "")
+    .replaceAll(/(await run\("cargo",[^\n]+\{ env: )cargoEnv/g, "$1compilerEnv");
+}
 function context(event = "pull_request") {
   const ref = event === "pull_request" ? "refs/pull/11/merge" : "refs/heads/main";
   return { repository: "instafy-dev/instafy", repository_id: "1001", run_id: "2002", run_attempt: "3",
@@ -119,6 +134,24 @@ test("only the two Shared startup steps select the browser-test profile; all pre
   assert.equal(createHash("sha256").update(original).digest("hex"),
     "39492b8b3c32d931444180ac4e7e52d77b6aa8eed9937b55d6d5bad7ee8aa0ec");
 });
+test("the Cargo default changes only four compiler environments and its exact helper, not fixture behavior", () => {
+  const reviewed = {
+    "scripts/browser-profile-e2e.mjs": "134b841a2fbc0a59b64bd05a3ef6b9a4421c0eff7c8dce431d3923743974fd51",
+    "scripts/shared-browser-studio-e2e.mjs": "be9b5ed601a895f6ae275f2ab5697d042cf5d7e97508cb38819f0709bb1f172e",
+  };
+  for (const [relative, hash] of Object.entries(reviewed)) {
+    const source = fs.readFileSync(path.join(root, relative), "utf8");
+    assert.equal((source.match(/env: cargoEnv/g) ?? []).length, 2);
+    assert.equal((source.match(/const cargoEnv = fixtureCargoEnvironment\(process\.env\);/g) ?? []).length, 1);
+    const original = withoutCargoLinkerDefault(source);
+    assert.doesNotMatch(original, /fixtureCargoEnvironment|cargoEnv/);
+    assert.equal(createHash("sha256").update(original).digest("hex"), hash, relative);
+  }
+  for (const job of jobs.filter(job => job.script)) {
+    assert.match(section(job.key), /install --yes --no-install-recommends x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld cmake libcap-dev protobuf-compiler/);
+    assert.match(section(job.key), /for package in x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld cmake libcap-dev protobuf-compiler/);
+  }
+});
 test("the reviewed fixtures need no Edge Functions and retain their exact assertions and global stack configuration", () => {
   const reviewed = {
     "scripts/browser-profile-e2e.mjs": "4670ec7470180cc3c4e35834ecc202275fd57582c51740608ca3e06430b575c6",
@@ -127,9 +160,9 @@ test("the reviewed fixtures need no Edge Functions and retain their exact assert
   };
   for (const [relative, hash] of Object.entries(reviewed)) {
     const source = fs.readFileSync(path.join(root, relative), "utf8");
-    // Remove only opt-in compiler diagnostics to retain the original whole-file
-    // proof for fixture assertions, commands, services and cleanup.
-    const original = source
+    // Remove only the exact Cargo default and opt-in compiler diagnostics to
+    // retain the original proof for assertions, commands, services and cleanup.
+    const original = withoutCargoLinkerDefault(source)
       .replace(/\/\/ Opt-in for the secret-free fixture compiler calls only,[\s\S]*?(?=export function fixtureChildEnvironment)/u, "")
       .replace("onOutput, onFailure }", "onOutput }")
       .replace("    if (status !== 0) onFailure?.(output);\n", "")
