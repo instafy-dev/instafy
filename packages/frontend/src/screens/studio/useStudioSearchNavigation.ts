@@ -12,7 +12,7 @@ export interface StudioSearchNavigationOptions {
   projectReady: boolean;
   projectAccessBlocked: boolean;
   conversationsProjectKey: string;
-  navigateToDestination: (destination: StudioDestination) => void;
+  navigateToDestination: (destination: StudioDestination, options?: { forceNewVisit?: boolean }) => void;
   openFileTab: (file: Pick<CodeFile, "id" | "path" | "label">) => void;
 }
 
@@ -98,11 +98,11 @@ export function useStudioSearchNavigation({
     cancelPending();
     if (!viewerUserId) return;
     if (target.kind === "conversation") {
-      navigateToDestination(target);
+      navigateToDestination(target, { forceNewVisit: true });
       return;
     }
     if (target.kind === "org-settings") {
-      navigateToDestination({ kind: "panel", panel: "settings", settingsTab: "org", settingsOrgId: target.orgId });
+      navigateToDestination({ kind: "panel", panel: "settings", settingsTab: "org", settingsOrgId: target.orgId }, { forceNewVisit: true });
       return;
     }
     if (target.kind === "file" && (!target.path || target.path.startsWith("/") || target.path.includes("\\")
@@ -111,7 +111,7 @@ export function useStudioSearchNavigation({
     const search = buildStudioDestinationSearch(projectSearch, target.kind === "file"
       ? { kind: "panel", panel: "code" }
       : { kind: "panel", panel: target.panel, ...(target.panel === "settings" ? { settingsTab: "project" as const } : {}) });
-    navigateToDestination({ kind: "route", search });
+    navigateToDestination({ kind: "route", search }, { forceNewVisit: true });
     // Navigation cancels an older pending selection first. Schedule this one
     // afterwards so it survives that same normal navigation continuation.
     if (target.kind === "file") setPending({ target, viewerUserId, originVisit: visit, originSearch: location.search, destinationSearch: search, destinationVisit: null });
@@ -133,11 +133,9 @@ export function useStudioSearchNavigation({
       if (pending.destinationVisit !== null || visit !== pending.originVisit || location.search !== pending.originSearch) setPending(null);
       return;
     }
-    // Files may already be visible at the origin while a drawer defers a
-    // different Files URL. Bind only after that new visit commits; a truly
-    // identical URL needs no navigation and can open immediately.
-    if (pending.destinationVisit === null && visit === pending.originVisit
-      && pending.destinationSearch !== pending.originSearch) return;
+    // Search always creates a fresh visit so Back can restore its results,
+    // even when a file is already open at an identical URL.
+    if (pending.destinationVisit === null && visit === pending.originVisit) return;
     if (!pending.destinationVisit) setPending({ ...pending, destinationVisit: visit });
     if (activeProjectId !== pending.target.projectId || !projectReady || conversationsProjectKey !== pending.target.projectId) return;
     setPending(null);

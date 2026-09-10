@@ -117,11 +117,13 @@ describe("ConversationMessageRows", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  async function renderSpeakerBoundaryMessages(messages: ChatMessage[]) {
+  async function renderSpeakerBoundaryMessages(messages: ChatMessage[], target?: string) {
     await act(async () => {
       root.render(
         <ConversationMessageRows
           messages={messages}
+          targetedMessageId={target}
+          highlightedMessageId={target}
           currentUserId="user-1"
           chatClientSessionId="session-1"
           projectId="project-1"
@@ -142,6 +144,16 @@ describe("ConversationMessageRows", () => {
       );
     });
   }
+
+  it("reveals a matched runtime event's canonical text with attribution and a target marker", async () => {
+    const target = createMessage({ id: "matched-event", content: "Recovered the missing report", messageType: "status", timestamp: Date.UTC(2026, 8, 10, 12, 30),
+      metadata: { messageType: "status", agent: { handle: "octo" } } });
+    await renderSpeakerBoundaryMessages([target], target.id);
+    expect(container.querySelector('[data-testid="chat-matched-message-content"]')?.textContent).toContain("Recovered the missing report");
+    expect(container.querySelector('[data-chat-message-target="true"]')?.getAttribute("data-chat-scroll-message-id")).toBe(target.id);
+    expect(container.querySelector(CHAT_SPEAKER_MARKER_SELECTOR)).not.toBeNull();
+    expect(container.querySelector("time")).not.toBeNull();
+  });
 
   async function renderWithNoticeActions(
     messages: ChatMessage[],

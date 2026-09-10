@@ -1,9 +1,10 @@
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
+import { useEffect, useLayoutEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type RefObject } from 'react';
 import { ChatLines, Clock, Page, Search, Settings, Xmark } from 'iconoir-react';
+import { StudioSearchResultCopy, type StudioSearchMessageExcerpt } from './StudioSearchResultCopy';
 import './StudioSearch.css';
 
 export type StudioSearchScope = 'space' | 'org' | 'all';
-export type StudioSearchResultGroup = 'Chats' | 'Files' | 'Settings' | 'Actions';
+export type StudioSearchResultGroup = 'Messages' | 'Chats' | 'Files' | 'Settings' | 'Actions';
 export interface StudioSearchRecord {
   id: string;
   title: string;
@@ -12,11 +13,22 @@ export interface StudioSearchRecord {
   group: StudioSearchResultGroup;
   orgId: string;
   spaceId: string | null;
+  message?: StudioSearchMessageExcerpt;
   activate: () => void;
 }
 export interface StudioSearchRequest {
   open: boolean;
   scope: StudioSearchScope;
+  query: string;
+  restoreMessagePages?: number;
+}
+export interface StudioSearchSnapshot {
+  query: string;
+  scope: StudioSearchScope;
+  scrollTop: number;
+  resultId: string;
+  resultLimit: number;
+  messagePageCount: number;
 }
 export interface StudioSearchProps {
   scopeKey: string;
@@ -32,6 +44,13 @@ export interface StudioSearchProps {
   onOpen?: () => void;
   /** Starts or scopes authenticated data discovery in the same event as the UI change. */
   onRequestChange?: (request: StudioSearchRequest) => void;
+  restoreSession?: (StudioSearchSnapshot & { restoreKey: string }) | null;
+  onBeforeResultActivate?: (snapshot: StudioSearchSnapshot) => void;
+  onDismiss?: () => void;
+  hasMoreMessages?: boolean;
+  loadingMoreMessages?: boolean;
+  onLoadMoreMessages?: () => void;
+  messagePageCount?: number;
   fullPage?: boolean;
   persistentControl?: boolean;
   returnFocusRef?: RefObject<HTMLElement | null>;
@@ -43,8 +62,8 @@ interface SearchState {
   scope: StudioSearchScope;
 }
 
-const GROUPS: StudioSearchResultGroup[] = ['Chats', 'Files', 'Settings', 'Actions'];
-const GROUP_ICONS = { Chats: ChatLines, Files: Page, Settings, Actions: Clock };
+const GROUPS: StudioSearchResultGroup[] = ['Messages', 'Chats', 'Files', 'Settings', 'Actions'];
+const GROUP_ICONS = { Messages: ChatLines, Chats: ChatLines, Files: Page, Settings, Actions: Clock };
 
 function canFocusSearchTarget(candidate: HTMLElement | null | undefined): candidate is HTMLElement {
   if (!candidate?.isConnected || !candidate.getClientRects().length || candidate.closest('[inert], [aria-hidden="true"], [hidden]')) return false;
@@ -53,7 +72,7 @@ function canFocusSearchTarget(candidate: HTMLElement | null | undefined): candid
 }
 
 /** A temporary search surface over records supplied by the authenticated Studio shell. */
-export function useStudioSearch({ scopeKey, org, space, records, loading = false, error, onRetry, notice, onOpen, onRequestChange, fullPage = true, persistentControl = false, returnFocusRef }: StudioSearchProps) {
+export function useStudioSearch({ scopeKey, org, space, records, loading = false, error, onRetry, notice, onOpen, onRequestChange, restoreSession, onBeforeResultActivate, onDismiss, hasMoreMessages, loadingMoreMessages, onLoadMoreMessages, messagePageCount = 1, fullPage = true, persistentControl = false, returnFocusRef }: StudioSearchProps) {
   const defaultScope: StudioSearchScope = space ? 'space' : org ? 'org' : 'all';
   const [search, setSearch] = useState<SearchState>({ scopeKey, open: false, query: '', scope: defaultScope });
   // Hide stale results synchronously; effects alone could expose the old scope for one paint.
@@ -68,6 +87,9 @@ export function useStudioSearch({ scopeKey, org, space, records, loading = false
   const triggerRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const resultRefs = useRef(new Map<string, HTMLButtonElement>());
+  const resultsScrollRef = useRef<HTMLDivElement>(null);
+  const appliedRestore = useRef<string | null>(null);
+  const pendingRestoreScroll = useRef<StudioSearchSnapshot | null>(null);
   const restoreFocusRef = useRef(false);
   const suppressInputFocusOpenRef = useRef(false);
   const openRequestedRef = useRef(open);
@@ -107,21 +129,24 @@ export function useStudioSearch({ scopeKey, org, space, records, loading = false
     openRequestedRef.current = true;
     restoreFocusRef.current = false;
     setSearch(previous => ({ scopeKey, open: true, query: previous.scopeKey === scopeKey ? previous.query : '', scope: previous.scopeKey === scopeKey ? resolveScope(previous.scope) : defaultScope }));
-    onRequestChange?.({ open: true, scope });
+    onRequestChange?.({ open: true, scope, query });
     if (!persistentControl || !alreadyRequested) onOpen?.();
   };
   const closeSearch = (restoreFocus = true) => {
+    pendingRestoreScroll.current = null;
+    if (restoreFocus) onDismiss?.();
     openRequestedRef.current = false;
     restoreFocusRef.current = restoreFocus;
     setSearch(previous => ({ scopeKey, open: false, query: persistentControl ? '' : previous.scopeKey === scopeKey ? previous.query : '', scope: persistentControl ? defaultScope : scope }));
-    onRequestChange?.({ open: false, scope: persistentControl ? defaultScope : scope });
+    onRequestChange?.({ open: false, scope: persistentControl ? defaultScope : scope, query: persistentControl ? '' : query });
   };
   const changeScope = (next: StudioSearchScope, focusInput = false) => {
+    pendingRestoreScroll.current = null;
     const shouldOpen = persistentControl && !openRequestedRef.current;
     openRequestedRef.current = true;
     const nextScope = resolveScope(next);
     setSearch({ scopeKey, open: true, query, scope: nextScope });
-    onRequestChange?.({ open: true, scope: nextScope });
+    onRequestChange?.({ open: true, scope: nextScope, query });
     if (shouldOpen) onOpen?.();
     if (focusInput) inputRef.current?.focus();
   };
@@ -135,6 +160,9 @@ export function useStudioSearch({ scopeKey, org, space, records, loading = false
   const filtered = records.filter(record => {
     if (scope === 'space' && (record.spaceId !== space!.id || org && record.orgId !== org.id)) return false;
     if (scope === 'org' && record.orgId !== org!.id) return false;
+    // Message excerpts may omit other matching text; the server already matched
+    // the complete message. Never carry a server hit over to a different query.
+    if (record.message) return record.message.query === query.trim();
     const searchable = `${record.title} ${record.description} ${record.keywords}`.toLocaleLowerCase();
     return terms.every(term => searchable.includes(term));
   });
@@ -144,6 +172,28 @@ export function useStudioSearch({ scopeKey, org, space, records, loading = false
   const [resultPage, setResultPage] = useState({ key: resultPageKey, limit: 100 });
   const resultLimit = resultPage.key === resultPageKey ? resultPage.limit : 100;
   const visibleMatches = matches.slice(0, resultLimit);
+  useLayoutEffect(() => {
+    if (!restoreSession || appliedRestore.current === restoreSession.restoreKey) return;
+    appliedRestore.current = restoreSession.restoreKey;
+    const restoredScope = restoreSession.scope === 'space' && !space ? org ? 'org' : 'all'
+      : restoreSession.scope === 'org' && !org ? 'all' : restoreSession.scope;
+    openRequestedRef.current = true;
+    setSearch({ scopeKey, open: true, query: restoreSession.query, scope: restoredScope });
+    setResultPage({ key: JSON.stringify([scopeKey, restoredScope, restoreSession.query]), limit: restoreSession.resultLimit });
+    pendingRestoreScroll.current = restoreSession;
+    onRequestChange?.({ open: true, scope: restoredScope, query: restoreSession.query, restoreMessagePages: restoreSession.messagePageCount });
+  }, [onRequestChange, org, restoreSession, scopeKey, space]);
+  useEffect(() => {
+    if (!open || loading || loadingMoreMessages || !pendingRestoreScroll.current) return;
+    const saved = pendingRestoreScroll.current;
+    const frame = requestAnimationFrame(() => {
+      if (pendingRestoreScroll.current !== saved) return;
+      if (resultsScrollRef.current) resultsScrollRef.current.scrollTop = saved.scrollTop;
+      resultRefs.current.get(saved.resultId)?.focus({ preventScroll: true });
+      pendingRestoreScroll.current = null;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [loading, loadingMoreMessages, open, visibleMatches.length]);
   const focusResult = (index: number) => {
     const target = visibleMatches[index] && resultRefs.current.get(visibleMatches[index].id);
     target?.focus();
@@ -187,7 +237,7 @@ export function useStudioSearch({ scopeKey, org, space, records, loading = false
           {scope === 'all' ? <span className="studio-search-all">All orgs</span> : null}</> : tokensOverride}
         </div>
         <div className="studio-search-entry">
-          <input ref={inputRef} type="search" autoFocus={!persistentControl} value={query}
+          <input ref={inputRef} type="search" autoFocus={!persistentControl} value={query} maxLength={200}
             aria-label={`Search chats, files, settings in ${scopeName}`} aria-controls={open ? resultsId : undefined} aria-describedby={open ? scopeHintId : undefined}
             placeholder="Search…" data-testid="studio-search-input"
             onFocus={() => {
@@ -197,10 +247,11 @@ export function useStudioSearch({ scopeKey, org, space, records, loading = false
               if (persistentControl && !openRequestedRef.current) openSearch();
             }}
             onChange={event => {
+              pendingRestoreScroll.current = null;
               const shouldOpen = persistentControl && !openRequestedRef.current;
               openRequestedRef.current = true;
               setSearch({ scopeKey, open: true, query: event.target.value, scope });
-              onRequestChange?.({ open: true, scope });
+              onRequestChange?.({ open: true, scope, query: event.target.value });
               if (shouldOpen) onOpen?.();
             }}
             onKeyDown={event => {
@@ -244,7 +295,7 @@ export function useStudioSearch({ scopeKey, org, space, records, loading = false
         </select></label>
       </div>
       <p id={scopeHintId} className="studio-search-hint">Backspace with an empty query broadens scope.</p>
-      <div id={resultsId} className="studio-search-results" data-testid="studio-search-results" aria-busy={loading}>
+      <div ref={resultsScrollRef} id={resultsId} className="studio-search-results" data-testid="studio-search-results" aria-busy={loading || Boolean(loadingMoreMessages)}>
         {loading ? <p className="studio-search-status" role="status">Searching…</p> : null}
         {error ? <div className="studio-search-status studio-search-error" role="alert">
           <p>{error}</p>
@@ -265,14 +316,22 @@ export function useStudioSearch({ scopeKey, org, space, records, loading = false
               }}
               className="studio-search-result" data-testid={`studio-search-result-${result.id}`}
               onKeyDown={event => onResultKeyDown(event, visibleMatches.indexOf(result))}
-              onClick={() => { closeSearch(false); result.activate(); }}>
+              onClick={() => {
+                onBeforeResultActivate?.({ query, scope, scrollTop: resultsScrollRef.current?.scrollTop ?? 0,
+                  resultId: result.id, resultLimit, messagePageCount });
+                closeSearch(false);
+                result.activate();
+              }}>
               <Icon aria-hidden="true" />
-              <span className="studio-search-result-copy"><strong>{result.title}</strong><span>{result.description}</span></span>
+              <StudioSearchResultCopy title={result.title} description={result.description} message={result.message} />
             </button>)}
           </section>;
         })}
         {visibleMatches.length < matches.length ? <button type="button" className="studio-search-more" onClick={() => setResultPage({ key: resultPageKey, limit: resultLimit + 100 })}>
           Show {Math.min(100, matches.length - visibleMatches.length)} more results ({visibleMatches.length} of {matches.length} shown)
+        </button> : null}
+        {hasMoreMessages ? <button type="button" className="studio-search-more" disabled={loadingMoreMessages} onClick={onLoadMoreMessages}>
+          {loadingMoreMessages ? 'Loading more messages…' : 'Load more message results'}
         </button> : null}
         {!matches.length && !loading && !error ? <p className="studio-search-empty">No results in this scope. Try another query or a wider scope.</p> : null}
       </div>

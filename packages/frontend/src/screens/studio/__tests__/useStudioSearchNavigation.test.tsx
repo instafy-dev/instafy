@@ -164,14 +164,13 @@ describe("useStudioSearchNavigation with real Studio routing", () => {
     expect(options.openFileTab).not.toHaveBeenCalled();
   });
 
-  it("opens immediately for a true same-URL no-op even when its navigation continuation is deferred", async () => {
+  it("waits for a fresh same-URL visit so Back can restore search results", async () => {
     window.history.replaceState(null, "", "/studio?projectId=space-b&panel=code");
     window.addEventListener("instafy:open-workspace-file", acceptFile);
     await render({ activeProjectId: "space-b", conversationsProjectKey: "space-b" });
     deferNavigation = true;
     await activate({ ...file, requiresLoad: true });
-    expect(accepted).toHaveLength(1);
-    expect(accepted[0].signal?.aborted).toBe(false);
+    expect(accepted).toHaveLength(0);
     await commitDeferredNavigation();
     expect(accepted).toHaveLength(1);
     expect(accepted[0].signal?.aborted).toBe(false);

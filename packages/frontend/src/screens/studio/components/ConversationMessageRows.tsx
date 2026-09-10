@@ -37,6 +37,7 @@ import { shouldSuppressOuterAvatarForConversationThread } from "./conversationTh
 import { sanitizeChatMessageCopyEvent } from "./chatSelectionCopy";
 import { DeferredChatMessageRow, DeferredChatRows } from "./DeferredChatMessageRow";
 import { getConversationScrollAnchorMessageId } from "./useChatScrollOrchestration";
+import { MessageContent } from "./ChatMessageContent";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -177,6 +178,8 @@ export function ConversationMessageRows({
   runtimeId,
   conversationLocalId,
   scrollSnapshotKey = null,
+  targetedMessageId = null,
+  highlightedMessageId = null,
   conversationControllerId,
   firstPlanMessageId,
   mentionableAgentHandles,
@@ -201,6 +204,8 @@ export function ConversationMessageRows({
   runtimeId: string | null;
   conversationLocalId: string | null;
   scrollSnapshotKey?: string | null;
+  targetedMessageId?: string | null;
+  highlightedMessageId?: string | null;
   conversationControllerId: string | null;
   firstPlanMessageId: string | null;
   mentionableAgentHandles?: string[] | null;
@@ -231,7 +236,7 @@ export function ConversationMessageRows({
   }, []);
 
   const rows: JSX.Element[] = [];
-  const anchorMessageId = getConversationScrollAnchorMessageId(scrollSnapshotKey);
+  const anchorMessageId = targetedMessageId ?? getConversationScrollAnchorMessageId(scrollSnapshotKey);
   const anchorIndex = anchorMessageId ? messages.findIndex((message) => message.id === anchorMessageId) : -1;
   const assistantContextMessages = allConversationMessages ?? messages;
   const multiAgentGroupByParentJob = buildMultiAgentGroupByParentJob(assistantContextMessages);
@@ -395,13 +400,14 @@ export function ConversationMessageRows({
           assistantHandleForMessage.length > 0 &&
           assistantHandleForMessage === normalizedPreviousAssistantHandle;
         const suppressDesktopAssistantAvatar = suppressOuterAssistantAvatar || isRepeatedAssistantSpeaker;
-        const usesAssistantAvatarRail = message.role === "assistant" && Boolean(workflowSpineKey);
-        const showSpeakerIdentity = shouldShowSpeakerIdentityForMessage(message);
+        const usesAssistantAvatarRail = message.role === "assistant" && Boolean(workflowSpineKey) && message.id !== targetedMessageId;
+        const showSpeakerIdentity = message.id === targetedMessageId || shouldShowSpeakerIdentityForMessage(message);
         const showRuntimeNoticeIdentity =
           message.role === "assistant" &&
           normalizedMessageType === "runtime_alert" &&
           assistantHandleForMessage.length > 0;
         const showInlineNarrowSpeakerIdentity =
+          (message.role === "assistant" && message.id === targetedMessageId) ||
           showRuntimeNoticeIdentity ||
           (showSpeakerIdentity && assistantHandleForMessage !== normalizedPreviousAssistantHandle);
         const threadTerminalStatusMarker = showInlineNarrowSpeakerIdentity
@@ -431,6 +437,10 @@ export function ConversationMessageRows({
               onOpenImage={onOpenImage}
               mentionableAgentHandles={mentionableAgentHandles}
             />
+          ) : message.id === targetedMessageId ? (
+            <div className="min-w-0 py-2" data-testid="chat-matched-message-content">
+              <MessageContent content={message.content} metadata={message.metadata} projectId={projectId} mentionableAgentHandles={mentionableAgentHandles} />
+            </div>
           ) : (
             <AssistantMessageEntry
               message={message}
@@ -526,6 +536,7 @@ export function ConversationMessageRows({
           <DeferredChatMessageRow
             key={message.id}
             message={message}
+            highlighted={message.id === highlightedMessageId}
             layoutKey={`${isLeftAligned}:${Boolean(speakerIdentity)}:${Boolean(narrowSpeakerIdentity)}`}
             eager={anchorIndex >= 0 ? Math.abs(messageIndex - anchorIndex) <= 10 : messageIndex >= messages.length - 20}
             eligible={

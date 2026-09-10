@@ -12,6 +12,7 @@ import {
   type JSX,
 } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import type { RealtimeChannel } from "@supabase/supabase-js";
 import { Capacitor } from "@capacitor/core";
 import { Button } from "../../../components/Button";
@@ -257,6 +258,9 @@ import {
 } from "../../../utils/aiProviderModels";
 import { useChatComposerLayoutState } from "./useChatComposerLayoutState";
 import { useChatAutoScrollSync, useChatScrollController } from "./useChatScrollOrchestration";
+import { useMessageContext } from "../../../conversations/useMessageContext";
+import { useStudioNavigation } from "../../../navigation/useStudioNavigation";
+import { revealCanonicalMessageTarget } from "./messageContextPresentation";
 import { ChatScrollSnapshotBoundary } from "./ChatScrollSnapshotBoundary";
 import { resolveChatScrollHistoryVisit } from "./chatScrollHistory";
 import {
@@ -481,12 +485,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     retryRemoteConversationHistory,
     conversations,
     appendMessages,
+    replaceMessages,
     createConversation,
     setConversationDraft,
   } = useConversations();
   const {
     activeConversationId,
-    messages,
+    messages: recentMessages,
     inputValue,
     inputEditorState,
     assistantEnabled,
@@ -495,12 +500,12 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     onAssistantEnabledChange,
     onRemoveAgentHandle,
     isAssistantTyping,
-    hasMoreHistory,
-    isHistoryLoading,
-    isInitialHistoryLoading,
-    initialHistoryError,
-    retryInitialHistory,
-    loadOlderMessages,
+    hasMoreHistory: hasMoreRecentHistory,
+    isHistoryLoading: isRecentHistoryLoading,
+    isInitialHistoryLoading: isInitialRecentHistoryLoading,
+    initialHistoryError: recentHistoryError,
+    retryInitialHistory: retryRecentHistory,
+    loadOlderMessages: loadOlderRecentMessages,
     onInputChange,
     onRecordMessage,
     onMaybeAutoTitleConversation,
@@ -608,6 +613,39 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     }
     return conversations.find((conversation) => conversation.localId === activeConversationId)?.controllerId ?? null;
   }, [activeConversationId, conversations]);
+  const goToStudio = useStudioNavigation();
+  const messageQueryClient = useQueryClient();
+  const requestedMessageId = new URLSearchParams(location.search).get("messageId")?.trim() || null;
+  const messageTargetActive = Boolean(requestedMessageId && !jobThread);
+  const chatScrollHistoryVisit = resolveChatScrollHistoryVisit({
+    location, userId: currentUserId, projectId: activeProjectId ?? null,
+    conversationsProjectKey, conversationId: activeConversationId,
+    conversationControllerId: activeConversationControllerId, jobThread,
+  });
+  const messageContext = useMessageContext(messageTargetActive && chatScrollHistoryVisit && activeConversationControllerId
+    ? { userId: chatScrollHistoryVisit.userId, projectId: chatScrollHistoryVisit.projectId,
+      conversationId: activeConversationControllerId, messageId: requestedMessageId!, visitKey: chatScrollHistoryVisit.key }
+    : null);
+  const messages = messageTargetActive ? messageContext.messages : recentMessages;
+  const hasMoreHistory = messageTargetActive ? messageContext.hasOlder : hasMoreRecentHistory;
+  const isHistoryLoading = messageTargetActive ? messageContext.loading : isRecentHistoryLoading;
+  const isInitialHistoryLoading = messageTargetActive
+    ? !chatScrollHistoryVisit || (messageContext.loading && !messages.length)
+    : isInitialRecentHistoryLoading;
+  const initialHistoryError = messageTargetActive ? messageContext.error : recentHistoryError;
+  const retryInitialHistory = messageTargetActive ? messageContext.retry : retryRecentHistory;
+  const loadOlderMessages = messageTargetActive ? messageContext.loadOlder : loadOlderRecentMessages;
+  useEffect(() => {
+    if (!messageContext.accessDenied || !currentUserId || !activeConversationId || !activeConversationControllerId) return;
+    messageQueryClient.removeQueries({ queryKey: ["conversation-messages", currentUserId, activeConversationControllerId], exact: true });
+    messageQueryClient.removeQueries({ queryKey: ["conversation-messages-latest", currentUserId, activeConversationControllerId], exact: true });
+    replaceMessages(activeConversationId, []);
+  }, [messageContext.accessDenied, currentUserId, activeConversationId, activeConversationControllerId, messageQueryClient, replaceMessages]);
+  const returnToLatestMessages = useCallback(() => {
+    if (!activeProjectId || !activeConversationId) return;
+    goToStudio({ kind: "conversation", projectId: activeProjectId, conversationId: activeConversationId,
+      conversationControllerId: activeConversationControllerId });
+  }, [activeProjectId, activeConversationId, activeConversationControllerId, goToStudio]);
   const {
     browserSessionOpen,
     browserSessionStateHydrated,
@@ -638,6 +676,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   // back to Chat does NOT close/unmount the browser — it keeps the live remote
   // connection mounted, avoiding a reconnect on every switch.
   const [browserSubtab, setBrowserSubtab] = useState<ChatBrowserSubtab>("chat");
+  useEffect(() => { if (messageTargetActive) setBrowserSubtab("chat"); }, [messageTargetActive, location.key]);
   const [sharedBrowserApprovalPending, setSharedBrowserApprovalPending] = useState(false);
   const [browserTransport, setBrowserTransport] = useState<BrowserTransport>("shared");
   const [browserTransportPreferenceResolved, setBrowserTransportPreferenceResolved] =
@@ -1882,15 +1921,6 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const openImageLightbox = useCallback((src: string, alt: string) => {
     setImageLightbox({ src, alt });
   }, []);
-  const chatScrollHistoryVisit = resolveChatScrollHistoryVisit({
-    location,
-    userId: currentUserId,
-    projectId: activeProjectId ?? null,
-    conversationsProjectKey,
-    conversationId: activeConversationId,
-    conversationControllerId: activeConversationEntry?.controllerId ?? null,
-    jobThread,
-  });
   const chatScrollMutationIdentity = JSON.stringify([
     location.key, currentUserId, activeProjectId, conversationsProjectKey,
     activeConversationId, jobThread?.jobId ?? null, browserSubtab,
@@ -1899,6 +1929,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     autoScrollSuspendedRef,
     autoScrollPendingRef,
     handleScrollContentRef,
+    highlightedMessageId,
     lastComposerScrollTopRef,
     lastScrollHeightRef,
     recordScrollPosition,
@@ -2629,7 +2660,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const collapsedConversationMessages = useMemo(() => collapseLifecycleMessages(messages), [messages]);
   const previewThreads = useConversationPreviewThreads(conversations, activeConversation?.controllerId ?? null);
 
-  const displayedMessages = useMemo(() => {
+  const groupedMessages = useMemo(() => {
     const collapsedVisible = collapsedConversationMessages.filter((message) => shouldDisplayChatMessage(message));
     const jobThreads = synthesizeAgentJobThreadMessages(collapsedConversationMessages, collapsedVisible);
 
@@ -2666,6 +2697,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
     return [...jobThreads, ...threadMessages];
   }, [activeConversation?.controllerId, collapsedConversationMessages, previewThreads, messages]);
+  const displayedMessages = useMemo(() => revealCanonicalMessageTarget(
+    groupedMessages, messages, messageTargetActive ? requestedMessageId : null,
+  ), [groupedMessages, messages, messageTargetActive, requestedMessageId]);
 
   useEffect(() => {
     if (autoRevealHistoryConversationRef.current !== activeConversationId) {
@@ -5487,6 +5521,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           />
         </ChatColumn>
       </div>
+      {messageTargetActive ? (
+        <div className="flex-none px-3 sm:px-4">
+          <ChatColumn className="flex flex-wrap items-center justify-between gap-2 py-1 text-sm text-slate-500 dark:text-slate-400">
+            <span role="status" data-testid="chat-message-context">{messageContext.loading && !messages.length ? "Finding message…" : "Search result"}</span>
+            <Button variant="ghost" size="xs" onPress={returnToLatestMessages} isDisabled={!chatScrollHistoryVisit} data-testid="chat-message-return-latest">Return to latest</Button>
+          </ChatColumn>
+        </div>
+      ) : null}
       <ChatScrollSnapshotBoundary identity={chatScrollMutationIdentity} messages={messages} capture={recordScrollPosition}>
       <ChatTranscriptViewport
         ariaLabel={conversationLabel}
@@ -5607,6 +5649,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               rows.push(
                 <ConversationMessageRows
                   scrollSnapshotKey={scrollSnapshotKey}
+                  targetedMessageId={messageTargetActive ? requestedMessageId : null}
+                  highlightedMessageId={highlightedMessageId}
                   key="conversation-message-rows"
                   messages={displayedMessages}
                   allConversationMessages={collapsedConversationMessages}
@@ -5635,6 +5679,11 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
               return rows;
             })()}
+            {messageTargetActive && messageContext.hasNewer ? (
+              <div className="flex justify-center py-2">
+                <Button variant="outline" size="xs" onPress={() => void messageContext.loadNewer()} isDisabled={messageContext.loading} data-testid="chat-message-load-newer">View later messages</Button>
+              </div>
+            ) : null}
             <ChatPostTranscriptAuxiliaryRows
               jobThreadPresent={Boolean(jobThread)}
               workspaceFileStaleNotice={workspaceFileStaleNotice}

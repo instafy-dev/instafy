@@ -102,6 +102,7 @@ type ConversationScrollSnapshot = {
   clientHeight: number;
   wasAtBottom: boolean;
   anchor: MessageScrollAnchor | null;
+  revealedMessageId: string | null;
 };
 
 const conversationScrollSnapshots = new Map<string, ConversationScrollSnapshot>();
@@ -128,6 +129,8 @@ export function useChatScrollController({
   const [layoutRevision, setLayoutRevision] = useState(0);
   const [historyWindowUnderfilled, setHistoryWindowUnderfilled] = useState(false);
   const [historyAutoFillExhausted, setHistoryAutoFillExhausted] = useState(false);
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autoScrollSuspendedRef = useRef(false);
   const shouldAutoScrollRef = useRef(true);
   const autoScrollPendingRef = useRef(false);
@@ -158,6 +161,8 @@ export function useChatScrollController({
   // Only a committed, route/data-matched visit can own geometry. During route
   // hydration this is null, even if the old transcript is still on screen.
   const activeSnapshotKeyRef = useRef<string | null>(null);
+  const activeMessageTargetRef = useRef<string | null>(null);
+  const pendingMessageTargetRef = useRef<string | null>(null);
   const restoredSnapshotKeyRef = useRef<string | null>(null);
   const restoringInitialHistoryRef = useRef(false);
   const historyScrollAnchorRef = useRef<{
@@ -179,7 +184,7 @@ export function useChatScrollController({
   const saveCurrentConversationScrollSnapshot = useCallback(() => {
     const snapshotKey = activeSnapshotKeyRef.current;
     const node = scrollContainerRef.current;
-    if (!snapshotKey || !node || node.clientHeight <= 0 || autoScrollSuspendedRef.current || autoScrollPendingRef.current) {
+    if (!snapshotKey || !node || node.clientHeight <= 0 || pendingMessageTargetRef.current || autoScrollSuspendedRef.current || autoScrollPendingRef.current) {
       return;
     }
     const distanceFromBottom = node.scrollHeight - (node.scrollTop + node.clientHeight);
@@ -190,6 +195,7 @@ export function useChatScrollController({
       clientHeight: node.clientHeight,
       wasAtBottom: distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX,
       anchor: distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX ? null : readVisibleMessageAnchor(node),
+      revealedMessageId: activeMessageTargetRef.current,
     });
     if (conversationScrollSnapshots.size > MAX_CHAT_SCROLL_SNAPSHOTS) {
       const oldest = conversationScrollSnapshots.keys().next().value;
@@ -208,8 +214,10 @@ export function useChatScrollController({
 
   const setAutoScrollSuspended = useCallback(
     (suspended: boolean) => {
+      const wasSuspended = autoScrollSuspendedRef.current;
       autoScrollSuspendedRef.current = suspended;
       if (!suspended) {
+        if (wasSuspended && pendingMessageTargetRef.current) setLayoutRevision((revision) => revision + 1);
         return;
       }
       cancelScrollAnimation();
@@ -287,7 +295,7 @@ export function useChatScrollController({
 
   const scrollToBottom = useCallback((options?: ScrollToBottomOptions) => {
     const node = scrollContainerRef.current;
-    if (!node || !activeSnapshotKeyRef.current) {
+    if (!node || !activeSnapshotKeyRef.current || pendingMessageTargetRef.current) {
       return;
     }
     if (autoScrollSuspendedRef.current) {
@@ -369,11 +377,21 @@ export function useChatScrollController({
   useLayoutEffect(() => {
     const conversationChanged = restoredSnapshotKeyRef.current !== scrollSnapshotKey;
     activeSnapshotKeyRef.current = scrollSnapshotKey;
+    activeMessageTargetRef.current = historyVisit?.messageId ?? null;
     restoredSnapshotKeyRef.current = scrollSnapshotKey;
     if (conversationChanged) {
+      const requestedMessageId = activeMessageTargetRef.current;
+      const saved = scrollSnapshotKey ? conversationScrollSnapshots.get(scrollSnapshotKey) : null;
+      // A placeholder's bottom position must never count as having revealed
+      // an explicit target. Only snapshots captured after that reveal can
+      // restore a later reading position on Back/Forward.
+      pendingMessageTargetRef.current = scrollSnapshotKey && requestedMessageId && saved?.revealedMessageId !== requestedMessageId
+        ? requestedMessageId : null;
       historyPaginationRef.current = { pending: false, scrollHeight: 0 };
       clearHistoryScrollAnchor();
       cancelScrollAnimation();
+      if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+      setHighlightedMessageId(null);
     }
     const node = scrollContainerRef.current;
     if (!node || !scrollSnapshotKey) {
@@ -399,6 +417,30 @@ export function useChatScrollController({
       // Neither hydration placeholders nor hidden panels are a reading position.
       autoScrollPendingRef.current = true;
       restoringInitialHistoryRef.current = true;
+      return;
+    }
+    const targetMessageId = pendingMessageTargetRef.current;
+    if (targetMessageId) {
+      cancelScrollAnimation();
+      shouldAutoScrollRef.current = false;
+      const anchor = { messageId: targetMessageId, offset: 24 };
+      const row = findMessageAnchorRow(node, anchor);
+      if (!row || row.dataset.chatRowDeferred === "true") {
+        autoScrollPendingRef.current = true;
+        restoringInitialHistoryRef.current = true;
+        return;
+      }
+      restoringInitialHistoryRef.current = false;
+      node.scrollTop = Math.max(0, Math.min(
+        node.scrollTop + row.getBoundingClientRect().top - node.getBoundingClientRect().top - anchor.offset,
+        node.scrollHeight - node.clientHeight,
+      ));
+      lastScrollHeightRef.current = node.scrollHeight;
+      pendingMessageTargetRef.current = null;
+      startHistoryScrollAnchor(node, anchor);
+      saveCurrentConversationScrollSnapshot();
+      setHighlightedMessageId(targetMessageId);
+      highlightTimerRef.current = setTimeout(() => setHighlightedMessageId(null), 3_000);
       return;
     }
     if (!conversationChanged && !restoringInitialHistoryRef.current) {
@@ -438,7 +480,9 @@ export function useChatScrollController({
     lastScrollHeightRef.current = node.scrollHeight;
     if (anchorRow && snapshot.anchor) startHistoryScrollAnchor(node, snapshot.anchor);
     saveCurrentConversationScrollSnapshot();
-  }, [scrollSnapshotKey, applyHistoryScrollAnchor, cancelScrollAnimation, clearHistoryScrollAnchor, isInitialHistoryLoading, layoutRevision, measureHistoryWindowUnderfill, messages, saveCurrentConversationScrollSnapshot, scrollToBottom, startHistoryScrollAnchor]);
+  }, [scrollSnapshotKey, historyVisit?.messageId, applyHistoryScrollAnchor, cancelScrollAnimation, clearHistoryScrollAnchor, isInitialHistoryLoading, layoutRevision, measureHistoryWindowUnderfill, messages, saveCurrentConversationScrollSnapshot, scrollToBottom, startHistoryScrollAnchor]);
+
+  useEffect(() => () => { if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current); }, []);
 
   const handleScrollContentRef = useCallback((node: HTMLDivElement | null) => {
     setScrollContentNode(node);
@@ -692,6 +736,7 @@ export function useChatScrollController({
     autoScrollSuspendedRef,
     autoScrollPendingRef,
     handleScrollContentRef,
+    highlightedMessageId,
     historyWindowUnderfilled,
     lastComposerScrollTopRef,
     lastScrollHeightRef,

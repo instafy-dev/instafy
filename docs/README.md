@@ -6,6 +6,7 @@ These docs reflect the current product scope: a chat-first filesystem workspace 
 - Product overview: `docs/Product.md`
 - Brand colors, logo variants, and asset rules: `docs/Brand.md`
 - Scheduled automations and quiet runs: `docs/Automations.md`
+- Scoped search, message excerpts and exact-message navigation: [Studio search](Studio-Search.md)
 - Durable notification center, push delivery, and verification: [Notifications](Notifications.md)
 - Runtime architecture: `docs/Architecture.md`
 - Runtime pooling plan (shared vs dedicated): `docs/runtime-plan-shared-vs-dedicated.md`

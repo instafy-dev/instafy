@@ -12,12 +12,12 @@ export function useStudioNavigation(beforeNavigation?: (action: () => void) => v
   // StudioLayout owns the drawer and supplies its continuation directly;
   // descendants use the same continuation through the provider.
   const runNavigation = beforeNavigation ?? contextNavigation;
-  return useCallback((destination: StudioDestination) => {
+  return useCallback((destination: StudioDestination, options?: { forceNewVisit?: boolean }) => {
     runNavigation(() => {
       // A second click may precede Router's next render. Chain from the committed
       // browser URL, never a closure holding the preceding visit's search.
       const search = buildStudioDestinationSearch(window.location.search, destination);
-      if (window.location.pathname === "/studio" && window.location.search === search) return;
+      if (!options?.forceNewVisit && window.location.pathname === "/studio" && window.location.search === search) return;
       // Do not carry an overlay or the previous visit's scroll key into a new destination.
       void navigate({ pathname: "/studio", search }, { state: null });
     });

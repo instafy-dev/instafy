@@ -10,13 +10,14 @@ import type { ProjectListItem } from "../../projects/useProjects";
 import { controllerClient, type ControllerProjectConversation, type ControllerProjectSummary } from "../../sdk/instafy";
 import type { StudioSearchRecord, StudioSearchScope } from "./components/useStudioSearch";
 import { isSafeStudioFilePath, type StudioKnownFile } from "./useStudioKnownFiles";
+import { useStudioMessageSearch } from "./useStudioMessageSearch";
 
 const CHAT_LIMIT = 200;
 const SPACE_LIMIT = 40;
 const CONCURRENT_READS = 4;
 
 export type StudioSearchTarget =
-  | { kind: "conversation"; projectId: string; conversationId: string | null; conversationControllerId: string | null }
+  | { kind: "conversation"; projectId: string; conversationId: string | null; conversationControllerId: string | null; messageId?: string }
   | { kind: "file"; projectId: string; path: string; fileId: string; requiresLoad?: boolean }
   | { kind: "space-panel"; projectId: string; panel: "settings" | "automations" }
   | { kind: "org-settings"; orgId: string };
@@ -24,6 +25,8 @@ export type StudioSearchTarget =
 export interface StudioSearchRecordsOptions {
   viewerUserId: string | null;
   enabled: boolean;
+  query?: string;
+  restoreMessagePages?: number;
   scope: StudioSearchScope;
   /** Personal spaces use the same "personal" key as the navigation rail. */
   orgId: string | null;
@@ -52,7 +55,7 @@ function emptySnapshot(key: string, loading: boolean): SearchSnapshot {
 
 /** Search does not open origins or start runtimes: files are already-known paths only. */
 export function useStudioSearchRecords({
-  viewerUserId, enabled, scope, orgId, spaceId, projects, knownFiles, activeConversations, onActivate,
+  viewerUserId, enabled, query = "", restoreMessagePages, scope, orgId, spaceId, projects, knownFiles, activeConversations, onActivate,
 }: StudioSearchRecordsOptions) {
   const [revision, setRevision] = useState(0);
   const retry = useCallback(() => setRevision((value) => value + 1), []);
@@ -60,6 +63,7 @@ export function useStudioSearchRecords({
   const canSearch = enabled && Boolean(viewerUserId) && scopeReady;
   const key = JSON.stringify([canSearch, viewerUserId, scope, orgId, spaceId, revision]);
   const [snapshot, setSnapshot] = useState(() => emptySnapshot(key, canSearch));
+  const messages = useStudioMessageSearch({ viewerUserId, enabled: canSearch, query, scope, orgId, spaceId, revision, restoreMessagePages });
 
   useEffect(() => {
     if (!canSearch) return;
@@ -141,6 +145,21 @@ export function useStudioSearchRecords({
   const records = useMemo<StudioSearchRecord[]>(() => {
     if (!canSearch) return [];
     const output: StudioSearchRecord[] = [];
+    for (const message of messages.matches) {
+      const local = activeConversations?.projectId === message.projectId
+        ? activeConversations.items.find((chat) => chat.controllerId === message.conversationId) : null;
+      output.push({
+        id: `message:${message.projectId}:${message.conversationId}:${message.messageId}`,
+        title: message.conversationTitle.trim() || "Untitled chat",
+        description: `${message.orgName?.trim() || (message.orgId ? "Team" : "Personal")} / ${message.projectName.trim() || "Untitled space"}`,
+        keywords: "", group: "Messages", orgId: message.orgId ?? "personal", spaceId: message.projectId,
+        message: { excerpt: message.snippet, query: query.trim(), matchRanges: message.matchRanges,
+          authorLabel: message.role === "assistant" ? "Assistant" : "User", createdAt: message.createdAt },
+        activate: () => onActivate({ kind: "conversation", projectId: message.projectId,
+          conversationId: local?.localId ?? null, conversationControllerId: message.conversationId,
+          messageId: message.messageId }),
+      });
+    }
     const knownProjects = new Map(projects.map((project) => [project.id, project]));
     const seenOrgs = new Set<string>();
     for (const project of current.projects) {
@@ -198,7 +217,8 @@ export function useStudioSearchRecords({
       }
     }
     return output;
-  }, [activeConversations, canSearch, current.conversations, current.projects, knownFiles, onActivate, projects, viewerUserId]);
-  const notice = `Searches recent chat titles (up to ${CHAT_LIMIT} per space), opened file names, files already listed in the current space and settings. Unloaded folders, message and file contents are not included.${current.limitedSpaces ? ` Showing the first ${SPACE_LIMIT} spaces alphabetically; choose a team or space to narrow the search.` : ""}`;
-  return { records, loading: current.loading, error: current.error, notice, retry };
+  }, [activeConversations, canSearch, current.conversations, current.projects, knownFiles, messages.matches, onActivate, projects, query, viewerUserId]);
+  const notice = `Message search matches text in accessible conversations; use at least 2 characters. Also searches recent chat titles (up to ${CHAT_LIMIT} per space), opened file names, files already listed in the current space and settings. Unloaded folders and file contents are not included.${current.limitedSpaces ? ` Chat titles and file names cover the first ${SPACE_LIMIT} spaces alphabetically; message search covers the selected scope.` : ""}`;
+  return { records, loading: current.loading || messages.loading, error: [current.error, messages.error].filter(Boolean).join(" ") || null, notice, retry,
+    hasMoreMessages: messages.hasMore, loadMoreMessages: messages.loadMore, loadingMoreMessages: messages.loadingMore, messagePageCount: messages.pageCount };
 }

@@ -920,6 +920,15 @@ export function useStudioLayoutWorkspaceRouting({
       jobId: activeWorkspaceTabJobId,
       reviewTabId: activeWorkspaceReviewTabId,
     });
+    // A message target belongs only to this explicit conversation visit. Keep
+    // it through canonical hydration, but clear it for ordinary tab selection.
+    const preserveMessageTarget = pendingNavigationMode !== "push" && activePanel === "chat" &&
+      params.get("projectId") === resolvedProjectId &&
+      (params.get("conversationControllerId")
+        ? params.get("conversationControllerId") === projectScopedRouteValues.conversationControllerId
+        : params.get("conversationId") === projectScopedRouteValues.conversationId) &&
+      (params.get("jobId") || null) === projectScopedRouteValues.jobId;
+    if (!preserveMessageTarget) changed = syncParam("messageId", null) || changed;
     changed = clearStaleSharedBrowserResumeTarget(params, resolvedProjectId) || changed;
     changed = syncParam("projectId", resolvedProjectId) || changed;
     changed = syncParam("conversationId", projectScopedRouteValues.conversationId) || changed;

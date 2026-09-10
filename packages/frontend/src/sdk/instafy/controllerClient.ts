@@ -1,4 +1,5 @@
 import { listProductNotifications, updateProductNotificationState, readAllProductNotifications, getProductNotificationPreferences, saveProductNotificationPreferences } from "../../services/runtimeController/productNotifications";
+import { searchControllerMessages } from "../../services/runtimeController/messageSearch";
 import { createControllerClient } from "@instafy/sdk/controller-client";
 import {
   acknowledgeMyNotificationInboxItem,
@@ -251,6 +252,7 @@ export const controllerClient = createControllerClient({
     createInviteLink: createControllerOrgInviteLink,
     revokeInviteLink: revokeControllerOrgInviteLink,
   }),
+  search: Object.freeze({ messages: searchControllerMessages }),
   conversations: Object.freeze({
     listForProject: fetchProjectConversationsFromController,
     listMessages: fetchConversationMessagesFromController,

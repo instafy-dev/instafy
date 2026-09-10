@@ -42,6 +42,7 @@ import { StudioMobileContextHeader } from "./studio/components/StudioMobileConte
 import { useStudioSearchRecords } from "./studio/useStudioSearchRecords";
 import { getStudioWorkspaceOwnerKey, useStudioKnownFiles } from "./studio/useStudioKnownFiles";
 import { useStudioSearchNavigation } from "./studio/useStudioSearchNavigation";
+import { useStudioSearchHistory } from "./studio/useStudioSearchHistory";
 import { useNativeBackButtonAction } from "../native/useNativeBackButtonAction";
 import { desktopTitleBarFree } from "../lib/desktopShell";
 import "./studio/StudioContextLayout.css";
@@ -281,9 +282,10 @@ function StudioLayoutInner() {
   const activeProjectOrgKey = activeProjectSummary?.orgId ?? "personal";
   const navigationScope = resolveTeamNavigationScope(location.search, activeProjectOrgKey);
   const searchRoute = new URLSearchParams(location.search);
-  const searchKey = JSON.stringify([currentUserId, navigationScope.orgKey, activeProjectId, navigationScope.page, isLargeScreen,
+  const searchKey = JSON.stringify([currentUserId, getStudioVisitKey(location), navigationScope.orgKey, activeProjectId, navigationScope.page,
     ...["conversationId", "conversationControllerId", "jobId", "panel", "settingsTab", "settingsOrgId", "settingsCategory"].map(key => searchRoute.get(key))]);
   const searchHidesWorkspace = searchRequest?.key === searchKey && searchRequest.open;
+  const searchHistory = useStudioSearchHistory(currentUserId, getStudioVisitKey(location), searchKey);
 
   const [navigationTeam, setNavigationTeam] = useState<{ userId: string | null; key: string; name: string; avatarUrl: string | null } | null>(null);
   const handleActiveTeamChange = useCallback((team: { key: string; name: string; avatarUrl: string | null }) => {
@@ -2011,6 +2013,8 @@ function StudioLayoutInner() {
   const searchData = useStudioSearchRecords({
     viewerUserId: currentUserId,
     enabled: searchRequest?.key === searchKey && searchRequest.open,
+    query: searchRequest?.key === searchKey ? searchRequest.query : '',
+    restoreMessagePages: searchRequest?.key === searchKey ? searchRequest.restoreMessagePages : undefined,
     scope: searchRequest?.key === searchKey ? searchRequest.scope : searchSpace ? "space" : searchOrg ? "org" : "all",
     orgId: searchOrg?.id ?? null,
     spaceId: searchSpace?.id ?? null,
@@ -2022,6 +2026,9 @@ function StudioLayoutInner() {
   const search = useStudioSearch({
     scopeKey: searchKey, org: searchOrg, space: searchSpace, records: searchData.records,
     loading: searchData.loading, error: searchData.error, onRetry: searchData.retry, notice: searchData.notice,
+    hasMoreMessages: searchData.hasMoreMessages, loadingMoreMessages: searchData.loadingMoreMessages,
+    onLoadMoreMessages: searchData.loadMoreMessages, messagePageCount: searchData.messagePageCount,
+    restoreSession: searchHistory.restoredSession, onBeforeResultActivate: searchHistory.remember, onDismiss: searchHistory.dismiss,
     fullPage: true, persistentControl: isLargeScreen, returnFocusRef: showMobileLeftDrawerOverlay ? overlaySearchTriggerRef : mobileSearchTriggerRef,
     onRequestChange: request => setSearchRequest({ ...request, key: searchKey }),
     onOpen: () => { if (!isLargeScreen) runAfterSidebarClose(() => {}); },

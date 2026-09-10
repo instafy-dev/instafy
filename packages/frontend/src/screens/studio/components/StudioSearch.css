@@ -192,8 +192,7 @@
 }
 
 .studio-search-field:focus-within {
-  border-color: var(--color-primary-500);
-  box-shadow: 0 0 0 1px var(--color-primary-500);
+  background: var(--color-slate-100);
 }
 
 .studio-search-field input {
@@ -516,7 +515,7 @@
 }
 
 .dark .studio-search-field:focus-within {
-  border-color: var(--color-primary-500);
+  background: var(--color-studio-dark-control-hover);
 }
 
 /* The persistent context uses a background change for input focus;

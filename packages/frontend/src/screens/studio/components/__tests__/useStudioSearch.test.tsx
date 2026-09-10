@@ -495,19 +495,19 @@ describe('Studio search', () => {
 
     await act(async () => input().focus());
     await click(input());
-    expect(onRequestChange.mock.calls).toEqual([[{ open: true, scope: 'space' }]]);
+    expect(onRequestChange.mock.calls).toEqual([[{ open: true, scope: 'space', query: '' }]]);
     await key('Backspace');
-    expect(onRequestChange).toHaveBeenLastCalledWith({ open: true, scope: 'org' });
+    expect(onRequestChange).toHaveBeenLastCalledWith({ open: true, scope: 'org', query: '' });
     await enterQuery('report');
-    expect(onRequestChange).toHaveBeenLastCalledWith({ open: true, scope: 'org' });
+    expect(onRequestChange).toHaveBeenLastCalledWith({ open: true, scope: 'org', query: 'report' });
     await key('Escape');
-    expect(onRequestChange).toHaveBeenLastCalledWith({ open: false, scope: 'space' });
+    expect(onRequestChange).toHaveBeenLastCalledWith({ open: false, scope: 'space', query: '' });
 
     onRequestChange.mockClear();
     await render({ ...props, scopeKey: 'different-account:global', org: null, space: null });
     expect(onRequestChange).not.toHaveBeenCalled();
     await click(input());
-    expect(onRequestChange).toHaveBeenLastCalledWith({ open: true, scope: 'all' });
+    expect(onRequestChange).toHaveBeenLastCalledWith({ open: true, scope: 'all', query: '' });
   });
 
   it('shows loading instead of an empty-state claim and exposes partial-index limits', async () => {

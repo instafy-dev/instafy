@@ -132,6 +132,7 @@ function AnchorHarness({
   loading = false,
   historyVisit = visit(conversationId),
   clientHeight = 200,
+  mobileAnchor = false,
 }: {
   conversationId: string;
   rows: AnchorRow[];
@@ -139,6 +140,7 @@ function AnchorHarness({
   loading?: boolean;
   historyVisit?: ChatScrollHistoryVisit | null;
   clientHeight?: number | (() => number);
+  mobileAnchor?: boolean;
 }) {
   const messages = rows.map(({ id }) => createMessage(id));
   const controller = useChatScrollController({
@@ -150,6 +152,17 @@ function AnchorHarness({
     loadOlderMessages: () => undefined,
     messages,
   });
+  const wasMobileAnchored = useRef(false);
+  useLayoutEffect(() => {
+    controller.setAutoScrollSuspended(mobileAnchor);
+    if (mobileAnchor) {
+      wasMobileAnchored.current = true;
+    } else if (wasMobileAnchored.current) {
+      wasMobileAnchored.current = false;
+      controller.shouldAutoScrollRef.current = true;
+      controller.scrollToBottom({ behavior: "auto" });
+    }
+  }, [mobileAnchor, controller.setAutoScrollSuspended, controller.shouldAutoScrollRef, controller.scrollToBottom]);
   useChatAutoScrollSync({
     ...controller,
     displayedMessages: messages,
@@ -172,7 +185,7 @@ function AnchorHarness({
         Object.defineProperty(node, "clientHeight", { get: height, configurable: true });
         node.getBoundingClientRect = () => ({ top: 0, bottom: height(), height: height() } as DOMRect);
       }
-    }} data-testid="anchor-scroll">
+    }} data-testid="anchor-scroll" data-highlighted-message={controller.highlightedMessageId ?? undefined}>
       <div ref={controller.handleScrollContentRef}>
         {rows.map((row) => (
           <div key={row.id} data-chat-scroll-message-id={row.id} ref={(node) => {
@@ -254,6 +267,50 @@ describe("useChatScrollController", () => {
     vi.restoreAllMocks();
     container.remove();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
+  });
+
+  it("waits for the exact target, reveals it instead of following the bottom, and clears its highlight", async () => {
+    vi.useFakeTimers();
+    try {
+      const historyVisit = { ...visit("target-chat", "target-visit"), messageId: "old-message" };
+      await act(async () => root.render(<AnchorHarness conversationId="target-chat" historyVisit={historyVisit} loading rows={[]} scrollHeight={200} />));
+      const node = () => container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
+      expect(node().scrollTop).toBe(0);
+      expect(node().dataset.highlightedMessage).toBeUndefined();
+      const rows = [{ id: "old-message", top: 600, height: 200 }, { id: "recent", top: 1000, height: 200 }];
+      await act(async () => root.render(<AnchorHarness conversationId="target-chat" historyVisit={historyVisit} rows={rows} scrollHeight={1400} />));
+      expect(node().scrollTop).toBe(576);
+      expect(node().dataset.highlightedMessage).toBe("old-message");
+      await act(async () => vi.advanceTimersByTime(3001));
+      expect(node().dataset.highlightedMessage).toBeUndefined();
+      expect(node().scrollTop).toBe(576);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("does not reveal a departed message target when another visit becomes active", async () => {
+    const targetVisit = { ...visit("target-leave", "old-target-visit"), messageId: "old-message" };
+    await act(async () => root.render(<AnchorHarness conversationId="target-leave" historyVisit={targetVisit} loading rows={[]} scrollHeight={200} />));
+    await act(async () => root.render(<AnchorHarness conversationId="other-chat" historyVisit={visit("other-chat", "new-visit")} rows={[
+      { id: "other-first", top: 0, height: 300 }, { id: "other-last", top: 900, height: 300 },
+    ]} scrollHeight={1200} />));
+    const node = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
+    expect(node.scrollTop).toBe(1000);
+    expect(node.dataset.highlightedMessage).toBeUndefined();
+  });
+
+  it("does not let mobile onboarding release capture placeholder bottom geometry before a cross-space target loads", async () => {
+    const historyVisit = { ...visit("mobile-target", "mobile-target-visit", "user", "next-space"), messageId: "matched" };
+    await act(async () => root.render(<AnchorHarness conversationId="previous-chat" historyVisit={null} mobileAnchor loading rows={[]} scrollHeight={200} />));
+    await act(async () => root.render(<AnchorHarness conversationId="mobile-target" historyVisit={historyVisit} mobileAnchor loading rows={[]} scrollHeight={200} />));
+    // The old mobile getting-started surface releases its top anchor while
+    // the new conversation's around-message request is still pending.
+    await act(async () => root.render(<AnchorHarness conversationId="mobile-target" historyVisit={historyVisit} loading rows={[]} scrollHeight={200} />));
+    await act(async () => root.render(<AnchorHarness conversationId="mobile-target" historyVisit={historyVisit} rows={[
+      { id: "before", top: 0, height: 600 }, { id: "matched", top: 600, height: 200 }, { id: "after", top: 800, height: 600 },
+    ]} scrollHeight={1400} />));
+    const node = container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
+    expect(node.scrollTop).toBe(576);
+    expect(node.dataset.highlightedMessage).toBe("matched");
   });
 
   it("auto-loads older history while the loaded transcript underfills the viewport", async () => {

@@ -10,6 +10,7 @@
     "./agents": "./src/agents.ts",
     "./capabilities": "./src/capabilities.ts",
     "./controller-client": "./src/controllerClient.ts",
+    "./conversation-search": "./src/conversationSearch.ts",
     "./project-identity": "./src/projectIdentity.ts",
     "./feature-modules": {
       "types": "./src/featureModules.d.ts",

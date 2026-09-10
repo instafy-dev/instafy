@@ -7,9 +7,11 @@ import type { ControllerProjectConversation, ControllerProjectSummary } from "..
 import type { ProjectListItem } from "../../../projects/useProjects";
 import { PROJECT_ACCESS_REFRESH_EVENT } from "../../../projects/projectAccessEvents";
 import { useStudioSearchRecords, type StudioSearchRecordsOptions } from "../useStudioSearchRecords";
+import type { ControllerMessageSearchMatch, ControllerMessageSearchPage } from "@instafy/sdk/conversation-search";
+import { ControllerMessageSearchError } from "../../../services/runtimeController/messageSearch";
 
-const { discover, listChats } = vi.hoisted(() => ({ discover: vi.fn(), listChats: vi.fn() }));
-vi.mock("../../../sdk/instafy", () => ({ controllerClient: { projects: { listResult: discover }, conversations: { listForProject: listChats } } }));
+const { discover, listChats, searchMessages } = vi.hoisted(() => ({ discover: vi.fn(), listChats: vi.fn(), searchMessages: vi.fn() }));
+vi.mock("../../../sdk/instafy", () => ({ controllerClient: { projects: { listResult: discover }, conversations: { listForProject: listChats }, search: { messages: searchMessages } } }));
 
 const project = (id: string, orgId: string | null = "team-a"): ControllerProjectSummary => ({ projectId: id, projectName: id, orgId, orgName: orgId ?? "Personal" });
 const chat = (id: string, projectId = "space-a", metadata: Record<string, unknown> = { title: id }): ControllerProjectConversation => ({
@@ -23,6 +25,12 @@ function deferred<T>() {
   const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
   return { promise, resolve };
 }
+const messageMatch = (messageId = "message-1", overrides: Partial<ControllerMessageSearchMatch> = {}): ControllerMessageSearchMatch => ({
+  messageId, conversationId: "remote-space-a", projectId: "space-a", orgId: "team-a", projectName: "Core", orgName: "Team",
+  conversationTitle: "Repair navigation", role: "user", createdAt: "2026-09-10T10:00:00Z",
+  snippet: "Please fix this search", matchRanges: [{ start: 16, end: 22 }], ...overrides,
+});
+const messagePage = (matches = [messageMatch()], nextCursor: string | null = null): ControllerMessageSearchPage => ({ matches, nextCursor, hasMore: Boolean(nextCursor) });
 
 describe("useStudioSearchRecords", () => {
   let root: Root;
@@ -42,8 +50,10 @@ describe("useStudioSearchRecords", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.resetAllMocks();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     discover.mockResolvedValue({ status: "success", projects: [project("space-a"), project("space-b", "team-b")] });
     listChats.mockImplementation(async ({ projectId }) => [chat(`remote-${projectId}`, projectId)]);
+    searchMessages.mockResolvedValue(messagePage());
     options = { viewerUserId: "viewer", enabled: true, scope: "space", orgId: "team-a", spaceId: "space-a", projects: [], activeConversations: null, onActivate: vi.fn() };
     renders = [];
     container = document.createElement("div");
@@ -53,6 +63,7 @@ describe("useStudioSearchRecords", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    vi.useRealTimers();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
@@ -118,7 +129,7 @@ describe("useStudioSearchRecords", () => {
     files[0].activate();
     expect(options.onActivate).toHaveBeenLastCalledWith({ kind: "file", projectId: "space-a", path: "src/main.ts", fileId: "file-0" });
     expect(current.notice).toContain("opened file names");
-    expect(current.notice).toContain("Unloaded folders, message and file contents are not included");
+    expect(current.notice).toContain("Unloaded folders and file contents are not included");
   });
 
   it("adds already-listed unopened files without more I/O and prefers an opened file identity", async () => {
@@ -246,5 +257,121 @@ describe("useStudioSearchRecords", () => {
     expect(current.records.filter((record) => record.spaceId === "space-04" && record.group === "Chats")).toHaveLength(200);
     expect(current.notice).toContain("first 40 spaces alphabetically");
     expect(current.loading).toBe(false);
+  });
+
+  it("debounces message search without repeating title discovery and opens the exact message", async () => {
+    await render({ query: "se" });
+    await act(async () => vi.advanceTimersByTimeAsync(200));
+    await render({ query: "search" });
+    await act(async () => vi.advanceTimersByTimeAsync(249));
+    expect(searchMessages).not.toHaveBeenCalled();
+    await act(async () => vi.advanceTimersByTimeAsync(1));
+    expect(discover).toHaveBeenCalledTimes(1);
+    expect(searchMessages).toHaveBeenCalledExactlyOnceWith({ query: "search", projectId: "space-a", orgId: "team-a", limit: 30, signal: expect.any(AbortSignal) });
+    const result = current.records.find((record) => record.group === "Messages")!;
+    expect(result.message).toEqual({ excerpt: "Please fix this search", query: "search", matchRanges: [{ start: 16, end: 22 }], authorLabel: "User", createdAt: "2026-09-10T10:00:00Z" });
+    result.activate();
+    expect(options.onActivate).toHaveBeenLastCalledWith({ kind: "conversation", projectId: "space-a", conversationId: null, conversationControllerId: "remote-space-a", messageId: "message-1" });
+    expect(current.messagePageCount).toBe(1);
+  });
+
+  it("does not request message bodies for an empty, too-short, or overlong query", async () => {
+    await render({ query: "x" });
+    await act(async () => vi.advanceTimersByTimeAsync(300));
+    expect(searchMessages).not.toHaveBeenCalled();
+    await render({ query: "" });
+    await act(async () => vi.advanceTimersByTimeAsync(300));
+    expect(searchMessages).not.toHaveBeenCalled();
+    await render({ query: "x".repeat(201) });
+    await act(async () => vi.advanceTimersByTimeAsync(300));
+    expect(searchMessages).not.toHaveBeenCalled();
+    expect(current.error).toContain("up to 200 characters");
+  });
+
+  it("cancels old queries and hides obsolete message results during A → B → A", async () => {
+    const late = deferred<ControllerMessageSearchPage>();
+    searchMessages.mockReturnValueOnce(late.promise);
+    await render({ query: "search" });
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    const signal = searchMessages.mock.calls[0][0].signal as AbortSignal;
+    await render({ query: "other" });
+    await render({ query: "search" });
+    expect(signal.aborted).toBe(true);
+    await act(async () => late.resolve(messagePage([messageMatch("obsolete")])));
+    expect(current.records.some((record) => record.group === "Messages")).toBe(false);
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    expect(current.records.some((record) => record.id.endsWith(":message-1"))).toBe(true);
+    const start = renders.length;
+    await render({ viewerUserId: "another-account" });
+    expect(renders[start]).toEqual([]);
+    expect(current.records.some((record) => record.group === "Messages")).toBe(false);
+  });
+
+  it("passes Personal and all-org scopes to the server and filters mismatched response scope", async () => {
+    searchMessages.mockResolvedValue(messagePage([messageMatch("personal", { orgId: null }), messageMatch("wrong-team")]));
+    await render({ query: "search", scope: "org", orgId: "personal" });
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    expect(searchMessages).toHaveBeenLastCalledWith({ query: "search", personal: true, limit: 30, signal: expect.any(AbortSignal) });
+    expect(current.records.filter((record) => record.group === "Messages").map((record) => record.orgId)).toEqual(["personal"]);
+    await render({ scope: "all" });
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    expect(searchMessages).toHaveBeenLastCalledWith({ query: "search", limit: 30, signal: expect.any(AbortSignal) });
+    expect(current.records.filter((record) => record.group === "Messages")).toHaveLength(2);
+  });
+
+  it("loads distinct message pages once and restores their count with fresh authorized reads", async () => {
+    searchMessages.mockImplementation(async ({ cursor }) => cursor
+      ? messagePage([messageMatch("message-1"), messageMatch("message-2")])
+      : messagePage([messageMatch("message-1")], "page-2"));
+    await render({ query: "search" });
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    expect(current.hasMoreMessages).toBe(true);
+    await act(async () => { current.loadMoreMessages(); current.loadMoreMessages(); });
+    expect(searchMessages).toHaveBeenCalledTimes(2);
+    expect(current.records.filter((record) => record.group === "Messages")).toHaveLength(2);
+    expect(current.messagePageCount).toBe(2);
+    expect(current.hasMoreMessages).toBe(false);
+    await render({ enabled: false });
+    expect(current.records).toEqual([]);
+    await render({ enabled: true, restoreMessagePages: 2 });
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    expect(searchMessages).toHaveBeenCalledTimes(4);
+    expect(current.messagePageCount).toBe(2);
+    expect(current.records.filter((record) => record.group === "Messages")).toHaveLength(2);
+  });
+
+  it("reports unavailable message search without losing title results, then retries", async () => {
+    searchMessages.mockRejectedValueOnce(new ControllerMessageSearchError("Message search is not available on this controller yet.", 404));
+    await render({ query: "search" });
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    expect(current.error).toContain("not available on this controller");
+    expect(current.records.some((record) => record.group === "Chats")).toBe(true);
+    await act(async () => current.retry());
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    expect(current.error).toBeNull();
+    expect(current.records.some((record) => record.group === "Messages")).toBe(true);
+  });
+
+  it("clears existing message pages when pagination reports revoked access", async () => {
+    searchMessages.mockResolvedValueOnce(messagePage([messageMatch()], "page-2"));
+    await render({ query: "search" });
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    searchMessages.mockRejectedValueOnce(new ControllerMessageSearchError("Access changed", 403));
+    await act(async () => current.loadMoreMessages());
+    expect(current.records.some((record) => record.group === "Messages")).toBe(false);
+    expect(current.hasMoreMessages).toBe(false);
+    expect(current.error).toContain("Access changed");
+  });
+
+  it("invalidates message pages with the existing project access refresh event", async () => {
+    await render({ query: "search" });
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    const signal = searchMessages.mock.calls[0][0].signal as AbortSignal;
+    await act(async () => window.dispatchEvent(new Event(PROJECT_ACCESS_REFRESH_EVENT)));
+    expect(signal.aborted).toBe(true);
+    expect(current.records.some((record) => record.group === "Messages")).toBe(false);
+    searchMessages.mockResolvedValueOnce(messagePage([]));
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    expect(current.records.some((record) => record.group === "Messages")).toBe(false);
   });
 });

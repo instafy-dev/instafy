@@ -169,11 +169,12 @@ export function DeferredChatRows({ children, messageCount }: {
   );
 }
 
-export function DeferredChatMessageRow({ message, layoutKey, eager, eligible, children }: {
+export function DeferredChatMessageRow({ message, layoutKey, eager, eligible, highlighted = false, children }: {
   message: ChatMessage;
   layoutKey: string;
   eager: boolean;
   eligible: boolean;
+  highlighted?: boolean;
   children: ReactNode;
 }) {
   const context = useContext(DeferredRowsContext);
@@ -182,7 +183,7 @@ export function DeferredChatMessageRow({ message, layoutKey, eager, eligible, ch
   const validMeasurement = cached?.layoutKey === layoutKey && cached.viewportWidth === window.innerWidth
     ? cached : null;
   const [visible, setVisible] = useState(() => eager || !validMeasurement);
-  const deferred = Boolean(context?.enabled && eligible && !visible && validMeasurement);
+  const deferred = Boolean(context?.enabled && eligible && !eager && !visible && validMeasurement);
   const measure = useCallback(() => {
     const node = nodeRef.current;
     if (!node) return;
@@ -208,9 +209,10 @@ export function DeferredChatMessageRow({ message, layoutKey, eager, eligible, ch
   return (
     <div
       ref={nodeRef}
-      className="relative w-full"
+      className={`relative w-full rounded-lg transition-colors ${highlighted ? "bg-primary-100/70 ring-2 ring-inset ring-primary-400/60 dark:bg-primary-500/20" : ""}`}
       data-testid="chat-message-row"
       data-chat-scroll-message-id={message.id}
+      data-chat-message-target={highlighted ? "true" : undefined}
       data-chat-row-deferred={deferred ? "true" : undefined}
       style={deferred ? { height: validMeasurement?.height } : undefined}
       role={deferred ? "article" : undefined}

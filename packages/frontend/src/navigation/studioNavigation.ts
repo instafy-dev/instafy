@@ -17,6 +17,7 @@ export type StudioDestination =
       conversationId?: string | null;
       conversationControllerId?: string | null;
       jobId?: string | null;
+      messageId?: string | null;
     }
   | {
       kind: "panel";
@@ -42,13 +43,13 @@ export function buildStudioDestinationSearch(search: string, destination: Studio
     return next ? `?${next}` : "";
   }
   const currentTeam = params.get("teamId") ?? params.get("settingsOrgId");
-  for (const key of ["jobId", "reviewTab", "workspaceTab", "settingsTab", "settingsCategory", "settingsItem", "settingsOrgId", "teamId", "view"]) {
+  for (const key of ["jobId", "messageId", "reviewTab", "workspaceTab", "settingsTab", "settingsCategory", "settingsItem", "settingsOrgId", "teamId", "view"]) {
     params.delete(key);
   }
   if (destination.kind === "conversation") {
     params.set("projectId", destination.projectId);
     params.delete("panel");
-    for (const key of ["conversationId", "conversationControllerId", "jobId"] as const) {
+    for (const key of ["conversationId", "conversationControllerId", "jobId", "messageId"] as const) {
       const value = destination[key]?.trim();
       if (value) params.set(key, value);
       else params.delete(key);

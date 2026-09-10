@@ -2,6 +2,15 @@ import { describe, expect, it } from "vitest";
 import { buildStudioDestinationSearch } from "../studioNavigation";
 
 describe("Studio destination construction", () => {
+  it("opens an exact message and clears its target on ordinary conversation or panel navigation", () => {
+    const target = buildStudioDestinationSearch("?projectId=old&messageId=stale", {
+      kind: "conversation", projectId: "A", conversationControllerId: "remote", messageId: "saved-message",
+    });
+    expect(Object.fromEntries(new URLSearchParams(target))).toEqual({ projectId: "A", conversationControllerId: "remote", messageId: "saved-message" });
+    expect(new URLSearchParams(buildStudioDestinationSearch(target, { kind: "conversation", projectId: "A", conversationControllerId: "remote" })).has("messageId")).toBe(false);
+    expect(new URLSearchParams(buildStudioDestinationSearch(target, { kind: "panel", panel: "home" })).has("messageId")).toBe(false);
+    expect(new URLSearchParams(buildStudioDestinationSearch(target, { kind: "drawer", workspaceTab: "history" })).get("messageId")).toBe("saved-message");
+  });
   it.each([
     "?projectId=A&panel=settings&settingsTab=org&settingsOrgId=empty-team&settingsCategory=members",
     "?projectId=A&panel=settings&settingsTab=profile&settingsCategory=ai&settingsItem=audio&teamId=personal",

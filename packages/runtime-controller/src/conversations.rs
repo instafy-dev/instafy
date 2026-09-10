@@ -3751,7 +3751,7 @@ pub(crate) fn runtime_preference_wrapper_json(
     JsonValue::Object(wrapper)
 }
 
-fn message_row_to_payload(row: &ConversationMessageRow) -> ConversationMessagePayload {
+pub(crate) fn message_row_to_payload(row: &ConversationMessageRow) -> ConversationMessagePayload {
     ConversationMessagePayload {
         id: row.id,
         conversation_id: row.conversation_id,
