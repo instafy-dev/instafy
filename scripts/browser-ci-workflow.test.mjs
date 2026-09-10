@@ -133,6 +133,19 @@ test("only the self-hosted Personal job installs its documented GTK3 dependency 
   assert.doesNotMatch(personal, /--no-sandbox|--allow-unauthenticated|--ignore-scripts|NODE_TLS_REJECT_UNAUTHORIZED/u);
 });
 
+test("Personal CI installs its locked Electron binary before the scrubbed test process", () => {
+  const personal = jobSource("personal");
+  const install = "      - name: Install the locked Electron binary\n        timeout-minutes: 5\n        env:\n          NODE_USE_ENV_PROXY: \"1\"\n        run: pnpm --filter @instafy/desktop-app exec install-electron\n";
+  assert.ok(personal.includes(install));
+  assert.ok(personal.indexOf(install) > personal.indexOf("run: pnpm install --frozen-lockfile"));
+  assert.ok(personal.indexOf(install) < personal.indexOf("Run real Personal Browser cookie and ownership E2E"));
+  assert.equal((read(".github/workflows/browser-e2e.yml").match(/exec install-electron/g) ?? []).length, 1);
+  assert.doesNotMatch(personal, /npx|pnpm dlx|electron@latest|ELECTRON_OVERRIDE_DIST_PATH|electron_use_remote_checksums|NODE_TLS_REJECT_UNAUTHORIZED/u);
+  const runner = read("packages/frontend/scripts/browser-ci.mjs");
+  assert.doesNotMatch(runner, /NODE_USE_ENV_PROXY|HTTP_PROXY|HTTPS_PROXY|ELECTRON_GET_USE_PROXY/u,
+    "download proxy support must not enter either scrubbed test environment");
+});
+
 test("Public Build includes browser verification in its existing release result", () => {
   const build = read(".github/workflows/build.yml");
   assert.match(build, /\n  pull_request:/);

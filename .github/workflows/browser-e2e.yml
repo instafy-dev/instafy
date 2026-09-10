@@ -61,6 +61,11 @@ jobs:
           cache: pnpm
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
+      - name: Install the locked Electron binary
+        timeout-minutes: 5
+        env:
+          NODE_USE_ENV_PROXY: "1"
+        run: pnpm --filter @instafy/desktop-app exec install-electron
       - name: Install browser and display dependencies
         run: pnpm --filter @instafy/frontend exec playwright install --with-deps chromium
       - name: Install Linux Electron runtime dependency

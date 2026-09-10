@@ -10,6 +10,7 @@ test("browser CI keeps OS/display settings but cannot inherit credentials or dev
     VITE_SUPABASE_URL: "https://remote.invalid", SUPABASE_SERVICE_ROLE_KEY: "fixture-key",
     OPENAI_API_KEY: "fixture-key", CODEX_HOME: "/private/auth", CONTROLLER_URL: "https://remote.invalid",
     PLAYWRIGHT_ELECTRON_EXECUTABLE_PATH: "/some/installed/user/app", HTTP_PROXY: "https://remote.invalid",
+    NODE_USE_ENV_PROXY: "1", HTTPS_PROXY: "https://remote.invalid", ELECTRON_GET_USE_PROXY: "true",
   };
   assert.deepEqual(browserCiEnvironment(source), {
     PATH: source.PATH, HOME: source.HOME, DISPLAY: source.DISPLAY, TMPDIR: source.TMPDIR,
