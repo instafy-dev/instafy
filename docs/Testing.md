@@ -45,6 +45,13 @@ including its downstream release-workflow result. Repository administrators
 must also require the emitted browser job checks in branch protection; adding
 workflow YAML does not change repository protection settings.
 
+System SDK and tool-cache reclamation is limited to GitHub-hosted runners.
+Self-hosted runners retain their installed toolchains. Runtime image publication
+checks its minimum 20 GiB free disk separately on every runner; skipping SDK
+reclamation cannot skip that prerequisite. This safeguard does not select a
+runner or enable publication. `node --test scripts/check-public-release-workflows.test.mjs`
+includes the cleanup inventory and executable free-disk regression checks.
+
 Pull requests are leak-gated by the separate
 `Public boundary (trusted base)` check. Its `pull_request_target` workflow owns
 the scanner, policy, and Gitleaks configuration from protected `main`, checks
