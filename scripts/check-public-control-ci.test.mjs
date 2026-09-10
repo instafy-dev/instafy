@@ -14,6 +14,9 @@ const jobs = [
   { file: "continuous-image-publication.yml", key: "publish", label: "public-image-coordinator", name: "Publish exact protected-main images after CI", minutes: 5,
     tools: ["bash", "gh", "jq", "date"],
     baseline: "3838d5ccfed0f56540dd42251203a5472845aa8abe234e8122b8c2587d7abe6d" },
+  { file: "npm-release.yml", key: "pack", label: "public-npm-pack", name: "Test and pack exact npm artifacts", minutes: 25,
+    tools: ["bash", "git", "curl", "tar", "sha256sum", "unzip"],
+    baseline: "cc6e1f9c78e8ce69b7d34a816d785c71c20febc1c7b7fbc92b95c440a6c78670" },
 ];
 const workflowRef = job => `instafy-dev/instafy/.github/workflows/${job.file}@refs/heads/main`;
 
@@ -153,7 +156,7 @@ test("public visibility, repository identity drift, unprotected refs and wrong w
     github => { delete github.repository_id; }, github => { github.ref_protected = false; },
     github => { delete github.ref_protected; }, github => { github.ref = "refs/heads/topic"; },
     github => { github.ref = "refs/tags/v1"; }, github => { github.workflow_ref = workflowRef(job).replace("@refs/heads/main", "@refs/heads/topic"); },
-    github => { github.workflow_ref = workflowRef(jobs.find(other => other !== job)); },
+    github => { github.workflow_ref = workflowRef(jobs.find(other => other.file !== job.file)); },
   ]) {
     const github = context(job); mutate(github);
     assert.equal(select(job, github), "ubuntu-24.04");
@@ -168,7 +171,7 @@ test("PR, fork, scheduled, manual and all unsupported event shapes stay hosted",
   }
 });
 
-test("both control preflights check exact source identity and baseline tools before any existing step", () => {
+test("all three control preflights check exact source identity and baseline tools before any existing step", () => {
   for (const job of jobs) {
     assert.deepEqual(preflight(job), [...job.tools, ...(job.key === "publish" ? ["GNU date parse"] : [])]);
     for (const tool of job.tools) assert.throws(() => preflight(job, undefined, tool), /missing required tool/u);
@@ -190,12 +193,15 @@ test("control preflights reject nonisolated, root, wrong-platform, runtime or pr
   ]) assert.throws(() => preflight(job, mutate));
 });
 
-test("removing only the two selectors and exact first preflights reconstructs complete protected-main workflows", () => {
+test("removing only the three selectors and exact first preflights reconstructs complete original workflows", () => {
   for (const job of jobs) {
-    const source = read(job.file), selected = selector(job)[0], expected = expectedPreflight(job);
-    assert.equal(source.split(selected).length, 2);
-    assert.equal(source.split(expected).length, 2);
-    const normalized = source.replace(selected, "    runs-on: ubuntu-24.04\n").replace(expected, "");
+    let normalized = read(job.file);
+    for (const sibling of jobs.filter(value => value.file === job.file)) {
+      const selected = selector(sibling)[0], expected = expectedPreflight(sibling);
+      assert.equal(normalized.split(selected).length, 2);
+      assert.equal(normalized.split(expected).length, 2);
+      normalized = normalized.replace(selected, "    runs-on: ubuntu-24.04\n").replace(expected, "");
+    }
     assert.equal(createHash("sha256").update(normalized).digest("hex"), job.baseline,
       "all original jobs, commands, permissions, triggers, timeouts, outputs and publication gates must remain exact");
     assert.match(section(job), new RegExp(`^    name: ${job.name}$`, "mu"));
@@ -203,9 +209,23 @@ test("removing only the two selectors and exact first preflights reconstructs co
   }
 });
 
-test("only these two jobs use the separate control switch and release regressions include this file", () => {
+test("only these three jobs use the separate control switch and release regressions include this file", () => {
   for (const file of fs.readdirSync(path.join(root, ".github/workflows")).filter(file => /\.ya?ml$/u.test(file))) {
     assert.equal((read(file).match(/vars\.CI_PUBLIC_CONTROL_SELF_HOSTED/g) ?? []).length, jobs.filter(job => job.file === file).length);
   }
   assert.match(fs.readFileSync(path.join(root, "scripts/check-public-release-workflows.test.mjs"), "utf8"), /import "\.\/check-public-control-ci\.test\.mjs";/u);
+});
+
+test("removing only pack routing reconstructs the exact reviewed control-routing model", () => {
+  const job = jobs.find(value => value.key === "pack");
+  const normalized = read(job.file).replace(selector(job)[0], "    runs-on: ubuntu-24.04\n").replace(expectedPreflight(job), "");
+  assert.equal(createHash("sha256").update(normalized).digest("hex"), "f6dee10687239c28d710e8797b09193077ad7a764a9c959b69b25dcc5479db57",
+    "all other selectors, permissions, commands, dependencies, artifacts and OIDC publication remain exact to reviewed f2af source");
+  const pack = section(job);
+  assert.match(pack, /^    needs: select$/mu);
+  assert.match(pack, /^    if: \$\{\{ needs\.select\.outputs\.mode == 'publish' \}\}$/mu);
+  assert.match(pack, /permissions:\n      actions: read\n      contents: read/u);
+  assert.doesNotMatch(pack, /secrets\.|id-token:|environment:|contents: write|actions: write|cache:|pnpm changeset publish/u);
+  for (const key of ["version", "publish"]) assert.match(section({ file: job.file, key }), /^    runs-on: ubuntu-24\.04$/mu);
+  assert.match(section({ file: job.file, key: "publish" }), /environment: npm-release[\s\S]*id-token: write/u);
 });
