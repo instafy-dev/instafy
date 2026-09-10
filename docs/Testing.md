@@ -115,6 +115,20 @@ do not automatically move pools. Run `node --test scripts/check-expanded-ci-rout
 for routing regressions. These tests are not real ARM64 workload or teardown
 qualification, which is required before enabling the switch.
 
+The path-filtered `Public Git Conflict Contract` has its own default-off
+`CI_GIT_CONFLICT_SELF_HOSTED=true` switch. Only same-repository, non-fork PRs to
+`main` and protected `main` pushes while this repository is private may select
+the disposable Linux ARM64 pool; public visibility, forks, manual runs and all
+other events retain `ubuntu-latest`. It uses the same trust-specific groups and
+per-run/attempt label format above, with literal suffix `deterministic-conflict`.
+The first step checks the isolated runner prerequisites before an exact-event,
+non-persistent checkout. The five-minute `Deterministic conflict fixture` keeps
+its read-only permission and original local Git conflict/rebase/push assertions.
+Run `node --test scripts/check-git-conflict-ci.test.mjs` for routing and fixture
+regressions; the workflow runs these tests as well. Enabling this switch still
+requires independently reviewed exact-workflow admission and an actual cold
+job/cleanup proof. It enables no release or manual runner admission.
+
 The trusted gate rejects unreviewed environment templates, live
 environment/auth files, private-only package/product markers, personal paths,
 private hosts/networks, browser-exposed service-role names, token prefixes,
