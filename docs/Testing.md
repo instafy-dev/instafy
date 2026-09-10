@@ -239,7 +239,13 @@ installation, including the pinned Playwright fixture required by agent tests.
 Stable native Rust and debug-info settings are unchanged. Each child has its
 own target directory; Cargo caches are partitioned by job, operating system,
 CPU architecture and the exact workspace Cargo lockfiles, with no cross-arch
-or old-lock fallback. The existing unused-toolchain disk cleanup runs only on
+or old-lock fallback. Self-hosted Rust compile/test children restore these caches
+with the pinned restore-only action; they do not upload caches in a post-job step.
+This keeps an optional large cache save from exhausting the job after its Cargo
+checks pass. A cache miss still runs every command cold and must fit the same
+30-minute limit. GitHub-hosted children retain the original restore/save action,
+keys and paths. No test failure, cancellation or aggregate failure is ignored.
+The existing unused-toolchain disk cleanup runs only on
 GitHub-hosted images, never against a self-hosted host or guest image.
 
 All twelve jobs default to `ubuntu-latest`. Only the independent
@@ -274,6 +280,11 @@ memory/disk use and complete guest teardown first. A split or a warm cache hit
 is not that qualification; never reduce the test selection or ignore a timeout
 to make a job green. No database, provider, signing or release credentials are
 introduced by this lane.
+
+The same restore-only compiler-cache policy applies to the two self-hosted
+Shared Browser children and Controller database tests. Their hosted compiler
+caches, Supabase image caches and pnpm caches are unchanged. Cache restoration
+is an optimization, not evidence that a cold workload has passed.
 
 Disable the Rust switch to restore hosted selection for new runs; already
 queued jobs retain their selected pools. No required-check rule changes are

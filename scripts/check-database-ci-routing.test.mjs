@@ -175,9 +175,35 @@ test('controller resource/cache settings are bounded and never shared across OS,
   const cache = step(jobs[0], 'Cache controller Cargo dependencies and build');
   assert.match(cache, /actions\/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9/u);
   assert.match(cache, /controller-db-\$\{\{ runner.os \}\}-\$\{\{ runner.arch \}\}-\$\{\{ hashFiles\('packages\/runtime-controller\/Cargo.lock'\) \}\}/u);
-  assert.doesNotMatch(cache, /restore-keys:|enableCrossOsArchive|\.env|credentials/u);
+  assert.doesNotMatch(cache.replace("        if: runner.environment == 'github-hosted'\n", ''),
+    /restore-keys:|enableCrossOsArchive|\.env|credentials/u);
   assert.match(source(jobs[0]), /CARGO_BUILD_JOBS: "2"/u);
   assert.doesNotMatch(source(jobs[1]), /rustup|cargo |actions\/cache@|apt-get/u);
   const proto = fs.readFileSync(path.join(root, 'packages/runtime-contracts/build.rs'), 'utf8');
   assert.match(proto, /protoc_bin_vendored::protoc_bin_path\(\)/u);
+});
+
+test('self-hosted controller compiler cache restores only and all other workflow bytes remain exact', () => {
+  const text = source(jobs[0]);
+  const restore = step(jobs[0], 'Restore compiler cache without saving');
+  const hosted = step(jobs[0], 'Cache controller Cargo dependencies and build');
+  assert.match(restore, /^        if: runner\.environment == 'self-hosted'$/mu);
+  assert.match(hosted, /^        if: runner\.environment == 'github-hosted'$/mu);
+  assert.match(restore, /^        uses: actions\/cache\/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0$/mu);
+  assert.match(hosted, /^        uses: actions\/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0$/mu);
+  const inputs = value => value.match(/        with:\n(?:          .+\n)+/u)?.[0];
+  assert.ok(inputs(restore)); assert.equal(inputs(restore), inputs(hosted));
+  for (const environment of ['self-hosted', 'github-hosted', '', 'unknown']) {
+    for (const [part, selected] of [[restore, 'self-hosted'], [hosted, 'github-hosted']]) {
+      assert.equal(vm.runInNewContext(part.match(/^        if: (.+)$/mu)[1], { runner: { environment } }, { timeout: 1000 }), environment === selected);
+    }
+  }
+  assert.equal((text.match(/uses: actions\/cache(?:\/\w+)?@/gu) ?? []).length, 2);
+  assert.doesNotMatch(text, /actions\/cache\/save@|continue-on-error|save-always|lookup-only/u);
+  const normalized = text.replace(restore + '\n', '').replace(hosted,
+    hosted.replace("        if: runner.environment == 'github-hosted'\n", ''));
+  // Complete controller-db-tests.yml at combined source 2ef4dde: same Cargo,
+  // migrations, stack lifecycle, permissions, routing and resource limits.
+  assert.equal(createHash('sha256').update(normalized).digest('hex'),
+    '79ed4285fb5ea6ded4878bb041a26c000f938c848b10412c4e8310db67024c27');
 });

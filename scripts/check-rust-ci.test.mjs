@@ -222,12 +222,51 @@ test('test children preserve unfiltered frozen Node20 installation and host-only
 
 test('cargo caches cannot cross OS, CPU architecture, crate lane or lockfile inventory', () => {
   for (const item of children) {
-    const cache = step(item.key, 'Restore cargo cache');
-    assert.match(cache, /actions\/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9/u);
-    assert.ok(cache.includes(`key: rust-ci-v3-\${{ runner.os }}-\${{ runner.arch }}-${item.label}-\${{ hashFiles('packages/*/Cargo.lock') }}`));
-    assert.match(cache, /~\/\.cargo\/registry\n            ~\/\.cargo\/git\n            \.cargo-target/u);
-    assert.doesNotMatch(cache, /restore-keys:|rust-tests-v2|if:|enableCrossOsArchive/u);
+    for (const name of ['Restore cargo cache', 'Restore cargo cache without saving']) {
+      const cache = step(item.key, name);
+      assert.ok(cache.includes(`key: rust-ci-v3-\${{ runner.os }}-\${{ runner.arch }}-${item.label}-\${{ hashFiles('packages/*/Cargo.lock') }}`));
+      assert.match(cache, /~\/\.cargo\/registry\n            ~\/\.cargo\/git\n            \.cargo-target/u);
+      assert.doesNotMatch(cache, /restore-keys:|rust-tests-v2|enableCrossOsArchive/u);
+    }
   }
+});
+
+test('only self-hosted Rust children use restore-only caches while hosted saves remain intact', () => {
+  const pin = '55cc8345863c7cc4c66a329aec7e433d2d1c52a9';
+  for (const item of children) {
+    const restore = step(item.key, 'Restore cargo cache without saving');
+    const hosted = step(item.key, 'Restore cargo cache');
+    assert.match(restore, /^        if: runner\.environment == 'self-hosted'$/mu);
+    assert.match(hosted, /^        if: runner\.environment == 'github-hosted'$/mu);
+    assert.ok(restore.includes(`        uses: actions/cache/restore@${pin} # v6.1.0\n`));
+    assert.ok(hosted.includes(`        uses: actions/cache@${pin} # v6.1.0\n`));
+    assert.equal(restore.split('        with:\n')[1], hosted.split('        with:\n')[1]);
+    assert.equal((job(item.key).match(/uses: actions\/cache(?:\/\w+)?@/gu) ?? []).length, 2);
+    assert.doesNotMatch(job(item.key), /actions\/cache\/save@|continue-on-error|save-always|lookup-only/u);
+    const enabled = (text, environment) => vm.runInNewContext(
+      text.match(/^        if: (.+)$/mu)[1], { runner: { environment } }, { timeout: 1000 });
+    for (const environment of ['self-hosted', 'github-hosted', '', 'unknown']) {
+      assert.equal(enabled(restore, environment), environment === 'self-hosted');
+      assert.equal(enabled(hosted, environment), environment === 'github-hosted');
+    }
+    const cargoStep = item.key.startsWith('rust-check-') ? 'Check public Rust package' : 'Run database-free Rust test suite';
+    assert.ok(job(item.key).indexOf(restore) < job(item.key).indexOf(step(item.key, cargoStep)));
+  }
+  assert.equal((source.match(/uses: actions\/cache\/restore@/gu) ?? []).length, 10);
+});
+
+test('the restore-only mitigation preserves every other byte of the reviewed Build workflow', () => {
+  let normalized = source;
+  for (const item of children) {
+    const restore = step(item.key, 'Restore cargo cache without saving');
+    const hosted = step(item.key, 'Restore cargo cache');
+    normalized = normalized.replace(restore + '\n', '').replace(hosted,
+      hosted.replace("        if: runner.environment == 'github-hosted'\n", ''));
+  }
+  // Full build.yml at the reviewed combined source 2ef4dde: includes all original
+  // functional commands, aggregate guards, routing, permissions and other jobs.
+  assert.equal(createHash('sha256').update(normalized).digest('hex'),
+    'cfbf699d139a325d9d2add3add71ec8d3db4d4ca737925bc3963871706d7fa4a');
 });
 
 test('actual inline runner qualification rejects wrong native identity, ambient private env and missing compilers', () => {
