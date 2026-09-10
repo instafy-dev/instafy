@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import vm from "node:vm";
+import { spawnSync } from "node:child_process";
 
 const root = path.resolve(import.meta.dirname, "..");
 const read = file => fs.readFileSync(path.join(root, ".github/workflows", file), "utf8");
@@ -16,6 +17,9 @@ const jobs = [
     baseline: "3838d5ccfed0f56540dd42251203a5472845aa8abe234e8122b8c2587d7abe6d" },
   { file: "npm-release.yml", key: "pack", label: "public-npm-pack", name: "Test and pack exact npm artifacts", minutes: 25,
     tools: ["bash", "git", "curl", "tar", "sha256sum", "unzip"],
+    baseline: "cc6e1f9c78e8ce69b7d34a816d785c71c20febc1c7b7fbc92b95c440a6c78670" },
+  { file: "npm-release.yml", key: "version", label: "public-npm-version", name: "Create or update the signed version pull request", minutes: 15,
+    tools: ["bash", "git", "curl", "tar", "sha256sum", "unzip", "gh"],
     baseline: "cc6e1f9c78e8ce69b7d34a816d785c71c20febc1c7b7fbc92b95c440a6c78670" },
 ];
 const workflowRef = job => `instafy-dev/instafy/.github/workflows/${job.file}@refs/heads/main`;
@@ -120,6 +124,29 @@ function preflight(job, mutate = () => {}, missingTool, dateResult = "0\n") {
   return observed;
 }
 
+const versionGuard = `      - name: Require exact current protected main before bot authorization
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          GH_TOKEN: \${{ github.token }}
+        run: |
+          set -euo pipefail
+          current_sha="$(gh api --method GET "repos/instafy-dev/instafy/branches/main" --jq 'select(.name == "main" and .protected == true) | .commit.sha')"
+          test "$current_sha" = "$GITHUB_SHA"
+          checkout_sha="$(git rev-parse HEAD)"
+          test "$checkout_sha" = "$GITHUB_SHA"
+
+`;
+
+function withoutVersionRouting(source) {
+  const job = jobs.find(value => value.key === "version"), original = section(job);
+  assert.equal(source.split(original).length, 2);
+  assert.equal(original.split(versionGuard).length, 2);
+  const normalized = original.replace(selector(job)[0], "    runs-on: ubuntu-24.04\n")
+    .replace(expectedPreflight(job), "").replace(versionGuard, "");
+  return source.replace(original, normalized);
+}
+
 test("public control routing is independently default-off even when existing CI switches are enabled", () => {
   for (const job of jobs) for (const toggle of [undefined, "", "false", "0", "unknown", null]) {
     assert.equal(select(job, context(job), toggle), "ubuntu-24.04");
@@ -171,7 +198,7 @@ test("PR, fork, scheduled, manual and all unsupported event shapes stay hosted",
   }
 });
 
-test("all three control preflights check exact source identity and baseline tools before any existing step", () => {
+test("all four routed preflights check exact source identity and baseline tools before any existing step", () => {
   for (const job of jobs) {
     assert.deepEqual(preflight(job), [...job.tools, ...(job.key === "publish" ? ["GNU date parse"] : [])]);
     for (const tool of job.tools) assert.throws(() => preflight(job, undefined, tool), /missing required tool/u);
@@ -193,10 +220,10 @@ test("control preflights reject nonisolated, root, wrong-platform, runtime or pr
   ]) assert.throws(() => preflight(job, mutate));
 });
 
-test("removing only the three selectors and exact first preflights reconstructs complete original workflows", () => {
+test("removing only reviewed routing and version freshness guards reconstructs complete original workflows", () => {
   for (const job of jobs) {
-    let normalized = read(job.file);
-    for (const sibling of jobs.filter(value => value.file === job.file)) {
+    let normalized = job.file === "npm-release.yml" ? withoutVersionRouting(read(job.file)) : read(job.file);
+    for (const sibling of jobs.filter(value => value.file === job.file && value.key !== "version")) {
       const selected = selector(sibling)[0], expected = expectedPreflight(sibling);
       assert.equal(normalized.split(selected).length, 2);
       assert.equal(normalized.split(expected).length, 2);
@@ -209,7 +236,7 @@ test("removing only the three selectors and exact first preflights reconstructs 
   }
 });
 
-test("only these three jobs use the separate control switch and release regressions include this file", () => {
+test("only these four jobs use the separate control switch and release regressions include this file", () => {
   for (const file of fs.readdirSync(path.join(root, ".github/workflows")).filter(file => /\.ya?ml$/u.test(file))) {
     assert.equal((read(file).match(/vars\.CI_PUBLIC_CONTROL_SELF_HOSTED/g) ?? []).length, jobs.filter(job => job.file === file).length);
   }
@@ -218,7 +245,7 @@ test("only these three jobs use the separate control switch and release regressi
 
 test("removing only pack routing reconstructs the exact reviewed control-routing model", () => {
   const job = jobs.find(value => value.key === "pack");
-  const normalized = read(job.file).replace(selector(job)[0], "    runs-on: ubuntu-24.04\n").replace(expectedPreflight(job), "");
+  const normalized = withoutVersionRouting(read(job.file)).replace(selector(job)[0], "    runs-on: ubuntu-24.04\n").replace(expectedPreflight(job), "");
   assert.equal(createHash("sha256").update(normalized).digest("hex"), "f6dee10687239c28d710e8797b09193077ad7a764a9c959b69b25dcc5479db57",
     "all other selectors, permissions, commands, dependencies, artifacts and OIDC publication remain exact to reviewed f2af source");
   const pack = section(job);
@@ -226,6 +253,88 @@ test("removing only pack routing reconstructs the exact reviewed control-routing
   assert.match(pack, /^    if: \$\{\{ needs\.select\.outputs\.mode == 'publish' \}\}$/mu);
   assert.match(pack, /permissions:\n      actions: read\n      contents: read/u);
   assert.doesNotMatch(pack, /secrets\.|id-token:|environment:|contents: write|actions: write|cache:|pnpm changeset publish/u);
-  for (const key of ["version", "publish"]) assert.match(section({ file: job.file, key }), /^    runs-on: ubuntu-24\.04$/mu);
+  assert.match(section({ file: job.file, key: "publish" }), /^    runs-on: ubuntu-24\.04$/mu);
   assert.match(section({ file: job.file, key: "publish" }), /environment: npm-release[\s\S]*id-token: write/u);
+});
+
+test("version-only additions reconstruct the entire frozen pack workflow and retain the two exact bot-secret uses", () => {
+  const source = read("npm-release.yml"), job = jobs.find(value => value.key === "version"), version = section(job);
+  assert.equal(createHash("sha256").update(withoutVersionRouting(source)).digest("hex"),
+    "a219fe5e3ba2e0ca1f533465ae34caca3e0b1d6d14d1cb258033f6b7948b9523");
+  assert.match(version, /^    needs: select\n    if: \$\{\{ needs\.select\.outputs\.mode == 'version' \}\}$/mu);
+  assert.match(version, /permissions:\n      contents: read\n\n    steps:/u);
+  assert.doesNotMatch(version, /id-token:|environment:|contents: write|actions: write|NPM_TOKEN|NODE_AUTH_TOKEN|GITHUB_ENV/u);
+  assert.equal((source.match(/secrets\.INSTAFY_BOT_TOKEN/gu) ?? []).length, 2);
+  assert.equal((version.match(/secrets\.INSTAFY_BOT_TOKEN/gu) ?? []).length, 2);
+  assert.ok(version.includes(versionGuard + "      - name: Require the dedicated instafy-bot credential\n"));
+  assert.doesNotMatch(version.slice(0, version.indexOf("      - name: Require the dedicated instafy-bot credential\n")), /secrets\./u);
+  assert.ok(version.indexOf(versionGuard) > version.indexOf("run: pnpm install --frozen-lockfile --ignore-scripts"));
+  assert.ok(version.indexOf("      - name: Create or update the Changesets version pull request\n") >
+    version.indexOf("      - name: Require the dedicated instafy-bot credential\n"));
+});
+
+function runVersionGuard({ current = "a".repeat(40), checkout = "a".repeat(40), apiStatus = "0", gitStatus = "0" } = {}) {
+  const version = section(jobs.find(value => value.key === "version"));
+  assert.ok(version.includes(versionGuard));
+  const body = versionGuard.split("        run: |\n")[1].replace(/^          /gmu, "");
+  const fixture = `gh() {
+  test "$#" = 6 && test "$1" = api && test "$2" = --method && test "$3" = GET &&
+    test "$4" = repos/instafy-dev/instafy/branches/main && test "$5" = --jq &&
+    test "$6" = 'select(.name == "main" and .protected == true) | .commit.sha' || return 99
+  test "$GH_TOKEN" = inert-read-token || return 99
+  test -z "\${INSTAFY_BOT_TOKEN+x}" || return 99
+  printf '%s\\n' "$INERT_CURRENT"
+  return "$INERT_API_STATUS"
+}
+git() {
+  test "$#" = 2 && test "$1" = rev-parse && test "$2" = HEAD || return 99
+  printf '%s\\n' "$INERT_CHECKOUT"
+  return "$INERT_GIT_STATUS"
+}
+`;
+  return spawnSync("/bin/bash", ["--noprofile", "--norc", "-c", fixture + body + "printf '%s\\n' bot-step-reached\n"], {
+    encoding: "utf8", timeout: 5000, maxBuffer: 8192,
+    env: { PATH: "/usr/bin:/bin", GITHUB_SHA: "a".repeat(40), GH_TOKEN: "inert-read-token",
+      INERT_CURRENT: current, INERT_CHECKOUT: checkout, INERT_API_STATUS: apiStatus, INERT_GIT_STATUS: gitStatus },
+  });
+}
+
+test("actual version freshness Bash permits only exact current protected-source and checkout before bot exposure", () => {
+  const result = runVersionGuard();
+  assert.equal(result.status, 0); assert.equal(result.stdout, "bot-step-reached\n"); assert.equal(result.stderr, "");
+});
+
+test("actual version freshness Bash refuses missing, stale, malformed, failed API or checkout without reaching bot exposure", () => {
+  for (const options of [
+    { current: "" }, { current: "null" }, { current: "b".repeat(40) }, { current: "A".repeat(40) },
+    { current: "INERT_UNTRUSTED_RESPONSE" }, { current: "a".repeat(40) + "\n" + "a".repeat(40) },
+    { apiStatus: "1" }, { apiStatus: "124" }, { checkout: "" }, { checkout: "b".repeat(40) }, { gitStatus: "1" },
+  ]) {
+    const result = runVersionGuard(options);
+    assert.notEqual(result.status, 0); assert.equal(result.stdout, ""); assert.equal(result.stderr, "");
+  }
+});
+
+test("the exact offline jq projection rejects wrong branch, unprotected and missing or ambiguous SHA responses", () => {
+  const filter = versionGuard.match(/--jq '([^']+)'/u)[1];
+  for (const [response, allowed] of [
+    [{ name: "main", protected: true, commit: { sha: "a".repeat(40) } }, true],
+    [{ name: "main", protected: false, commit: { sha: "a".repeat(40) } }, false],
+    [{ name: "topic", protected: true, commit: { sha: "a".repeat(40) } }, false],
+    [{ name: "main", protected: "true", commit: { sha: "a".repeat(40) } }, false],
+    [{ name: "main", commit: { sha: "a".repeat(40) } }, false],
+    [{ name: "main", protected: true }, false],
+    [{ name: "main", protected: true, commit: { sha: null } }, false],
+    [{ name: "main", protected: true, commit: { sha: ["a".repeat(40), "b".repeat(40)] } }, false],
+    [{ name: "main", protected: true, commit: { sha: { unexpected: "a".repeat(40) } } }, false],
+  ]) {
+    const projection = spawnSync("jq", ["-r", filter], { input: JSON.stringify(response), encoding: "utf8",
+      timeout: 1000, maxBuffer: 8192, env: { PATH: "/usr/bin:/bin:/opt/homebrew/bin" } });
+    assert.equal(projection.error, undefined, "offline jq is required; a missing test dependency is not a pass");
+    assert.equal(projection.status, 0); assert.equal(projection.stderr, "");
+    const result = runVersionGuard({ current: projection.stdout.trimEnd() });
+    assert.equal(result.status === 0, allowed);
+    assert.equal(result.stdout, allowed ? "bot-step-reached\n" : "");
+    assert.equal(result.stderr, "");
+  }
 });

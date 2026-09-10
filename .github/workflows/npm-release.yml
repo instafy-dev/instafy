@@ -184,12 +184,49 @@ jobs:
     name: Create or update the signed version pull request
     needs: select
     if: ${{ needs.select.outputs.mode == 'version' }}
-    runs-on: ubuntu-24.04
+    runs-on: >-
+      ${{ vars.CI_PUBLIC_CONTROL_SELF_HOSTED == 'true'
+          && github.repository == 'instafy-dev/instafy'
+          && github.repository_id == '1309636737'
+          && github.event.repository.private == true
+          && github.event_name == 'push'
+          && github.ref == 'refs/heads/main'
+          && github.ref_protected == true
+          && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/npm-release.yml@refs/heads/main'
+          && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-npm-version","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt))
+          || 'ubuntu-24.04' }}
     timeout-minutes: 15
     permissions:
       contents: read
 
     steps:
+      - name: Qualify isolated protected-main control runner
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const { execFileSync } = require('node:child_process');
+          assert.equal(process.env.GITHUB_REPOSITORY, 'instafy-dev/instafy');
+          assert.equal(process.env.GITHUB_REPOSITORY_ID, '1309636737');
+          assert.equal(process.env.GITHUB_EVENT_NAME, 'push');
+          assert.equal(process.env.GITHUB_REF, 'refs/heads/main');
+          assert.equal(process.env.GITHUB_REF_PROTECTED, 'true');
+          assert.equal(process.env.GITHUB_WORKFLOW_REF, 'instafy-dev/instafy/.github/workflows/npm-release.yml@refs/heads/main');
+          assert.match(process.env.GITHUB_SHA, /^[0-9a-f]{40}$/);
+          assert.equal(process.platform, 'linux');
+          assert.equal(process.arch, 'arm64');
+          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
+          assert.equal(process.versions.node.split('.')[0], '22');
+          assert.equal(process.env.RUNNER_OS, 'Linux');
+          assert.equal(process.env.RUNNER_ARCH, 'ARM64');
+          assert.equal(process.env.INSTAFY_CI_JOB_ISOLATION, 'ephemeral');
+          assert.ok(!process.env.INSTAFY_ENV_DIR);
+          for (const tool of ['bash', 'git', 'curl', 'tar', 'sha256sum', 'unzip', 'gh']) {
+            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'public-control-preflight', tool], { timeout: 1000, stdio: 'ignore' });
+          }
+          NODE
+
       - name: Checkout the exact protected-main event commit
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -210,6 +247,18 @@ jobs:
 
       - name: Install the exact dependency graph without lifecycle scripts
         run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Require exact current protected main before bot authorization
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current_sha="$(gh api --method GET "repos/instafy-dev/instafy/branches/main" --jq 'select(.name == "main" and .protected == true) | .commit.sha')"
+          test "$current_sha" = "$GITHUB_SHA"
+          checkout_sha="$(git rev-parse HEAD)"
+          test "$checkout_sha" = "$GITHUB_SHA"
 
       - name: Require the dedicated instafy-bot credential
         env:
