@@ -427,7 +427,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation, newChatInSide
       {useDesktopTabChrome ? (
         <WorkspaceTabs
           leading={<><StudioHistoryControls />{desktopParentConversationButton}</>}
-          className="bg-transparent pr-0 pt-0 dark:bg-transparent"
+          className={`bg-transparent pr-0 pt-0 dark:bg-transparent ${contextHeaderAbove ? "studio-context-tab-rail" : ""}`}
           emptyStateContent={!hasDesktopTabs ? desktopEmptyStateTab : undefined}
           tabStripActions={
             shouldShowNewChat ? (
