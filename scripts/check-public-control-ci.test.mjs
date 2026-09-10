@@ -37,9 +37,16 @@ function context(job) {
 
 function select(job, github = context(job), toggle) {
   if (arguments.length < 3) toggle = "true";
-  const expression = selector(job)[1].trim().replace(/^\$\{\{\s*|\s*\}\}$/gu, "");
+  // GitHub string equality is case-insensitive; plain JavaScript == is not.
+  // Translate only the selector's literal comparisons, not its output labels.
+  const expression = selector(job)[1].trim().replace(/^\$\{\{\s*|\s*\}\}$/gu, "")
+    .replace(/((?:vars|github)\.[\w.]+) == ('[^']*'|true)/gu, "actionsEqual($1, $2)");
+  assert.doesNotMatch(expression, /==/u);
   const value = vm.runInNewContext(expression, {
     github, vars: { CI_PUBLIC_CONTROL_SELF_HOSTED: toggle, CI_EXPANDED_SELF_HOSTED: "true", CI_BOOTSTRAP_SELF_HOSTED: "true", CI_RUNNER_MODE: "self-hosted" },
+    actionsEqual: (left, right) => typeof left === "string" && typeof right === "string"
+      ? left.toLowerCase() === right.toLowerCase()
+      : left === right,
     fromJSON: JSON.parse,
     format: (template, ...values) => template.replace(/\{\{|\}\}|\{(\d+)\}/gu,
       (match, index) => match === "{{" ? "{" : match === "}}" ? "}" : String(values[index])),
@@ -111,8 +118,20 @@ function preflight(job, mutate = () => {}, missingTool, dateResult = "0\n") {
 }
 
 test("public control routing is independently default-off even when existing CI switches are enabled", () => {
-  for (const job of jobs) for (const toggle of [undefined, "", "false", "0", "TRUE", "unknown", null]) {
+  for (const job of jobs) for (const toggle of [undefined, "", "false", "0", "unknown", null]) {
     assert.equal(select(job, context(job), toggle), "ubuntu-24.04");
+  }
+});
+
+test("GitHub case-folded opt-in and identity selection do not weaken exact preflight identity checks", () => {
+  for (const job of jobs) {
+    for (const toggle of ["TRUE", "TrUe"]) assert.deepEqual(select(job, context(job), toggle), select(job));
+    for (const [key, envKey] of [["repository", "GITHUB_REPOSITORY"], ["event_name", "GITHUB_EVENT_NAME"],
+      ["ref", "GITHUB_REF"], ["workflow_ref", "GITHUB_WORKFLOW_REF"]]) {
+      const github = context(job); github[key] = github[key].toUpperCase();
+      assert.deepEqual(select(job, github), select(job));
+      assert.throws(() => preflight(job, state => { state.env[envKey] = github[key]; }));
+    }
   }
 });
 
