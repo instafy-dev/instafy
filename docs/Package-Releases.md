@@ -51,6 +51,15 @@ Pull-request checks run on hosted runners with read-only repository access and n
 Publishing never runs from `pull_request` or `pull_request_target`. Every external Action is pinned
 to an immutable commit.
 
+The independently default-off `CI_PUBLIC_CONTROL_SELF_HOSTED` switch can route
+only the protected-main push **Select** job to an authenticated disposable Linux
+ARM64 runner while the canonical repository remains private. Other triggers
+keep hosted selection; Version, Pack, Publish, approvals and credentials are
+unchanged. This requires separate exact-job runner admission, baseline-tool
+qualification and cold execution/cleanup proof before enabling the switch; see
+[Testing](Testing.md). It does not grant npm publication authority or make the
+remaining hosted release stages available.
+
 The source repository is currently internal. npm trusted publishing can still replace static npm
 tokens, but npm will not generate public provenance attestations until the source repository is
 public. Do not claim provenance before that visibility boundary changes.

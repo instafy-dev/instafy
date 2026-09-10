@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import "./check-hosted-sdk-cleanup.test.mjs";
 import "./check-image-coordinator.test.mjs";
+import "./check-public-control-ci.test.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const workflowRoot = path.join(repositoryRoot, ".github", "workflows");
