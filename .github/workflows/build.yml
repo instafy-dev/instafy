@@ -734,7 +734,7 @@ jobs:
           [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
           [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
           for package in clang lld cmake libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
@@ -835,7 +835,7 @@ jobs:
           [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
           [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
           for package in clang lld cmake libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
@@ -936,7 +936,7 @@ jobs:
           [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
           [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
           for package in clang lld cmake libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
@@ -1037,7 +1037,7 @@ jobs:
           [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
           [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
           for package in clang lld cmake libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
@@ -1138,7 +1138,7 @@ jobs:
           [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
           [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
           for package in clang lld cmake libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
@@ -1389,7 +1389,7 @@ jobs:
           [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
           [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
           for package in clang lld cmake libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
@@ -1514,7 +1514,7 @@ jobs:
           [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
           [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
           for package in clang lld cmake libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
@@ -1559,6 +1559,9 @@ jobs:
 
       - name: Run database-free Rust test suite
         run: |
+          if [[ '${{ runner.environment == 'self-hosted' && runner.os == 'Linux' }}' == true && "${RUSTFLAGS+x}" != x ]]; then
+            export RUSTFLAGS='-C link-arg=-fuse-ld=lld'
+          fi
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --no-run
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --lib --test controller_client -- --test-threads=1
 
@@ -1640,7 +1643,7 @@ jobs:
           [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
           [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
           for package in clang lld cmake libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
@@ -1765,7 +1768,7 @@ jobs:
           [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
           [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
           for package in clang lld cmake libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
@@ -1890,7 +1893,7 @@ jobs:
           [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
           [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
           for package in clang lld cmake libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done

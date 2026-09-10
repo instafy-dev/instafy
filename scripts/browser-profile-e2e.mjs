@@ -159,6 +159,96 @@ export function cargoTestArtifact(output, targetName, kind) {
   return artifacts[0].executable;
 }
 
+// Opt-in for the secret-free fixture compiler calls only, never arbitrary child
+// stdout. Cargo's JSON stdout also contains build-script env and artifact paths.
+// Retain only bounded error headings/locations, not snippets or linker argv.
+function compilerFailureContext(diagnostic, heading) {
+  const categories = new Set();
+  const classify = line => {
+    // Ignore command/environment/credential-shaped text even when it contains a
+    // known phrase. Matches are observations; never retain the matching line.
+    line = line.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").trim();
+    if (/[^\x20-\x7e]|token|secret|password|authorization|cookie|api.?key|[a-z][a-z0-9+.-]*:\/\/|\b[A-Z][A-Z0-9_]*\s*=|^["'`]|^::|^[0-9]+\s*\|/i.test(line)) return false;
+    let matched = false;
+    const observe = category => { categories.add(category); matched = true; };
+    if (/^linking with [`"'][^`"']+[`"'] failed: exit status: [1-9][0-9]*$/.test(line)) observe("linker-failed");
+    if (/^(?:(?:[^\s:]+\/)?(?:collect2|ld(?:\.lld|\.bfd|\.gold)?|rust-lld|clang|cc|gcc):\s*)?(?:fatal error: )?(?:ld|linker) terminated with signal 9(?: \[Killed\])?\.?$/i.test(line)) observe("linker-killed");
+    if (/^(?:[^\s:]+\/)?(?:ld(?:\.lld|\.bfd|\.gold)?|rust-lld):\s*(?:error: )?(?:cannot find -l\S+|unable to find library -l\S+|library not found for -l\S+)(?:: .*)?$/i.test(line)) observe("missing-library");
+    if (/^(?:(?:[^\s:]+\/)?(?:ld(?:\.lld|\.bfd|\.gold)?|rust-lld):\s*(?:error: )?)?(?:undefined symbol:|Undefined symbols for architecture )/.test(line)
+      || /^(?:[^\s]+:\s*)?undefined reference to [`'"]/.test(line)) observe("undefined-symbol");
+    if (/^(?:(?:[^\s:]+\/)?(?:ld(?:\.lld|\.bfd|\.gold)?|rust-lld|collect2):\s*(?:fatal error: |error: )?)?(?:No space left on device|final link failed: No space left on device|LLVM ERROR: IO failure on output stream: No space left on device)[.!]?$/i.test(line)) observe("disk-full");
+    if (/^(?:(?:[^\s:]+\/)?(?:ld(?:\.lld|\.bfd|\.gold)?|rust-lld|collect2):\s*(?:fatal error: |error: )?)?(?:Cannot allocate memory|LLVM ERROR: out of memory|memory allocation of [0-9]+ bytes failed)[.!]?$/i.test(line)) observe("allocation-failed");
+    return matched;
+  };
+  classify(heading.replace(/^error(?:\[E[0-9]{4}\])?: /, "").slice(0, 2048));
+  const children = diagnostic.children;
+  let notes = "absent";
+  if (children != null && !Array.isArray(children)) notes = "invalid";
+  else if (children?.length) {
+    let limited = children.length > 16, invalid = false, matched = false;
+    for (const child of children.slice(0, 16)) {
+      // rustc documents flat children. Do not recurse into unknown structures.
+      if (!child || typeof child !== "object" || typeof child.message !== "string"
+        || (child.children != null && (!Array.isArray(child.children) || child.children.length > 0))) { invalid = true; continue; }
+      if (!["note", "failure-note"].includes(child.level)) continue;
+      if (child.message.length > 64 * 1024 || Buffer.byteLength(child.message, "utf8") > 64 * 1024) { limited = true; continue; }
+      const lines = child.message.split(/\r?\n/);
+      if (lines.length > 128) limited = true;
+      for (const line of lines.slice(0, 128)) {
+        if (line.length > 2048 || Buffer.byteLength(line, "utf8") > 2048) { limited = true; continue; }
+        matched = classify(line) || matched;
+      }
+    }
+    notes = invalid ? "invalid" : limited ? "limited" : matched ? "matched" : "unclassified";
+  }
+  return { categories: [...categories].sort(), notes };
+}
+
+export function reportCargoCompilerErrors(output, crateDirectory, write = text => process.stderr.write(text)) {
+  assert.ok(["packages/runtime-agent", "packages/runtime-controller"].includes(crateDirectory), "fixed fixture compiler crate required");
+  let offset = 0, reported = 0;
+  while (offset < output.length && reported < 8) {
+    const newline = output.indexOf("\n", offset);
+    const end = newline < 0 ? output.length : newline;
+    const start = offset;
+    offset = end + 1;
+    if (end - start > 256 * 1024 || output[start] !== "{") continue;
+    const recordText = output.slice(start, end);
+    if (Buffer.byteLength(recordText, "utf8") > 256 * 1024) continue;
+    let record;
+    try { record = JSON.parse(recordText); } catch { continue; }
+    const diagnostic = record?.message;
+    if (record?.reason !== "compiler-message" || diagnostic?.level !== "error"
+      || typeof diagnostic.rendered !== "string") continue;
+    const heading = diagnostic.rendered.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").split(/\r?\n/, 1)[0];
+    if (!/^error(?:\[E[0-9]{4}\])?: /.test(heading)) continue;
+    let safe = heading
+      .replace(/`[^`]*`|"[^"\r\n]*"|'[^'\r\n]*'/g, "[quoted]")
+      .replace(/[a-z][a-z0-9+.-]*:\/\/[^\s]+/gi, "[url]")
+      .replace(/(?:[A-Za-z]:[\\/]|\/)[^\s]+/g, "[path]")
+      .replace(/[A-Za-z0-9_+/.=-]{24,}/g, "[opaque]")
+      .replace(/[^\x20-\x7e]/g, "");
+    if (/token|secret|password|authorization|cookie|api.?key|\b[A-Z][A-Z0-9_]*\s*=/i.test(heading)) {
+      safe = `${heading.match(/^error(?:\[E[0-9]{4}\])?/)[0]}: [sensitive heading omitted]`;
+    }
+    write(`[cargo-compiler] ${safe.slice(0, 512)}\n`);
+    const context = compilerFailureContext(diagnostic, heading);
+    write(`[cargo-compiler] categories=${context.categories.join(",") || "none"}; notes=${context.notes}\n`);
+    // Span text, labels, expansions and absolute dependency paths are private.
+    const span = Array.isArray(diagnostic.spans) && diagnostic.spans.find(item => item?.is_primary);
+    const file = span?.file_name;
+    if (record.manifest_path === path.join(root, crateDirectory, "Cargo.toml")
+      && typeof file === "string" && /^(?:(?:src|tests|benches|examples)\/[A-Za-z0-9_./-]+\.rs|build\.rs)$/.test(file)
+      && file.length <= 240 && !file.split("/").some(part => !part || part === "." || part === "..")
+      && Number.isSafeInteger(span.line_start) && span.line_start > 0 && span.line_start <= 1_000_000
+      && Number.isSafeInteger(span.column_start) && span.column_start > 0 && span.column_start <= 1_000_000) {
+      write(`[cargo-compiler] at ${crateDirectory}/${file}:${span.line_start}:${span.column_start}\n`);
+    }
+    reported++;
+  }
+  if (reported === 8) write("[cargo-compiler] diagnostic limit reached (8 errors)\n");
+}
+
 export function fixtureChildEnvironment(env) {
   const allowed = ["PATH", "HOME", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPDIR", "TMP", "TEMP",
     "CARGO_HOME", "RUSTUP_HOME", "CARGO_TARGET_DIR", "CARGO_INCREMENTAL", "CARGO_PROFILE_DEV_DEBUG", "CARGO_BUILD_JOBS",
@@ -196,6 +286,14 @@ export function fixtureCompilerEnvironment(env) {
   return compiler;
 }
 
+// Linux fixture Cargo builds default to LLD through the existing compiler
+// driver. Preserve every explicit RUSTFLAGS value, including an empty opt-out.
+export function fixtureCargoEnvironment(env, platform = process.platform) {
+  const compiler = fixtureCompilerEnvironment(env);
+  if (platform === "linux" && compiler.RUSTFLAGS === undefined) compiler.RUSTFLAGS = "-C link-arg=-fuse-ld=lld";
+  return compiler;
+}
+
 export async function copyFixtureEntrypoint(binDirectory) {
   const destination = path.join(binDirectory, "runtime-entrypoint");
   // Docker makes the checked-in 0644 script executable while copying it into
@@ -229,7 +327,7 @@ export function installCancellationSignalHandlers(cancellation, emitter = proces
 // Builds and browser fixtures use the same cancellable, privately owned process
 // group mechanism. No synchronous build can postpone SIGINT/SIGTERM cleanup.
 export async function runOwnedProcess(command, args, { env, cwd = root, signal,
-  timeoutMs = 25 * 60_000, onOutput } = {}) {
+  timeoutMs = 25 * 60_000, onOutput, onFailure } = {}) {
   const child = spawn(command, args, { cwd, env, signal, detached: true,
     stdio: ["ignore", "pipe", "inherit"] });
   let output = "";
@@ -248,6 +346,7 @@ export async function runOwnedProcess(command, args, { env, cwd = root, signal,
       child.once("exit", resolve);
     });
     assert.ok(!overflow, `${command} exceeded bounded output`);
+    if (status !== 0) onFailure?.(output);
     assert.equal(status, 0, `${command} failed`);
     return output;
   } finally {
@@ -359,6 +458,7 @@ async function lifecycle() {
   validateFixtureEnvironment(process.env);
   const env = fixtureChildEnvironment(process.env);
   const compilerEnv = fixtureCompilerEnvironment(process.env);
+  const cargoEnv = fixtureCargoEnvironment(process.env);
   const playwright = playwrightPackage();
   const temporary = await mkdtemp(path.join(tmpdir(), "instafy-profile-e2e-"));
   let claimedFixedDirectory = false;
@@ -393,9 +493,9 @@ async function lifecycle() {
     }
     assert.ok(found, "existing production launch helper requires /usr/bin/chromium or /usr/bin/google-chrome (runner-only symlink to Playwright Chromium is supported)");
     stage = "build-runtime-fixture";
-    const agent = cargoTestArtifact(await run("cargo", ["test", "--locked", "--manifest-path", "packages/runtime-agent/Cargo.toml", "--test", "browser_profile_e2e", "--no-run", "--message-format=json"], { env: compilerEnv }), "browser_profile_e2e", "test");
+    const agent = cargoTestArtifact(await run("cargo", ["test", "--locked", "--manifest-path", "packages/runtime-agent/Cargo.toml", "--test", "browser_profile_e2e", "--no-run", "--message-format=json"], { env: cargoEnv, onFailure: output => reportCargoCompilerErrors(output, "packages/runtime-agent") }), "browser_profile_e2e", "test");
     stage = "build-controller-fixture";
-    const controller = cargoTestArtifact(await run("cargo", ["test", "--locked", "--manifest-path", "packages/runtime-controller/Cargo.toml", "--bin", "runtime-controller", "--no-run", "--message-format=json"], { env: compilerEnv }), "runtime-controller", "bin");
+    const controller = cargoTestArtifact(await run("cargo", ["test", "--locked", "--manifest-path", "packages/runtime-controller/Cargo.toml", "--bin", "runtime-controller", "--no-run", "--message-format=json"], { env: cargoEnv, onFailure: output => reportCargoCompilerErrors(output, "packages/runtime-controller") }), "runtime-controller", "bin");
     const runEnv = { ...env,
       PATH: `${bin}:${env.PATH}`,
       TEST_DATABASE_URL: process.env.TEST_DATABASE_URL,

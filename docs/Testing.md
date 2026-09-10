@@ -248,6 +248,17 @@ keys and paths. No test failure, cancellation or aggregate failure is ignored.
 The existing unused-toolchain disk cleanup runs only on
 GitHub-hosted images, never against a self-hosted host or guest image.
 
+Only the self-hosted Linux `Rust test runtime agent` Cargo step defaults unset
+`RUSTFLAGS` to `-C link-arg=-fuse-ld=lld`; its scoped prerequisites already install
+and verify `lld`. Explicit flags, including an empty opt-out, are preserved.
+Hosted and non-Linux execution and other Rust children are unchanged. The default
+retains the existing compiler driver and both full Cargo commands, including
+compilation of every integration target before the database-free tests run.
+It addresses a separately observed default-linker signal9 failure in that broad
+compile path, which does not use the Shared fixture's JavaScript compiler helper.
+Signal9 alone does not prove an out-of-memory cause. Cold completion and memory
+use still require the real job; source regressions are not that qualification.
+
 All twelve jobs default to `ubuntu-latest`. Only the independent
 `CI_RUST_SELF_HOSTED=true` switch may select isolated Linux ARM64 workers, for
 private same-repository PRs to `main` and protected-main pushes. It uses the
@@ -267,7 +278,11 @@ no private environment directory, and native Rust/C build tools. Those checks
 do not prove that native libraries, downloads or workload timings are ready.
 Each self-hosted child then installs the fixed missing native package set
 (`clang`, `lld`, `cmake`, `libcap-dev`, `protobuf-compiler`) in a visible,
-five-minute GitHub step inside the unchanged 30-minute job. Hosted jobs and
+five-minute GitHub step inside the unchanged 30-minute job. The package list
+stays unchanged. The install waits at most 120 seconds for the
+DPkg lock if Ubuntu's automatic updater is finishing; it never deletes lock
+files, kills the updater or skips package verification. Lock exhaustion still
+fails within the existing five-minute step. Hosted jobs and
 aggregates do not run that step. The manager must first qualify only APT's
 fixed proxy configuration in the fresh guest; package installation stays in
 the workflow, without changing the base image, repository trust or TLS rules.
@@ -344,7 +359,14 @@ existing developer homes and credentials are not loaded. A fixed invalid token
 sentinel also prevents the CLI from consulting the operating-system keychain.
 Each pull is bounded to three minutes and total preparation to ten minutes inside the existing job
 timeout. Exact-ref local inspection must succeed before startup; failures stop
-without entering the normal startup retry. CLI upgrades require updating and
+without entering the normal startup retry. Failed Docker commands report only
+the fixed preparation stage/image name, bounded exit/signal/error-code fields,
+and fixed hints derived from at most 32 KiB of stderr. Raw output, image tags,
+URLs, paths and credentials are not logged. Hints are Docker-reported symptoms,
+not proof of the underlying cause; a signal is not proof of an out-of-memory
+failure. Missing/oversized/unrecognized diagnostics remain unclassified. This
+does not retry a failed pull, skip an image or change the failure result.
+CLI upgrades require updating and
 testing the pinned ancillary inventory. Run
 `node --test scripts/lib/supabaseSerialPull.test.mjs` for offline regression tests.
 These do not qualify real cold downloads or concurrent connection usage.
@@ -457,6 +479,13 @@ Node22, Xvfb and xauth before checkout; the unchanged
 Playwright installation obtains Chromium and system libraries. The self-hosted
 Personal job also explicitly installs Ubuntu24.04's GTK3 runtime package for
 Electron before building its fixture. Restricted
+workers also prepare the exact locked Electron binary with
+`pnpm --filter @instafy/desktop-app exec install-electron` before the test process.
+[Electron 42 and newer download lazily](https://www.electronjs.org/blog/electron-42-0), so a successful package install alone
+does not prove that binary exists. The five-minute preparation step enables
+Node's environment-proxy support (available since Node 22.21); it uses the installed package and its bundled
+checksums, not an unpinned `npx` download. Proxy settings still do not enter the
+scrubbed Playwright or Electron fixture environments. Restricted
 workers must configure the disposable guest's APT proxy too: sudo does not
 preserve the browser installer's proxy environment. Keep TLS and browser
 sandbox protections intact. No template, host paths or proxy credentials belong
@@ -534,6 +563,16 @@ compiler environment. Database commands, display probes, production runtime
 helpers, controller services and browser processes retain their existing
 proxy/credential scrubbing. No general inherited environment, bypass list,
 private endpoint, credential or TLS override is added to the public source.
+
+On Linux, the four Cargo fixture builds default to `RUSTFLAGS="-C link-arg=-fuse-ld=lld"`
+only when `RUSTFLAGS` is unset. This keeps the existing compiler driver and
+requires `lld` on the build host; both Shared workflow children already install
+it. Every explicit `RUSTFLAGS` string, including an empty opt-out, is preserved
+byte-for-byte. Other platforms and the two Go builds retain their existing
+compiler environment. The default aims to reduce peak linker memory without
+changing Cargo arguments, features, fixture assertions or runtime environments.
+A warm final-link result alone does not qualify cold end-to-end CI or its memory
+and time budgets.
 
 Cold ARM64 completion within 30 minutes is unproven: prior hosted timings or
 warm caches do not qualify these split jobs. Keep activation supervised until
@@ -689,6 +728,30 @@ actual X-display connection after the long builds. A failed profile fixture
 retains only fixed diagnostic categories from at most the last 64 KiB of its
 owned Chromium log, never raw log lines. Categories are observations, not a
 root-cause diagnosis; missing or unrecognized evidence remains explicit.
+
+The four Shared fixture Cargo builds keep JSON artifact discovery unchanged.
+On a failed build they report at most eight compiler-error headings and bounded
+repository-relative Rust source locations. Quoted payloads, URLs, absolute
+paths and credential-like headings are redacted; source snippets, linker
+arguments, build-script environment, other JSON records and arbitrary child
+stdout are not printed. Each JSON record is limited to 256 KiB for diagnostics;
+oversized or unrecognized records are omitted, not inferred. This diagnostic
+path does not make a failing compiler or missing executable pass. Crate-relative
+locations use the fixed agent/controller callsite context only when Cargo's
+manifest matches that exact checkout crate; dependency locations are omitted.
+Absolute, Windows and escaping span paths are refused. Reproduce
+the complete fixture on disposable Linux to obtain the real compiler error;
+passing parser tests alone does not qualify the browser workload.
+
+Compiler child notes can add only fixed observed categories: `linker-failed`,
+`linker-killed`, `missing-library`, `undefined-symbol`, `disk-full`, or
+`allocation-failed`. No matched note, command, environment, symbol or library
+name is printed. Notes are explicitly `absent`, `unclassified`, `matched`,
+`limited`, or `invalid`. The reader examines at most 16 direct notes, each at
+most 64 KiB UTF-8, 128 lines and 2048 bytes per line; it never recurses. The
+existing eight-error/256-KiB-record limits remain. Credential/URL/command-shaped
+lines are ignored. These categories report compiler text, not proven causes:
+in particular, linker SIGKILL is **not proof of an out-of-memory kill**.
 
 The standard hosted workflow uses Docker to provision disposable migrated
 Supabase (Postgres and local authentication); Chromium and runtime/controller
