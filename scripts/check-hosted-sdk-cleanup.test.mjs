@@ -62,7 +62,9 @@ test("actual workflow disk check accepts the threshold and rejects insufficient 
     .split("\n").map((line) => line.replace(/^          /u, "")).join("\n");
   assert.doesNotMatch(script, /\brm\s/u);
   for (const [available, status] of [
-    ["20971520", 0], ["20971521", 0], ["20971519", 1], ["0", 1], ["unknown", 1], ["", 1],
+    ["20971520", 0], ["20971521", 0], ["999999999999999999", 0],
+    ["20971519", 1], ["0", 1], ["unknown", 1], ["", 1],
+    ["020971520", 1], ["18446744073730523136", 1], ["-1", 1], ["2.1e7", 1],
   ]) {
     // Only df is stubbed. Execute the actual non-mutating workflow condition,
     // with no inherited credentials, shell startup files or host disk cleanup.
