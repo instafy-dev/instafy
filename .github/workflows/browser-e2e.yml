@@ -314,7 +314,18 @@ jobs:
         with:
           path: ~/.instafy-image-cache
           key: shared-browser-image-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/test-supabase-migrations-empty-db.mjs') }}
+      - name: Restore compiler cache without saving
+        if: runner.environment == 'self-hosted'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .cargo-target
+          key: shared-browser-cargo-v1-${{ runner.os }}-${{ runner.arch }}-public-shared-browser-profile-${{ hashFiles('packages/*/Cargo.lock') }}
+
       - name: Restore architecture-specific compiler cache
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -449,7 +460,18 @@ jobs:
         with:
           path: ~/.instafy-image-cache
           key: shared-browser-image-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/test-supabase-migrations-empty-db.mjs') }}
+      - name: Restore compiler cache without saving
+        if: runner.environment == 'self-hosted'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .cargo-target
+          key: shared-browser-cargo-v1-${{ runner.os }}-${{ runner.arch }}-public-shared-browser-studio-${{ hashFiles('packages/*/Cargo.lock') }}
+
       - name: Restore architecture-specific compiler cache
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

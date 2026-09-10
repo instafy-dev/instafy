@@ -186,6 +186,7 @@ jobs:
           submodules: recursive
 
       - name: Reclaim hosted-runner disk for the audited image
+        if: runner.environment == 'github-hosted'
         shell: bash
         run: |
           set -euo pipefail
@@ -197,9 +198,15 @@ jobs:
             /opt/ghc \
             /usr/local/lib/android \
             /usr/share/dotnet
+
+      - name: Require sufficient free disk for the audited image
+        shell: bash
+        run: |
+          set -euo pipefail
           available_kib="$(df -Pk / | awk 'NR == 2 { print $4 }')"
-          echo "Free disk after reclaim: ${available_kib} KiB"
-          if [[ ! "$available_kib" =~ ^[0-9]+$ ]] ||
+          echo "Free disk for image build: ${available_kib} KiB"
+          # Canonical bounded decimal avoids Bash octal parsing and integer overflow.
+          if [[ ! "$available_kib" =~ ^(0|[1-9][0-9]{0,17})$ ]] ||
             (( available_kib < 20 * 1024 * 1024 )); then
             echo "::error::Runtime image publication requires at least 20 GiB of free disk (have ${available_kib} KiB)."
             exit 1
