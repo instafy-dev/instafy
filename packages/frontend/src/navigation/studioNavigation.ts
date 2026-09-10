@@ -1,5 +1,17 @@
 import type { SettingsTab, StudioPanel } from "../screens/studio/types";
 
+export interface StudioNavigationOptions {
+  forceNewVisit?: boolean;
+  /** Opaque reference to an account-owned, in-memory search checkpoint. */
+  searchOriginToken?: string;
+}
+
+export function readStudioSearchOriginToken(state: unknown): string | null {
+  if (!state || typeof state !== "object") return null;
+  const value = (state as Record<string, unknown>).instafySearchOriginToken;
+  return typeof value === "string" && value.length > 0 && value.length <= 128 ? value : null;
+}
+
 export type StudioDestination =
   | {
       /** Show or close navigation beside the current destination without changing its scope. */

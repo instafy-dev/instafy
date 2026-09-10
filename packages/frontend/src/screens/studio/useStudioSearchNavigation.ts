@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { buildStudioDestinationSearch, type StudioDestination } from "../../navigation/studioNavigation";
+import { buildStudioDestinationSearch, type StudioDestination, type StudioNavigationOptions } from "../../navigation/studioNavigation";
 import { getStudioVisitKey } from "../../navigation/studioVisit";
 import type { CodeFile } from "../../types";
 import type { StudioSearchTarget } from "./useStudioSearchRecords";
@@ -12,7 +12,8 @@ export interface StudioSearchNavigationOptions {
   projectReady: boolean;
   projectAccessBlocked: boolean;
   conversationsProjectKey: string;
-  navigateToDestination: (destination: StudioDestination, options?: { forceNewVisit?: boolean }) => void;
+  navigateToDestination: (destination: StudioDestination, options?: StudioNavigationOptions) => void;
+  getSearchOriginToken?: () => string | null;
   openFileTab: (file: Pick<CodeFile, "id" | "path" | "label">) => void;
 }
 
@@ -70,7 +71,7 @@ function dispatchFileOpen(projectId: string, path: string, signal: AbortSignal) 
 /** Search opens normal destinations; a file tab waits for the authorized destination space. */
 export function useStudioSearchNavigation({
   viewerUserId, location, activeProjectId, projectReady, projectAccessBlocked,
-  conversationsProjectKey, navigateToDestination, openFileTab,
+  conversationsProjectKey, navigateToDestination, openFileTab, getSearchOriginToken,
 }: StudioSearchNavigationOptions) {
   const [pending, setPending] = useState<PendingFile | null>(null);
   const fileLoad = useRef<FileLoad | null>(null);
@@ -97,12 +98,14 @@ export function useStudioSearchNavigation({
   const activateTarget = useCallback((target: StudioSearchTarget) => {
     cancelPending();
     if (!viewerUserId) return;
+    const originToken = getSearchOriginToken?.();
+    const options: StudioNavigationOptions = { forceNewVisit: true, ...(originToken ? { searchOriginToken: originToken } : {}) };
     if (target.kind === "conversation") {
-      navigateToDestination(target, { forceNewVisit: true });
+      navigateToDestination(target, options);
       return;
     }
     if (target.kind === "org-settings") {
-      navigateToDestination({ kind: "panel", panel: "settings", settingsTab: "org", settingsOrgId: target.orgId }, { forceNewVisit: true });
+      navigateToDestination({ kind: "panel", panel: "settings", settingsTab: "org", settingsOrgId: target.orgId }, options);
       return;
     }
     if (target.kind === "file" && (!target.path || target.path.startsWith("/") || target.path.includes("\\")
@@ -111,11 +114,11 @@ export function useStudioSearchNavigation({
     const search = buildStudioDestinationSearch(projectSearch, target.kind === "file"
       ? { kind: "panel", panel: "code" }
       : { kind: "panel", panel: target.panel, ...(target.panel === "settings" ? { settingsTab: "project" as const } : {}) });
-    navigateToDestination({ kind: "route", search }, { forceNewVisit: true });
+    navigateToDestination({ kind: "route", search }, options);
     // Navigation cancels an older pending selection first. Schedule this one
     // afterwards so it survives that same normal navigation continuation.
     if (target.kind === "file") setPending({ target, viewerUserId, originVisit: visit, originSearch: location.search, destinationSearch: search, destinationVisit: null });
-  }, [cancelPending, location.search, navigateToDestination, viewerUserId, visit]);
+  }, [cancelPending, getSearchOriginToken, location.search, navigateToDestination, viewerUserId, visit]);
 
   useEffect(() => {
     if (!pending) return;

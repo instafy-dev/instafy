@@ -18,17 +18,6 @@ const humanSpeaker: StickyChatSpeaker = {
   avatarSeed: "user-1",
 };
 
-/**
- * Founder feedback, fourth round on this area: "what about the gray/background
- * bar we have between the text and the tabs, did we ever fix/remove that or
- * make it better?" Three backdrop bands behind a floating pill (a solid hold,
- * a tint fade, a backdrop blur) were rejected already; a later top-edge
- * content mask (added to stop the pill sitting on top of readable text) still
- * read as a grey bar to him. The pill has since moved into the conversation
- * roster row above the transcript, so this component no longer needs to know
- * about it at all — these tests pin that the scroller is plain: no mask, no
- * absolute layer, nothing painted over message text.
- */
 describe("ChatTranscriptViewport", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -48,7 +37,7 @@ describe("ChatTranscriptViewport", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  async function renderViewport(options: { scrollPaddingBottom?: number | null } = {}) {
+  async function renderViewport(options: { scrollPaddingBottom?: number | null; header?: boolean } = {}) {
     const scrollContainerRef = createRef<HTMLDivElement>();
     await act(async () => {
       root.render(
@@ -56,6 +45,7 @@ describe("ChatTranscriptViewport", () => {
           ariaLabel="Conversation"
           scrollContainerRef={scrollContainerRef}
           scrollPaddingBottom={options.scrollPaddingBottom}
+          header={options.header ? <button type="button">Participants</button> : undefined}
         >
           <p data-testid="transcript-line">First message</p>
         </ChatTranscriptViewport>,
@@ -86,6 +76,18 @@ describe("ChatTranscriptViewport", () => {
     expect(scroller.style.paddingBottom).toBe("24px");
   });
 
+  it("keeps presence outside the scrolling messages and reserves the faded area for reveals", async () => {
+    const { scroller } = await renderViewport({ header: true });
+    const header = container.querySelector('[data-testid="chat-transcript-header"]');
+    expect(header?.textContent).toBe("Participants");
+    expect(scroller.contains(header)).toBe(false);
+    expect(header?.parentElement).toBe(scroller.parentElement);
+    expect(scroller.className).toContain("chat-transcript-scroll-with-header");
+    expect(scroller.style.paddingTop).toBe("48px");
+    expect(scroller.style.scrollPaddingTop).toBe("48px");
+    expect(scroller.style.background).toBe("");
+  });
+
   it("keeps the scroller's own testid, hands out the scroll ref, and preserves the scroll orchestration props", async () => {
     const { scrollContainerRef, scroller } = await renderViewport();
 
@@ -108,11 +110,8 @@ describe("ChatTranscriptViewport", () => {
 });
 
 /**
- * ChatSpeakerStickyOverlay itself is unchanged by the move — ChatPanel now
- * renders it directly inside the roster row instead of ChatTranscriptViewport
- * rendering it as an absolute sibling of the scroller. These tests pin its
- * own behavior (fade in/out, which pill kind it shows) independent of where
- * it is mounted.
+ * The speaker pill owns only its identity and fade in/out. The transcript
+ * viewport owns the shared presence placement and message fade.
  */
 describe("ChatSpeakerStickyOverlay", () => {
   let container: HTMLDivElement;

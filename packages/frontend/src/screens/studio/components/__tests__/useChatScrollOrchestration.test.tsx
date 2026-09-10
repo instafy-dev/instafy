@@ -133,6 +133,7 @@ function AnchorHarness({
   historyVisit = visit(conversationId),
   clientHeight = 200,
   mobileAnchor = false,
+  scrollPaddingTop = 0,
 }: {
   conversationId: string;
   rows: AnchorRow[];
@@ -141,6 +142,7 @@ function AnchorHarness({
   historyVisit?: ChatScrollHistoryVisit | null;
   clientHeight?: number | (() => number);
   mobileAnchor?: boolean;
+  scrollPaddingTop?: number;
 }) {
   const messages = rows.map(({ id }) => createMessage(id));
   const controller = useChatScrollController({
@@ -177,7 +179,7 @@ function AnchorHarness({
   });
   return (
     <ChatScrollSnapshotBoundary identity={JSON.stringify([historyVisit, conversationId])} messages={messages} capture={controller.recordScrollPosition}>
-    <div ref={(node) => {
+    <div style={{ scrollPaddingTop }} ref={(node) => {
       controller.scrollContainerRef.current = node;
       if (node) {
         Object.defineProperty(node, "scrollHeight", { get: () => scrollHeight, configurable: true });
@@ -269,21 +271,21 @@ describe("useChatScrollController", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it("waits for the exact target, reveals it instead of following the bottom, and clears its highlight", async () => {
+  it.each([0, 48])("reveals the exact target below a %ipx header and clears its highlight without moving it", async (scrollPaddingTop) => {
     vi.useFakeTimers();
     try {
-      const historyVisit = { ...visit("target-chat", "target-visit"), messageId: "old-message" };
-      await act(async () => root.render(<AnchorHarness conversationId="target-chat" historyVisit={historyVisit} loading rows={[]} scrollHeight={200} />));
+      const historyVisit = { ...visit("target-chat", `target-visit-${scrollPaddingTop}`), messageId: "old-message" };
+      await act(async () => root.render(<AnchorHarness conversationId="target-chat" scrollPaddingTop={scrollPaddingTop} historyVisit={historyVisit} loading rows={[]} scrollHeight={200} />));
       const node = () => container.querySelector('[data-testid="anchor-scroll"]') as HTMLDivElement;
       expect(node().scrollTop).toBe(0);
       expect(node().dataset.highlightedMessage).toBeUndefined();
       const rows = [{ id: "old-message", top: 600, height: 200 }, { id: "recent", top: 1000, height: 200 }];
-      await act(async () => root.render(<AnchorHarness conversationId="target-chat" historyVisit={historyVisit} rows={rows} scrollHeight={1400} />));
-      expect(node().scrollTop).toBe(576);
+      await act(async () => root.render(<AnchorHarness conversationId="target-chat" scrollPaddingTop={scrollPaddingTop} historyVisit={historyVisit} rows={rows} scrollHeight={1400} />));
+      expect(node().scrollTop).toBe(576 - scrollPaddingTop);
       expect(node().dataset.highlightedMessage).toBe("old-message");
       await act(async () => vi.advanceTimersByTime(3001));
       expect(node().dataset.highlightedMessage).toBeUndefined();
-      expect(node().scrollTop).toBe(576);
+      expect(node().scrollTop).toBe(576 - scrollPaddingTop);
     } finally { vi.useRealTimers(); }
   });
 

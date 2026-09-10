@@ -27,11 +27,18 @@ focus empty, the message becomes the focus destination; an already focused
 composer or other control is preserved. The temporary tint fades after three
 seconds, while keyboard focus remains visible until it moves. The outline has
 space around the text, supports forced colors and respects reduced motion.
-**Return to latest** returns to ordinary
-live chat history. Browser Back restores the query, scope and result position;
-Forward reopens the selected destination. These search checkpoints live only in
-the current Studio session and are cleared when accounts change. Results are
-fetched again when returning, so a checkpoint does not bypass authorization.
+**Back to results** restores the query, scope, loaded result pages and reading
+position. It stays available after **Return to latest**, which moves to ordinary
+live chat history. Browser Back and Forward retain their normal visit-by-visit
+behavior; Electron and native shells also expose app history controls on the
+search screen. Direct message links show **Earlier message** without inventing
+a search to return to. These checkpoints live only in the current Studio session
+and are cleared on reload or account change. Results are fetched again when
+returning, so a checkpoint does not bypass authorization.
+
+The conversation's presence controls stay fixed while message content fades
+beneath them. Exact-message reveals land below that fade, with room around the
+highlight. Forced-colors mode uses a solid system-color header instead.
 
 ## Controller and database
 

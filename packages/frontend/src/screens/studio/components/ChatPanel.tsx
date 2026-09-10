@@ -120,6 +120,8 @@ import {
   type StickyChatSpeaker,
 } from "./chatSpeakerMarker";
 import { ChatColumn } from "./ChatColumn";
+import { ChatMessageContextToolbar } from "./ChatMessageContextToolbar";
+import { useStudioSearchReturn } from "./StudioSearchReturnContext";
 import { useOctoSilenceHint } from "./useOctoSilenceHint";
 import { ChatTypingRows } from "./ChatTypingRows";
 import {
@@ -333,7 +335,7 @@ import {
   readBrowserTransportPreference,
   writeBrowserTransportPreference,
 } from "./browserTransportPreference";
-import { ChatSpeakerStickyOverlay, ChatTranscriptViewport } from "./ChatTranscriptViewport";
+import { CHAT_TRANSCRIPT_HEADER_INSET_PX, ChatSpeakerStickyOverlay, ChatTranscriptViewport } from "./ChatTranscriptViewport";
 import { resolveSharedBrowserControlOwner } from "./sharedBrowserControlOwner";
 import { useSharedBrowserApprovalTransport } from "./useSharedBrowserApprovalTransport";
 import { useChatBrowserHandoff } from "./useChatBrowserHandoff";
@@ -419,7 +421,6 @@ const NARROW_SPEAKER_INLINE_SELECTOR = '[data-chat-speaker-inline="true"]';
 // actually starts painting. The pill now lives in the roster row above the
 // transcript rather than overlapping it, so this edge (not the pill's own
 // position) is the only stable line left to compare marker positions against.
-const CHAT_TRANSCRIPT_VISIBLE_TOP_INSET_PX = 8;
 
 function speakersEqual(left: StickyChatSpeaker | null, right: StickyChatSpeaker | null): boolean {
   if (left === null || right === null) {
@@ -614,6 +615,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     return conversations.find((conversation) => conversation.localId === activeConversationId)?.controllerId ?? null;
   }, [activeConversationId, conversations]);
   const goToStudio = useStudioNavigation();
+  const searchReturn = useStudioSearchReturn();
   const messageQueryClient = useQueryClient();
   const requestedMessageId = new URLSearchParams(location.search).get("messageId")?.trim() || null;
   const messageTargetActive = Boolean(requestedMessageId && !jobThread);
@@ -644,8 +646,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const returnToLatestMessages = useCallback(() => {
     if (!activeProjectId || !activeConversationId) return;
     goToStudio({ kind: "conversation", projectId: activeProjectId, conversationId: activeConversationId,
-      conversationControllerId: activeConversationControllerId });
-  }, [activeProjectId, activeConversationId, activeConversationControllerId, goToStudio]);
+      conversationControllerId: activeConversationControllerId }, { searchOriginToken: searchReturn.originToken ?? undefined });
+  }, [activeProjectId, activeConversationId, activeConversationControllerId, goToStudio, searchReturn.originToken]);
   const {
     browserSessionOpen,
     browserSessionStateHydrated,
@@ -3213,11 +3215,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
   const [stickyChatSpeaker, setStickyChatSpeaker] =
     useState<StickyChatSpeaker | null>(null);
-  // Rendered in the roster row above the transcript (never inside the
-  // scroller), so the ref stays valid for as long as the chat panel is
-  // mounted — the sticky-speaker effect below no longer reads its rect (see
-  // CHAT_TRANSCRIPT_VISIBLE_TOP_INSET_PX), but ChatSpeakerStickyOverlay still
-  // takes a ref, so this stays the one it's given.
+  // Presence stays outside the scroller while the message ink fades beneath it.
   const stickySpeakerOverlayRef = useRef<HTMLDivElement>(null);
 
   useLayoutEffect(() => {
@@ -3229,12 +3227,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
     let animationFrameId: number | null = null;
     const readAndApplySpeaker = () => {
-      // The pill lives in the roster row now, physically separate from the
-      // transcript, so its own rect can no longer mark the handoff line — a
-      // marker's inline label only needs to hide once it has actually
-      // scrolled past the transcript's own visible top edge.
+      // Hand off the inline identity at the fully readable edge of the fade.
       const containerRect = scrollContainer.getBoundingClientRect();
-      const thresholdTop = containerRect.top + CHAT_TRANSCRIPT_VISIBLE_TOP_INSET_PX;
+      const thresholdTop = containerRect.top + CHAT_TRANSCRIPT_HEADER_INSET_PX;
       const markers = Array.from(
         scrollContainer.querySelectorAll(CHAT_SPEAKER_MARKER_SELECTOR),
       );
@@ -5496,14 +5491,22 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         hidden={browserSubtab !== "chat"}
         className={browserSubtab === "chat" ? "flex min-h-0 flex-1 flex-col" : "hidden"}
       >
-      {/* Presence belongs to the conversation, so it sits at the top of the
-          conversation surface: one placement at every width, a flow row (never
-          an overlay) so it cannot cover message text, and outside the scroller
-          so it never scrolls away. Always rendered — the roster collapses to a
-          plain "open participants" icon when no one has joined, so the
-          participants/config panel is reachable even on a brand-new chat. */}
+      <ChatMessageContextToolbar
+        messageTargetActive={messageTargetActive}
+        findingMessage={messageContext.loading && !messages.length}
+        canReturnToLatest={Boolean(chatScrollHistoryVisit)}
+        onReturnToLatest={returnToLatestMessages}
+      />
+      <ChatScrollSnapshotBoundary identity={chatScrollMutationIdentity} messages={messages} capture={recordScrollPosition}>
+      <ChatTranscriptViewport
+        ariaLabel={conversationLabel}
+        onScroll={handleScroll}
+        onContextMenu={handleConversationContextMenu}
+        scrollContainerRef={scrollContainerRef}
+        scrollPaddingBottom={chatScrollPaddingBottom}
+        header={
       <div
-        className="flex-none px-3 pt-2 sm:px-4"
+        className="px-3 pt-2 sm:px-4"
         data-testid="chat-conversation-roster-row"
       >
         {/* Constrain to the shared 56rem chat column so the roster's right
@@ -5512,7 +5515,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
             transcript scrolls) and the roster stays right-aligned; both are
             always rendered, so the roster never shifts when the pill appears
             or disappears. */}
-        <ChatColumn className="flex items-center justify-between gap-2">
+        <ChatColumn className="pointer-events-none flex items-center justify-between gap-2 [&>:last-child]:pointer-events-auto">
           <ChatSpeakerStickyOverlay ref={stickySpeakerOverlayRef} speaker={stickyChatSpeaker} />
           <ConversationRoster
             agents={conversationRosterAgents}
@@ -5521,21 +5524,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           />
         </ChatColumn>
       </div>
-      {messageTargetActive ? (
-        <div className="flex-none px-3 sm:px-4">
-          <ChatColumn className="flex flex-wrap items-center justify-between gap-2 py-1 text-sm text-slate-500 dark:text-slate-400">
-            <span role="status" data-testid="chat-message-context">{messageContext.loading && !messages.length ? "Finding message…" : "Search result"}</span>
-            <Button variant="ghost" size="xs" onPress={returnToLatestMessages} isDisabled={!chatScrollHistoryVisit} data-testid="chat-message-return-latest">Return to latest</Button>
-          </ChatColumn>
-        </div>
-      ) : null}
-      <ChatScrollSnapshotBoundary identity={chatScrollMutationIdentity} messages={messages} capture={recordScrollPosition}>
-      <ChatTranscriptViewport
-        ariaLabel={conversationLabel}
-        onScroll={handleScroll}
-        onContextMenu={handleConversationContextMenu}
-        scrollContainerRef={scrollContainerRef}
-        scrollPaddingBottom={chatScrollPaddingBottom}
+        }
       >
         <OctoScrollMotionScope
           sourceRef={scrollContainerRef}

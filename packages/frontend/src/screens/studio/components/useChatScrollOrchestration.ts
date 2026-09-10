@@ -33,18 +33,24 @@ const HISTORY_UNDERFILL_THRESHOLD_PX = 4;
 const CHAT_SCROLL_MESSAGE_SELECTOR = "[data-chat-scroll-message-id]";
 const MAX_CHAT_SCROLL_SNAPSHOTS = 200;
 
+function readTranscriptTopInset(node: HTMLDivElement): number {
+  const inset = Number.parseFloat(getComputedStyle(node).scrollPaddingTop);
+  return Number.isFinite(inset) ? Math.max(0, inset) : 0;
+}
+
 type MessageScrollAnchor = { messageId: string; offset: number };
 
 function readVisibleMessageAnchor(node: HTMLDivElement): MessageScrollAnchor | null {
   const rows = node.querySelectorAll<HTMLElement>(CHAT_SCROLL_MESSAGE_SELECTOR);
   const viewport = node.getBoundingClientRect();
+  const readableTop = viewport.top + readTranscriptTopInset(node);
   // Rows remain in transcript order, including any deferred-rendering shells.
   // Find the first visible one without measuring every earlier message.
   let low = 0;
   let high = rows.length;
   while (low < high) {
     const middle = Math.floor((low + high) / 2);
-    if (rows[middle].getBoundingClientRect().bottom <= viewport.top) low = middle + 1;
+    if (rows[middle].getBoundingClientRect().bottom <= readableTop) low = middle + 1;
     else high = middle;
   }
   const row = rows[low];
@@ -423,7 +429,7 @@ export function useChatScrollController({
     if (targetMessageId) {
       cancelScrollAnimation();
       shouldAutoScrollRef.current = false;
-      const anchor = { messageId: targetMessageId, offset: 24 };
+      const anchor = { messageId: targetMessageId, offset: readTranscriptTopInset(node) + 24 };
       const row = findMessageAnchorRow(node, anchor);
       if (!row || row.dataset.chatRowDeferred === "true") {
         autoScrollPendingRef.current = true;

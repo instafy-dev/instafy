@@ -16,12 +16,14 @@ describe("search result browser history", () => {
   let sameDestination = false;
   let queryRequests: StudioSearchRequest[];
   let lastSearch: ReturnType<typeof useStudioSearch>;
+  let lastHistory: ReturnType<typeof useStudioSearchHistory>;
   function Harness() {
     const location = useLocation();
     navigate = useNavigate();
     const go = useStudioNavigation();
     const scopeKey = `${viewer}:${getStudioVisitKey(location)}:${location.search}`;
     const history = useStudioSearchHistory(viewer, getStudioVisitKey(location), scopeKey);
+    lastHistory = history;
     lastSearch = useStudioSearch({
       scopeKey, org: null, space: null, persistentControl: true,
       restoreSession: history.restoredSession, onBeforeResultActivate: history.remember, onDismiss: history.dismiss,
@@ -30,7 +32,8 @@ describe("search result browser history", () => {
         orgId: "org-a", spaceId: "space-a", message: { excerpt: "a needle in earlier history", query: "needle",
           matchRanges: [{ start: 2, end: 8 }], authorLabel: "Assistant", createdAt: "2026-09-10T00:00:00Z" },
         activate: () => go({ kind: "conversation", projectId: sameDestination ? "space-a" : "space-b",
-          conversationId: sameDestination ? "chat-a" : "chat-b", messageId: "message-a" }, { forceNewVisit: true }),
+          conversationId: sameDestination ? "chat-a" : "chat-b", messageId: "message-a" },
+        { forceNewVisit: true, searchOriginToken: history.getOriginToken() ?? undefined }),
       }],
     });
     return <>{lastSearch.renderControl()}{lastSearch.results}</>;
@@ -80,6 +83,7 @@ describe("search result browser history", () => {
     container.querySelector<HTMLElement>('[data-testid="studio-search-results"]')!.scrollTop = 730;
     await act(async () => result().click());
     expect(lastSearch.open).toBe(false);
+    expect(lastHistory.originToken).not.toBeNull();
     expect(new URLSearchParams(window.location.search).get("projectId")).toBe(same ? "space-a" : "space-b");
     await travel(-1);
     expect(lastSearch.open).toBe(true);

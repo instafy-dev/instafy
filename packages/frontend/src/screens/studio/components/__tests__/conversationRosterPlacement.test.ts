@@ -30,21 +30,22 @@ describe("conversation roster placement", () => {
     // The chat panel's scroll container is composed by ChatTranscriptViewport
     // (the read-only job-thread branch earlier in the file inlines its own),
     // so look for the viewport that belongs to this chat panel.
-    const scrollContainer = chatPanel.indexOf("<ChatTranscriptViewport", rosterRow);
+    const scrollContainer = chatPanel.indexOf("<ChatTranscriptViewport", chatPanelWrapper);
 
     expect(chatPanelWrapper).toBeGreaterThan(-1);
     expect(rosterRow).toBeGreaterThan(chatPanelWrapper);
-    expect(scrollContainer).toBeGreaterThan(rosterRow);
+    expect(scrollContainer).toBeGreaterThan(chatPanelWrapper);
+    expect(rosterRow).toBeGreaterThan(scrollContainer);
     expect(chatPanel).toContain("<ConversationRoster");
   });
 
-  it("keeps the roster row a flow row, never an overlay", () => {
+  it("keeps presence in the viewport header with the same message gutters", () => {
     const rowClass = /className="([^"]*)"\s*\n\s*data-testid="chat-conversation-roster-row"/.exec(
       chatPanel,
     )?.[1];
 
     expect(rowClass).toBeDefined();
-    expect(rowClass).toContain("flex-none");
+    expect(chatPanel).toContain("header={");
     // Same horizontal padding as the scroll container beneath it.
     expect(rowClass).toContain("px-3");
     expect(rowClass).toContain("sm:px-4");
@@ -82,14 +83,12 @@ describe("conversation roster placement", () => {
     expect(rowClass).not.toMatch(/\blg:flex\b/);
   });
 
-  it("keeps the row's height contract unchanged: no added padding or fixed height", () => {
-    // The pill moved into this row's existing 40px of height (flex-none,
-    // pt-2, no pb-* or explicit h-*) rather than growing the row to make room.
+  it("keeps the controls compact within the transcript header inset", () => {
     const rowClass = /className="([^"]*)"\s*\n\s*data-testid="chat-conversation-roster-row"/.exec(
       chatPanel,
     )?.[1];
 
-    expect(rowClass).toBe("flex-none px-3 pt-2 sm:px-4");
+    expect(rowClass).toBe("px-3 pt-2 sm:px-4");
   });
 
   it("no longer renders the roster from the workspace top bar", () => {
@@ -99,19 +98,10 @@ describe("conversation roster placement", () => {
     expect(topBar).not.toContain("conversationRosterPresence");
   });
 
-  /**
-   * Founder feedback, fourth round: the grey/dim band between the tab strip
-   * and the first readable line of chat. It traced back to the sticky speaker
-   * pill floating as an absolutely-positioned overlay above the transcript,
-   * plus a content mask added to keep it from sitting on top of message text.
-   * The fix: move the pill into this row's own empty left side — the same
-   * "flow row, outside the scroller" placement this row's own comment already
-   * mandates for presence — and delete the mask entirely.
-   */
   describe("sticky speaker pill lives in the roster row", () => {
     const rowStart = chatPanel.indexOf('data-testid="chat-conversation-roster-row"');
     const rosterTag = chatPanel.indexOf("<ConversationRoster", rowStart);
-    const transcriptTag = chatPanel.indexOf("<ChatTranscriptViewport", rowStart);
+    const transcriptTag = chatPanel.lastIndexOf("<ChatTranscriptViewport", rowStart);
 
     it("renders the pill inside the roster row, on the left of the roster avatars", () => {
       const pillOccurrences = chatPanel.match(/<ChatSpeakerStickyOverlay\b/g) ?? [];
@@ -123,13 +113,11 @@ describe("conversation roster placement", () => {
       // Left of the roster avatars, and both are inside the row (before the
       // roster row's ChatColumn hands off to ChatTranscriptViewport).
       expect(pillTag).toBeLessThan(rosterTag);
-      expect(rosterTag).toBeLessThan(transcriptTag);
+      expect(transcriptTag).toBeLessThan(rowStart);
     });
 
     it("does not render the pill as a descendant of the message scroller", () => {
-      // ChatTranscriptViewport (the message scroller) no longer takes a
-      // stickySpeaker/stickySpeakerOverlayRef prop — the pill is not passed
-      // into it or rendered inside it at all anymore.
+      // The viewport renders its header as a sibling of the role=log scroller.
       expect(transcriptTag).toBeGreaterThan(-1);
       expect(chatPanel).not.toContain("stickySpeaker={stickyChatSpeaker}");
       expect(chatPanel).not.toContain("stickySpeakerOverlayRef={stickySpeakerOverlayRef}");

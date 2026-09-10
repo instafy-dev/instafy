@@ -85,6 +85,13 @@ describe("useStudioSearchNavigation with real Studio routing", () => {
     expect(options.openFileTab).not.toHaveBeenCalled();
   });
 
+  it("carries only the explicitly supplied search origin into a result visit", async () => {
+    await render({ getSearchOriginToken: () => "owned-checkpoint" });
+    await activate({ kind: "conversation", projectId: "space-b", conversationId: "chat-b", conversationControllerId: "controller-b", messageId: "message-b" });
+    expect(window.history.state.usr).toEqual({ instafySearchOriginToken: "owned-checkpoint" });
+    expect(new URLSearchParams(window.location.search).get("messageId")).toBe("message-b");
+  });
+
   it("routes space settings and automations with their target project rather than the working space", async () => {
     await render();
     await activate({ kind: "space-panel", projectId: "space-b", panel: "settings" });

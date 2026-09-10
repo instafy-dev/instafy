@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Capacitor } from "@capacitor/core";
 import { isDesktopShell } from "../../lib/desktopShell";
 import { StudioHistoryControls, studioHistoryControlsAvailable } from "../StudioHistoryControls";
+import { useStudioHistory } from "../useStudioHistory";
 
 vi.mock("@capacitor/core", () => ({ Capacitor: { isNativePlatform: vi.fn(() => false) } }));
 vi.mock("../../lib/desktopShell", () => ({ isDesktopShell: vi.fn(() => false) }));
@@ -16,10 +17,12 @@ describe("Studio history controls", () => {
   let navigate: ReturnType<typeof useNavigate>;
   let location: ReturnType<typeof useLocation>;
   let enabled: boolean | undefined;
+  let shareHistory: boolean;
   function Harness() {
     navigate = useNavigate();
     location = useLocation();
-    return <StudioHistoryControls enabled={enabled} />;
+    const history = useStudioHistory();
+    return <StudioHistoryControls enabled={enabled} history={shareHistory ? history : undefined} />;
   }
   const render = async () => { await act(async () => root.render(<BrowserRouter><Harness /></BrowserRouter>)); };
   const button = (name: string) => container.querySelector<HTMLButtonElement>(`button[aria-label="${name}"]`)!;
@@ -43,6 +46,7 @@ describe("Studio history controls", () => {
     vi.mocked(isDesktopShell).mockReturnValue(false);
     vi.mocked(Capacitor.isNativePlatform).mockReturnValue(false);
     enabled = true;
+    shareHistory = false;
     window.history.replaceState({ idx: 0, key: "start" }, "", "/studio?chat=A");
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -109,6 +113,24 @@ describe("Studio history controls", () => {
     enabled = false; await render(); enabled = true; await render();
     expect(button("Go back").disabled).toBe(false);
     expect(button("Go forward").disabled).toBe(true);
+  });
+
+  it("retains native Forward when conditional search controls share the layout history", async () => {
+    vi.mocked(isDesktopShell).mockReturnValue(true);
+    shareHistory = true;
+    enabled = false;
+    await render();
+    await push("chat=result");
+    const resultKey = location.key;
+    await act(async () => {
+      await navigate(-1);
+      await vi.waitFor(() => expect(window.history.state.key).toBe("start"));
+    });
+    enabled = undefined;
+    await render();
+    expect(button("Go forward").disabled).toBe(false);
+    await click("Go forward");
+    expect(location.key).toBe(resultKey);
   });
 
   it("fails closed for malformed or stale non-Router history state", async () => {

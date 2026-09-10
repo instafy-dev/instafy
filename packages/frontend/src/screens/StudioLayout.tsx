@@ -4,6 +4,7 @@ import { UUID_PATTERN, parseNotificationClickUrl } from "../notifications/notifi
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { StudioNavigationProvider, useStudioNavigation } from "../navigation/useStudioNavigation";
+import { StudioHistoryControls } from "../navigation/StudioHistoryControls";
 import { StudioPanelScrollContainer, buildStudioPanelScrollIdentity } from "../navigation/StudioPanelScrollContainer";
 import { resolveSettingsRoute } from "./studio/settingsRoute";
 import { getStudioVisitKey } from "../navigation/studioVisit";
@@ -38,6 +39,7 @@ import {
 } from "./studio/components/chatParticipantsStore";
 import { useStudioSearch, type StudioSearchRequest } from "./studio/components/useStudioSearch";
 import { StudioSearchContext } from "./studio/components/StudioSearchContext";
+import { StudioSearchReturnProvider } from "./studio/components/StudioSearchReturnContext";
 import { StudioMobileContextHeader } from "./studio/components/StudioMobileContextHeader";
 import { useStudioSearchRecords } from "./studio/useStudioSearchRecords";
 import { getStudioWorkspaceOwnerKey, useStudioKnownFiles } from "./studio/useStudioKnownFiles";
@@ -285,7 +287,8 @@ function StudioLayoutInner() {
   const searchKey = JSON.stringify([currentUserId, getStudioVisitKey(location), navigationScope.orgKey, activeProjectId, navigationScope.page,
     ...["conversationId", "conversationControllerId", "jobId", "panel", "settingsTab", "settingsOrgId", "settingsCategory"].map(key => searchRoute.get(key))]);
   const searchHidesWorkspace = searchRequest?.key === searchKey && searchRequest.open;
-  const searchHistory = useStudioSearchHistory(currentUserId, getStudioVisitKey(location), searchKey);
+  const searchHistory = useStudioSearchHistory(currentUserId, getStudioVisitKey(location), searchKey,
+    currentUserId ? `${currentUserId}:${activeProjectId ?? "no-project"}` : null);
 
   const [navigationTeam, setNavigationTeam] = useState<{ userId: string | null; key: string; name: string; avatarUrl: string | null } | null>(null);
   const handleActiveTeamChange = useCallback((team: { key: string; name: string; avatarUrl: string | null }) => {
@@ -2008,7 +2011,7 @@ function StudioLayoutInner() {
   const searchNavigation = useStudioSearchNavigation({
     viewerUserId: currentUserId, location, activeProjectId,
     projectReady: projectReadyForWorkspace, projectAccessBlocked, conversationsProjectKey,
-    navigateToDestination, openFileTab,
+    navigateToDestination, openFileTab, getSearchOriginToken: searchHistory.getOriginToken,
   });
   const searchData = useStudioSearchRecords({
     viewerUserId: currentUserId,
@@ -2052,6 +2055,7 @@ function StudioLayoutInner() {
 
   return (
     <StudioNavigationProvider value={runStudioNavigation}>
+    <StudioSearchReturnProvider value={{ originToken: searchHistory.originToken, returnToResults: () => runStudioNavigation(searchHistory.returnToResults) }}>
     <ControllerNoticeActionsProvider value={controllerNoticeActionsValue}>
       {shouldRenderFilesExplorerPortal ? (
         <FilesPanel
@@ -2207,6 +2211,7 @@ function StudioLayoutInner() {
 
           {search.open ? <div className="studio-context-search-screen">
             {!isLargeScreen ? <header className="studio-context-search-mobile" aria-label="Search">{search.renderControl()}</header> : null}
+            <StudioHistoryControls history={mobileHistory} className="self-start px-1" />
             <main className="flex min-h-0 min-w-0 flex-1" aria-label="Search results" data-testid="studio-search-screen">{search.results}</main>
           </div> : null}
           <div
@@ -2409,6 +2414,7 @@ function StudioLayoutInner() {
       <Status />
       <DesktopRuntimeHelpDialog />
     </ControllerNoticeActionsProvider>
+    </StudioSearchReturnProvider>
     </StudioNavigationProvider>
   );
 }
