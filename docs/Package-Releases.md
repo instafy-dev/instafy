@@ -52,11 +52,17 @@ Publishing never runs from `pull_request` or `pull_request_target`. Every extern
 to an immutable commit.
 
 The independently default-off `CI_PUBLIC_CONTROL_SELF_HOSTED` switch can route
-only the protected-main push **Select** job to an authenticated disposable Linux
-ARM64 runner while the canonical repository remains private. Other triggers
-keep hosted selection; Version, Pack, Publish, approvals and credentials are
-unchanged. This requires separate exact-job runner admission, baseline-tool
-qualification and cold execution/cleanup proof before enabling the switch; see
+the protected-main push **Select**, **Version** and **Pack** jobs to authenticated disposable
+Linux ARM64 runners while the canonical repository remains private. Other
+triggers retain hosted routing. Version retains Select's version mode and the existing
+repository-only bot credential in its two original steps; it is not credential-free.
+Its isolated-runner preflight precedes checkout, and a fresh protected-main and
+checkout-SHA check immediately precedes bot authorization. The earlier Select
+check alone cannot authorize a Version job delayed in the queue. Publish, approvals
+and npm OIDC routing are unchanged. Pack still requires Select's publish mode and exact immutable plan,
+tests the packages and uploads only verified tarballs; it has no npm OIDC or
+repository-write authority. This requires separate exact-job runner admission,
+baseline-tool qualification and cold execution/cleanup proof before enabling the switch; see
 [Testing](Testing.md). It does not grant npm publication authority or make the
 remaining hosted release stages available.
 
