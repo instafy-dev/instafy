@@ -52,6 +52,7 @@ export async function customerControllerJsonRequest<T>(
     apiPath: string;
     body?: unknown;
     operation: string;
+    notFoundMessage?: string;
   },
 ): Promise<T> {
   const resolved = resolveCustomerToken(options.accessToken);
@@ -93,6 +94,7 @@ export async function customerControllerJsonRequest<T>(
   });
   const responseText = await response.text().catch(() => "");
   if (!response.ok) {
+    if (response.status === 404 && options.notFoundMessage) throw new Error(options.notFoundMessage);
     if (response.status === 401 || response.status === 403) {
       throw formatAuthRejectedError({
         status: response.status,

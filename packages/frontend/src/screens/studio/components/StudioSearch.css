@@ -300,6 +300,10 @@
 }
 
 .studio-search-results h3 {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
   margin: 0 12px 4px;
   font-size: 11px;
   line-height: 1.5;
@@ -307,9 +311,13 @@
   color: var(--color-slate-500);
 }
 
+.studio-search-order {
+  font-weight: 400;
+}
+
 .studio-search-result {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 12px;
   width: 100%;
   min-height: 52px;
@@ -326,6 +334,7 @@
   width: 18px;
   height: 18px;
   flex: none;
+  margin-top: 2px;
   color: var(--color-slate-500);
 }
 

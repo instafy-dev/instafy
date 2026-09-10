@@ -12,6 +12,13 @@ the newest matches first. It does not perform semantic search, search attachment
 contents or index file contents. File-name discovery remains limited to paths
 known to the current workspace.
 
+Results are grouped by type. **Messages · Newest first** orders matching messages
+by their creation time (then message ID for ties), including across paginated
+results. **Chats · Recent activity** orders chat-title matches across spaces by
+their latest message time, falling back to the chat's update or creation time.
+Files, settings and actions keep their navigation order; there is no relevance
+ranking yet.
+
 Each message result shows its chat, organization/space, role, date and a plain-text
 excerpt with highlighted matches. Selecting it opens a contiguous history window
 around that exact message and briefly highlights the message. Earlier and later
@@ -48,3 +55,17 @@ Older controllers report message search as unavailable while the other result
 types remain usable. Deploying only the frontend does not enable message search.
 The shared request/response types and URL helpers are exported from
 `@instafy/sdk/conversation-search`.
+
+## CLI access
+
+`instafy conversation grep "retry failure" --json` searches the same persisted
+message text in the linked space. Use `--org <id>`, `--personal` or `--all` to
+broaden it, and `--cursor` to request another page. A result's conversation and
+message IDs can be passed to `instafy conversation context <conversationId>
+<messageId> --json` to retrieve surrounding history. Both commands require the
+CLI's signed-in user session and retain the controller's access checks. They do
+not grant unattended runtime credentials additional access.
+
+The older `conversation search` command still offers bounded title/preview and
+recent-history discovery. Local file contents can be searched with `rg` in the
+workspace. See the [CLI guide](CLI.md) for arguments and exit codes.

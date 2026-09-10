@@ -89,6 +89,59 @@ describe("useStudioSearchRecords", () => {
     expect(options.onActivate).not.toHaveBeenCalled();
   });
 
+  it("orders initial chat titles across spaces by message activity with timestamp fallbacks", async () => {
+    listChats.mockImplementation(async ({ projectId }) => projectId === "space-a" ? [
+      { ...chat("older-message", projectId), lastMessageAt: "2026-09-03", updatedAt: "2026-09-14" },
+      { ...chat("tie-a", projectId), lastMessageAt: "2026-09-09" },
+      { ...chat("unknown", projectId), lastMessageAt: "invalid", updatedAt: "", createdAt: "invalid" },
+    ] : [
+      { ...chat("recent-message", projectId), lastMessageAt: "2026-09-12" },
+      { ...chat("updated-fallback", projectId), lastMessageAt: "invalid", updatedAt: "2026-09-11" },
+      { ...chat("created-fallback", projectId), lastMessageAt: null, updatedAt: "invalid", createdAt: "2026-09-10" },
+      { ...chat("tie-b", projectId), lastMessageAt: "2026-09-09" },
+    ]);
+    await render({ scope: "all", activeConversations: { projectId: "space-a", items: [
+      { localId: "unsynced", controllerId: null, title: "Just created", createdAt: Date.parse("2026-09-13") },
+    ] } });
+    expect(searchMessages).not.toHaveBeenCalled();
+    expect(current.records.filter((record) => record.group === "Chats").map((record) => record.title)).toEqual([
+      "Just created", "recent-message", "updated-fallback", "created-fallback", "tie-a", "tie-b", "older-message", "unknown",
+    ]);
+    current.records.find((record) => record.title === "recent-message")!.activate();
+    expect(options.onActivate).toHaveBeenLastCalledWith({ kind: "conversation", projectId: "space-b", conversationId: null, conversationControllerId: "recent-message" });
+  });
+
+  it("keeps equal chat activity stable and preserves backend message and non-chat order", async () => {
+    listChats.mockImplementation(async ({ projectId }) => [
+      { ...chat(`z-${projectId}`, projectId), lastMessageAt: "2026-09-10" },
+      { ...chat(`a-${projectId}`, projectId), lastMessageAt: "2026-09-10" },
+    ]);
+    searchMessages.mockResolvedValue(messagePage([
+      messageMatch("z-message", { projectId: "space-b", orgId: "team-b" }),
+      messageMatch("a-message"),
+    ]));
+    await render({ query: "search", scope: "all", projects: [
+      knownProject("space-a", [{ path: "a.md" }]), knownProject("space-b", [{ path: "b.md" }]),
+    ] });
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    const chatTitles = () => current.records.filter((record) => record.group === "Chats").map((record) => record.title);
+    const otherRecords = () => current.records.filter((record) => record.group !== "Chats").map((record) => record.id);
+    expect(chatTitles()).toEqual(["z-space-a", "a-space-a", "z-space-b", "a-space-b"]);
+    expect(current.records.filter((record) => record.group === "Messages").map((record) => record.id)).toEqual([
+      "message:space-b:remote-space-a:z-message", "message:space-a:remote-space-a:a-message",
+    ]);
+    const originalOtherOrder = otherRecords();
+    // Fresh activity in the later alphabetical space changes only chat ordering.
+    listChats.mockImplementation(async ({ projectId }) => [
+      { ...chat(`z-${projectId}`, projectId), lastMessageAt: projectId === "space-b" ? "2026-09-11" : "2026-09-10" },
+      { ...chat(`a-${projectId}`, projectId), lastMessageAt: "2026-09-10" },
+    ]);
+    await act(async () => current.retry());
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    expect(chatTitles()).toEqual(["z-space-b", "z-space-a", "a-space-a", "a-space-b"]);
+    expect(otherRecords()).toEqual(originalOtherOrder);
+  });
+
   it("keeps Personal separate from team spaces and ignores an inaccessible cached project", async () => {
     discover.mockResolvedValue({ status: "success", projects: [project("personal", null), project("space-a")] });
     await render({ scope: "org", orgId: "personal", projects: [knownProject("inaccessible", [{ path: "secret.md" }])] });

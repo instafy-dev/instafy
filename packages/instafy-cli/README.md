@@ -31,7 +31,9 @@ Run Instafy spaces locally and connect them back to Instafy Studio — from any 
   - Works for existing members and pending invites.
   - `builder` means read & write.
   - Fallbacks: `--space <id>` or `--team-id <uuid>` when the folder is not linked yet
-- `instafy conversation search "<keywords>"` — find earlier conversations in the linked space by title, preview, and recent message content.
+- `instafy conversation search "<keywords>"` — search recent titles/previews and recent messages in at most 12 conversations. Use `grep` for persisted message content beyond those recent pages.
+- `instafy conversation grep "<text>" --json` — search authorized persisted user/assistant messages in the linked space, with snippets and exact message IDs.
+- `instafy conversation context <conversationId> <messageId> --json` — read a bounded window around an exact message, including old messages outside the latest history page.
 - `instafy conversation show "<title-or-id>"` — inspect one conversation’s messages so you can reuse earlier context in a new chat.
 - `instafy conversation create --parent <conversationId> --thread-kind agent --title "Octo coordination"` — create a linked child thread for conversation-native agent coordination.
 - `instafy chat --conversation <threadId> "@octo ..." --no-wait` — involve another agent by posting a normal message into a normal conversation/thread. Use non-blocking posts from inside an active runtime turn.
@@ -76,6 +78,43 @@ message cursor flags to read the next page without skipping reports that share a
 - `instafy providers probe <providerId>` — run a transport probe against one provider.
 
 Run `instafy --help` for the public command list and options.
+
+## Search conversation context
+
+After `instafy login`, local agents and terminal users can recover earlier chat evidence without
+opening Studio:
+
+```bash
+instafy conversation grep "auth session" --json
+instafy conversation grep "auth session" --org <orgId> --limit 20 --json
+instafy conversation context <conversationId> <messageId> --before 20 --after 20 --json
+rg "auth session" .
+```
+
+Use `grep` for conversation messages and `rg` for local files. `grep` matches literal,
+case-insensitive text (2–200 characters), not regular expressions. It searches the linked space by
+default; choose one of `--space <id>`, `--org <id>`, `--personal`, or `--all` to change scope. Access
+and conversation visibility are enforced by the controller. These reads do not wake a runtime.
+
+Results are newest first, with a default page of 30 messages (maximum 50). Repeat the same query
+and scope with `--cursor <nextCursor>` to continue. JSON includes plain-text snippets, UTF-16
+highlight ranges, stable IDs, and pagination. Human output is one escaped line per match:
+`spaceId:conversationId:messageId:role:timestamp: snippet`. Exit codes are 0 for matches, 1 for no
+matches, and 2 for errors, including invalid arguments. JSON no-match output remains a valid empty
+result page.
+
+`context` defaults to 20 messages before and after the target (maximum 50 each). JSON retains
+canonical message IDs in newest-first order and provides `olderCursor`/`newerCursor` plus
+`hasOlder`/`hasNewer`. To read farther back, use the older cursor as the next message ID with
+`--before 40 --after 0`; to read forward, use the newer cursor with `--before 0 --after 40`.
+Adjacent pages repeat their anchor; deduplicate by message ID. Human context is chronological and
+marks the requested message with `>`.
+
+Both commands require signed-in user credentials from `instafy login`, an explicit user
+`--access-token`, or `INSTAFY_ACCESS_TOKEN`/`SUPABASE_ACCESS_TOKEN`. They do not accept unattended
+runtime-agent, origin, or service credentials and do not mint runtime tokens. Saved logins remain
+bound to their controller origin. The controller must support message search/context; older
+controllers report the unavailable API rather than falling back to a partial recent-message scan.
 
 ## AI-readable diagnostics
 

@@ -47,8 +47,8 @@ export function StudioSearchResultCopy({ title, description, message }: {
     {message ? <>
       <span className="studio-search-message-meta">
         {message.authorLabel}
-        {date ? <> · <time dateTime={message.createdAt}>{date.toLocaleDateString(undefined, {
-          month: "short", day: "numeric", year: "numeric",
+        {date ? <> · <time dateTime={message.createdAt}>{date.toLocaleString(undefined, {
+          month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit",
         })}</time></> : null}
       </span>
       <span className="studio-search-message-excerpt">

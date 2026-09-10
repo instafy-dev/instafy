@@ -35,7 +35,7 @@ export interface StudioSearchRecordsOptions {
   knownFiles?: readonly StudioKnownFile[];
   activeConversations: {
     projectId: string;
-    items: readonly (Pick<ConversationState, "localId" | "controllerId" | "title"> & Partial<Pick<ConversationState, "lifecycleStatus">>)[];
+    items: readonly (Pick<ConversationState, "localId" | "controllerId" | "title"> & Partial<Pick<ConversationState, "lifecycleStatus" | "createdAt">>)[];
   } | null;
   onActivate: (target: StudioSearchTarget) => void;
 }
@@ -51,6 +51,14 @@ interface SearchSnapshot {
 
 function emptySnapshot(key: string, loading: boolean): SearchSnapshot {
   return { key, projects: [], conversations: {}, loading, error: null, limitedSpaces: false };
+}
+
+function chatActivityTimestamp(chat: ControllerProjectConversation): number {
+  for (const value of [chat.lastMessageAt, chat.updatedAt, chat.createdAt]) {
+    const timestamp = Date.parse(value ?? "");
+    if (Number.isFinite(timestamp)) return timestamp;
+  }
+  return 0;
 }
 
 /** Search does not open origins or start runtimes: files are already-known paths only. */
@@ -145,6 +153,7 @@ export function useStudioSearchRecords({
   const records = useMemo<StudioSearchRecord[]>(() => {
     if (!canSearch) return [];
     const output: StudioSearchRecord[] = [];
+    const chatActivity = new Map<string, number>();
     for (const message of messages.matches) {
       const local = activeConversations?.projectId === message.projectId
         ? activeConversations.items.find((chat) => chat.controllerId === message.conversationId) : null;
@@ -168,8 +177,9 @@ export function useStudioSearchRecords({
       const orgName = project.orgName?.trim() || (project.orgId ? "Team" : "Personal");
       const name = project.projectName?.trim() || "Untitled space";
       const description = `${orgName} / ${name}`;
-      const push = (record: Omit<StudioSearchRecord, "orgId" | "spaceId" | "description" | "activate">, target: StudioSearchTarget) => {
+      const push = (record: Omit<StudioSearchRecord, "orgId" | "spaceId" | "description" | "activate">, target: StudioSearchTarget, activityAt = 0) => {
         output.push({ ...record, orgId: projectOrgId, spaceId: projectId, description, activate: () => onActivate(target) });
+        if (record.group === "Chats") chatActivity.set(record.id, activityAt);
       };
       const remote = current.conversations[projectId];
       const local = activeConversations?.projectId === projectId ? activeConversations.items : [];
@@ -183,7 +193,7 @@ export function useStudioSearchRecords({
         if (lifecycle === "hidden" || lifecycle === "deleted") continue;
         push({ id: `chat:${projectId}:${chat.id}`, title: loaded?.title.trim() || extractConversationTitleFromMetadata(chat.metadata) || "Untitled chat", keywords: "chat conversation thread", group: "Chats" }, {
           kind: "conversation", projectId, conversationId: loaded?.localId ?? extractConversationLocalIdFromMetadata(chat.metadata), conversationControllerId: chat.id,
-        });
+        }, chatActivityTimestamp(chat));
       }
       // Preserve newly created local chats, but do not resurrect cached private chats
       // that the controller no longer includes for this account.
@@ -192,7 +202,7 @@ export function useStudioSearchRecords({
         seenChats.add(chat.localId);
         push({ id: `chat:${projectId}:local:${chat.localId}`, title: chat.title.trim() || "New chat", keywords: "chat conversation thread", group: "Chats" }, {
           kind: "conversation", projectId, conversationId: chat.localId, conversationControllerId: null,
-        });
+        }, typeof chat.createdAt === "number" && Number.isFinite(chat.createdAt) ? chat.createdAt : 0);
       }
       const seenPaths = new Set<string>();
       for (const file of knownProjects.get(projectId)?.state.code.files ?? []) {
@@ -216,7 +226,12 @@ export function useStudioSearchRecords({
         output.push({ id: `org-settings:${project.orgId}`, title: "Team settings", description: orgName, keywords: "settings organization team members profile", group: "Settings", orgId: project.orgId, spaceId: null, activate: () => onActivate({ kind: "org-settings", orgId: project.orgId! }) });
       }
     }
-    return output;
+    // Keep the backend's message order and each non-chat surface stable. Equal
+    // activity timestamps retain their source order through the stable sort.
+    const chats = output.filter((record) => record.group === "Chats")
+      .sort((left, right) => (chatActivity.get(right.id) ?? 0) - (chatActivity.get(left.id) ?? 0));
+    let chatIndex = 0;
+    return output.map((record) => record.group === "Chats" ? chats[chatIndex++] : record);
   }, [activeConversations, canSearch, current.conversations, current.projects, knownFiles, messages.matches, onActivate, projects, query, viewerUserId]);
   const notice = `Message search matches text in accessible conversations; use at least 2 characters. Also searches recent chat titles (up to ${CHAT_LIMIT} per space), opened file names, files already listed in the current space and settings. Unloaded folders and file contents are not included.${current.limitedSpaces ? ` Chat titles and file names cover the first ${SPACE_LIMIT} spaces alphabetically; message search covers the selected scope.` : ""}`;
   return { records, loading: current.loading || messages.loading, error: [current.error, messages.error].filter(Boolean).join(" ") || null, notice, retry,

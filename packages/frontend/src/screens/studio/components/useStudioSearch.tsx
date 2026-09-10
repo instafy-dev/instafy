@@ -308,7 +308,10 @@ export function useStudioSearch({ scopeKey, org, space, records, loading = false
           const Icon = GROUP_ICONS[group];
           const headingId = `${resultsId}-${group.toLowerCase()}`;
           return <section key={group} aria-labelledby={headingId}>
-            <h3 id={headingId}>{group}</h3>
+            <h3 id={headingId}>{group}{' '}
+              {group === 'Messages' ? <span className="studio-search-order">Newest first</span>
+                : group === 'Chats' ? <span className="studio-search-order">Recent activity</span> : null}
+            </h3>
             {groupResults.map(result => <button type="button" key={result.id}
               ref={element => {
                 if (element) resultRefs.current.set(result.id, element);
