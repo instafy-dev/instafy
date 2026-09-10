@@ -542,7 +542,7 @@ helpers, controller services and browser processes retain their existing
 proxy/credential scrubbing. No general inherited environment, bypass list,
 private endpoint, credential or TLS override is added to the public source.
 
-On Linux, the four Cargo fixture builds default to `RUSTFLAGS=-C link-arg=-fuse-ld=lld`
+On Linux, the four Cargo fixture builds default to `RUSTFLAGS="-C link-arg=-fuse-ld=lld"`
 only when `RUSTFLAGS` is unset. This keeps the existing compiler driver and
 requires `lld` on the build host; both Shared workflow children already install
 it. Every explicit `RUSTFLAGS` string, including an empty opt-out, is preserved
