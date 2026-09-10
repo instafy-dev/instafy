@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import "./check-hosted-sdk-cleanup.test.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const workflowRoot = path.join(repositoryRoot, ".github", "workflows");
