@@ -331,6 +331,11 @@ changes the tab: the conversation remains available in Chats. Previously open ta
 and the preview state is remembered per space alongside them. Mobile chat selection uses the
 same preview behavior without adding another step to the two-tap switching flow.
 
+All workspace tabs can be reordered, including panels such as Machines and Settings and run
+threads. Select a tab and drag it to its new position; keyboard users can press Space to pick
+it up, use Left/Right to move it, and press Space to drop it or Escape to cancel. Chat title
+and unread updates preserve the order of tabs across different kinds of content.
+
 ## Home activity
 
 Home separates **Unread** conversations from **Recent activity**, using flat rows on the

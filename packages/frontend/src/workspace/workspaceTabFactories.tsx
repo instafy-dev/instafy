@@ -245,7 +245,7 @@ export function createTabForPanel(panel: StudioPanel): WorkspacePanelTabState {
     closable: meta.closable,
     dirty: false,
     badge: null,
-    draggable: false,
+    draggable: true,
   };
 }
 
@@ -317,7 +317,7 @@ export function createTabForJobThread(params: {
     closable: true,
     dirty: false,
     badge: null,
-    draggable: false,
+    draggable: true,
   };
 }
 
