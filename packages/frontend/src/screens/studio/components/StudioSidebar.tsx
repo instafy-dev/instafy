@@ -1550,7 +1550,7 @@ export function StudioSidebar({
           />
         ) : null}
         {desktopRail ? <div
-          className={`${externalHeader ? "h-12 min-h-12 border-b border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]" : "min-h-11"} shrink-0 ${pathHeader ? "gap-x-0 flex items-center border-b border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]" : "gap-x-1 flex items-center"} ${showLabels ? pathHeader ? "pr-px" : "pr-[7px]" : ""}`}
+          className={`${externalHeader ? "h-12 min-h-12 border-b border-transparent" : "min-h-11"} shrink-0 ${pathHeader ? "gap-x-0 flex items-center border-b border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]" : "gap-x-1 flex items-center"} ${showLabels ? pathHeader ? "pr-px" : "pr-[7px]" : ""}`}
           data-testid="sidebar-team-header">
           <div className={`flex w-[calc(4rem-1px)] shrink-0 items-center justify-center ${pathHeader ? "h-11" : ""}`}>
             <IconButton variant="ghost" size="sm"
@@ -1758,7 +1758,7 @@ export function StudioSidebar({
             moreIndicator={moreIndicator}
             selectedMoreKeys={selectedMoreKeys}
           />
-          </> : <li className={`${showLabels ? "mx-3" : ""} ${desktopRail ? "pt-2" : "mt-3 pt-3"} border-t border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]`} data-testid="sidebar-no-selected-space">
+          </> : <li className={`${showLabels ? "mx-3" : ""} ${desktopRail ? "pt-2" : "mt-3 pt-3"} border-t ${externalHeader ? "border-transparent" : "border-slate-200/70 dark:border-[color:var(--color-studio-dark-divider)]"}`} data-testid="sidebar-no-selected-space">
             {showLabels ? <Text as="p" variant="caption" tone="muted">Choose a space in this team to open its tools.</Text> : null}
             {onStartNewProject && canCreateSelectedTeamSpace ? <Button variant="ghost" size="sm" fullWidth={!showLabels}
               className={showLabels ? "mt-1" : `mt-1 ${sidebarRowLayoutClass}`}
