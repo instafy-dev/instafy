@@ -121,6 +121,7 @@ import {
 } from "./chatSpeakerMarker";
 import { ChatColumn } from "./ChatColumn";
 import { ChatMessageContextToolbar } from "./ChatMessageContextToolbar";
+import { ChatMessageHistoryControls } from "./ChatMessageHistoryControls";
 import { useStudioSearchReturn } from "./StudioSearchReturnContext";
 import { useOctoSilenceHint } from "./useOctoSilenceHint";
 import { ChatTypingRows } from "./ChatTypingRows";
@@ -5491,12 +5492,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
         hidden={browserSubtab !== "chat"}
         className={browserSubtab === "chat" ? "flex min-h-0 flex-1 flex-col" : "hidden"}
       >
-      <ChatMessageContextToolbar
-        messageTargetActive={messageTargetActive}
-        findingMessage={messageContext.loading && !messages.length}
-        canReturnToLatest={Boolean(chatScrollHistoryVisit)}
-        onReturnToLatest={returnToLatestMessages}
-      />
+      <ChatMessageContextToolbar />
       <ChatScrollSnapshotBoundary identity={chatScrollMutationIdentity} messages={messages} capture={recordScrollPosition}>
       <ChatTranscriptViewport
         ariaLabel={conversationLabel}
@@ -5551,10 +5547,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 {isHistoryLoading ? (
                   <>
                     <Spinner aria-hidden="true" data-testid="chat-history-loading" tone="slate" size="sm" />
-                    Loading earlier messages…
+                    Loading messages…
                   </>
                 ) : (
-                  "View earlier messages"
+                  "Load older messages"
                 )}
               </Button>
             </div>
@@ -5590,8 +5586,8 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                 />
               </ChatBubbleRow>
             ) : null}
-            {!shouldShowGettingStarted && isInitialHistoryLoading && !initialHistoryError && !remoteConversationHistoryError ? (
-              <div className="flex justify-center px-2 py-1">
+            {(messageTargetActive || !shouldShowGettingStarted) && isInitialHistoryLoading && !initialHistoryError && !remoteConversationHistoryError ? (
+              <div className="flex justify-center px-2 py-1" role="status">
                 <div className="inline-flex items-center gap-3 rounded-2xl border border-slate-200/70 bg-white/85 px-4 py-3 text-sm font-medium text-slate-600 shadow-sm dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-panel-soft)] dark:text-slate-300">
                   <Spinner aria-hidden="true" tone="slate" size="sm" />
                   <span>Loading messages…</span>
@@ -5599,7 +5595,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               </div>
             ) : null}
             {initialHistoryError || remoteConversationHistoryError ? (
-              <div className="flex justify-center px-2 py-1" data-testid="chat-history-error">
+              <div className="flex justify-center px-2 py-1" role="alert" data-testid="chat-history-error">
                 <div className="flex flex-wrap items-center justify-center gap-3 text-sm text-slate-600 dark:text-slate-300">
                   <span>{initialHistoryError ?? remoteConversationHistoryError}</span>
                   <Button
@@ -5668,11 +5664,14 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
 
               return rows;
             })()}
-            {messageTargetActive && messageContext.hasNewer ? (
-              <div className="flex justify-center py-2">
-                <Button variant="outline" size="xs" onPress={() => void messageContext.loadNewer()} isDisabled={messageContext.loading} data-testid="chat-message-load-newer">View later messages</Button>
-              </div>
-            ) : null}
+            <ChatMessageHistoryControls
+              messageTargetActive={messageTargetActive}
+              hasNewer={messageContext.hasNewer}
+              loading={messageContext.loading}
+              canReturnToLatest={Boolean(chatScrollHistoryVisit)}
+              onLoadNewer={() => void messageContext.loadNewer()}
+              onReturnToLatest={returnToLatestMessages}
+            />
             <ChatPostTranscriptAuxiliaryRows
               jobThreadPresent={Boolean(jobThread)}
               workspaceFileStaleNotice={workspaceFileStaleNotice}

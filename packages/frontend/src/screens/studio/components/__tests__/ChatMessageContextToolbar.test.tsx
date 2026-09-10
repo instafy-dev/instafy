@@ -12,11 +12,9 @@ describe("message context navigation", () => {
   let container: HTMLDivElement;
   let root: Root;
   const returnToResults = vi.fn();
-  const returnToLatest = vi.fn();
-  const render = async (originToken: string | null, messageTargetActive = true) => {
+  const render = async (originToken: string | null) => {
     await act(async () => root.render(<StudioSearchReturnProvider value={{ originToken, returnToResults }}>
-      <ChatMessageContextToolbar messageTargetActive={messageTargetActive} findingMessage={false}
-        canReturnToLatest onReturnToLatest={returnToLatest} />
+      <ChatMessageContextToolbar />
     </StudioSearchReturnProvider>));
   };
   beforeEach(() => {
@@ -33,36 +31,28 @@ describe("message context navigation", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it("labels a direct message link accurately without inventing a search origin", async () => {
+  it("omits the toolbar entirely without a saved search origin", async () => {
     await render(null);
-    expect(container.querySelector('[data-testid="chat-message-context"]')?.textContent).toBe("Earlier message");
-    expect(container.querySelector('[data-testid="chat-back-to-search-results"]')).toBeNull();
-    await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="chat-message-return-latest"]')!.click());
-    expect(returnToLatest).toHaveBeenCalledOnce();
+    expect(container.textContent).toBe("");
+    expect(container.querySelector("button")).toBeNull();
     expect(returnToResults).not.toHaveBeenCalled();
   });
 
-  it("leaves search return to the compact header and removes the toolbar at latest", async () => {
+  it("leaves compact search return to the top navigation without a duplicate row", async () => {
     layout.isLargeScreen = false;
     await render("owned-checkpoint");
-    expect(container.querySelector('[data-testid="chat-back-to-search-results"]')).toBeNull();
-    expect(container.querySelector('[data-testid="chat-message-context"]')?.textContent).toBe("Search result");
-    expect(container.querySelector('[data-testid="chat-message-return-latest"]')?.textContent).toBe("Jump to latest");
-    await render("owned-checkpoint", false);
     expect(container.textContent).toBe("");
-    layout.isLargeScreen = true;
-    await render("owned-checkpoint", false);
-    expect(container.querySelector('[data-testid="chat-back-to-search-results"]')).not.toBeNull();
+    expect(container.querySelector("button")).toBeNull();
   });
 
-  it("keeps Back to results accessible after returning to latest history", async () => {
+  it("keeps desktop Back to results independent of the message target, without status or latest controls", async () => {
     await render("owned-checkpoint");
-    expect(container.querySelector('[data-testid="chat-message-context"]')?.textContent).toBe("Search result");
-    await render("owned-checkpoint", false);
+    expect(container.querySelector('[role="status"]')).toBeNull();
     expect(container.querySelector('[data-testid="chat-message-return-latest"]')).toBeNull();
+    expect(container.querySelectorAll("button")).toHaveLength(1);
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="chat-back-to-search-results"]')!.click());
     expect(returnToResults).toHaveBeenCalledOnce();
-    await render(null, false);
+    await render(null);
     expect(container.textContent).toBe("");
   });
 });

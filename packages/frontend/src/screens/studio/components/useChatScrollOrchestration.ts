@@ -25,7 +25,7 @@ const HISTORY_SCROLL_USER_MOVE_THRESHOLD_PX = 4;
 // HISTORY_AUTO_FILL_SAFETY_CAP_PAGES is the hard backstop that bounds a
 // pathological thread which keeps growing just enough to look like progress, so
 // the loop can never fetch unboundedly. Either brake marks auto-fill exhausted,
-// which is what surfaces the manual "View earlier messages" button.
+// which is what surfaces the manual "Load older messages" button.
 const HISTORY_AUTO_FILL_SAFETY_CAP_PAGES = 15;
 const HISTORY_AUTO_FILL_MAX_STALLED_PAGES = 2;
 const HISTORY_AUTO_FILL_MIN_PROGRESS_PX = 4;

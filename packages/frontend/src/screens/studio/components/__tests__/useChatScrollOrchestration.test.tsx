@@ -112,7 +112,7 @@ function ScrollHarness({
       </div>
       {showHistoryLoadButton ? (
         <button type="button" onClick={requestOlderMessages}>
-          View earlier messages
+          Load older messages
         </button>
       ) : null}
       <button type="button" data-testid="scroll-bottom" onClick={() => scrollToBottom()}>
@@ -667,7 +667,7 @@ describe("useChatScrollController", () => {
     expect(loadOlderMessages).toHaveBeenCalledTimes(2);
     expect(
       Array.from(container.querySelectorAll("button")).find(
-        (button) => button.textContent === "View earlier messages",
+        (button) => button.textContent === "Load older messages",
       ),
     ).toBeDefined();
   });
@@ -676,7 +676,7 @@ describe("useChatScrollController", () => {
     const loadOlderMessages = vi.fn();
     const findLoadButton = () =>
       Array.from(container.querySelectorAll("button")).find(
-        (button) => button.textContent === "View earlier messages",
+        (button) => button.textContent === "Load older messages",
       ) ?? null;
 
     // An automation thread's pages are dominated by command_execution run
@@ -764,7 +764,7 @@ describe("useChatScrollController", () => {
     expect(container.querySelector('[data-testid="history-underfilled"]')?.textContent).toBe("underfilled");
     expect(
       Array.from(container.querySelectorAll("button")).find(
-        (button) => button.textContent === "View earlier messages",
+        (button) => button.textContent === "Load older messages",
       ),
     ).toBeDefined();
   });
@@ -786,7 +786,7 @@ describe("useChatScrollController", () => {
     expect(loadOlderMessages).not.toHaveBeenCalled();
     expect(
       Array.from(container.querySelectorAll("button")).find(
-        (button) => button.textContent === "View earlier messages",
+        (button) => button.textContent === "Load older messages",
       ),
     ).toBeUndefined();
   });

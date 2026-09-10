@@ -600,11 +600,11 @@ export function StudioTopBar({ notificationBell, mobileNavigation, newChatInSide
             data-testid="topbar-sidebar-toggle"
             className={`${COMPACT_TAB_SELECTOR_CLASS} flex-1 text-left`}
           >
+            <SidebarExpand className="h-4 w-4 shrink-0" aria-hidden="true" />
             <span className="min-w-0 flex-1">
               {!contextHeaderAbove ? <span className="block truncate text-2xs font-normal text-slate-600 dark:text-slate-400">{resolvedProjectName}</span> : null}
               <span className="block truncate text-xs font-semibold">{topbarLocationTitle}</span>
             </span>
-            <SidebarExpand className="h-4 w-4 shrink-0" aria-hidden="true" />
           </Button>
           <div className="flex shrink-0 items-center">
             {parentConversationButton}

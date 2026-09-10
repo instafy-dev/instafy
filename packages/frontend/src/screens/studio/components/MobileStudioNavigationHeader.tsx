@@ -28,7 +28,7 @@ export interface MobileStudioNavigationHeaderProps {
 
 const TOUCH_TARGET = "!min-h-12 !min-w-12";
 
-/** Touch navigation uses the history owner supplied by Studio, never a second
+/** Compact navigation uses the history owner supplied by Studio, never a second
  * history stack. Secondary actions keep the existing shared popover controls. */
 export function MobileStudioNavigationHeader({
   history, title, spaceName, showSpaceName = true, onOpenPicker, onOpenChats,
@@ -61,18 +61,18 @@ export function MobileStudioNavigationHeader({
       <Button
         variant="ghost"
         size="icon"
-        className={`${TOUCH_TARGET} min-w-0 flex-1 justify-start gap-1 px-2 text-left`}
+        className={`${TOUCH_TARGET} min-w-0 flex-1 justify-start gap-2 px-2 text-left`}
         aria-label={`Open space navigation: ${spaceName}`}
         aria-haspopup="dialog"
         aria-expanded={sidebarOpen}
         data-testid="mobile-header-picker"
         onPress={onOpenPicker}
       >
+        <SidebarExpand className="h-4 w-4 shrink-0" aria-hidden="true" />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-semibold" data-testid="mobile-header-title">{title}</span>
           {showSpaceName ? <span className="block truncate text-xs font-normal text-slate-600 dark:text-slate-400" data-testid="mobile-header-space">{spaceName}</span> : null}
         </span>
-        <SidebarExpand className="h-4 w-4 shrink-0" aria-hidden="true" />
       </Button>
       <DialogTrigger isOpen={moreOpen} onOpenChange={changeMoreOpen}>
         <IconButton

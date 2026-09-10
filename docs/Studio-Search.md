@@ -35,12 +35,15 @@ visit, and Chats for direct entry without history. Forward, tab switching and
 other secondary actions are available in **More**. Drawer dismissal and parent
 conversation navigation remain separate actions.
 
-**Jump to latest** moves to ordinary live chat history without adding a Back
-step. It replaces the older-message destination, so Back returns to the search
-and Forward opens latest messages. Results remains available in the compact
-header, while the temporary message toolbar disappears. Electron and native
-shells also expose app history controls on the search screen. Direct message
-links show **Earlier message** without inventing a search to return to. These
+Below a historical message window, **Load newer messages** continues reading in
+order. **Latest ↓**, immediately to its right, jumps to ordinary live chat
+history without adding a Back step. Latest remains available after all pages
+are loaded or a history request fails. It replaces the older-message destination,
+so Back returns to the search and Forward opens latest messages. Results stays
+in the compact header; history controls stay with the transcript. Electron and
+native shells also expose app history controls on the search screen. Direct
+message links offer the same history controls without inventing a search to
+return to. These
 checkpoints live only in the current Studio session and are cleared on reload
 or account change. Results are fetched again when returning, so a checkpoint
 does not bypass authorization.
