@@ -3,6 +3,7 @@ import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { StudioTopBar, type StudioTopBarProps } from "../StudioTopBar";
+import { StudioSearchReturnProvider } from "../StudioSearchReturnContext";
 
 const mocks = vi.hoisted(() => ({
   controls: vi.fn(), projects: vi.fn(), conversations: vi.fn(), tabs: vi.fn(), auth: vi.fn(), posture: vi.fn(),
@@ -29,9 +30,12 @@ describe("StudioTopBar mobile navigation integration", () => {
   let root: Root;
   let container: HTMLDivElement;
   let props: StudioTopBarProps;
+  let originToken: string | null;
+  const returnToResults = vi.fn();
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
+    originToken = null;
     mocks.controls.mockReturnValue({ activeProjectName: "Alpha space", showChatActions: true, onStartNewConversation: vi.fn(), onStartPrivateConversation: vi.fn(), onToggleSidebar: vi.fn(), onOpenProjectSettings: vi.fn() });
     mocks.projects.mockReturnValue({ activeProjectId: "space-a", projectList: [{ id: "space-a", orgId: "org-a" }] });
     mocks.auth.mockReturnValue({ user: { id: "user-a" } });
@@ -47,11 +51,42 @@ describe("StudioTopBar mobile navigation integration", () => {
     vi.restoreAllMocks();
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
-  const render = () => act(async () => root.render(<StudioTopBar {...props} />));
+  const render = () => act(async () => root.render(<StudioSearchReturnProvider value={{ originToken, returnToResults }}><StudioTopBar {...props} /></StudioSearchReturnProvider>));
   const query = (testId: string) => document.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`);
   async function click(testId: string) {
     expect(query(testId)).not.toBeNull(); await act(async () => query(testId)!.click());
   }
+
+  it.each([true, false])("shares Results, Back and Chats destinations without duplicate arrows (touch=%s)", async touch => {
+    mocks.posture.mockReturnValue({ isLargeScreen: false, showTouchBottomDock: touch });
+    props.mobileNavigation!.history.canGoBack = true;
+    originToken = "owned-search";
+    await render();
+    expect(query("mobile-header-results")?.textContent).toBe("Results");
+    expect(query("mobile-header-back")).toBeNull();
+    expect(query("topbar-back-button")).toBeNull();
+    expect(query("mobile-header-open-chats")).toBeNull();
+    await click("mobile-header-results");
+    expect(returnToResults).toHaveBeenCalledOnce();
+    expect(props.mobileNavigation!.history.goBack).not.toHaveBeenCalled();
+    expect(props.mobileNavigation!.onOpenChats).not.toHaveBeenCalled();
+
+    originToken = null;
+    await render();
+    expect(query("mobile-header-results")).toBeNull();
+    await click("mobile-header-back");
+    expect(props.mobileNavigation!.history.goBack).toHaveBeenCalledOnce();
+    expect(props.mobileNavigation!.onOpenChats).not.toHaveBeenCalled();
+
+    props.mobileNavigation!.history.canGoBack = false;
+    await render();
+    expect(query("mobile-header-back")).toBeNull();
+    expect(query("mobile-header-open-chats")?.textContent).toBe("Chats");
+    await click("mobile-header-open-chats");
+    expect(props.mobileNavigation!.onOpenChats).toHaveBeenCalledOnce();
+    expect(props.mobileNavigation!.history.goBack).toHaveBeenCalledOnce();
+    expect(returnToResults).toHaveBeenCalledOnce();
+  });
 
   it("uses the active chat and space labels, but respects the full-history title override", async () => {
     await render();
@@ -71,31 +106,27 @@ describe("StudioTopBar mobile navigation integration", () => {
     props.mobileNavigation!.history.canGoBack = true;
     mocks.posture.mockReturnValue({ isLargeScreen: false, showTopbarHomeButton: false, showTouchBottomDock: touch });
     await render();
-    const pickerId = touch ? "mobile-header-picker" : "topbar-sidebar-toggle";
+    const pickerId = "mobile-header-picker";
     expect(query(pickerId)?.textContent).toBe("Active chat");
     expect(query(pickerId)?.getAttribute("aria-label")).toBe("Open space navigation: Alpha space");
     expect(query("mobile-header-space")).toBeNull();
     await click(pickerId);
     expect(mocks.controls().onToggleSidebar).toHaveBeenCalledOnce();
 
-    if (touch) {
-      await click("mobile-header-back");
-      expect(props.mobileNavigation!.history.goBack).toHaveBeenCalledOnce();
-      await click("mobile-header-more");
-      expect(query("chat-new-chat-private")).not.toBeNull();
-      expect(query("chat-new-chat-public")).not.toBeNull();
-      expect(query("topbar-tab-overflow")).not.toBeNull();
-    } else {
-      expect(query("studio-mobile-history-bar")).not.toBeNull();
-      expect(query("topbar-tab-selector")).not.toBeNull();
-      await click("topbar-new-conversation");
-      expect(query("chat-new-chat-private")).not.toBeNull();
-    }
+    await click("mobile-header-back");
+    expect(props.mobileNavigation!.history.goBack).toHaveBeenCalledOnce();
+    expect(query("studio-mobile-history-bar")).toBeNull();
+    await click("mobile-header-more");
+    expect(query("chat-new-chat-private")).not.toBeNull();
+    expect(query("chat-new-chat-public")).not.toBeNull();
+    expect(query("topbar-tab-overflow")).not.toBeNull();
   });
 
   it.each(["home", "team", "account"])("opens the regular navigation drawer on touch %s while keeping Home and profile actions stable", async (navigationPage) => {
+    originToken = "owned-search";
     mocks.controls.mockReturnValue({ ...mocks.controls(), navigationPage, activeTeamName: "Research team", activeTeamAvatarUrl: "https://example.test/team.png", onOpenHome: vi.fn(), onOpenTeamSwitcher: vi.fn(), onOpenProfileSettings: vi.fn() });
     await render();
+    expect(query("mobile-header-results")).toBeNull();
     expect(query("mobile-studio-navigation-header")).toBeNull();
     expect(query("topbar-global-navigation")).not.toBeNull();
     expect(query("topbar-home-button")?.nextElementSibling).toBe(query("topbar-team-selector"));
@@ -200,6 +231,22 @@ describe("StudioTopBar mobile navigation integration", () => {
     expect(props.mobileNavigation!.history.goForward).not.toHaveBeenCalled();
   });
 
+  it("dismisses global history when input posture changes at the same narrow width", async () => {
+    mocks.controls.mockReturnValue({ ...mocks.controls(), navigationPage: "home" });
+    props.mobileNavigation!.history.canGoBack = true;
+    await render(); await click("topbar-history-menu-trigger");
+    expect(query("topbar-history-menu")).not.toBeNull();
+    mocks.posture.mockReturnValue({ isLargeScreen: false, showTouchBottomDock: false });
+    await render();
+    expect(query("topbar-history-menu")).toBeNull();
+    expect(query("studio-mobile-history-bar")).not.toBeNull();
+    mocks.posture.mockReturnValue({ isLargeScreen: false, showTouchBottomDock: true });
+    await render();
+    expect(query("topbar-history-menu-trigger")?.getAttribute("aria-expanded")).toBe("false");
+    expect(query("topbar-history-menu")).toBeNull();
+    expect(props.mobileNavigation!.history.goBack).not.toHaveBeenCalled();
+  });
+
   it("keeps chronological Back distinct from opening a parent conversation", async () => {
     props.mobileNavigation!.history.canGoBack = true;
     await render(); await click("mobile-header-back");
@@ -292,13 +339,17 @@ describe("StudioTopBar mobile navigation integration", () => {
     expect(query("mobile-studio-navigation-header")).toBeNull();
   });
 
-  it("retains the existing non-touch compact header when the posture is not touch", async () => {
+  it("keeps Forward in the shared compact menu without an extra native history row", async () => {
     mocks.posture.mockReturnValue({ isLargeScreen: false, showTopbarHomeButton: false, showTouchBottomDock: false });
     await render();
-    expect(query("mobile-studio-navigation-header")).toBeNull();
-    expect(query("topbar-tab-selector")).not.toBeNull();
-    expect(query("topbar-sidebar-toggle")).not.toBeNull();
-    expect(query("studio-mobile-history-bar")).not.toBeNull();
+    expect(query("mobile-studio-navigation-header")).not.toBeNull();
+    expect(query("studio-mobile-history-bar")).toBeNull();
     expect(query("topbar-home-button")).toBeNull();
+    props.mobileNavigation!.history.canGoForward = true;
+    await render();
+    await click("mobile-header-more");
+    await click("mobile-header-forward");
+    expect(props.mobileNavigation!.history.goForward).toHaveBeenCalledOnce();
+    expect(props.mobileNavigation!.history.goBack).not.toHaveBeenCalled();
   });
 });

@@ -2,6 +2,8 @@ import type { SettingsTab, StudioPanel } from "../screens/studio/types";
 
 export interface StudioNavigationOptions {
   forceNewVisit?: boolean;
+  /** Replace the URL entry while giving the destination a fresh scroll identity. */
+  replace?: boolean;
   /** Opaque reference to an account-owned, in-memory search checkpoint. */
   searchOriginToken?: string;
 }

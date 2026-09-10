@@ -1,11 +1,12 @@
 import { cloneElement, isValidElement, useState, type ReactNode } from "react";
 import { DialogTrigger } from "react-aria-components";
-import { ChatLines, Lock, MoreHoriz, NavArrowLeft, NavArrowRight, NavArrowUp, Settings, SidebarExpand } from "iconoir-react";
+import { ChatLines, Lock, MoreHoriz, NavArrowRight, NavArrowUp, Settings, SidebarExpand } from "iconoir-react";
 import { Button, IconButton, type ButtonProps } from "../../../components/Button";
 import { EntityRow } from "../../../components/EntityRow";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import type { StudioHistory } from "../../../navigation/useStudioHistory";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
+import { MobileWorkspaceBackButton } from "./MobileWorkspaceBackButton";
 
 export interface MobileStudioNavigationHeaderProps {
   history: StudioHistory;
@@ -56,17 +57,7 @@ export function MobileStudioNavigationHeader({
 
   return (
     <div className="flex min-w-0 items-center gap-1 px-3 py-1" data-testid="mobile-studio-navigation-header">
-      <Button
-        variant="ghost"
-        size="icon"
-        className={`${TOUCH_TARGET} shrink-0 gap-1 px-2`}
-        aria-label={history.canGoBack ? "Go back" : "Open chats"}
-        data-testid={history.canGoBack ? "mobile-header-back" : "mobile-header-open-chats"}
-        onPress={history.canGoBack ? history.goBack : onOpenChats}
-      >
-        {history.canGoBack ? <NavArrowLeft className="h-5 w-5" aria-hidden="true" /> : <ChatLines className="h-5 w-5" aria-hidden="true" />}
-        <span className="text-sm">{history.canGoBack ? "Back" : "Chats"}</span>
-      </Button>
+      <MobileWorkspaceBackButton history={history} onOpenChats={onOpenChats} />
       <Button
         variant="ghost"
         size="icon"

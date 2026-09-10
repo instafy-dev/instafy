@@ -1960,7 +1960,7 @@ function StudioLayoutInner() {
       onProjectsPress={handleMobileDockOpenProjects}
     />
   ) : null;
-  const mobileTopbarNavigation = showTouchBottomDock ? {
+  const mobileTopbarNavigation = !isLargeScreen ? {
     visitKey: location.key,
     history: mobileHistory,
     onOpenPicker: handleToggleSidebar,

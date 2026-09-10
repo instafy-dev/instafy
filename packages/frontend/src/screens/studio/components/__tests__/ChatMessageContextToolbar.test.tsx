@@ -5,6 +5,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatMessageContextToolbar } from "../ChatMessageContextToolbar";
 import { StudioSearchReturnProvider } from "../StudioSearchReturnContext";
 
+const layout = vi.hoisted(() => ({ isLargeScreen: true }));
+vi.mock("../../useStudioDesktopLayout", () => ({ useStudioDesktopLayout: () => layout.isLargeScreen }));
+
 describe("message context navigation", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -22,6 +25,7 @@ describe("message context navigation", () => {
     document.body.appendChild(container);
     root = createRoot(container);
     vi.clearAllMocks();
+    layout.isLargeScreen = true;
   });
   afterEach(async () => {
     await act(async () => root.unmount());
@@ -36,6 +40,19 @@ describe("message context navigation", () => {
     await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="chat-message-return-latest"]')!.click());
     expect(returnToLatest).toHaveBeenCalledOnce();
     expect(returnToResults).not.toHaveBeenCalled();
+  });
+
+  it("leaves search return to the compact header and removes the toolbar at latest", async () => {
+    layout.isLargeScreen = false;
+    await render("owned-checkpoint");
+    expect(container.querySelector('[data-testid="chat-back-to-search-results"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chat-message-context"]')?.textContent).toBe("Search result");
+    expect(container.querySelector('[data-testid="chat-message-return-latest"]')?.textContent).toBe("Jump to latest");
+    await render("owned-checkpoint", false);
+    expect(container.textContent).toBe("");
+    layout.isLargeScreen = true;
+    await render("owned-checkpoint", false);
+    expect(container.querySelector('[data-testid="chat-back-to-search-results"]')).not.toBeNull();
   });
 
   it("keeps Back to results accessible after returning to latest history", async () => {

@@ -16,6 +16,7 @@ describe("verified return to search results", () => {
   let location: ReturnType<typeof useLocation>;
   let navigate: NavigateFunction;
   let go: ReturnType<typeof useStudioNavigation>;
+  let beforeNavigation: ((action: () => void) => void) | undefined;
   let history: ReturnType<typeof useStudioSearchHistory>;
   let sidebar: ReturnType<typeof useMobileSidebarHistory>;
   const sourceSearch = "?projectId=space-a&conversationId=chat-a";
@@ -27,7 +28,7 @@ describe("verified return to search results", () => {
   function Harness() {
     location = useLocation();
     navigate = useNavigate();
-    go = useStudioNavigation();
+    go = useStudioNavigation(beforeNavigation);
     const visitKey = getStudioVisitKey(location);
     const projectId = new URLSearchParams(location.search).get("projectId");
     const sidebarScopeKey = viewer ? `${viewer}:${projectId ?? "no-project"}` : null;
@@ -63,6 +64,7 @@ describe("verified return to search results", () => {
   beforeEach(async () => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     viewer = "viewer-a";
+    beforeNavigation = undefined;
     window.history.replaceState({ idx: 0, key: "source", usr: null }, "", `/studio${sourceSearch}`);
     container = document.createElement("div");
     document.body.appendChild(container);
@@ -76,23 +78,96 @@ describe("verified return to search results", () => {
     delete (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT;
   });
 
-  it("returns past a message result and Return to latest to the exact results visit", async () => {
+  it("replaces an anchored message so Back restores results and Forward opens latest", async () => {
     const token = await openResult();
+    const messageVisit = getStudioVisitKey(location);
     expect(history.originToken).toBe(token);
     expect(location.state).toEqual({ instafySearchOriginToken: token });
+    await act(async () => navigate(`${location.pathname}${location.search}&conversationControllerId=controller-b`, {
+      replace: true, state: { ...location.state, instafyVisitKey: messageVisit },
+    }));
     await act(async () => {
-      go({ kind: "conversation", projectId: "space-a", conversationId: "chat-b" },
-        { searchOriginToken: history.originToken ?? undefined });
+      go({ kind: "conversation", projectId: "space-a", conversationId: "chat-b", conversationControllerId: "controller-b" },
+        { replace: true, searchOriginToken: history.originToken ?? undefined });
     });
-    expect(window.history.state.idx).toBe(2);
+    expect(window.history.state.idx).toBe(1);
+    expect(getStudioVisitKey(location)).not.toBe(messageVisit);
+    expect(location.state).toEqual({ instafySearchOriginToken: token });
+    expect(new URLSearchParams(location.search).has("messageId")).toBe(false);
+    const latestVisit = getStudioVisitKey(location);
     expect(history.originToken).toBe(token);
-    await act(async () => history.returnToResults());
+    await act(async () => navigate(-1));
     await waitFor(assertAtResults);
-    await act(async () => navigate(2));
-    await waitFor(() => expect(window.history.state.idx).toBe(2));
+    await act(async () => navigate(1));
+    await waitFor(() => expect(window.history.state.idx).toBe(1));
+    expect(getStudioVisitKey(location)).toBe(latestVisit);
+    expect(new URLSearchParams(location.search).has("messageId")).toBe(false);
     expect(history.originToken).toBe(token);
+    const move = vi.spyOn(window.history, "go");
     await act(async () => history.returnToResults());
+    expect(move).toHaveBeenCalledWith(-1);
     await waitFor(assertAtResults);
+  });
+
+  it("replaces a direct message link without inventing a result origin or a previous visit", async () => {
+    await act(async () => navigate("/studio?projectId=space-a&conversationId=chat-b&messageId=message-b", {
+      replace: true, state: { instafyVisitKey: "direct-message" },
+    }));
+    await act(async () => go({ kind: "conversation", projectId: "space-a", conversationId: "chat-b" }, { replace: true }));
+    expect(window.history.state.idx).toBe(0);
+    expect(getStudioVisitKey(location)).not.toBe("direct-message");
+    expect(location.state).toBeNull();
+    expect(new URLSearchParams(location.search).has("messageId")).toBe(false);
+    expect(history.originToken).toBeNull();
+  });
+
+  it.each([false, true])("does not replace the search source from a stale latest action (Back rendered: %s)", async (rendered) => {
+    const token = await openResult();
+    const staleGo = go;
+    if (rendered) {
+      await act(async () => navigate(-1));
+      await waitFor(assertAtResults);
+    } else {
+      window.history.replaceState({ idx: 0, key: "source", usr: null }, "", `/studio${sourceSearch}`);
+    }
+    await act(async () => staleGo({ kind: "conversation", projectId: "space-a", conversationId: "chat-b" },
+      { replace: true, searchOriginToken: token }));
+    expect(window.location.search).toBe(sourceSearch);
+    expect(window.history.state).toMatchObject({ idx: 0, key: "source" });
+  });
+
+  it("replaces only the message destination after closing its nested drawer", async () => {
+    const token = await openResult();
+    const messageVisit = getStudioVisitKey(location);
+    await act(async () => sidebar.setMobileSidebarOpen(true));
+    await act(async () => sidebar.mobileSidebarNavigation.openView("more"));
+    const replaceLatest = go;
+    await act(async () => sidebar.runAfterSidebarClose(() => replaceLatest(
+      { kind: "conversation", projectId: "space-a", conversationId: "chat-b" },
+      { replace: true, searchOriginToken: token },
+    )));
+    await waitFor(() => expect(new URLSearchParams(location.search).has("messageId")).toBe(false));
+    expect(window.history.state.idx).toBe(1);
+    expect(getStudioVisitKey(location)).not.toBe(messageVisit);
+    expect(history.originToken).toBe(token);
+    expect(sidebar.mobileSidebarOpen).toBe(false);
+    await act(async () => navigate(-1));
+    await waitFor(assertAtResults);
+  });
+
+  it("rejects stale replacement before navigation can close restored search", async () => {
+    const continuation = vi.fn((action: () => void) => action());
+    beforeNavigation = continuation;
+    await render();
+    const token = await openResult();
+    const staleGo = go;
+    await act(async () => navigate(-1));
+    await waitFor(assertAtResults);
+    continuation.mockClear();
+    await act(async () => staleGo({ kind: "conversation", projectId: "space-a", conversationId: "chat-b" },
+      { replace: true, searchOriginToken: token }));
+    expect(continuation).not.toHaveBeenCalled();
+    assertAtResults();
   });
 
   it("does not offer a return for a direct link or ordinary navigation", async () => {

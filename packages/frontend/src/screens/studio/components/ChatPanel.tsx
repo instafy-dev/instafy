@@ -646,7 +646,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
   const returnToLatestMessages = useCallback(() => {
     if (!activeProjectId || !activeConversationId) return;
     goToStudio({ kind: "conversation", projectId: activeProjectId, conversationId: activeConversationId,
-      conversationControllerId: activeConversationControllerId }, { searchOriginToken: searchReturn.originToken ?? undefined });
+      conversationControllerId: activeConversationControllerId }, { replace: true, searchOriginToken: searchReturn.originToken ?? undefined });
   }, [activeProjectId, activeConversationId, activeConversationControllerId, goToStudio, searchReturn.originToken]);
   const {
     browserSessionOpen,

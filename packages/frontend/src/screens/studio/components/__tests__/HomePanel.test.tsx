@@ -2,6 +2,7 @@
 
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { BrowserRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConversationState } from "../../../../conversations/ConversationsProvider";
 import type { NotificationInboxItem } from "../../../../sdk/instafy";
@@ -34,7 +35,10 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../../useHomeActivity", () => ({ useHomeActivity: () => mocks.activity }));
 vi.mock("../../useStudioDesktopLayout", () => ({ useStudioDesktopLayout: () => false }));
-vi.mock("react-router-dom", () => ({ useNavigate: () => mocks.navigate }));
+vi.mock("react-router-dom", async (importOriginal) => ({
+  ...await importOriginal<typeof import("react-router-dom")>(),
+  useNavigate: () => mocks.navigate,
+}));
 vi.mock("../../../../projects/useProjects", () => ({
   useProjects: () => ({
     projectList: [{ id: "project-personal", name: "My space", orgId: null, orgName: "Personal" }],
@@ -137,7 +141,7 @@ describe("HomePanel activity states", () => {
   });
 
   async function render(props: ComponentProps<typeof HomePanel> = {}) {
-    await act(async () => root.render(<HomePanel {...props} />));
+    await act(async () => root.render(<BrowserRouter><HomePanel {...props} /></BrowserRouter>));
   }
 
   function query<T extends HTMLElement = HTMLElement>(testId: string): T | null {

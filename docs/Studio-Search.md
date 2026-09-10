@@ -28,13 +28,22 @@ composer or other control is preserved. The temporary tint fades after three
 seconds, while keyboard focus remains visible until it moves. The outline has
 space around the text, supports forced colors and respects reduced motion.
 **Back to results** restores the query, scope, loaded result pages and reading
-position. It stays available after **Return to latest**, which moves to ordinary
-live chat history. Browser Back and Forward retain their normal visit-by-visit
-behavior; Electron and native shells also expose app history controls on the
-search screen. Direct message links show **Earlier message** without inventing
-a search to return to. These checkpoints live only in the current Studio session
-and are cleared on reload or account change. Results are fetched again when
-returning, so a checkpoint does not bypass authorization.
+position. Below 900px, this appears as **Results** in the existing workspace
+header, replacing its Back/Chats action. Touch and compact mouse layouts use the
+same rule: Results when there is a saved search, Back when there is a previous
+visit, and Chats for direct entry without history. Forward, tab switching and
+other secondary actions are available in **More**. Drawer dismissal and parent
+conversation navigation remain separate actions.
+
+**Jump to latest** moves to ordinary live chat history without adding a Back
+step. It replaces the older-message destination, so Back returns to the search
+and Forward opens latest messages. Results remains available in the compact
+header, while the temporary message toolbar disappears. Electron and native
+shells also expose app history controls on the search screen. Direct message
+links show **Earlier message** without inventing a search to return to. These
+checkpoints live only in the current Studio session and are cleared on reload
+or account change. Results are fetched again when returning, so a checkpoint
+does not bypass authorization.
 
 The conversation's presence controls stay fixed while message content fades
 beneath them. Exact-message reveals land below that fade, with room around the

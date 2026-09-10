@@ -104,6 +104,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation, newChatInSide
   const controllerProjectMissing = runtime.controllerProjectMissing || projectAccessBlocked;
   const shouldShowNewChat = !newChatInSidebar && showChatActions && Boolean(onStartNewConversation);
   const { isLargeScreen, showTouchBottomDock } = useStudioNavigationPosture();
+  const hasCompactNavigation = !isLargeScreen && Boolean(mobileNavigation);
   const isGlobalPage = navigationPage !== "workspace";
   const globalHistoryAvailable = !isLargeScreen && isGlobalPage && showTouchBottomDock &&
     Boolean(mobileNavigation?.history.canGoBack || mobileNavigation?.history.canGoForward);
@@ -111,8 +112,8 @@ export function StudioTopBar({ notificationBell, mobileNavigation, newChatInSide
 
   useEffect(() => {
     setHistoryMenuOpen(false);
-    if (showTouchBottomDock) setTabMenuOpen(false);
-  }, [activeProjectId, currentUserId, isLargeScreen, mobileNavigation?.visitKey, navigationPage, showTouchBottomDock]);
+    if (hasCompactNavigation) setTabMenuOpen(false);
+  }, [activeProjectId, currentUserId, hasCompactNavigation, mobileNavigation?.visitKey, navigationPage, showTouchBottomDock]);
 
   const activeWorkspaceTab = useMemo(() => {
     if (!activeTabId) {
@@ -552,7 +553,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation, newChatInSide
             </IconButton>
           </div>
         </div>
-      ) : showTouchBottomDock && mobileNavigation ? (
+      ) : mobileNavigation ? (
         <StudioNewChatButton
           dismissalKey={mobileNavigation.visitKey}
           renderTrigger={({ onNewChat, onNewPrivateChat }) => (
@@ -630,7 +631,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation, newChatInSide
           </div>
         </div>
       )}
-      {!isLargeScreen && !showTouchBottomDock && studioHistoryControlsAvailable() ? (
+      {!isLargeScreen && !showTouchBottomDock && (!hasCompactNavigation || isGlobalPage) && studioHistoryControlsAvailable() ? (
         <div className={`flex items-center border-t border-slate-200/70 px-3 ${DARK_DIVIDER_BORDER_CLASS}`} data-testid="studio-mobile-history-bar">
           <StudioHistoryControls />
         </div>
