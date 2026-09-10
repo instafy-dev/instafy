@@ -519,8 +519,8 @@
   border-color: var(--color-primary-500);
 }
 
-/* The persistent context belongs to the header. Only typing needs a field
-   outline; focusing either scope picker keeps its own button indicator. */
+/* The persistent context uses a background change for input focus;
+   scope pickers retain their own button focus indicators. */
 .studio-search-control[data-search-persistent] .studio-search-field {
   border-color: transparent;
   box-shadow: none;
@@ -534,10 +534,6 @@
 .dark .studio-search-control[data-search-persistent] .studio-search-field:hover,
 .dark .studio-search-control[data-search-persistent] .studio-search-field:has(input:focus) {
   background: var(--color-studio-dark-control-hover);
-}
-
-.studio-search-control[data-search-persistent] .studio-search-field:has(input:focus) {
-  box-shadow: inset 0 0 0 1px var(--color-primary-500);
 }
 
 .dark .studio-search-trigger:hover,
