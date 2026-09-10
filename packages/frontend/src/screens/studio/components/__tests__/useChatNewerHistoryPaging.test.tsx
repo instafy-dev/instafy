@@ -402,4 +402,137 @@ describe("intent-gated newer history paging", () => {
     await wheel();
     expect(nextLoad).toHaveBeenCalledTimes(2);
   });
+
+  describe("reaching live history", () => {
+    let onReachLatest: ReturnType<typeof vi.fn>;
+
+    beforeEach(async () => {
+      onReachLatest = vi.fn();
+      options = { ...options, hasNewer: false, onReachLatest };
+      await render();
+    });
+
+    it.each([200, 685, 797])("does not exit at scrollTop %s above the actual final bottom", async top => {
+      metrics.scrollTop = top;
+      await wheel();
+      await scroll();
+      expect(onReachLatest).not.toHaveBeenCalled();
+      expect(loadNewer).not.toHaveBeenCalled();
+    });
+
+    it("completes once at the actual bottom even while routing lags across rerenders", async () => {
+      metrics.scrollTop = 798.5;
+      await wheel();
+      expect(onReachLatest).toHaveBeenCalledOnce();
+      await key("End");
+      await scroll();
+      options = { ...options, loading: true };
+      await render();
+      options = { ...options, loading: false, routeKey: "drawer-route" };
+      setRoute(options.routeKey);
+      await render();
+      await wheel();
+      expect(onReachLatest).toHaveBeenCalledOnce();
+      expect(loadNewer).not.toHaveBeenCalled();
+    });
+
+    it("does not exit from a near-latest reveal, restoration, resizing or rerendering alone", async () => {
+      metrics.scrollTop = 800;
+      await scroll();
+      await emit(new Event("resize"), window);
+      await render();
+      await scroll();
+      expect(onReachLatest).not.toHaveBeenCalled();
+      await key("End");
+      expect(onReachLatest).toHaveBeenCalledOnce();
+    });
+
+    it("pages without exiting and waits for the reader to traverse the appended final rows", async () => {
+      options = { ...options, hasNewer: true };
+      await render();
+      metrics.scrollTop = 800;
+      await wheel();
+      expect(loadNewer).toHaveBeenCalledOnce();
+      expect(onReachLatest).not.toHaveBeenCalled();
+      options = { ...options, loading: true };
+      await render();
+      metrics.scrollHeight = 1400;
+      options = { ...options, loading: false, hasNewer: false };
+      await render();
+      await scroll();
+      expect(onReachLatest).not.toHaveBeenCalled();
+      await wheel();
+      metrics.scrollTop = 1080;
+      await scroll();
+      expect(onReachLatest).not.toHaveBeenCalled();
+      metrics.scrollTop = 1200;
+      await scroll();
+      expect(onReachLatest).toHaveBeenCalledOnce();
+      expect(loadNewer).toHaveBeenCalledOnce();
+    });
+
+    it("requires fresh input after an underfilled final page commits", async () => {
+      metrics.scrollTop = 0;
+      metrics.scrollHeight = 150;
+      options = { ...options, hasNewer: true };
+      await render();
+      await wheel();
+      expect(loadNewer).toHaveBeenCalledOnce();
+      options = { ...options, loading: true };
+      await render();
+      metrics.scrollHeight = 190;
+      options = { ...options, loading: false, hasNewer: false };
+      await render();
+      await scroll();
+      expect(onReachLatest).not.toHaveBeenCalled();
+      await wheel();
+      expect(onReachLatest).toHaveBeenCalledOnce();
+    });
+
+    it.each(["loading", "error", "hidden", "reading", "stale"] as const)("does not complete while %s", async state => {
+      metrics.scrollTop = 800;
+      options = { ...options, loading: state === "loading", error: state === "error" ? "History unavailable" : null };
+      if (state === "hidden") container.querySelector('[data-testid="ancestor"]')!.setAttribute("hidden", "");
+      if (state === "reading") isReadingReady.mockReturnValue(false);
+      if (state === "stale") setRoute("other-route");
+      await render();
+      await wheel();
+      await key("End");
+      await scroll();
+      expect(onReachLatest).not.toHaveBeenCalled();
+    });
+
+    it("does not carry final-bottom intent into another account or visit", async () => {
+      metrics.scrollTop = 200;
+      await wheel();
+      options = { ...options, visitKey: "viewer-b:space-b:chat-b:visit-b", routeKey: "route-b" };
+      setRoute(options.routeKey);
+      await render();
+      metrics.scrollTop = 800;
+      await scroll();
+      expect(onReachLatest).not.toHaveBeenCalled();
+      await wheel();
+      expect(onReachLatest).toHaveBeenCalledOnce();
+      options = { ...options, visitKey: "viewer-a:space-a:chat-a:visit-a", routeKey: "route-a" };
+      setRoute(options.routeKey);
+      await render();
+      await wheel();
+      expect(onReachLatest).toHaveBeenCalledTimes(2);
+    });
+
+    it("attaches final-bottom handling when the callback becomes available and uses its latest value", async () => {
+      options = { ...options, onReachLatest: undefined };
+      await render();
+      metrics.scrollTop = 800;
+      await wheel();
+      const latestCallback = vi.fn();
+      options = { ...options, onReachLatest };
+      await render();
+      options = { ...options, onReachLatest: latestCallback };
+      await render();
+      await wheel();
+      expect(onReachLatest).not.toHaveBeenCalled();
+      expect(latestCallback).toHaveBeenCalledOnce();
+    });
+  });
 });

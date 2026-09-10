@@ -1,6 +1,7 @@
 import { useLayoutEffect, useMemo, useRef, type RefObject } from "react";
 
 const NEAR_BOTTOM_PX = 120;
+const REACHED_LATEST_PX = 2;
 const INTENT_LIFETIME_MS = 750;
 
 interface NewerHistoryPagingOptions {
@@ -13,23 +14,27 @@ interface NewerHistoryPagingOptions {
   scrollContainerRef: RefObject<HTMLDivElement | null>;
   isReadingReady: () => boolean;
   loadNewer: () => void | Promise<unknown>;
+  onReachLatest?: () => void;
 }
 
 function isEditing(target: EventTarget | null): boolean {
   return target instanceof Element && Boolean(target.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"]'));
 }
 
-/** Paging requires fresh downward input; target reveal, restoration and layout
- * scroll events alone never authorize another read. The data hook owns I/O. */
+/** Paging and returning to live history require fresh downward input; target
+ * reveal, restoration and layout scroll events alone never authorize either. */
 export function useChatNewerHistoryPaging(options: NewerHistoryPagingOptions) {
   const { visitKey, routeKey, enabled, hasNewer, loading, error, scrollContainerRef } = options;
-  const generation = useMemo(() => ({ visitKey, routeKey, enabled, hasNewer, loading, error }), [visitKey, routeKey, enabled, hasNewer, loading, error]);
+  const canReachLatest = Boolean(options.onReachLatest);
+  const generation = useMemo(() => ({ visitKey, routeKey, enabled, hasNewer, loading, error, canReachLatest }), [visitKey, routeKey, enabled, hasNewer, loading, error, canReachLatest]);
   const latest = useRef({ options, generation });
   latest.current = { options, generation };
+  const completion = useRef({ visitKey, done: false });
 
   useLayoutEffect(() => {
+    if (completion.current.visitKey !== visitKey) completion.current = { visitKey, done: false };
     const node = scrollContainerRef.current;
-    if (!node || !enabled || !visitKey || !hasNewer || loading || error) return;
+    if (!node || !enabled || !visitKey || (!hasNewer && !canReachLatest) || loading || error) return;
     let disposed = false;
     let pending = false;
     let failed = false;
@@ -41,16 +46,24 @@ export function useChatNewerHistoryPaging(options: NewerHistoryPagingOptions) {
       && !node.closest('[hidden], [inert], [aria-hidden="true"]');
     const ready = () => {
       const current = latest.current;
-      return !disposed && current.generation === generation && enabled && Boolean(visitKey) && hasNewer
+      return !disposed && current.generation === generation && enabled && Boolean(visitKey) && (hasNewer || canReachLatest)
+        && !completion.current.done
         && !loading && !error && !pending && !failed && visible()
         && (window.history.state?.key ?? "default") === routeKey && current.options.isReadingReady();
     };
     const requestIfNearBottom = () => {
       if (!armed || armed.until < Date.now() || !ready()) { armed = null; return; }
-      if (node.scrollHeight - node.clientHeight - node.scrollTop > NEAR_BOTTOM_PX) return;
+      if (node.scrollHeight - node.clientHeight - node.scrollTop > (hasNewer ? NEAR_BOTTOM_PX : REACHED_LATEST_PX)) return;
       armed = null;
       if (touch) touch.used = true;
       if (drag) drag.used = true;
+      if (!hasNewer) {
+        // Loading the final page reset its old gesture. Only fresh input at the
+        // committed end can exit, once even if routing is waiting on a drawer.
+        completion.current.done = true;
+        latest.current.options.onReachLatest?.();
+        return;
+      }
       pending = true;
       try {
         void Promise.resolve(latest.current.options.loadNewer()).then(
@@ -160,5 +173,5 @@ export function useChatNewerHistoryPaging(options: NewerHistoryPagingOptions) {
       window.visualViewport?.removeEventListener("resize", reset);
       node.ownerDocument.removeEventListener("visibilitychange", reset);
     };
-  }, [enabled, error, generation, hasNewer, loading, routeKey, scrollContainerRef, visitKey]);
+  }, [canReachLatest, enabled, error, generation, hasNewer, loading, routeKey, scrollContainerRef, visitKey]);
 }

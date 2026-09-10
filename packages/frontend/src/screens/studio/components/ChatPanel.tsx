@@ -1966,6 +1966,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     scrollContainerRef,
     isReadingReady: isHistoryReadingReady,
     loadNewer: messageContext.loadNewer,
+    onReachLatest: returnToLatestMessages,
   });
 
   useConversationNotificationRead({

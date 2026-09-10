@@ -40,15 +40,18 @@ the next page while preserving the reading position. Search-result reveals and
 restored visits do not start additional newer-page requests by themselves. If a
 newer page fails to load, an inline **Retry** action retries that same page.
 **Latest ↓** below the messages jumps directly to ordinary live chat history
-without adding a Back step. Latest remains available after all pages are loaded
-or a history request fails. It replaces the older-message destination,
-so Back returns to the search and Forward opens latest messages. Results stays
+without adding a Back step. After all newer pages have loaded, scrolling to the
+actual end also resumes live chat and removes Latest automatically. Loading the
+last page alone does not skip the remaining messages. Latest stays available
+while reading history or if a request fails. Both ways of resuming live chat
+replace the older-message destination, so Back returns to the search and Forward
+opens latest messages. Results stays
 in the compact header; history controls stay with the transcript. Electron and
 native shells also expose app history controls on the search screen. Direct
 message links offer the same history controls without inventing a search to
 return to. These checkpoints live only in the current Studio session and are
-cleared on reload or account change. Results are fetched again when returning, so a checkpoint
-does not bypass authorization.
+cleared on reload or account change. Results are fetched again when returning,
+so a checkpoint does not bypass authorization.
 
 The conversation's presence controls stay fixed while message content fades
 beneath them. Exact-message reveals land below that fade, with room around the
