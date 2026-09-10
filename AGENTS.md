@@ -117,9 +117,13 @@ around this.
 ## Release automation
 
 The protected-main image workflow in `.github/workflows/continuous-image-publication.yml`
-publishes immutable service and runtime images only after the exact public-main commit passes
-the required Public Build. It also refreshes an exact commit manifest when fewer than 14 days of
-retention remain. Manifests are retained for 90 days; mutable image tags are not release
+dispatches immutable service and runtime image publishers only after the exact public-main commit
+passes Public Build. Each five-minute reconciliation checks once and releases its worker; pending
+Build or publisher work is deferred to the next six-hour scheduled pass (or an explicit exact-main
+dispatch). A successful coordinator is not publication proof: consumers still require successful
+child publishers and their sealed exact-commit manifests. Fresh manifests must retain at least
+14 days of their 90-day retention. A sealed publication with a stale or missing manifest fails
+closed rather than attempting to overwrite an immutable release. Mutable tags are not release
 authority. Image publication makes an artifact deployable but does not deploy the hosted product.
 
 Hosted rollout authority lives in the private operations repository. Public CI must not receive
