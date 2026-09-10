@@ -13,6 +13,21 @@ const jobs = [
   { key: "shared-studio", label: "public-shared-browser-studio", name: "Shared Browser Studio journey", minutes: 30, script: "shared-browser-studio-e2e.mjs" },
 ];
 const section = key => workflow.split(`\n  ${key}:\n`)[1].split(/\n  [\w-]+:\n/u)[0];
+function cacheStep(key, name) {
+  const text = section(key), marker = `      - name: ${name}\n`, start = text.indexOf(marker);
+  assert.ok(start >= 0);
+  const end = text.indexOf('\n      - name: ', start + marker.length);
+  return text.slice(start, end < 0 ? text.length : end);
+}
+function withoutRestoreOnlyCaches(text) {
+  for (const job of jobs.filter(job => job.script)) {
+    const restore = cacheStep(job.key, 'Restore compiler cache without saving');
+    const hosted = cacheStep(job.key, 'Restore architecture-specific compiler cache');
+    text = text.replace(restore + '\n', '').replace(hosted,
+      hosted.replace("        if: runner.environment == 'github-hosted'\n", ''));
+  }
+  return text;
+}
 function context(event = "pull_request") {
   const ref = event === "pull_request" ? "refs/pull/11/merge" : "refs/heads/main";
   return { repository: "instafy-dev/instafy", repository_id: "1001", run_id: "2002", run_attempt: "3",
@@ -100,7 +115,7 @@ test("only the two Shared startup steps select the browser-test profile; all pre
   }
   // Normalize only the explicit profile opt-ins. All commands, permissions,
   // selectors, timeouts, assertions, cleanup and aggregate bytes stay intact.
-  const original = workflow.replaceAll(selectedStartup, originalStartup);
+  const original = withoutRestoreOnlyCaches(workflow).replaceAll(selectedStartup, originalStartup);
   assert.equal(createHash("sha256").update(original).digest("hex"),
     "39492b8b3c32d931444180ac4e7e52d77b6aa8eed9937b55d6d5bad7ee8aa0ec");
 });
@@ -130,6 +145,29 @@ test("Shared caches isolate operating system, architecture and child compiler ta
     assert.ok(source.includes(`key: shared-browser-cargo-v1-\${{ runner.os }}-\${{ runner.arch }}-${job.label}-\${{ hashFiles('packages/*/Cargo.lock') }}`));
     assert.doesNotMatch(source, /restore-keys:|supabase-postgres-image-\$\{/u);
   }
+});
+test('Shared self-hosted compiler caches restore only, preserving all other reviewed workflow bytes', () => {
+  for (const job of jobs.filter(job => job.script)) {
+    const restore = cacheStep(job.key, 'Restore compiler cache without saving');
+    const hosted = cacheStep(job.key, 'Restore architecture-specific compiler cache');
+    assert.match(restore, /^        if: runner\.environment == 'self-hosted'$/mu);
+    assert.match(hosted, /^        if: runner\.environment == 'github-hosted'$/mu);
+    assert.match(restore, /^        uses: actions\/cache\/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0$/mu);
+    assert.match(hosted, /^        uses: actions\/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0$/mu);
+    assert.equal(restore.split('        with:\n')[1].trimEnd(), hosted.split('        with:\n')[1].trimEnd());
+    for (const environment of ['self-hosted', 'github-hosted', '', 'unknown']) {
+      for (const [part, selected] of [[restore, 'self-hosted'], [hosted, 'github-hosted']]) {
+        assert.equal(vm.runInNewContext(part.match(/^        if: (.+)$/mu)[1], { runner: { environment } }, { timeout: 1000 }), environment === selected);
+      }
+    }
+    assert.equal((section(job.key).match(/uses: actions\/cache(?:\/\w+)?@/gu) ?? []).length, 3);
+    assert.doesNotMatch(section(job.key), /actions\/cache\/save@|continue-on-error|save-always|lookup-only/u);
+  }
+  assert.equal((workflow.match(/uses: actions\/cache\/restore@/gu) ?? []).length, 2);
+  // Complete browser-e2e.yml at combined source 2ef4dde, including image caches,
+  // every fixture/assertion, strict aggregate and the ordinary browser lanes.
+  assert.equal(createHash('sha256').update(withoutRestoreOnlyCaches(workflow)).digest('hex'),
+    '1e3cc8932d4cc78e1eb64ce389bd2b959362bb22bbaa92d155cf6743c5fd19c8');
 });
 function qualify(job, mutate = () => {}, badDaemon) {
   const source = section(job.key), programs = [...source.matchAll(/          node <<'NODE'\n([\s\S]*?)          NODE\n/gu)];
