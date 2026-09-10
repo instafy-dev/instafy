@@ -267,7 +267,11 @@ no private environment directory, and native Rust/C build tools. Those checks
 do not prove that native libraries, downloads or workload timings are ready.
 Each self-hosted child then installs the fixed missing native package set
 (`clang`, `lld`, `cmake`, `libcap-dev`, `protobuf-compiler`) in a visible,
-five-minute GitHub step inside the unchanged 30-minute job. Hosted jobs and
+five-minute GitHub step inside the unchanged 30-minute job. The package list
+stays unchanged. The install waits at most 120 seconds for the
+DPkg lock if Ubuntu's automatic updater is finishing; it never deletes lock
+files, kills the updater or skips package verification. Lock exhaustion still
+fails within the existing five-minute step. Hosted jobs and
 aggregates do not run that step. The manager must first qualify only APT's
 fixed proxy configuration in the fresh guest; package installation stays in
 the workflow, without changing the base image, repository trust or TLS rules.
@@ -464,6 +468,13 @@ Node22, Xvfb and xauth before checkout; the unchanged
 Playwright installation obtains Chromium and system libraries. The self-hosted
 Personal job also explicitly installs Ubuntu24.04's GTK3 runtime package for
 Electron before building its fixture. Restricted
+workers also prepare the exact locked Electron binary with
+`pnpm --filter @instafy/desktop-app exec install-electron` before the test process.
+[Electron 42 and newer download lazily](https://www.electronjs.org/blog/electron-42-0), so a successful package install alone
+does not prove that binary exists. The five-minute preparation step enables
+Node's environment-proxy support (available since Node 22.21); it uses the installed package and its bundled
+checksums, not an unpinned `npx` download. Proxy settings still do not enter the
+scrubbed Playwright or Electron fixture environments. Restricted
 workers must configure the disposable guest's APT proxy too: sudo does not
 preserve the browser installer's proxy environment. Keep TLS and browser
 sandbox protections intact. No template, host paths or proxy credentials belong

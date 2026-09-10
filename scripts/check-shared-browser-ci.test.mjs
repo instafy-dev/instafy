@@ -119,6 +119,11 @@ test("each Shared child preserves a complete independent dependency, migrated au
   }
   assert.doesNotMatch(workflow, /secrets:|secrets\.|NODE_OPTIONS|NODE_TLS_REJECT_UNAUTHORIZED|HTTP_PROXY:|HTTPS_PROXY:/u);
 });
+function withoutPersonalElectronPreparation(source) {
+  const step = "      - name: Install the locked Electron binary\n        timeout-minutes: 5\n        env:\n          NODE_USE_ENV_PROXY: \"1\"\n        run: pnpm --filter @instafy/desktop-app exec install-electron\n";
+  assert.equal(source.split(step).length - 1, 1);
+  return source.replace(step, "");
+}
 test("only the two Shared startup steps select the browser-test profile; all previous workflow bytes remain", () => {
   const originalStartup = "      - name: Start disposable migrated Supabase and local authentication\n";
   const selectedStartup = `${originalStartup}        env:\n          SUPABASE_BROWSER_TEST: "1"\n`;
@@ -130,7 +135,7 @@ test("only the two Shared startup steps select the browser-test profile; all pre
   }
   // Normalize only the explicit profile opt-ins. All commands, permissions,
   // selectors, timeouts, assertions, cleanup and aggregate bytes stay intact.
-  const original = withoutRestoreOnlyCaches(workflow).replaceAll(selectedStartup, originalStartup);
+  const original = withoutPersonalElectronPreparation(withoutRestoreOnlyCaches(workflow)).replaceAll(selectedStartup, originalStartup);
   assert.equal(createHash("sha256").update(original).digest("hex"),
     "39492b8b3c32d931444180ac4e7e52d77b6aa8eed9937b55d6d5bad7ee8aa0ec");
 });
@@ -207,7 +212,7 @@ test('Shared self-hosted compiler caches restore only, preserving all other revi
   assert.equal((workflow.match(/uses: actions\/cache\/restore@/gu) ?? []).length, 2);
   // Complete browser-e2e.yml at combined source 2ef4dde, including image caches,
   // every fixture/assertion, strict aggregate and the ordinary browser lanes.
-  assert.equal(createHash('sha256').update(withoutRestoreOnlyCaches(workflow)).digest('hex'),
+  assert.equal(createHash('sha256').update(withoutPersonalElectronPreparation(withoutRestoreOnlyCaches(workflow))).digest('hex'),
     '1e3cc8932d4cc78e1eb64ce389bd2b959362bb22bbaa92d155cf6743c5fd19c8');
 });
 function qualify(job, mutate = () => {}, badDaemon) {

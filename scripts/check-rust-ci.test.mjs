@@ -164,7 +164,9 @@ test('only self-hosted Rust children install the fixed missing native packages w
     assert.match(install,/^        timeout-minutes: 5$/mu);assert.match(text,/^    timeout-minutes: 30$/mu);
     assert.match(install,/^        shell: bash$/mu);assert.match(install,/set -euo pipefail/u);
     assert.match(install,/sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update/u);
-    assert.match(install,/sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler/u);
+    assert.match(install,/sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler/u);
+    assert.equal((install.match(/DPkg::Lock::Timeout=120/g) ?? []).length,1);
+    assert.doesNotMatch(install,/kill|systemctl|rm .*lock|DPkg::Lock::Timeout=-1/u);
     assert.match(install,/for package in clang lld cmake libcap-dev protobuf-compiler; do/u);
     assert.match(install,/dpkg-query --show --showformat='\$\{Status\}'/u);assert.match(install,/pkg-config --exists libcap/u);
     for(const tool of ['clang','ld.lld','cmake','protoc'])assert(install.includes(`          ${tool} --version\n`));
@@ -256,7 +258,8 @@ test('only self-hosted Rust children use restore-only caches while hosted saves 
 });
 
 test('the restore-only mitigation preserves every other byte of the reviewed Build workflow', () => {
-  let normalized = source;
+  assert.equal((source.match(/ -o DPkg::Lock::Timeout=120/g) ?? []).length,10);
+  let normalized = source.replaceAll(' -o DPkg::Lock::Timeout=120','');
   for (const item of children) {
     const restore = step(item.key, 'Restore cargo cache without saving');
     const hosted = step(item.key, 'Restore cargo cache');
