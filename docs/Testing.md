@@ -45,6 +45,13 @@ including its downstream release-workflow result. Repository administrators
 must also require the emitted browser job checks in branch protection; adding
 workflow YAML does not change repository protection settings.
 
+System SDK and tool-cache reclamation is limited to GitHub-hosted runners.
+Self-hosted runners retain their installed toolchains. Runtime image publication
+checks its minimum 20 GiB free disk separately on every runner; skipping SDK
+reclamation cannot skip that prerequisite. This safeguard does not select a
+runner or enable publication. `node --test scripts/check-public-release-workflows.test.mjs`
+includes the cleanup inventory and executable free-disk regression checks.
+
 Pull requests are leak-gated by the separate
 `Public boundary (trusted base)` check. Its `pull_request_target` workflow owns
 the scanner, policy, and Gitleaks configuration from protected `main`, checks
@@ -114,6 +121,20 @@ expanded switch to restore hosted routing for new runs; already queued jobs
 do not automatically move pools. Run `node --test scripts/check-expanded-ci-routing.test.mjs`
 for routing regressions. These tests are not real ARM64 workload or teardown
 qualification, which is required before enabling the switch.
+
+The path-filtered `Public Git Conflict Contract` has its own default-off
+`CI_GIT_CONFLICT_SELF_HOSTED=true` switch. Only same-repository, non-fork PRs to
+`main` and protected `main` pushes while this repository is private may select
+the disposable Linux ARM64 pool; public visibility, forks, manual runs and all
+other events retain `ubuntu-latest`. It uses the same trust-specific groups and
+per-run/attempt label format above, with literal suffix `deterministic-conflict`.
+The first step checks the isolated runner prerequisites before an exact-event,
+non-persistent checkout. The five-minute `Deterministic conflict fixture` keeps
+its read-only permission and original local Git conflict/rebase/push assertions.
+Run `node --test scripts/check-git-conflict-ci.test.mjs` for routing and fixture
+regressions; the workflow runs these tests as well. Enabling this switch still
+requires independently reviewed exact-workflow admission and an actual cold
+job/cleanup proof. It enables no release or manual runner admission.
 
 The trusted gate rejects unreviewed environment templates, live
 environment/auth files, private-only package/product markers, personal paths,
@@ -218,7 +239,13 @@ installation, including the pinned Playwright fixture required by agent tests.
 Stable native Rust and debug-info settings are unchanged. Each child has its
 own target directory; Cargo caches are partitioned by job, operating system,
 CPU architecture and the exact workspace Cargo lockfiles, with no cross-arch
-or old-lock fallback. The existing unused-toolchain disk cleanup runs only on
+or old-lock fallback. Self-hosted Rust compile/test children restore these caches
+with the pinned restore-only action; they do not upload caches in a post-job step.
+This keeps an optional large cache save from exhausting the job after its Cargo
+checks pass. A cache miss still runs every command cold and must fit the same
+30-minute limit. GitHub-hosted children retain the original restore/save action,
+keys and paths. No test failure, cancellation or aggregate failure is ignored.
+The existing unused-toolchain disk cleanup runs only on
 GitHub-hosted images, never against a self-hosted host or guest image.
 
 All twelve jobs default to `ubuntu-latest`. Only the independent
@@ -253,6 +280,11 @@ memory/disk use and complete guest teardown first. A split or a warm cache hit
 is not that qualification; never reduce the test selection or ignore a timeout
 to make a job green. No database, provider, signing or release credentials are
 introduced by this lane.
+
+The same restore-only compiler-cache policy applies to the two self-hosted
+Shared Browser children and Controller database tests. Their hosted compiler
+caches, Supabase image caches and pnpm caches are unchanged. Cache restoration
+is an optimization, not evidence that a cold workload has passed.
 
 Disable the Rust switch to restore hosted selection for new runs; already
 queued jobs retain their selected pools. No required-check rule changes are
