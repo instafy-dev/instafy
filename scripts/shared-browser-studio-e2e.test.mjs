@@ -74,7 +74,7 @@ test("builds retain scrubbed toolchain locations without passing them to isolate
   const runner = await readFile(new URL("./shared-browser-studio-e2e.mjs", import.meta.url), "utf8");
   assert.match(runner, /const buildEnv = fixtureChildEnvironment\(process\.env\)/);
   assert.match(runner, /const run = \(command, args, options = \{\}\) => runOwnedProcess\(command, args,\s*\{ env: buildEnv, signal, \.\.\.options \}\)/);
-  assert.equal((runner.match(/await run\("cargo", \["build", [^\n]+?"--message-format=json"\], \{ env: compilerEnv \}\)/g) ?? []).length, 2);
+  assert.equal((runner.match(/await run\("cargo", \["build", [^\n]+?"--message-format=json"\], \{ env: compilerEnv, onFailure: output => reportCargoCompilerErrors\(output, "packages\/runtime-(?:agent|controller)"\) \}\)/g) ?? []).length, 2);
 });
 
 test("compiler opt-in cannot leak proxy routing into Studio services or its empty browser home", () => {
