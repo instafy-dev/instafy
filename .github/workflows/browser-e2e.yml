@@ -314,11 +314,6 @@ jobs:
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
           pkg-config --exists libcap openssl
-      - name: Restore Supabase Postgres image cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.instafy-image-cache
-          key: shared-browser-image-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/test-supabase-migrations-empty-db.mjs') }}
       - name: Restore compiler cache without saving
         if: runner.environment == 'self-hosted'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -342,7 +337,6 @@ jobs:
         env:
           SUPABASE_BROWSER_TEST: "1"
         run: |
-          node scripts/ensure-supabase-postgres-image.mjs
           pnpm supabase:up
       - name: Test fixture safety guards
         run: node --test scripts/browser-profile-e2e.test.mjs scripts/shared-browser-studio-e2e.test.mjs scripts/lib/sharedStudioProvider.test.mjs scripts/check-shared-browser-ci.test.mjs
@@ -460,11 +454,6 @@ jobs:
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
           pkg-config --exists libcap openssl
-      - name: Restore Supabase Postgres image cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.instafy-image-cache
-          key: shared-browser-image-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/test-supabase-migrations-empty-db.mjs') }}
       - name: Restore compiler cache without saving
         if: runner.environment == 'self-hosted'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -488,7 +477,6 @@ jobs:
         env:
           SUPABASE_BROWSER_TEST: "1"
         run: |
-          node scripts/ensure-supabase-postgres-image.mjs
           pnpm supabase:up
       - name: Test fixture safety guards
         run: node --test scripts/browser-profile-e2e.test.mjs scripts/shared-browser-studio-e2e.test.mjs scripts/lib/sharedStudioProvider.test.mjs scripts/check-shared-browser-ci.test.mjs

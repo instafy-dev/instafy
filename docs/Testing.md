@@ -341,7 +341,8 @@ introduced by this lane.
 
 The same restore-only compiler-cache policy applies to the two self-hosted
 Shared Browser children and Controller database tests. Their hosted compiler
-caches, Supabase image caches and pnpm caches are unchanged. Cache restoration
+caches and pnpm caches are unchanged. Shared Browser no longer restores the
+standalone migration-image cache (see below). Cache restoration
 is an optimization, not evidence that a cold workload has passed.
 
 Disable the Rust switch to restore hosted selection for new runs; already
@@ -557,9 +558,18 @@ stack teardown. The profile-only script still permits a separately provisioned
 migrated loopback database; the signed-in Studio journey needs real local
 GoTrue. No fixture command, scenario, receipt, cleanup or safety check is
 replaced by the aggregate. Only the same fixed credential-free receipt paths
-are uploaded, separately per child. Image and compiler cache keys include the
+are uploaded, separately per child. Compiler cache keys include the
 operating system and architecture; compiler targets are child-specific with
 no old-lock or cross-architecture fallback.
+
+The children use `pnpm supabase:up` to prepare their actual CLI-selected images
+and apply migrations. They do not restore `~/.instafy-image-cache` or run
+`ensure-supabase-postgres-image.mjs`: that helper prepares a digest-derived local
+tag consumed by the separate empty-database migration test, not by CLI startup.
+The standalone migration lane retains its image cache and helper. Removing this
+extra archive transfer/load/save leaves browser image pulls, compiler caches,
+authentication, assertions and teardown intact. Docker layers can overlap, so
+measure both complete cold child jobs before claiming an end-to-end speedup.
 
 Both children explicitly set `SUPABASE_BROWSER_TEST=1` only for startup. This
 fixed profile excludes **only Edge Runtime**, using `supabase start --exclude
