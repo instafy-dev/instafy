@@ -13,9 +13,13 @@ const jobs = [
   { key: "shared-studio", label: "public-shared-browser-studio", name: "Shared Browser Studio journey", minutes: 30, script: "shared-browser-studio-e2e.mjs" },
 ];
 const section = key => workflow.split(`\n  ${key}:\n`)[1].split(/\n  [\w-]+:\n/u)[0];
+const compilerSegmentTimeout = '        env:\n          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"\n';
+const withoutCompilerSegmentTimeout = text => text.replaceAll(compilerSegmentTimeout, "");
 // Reconstruct only the removed standalone migration-image preparation for
-// the existing whole-workflow scope proofs. Do not loosen their baselines.
+// the existing whole-workflow scope proofs, excluding the separately proven
+// segment-timeout opt-ins. Do not loosen their baselines.
 function withStandaloneMigrationImagePreparation(text) {
+  text = withoutCompilerSegmentTimeout(text);
   const cache = [
     "      - name: Restore Supabase Postgres image cache",
     "        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0",
@@ -39,7 +43,7 @@ function cacheStep(key, name) {
 }
 function withoutRestoreOnlyCaches(text) {
   for (const job of jobs.filter(job => job.script)) {
-    const restore = cacheStep(job.key, 'Restore compiler cache without saving');
+    const restore = withoutCompilerSegmentTimeout(cacheStep(job.key, 'Restore compiler cache without saving'));
     const hosted = cacheStep(job.key, 'Restore architecture-specific compiler cache');
     text = text.replace(restore + '\n', '').replace(hosted,
       hosted.replace("        if: runner.environment == 'github-hosted'\n", ''));
@@ -221,6 +225,23 @@ test("Shared compiler caches isolate operating system, architecture and child ta
     assert.ok(source.includes(`key: shared-browser-cargo-v1-\${{ runner.os }}-\${{ runner.arch }}-${job.label}-\${{ hashFiles('packages/*/Cargo.lock') }}`));
     assert.doesNotMatch(source, /restore-keys:|supabase-postgres-image-\$\{/u);
   }
+});
+test("only self-hosted Shared compiler restores bound segment waits without changing required work", () => {
+  assert.equal(workflow.split(compilerSegmentTimeout).length - 1, 2);
+  assert.equal((workflow.match(/SEGMENT_DOWNLOAD_TIMEOUT_MINS/g) ?? []).length, 2);
+  for (const job of jobs.filter(job => job.script)) {
+    const restore = cacheStep(job.key, "Restore compiler cache without saving");
+    const hosted = cacheStep(job.key, "Restore architecture-specific compiler cache");
+    assert.match(restore, /^        if: runner\.environment == 'self-hosted'$/mu);
+    assert.ok(restore.includes(compilerSegmentTimeout));
+    assert.doesNotMatch(hosted, /SEGMENT_DOWNLOAD_TIMEOUT_MINS/u);
+    assert.doesNotMatch(restore, /timeout-minutes:|continue-on-error|fail-on-cache-miss|lookup-only/u);
+    assert.doesNotMatch(section(job.key), /cache-hit|continue-on-error/u);
+  }
+  // Exact merged baseline: both complete fixtures, migrations, cleanup, hosted
+  // restores, keys, paths, job budgets and aggregate remain byte-for-byte intact.
+  assert.equal(createHash("sha256").update(withoutCompilerSegmentTimeout(workflow)).digest("hex"),
+    "5c97291dd95421be8b8311413589a975c3fdc0c8dc831a3416f82c8b3bb441ff");
 });
 test('Shared self-hosted compiler caches restore only, preserving all other reviewed workflow bytes', () => {
   for (const job of jobs.filter(job => job.script)) {

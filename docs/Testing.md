@@ -562,6 +562,16 @@ are uploaded, separately per child. Compiler cache keys include the
 operating system and architecture; compiler targets are child-specific with
 no old-lock or cross-architecture fallback.
 
+The two self-hosted compiler restores set `SEGMENT_DOWNLOAD_TIMEOUT_MINS=2`.
+For the pinned action's Azure SDK downloader, this limits each 128 MiB segment
+to two minutes of wall time, even if bytes are arriving. It is not a total
+restore/job or inactivity timeout; legacy/non-Azure download paths do not use
+this setting. A segment timeout aborts that download and continues as a cache
+miss; migrations, compilation and both full fixtures still run. The 30-minute
+job limit remains, so cold compilation must fit it. Hosted restores, cache keys
+and paths are unchanged. See the
+[cache action's timeout guidance](https://github.com/actions/cache/blob/55cc8345863c7cc4c66a329aec7e433d2d1c52a9/tips-and-workarounds.md#cache-segment-restore-timeout).
+
 The children use `pnpm supabase:up` to prepare their actual CLI-selected images
 and apply migrations. They do not restore `~/.instafy-image-cache` or run
 `ensure-supabase-postgres-image.mjs`: that helper prepares a digest-derived local
