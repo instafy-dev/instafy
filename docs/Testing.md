@@ -45,6 +45,23 @@ including its downstream release-workflow result. Repository administrators
 must also require the emitted browser job checks in branch protection; adding
 workflow YAML does not change repository protection settings.
 
+The four summary checks (`JavaScript packages`, `Rust packages`, `Rust tests`
+and `Shared Browser profile E2E`) retain `always()` behavior for pull requests,
+manual dispatches and other contexts. Only a canceled workflow from a protected
+`main` push in the canonical repository may skip those aggregates, so an obsolete
+Build need not retain workers for its summaries. An uncanceled Build still runs
+the summaries and rejects every failed, canceled, skipped or missing child.
+This exception does not change test commands, step-level artifact/stack cleanup,
+runner routing or branch protection. Canceled/skipped Build runs are not successful
+release evidence. Do not broaden this to PRs: GitHub can count a condition-skipped
+required job as successful. See [workflow cancellation](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation)
+and [required-check semantics](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks).
+`node --test scripts/check-javascript-ci.test.mjs` covers all four predicates,
+actual aggregate gates and complete workflow-byte preservation; these source
+regressions do not prove GitHub scheduler behavior. The guard relies on GitHub's
+native boolean [`github.ref_protected` context](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#github-context), not a caller-supplied string or
+number; the fixtures also model Actions' numeric coercion for synthetic values.
+
 System SDK and tool-cache reclamation is limited to GitHub-hosted runners.
 Self-hosted runners retain their installed toolchains. Runtime image publication
 checks its minimum 20 GiB free disk separately on every runner; skipping SDK
@@ -210,9 +227,10 @@ require a security maintainer to inspect the bytes or object, update the policy,
 and use the explicit protected-branch break-glass path. Normal source
 contributions do not require that manual security review.
 
-The required `JavaScript packages` context is an always-run aggregate over four
-independent jobs. Each child has a 30-minute limit, checks out the same exact
-event commit and recursive submodules, and performs its own unfiltered frozen
+The required `JavaScript packages` context is a strict aggregate over four
+independent jobs, subject only to the canceled-main exception above. Each child
+has a 30-minute limit, checks out the same exact event commit and recursive
+submodules, and performs its own unfiltered frozen
 monorepo installation on Node20. No existing check is removed:
 
 | Child | Checks | Runner-label suffix |
@@ -261,7 +279,8 @@ the same exact event commit and recursive submodules, and has a 30-minute
 limit. Missing, skipped, cancelled or failed children fail the corresponding
 aggregate. Aggregates have no repository permissions or checkout and are
 scheduled only after their children finish; they do not hold a worker while
-waiting for other workers.
+waiting for other workers. Only the canceled-main exception above skips them;
+pull requests and manual runs retain always-run, fail-closed aggregation.
 
 | Child | Preserved commands | Runner-label suffix |
 | --- | --- | --- |
@@ -287,7 +306,8 @@ with the pinned restore-only action; they do not upload caches in a post-job ste
 This keeps an optional large cache save from exhausting the job after its Cargo
 checks pass. A cache miss still runs every command cold and must fit the same
 30-minute limit. GitHub-hosted children retain the original restore/save action,
-keys and paths. No test failure, cancellation or aggregate failure is ignored.
+keys and paths. An uncanceled Build never ignores a test failure, child
+cancellation or aggregate failure.
 The existing unused-toolchain disk cleanup runs only on
 GitHub-hosted images, never against a self-hosted host or guest image.
 
@@ -541,8 +561,9 @@ not a substitute for real browser execution and teardown.
 ### Bounded Shared Browser CI
 
 `Browser verification / Shared Browser profile E2E` retains its required name
-as an always-run five-minute aggregate. It succeeds only when both fixed
-children finish successfully; missing, skipped, cancelled or failed children
+as a strict five-minute aggregate, with only the canceled-main exception above.
+It succeeds only when both fixed children finish successfully; missing, skipped,
+cancelled or failed children
 fail the aggregate. It has no repository permissions or checkout and starts
 only after the children end, without holding a worker while waiting.
 
