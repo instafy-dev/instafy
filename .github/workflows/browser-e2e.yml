@@ -166,7 +166,7 @@ jobs:
     needs:
       - shared-profile-lifecycle
       - shared-studio
-    if: ${{ always() }}
+    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}
     permissions: {}
     runs-on: >-
       ${{ vars.CI_SHARED_BROWSER_SELF_HOSTED == 'true'

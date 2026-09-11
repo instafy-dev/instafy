@@ -7,6 +7,9 @@ import vm from "node:vm";
 
 const root = path.resolve(import.meta.dirname, "..");
 const workflow = fs.readFileSync(path.join(root, ".github/workflows/browser-e2e.yml"), "utf8");
+const aggregateIf = "    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}";
+// Only historical byte-reconstruction proofs use the former aggregate guard.
+const previousAggregateWorkflow = workflow.replace(aggregateIf, "    if: ${{ always() }}");
 const jobs = [
   { key: "shared-profile", label: "public-shared-browser-aggregate", name: "Shared Browser profile E2E", minutes: 5 },
   { key: "shared-profile-lifecycle", label: "public-shared-browser-profile", name: "Shared Browser profile lifecycle", minutes: 30, script: "browser-profile-e2e.mjs" },
@@ -157,7 +160,7 @@ test("only the two Shared startup steps select the browser-test profile; all pre
   }
   // Normalize only the explicit profile opt-ins. All commands, permissions,
   // selectors, timeouts, assertions, cleanup and aggregate bytes stay intact.
-  const original = withoutPersonalElectronPreparation(withoutRestoreOnlyCaches(withStandaloneMigrationImagePreparation(workflow))).replaceAll(selectedStartup, originalStartup);
+  const original = withoutPersonalElectronPreparation(withoutRestoreOnlyCaches(withStandaloneMigrationImagePreparation(previousAggregateWorkflow))).replaceAll(selectedStartup, originalStartup);
   assert.equal(createHash("sha256").update(original).digest("hex"),
     "39492b8b3c32d931444180ac4e7e52d77b6aa8eed9937b55d6d5bad7ee8aa0ec");
 });
@@ -211,7 +214,7 @@ test("Shared startup omits only standalone migration-image preparation, retainin
   for (const job of jobs.filter(job => job.script)) {
     assert.ok(section(job.key).includes('SUPABASE_BROWSER_TEST: "1"\n        run: |\n          pnpm supabase:up\n'));
   }
-  assert.equal(createHash("sha256").update(withStandaloneMigrationImagePreparation(workflow)).digest("hex"),
+  assert.equal(createHash("sha256").update(withStandaloneMigrationImagePreparation(previousAggregateWorkflow)).digest("hex"),
     "48e8ed7ce8e931e7679290199102717cc65de943dcdc3eacf63b61eacacef2f1");
   // The standalone migration lane really consumes this cache; keep it there.
   const build = fs.readFileSync(path.join(root, ".github/workflows/build.yml"), "utf8");
@@ -240,7 +243,7 @@ test("only self-hosted Shared compiler restores bound segment waits without chan
   }
   // Exact merged baseline: both complete fixtures, migrations, cleanup, hosted
   // restores, keys, paths, job budgets and aggregate remain byte-for-byte intact.
-  assert.equal(createHash("sha256").update(withoutCompilerSegmentTimeout(workflow)).digest("hex"),
+  assert.equal(createHash("sha256").update(withoutCompilerSegmentTimeout(previousAggregateWorkflow)).digest("hex"),
     "5c97291dd95421be8b8311413589a975c3fdc0c8dc831a3416f82c8b3bb441ff");
 });
 test('Shared self-hosted compiler caches restore only, preserving all other reviewed workflow bytes', () => {
@@ -263,7 +266,7 @@ test('Shared self-hosted compiler caches restore only, preserving all other revi
   assert.equal((workflow.match(/uses: actions\/cache\/restore@/gu) ?? []).length, 2);
   // Complete browser-e2e.yml at combined source 2ef4dde, including image caches,
   // every fixture/assertion, strict aggregate and the ordinary browser lanes.
-  assert.equal(createHash('sha256').update(withoutPersonalElectronPreparation(withoutRestoreOnlyCaches(withStandaloneMigrationImagePreparation(workflow)))).digest('hex'),
+  assert.equal(createHash('sha256').update(withoutPersonalElectronPreparation(withoutRestoreOnlyCaches(withStandaloneMigrationImagePreparation(previousAggregateWorkflow)))).digest('hex'),
     '1e3cc8932d4cc78e1eb64ce389bd2b959362bb22bbaa92d155cf6743c5fd19c8');
 });
 function qualify(job, mutate = () => {}, badDaemon) {
@@ -297,7 +300,7 @@ test("Shared prerequisites prove nonroot Linux ARM64 Node22 and real Docker only
 });
 test("the required Shared aggregate waits for both exact children and accepts only full success", () => {
   const source = section("shared-profile");
-  assert.ok(source.includes("needs:\n      - shared-profile-lifecycle\n      - shared-studio\n    if: ${{ always() }}"));
+  assert.ok(source.includes("needs:\n      - shared-profile-lifecycle\n      - shared-studio\n" + aggregateIf));
   assert.match(source, /    permissions: \{\}/u);
   assert.doesNotMatch(source, /actions\/checkout|actions\/setup|pnpm install|docker|apt-get|CARGO_|TEST_DATABASE_URL/u);
   const program = [...source.matchAll(/          node <<'NODE'\n([\s\S]*?)          NODE\n/gu)].at(-1)[1];
