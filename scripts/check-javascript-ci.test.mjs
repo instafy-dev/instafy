@@ -7,6 +7,7 @@ import vm from 'node:vm';
 
 const root = path.resolve(import.meta.dirname, '..');
 const source = fs.readFileSync(path.join(root, '.github/workflows/build.yml'), 'utf8');
+const aggregateIf = "    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}";
 const lanes = [
   { key: 'javascript-contracts', label: 'public-js-contracts', name: 'JavaScript contracts and migrations' },
   { key: 'javascript-frontend', label: 'public-js-frontend', name: 'JavaScript frontend' },
@@ -53,12 +54,158 @@ function route(key, github, enabled = '') {
   return JSON.parse(JSON.stringify(selected));
 }
 
-test('the required JavaScript identity is a strict always-run aggregate, not a replacement context', () => {
+// These are source-only cancellation regressions, not a GitHub scheduler test.
+// Keep them in this existing CI test entrypoint so no workflow command changes.
+const cancellationWorkflows = [
+  { file: 'build.yml', text: source, keys: ['javascript', 'rust', 'rust-tests'],
+    previousHash: '0c0332d3dc8eeebdd9f68e6fc23b31f145cd5f791017e5f3784e1619f38465bc' },
+  { file: 'browser-e2e.yml', text: fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8'),
+    keys: ['shared-profile'], previousHash: '71980384b6c935e2fbe90e48cd7526e8bbded8721611cea427ee0f9bd5da1115' },
+];
+const cancellationAggregates = cancellationWorkflows.flatMap(workflow => workflow.keys.map(key => {
+  const text = workflow.text.split('\n  ' + key + ':\n')[1]?.split(/\n  [\w-]+:\n/u)[0];
+  assert.ok(text, workflow.file + '/' + key);
+  return { key, text };
+}));
+// GitHub compares unlike types numerically; strings use case-insensitive
+// comparison only when BOTH operands are strings. Objects/arrays stay opaque.
+// https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#operators
+function actionsEqual(left, right) {
+  const type = value => value === null || value === undefined ? 'null' : typeof value;
+  if (type(left) === type(right)) {
+    if (type(left) === 'null') return true;
+    return typeof left === 'string' ? left.toLowerCase() === right.toLowerCase() : left === right;
+  }
+  const number = value => {
+    if (value === null || value === undefined) return 0;
+    if (typeof value === 'boolean') return value ? 1 : 0;
+    if (typeof value === 'number') return value;
+    if (typeof value !== 'string') return NaN;
+    if (value.trim() === '') return 0;
+    try {
+      const parsed = JSON.parse(value);
+      return typeof parsed === 'number' ? parsed : NaN;
+    } catch { return NaN; }
+  };
+  return number(left) === number(right);
+}
+function aggregateRuns(text, github, isCancelled) {
+  const expression = text.match(/^    if: \$\{\{ (.+) \}\}$/mu)?.[1];
+  assert.ok(expression);
+  // GitHub string comparisons ignore case. Status functions are supplied by
+  // GitHub, not by needs, event payload fields, runner placement or caller inputs.
+  const evaluated = expression.replace(/([a-zA-Z][\w.]*) == ('[^']*'|true|false|[a-zA-Z][\w.]*)/gu, 'equal($1, $2)');
+  return vm.runInNewContext(evaluated, {
+    github, always: () => true, cancelled: () => isCancelled, equal: actionsEqual,
+  }, { timeout: 1000 });
+}
+function aggregateResult(text, github, isCancelled, results) {
+  if (!aggregateRuns(text, github, isCancelled)) return 'skipped';
+  const env = text.match(/([A-Z_]+): \$\{\{ toJSON\(needs\) \}\}/u)?.[1];
+  assert.ok(env);
+  const programs = [...text.matchAll(/          node <<'NODE'\n([\s\S]*?)          NODE/gu)]
+    .map(match => match[1].replace(/^          /gmu, ''))
+    .filter(program => program.includes('process.env.' + env));
+  assert.equal(programs.length, 1);
+  try {
+    vm.runInNewContext(programs[0], {
+      require: name => { assert.equal(name, 'node:assert/strict'); return assert; },
+      process: { env: { [env]: JSON.stringify(results) } }, console: { log() {} },
+    }, { timeout: 1000 });
+    return 'success';
+  } catch {
+    return 'failure';
+  }
+}
+
+test('only four job if lines differ from both complete reviewed workflows at 3a6554', () => {
+  for (const workflow of cancellationWorkflows) {
+    assert.equal(workflow.text.split(aggregateIf).length - 1, workflow.keys.length, workflow.file);
+    for (const key of workflow.keys) {
+      const text = workflow.text.split('\n  ' + key + ':\n')[1].split(/\n  [\w-]+:\n/u)[0];
+      assert.ok(text.includes(aggregateIf + '\n'), key);
+    }
+    // The old guard is reconstructed literally; all routes, needs, inline gates,
+    // permissions, concurrency, timeouts and step-level always cleanup stay exact.
+    const original = workflow.text.replaceAll(aggregateIf, '    if: ${{ always() }}');
+    assert.equal(createHash('sha256').update(original).digest('hex'), workflow.previousHash, workflow.file);
+  }
+});
+
+test('only a cancelled canonical protected-main push can skip any of the four aggregates', () => {
+  for (const aggregate of cancellationAggregates)
+    for (const repository of ['instafy-dev/instafy', 'someone/instafy'])
+      for (const event_name of ['push', 'pull_request', 'workflow_dispatch', 'workflow_call', 'merge_group', 'pull_request_target', 'schedule'])
+        for (const ref of ['refs/heads/main', 'refs/heads/topic', 'refs/pull/2/merge'])
+          for (const ref_protected of [true, false, null, undefined])
+            for (const isCancelled of [true, false]) {
+              const github = { repository, event_name, ref, ref_protected };
+              const shouldSkip = repository === 'instafy-dev/instafy' && event_name === 'push'
+                && ref === 'refs/heads/main' && ref_protected === true && isCancelled;
+              assert.equal(aggregateRuns(aggregate.text, github, isCancelled), !shouldSkip,
+                aggregate.key + '/' + JSON.stringify({ github, isCancelled }));
+            }
+});
+
+test('the predicate fixture models numeric coercion without mistaking it for typed GitHub context', () => {
+  // ref_protected is a GitHub-owned BOOLEAN in real runs, not a caller input.
+  // Unlike a strict JS mock, Actions would also consider synthetic 1/"1" true.
+  const values = [
+    [true, false], [false, true], [null, true], [undefined, true],
+    [1, false], ['1', false], ['1.0', false], ['1e0', false],
+    [0, true], ['0', true], ['', true], [' ', true],
+    ['true', true], ['false', true], ['unknown', true],
+    [[], true], [[1], true], [{}, true], [{ value: 1 }, true],
+  ];
+  for (const aggregate of cancellationAggregates) for (const [ref_protected, shouldRun] of values) {
+    const github = { ...context('push'), ref_protected };
+    assert.equal(aggregateRuns(aggregate.text, github, true), shouldRun, JSON.stringify(ref_protected));
+    assert.equal(aggregateRuns(aggregate.text, github, false), true);
+  }
+});
+
+test('missing context fields stay always-run and event payloads cannot supply workflow cancellation', () => {
+  for (const aggregate of cancellationAggregates) {
+    for (const field of ['repository', 'event_name', 'ref', 'ref_protected']) {
+      const github = context('push'); delete github[field];
+      for (const isCancelled of [false, true]) assert.equal(aggregateRuns(aggregate.text, github, isCancelled), true, field);
+    }
+    const github = { ...context('push'), event: { cancelled: true, workflow_run: { conclusion: 'cancelled' } } };
+    assert.equal(aggregateRuns(aggregate.text, github, false), true);
+    // Documented GitHub string equality is case-insensitive, not JS strict equality.
+    assert.equal(aggregateRuns(aggregate.text, { ...github, repository: 'INSTAFY-DEV/INSTAFY', event_name: 'PUSH', ref: 'REFS/HEADS/MAIN' }, true), false);
+  }
+});
+
+test('PR and manual cancellation retain exact fail-closed gates; uncancelled main rejects cancelled children too', () => {
+  for (const aggregate of cancellationAggregates) {
+    const children = aggregate.text.match(/    needs:\n((?:      - .+\n)+)/u)[1]
+      .trim().split('\n').map(line => line.trim().slice(2));
+    const success = Object.fromEntries(children.map(key => [key, { result: 'success' }]));
+    const fixtures = [success];
+    for (const child of children) {
+      for (const result of ['failure', 'cancelled', 'skipped', 'timed_out', 'neutral', '', 'Success', null])
+        fixtures.push({ ...success, [child]: { result } });
+      const missing = { ...success }; delete missing[child]; fixtures.push(missing);
+    }
+    fixtures.push(null, [], {}, { ...success, unexpected: { result: 'success' } });
+    for (const event of ['pull_request', 'workflow_dispatch', 'push']) for (const isCancelled of [false, true]) {
+      const github = context(event);
+      for (const fixture of fixtures) {
+        const expected = event === 'push' && isCancelled ? 'skipped' : fixture === success ? 'success' : 'failure';
+        assert.equal(aggregateResult(aggregate.text, github, isCancelled, fixture), expected,
+          aggregate.key + '/' + event + '/' + isCancelled + '/' + JSON.stringify(fixture));
+      }
+    }
+  }
+});
+
+test('the required JavaScript identity is a strict aggregate, not a replacement context', () => {
   const aggregate = job('javascript');
   assert.match(aggregate, /^    name: JavaScript packages$/mu);
   const needs = aggregate.match(/    needs:\n((?:      - .+\n)+)/u)?.[1].trim().split('\n').map(line => line.trim().slice(2));
   assert.deepEqual(needs, lanes.map(lane => lane.key));
-  assert.match(aggregate, /^    if: \$\{\{ always\(\) \}\}$/mu);
+  assert.ok(aggregate.includes(aggregateIf + '\n'));
   assert.match(aggregate, /^    timeout-minutes: 5$/mu);
   assert.match(aggregate, /^    permissions: \{\}$/mu);
   assert.match(aggregate, /JAVASCRIPT_RESULTS: \$\{\{ toJSON\(needs\) \}\}/u);

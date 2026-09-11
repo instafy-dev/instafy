@@ -107,7 +107,8 @@ test("only completed successful exact Build opens publication", () => {
   const mixed = run(steps.ci, { [ciPath]: inventory(workflowRun(1, "build.yml"), workflowRun(2, "build.yml", "queued")) });
   passed(mixed); assert.equal(mixed.output, "ready=false\n");
 });
-for (const change of [{ conclusion: "failure" }, { head_sha: "b".repeat(40) }, { event: "pull_request" },
+for (const change of [{ conclusion: "failure" }, { conclusion: "cancelled" }, { conclusion: "skipped" },
+  { head_sha: "b".repeat(40) }, { event: "pull_request" },
   { head_branch: "other" }, { path: ".github/workflows/other.yml" }, { repository: { full_name: "other/repo" } }, { status: "unknown" }]) {
   test(`Build refuses ${JSON.stringify(change)}`, () => {
     const result = run(steps.ci, { [ciPath]: inventory({ ...workflowRun(1, "build.yml"), ...change }) });
