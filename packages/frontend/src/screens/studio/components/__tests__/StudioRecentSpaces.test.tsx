@@ -61,7 +61,7 @@ describe("StudioRecentSpaces", () => {
     await render({ presentation: "path", onSelectSpace, onExpandedChange, attentionCounts: { current: 2 } });
     const trigger = container.querySelector('[data-testid="sidebar-space-button"]')!;
     expect(trigger.textContent).toContain("Website");
-    expect(trigger.getAttribute("aria-label")).toContain("2 chats with unread replies");
+    expect(trigger.getAttribute("aria-label")).toContain("2 unread updates");
     expect(document.querySelector('[data-testid="sidebar-recent-spaces-list"]')).toBeNull();
     await click("sidebar-space-button");
     expect(trigger.getAttribute("aria-expanded")).toBe("true");
@@ -224,16 +224,16 @@ describe("StudioRecentSpaces", () => {
   it("shows unread-chat badges on the current trigger and space icons with exact accessible counts", async () => {
     await render({ attentionCounts: { current: 12, recent: 1 } });
     const current = container.querySelector('[data-testid="sidebar-recent-space-current"]');
-    expect(current?.getAttribute("aria-label")).toBe("Website, Current, 12 chats with unread replies");
+    expect(current?.getAttribute("aria-label")).toBe("Website, Current, 12 unread updates");
     expect(current?.querySelector('[data-testid="sidebar-recent-space-attention-current"]')?.textContent).toBe("9+");
     const recent = container.querySelector('[data-testid="sidebar-recent-space-recent"]');
-    expect(recent?.getAttribute("aria-label")).toBe("Documentation, 1 chat with unread replies");
+    expect(recent?.getAttribute("aria-label")).toBe("Documentation, 1 unread update");
     expect(recent?.querySelector('[data-testid="sidebar-recent-space-attention-recent"]')?.textContent).toBe("1");
-    expect(container.querySelector('[data-testid="sidebar-space-button"]')?.getAttribute("aria-label")).toBe("Choose space: Website, 12 chats with unread replies");
+    expect(container.querySelector('[data-testid="sidebar-space-button"]')?.getAttribute("aria-label")).toBe("Choose space: Website, 12 unread updates");
     const badge = container.querySelector('[data-testid="sidebar-current-space-attention"]');
     expect(badge?.textContent).toBe("9+");
     expect(badge?.getAttribute("aria-hidden")).toBe("true");
-    expect(badge?.getAttribute("title")).toBe("12 chats with unread replies");
+    expect(badge?.getAttribute("title")).toBe("12 unread updates");
   });
 
   it.each([0, -1, Number.NaN, Infinity])("hides invalid or zero unread counts (%s) without changing selection", async (count) => {

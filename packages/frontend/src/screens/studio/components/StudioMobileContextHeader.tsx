@@ -9,6 +9,7 @@ import { useProjectRecency } from "../../../projects/useProjectRecency";
 import type { ProjectListItem } from "../../../projects/useProjects";
 import { StudioRecentSpaces } from "./StudioRecentSpaces";
 import { StudioSidebarTeamMenu } from "./StudioSidebarTeamMenu";
+import { unreadUpdatesDescription } from "../homeUpdateLabels";
 
 export interface StudioMobileContextHeaderProps {
   teamName: string;
@@ -83,9 +84,9 @@ export function StudioMobileContextHeader({
         className="relative !min-h-12 !min-w-11 shrink-0 aria-[current=page]:bg-primary-50 dark:aria-[current=page]:bg-primary-500/15"
       >
         <OctoMark className="h-6 w-6 text-brand-ink dark:text-brand-paper" aria-hidden="true" />
-        <AttentionBadge count={unreadCount} aria-hidden className="absolute right-0 top-1" testId="studio-mobile-home-attention" />
+        <AttentionBadge count={unreadCount} aria-hidden title={`${unreadUpdatesDescription(unreadCount)} across teams`} className="absolute right-0 top-1" testId="studio-mobile-home-attention" />
       </IconButton>
-      {unreadCount > 0 ? <span id={homeAttentionId} className="sr-only">{unreadCount} {unreadCount === 1 ? "chat" : "chats"} with unread replies across teams</span> : null}
+      {unreadCount > 0 ? <span id={homeAttentionId} className="sr-only">{unreadUpdatesDescription(unreadCount)} across teams</span> : null}
       <div className="flex min-w-0 flex-1 items-center gap-[3px]" role="group" aria-label="Team and space">
         <StudioSidebarTeamMenu
           key={teamId}

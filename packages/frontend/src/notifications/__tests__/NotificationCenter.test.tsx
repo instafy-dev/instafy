@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act } from "react";
+import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({ list: vi.fn(), state: vi.fn(), readAll: vi.fn(), getPreferences: vi.fn(), savePreferences: vi.fn(), navigate: vi.fn(), show: vi.fn(), hide: vi.fn(), foreground: false, subscription: false }));
@@ -11,12 +11,20 @@ vi.mock("../webPushRegistration", () => ({ hasActiveWebPushSubscription: async (
 import { useNotificationCenter } from "../useNotificationCenter";
 const A = "11111111-1111-4111-8111-111111111111";
 const B = "22222222-2222-4222-8222-222222222222";
-const event = (id = A) => ({ id, eventName: "support.reply", version: 1, category: "support", resourceId: id, resourceType: "support_report", occurredAt: "2026-09-06T12:00:00Z", title: "Instafy", body: "Support replied to your report.", url: `/studio?supportReportId=${id}`, readAt: null, seenAt: null, archivedAt: null });
+const event = (id = A) => ({ id, eventName: "support.reply", version: 1, category: "support", resourceId: id, resourceType: "support_report", occurredAt: "2026-09-06T12:00:00Z", title: "Instafy", body: "Support replied to your report.", url: `/studio?supportReportId=${id}`, readAt: null as string | null, seenAt: null, archivedAt: null });
 const page = (items = [event()], nextCursor: string | null = null) => ({ items, nextCursor, unreadCount: items.length, asOf: "2026-09-06T12:01:00Z" });
 const preferences = { hidePreviews: true, preferences: [{ category: "support", channel: "local", enabled: true }] };
-function Harness({ userId = A }: { userId?: string }) {
-  const center = useNotificationCenter({ userId, accessToken: `token-${userId}`, navigate: mocks.navigate });
-  return <>{center.bell}{center.dialog}</>;
+function Harness({ userId = A, token = `token-${userId}` }: { userId?: string; token?: string }) {
+  const center = useNotificationCenter({ userId, accessToken: token, navigate: mocks.navigate });
+  return <div>
+    {center.error ? <p role="alert">{center.error}</p> : null}
+    <span data-testid="count">{center.page.items.length}</span>
+    <span data-testid="loading">{String(center.loading)}</span>
+    {center.page.items.map(item => <button key={item.id} data-testid={`notification-${item.id}`} data-read={Boolean(item.readAt)} onClick={() => void center.markRead([item])}>{item.body}</button>)}
+    <button onClick={() => void center.refresh()}>Retry</button>
+    <button onClick={() => void center.loadMore()}>Load more</button>
+    <button onClick={() => void center.markRead(center.page.items)}>Mark loaded read</button>
+  </div>;
 }
 let root: Root;
 let container: HTMLDivElement;
@@ -25,7 +33,6 @@ async function click(text: string) {
   expect(button, `button ${text}`).toBeTruthy();
   await act(async () => button?.click());
 }
-async function open() { await act(async () => (document.querySelector('[data-testid="notification-center-bell"]') as HTMLButtonElement).click()); }
 beforeEach(async () => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   vi.clearAllMocks(); mocks.foreground = false; mocks.subscription = false;
@@ -35,74 +42,94 @@ beforeEach(async () => {
 });
 afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
 describe("notification center", () => {
-  it("shows the durable unread badge and opens the exact support report", async () => {
-    expect(container.querySelector('[data-testid="notification-center-unread"]')?.textContent).toBe("1");
-    await open();
-    const item = document.querySelector(`[data-testid="notification-${A}"] button`) as HTMLButtonElement;
-    await act(async () => item.click());
-    expect(mocks.navigate).toHaveBeenCalledWith(`/studio?supportReportId=${A}`);
-    expect(mocks.state).toHaveBeenCalledWith({ id: A, action: "read", accessToken: `token-${A}` });
+  it("exposes Home data and acknowledges only the displayed IDs", async () => {
+    expect(container.querySelector('[data-testid="count"]')?.textContent).toBe("1");
+    await click("Mark loaded read");
+    expect(mocks.state).toHaveBeenCalledWith(expect.objectContaining({ id: A, action: "read", accessToken: `token-${A}`, expectedUserId: A, isCurrent: expect.any(Function) }));
+    expect(mocks.readAll).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-testid="notification-center-bell"]')).toBeNull();
+    const pin = mocks.state.mock.calls.find(([args]) => args.action === "read")?.[0].isCurrent;
+    expect(pin()).toBe(true);
+    await act(async () => root.render(<Harness token="updated-token" />));
+    expect(pin()).toBe(false);
   });
-  it("paginates, filters and uses the server snapshot when marking all read", async () => {
-    mocks.list.mockImplementation(async ({ before, view }) => before ? page([event(B)]) : page([event()], view === "unread" ? null : "opaque-cursor"));
-    await open(); await click("Load more");
-    expect(document.querySelectorAll('[data-testid^="notification-111"], [data-testid^="notification-222"]')).toHaveLength(2);
-    expect(mocks.list).toHaveBeenCalledWith(expect.objectContaining({ before: "opaque-cursor" }));
-    await click("Unread");
-    expect(document.querySelector(`[data-testid="notification-${B}"]`)).toBeNull();
-    expect(mocks.list).toHaveBeenCalledWith(expect.objectContaining({ view: "unread" }));
-    await click("Mark all read");
-    expect(mocks.readAll).toHaveBeenCalledWith({ before: "2026-09-06T12:01:00Z", accessToken: `token-${A}` });
-    await click("Archive");
-    expect(mocks.state).toHaveBeenCalledWith({ id: A, action: "archive", accessToken: `token-${A}` });
+  it("loads older unread pages even when they are outside the first Recent page", async () => {
+    mocks.list.mockImplementation(async ({ view, before }) => view === "unread" ? (before ? page([event(B)]) : page([event()], "unread-next")) : page([event()]));
+    await click("Retry");
+    expect(container.querySelector('[data-testid="count"]')?.textContent).toBe("2");
+    expect(mocks.list).toHaveBeenCalledWith({ view: "unread", before: "unread-next", accessToken: `token-${A}` });
   });
-  it("shows controller unavailability without an empty inbox claim and retries the current account and filter", async () => {
+  it("preserves loaded Recent pages while refreshing their read states", async () => {
+    mocks.list.mockImplementation(async ({ view, before }) => view === "unread" ? page([]) : before ? page([{ ...event(B), readAt: "2026-09-07T00:00:00Z" }]) : page([event()], "older"));
+    await click("Retry"); await click("Load more"); await click("Retry");
+    expect(container.querySelector('[data-testid="count"]')?.textContent).toBe("2");
+    await click("Mark loaded read");
+    expect(mocks.state).toHaveBeenCalledWith(expect.objectContaining({ id: A, action: "read", accessToken: `token-${A}`, expectedUserId: A }));
+    expect(mocks.state).not.toHaveBeenCalledWith(expect.objectContaining({ id: B }));
+  });
+  it("retains the oldest loaded row when new arrivals shift page boundaries", async () => {
+    const C = "33333333-3333-4333-8333-333333333333";
+    const D = "44444444-4444-4444-8444-444444444444";
+    const E = "55555555-5555-4555-8555-555555555555";
+    let rows = [A, B, C, D].map((id, index) => ({
+      ...event(id), occurredAt: `2026-09-07T12:0${4 - index}:00Z`, readAt: "2026-09-07T13:00:00Z",
+    }));
+    mocks.list.mockImplementation(async ({ view, before }) => {
+      if (view === "unread") return page([]);
+      const offset = before ? rows.findIndex(item => item.id === before) + 1 : 0;
+      const selected = rows.slice(offset, offset + 2);
+      return page(selected, offset + 2 < rows.length ? selected.at(-1)!.id : null);
+    });
+    await click("Retry");
+    expect(container.querySelector('[data-testid="count"]')?.textContent).toBe("2");
+    await click("Load more");
+    expect(container.querySelector('[data-testid="count"]')?.textContent).toBe("4");
+    rows = [{ ...event(E), occurredAt: "2026-09-07T12:05:00Z", readAt: "2026-09-07T13:00:00Z" }, ...rows];
+    await click("Retry");
+    expect(container.querySelector('[data-testid="count"]')?.textContent).toBe("5");
+    expect(container.querySelector(`[data-testid="notification-${D}"]`)).not.toBeNull();
+    expect(container.querySelector(`[data-testid="notification-${E}"]`)).not.toBeNull();
+    expect(mocks.list).toHaveBeenCalledWith({ view: "all", before: C, accessToken: `token-${A}` });
+  });
+  it("restarts a StrictMode request and ignores its delayed cleanup response", async () => {
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    let resolveAbandoned: ((value: ReturnType<typeof page>) => void) | undefined;
+    let allRequests = 0;
+    mocks.list.mockImplementation(({ view }) => {
+      if (view === "unread") return Promise.resolve(page([]));
+      allRequests += 1;
+      if (allRequests === 1) return new Promise(resolve => { resolveAbandoned = resolve; });
+      return Promise.resolve(page([event(B)]));
+    });
+    await act(async () => root.render(<StrictMode><Harness /></StrictMode>));
+    expect(allRequests).toBe(2);
+    expect(container.querySelector('[data-testid="loading"]')?.textContent).toBe("false");
+    expect(container.querySelector(`[data-testid="notification-${B}"]`)).not.toBeNull();
+    await act(async () => resolveAbandoned?.(page([event(A)])));
+    expect(container.querySelector(`[data-testid="notification-${A}"]`)).toBeNull();
+    expect(container.querySelector('[data-testid="count"]')?.textContent).toBe("1");
+    await click("Retry");
+    expect(allRequests).toBe(3);
+    expect(container.querySelector('[data-testid="loading"]')?.textContent).toBe("false");
+  });
+  it("reports server unavailability and recovers without claiming an empty inbox", async () => {
     mocks.list.mockRejectedValue(new Error("Unable to load notifications (404)"));
-    await act(async () => root.render(<Harness userId={B} />));
-    await open();
+    await click("Retry");
     expect(document.querySelector('[role="alert"]')?.textContent).toBe("Notifications are unavailable on this server.");
-    expect(document.body.textContent).not.toContain("No notifications yet.");
-    await click("Unread");
-    expect(document.body.textContent).not.toContain("You're all caught up.");
-
     mocks.list.mockResolvedValue(page([]));
-    mocks.list.mockClear();
-    await click("Retry");
-    expect(mocks.list).toHaveBeenCalledWith({ view: "unread", before: undefined, accessToken: `token-${B}` });
-    expect(document.querySelector('[role="alert"]')).toBeNull();
-    expect(document.body.textContent).toContain("You're all caught up.");
-    expect([...document.querySelectorAll("button")].some((button) => button.textContent?.trim() === "Retry")).toBe(false);
-  });
-  it("preserves other load errors and shows recovered notifications after retry", async () => {
-    mocks.list.mockRejectedValue(new Error("Unable to load notifications (502): Gateway unavailable"));
-    await act(async () => root.render(<Harness userId={B} />));
-    await open();
-    expect(document.querySelector('[role="alert"]')?.textContent).toBe("Unable to load notifications (502): Gateway unavailable");
-    expect(document.body.textContent).not.toContain("No notifications yet.");
-
-    mocks.list.mockResolvedValue(page([event(B)]));
     await click("Retry");
     expect(document.querySelector('[role="alert"]')).toBeNull();
-    expect(document.querySelector(`[data-testid="notification-${B}"]`)).not.toBeNull();
   });
-  it("saves preview and category/channel preferences on the server", async () => {
-    await open(); await click("Preferences");
-    const preview = [...document.querySelectorAll('input[type="checkbox"]')][0] as HTMLInputElement;
-    await act(async () => preview.click());
-    expect(mocks.savePreferences).toHaveBeenCalledWith({ hidePreviews: false, accessToken: `token-${A}` });
-    const channel = document.querySelector('[aria-label="Support Browser push"]') as HTMLInputElement;
-    await act(async () => channel.click());
-    expect(mocks.savePreferences).toHaveBeenCalledWith({ preferences: [{ category: "support", channel: "web_push", enabled: false }], accessToken: `token-${A}` });
-  });
-  it("clears account state immediately and ignores old-account delayed responses", async () => {
-    await open();
+  it("clears account data immediately and ignores delayed responses, including token changes", async () => {
     let complete: ((value: ReturnType<typeof page>) => void) | undefined;
-    mocks.list.mockImplementation(({ accessToken }) => accessToken === `token-${A}` ? new Promise((resolve) => { complete = resolve; }) : Promise.resolve(page([])));
+    mocks.list.mockImplementation(({ accessToken }) => accessToken === `token-${A}` ? new Promise(resolve => { complete = resolve; }) : Promise.resolve(page([])));
     await act(async () => window.dispatchEvent(new Event("focus")));
-    await act(async () => root.render(<Harness userId={B} />));
+    await act(async () => root.render(<Harness userId={A} token="refreshed-token" />));
     await act(async () => complete?.(page([event()])));
-    expect(container.querySelector('[data-testid="notification-center-unread"]')).toBeNull();
-    expect(document.querySelector('[data-testid="notification-center"]')).toBeNull();
+    expect(container.querySelector('[data-testid="count"]')?.textContent).toBe("0");
+    await act(async () => root.render(<Harness userId={B} />));
+    expect(container.querySelector('[data-testid="count"]')?.textContent).toBe("0");
   });
   it("leaves foreground presentation to Web Push while that channel is active", async () => {
     mocks.foreground = true; mocks.subscription = true;
@@ -126,7 +153,7 @@ describe("notification center", () => {
     const options = mocks.show.mock.calls.at(-1)?.[3];
     expect(mocks.state).not.toHaveBeenCalledWith(expect.objectContaining({ action: "seen" }));
     await act(async () => options.onShow());
-    expect(mocks.state).toHaveBeenCalledWith({ id: A, action: "seen", accessToken: `token-${A}` });
+    expect(mocks.state).toHaveBeenCalledWith(expect.objectContaining({ id: A, action: "seen", accessToken: `token-${A}`, expectedUserId: A }));
     await act(async () => root.render(<Harness userId={B} />));
     mocks.state.mockClear();
     await act(async () => options.onShow());

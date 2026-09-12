@@ -128,16 +128,13 @@ describe("MobileStudioNavigationHeader", () => {
     }
   });
 
-  it("preserves the existing notification and tabs controls without inventing disabled actions", async () => {
-    const notification = vi.fn(); const tabs = vi.fn();
-    props.notificationBell = <Button onPress={notification} aria-label="Notifications">Bell</Button>;
+  it("preserves tab controls without a duplicate notification entry", async () => {
+    const tabs = vi.fn();
     props.tabsAction = <Button onPress={tabs}>Browse tabs</Button>;
     await render(); await click("mobile-header-more");
     expect(document.body.textContent).not.toContain("Private chat");
     expect(document.body.textContent).not.toContain("Open parent conversation");
-    await clickText("Bell"); expect(notification).toHaveBeenCalledTimes(1);
-    expect(query("mobile-header-more")?.getAttribute("aria-expanded")).toBe("false");
-    await click("mobile-header-more");
+    expect(document.body.textContent).not.toContain("Notifications");
     await clickText("Browse tabs"); expect(tabs).toHaveBeenCalledTimes(1);
   });
 

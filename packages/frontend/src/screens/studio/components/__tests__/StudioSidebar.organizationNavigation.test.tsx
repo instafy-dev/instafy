@@ -473,9 +473,9 @@ describe("StudioSidebar organization navigation", () => {
     const trigger = container.querySelector<HTMLButtonElement>('[data-testid="sidebar-space-button"]')!;
     expect(trigger.textContent).toContain("Core");
     expect(trigger.querySelector('[data-testid="sidebar-current-space-attention"]')?.textContent).toBe("9+");
-    expect(trigger.getAttribute("aria-label")).toBe("Choose space: Core, 12 chats with unread replies");
+    expect(trigger.getAttribute("aria-label")).toBe("Choose space: Core, 12 unread updates");
     await click("sidebar-space-button");
-    expect(document.querySelector('[data-testid="sidebar-recent-space-space-a"]')?.getAttribute("aria-label")).toBe("Core, Current, 12 chats with unread replies");
+    expect(document.querySelector('[data-testid="sidebar-recent-space-space-a"]')?.getAttribute("aria-label")).toBe("Core, Current, 12 unread updates");
     await click("sidebar-recent-space-space-a");
     fixture.homeAttentionByProject = {};
     await render(props);
@@ -926,10 +926,10 @@ describe("StudioSidebar organization navigation", () => {
 
     await render();
     expect(visibleTileIds()).toEqual(expectedOrder);
-    expect(container.querySelector('[data-testid="sidebar-recent-space-space-a"]')?.getAttribute("aria-label")).toBe("Core, Current, 2 chats with unread replies");
+    expect(container.querySelector('[data-testid="sidebar-recent-space-space-a"]')?.getAttribute("aria-label")).toBe("Core, Current, 2 unread updates");
     expect(container.querySelector('[data-testid="sidebar-recent-space-attention-space-a"]')?.textContent).toBe("2");
     expect(container.querySelector('[data-testid="sidebar-current-space-attention"]')?.textContent).toBe("2");
-    expect(container.querySelector('[data-testid="sidebar-recent-space-space-z"]')?.getAttribute("aria-label")).toBe("Zebra, 12 chats with unread replies");
+    expect(container.querySelector('[data-testid="sidebar-recent-space-space-z"]')?.getAttribute("aria-label")).toBe("Zebra, 12 unread updates");
     expect(container.querySelector('[data-testid="sidebar-recent-space-attention-space-z"]')?.textContent).toBe("9+");
     expect(container.querySelector('[data-testid="sidebar-recent-space-attention-space-apps"]')).toBeNull();
     expect(container.querySelector('[data-testid="sidebar-recent-space-space-c"]')).toBeNull();

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { desktopTitleBarFree } from "../../../lib/desktopShell";
 import { DialogTrigger } from "react-aria-components";
 import {
@@ -57,7 +57,6 @@ const COMPACT_TAB_SELECTOR_CLASS =
   "h-10 min-w-0 justify-between gap-2 rounded-xl !border-transparent !bg-slate-100 px-2.5 !text-slate-950 hover:!bg-slate-100 data-[hovered]:!bg-slate-100 focus-visible:ring-primary-600 focus-visible:ring-offset-white max-[375px]:min-h-11 dark:!bg-white/[0.06] dark:!text-slate-50 dark:hover:!bg-white/[0.09] dark:data-[hovered]:!bg-white/[0.09] dark:focus-visible:ring-primary-400 dark:focus-visible:ring-offset-[var(--color-studio-dark-rail)]";
 
 export interface StudioTopBarProps {
-  notificationBell?: ReactNode;
   newChatInSidebar?: boolean;
   contextHeaderAbove?: boolean;
   mobileNavigation?: {
@@ -68,7 +67,7 @@ export interface StudioTopBarProps {
   };
 }
 
-export function StudioTopBar({ notificationBell, mobileNavigation, newChatInSidebar = false, contextHeaderAbove = false }: StudioTopBarProps = {}) {
+export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, contextHeaderAbove = false }: StudioTopBarProps = {}) {
   const {
     activeProjectName,
     onStartNewConversation,
@@ -443,7 +442,6 @@ export function StudioTopBar({ notificationBell, mobileNavigation, newChatInSide
           actions={
             hasDesktopTabs ? (
               <div className="flex items-center">
-                {notificationBell}
                 <DialogTrigger
                   isOpen={tabMenuOpen}
                   onOpenChange={(open) => setTabMenuOpen((current) => (open && current ? false : open))}
@@ -461,7 +459,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation, newChatInSide
                   {tabsMenu}
                 </DialogTrigger>
               </div>
-            ) : notificationBell
+            ) : null
           }
         />
       ) : isLargeScreen ? (
@@ -470,7 +468,6 @@ export function StudioTopBar({ notificationBell, mobileNavigation, newChatInSide
           {parentConversationButton}
           <div className="min-w-0 flex-1">{projectNameLabel}</div>
           {shouldShowNewChat ? <StudioNewChatButton /> : null}
-          {notificationBell}
         </div>
       ) : isGlobalPage ? (
         <div className="flex items-center gap-2 px-4 py-2 max-[375px]:gap-1 max-[375px]:px-3" data-testid="topbar-global-navigation">
@@ -507,8 +504,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation, newChatInSide
             <SidebarExpand className="h-4 w-4 shrink-0 text-slate-600 dark:text-slate-400" aria-hidden="true" />
           </Button>
           <div className="ml-auto flex shrink-0 items-center gap-1">
-            {notificationBell}
-            {globalHistoryAvailable && mobileNavigation ? (
+              {globalHistoryAvailable && mobileNavigation ? (
               <DialogTrigger isOpen={historyMenuOpen} onOpenChange={setHistoryMenuOpen}>
                 <IconButton
                   variant="ghost"
@@ -573,7 +569,6 @@ export function StudioTopBar({ notificationBell, mobileNavigation, newChatInSide
                 title: parentConversation.title || "Conversation",
                 onOpen: handleOpenParentConversation,
               } : undefined}
-              notificationBell={notificationBell}
               onMoreOpenChange={(open) => { if (!open) setTabMenuOpen(false); }}
               tabsAction={workspaceTabs.length > 0 && !controllerProjectMissing ? (
                 <DialogTrigger isOpen={tabMenuOpen} onOpenChange={setTabMenuOpen}>
@@ -627,8 +622,7 @@ export function StudioTopBar({ notificationBell, mobileNavigation, newChatInSide
               </DialogTrigger>
             ) : null}
             {shouldShowNewChat ? <StudioNewChatButton /> : null}
-            {notificationBell}
-          </div>
+            </div>
         </div>
       )}
       {!isLargeScreen && !showTouchBottomDock && (!hasCompactNavigation || isGlobalPage) && studioHistoryControlsAvailable() ? (

@@ -29,6 +29,7 @@ import {
 import { getOrgDisplayName, isPersonalOrgName } from "../../../org/orgNaming";
 import { useStatus } from "../../../status/useStatus";
 import { ProfileEditor } from "../../../profile/ProfileEditor";
+import { NotificationPreferencesSettings } from "../../../notifications/NotificationPreferencesSettings";
 import { SettingsSection } from "./SettingsSection";
 import { TeamProfileSettings } from "./TeamProfileSettings";
 import { useSettingsOrganization } from "./useSettingsOrganization";
@@ -83,7 +84,7 @@ interface SettingsPanelProps {
 export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrganizationChange }: SettingsPanelProps) {
   const { onStartNewProject } = useWorkspaceControls();
   const isLargeScreen = useStudioDesktopLayout();
-  const { user } = useAuth();
+  const { user, session } = useAuth();
   const {
     projectList,
     activeProjectId,
@@ -961,7 +962,9 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
                 : "Danger zone"
             : profileCategory === "account"
               ? "Account"
-              : "Preferences";
+              : profileCategory === "notifications"
+                ? "Notifications"
+                : "Preferences";
 
   const settingsScope =
     activeTab === "profile" ? (
@@ -1297,6 +1300,7 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
     return [
       { id: "account", label: "Account", testId: "settings-category-profile-account" },
       { id: "preferences", label: "Preferences", testId: "settings-category-profile-preferences" },
+      { id: "notifications", label: "Notifications", testId: "settings-category-profile-notifications" },
     ];
   }, [activeTab, projectAiItems]);
 
@@ -1609,6 +1613,8 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
           <div className="space-y-4" data-testid="profile-settings-section">
             {profileCategory === "account" ? (
             <ProfileEditor variant="panel" />
+          ) : profileCategory === "notifications" ? (
+            <NotificationPreferencesSettings userId={user?.id ?? null} accessToken={session?.access_token ?? null} />
           ) : (
             <Card tone="default" radius="2xl" shadow="none" padding="sm" className="py-2.5">
               <Text variant="bodyStrong" tone="secondary">

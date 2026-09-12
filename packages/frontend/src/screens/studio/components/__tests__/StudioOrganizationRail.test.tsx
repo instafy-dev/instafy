@@ -58,9 +58,11 @@ describe("StudioOrganizationRail", () => {
     expect(home?.getAttribute("aria-current")).toBe("page");
     expect(home?.getAttribute("aria-label")).toBe("Home — all teams");
     expect(home?.getAttribute("title")).toBe("Home — all teams");
+    expect(document.getElementById(home!.getAttribute("aria-describedby")!)?.textContent).toBe("3 unread updates across teams");
     expect(container.querySelector('[data-testid="sidebar-home-badge"]')?.textContent).toBe("3");
+    expect(container.querySelector('[data-testid="sidebar-home-badge"]')?.getAttribute("title")).toBe("3 unread updates across teams");
     expect(container.querySelector('[data-testid="sidebar-team-one"]')?.hasAttribute("aria-current")).toBe(false);
-    expect(container.querySelector('[data-testid="sidebar-team-empty"]')?.getAttribute("aria-label")).toContain("2 updates");
+    expect(container.querySelector('[data-testid="sidebar-team-empty"]')?.getAttribute("aria-label")).toContain("2 unread updates");
     await act(async () => {
       container.querySelector<HTMLButtonElement>('[data-testid="sidebar-home-button"]')?.click();
       container.querySelector<HTMLButtonElement>('[data-testid="sidebar-team-empty"]')?.click();
@@ -71,6 +73,16 @@ describe("StudioOrganizationRail", () => {
     expect(onSelectOrganization).toHaveBeenCalledWith("empty");
     expect(onCreateOrganization).toHaveBeenCalledOnce();
     expect(onBrowseOrganizations).toHaveBeenCalledOnce();
+  });
+
+  it("announces a single unread update for Home and teams without implying it is a chat", async () => {
+    await render({ homeAttentionCount: 1, orgAttentionCounts: { one: 1 } });
+    const home = container.querySelector('[data-testid="sidebar-home-button"]')!;
+    expect(document.getElementById(home.getAttribute("aria-describedby")!)?.textContent).toBe("1 unread update across teams");
+    expect(container.querySelector('[data-testid="sidebar-team-one"]')?.getAttribute("aria-label")).toBe("One, 1 unread update");
+    expect(container.querySelector('[data-testid="sidebar-team-attention-one"]')?.getAttribute("title")).toBe("1 unread update");
+    await render();
+    expect(container.querySelector('[data-testid="sidebar-home-button"]')?.hasAttribute("aria-describedby")).toBe(false);
   });
 
   it("preserves list scroll during unrelated renders and reveals selection by scrolling only the list", async () => {

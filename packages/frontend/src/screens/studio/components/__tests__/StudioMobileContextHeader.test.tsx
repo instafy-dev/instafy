@@ -69,6 +69,7 @@ describe("StudioMobileContextHeader", () => {
     expect(document.querySelectorAll('[aria-label="Home — all teams"]')).toHaveLength(1);
     expect(button("topbar-home-button").getAttribute("aria-current")).toBe("page");
     expect(button("topbar-home-button").getAttribute("aria-describedby")).toBeTruthy();
+    expect(document.getElementById(button("topbar-home-button").getAttribute("aria-describedby")!)?.textContent).toBe("3 unread updates across teams");
     expect(container.querySelector('[data-testid="studio-mobile-home-attention"]')?.textContent).toBe("3");
     expect(props.searchRef.current).toBe(button("studio-mobile-search-trigger"));
     await click("topbar-home-button");
@@ -80,10 +81,17 @@ describe("StudioMobileContextHeader", () => {
     expect(props.onSwitchTeam).not.toHaveBeenCalled();
   });
 
+  it("uses singular update wording for Home and the current space", async () => {
+    await render({ ...props, homeAttentionCount: 1, attentionCounts: { current: 1 } });
+    expect(document.getElementById(button("topbar-home-button").getAttribute("aria-describedby")!)?.textContent).toBe("1 unread update across teams");
+    expect(button("sidebar-space-button").getAttribute("aria-label")).toBe("Choose space: Autofix, 1 unread update");
+    expect(container.querySelector('[data-testid="studio-mobile-home-attention"]')?.getAttribute("title")).toBe("1 unread update across teams");
+  });
+
   it("shows only the selected team's recent spaces and routes an exact selection", async () => {
     await render();
     expect(mocks.recency).toHaveBeenCalledWith("reader@example.test");
-    expect(button("sidebar-space-button").getAttribute("aria-label")).toContain("Autofix, 2 chats with unread replies");
+    expect(button("sidebar-space-button").getAttribute("aria-label")).toContain("Autofix, 2 unread updates");
     await click("sidebar-space-button");
     expect(document.querySelector('[data-testid="sidebar-recent-space-foreign"]')).toBeNull();
     expect(document.querySelector('[data-testid="sidebar-recent-space-current"]')).not.toBeNull();

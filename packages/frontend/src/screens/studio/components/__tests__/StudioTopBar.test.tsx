@@ -304,17 +304,14 @@ describe("StudioTopBar navigation", () => {
     { posture: "mobile Home", isLargeScreen: false, hasTabs: true, controllerProjectMissing: false, projectAccessBlocked: false, navigationPage: "home" },
     { posture: "mobile team", isLargeScreen: false, hasTabs: true, controllerProjectMissing: false, projectAccessBlocked: false, navigationPage: "team" },
     { posture: "mobile account", isLargeScreen: false, hasTabs: true, controllerProjectMissing: false, projectAccessBlocked: false, navigationPage: "account" },
-  ])("preserves the notification bell exactly once in $posture", async (posture) => {
+  ])("has no separate notification bell in $posture", async (posture) => {
     Object.assign(mocks, posture);
-    const onOpenNotifications = vi.fn();
     await act(async () => root.render(
-      <StudioTopBar notificationBell={<button type="button" aria-label="Notifications" onClick={onOpenNotifications}>Notifications</button>} />,
+      <StudioTopBar />,
     ));
 
     const bells = container.querySelectorAll<HTMLButtonElement>('button[aria-label="Notifications"]');
-    expect(bells).toHaveLength(1);
-    await act(async () => bells[0].click());
-    expect(onOpenNotifications).toHaveBeenCalledTimes(1);
+    expect(bells).toHaveLength(0);
     expect(container.querySelector('[data-testid="topbar-get-desktop"]')).toBeNull();
     expect(container.querySelector('a[href^="/install"]')).toBeNull();
   });

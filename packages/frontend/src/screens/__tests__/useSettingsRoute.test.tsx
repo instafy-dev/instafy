@@ -62,6 +62,16 @@ describe("URL-driven settings selection", () => {
     await act(async () => navigate(-1)); expect(state().category).toBe("billing");
   });
 
+  it("restores Notifications through Back and Forward in account settings", async () => {
+    await act(async () => root.render(<MemoryRouter initialEntries={["/studio?panel=settings&settingsTab=profile&settingsCategory=notifications"]}><Harness /></MemoryRouter>));
+    expect(state().category).toBe("notifications");
+    await act(async () => select("preferences"));
+    await act(async () => navigate(-1));
+    expect(state().category).toBe("notifications");
+    await act(async () => navigate(1));
+    expect(state().category).toBe("preferences");
+  });
+
   it("restores Profile and Members for each selected team without changing the active space", async () => {
     const originalSearch = "?panel=settings&settingsTab=org&settingsOrgId=empty-team&projectId=other-space";
     await act(async () => root.render(<MemoryRouter initialEntries={[`/studio${originalSearch}`]}><Harness /></MemoryRouter>));

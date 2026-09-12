@@ -353,6 +353,8 @@ struct CustomerBugReportDetailResponse {
     customer_last_message_at: Option<String>,
     support_last_message_at: Option<String>,
     resolved_at: Option<String>,
+    /// Exact durable resolution represented by this response snapshot.
+    resolution_notification_id: Option<String>,
     has_unread_support_activity: bool,
     has_unread_resolution: bool,
     message: String,
@@ -418,6 +420,9 @@ struct CreateBugReportMessageResponse {
 #[serde(rename_all = "camelCase")]
 struct AcknowledgeSupportActivityRequest {
     seen_through: String,
+    message_ids: Option<Vec<Uuid>>,
+    resolution_notification_id: Option<Uuid>,
+    expected_user_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -598,6 +603,29 @@ async fn acknowledge_support_report_activity(
         })?;
     let body = serde_json::from_slice::<AcknowledgeSupportActivityRequest>(&body_bytes)
         .map_err(|_| bad_request("support acknowledgement request must be valid JSON"))?;
+    if body
+        .expected_user_id
+        .is_some_and(|expected| expected != customer_user_id)
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ApiError::new(
+                "Notification session changed; refresh and try again",
+            )),
+        ));
+    }
+    if body.message_ids.as_ref().is_some_and(|ids| ids.len() > 100) {
+        return Err(bad_request(
+            "messageIds permits at most 100 displayed support messages",
+        ));
+    }
+    if (body.message_ids.is_some() || body.resolution_notification_id.is_some())
+        && body.expected_user_id.is_none()
+    {
+        return Err(bad_request(
+            "expectedUserId is required for an exact support acknowledgement",
+        ));
+    }
     let seen_through = chrono::DateTime::parse_from_rfc3339(body.seen_through.trim())
         .map(|value| value.with_timezone(&Utc))
         .map_err(|_| bad_request("seenThrough must be a valid RFC3339 timestamp"))?;
@@ -668,6 +696,38 @@ async fn acknowledge_support_report_activity(
         .map_err(|error| {
             internal_error(format!("failed to acknowledge support activity: {error}"))
         })?;
+    if body.message_ids.is_some() || body.resolution_notification_id.is_some() {
+        // Source IDs are the rendered timeline snapshot, not a timestamp range.
+        // A backdated reply committed after loading must remain unread in Home.
+        let message_ids = body.message_ids.unwrap_or_default();
+        transaction
+            .execute(
+                "update notification_recipients r
+                set seen_at=coalesce(r.seen_at,clock_timestamp()),
+                    read_at=coalesce(r.read_at,clock_timestamp())
+               from notification_events e
+              where r.event_id=e.id and r.user_id=$2
+                and e.resource_type='support_report' and e.resource_id=$1
+                and notification_recipient_authorized(e.id,$2)
+                and ((e.event_name='support.reply' and exists(
+                    select 1 from bug_report_messages m
+                     where m.bug_report_id=$1 and m.author_type='support' and m.id=any($3::uuid[])
+                       and e.producer_key='support.reply:'||m.id::text
+                )) or (e.event_name='support.resolved' and e.id=$4))",
+                &[
+                    &bug_report_id,
+                    &customer_user_id,
+                    &message_ids,
+                    &body.resolution_notification_id,
+                ],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!(
+                    "failed to acknowledge support notifications: {error}"
+                ))
+            })?;
+    }
     transaction.commit().await.map_err(|error| {
         internal_error(format!(
             "failed to finalize support acknowledgement: {error}"
@@ -2467,8 +2527,12 @@ async fn get_bug_report(
             .query_opt(
                 "select id, user_id, created_at, updated_at, customer_last_message_at,
                         support_last_message_at, customer_last_seen_support_at, resolved_at,
-                        message, details, status, project_id
-                   from bug_reports
+                        message, details, status, project_id,
+                        (select e.id from notification_events e join notification_recipients nr on nr.event_id=e.id
+                          where e.event_name='support.resolved' and e.resource_id=br.id
+                            and e.producer_key='support.resolved:'||br.id::text||':'||br.notification_resolution_sequence::text
+                            and nr.user_id=$2) as resolution_notification_id
+                   from bug_reports br
                   where id = $1 and user_id = $2",
                 &[&bug_report_id, &viewer],
             )
@@ -2532,6 +2596,9 @@ async fn get_bug_report(
         );
         return Ok(Json(BugReportDetailResponseView::Customer(
             CustomerBugReportDetailResponse {
+                resolution_notification_id: row
+                    .get::<_, Option<Uuid>>("resolution_notification_id")
+                    .map(|id| id.to_string()),
                 id: row.get::<_, Uuid>("id").to_string(),
                 created_at: row
                     .get::<_, chrono::DateTime<Utc>>("created_at")

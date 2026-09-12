@@ -16,10 +16,13 @@ import {
 } from "./bugReportEvents";
 import { requestMotionAccessIfNeeded } from "./motionPermission";
 import { controllerClient } from "../../../sdk/instafy";
+import { buildHomeSupportReports, type HomeSupportReport } from "../homeSupportReports";
+import { NOTIFICATION_RECEIVED_EVENT } from "../../../notifications/notificationPresentation";
 import { getStoredShakeReportEnabled, setStoredShakeReportEnabled } from "./shakeReportPreference";
 import { NATIVE_SHAKE_REPORT_EVENT, useShakeToReport } from "./useShakeToReport";
 
 const SHAKE_SCREENSHOT_TIMEOUT_MS = 3_000;
+const EMPTY_SUPPORT_REPORTS: HomeSupportReport[] = [];
 
 interface UseStudioBugReportControllerOptions {
   currentUserId: string | null;
@@ -57,7 +60,10 @@ export function useStudioBugReportController({
   const [supportUnreadSnapshot, setSupportUnreadSnapshot] = useState<{
     userId: string | null;
     count: number;
-  }>({ userId: null, count: 0 });
+    reports: HomeSupportReport[];
+    loading: boolean;
+    error: string | null;
+  }>({ userId: null, count: 0, reports: EMPTY_SUPPORT_REPORTS, loading: false, error: null });
   const supportPollGenerationRef = useRef(0);
   const currentUserIdRef = useRef(currentUserId);
   const resolutionToastUsersRef = useRef(new Map<string, string>());
@@ -87,6 +93,12 @@ export function useStudioBugReportController({
     currentUserId !== null && bugReportInboxOpenForUserId === currentUserId;
   const supportUnreadCount =
     supportUnreadSnapshot.userId === currentUserId ? supportUnreadSnapshot.count : 0;
+  const supportUnreadReports = supportUnreadSnapshot.userId === currentUserId
+    ? supportUnreadSnapshot.reports : EMPTY_SUPPORT_REPORTS;
+  const supportNotificationsLoading = currentUserId !== null &&
+    (supportUnreadSnapshot.userId !== currentUserId || supportUnreadSnapshot.loading);
+  const supportNotificationsError = supportUnreadSnapshot.userId === currentUserId
+    ? supportUnreadSnapshot.error : null;
 
   const handleOpenBugReportInbox = useCallback((reportId: string | null = null) => {
     const userId = currentUserIdRef.current;
@@ -107,20 +119,40 @@ export function useStudioBugReportController({
     async (notifyAboutResolution = true) => {
       const requestUserId = currentUserId;
       if (!requestUserId) {
-        setSupportUnreadSnapshot({ userId: null, count: 0 });
+        setSupportUnreadSnapshot({ userId: null, count: 0, reports: EMPTY_SUPPORT_REPORTS, loading: false, error: null });
         return;
       }
       const generation = ++supportPollGenerationRef.current;
+      const current = () => generation === supportPollGenerationRef.current && currentUserIdRef.current === requestUserId;
+      setSupportUnreadSnapshot(previous => ({
+        userId: requestUserId,
+        count: previous.userId === requestUserId ? previous.count : 0,
+        reports: previous.userId === requestUserId ? previous.reports : EMPTY_SUPPORT_REPORTS,
+        loading: true, error: null,
+      }));
+      let reportsLoaded = false;
       try {
-        const page = await controllerClient.bugReports.listPage(100, null, requestUserId);
-        if (
-          generation !== supportPollGenerationRef.current ||
-          currentUserIdRef.current !== requestUserId
-        ) {
-          return;
+        const firstPage = await controllerClient.bugReports.listPage(100, null, requestUserId);
+        if (!current()) return;
+        let page = firstPage;
+        const reports = new Map(buildHomeSupportReports(page.reports).map(report => [report.id, report]));
+        const cursors = new Set<string>();
+        // An old unread support reply can sit behind many newer read reports.
+        // Keep paging until Home can show every unread destination counted by
+        // the existing support badge, rather than stopping at the first 100.
+        while (reports.size < firstPage.unreadCount && page.hasMore && page.nextCursor) {
+          const cursorKey = `${page.nextCursor.activityAt}:${page.nextCursor.id}`;
+          if (cursors.has(cursorKey)) throw new Error("Repeated support report cursor");
+          cursors.add(cursorKey);
+          page = await controllerClient.bugReports.listPage(100, page.nextCursor, requestUserId);
+          if (!current()) return;
+          for (const report of buildHomeSupportReports(page.reports)) {
+            if (!reports.has(report.id)) reports.set(report.id, report);
+          }
         }
-        setSupportUnreadSnapshot({ userId: requestUserId, count: page.unreadCount });
-        if (!legacyResolutionToasts || !notifyAboutResolution || page.unnotifiedResolutionCount <= 0) return;
+        setSupportUnreadSnapshot({ userId: requestUserId, count: firstPage.unreadCount, reports: [...reports.values()], loading: false, error: null });
+        reportsLoaded = true;
+        if (!legacyResolutionToasts || !notifyAboutResolution || firstPage.unnotifiedResolutionCount <= 0) return;
         const claim = await controllerClient.bugReports.claimResolutionAlerts(requestUserId);
         if (currentUserIdRef.current !== requestUserId || claim.claimedCount <= 0) return;
         const toastId = `support-resolution:${claim.latestReportId ?? "reports"}:${
@@ -150,8 +182,13 @@ export function useStudioBugReportController({
           },
         );
       } catch {
-        // The support hub remains manually available. Background polling should
-        // never turn a transient controller or connectivity failure into noise.
+        if (!reportsLoaded && current()) {
+          // Home can retain the last successful rows and expose a quiet retry
+          // without presenting a failed request as an empty account.
+          setSupportUnreadSnapshot(previous => previous.userId === requestUserId ? {
+            ...previous, loading: false, error: "Support updates couldn’t be loaded. Please try again.",
+          } : previous);
+        }
       }
     },
     [currentUserId, handleOpenBugReportInbox, legacyResolutionToasts, showStatus],
@@ -164,7 +201,7 @@ export function useStudioBugReportController({
   useEffect(() => {
     supportPollGenerationRef.current += 1;
     if (!currentUserId) {
-      setSupportUnreadSnapshot({ userId: null, count: 0 });
+      setSupportUnreadSnapshot({ userId: null, count: 0, reports: EMPTY_SUPPORT_REPORTS, loading: false, error: null });
       return;
     }
     const refreshWhenVisible = () => {
@@ -174,11 +211,14 @@ export function useStudioBugReportController({
     };
     refreshWhenVisible();
     const intervalId = window.setInterval(refreshWhenVisible, 20_000);
+    const refreshReadState = () => { void refreshSupportNotifications(false); };
     window.addEventListener("focus", refreshWhenVisible);
+    window.addEventListener(NOTIFICATION_RECEIVED_EVENT, refreshReadState);
     document.addEventListener("visibilitychange", refreshWhenVisible);
     return () => {
       window.clearInterval(intervalId);
       window.removeEventListener("focus", refreshWhenVisible);
+      window.removeEventListener(NOTIFICATION_RECEIVED_EVENT, refreshReadState);
       document.removeEventListener("visibilitychange", refreshWhenVisible);
       supportPollGenerationRef.current += 1;
     };
@@ -494,5 +534,9 @@ export function useStudioBugReportController({
     onOpenBugReport: () => void handleOpenManualBugReport(),
     onOpenBugReportInbox: handleOpenBugReportInbox,
     supportUnreadCount,
+    supportUnreadReports,
+    supportNotificationsLoading,
+    supportNotificationsError,
+    refreshSupportNotifications,
   };
 }

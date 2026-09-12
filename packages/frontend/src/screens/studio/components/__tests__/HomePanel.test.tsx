@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConversationState } from "../../../../conversations/ConversationsProvider";
 import type { NotificationInboxItem } from "../../../../sdk/instafy";
 import type { ActivityItem } from "../../../../services/runtimeController/activity";
+import type { ProductNotification } from "../../../../notifications/notificationContract";
+import type { HomeNotifications } from "../../../../notifications/useNotificationCenter";
 import { HomePanel } from "../HomePanel";
 
 const mocks = vi.hoisted(() => ({
@@ -21,6 +23,10 @@ const mocks = vi.hoisted(() => ({
     retryActivity: vi.fn<() => Promise<boolean>>(),
   },
   conversations: [] as ConversationState[],
+  userId: "viewer",
+  accessToken: "viewer-token",
+  activeProjectId: "project-personal",
+  projects: [] as Array<{ id: string; name: string; orgId: string | null; orgName: string }>,
   organizations: vi.fn(),
   acknowledgeInbox: vi.fn(),
   startChat: vi.fn(),
@@ -41,8 +47,8 @@ vi.mock("react-router-dom", async (importOriginal) => ({
 }));
 vi.mock("../../../../projects/useProjects", () => ({
   useProjects: () => ({
-    projectList: [{ id: "project-personal", name: "My space", orgId: null, orgName: "Personal" }],
-    activeProjectId: "project-personal",
+    projectList: mocks.projects,
+    activeProjectId: mocks.activeProjectId,
   }),
 }));
 vi.mock("../../../../conversations/ConversationsProvider", () => ({
@@ -54,7 +60,7 @@ vi.mock("../../../../conversations/ConversationsProvider", () => ({
   }),
 }));
 vi.mock("../../../../providers/AuthProvider", () => ({
-  useAuth: () => ({ user: { id: "viewer" } }),
+  useAuth: () => ({ user: { id: mocks.userId }, session: { access_token: mocks.accessToken } }),
 }));
 vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus: mocks.showStatus }) }));
 vi.mock("../../../../workspace/WorkspaceTabsProvider", () => ({
@@ -111,6 +117,45 @@ function inboxItem(overrides: Partial<NotificationInboxItem> = {}): Notification
   };
 }
 
+const PROJECT = "11111111-1111-4111-8111-111111111111";
+const CONVERSATION = "22222222-2222-4222-8222-222222222222";
+const REPORT = "33333333-3333-4333-8333-333333333333";
+const EVENT_A = "44444444-4444-4444-8444-444444444444";
+const EVENT_B = "55555555-5555-4555-8555-555555555555";
+const EVENT_C = "66666666-6666-4666-8666-666666666666";
+const MESSAGE = "77777777-7777-4777-8777-777777777777";
+const AUTOMATION = "88888888-8888-4888-8888-888888888888";
+
+function notification(overrides: Partial<ProductNotification> = {}): ProductNotification {
+  return {
+    id: EVENT_A, eventName: "support.reply", category: "support", version: 1,
+    resourceType: "support_report", resourceId: REPORT, occurredAt: "2026-09-06T12:30:00Z",
+    title: "Instafy", body: "There is a new reply to your support report.",
+    url: `/studio?supportReportId=${REPORT}`, readAt: null, seenAt: null, archivedAt: null,
+    ...overrides,
+  };
+}
+
+function notificationState(items: ProductNotification[], overrides: Partial<HomeNotifications> = {}): HomeNotifications {
+  return {
+    page: { items, nextCursor: null, unreadCount: items.filter(item => !item.readAt && !item.archivedAt).length, asOf: "2026-09-06T12:35:00Z" },
+    loading: false, error: null, refresh: vi.fn(async () => {}), loadMore: vi.fn(async () => {}),
+    markRead: vi.fn(async () => true), ...overrides,
+  };
+}
+
+function localConversation(overrides: Partial<ConversationState> = {}): ConversationState {
+  return {
+    localId: "local-unread", controllerId: CONVERSATION, title: "Local unread work", visibility: "shared",
+    lifecycleStatus: "active", parentConversationId: null, threadKind: null, ownerAgent: null,
+    activeGoal: null, originMessageId: null, delegatedByAgentId: null,
+    messages: [{ id: MESSAGE, role: "assistant", content: "Please review the change", timestamp: Date.parse("2026-09-06T12:30:00Z") }],
+    draft: "", draftEditorState: null, assistantEnabled: true, extraAgentHandles: [], unreadCount: 1,
+    createdAt: Date.parse("2026-09-06T12:00:00Z"), pendingRunIds: [], awaitingLeaseRunIds: [],
+    pendingRunSubmittedAt: {}, runtimePreference: null, ...overrides,
+  } as ConversationState;
+}
+
 describe("HomePanel activity states", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -126,8 +171,12 @@ describe("HomePanel activity states", () => {
     mocks.activity.loadMoreActivity.mockResolvedValue(true);
     mocks.activity.retryActivity.mockResolvedValue(true);
     mocks.organizations.mockResolvedValue([{ id: "team-design", name: "Design review", slug: "design-review" }]);
-    mocks.acknowledgeInbox.mockResolvedValue({ success: true });
+    mocks.acknowledgeInbox.mockImplementation(async ({ notificationIds = [] }: { notificationIds?: string[] }) => ({ success: true, inboxAcknowledged: true, acknowledgedNotificationIds: notificationIds }));
     mocks.conversations = [];
+    mocks.userId = "viewer";
+    mocks.accessToken = "viewer-token";
+    mocks.activeProjectId = "project-personal";
+    mocks.projects = [{ id: "project-personal", name: "My space", orgId: null, orgName: "Personal" }];
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -152,6 +201,12 @@ describe("HomePanel activity states", () => {
     const button = query<HTMLButtonElement>(testId);
     expect(button).not.toBeNull();
     await act(async () => button?.click());
+  }
+
+  async function clickLabel(label: string) {
+    const button = [...container.querySelectorAll("button")].find(element => element.textContent?.trim() === label);
+    expect(button, label).toBeTruthy();
+    await act(async () => button!.click());
   }
 
   it("opens unloaded Home activity with one destination, without a competing tab push", async () => {
@@ -360,9 +415,246 @@ describe("HomePanel activity states", () => {
     expect(dismiss?.getAttribute("aria-label")).toBe("Mark Scheduled cleanup as read");
     await click("home-attention-conversation-conversation-unread-dismiss");
 
-    expect(mocks.acknowledgeInbox).toHaveBeenCalledWith({ conversationId: "conversation-unread" });
+    expect(mocks.acknowledgeInbox).toHaveBeenCalledWith({
+      conversationId: "conversation-unread", expectedLastMessageId: "message-unread", notificationIds: [], accessToken: "viewer-token",
+      expectedUserId: "viewer", isCurrent: expect.any(Function),
+    });
     expect(mocks.openConversationTab).not.toHaveBeenCalled();
     expect(mocks.navigate).not.toHaveBeenCalled();
+    // The controller's next inbox snapshot owns removal; no stable local key
+    // is allowed to suppress a reply that arrives during acknowledgement.
+    expect(query("home-attention-conversation-conversation-unread")).not.toBeNull();
+    await render({ inboxItems: [] });
     expect(query("home-attention-conversation-conversation-unread")).toBeNull();
+  });
+
+  it.each([
+    ["support.reply", "support", `/studio?supportReportId=${REPORT}`, REPORT, "Support replied"],
+    ["automation.failed", "automations", `/studio?projectId=${PROJECT}&panel=automations`, AUTOMATION, "Automation failed"],
+  ] as const)("places %s in Home's existing unread lane and opens the canonical destination", async (eventName, category, url, resourceId, title) => {
+    const item = notification({ eventName, category, url, resourceId });
+    const notifications = notificationState([item]);
+    await render({ notifications });
+    expect(query(`home-notification-${EVENT_A}`)?.textContent).toContain(title);
+    expect(query("home-attention-section")?.contains(query(`home-notification-${EVENT_A}`)!)).toBe(true);
+    expect(query("notification-center-bell")).toBeNull();
+    expect(query("notification-center")).toBeNull();
+    expect([...container.querySelectorAll("button")].some(button => button.textContent?.trim() === "Inbox")).toBe(false);
+    await click(`home-notification-${EVENT_A}`);
+    expect(notifications.markRead).toHaveBeenCalledExactlyOnceWith([item]);
+    expect(mocks.navigate).toHaveBeenCalledExactlyOnceWith(url);
+  });
+
+  it("marks only loaded unread groups in the selected team's feed without using a global watermark", async () => {
+    mocks.projects.push({ id: PROJECT, name: "Release space", orgId: "team-design", orgName: "Design review" });
+    const first = notification({ eventName: "automation.failed", category: "automations", resourceId: AUTOMATION, url: `/studio?projectId=${PROJECT}&panel=automations` });
+    const second = notification({ ...first, id: EVENT_B, occurredAt: "2026-09-06T12:20:00Z" });
+    const unrelated = notification({ id: EVENT_C });
+    const notifications = notificationState([first, second, unrelated]);
+    await render({ notifications });
+    await click("home-team-chip-team-design");
+    expect(query(`home-notification-${EVENT_C}`)).toBeNull();
+    await clickLabel("Mark all read");
+    expect(notifications.markRead).toHaveBeenCalledExactlyOnceWith([first, second]);
+    expect(mocks.acknowledgeInbox).not.toHaveBeenCalled();
+    expect(mocks.navigate).not.toHaveBeenCalled();
+  });
+
+  it("merges a conversation's inbox and durable updates into one row and acknowledges the exact displayed snapshot", async () => {
+    const inbox = inboxItem({ projectId: PROJECT, conversationId: CONVERSATION, lastMessageId: MESSAGE });
+    const reply = notification({ eventName: "conversation.reply", category: "conversations", resourceId: CONVERSATION, url: `/studio?projectId=${PROJECT}&conversationControllerId=${CONVERSATION}` });
+    const failure = notification({ ...reply, id: EVENT_B, eventName: "run.failed", category: "runs", occurredAt: "2026-09-06T12:20:00Z" });
+    const alreadyRead = notification({ ...reply, id: EVENT_C, readAt: "2026-09-06T12:25:00Z", occurredAt: "2026-09-06T12:15:00Z" });
+    const notifications = notificationState([reply, failure, alreadyRead]);
+    const refreshInbox = vi.fn(async () => []);
+    await render({ inboxItems: [inbox], notifications, refreshInbox });
+    expect(query(`home-attention-conversation-${CONVERSATION}`)?.textContent).toContain("Unread work");
+    expect(query(`home-notification-${EVENT_A}`)).toBeNull();
+    expect(query(`home-notification-${EVENT_B}`)).toBeNull();
+    await click(`home-attention-conversation-${CONVERSATION}-dismiss`);
+    expect(mocks.acknowledgeInbox).toHaveBeenCalledExactlyOnceWith({
+      conversationId: CONVERSATION, expectedLastMessageId: MESSAGE, notificationIds: [EVENT_A, EVENT_B], accessToken: "viewer-token",
+      expectedUserId: "viewer", isCurrent: expect.any(Function),
+    });
+    expect(notifications.markRead).not.toHaveBeenCalled();
+    expect(notifications.refresh).toHaveBeenCalledWith({ force: true });
+    expect(refreshInbox).toHaveBeenCalledWith({ force: true });
+  });
+
+  it("keeps a failed inbox snapshot visible and surfaces the error without acknowledging durable updates separately", async () => {
+    mocks.acknowledgeInbox.mockResolvedValue({ success: false, error: "Unable to acknowledge snapshot" });
+    const item = inboxItem();
+    await render({ inboxItems: [item] });
+    await click("home-attention-conversation-conversation-unread-dismiss");
+    expect(query("home-attention-conversation-conversation-unread")).not.toBeNull();
+    expect(mocks.markConversationRead).not.toHaveBeenCalled();
+    expect(mocks.showStatus).toHaveBeenCalledWith("Unable to acknowledge snapshot", "error", 4000);
+  });
+
+  it("leaves local unread state intact when the server reports a newer concurrent reply", async () => {
+    mocks.activeProjectId = PROJECT;
+    mocks.projects = [{ id: PROJECT, name: "My space", orgId: null, orgName: "Personal" }];
+    mocks.conversations = [localConversation()];
+    mocks.acknowledgeInbox.mockResolvedValue({ success: true, inboxAcknowledged: false, acknowledgedNotificationIds: [] });
+    const item = inboxItem({ projectId: PROJECT, conversationId: CONVERSATION, lastMessageId: MESSAGE });
+    await render({ inboxItems: [item] });
+    await click(`home-attention-conversation-${CONVERSATION}-dismiss`);
+    expect(mocks.acknowledgeInbox).toHaveBeenCalledWith(expect.objectContaining({ conversationId: CONVERSATION, expectedLastMessageId: MESSAGE }));
+    expect(mocks.markConversationRead).not.toHaveBeenCalled();
+    expect(query(`home-attention-conversation-${CONVERSATION}`)).not.toBeNull();
+  });
+
+  it("marks the unchanged local conversation read only after its inbox and durable snapshot are acknowledged", async () => {
+    mocks.activeProjectId = PROJECT;
+    mocks.projects = [{ id: PROJECT, name: "My space", orgId: null, orgName: "Personal" }];
+    mocks.conversations = [localConversation()];
+    const reply = notification({ eventName: "conversation.reply", category: "conversations", resourceId: CONVERSATION, url: `/studio?projectId=${PROJECT}&conversationControllerId=${CONVERSATION}` });
+    const notifications = notificationState([reply]);
+    const item = inboxItem({ projectId: PROJECT, conversationId: CONVERSATION, lastMessageId: MESSAGE });
+    let complete!: (value: unknown) => void;
+    mocks.acknowledgeInbox.mockReturnValue(new Promise(resolve => { complete = resolve; }));
+    await render({ inboxItems: [item], notifications });
+    await click(`home-attention-conversation-${CONVERSATION}-dismiss`);
+    expect(mocks.markConversationRead).not.toHaveBeenCalled();
+    expect(mocks.acknowledgeInbox).toHaveBeenCalledWith(expect.objectContaining({ conversationId: CONVERSATION, expectedLastMessageId: MESSAGE, notificationIds: [EVENT_A] }));
+    await act(async () => complete({ success: true, inboxAcknowledged: true, acknowledgedNotificationIds: [EVENT_A] }));
+    expect(mocks.markConversationRead).toHaveBeenCalledExactlyOnceWith("local-unread");
+    expect(notifications.markRead).not.toHaveBeenCalled();
+  });
+
+  it("does not mark local unread state when the server omits one of the requested durable acknowledgements", async () => {
+    mocks.activeProjectId = PROJECT;
+    mocks.projects = [{ id: PROJECT, name: "My space", orgId: null, orgName: "Personal" }];
+    mocks.conversations = [localConversation()];
+    const reply = notification({ eventName: "conversation.reply", category: "conversations", resourceId: CONVERSATION, url: `/studio?projectId=${PROJECT}&conversationControllerId=${CONVERSATION}` });
+    const notifications = notificationState([reply]);
+    mocks.acknowledgeInbox.mockResolvedValue({ success: true, inboxAcknowledged: true, acknowledgedNotificationIds: [] });
+    await render({ inboxItems: [inboxItem({ projectId: PROJECT, conversationId: CONVERSATION, lastMessageId: MESSAGE })], notifications });
+    await click(`home-attention-conversation-${CONVERSATION}-dismiss`);
+    expect(mocks.markConversationRead).not.toHaveBeenCalled();
+    expect(query(`home-attention-conversation-${CONVERSATION}`)).not.toBeNull();
+    expect(mocks.showStatus).toHaveBeenCalledWith(expect.stringContaining("Unable to mark this update as read"), "error", 4000);
+  });
+
+  it.each(["account", "token"] as const)("ignores a snapshot completion after the authenticated %s changes", async (change) => {
+    mocks.activeProjectId = PROJECT;
+    mocks.projects = [{ id: PROJECT, name: "My space", orgId: null, orgName: "Personal" }];
+    mocks.conversations = [localConversation()];
+    let complete!: (value: unknown) => void;
+    mocks.acknowledgeInbox.mockReturnValue(new Promise(resolve => { complete = resolve; }));
+    const item = inboxItem({ projectId: PROJECT, conversationId: CONVERSATION, lastMessageId: MESSAGE });
+    await render({ inboxItems: [item] });
+    await click(`home-attention-conversation-${CONVERSATION}-dismiss`);
+    const isCurrent = mocks.acknowledgeInbox.mock.calls[0][0].isCurrent as () => boolean;
+    expect(isCurrent()).toBe(true);
+    if (change === "account") mocks.userId = "different-viewer";
+    mocks.accessToken = "new-token";
+    await render({ inboxItems: [item] });
+    expect(isCurrent()).toBe(false);
+    await act(async () => complete({ success: true, inboxAcknowledged: true, acknowledgedNotificationIds: [] }));
+    expect(mocks.markConversationRead).not.toHaveBeenCalled();
+    expect(mocks.showStatus).not.toHaveBeenCalled();
+  });
+
+  it("does not clear a new local message that arrives while the displayed inbox snapshot is being acknowledged", async () => {
+    mocks.activeProjectId = PROJECT;
+    mocks.projects = [{ id: PROJECT, name: "My space", orgId: null, orgName: "Personal" }];
+    const original = localConversation();
+    mocks.conversations = [original];
+    let complete!: (value: unknown) => void;
+    mocks.acknowledgeInbox.mockReturnValue(new Promise(resolve => { complete = resolve; }));
+    const item = inboxItem({ projectId: PROJECT, conversationId: CONVERSATION, lastMessageId: MESSAGE });
+    await render({ inboxItems: [item] });
+    await click(`home-attention-conversation-${CONVERSATION}-dismiss`);
+    mocks.conversations = [localConversation({ unreadCount: 2, messages: [...original.messages, { id: "new-message", role: "assistant", content: "One more change", timestamp: Date.parse("2026-09-06T12:40:00Z") }] })];
+    await render({ inboxItems: [item] });
+    await act(async () => complete({ success: true, inboxAcknowledged: true, acknowledgedNotificationIds: [] }));
+    expect(mocks.markConversationRead).not.toHaveBeenCalled();
+    expect(query(`home-attention-conversation-${CONVERSATION}`)).not.toBeNull();
+  });
+
+  it("does not claim Home is empty while notification loading or retryable errors are unresolved", async () => {
+    const notifications = notificationState([], { loading: true });
+    await render({ notifications });
+    expect(query("home-empty")).toBeNull();
+    expect(container.textContent).not.toContain("Quiet so far.");
+    expect(container.querySelector('[role="status"][aria-label*="Loading"]')).not.toBeNull();
+    notifications.loading = false;
+    notifications.error = "Updates could not be loaded.";
+    await render({ notifications });
+    expect(query("home-empty")).toBeNull();
+    expect(container.textContent).not.toContain("Quiet so far.");
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(notifications.error);
+    await clickLabel("Retry notifications");
+    expect(notifications.refresh).toHaveBeenCalledTimes(1);
+    notifications.error = null;
+    await render({ notifications });
+    expect(query("home-empty")).not.toBeNull();
+  });
+
+  it("loads older notifications through Home while preserving activity rows and guarding repeated loading clicks", async () => {
+    mocks.activity.activityItems = [activityItem()];
+    const notifications = notificationState([]);
+    notifications.page.nextCursor = "older-cursor";
+    await render({ notifications });
+    expect(query("home-recent-item-20")).not.toBeNull();
+    await click("home-recent-show-more");
+    expect(notifications.loadMore).toHaveBeenCalledTimes(1);
+    notifications.loading = true;
+    await render({ notifications });
+    expect(query<HTMLButtonElement>("home-recent-show-more")?.disabled).toBe(true);
+    await click("home-recent-show-more");
+    expect(notifications.loadMore).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens pre-migration unread support in the existing report flow without inventing a read acknowledgement", async () => {
+    const notifications = notificationState([]);
+    const report = {
+      id: REPORT, title: "Tabs cannot be dragged", projectId: null, activityAt: "2026-09-01T12:00:00Z",
+      supportLastMessageAt: "2026-09-01T12:00:00Z", resolvedAt: null, hasUnreadResolution: false,
+    };
+    await render({ notifications, supportReports: [report] });
+    expect(query(`home-support-${REPORT}`)?.textContent).toContain("Tabs cannot be dragged");
+    expect(query("home-attention-section")?.contains(query(`home-support-${REPORT}`)!)).toBe(true);
+    expect(query(`home-support-${REPORT}-dismiss`)).toBeNull();
+    expect([...container.querySelectorAll("button")].some(button => button.textContent?.trim() === "Mark all read")).toBe(false);
+    await click(`home-support-${REPORT}`);
+    expect(mocks.navigate).toHaveBeenCalledExactlyOnceWith(`/studio?supportReportId=${REPORT}`);
+    expect(notifications.markRead).not.toHaveBeenCalled();
+    expect(mocks.acknowledgeInbox).not.toHaveBeenCalled();
+  });
+
+  it("keeps Home out of its empty state while legacy support is loading or cannot be refreshed", async () => {
+    const refreshSupport = vi.fn(async () => {});
+    await render({ supportLoading: true, refreshSupport });
+    expect(query("home-empty")).toBeNull();
+    expect(container.querySelector('[role="status"][aria-label*="Loading"]')).not.toBeNull();
+    await render({ supportError: "Support updates could not be loaded.", refreshSupport });
+    expect(query("home-empty")).toBeNull();
+    expect(container.textContent).not.toContain("Quiet so far.");
+    await clickLabel("Retry support updates");
+    expect(refreshSupport).toHaveBeenCalledTimes(1);
+    await render({ supportReports: [], refreshSupport });
+    expect(query("home-empty")).not.toBeNull();
+  });
+
+  it.each(["legacy", "durable"] as const)("opens %s support through the root report dialog without leaving Home", async (source) => {
+    window.history.replaceState(null, "", "/studio?projectId=project-personal&panel=home");
+    const homeUrl = window.location.href;
+    const onOpenSupport = vi.fn();
+    const items = [notification(), notification({ id: EVENT_B, occurredAt: "2026-09-06T12:20:00Z" })];
+    const notifications = notificationState(source === "durable" ? items : []);
+    const supportReports = source === "legacy" ? [{
+      id: REPORT, title: "Tabs cannot be dragged", projectId: null, activityAt: "2026-09-01T12:00:00Z",
+      supportLastMessageAt: "2026-09-01T12:00:00Z", resolvedAt: null, hasUnreadResolution: false,
+    }] : [];
+    await render({ notifications, supportReports, onOpenSupport });
+    await click(source === "legacy" ? `home-support-${REPORT}` : `home-notification-${EVENT_A}`);
+    expect(onOpenSupport).toHaveBeenCalledExactlyOnceWith(REPORT);
+    expect(mocks.navigate).not.toHaveBeenCalled();
+    expect(window.location.href).toBe(homeUrl);
+    if (source === "durable") expect(notifications.markRead).toHaveBeenCalledExactlyOnceWith(items);
+    else expect(notifications.markRead).not.toHaveBeenCalled();
+    expect(mocks.acknowledgeInbox).not.toHaveBeenCalled();
   });
 });

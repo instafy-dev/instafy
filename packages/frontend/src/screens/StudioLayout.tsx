@@ -1,3 +1,5 @@
+import { buildHomeFeed } from "./studio/homeFeed";
+import { getHomeNotificationTarget } from "./studio/homeNotifications";
 import { processNotificationClickDestination } from "../notifications/notificationClickDestination";
 import { useNotificationCenter } from "../notifications/useNotificationCenter";
 import { UUID_PATTERN, parseNotificationClickUrl } from "../notifications/notificationContract";
@@ -577,35 +579,32 @@ function StudioLayoutInner() {
     [homeAttentionInboxItems, visibleConversationControllerId],
   );
 
-  const homeAttentionCount = useMemo(() => {
-    const currentSpaceName = (activeProjectName ?? "").trim() || "Choose a Space";
-    // The badge counts what Home's "Needs you" lane shows: replies waiting on
-    // the user. Work in flight is progress, not a demand — it lives in Recent.
-    return buildHomeAttentionEntries({
-      conversations,
-      inboxItems: visibleHomeAttentionInboxItems,
-      currentSpaceName,
-      visibleConversationLocalId,
-      visibleConversationControllerId,
-    }).filter((entry) => entry.kind === "reply").length;
-  }, [
-    activeProjectName,
-    conversations,
-    visibleConversationControllerId,
-    visibleConversationLocalId,
-    visibleHomeAttentionInboxItems,
-  ]);
-
+  const homeAttentionFeed = useMemo(() => buildHomeFeed({
+    attentionEntries: buildHomeAttentionEntries({
+      conversations, inboxItems: visibleHomeAttentionInboxItems,
+      currentSpaceName: (activeProjectName ?? "").trim() || "Choose a Space",
+      visibleConversationLocalId, visibleConversationControllerId,
+    }),
+    notifications: notificationCenter.page.items.filter(item => {
+      const target = getHomeNotificationTarget(item);
+      return item.eventName !== "conversation.reply" || !visibleConversationControllerId || target?.conversationId !== visibleConversationControllerId;
+    }),
+    supportReports: bugReportController.supportUnreadReports,
+    recentConversations: [], projects: projectList,
+    activeProject: projectList.find(project => project.id === activeProjectId) ?? null,
+    conversations, teamFilter: "all", lastSeenAt: null,
+  }), [activeProjectId, activeProjectName, bugReportController.supportUnreadReports, conversations, notificationCenter.page.items, projectList,
+    visibleConversationControllerId, visibleConversationLocalId, visibleHomeAttentionInboxItems]);
+  const homeAttentionCount = homeAttentionFeed.needs.length;
   const { homeAttentionByProject, homeAttentionByOrg } = useMemo(() => {
     const byProject: Record<string, number> = {};
     const byOrg: Record<string, number> = {};
-    for (const item of visibleHomeAttentionInboxItems) {
-      byProject[item.projectId] = (byProject[item.projectId] ?? 0) + 1;
-      const orgKey = item.orgId ?? "personal";
-      byOrg[orgKey] = (byOrg[orgKey] ?? 0) + 1;
+    for (const item of homeAttentionFeed.needs) {
+      if (item.project.id) byProject[item.project.id] = (byProject[item.project.id] ?? 0) + 1;
+      if (item.team.key !== "all") byOrg[item.team.key] = (byOrg[item.team.key] ?? 0) + 1;
     }
     return { homeAttentionByProject: byProject, homeAttentionByOrg: byOrg };
-  }, [visibleHomeAttentionInboxItems]);
+  }, [homeAttentionFeed.needs]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !currentUserId) {
@@ -1919,7 +1918,7 @@ function StudioLayoutInner() {
       const scroller = (
         <StudioPanelScrollContainer identity={panelScrollIdentity} ready={panelScrollReady} className={`flex-1 overflow-y-auto ${scrollPaddingClass}`} data-testid="studio-panel-scroll">
           {activeWorkspaceTab.panel === "home" ? (
-            <HomePanel inboxItems={homeAttentionInboxItems} refreshInbox={refreshHomeAttentionCount} />
+            <HomePanel inboxItems={homeAttentionInboxItems} refreshInbox={refreshHomeAttentionCount} notifications={notificationCenter} supportReports={bugReportController.supportUnreadReports} supportLoading={bugReportController.supportNotificationsLoading} supportError={bugReportController.supportNotificationsError} refreshSupport={() => bugReportController.refreshSupportNotifications(false)} onOpenSupport={bugReportController.onOpenBugReportInbox} />
           ) : activeWorkspaceTab.panel === "team" ? (
             <TeamPanel organizationId={navigationScope.orgKey === "personal" ? null : navigationScope.orgKey} />
           ) : activeWorkspaceTab.panel === "credits" ? (
@@ -2221,10 +2220,9 @@ function StudioLayoutInner() {
             inert={search.open || showMobileLeftDrawerOverlay || undefined}
           >
             {!isLargeScreen ? mobileContextHeader() : null}
-            {isLargeScreen || navigationScope.page === "workspace" ? <StudioTopBar newChatInSidebar={isLargeScreen} contextHeaderAbove notificationBell={notificationCenter.bell} mobileNavigation={mobileTopbarNavigation} /> : <div className="flex min-h-12 items-center gap-2 border-b border-slate-200/70 px-1 dark:border-[color:var(--color-studio-dark-divider)]">
+            {isLargeScreen || navigationScope.page === "workspace" ? <StudioTopBar newChatInSidebar={isLargeScreen} contextHeaderAbove mobileNavigation={mobileTopbarNavigation} /> : <div className="flex min-h-12 items-center gap-2 border-b border-slate-200/70 px-1 dark:border-[color:var(--color-studio-dark-divider)]">
               <IconButton variant="ghost" aria-label="Open navigation" data-testid="topbar-sidebar-toggle" onPress={handleToggleSidebar} className="!min-h-12 !min-w-12"><SidebarExpand className="h-4 w-4" /></IconButton>
               <span className="min-w-0 flex-1 truncate text-sm text-slate-500 dark:text-slate-400">{topbarLocationOverride?.title ?? (contextHomeActive ? "Home" : activeTeamName)}</span>
-              {notificationCenter.bell}
             </div>}
             <ProjectAccessRecoveryBanner />
             {/* relative: the participants drawer overlays the right edge of the
@@ -2328,7 +2326,7 @@ function StudioLayoutInner() {
               }}
             >
               {mobileContextHeader(true)}
-              <StudioTopBar contextHeaderAbove notificationBell={notificationCenter.bell} mobileNavigation={mobileTopbarNavigation} />
+              <StudioTopBar contextHeaderAbove mobileNavigation={mobileTopbarNavigation} />
               <div className="flex-1 min-h-0 overflow-hidden">
                   {leftDrawer === "history" ? (
                     <ConversationHistoryTab
@@ -2389,7 +2387,6 @@ function StudioLayoutInner() {
               </div>
             </div>
           ) : null}
-          {notificationCenter.dialog}
           {bugReportController.dialogs}
         </WorkspaceControlsProvider>
       </div>

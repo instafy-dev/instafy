@@ -7,6 +7,7 @@ import { ControlChevron } from "../../../components/ControlChevron";
 import { SpaceIdentity } from "../../../components/SpaceIdentity";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import type { ProjectRecencyMap } from "../../../projects/projectRecency";
+import { unreadUpdatesDescription as unreadDescription } from "../homeUpdateLabels";
 
 export const SIDEBAR_RECENT_SPACE_LIMIT = 6;
 
@@ -40,7 +41,6 @@ export function selectRecentSpaces(
     .sort(compareSpaceNames);
 }
 
-const unreadDescription = (count: number) => `${count} ${count === 1 ? "chat" : "chats"} with unread replies`;
 
 export interface StudioRecentSpacesProps {
   spaces: readonly RecentSpace[];

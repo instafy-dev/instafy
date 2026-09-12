@@ -1,7 +1,7 @@
-import { cloneElement, isValidElement, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { DialogTrigger } from "react-aria-components";
 import { ChatLines, Lock, MoreHoriz, NavArrowRight, NavArrowUp, Settings, SidebarExpand } from "iconoir-react";
-import { Button, IconButton, type ButtonProps } from "../../../components/Button";
+import { Button, IconButton } from "../../../components/Button";
 import { EntityRow } from "../../../components/EntityRow";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import type { StudioHistory } from "../../../navigation/useStudioHistory";
@@ -21,7 +21,6 @@ export interface MobileStudioNavigationHeaderProps {
   onNewChat?: () => void;
   onNewPrivateChat?: () => void;
   parentConversation?: { title: string; onOpen: () => void };
-  notificationBell?: ReactNode;
   tabsAction?: ReactNode;
   onMoreOpenChange?: (open: boolean) => void;
 }
@@ -33,7 +32,7 @@ const TOUCH_TARGET = "!min-h-12 !min-w-12";
 export function MobileStudioNavigationHeader({
   history, title, spaceName, showSpaceName = true, onOpenPicker, onOpenChats,
   onOpenSidebar, sidebarOpen = false, onOpenSettings,
-  onNewChat, onNewPrivateChat, parentConversation, notificationBell, tabsAction, onMoreOpenChange,
+  onNewChat, onNewPrivateChat, parentConversation, tabsAction, onMoreOpenChange,
 }: MobileStudioNavigationHeaderProps) {
   const [moreOpen, setMoreOpen] = useState(false);
   const changeMoreOpen = (open: boolean) => {
@@ -45,15 +44,6 @@ export function MobileStudioNavigationHeader({
     changeMoreOpen(false);
     action();
   };
-  // Let the supplied bell finish its semantic press before unmounting More.
-  // Closing in ancestor click capture interrupts React Aria's touch press.
-  const notificationPress = isValidElement<ButtonProps>(notificationBell) ? notificationBell.props.onPress : undefined;
-  const mobileNotificationBell = isValidElement<ButtonProps>(notificationBell) && typeof notificationPress === "function"
-    ? cloneElement(notificationBell, { onPress: event => {
-      notificationPress(event);
-      changeMoreOpen(false);
-    } })
-    : notificationBell;
 
   return (
     <div className="flex min-w-0 items-center gap-1 px-3 py-1" data-testid="mobile-studio-navigation-header">
@@ -101,9 +91,7 @@ export function MobileStudioNavigationHeader({
             {onOpenSettings ? <EntityRow title="Space settings" surface="interactive" pressable className={TOUCH_TARGET}
               start={<Settings className="h-5 w-5" aria-hidden="true" />} onPress={() => actAndClose(onOpenSettings)} /> : null}
             {tabsAction}
-            {notificationBell ? <div role="group" aria-label="Notifications" className="flex min-h-12 items-center justify-between gap-2 px-3 [&_button]:!min-h-12 [&_button]:!min-w-12">
-              <span className="text-sm font-medium">Notifications</span>{mobileNotificationBell}
-            </div> : null}
+
           </div>
         </StudioDialogPopover>
       </DialogTrigger>

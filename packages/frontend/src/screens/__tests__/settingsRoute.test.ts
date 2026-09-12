@@ -98,6 +98,7 @@ describe("settings sections in all scopes", () => {
     ["org", "profile", "billing"],
     ["project", "overview", "providers"],
     ["profile", "account", "preferences"],
+    ["profile", "account", "notifications"],
   ] as const)("round trips %s categories and defaults", (tab, defaultCategory, category) => {
     const search = buildSettingsSectionSearch("?projectId=space&filter=local", tab, category);
     expect(resolveSettingsRoute(`?${search}`)).toEqual({ tab, category, itemId: null });
@@ -115,6 +116,13 @@ describe("settings sections in all scopes", () => {
     expect(resolveSettingsRoute("?panel=credits&settingsTab=project&settingsCategory=ai&settingsItem=speech", "profile"))
       .toEqual({ tab: "profile", category: "account", itemId: null });
     expect(() => buildSettingsSectionSearch("", "profile", "providers")).toThrow("Unknown settings category");
+  });
+
+  it("opens account notification settings without inheriting the selected team's scope", () => {
+    const search = buildSettingsSectionSearch("?panel=settings&settingsTab=org&settingsOrgId=team&projectId=space&settingsCategory=members", "profile", "notifications");
+    expect(resolveSettingsRoute(search)).toEqual({ tab: "profile", category: "notifications", itemId: null });
+    expect(new URLSearchParams(search).has("settingsOrgId")).toBe(false);
+    expect(new URLSearchParams(search).get("projectId")).toBe("space");
   });
 
   it("round trips a bounded capability item only under project audio and clears it on category changes", () => {

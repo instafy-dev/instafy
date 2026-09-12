@@ -84,6 +84,7 @@ impl ConversationReadCase {
             .map_err(|error| controller_error("issue outsider token", error))?
             .token;
         let app = crate::notification_platform::router()
+            .merge(crate::notifications::router())
             .with_state(build_test_state(pool.clone(), config));
         Ok(Self {
             pool,
@@ -376,4 +377,380 @@ async fn notification_conversation_read_bounds_and_validates_the_message_set() -
     );
     assert!(case.read_state(message, case.reader).await?.1.is_some());
     case.cleanup().await
+}
+
+#[tokio::test]
+async fn notification_home_snapshot_ack_keeps_concurrent_messages_and_exact_event_identity(
+) -> anyhow::Result<()> {
+    let case = ConversationReadCase::create().await?;
+    let shown = case.message(case.conversation, 0.0).await?;
+    let newer = case.message(case.conversation, -3600.0).await?;
+    let elsewhere = case.message(case.other_conversation, 0.0).await?;
+    let connection = case.pool.get().await?;
+    let event = |message: Uuid| format!("conversation.reply:{message}");
+    let shown_event: Uuid = connection
+        .query_one(
+            "select id from notification_events where producer_key=$1",
+            &[&event(shown)],
+        )
+        .await?
+        .get(0);
+    let other_event: Uuid = connection
+        .query_one(
+            "select id from notification_events where producer_key=$1",
+            &[&event(elsewhere)],
+        )
+        .await?
+        .get(0);
+    connection
+        .execute(
+            "update conversations set last_message_id=$2 where id=$1",
+            &[&case.conversation, &newer],
+        )
+        .await?;
+    connection.execute("update conversation_participants set last_seen_message_id=$3 where conversation_id=$1 and user_id=$2", &[&case.conversation, &case.reader, &newer]).await?;
+    drop(connection);
+    let send = |path: &'static str, body: serde_json::Value| {
+        let app = case.app.clone();
+        let token = case.reader_token.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::from(body.to_string()))?,
+                )
+                .await?;
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 1024 * 1024).await?;
+            Ok::<_, anyhow::Error>((status, serde_json::from_slice::<serde_json::Value>(&bytes)?))
+        }
+    };
+    let stale_body = json!({ "conversationId":case.conversation, "expectedUserId":case.reader, "expectedLastMessageId":shown,
+        "notificationIds":[shown_event, shown_event, other_event, Uuid::new_v4()] });
+    let (status, body) = send("/me/notifications/inbox/ack-snapshot", stale_body.clone()).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["inboxAcknowledged"], false);
+    assert_eq!(body["acknowledgedNotificationIds"], json!([shown_event]));
+    let first_read = case.read_state(shown, case.reader).await?;
+    assert!(first_read.0.is_some() && first_read.1.is_some());
+    assert_eq!(case.read_state(newer, case.reader).await?, (None, None));
+    assert_eq!(case.read_state(elsewhere, case.reader).await?, (None, None));
+    assert_eq!(case.read_state(shown, case.peer).await?, (None, None));
+    assert_eq!(case.pool.get().await?.query_one("select last_seen_message_id from conversation_participants where conversation_id=$1 and user_id=$2", &[&case.conversation, &case.reader]).await?.get::<_, Option<Uuid>>(0), Some(newer), "stale snapshot must not regress the legacy cursor");
+    assert_eq!(
+        send("/me/notifications/inbox/ack-snapshot", stale_body)
+            .await?
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(case.read_state(shown, case.reader).await?, first_read);
+    case.pool.get().await?.execute("update conversation_participants set last_seen_message_id=$3 where conversation_id=$1 and user_id=$2", &[&case.conversation, &case.reader, &shown]).await?;
+    let (_, current) = send("/me/notifications/inbox/ack-snapshot", json!({ "conversationId":case.conversation, "expectedUserId":case.reader, "expectedLastMessageId":newer, "notificationIds":[] })).await?;
+    assert_eq!(current["inboxAcknowledged"], true);
+    assert_eq!(
+        case.read_state(newer, case.reader).await?,
+        (None, None),
+        "cursor update must not read an omitted event"
+    );
+    // A durable-only Home row also clears a matching legacy source, without
+    // acknowledging a newly arrived source that was absent from its snapshot.
+    let connection = case.pool.get().await?;
+    let newer_event: Uuid = connection
+        .query_one(
+            "select id from notification_events where producer_key=$1",
+            &[&format!("conversation.reply:{newer}")],
+        )
+        .await?
+        .get(0);
+    connection.execute("update conversation_participants set last_seen_message_id=$3 where conversation_id=$1 and user_id=$2", &[&case.conversation,&case.reader,&shown]).await?;
+    drop(connection);
+    assert_eq!(
+        send(
+            "/me/notifications/state",
+            json!({"id":newer_event,"action":"read","expectedUserId":case.reader})
+        )
+        .await?
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(case.pool.get().await?.query_one("select last_seen_message_id from conversation_participants where conversation_id=$1 and user_id=$2", &[&case.conversation,&case.reader]).await?.get::<_,Option<Uuid>>(0),Some(newer));
+    case.cleanup().await
+}
+
+#[tokio::test]
+async fn notification_home_snapshot_ack_validates_source_and_legacy_compatibility(
+) -> anyhow::Result<()> {
+    let case = ConversationReadCase::create().await?;
+    let shown = case.message(case.conversation, 0.0).await?;
+    let elsewhere = case.message(case.other_conversation, 0.0).await?;
+    let shown_event: Uuid = case
+        .pool
+        .get()
+        .await?
+        .query_one(
+            "select id from notification_events where producer_key=$1",
+            &[&format!("conversation.reply:{shown}")],
+        )
+        .await?
+        .get(0);
+    case.pool
+        .get()
+        .await?
+        .execute(
+            "update conversations set last_message_id=$2 where id=$1",
+            &[&case.conversation, &shown],
+        )
+        .await?;
+    let send = |path: &'static str, body: serde_json::Value, token: String| {
+        let app = case.app.clone();
+        async move {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("content-type", "application/json")
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::from(body.to_string()))?,
+                )
+                .await?;
+            let status = response.status();
+            let bytes = to_bytes(response.into_body(), 1024 * 1024).await?;
+            Ok::<_, anyhow::Error>((status, serde_json::from_slice::<serde_json::Value>(&bytes)?))
+        }
+    };
+    let invalid = json!({ "conversationId":case.conversation, "expectedUserId":case.reader, "expectedLastMessageId":elsewhere, "notificationIds":[shown_event] });
+    assert_eq!(
+        send(
+            "/me/notifications/inbox/ack-snapshot",
+            invalid,
+            case.reader_token.clone()
+        )
+        .await?
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(case.read_state(shown, case.reader).await?, (None, None));
+    let too_many = json!({ "conversationId":case.conversation, "expectedUserId":case.reader, "notificationIds":vec![shown_event;101] });
+    assert_eq!(
+        send(
+            "/me/notifications/inbox/ack-snapshot",
+            too_many,
+            case.reader_token.clone()
+        )
+        .await?
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let base = json!({ "conversationId":case.conversation, "expectedUserId":case.reader });
+    let (_, empty_snapshot) = send(
+        "/me/notifications/inbox/ack-snapshot",
+        base.clone(),
+        case.reader_token.clone(),
+    )
+    .await?;
+    assert_eq!(empty_snapshot["inboxAcknowledged"], false);
+    assert!(case.pool.get().await?.query_one("select last_seen_message_id from conversation_participants where conversation_id=$1 and user_id=$2", &[&case.conversation, &case.reader]).await?.get::<_, Option<Uuid>>(0).is_none());
+    let (_, legacy) = send(
+        "/me/notifications/inbox/ack",
+        base,
+        case.reader_token.clone(),
+    )
+    .await?;
+    assert_eq!(legacy["inboxAcknowledged"], true);
+    assert_eq!(
+        case.read_state(shown, case.reader).await?,
+        (None, None),
+        "legacy caller must not implicitly mark durable events read"
+    );
+    let wrong_pin = json!({ "conversationId":case.conversation, "expectedUserId":case.outsider, "expectedLastMessageId":shown, "notificationIds":[shown_event] });
+    assert_eq!(
+        send(
+            "/me/notifications/inbox/ack-snapshot",
+            wrong_pin,
+            case.reader_token.clone()
+        )
+        .await?
+        .0,
+        StatusCode::CONFLICT
+    );
+    let private = json!({ "conversationId":case.conversation, "expectedUserId":case.outsider, "expectedLastMessageId":shown, "notificationIds":[shown_event] });
+    assert_eq!(
+        send(
+            "/me/notifications/inbox/ack-snapshot",
+            private,
+            case.outsider_token.clone()
+        )
+        .await?
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    case.cleanup().await
+}
+
+#[tokio::test]
+async fn notification_conversation_viewport_read_bridges_only_current_source_without_enrollment(
+) -> anyhow::Result<()> {
+    let case = ConversationReadCase::create().await?;
+    let shown = case.message(case.conversation, 0.0).await?;
+    let newer = case.message(case.conversation, -3600.0).await?;
+    case.pool
+        .get()
+        .await?
+        .execute(
+            "update conversations set last_message_id=$2 where id=$1",
+            &[&case.conversation, &shown],
+        )
+        .await?;
+    assert_eq!(
+        case.request(Some(&case.reader_token), case.body(&[shown]))
+            .await?
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(case.pool.get().await?.query_one("select last_seen_message_id from conversation_participants where conversation_id=$1 and user_id=$2",&[&case.conversation,&case.reader]).await?.get::<_,Option<Uuid>>(0),Some(shown));
+    let connection = case.pool.get().await?;
+    connection
+        .execute(
+            "update conversations set last_message_id=$2 where id=$1",
+            &[&case.conversation, &newer],
+        )
+        .await?;
+    connection.execute("update conversation_participants set last_seen_message_id=$3 where conversation_id=$1 and user_id=$2",&[&case.conversation,&case.reader,&newer]).await?;
+    drop(connection);
+    assert_eq!(
+        case.request(Some(&case.reader_token), case.body(&[shown]))
+            .await?
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(case.pool.get().await?.query_one("select last_seen_message_id from conversation_participants where conversation_id=$1 and user_id=$2",&[&case.conversation,&case.reader]).await?.get::<_,Option<Uuid>>(0),Some(newer));
+    assert_eq!(case.read_state(newer, case.reader).await?, (None, None));
+    // Public access + a one-off mention does not create a participant record.
+    let connection = case.pool.get().await?;
+    connection
+        .execute(
+            "update conversations set visibility='public' where id=$1",
+            &[&case.conversation],
+        )
+        .await?;
+    connection
+        .execute(
+            "delete from conversation_participants where conversation_id=$1 and user_id=$2",
+            &[&case.conversation, &case.reader],
+        )
+        .await?;
+    drop(connection);
+    assert_eq!(
+        case.request(Some(&case.reader_token), case.body(&[newer]))
+            .await?
+            .0,
+        StatusCode::OK
+    );
+    assert!(case
+        .pool
+        .get()
+        .await?
+        .query_opt(
+            "select user_id from conversation_participants where conversation_id=$1 and user_id=$2",
+            &[&case.conversation, &case.reader]
+        )
+        .await?
+        .is_none());
+    case.cleanup().await
+}
+
+#[tokio::test]
+async fn notification_home_snapshot_rechecks_privacy_and_participation_after_lock_wait(
+) -> anyhow::Result<()> {
+    for revoke_participant in [false, true] {
+        let case = ConversationReadCase::create().await?;
+        let shown = case.message(case.conversation, 0.0).await?;
+        let connection = case.pool.get().await?;
+        connection
+            .execute(
+                "update conversations set last_message_id=$2,visibility=$3 where id=$1",
+                &[
+                    &case.conversation,
+                    &shown,
+                    &if revoke_participant {
+                        "private"
+                    } else {
+                        "public"
+                    },
+                ],
+            )
+            .await?;
+        let event_id: Uuid = connection
+            .query_one(
+                "select id from notification_events where producer_key=$1",
+                &[&format!("conversation.reply:{shown}")],
+            )
+            .await?
+            .get(0);
+        if !revoke_participant {
+            connection
+                .execute(
+                    "delete from conversation_participants where conversation_id=$1 and user_id=$2",
+                    &[&case.conversation, &case.reader],
+                )
+                .await?;
+        }
+        drop(connection);
+        let mut locker = case.pool.get().await?;
+        let transaction = locker.transaction().await?;
+        let blocker: i32 = transaction
+            .query_one("select pg_backend_pid()", &[])
+            .await?
+            .get(0);
+        transaction
+            .execute(
+                "update conversations set visibility='private' where id=$1",
+                &[&case.conversation],
+            )
+            .await?;
+        if revoke_participant {
+            transaction
+                .execute(
+                    "delete from conversation_participants where conversation_id=$1 and user_id=$2",
+                    &[&case.conversation, &case.reader],
+                )
+                .await?;
+        }
+        let app = case.app.clone();
+        let token = case.reader_token.clone();
+        let body = json!({"conversationId":case.conversation,"expectedLastMessageId":shown,"notificationIds":[event_id],"expectedUserId":case.reader});
+        let request = tokio::spawn(async move {
+            app.oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/me/notifications/inbox/ack-snapshot")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        });
+        // Prove the request reached the locked source, rather than relying on a sleep.
+        tokio::time::timeout(std::time::Duration::from_secs(3),async {
+            loop {
+                let waiting:bool=case.pool.get().await?.query_one("select exists(select 1 from pg_stat_activity where $1=any(pg_blocking_pids(pid)))",&[&blocker]).await?.get(0);
+                if waiting { return Ok::<_,anyhow::Error>(()); }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await??;
+        transaction.commit().await?;
+        drop(locker);
+        assert_eq!(request.await?.status(), StatusCode::FORBIDDEN);
+        assert!(case.pool.get().await?.query_opt("select user_id from conversation_participants where conversation_id=$1 and user_id=$2",&[&case.conversation,&case.reader]).await?.is_none());
+        assert_eq!(case.read_state(shown, case.reader).await?, (None, None));
+        case.cleanup().await?;
+    }
+    Ok(())
 }

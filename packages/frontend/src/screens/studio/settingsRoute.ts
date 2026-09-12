@@ -26,7 +26,7 @@ export function buildOrganizationSettingsCategorySearch(
 const categoriesByTab = {
   org: ["profile", "members", "ai", "billing", "danger"],
   project: ["overview", "access", "providers", "ai", "danger"],
-  profile: ["account", "preferences"],
+  profile: ["account", "preferences", "notifications"],
 } as const;
 
 export function isSettingsCategory(tab: SettingsTab, category: string): boolean {
