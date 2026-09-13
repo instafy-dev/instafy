@@ -42,12 +42,23 @@ jobs:
           && github.ref_protected == true
           && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/continuous-image-publication.yml@refs/heads/main'
           && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-image-coordinator","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt))
+          || vars.TRUSTED_AMD64_BUILD_RUNNER_MODE == 'self-hosted'
+          && github.repository == 'instafy-dev/instafy'
+          && github.repository_id == '1309636737'
+          && github.event.repository.private == true
+          && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+          && github.ref == 'refs/heads/main'
+          && github.ref_protected == true
+          && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/continuous-image-publication.yml@refs/heads/main'
+          && github.workflow_sha == github.sha
+          && (github.event_name == 'schedule' || inputs.commit_sha == github.sha)
+          && fromJSON('{"group":"org/instafy-trusted-build","labels":["self-hosted","Linux","X64","instafy-build"]}')
           || 'ubuntu-24.04' }}
     timeout-minutes: 5
 
     steps:
       - name: Qualify isolated protected-main control runner
-        if: runner.environment == 'self-hosted'
+        if: runner.environment == 'self-hosted' && github.event_name == 'push'
         shell: bash
         run: |
           node <<'NODE'
@@ -70,6 +81,34 @@ jobs:
           assert.ok(!process.env.INSTAFY_ENV_DIR);
           for (const tool of ['bash', 'gh', 'jq', 'date']) {
             execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'public-control-preflight', tool], { timeout: 1000, stdio: 'ignore' });
+          }
+          assert.equal(execFileSync('date', ['-u', '-d', '1970-01-01T00:00:00Z', '+%s'], { timeout: 1000, encoding: 'utf8' }).trim(), '0');
+          NODE
+
+      - name: Qualify trusted image reconciliation runner
+        if: runner.environment == 'self-hosted' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const { execFileSync } = require('node:child_process');
+          assert.equal(process.env.GITHUB_REPOSITORY, 'instafy-dev/instafy');
+          assert.equal(process.env.GITHUB_REPOSITORY_ID, '1309636737');
+          assert.ok(['schedule', 'workflow_dispatch'].includes(process.env.GITHUB_EVENT_NAME));
+          assert.equal(process.env.GITHUB_REF, 'refs/heads/main');
+          assert.equal(process.env.GITHUB_REF_PROTECTED, 'true');
+          assert.equal(process.env.GITHUB_WORKFLOW_REF, 'instafy-dev/instafy/.github/workflows/continuous-image-publication.yml@refs/heads/main');
+          assert.match(process.env.GITHUB_SHA, /^[0-9a-f]{40}$/);
+          assert.equal(process.env.GITHUB_WORKFLOW_SHA, process.env.GITHUB_SHA);
+          assert.equal(process.platform, 'linux');
+          assert.equal(process.arch, 'x64');
+          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
+          assert.equal(process.versions.node.split('.')[0], '22');
+          assert.equal(process.env.RUNNER_OS, 'Linux');
+          assert.equal(process.env.RUNNER_ARCH, 'X64');
+          assert.ok(!process.env.INSTAFY_ENV_DIR);
+          for (const tool of ['bash', 'gh', 'jq', 'date']) {
+            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'public-image-build-preflight', tool], { timeout: 1000, stdio: 'ignore' });
           }
           assert.equal(execFileSync('date', ['-u', '-d', '1970-01-01T00:00:00Z', '+%s'], { timeout: 1000, encoding: 'utf8' }).trim(), '0');
           NODE

@@ -5,6 +5,7 @@ import test from "node:test";
 import "./check-hosted-sdk-cleanup.test.mjs";
 import "./check-image-coordinator.test.mjs";
 import "./check-public-control-ci.test.mjs";
+import "./check-image-build-routing.test.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const workflowRoot = path.join(repositoryRoot, ".github", "workflows");
@@ -279,11 +280,12 @@ test("runtime images publish only exact protected main from a fixed namespace", 
   assert.match(approval, /permissions: \{\}/u);
   assert.doesNotMatch(approval, /packages: write/u);
 
-  // Every flavor×architecture cell builds natively — no QEMU emulation.
+  // Hosted native cells remain the fallback. BUILD's two-platform daemon is
+  // qualified separately; this workflow does not install emulation or binfmt.
   assert.doesNotMatch(source, /setup-qemu/u);
   assert.doesNotMatch(source, /binfmt/u);
   assert.match(publish, /- release-approval/u);
-  assert.match(publish, /runs-on: \$\{\{ matrix\.runner \}\}/u);
+  assert.match(publish, /\|\| matrix\.runner \}\}/u);
   assert.match(publish, /runner: ubuntu-24\.04\n/u);
   assert.match(publish, /runner: ubuntu-24\.04-arm\n/u);
   assert.match(publish, /trivy_asset: Linux-64bit/u);
