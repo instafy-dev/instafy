@@ -168,16 +168,44 @@ Before those steps, a fresh read must prove the event SHA is still protected mai
 and the checkout is exactly that SHA. API failure, source drift or failed runner
 qualification prevents bot exposure. The original hosted/manual path is unchanged.
 This source-only route still needs exact runner admission and real cold
-execution/cleanup qualification. npm publish and image-building/publishing jobs
-remain unchanged and hosted. A push coordinator
-can defer while Build is incomplete; its next
-six-hour scheduled or manual reconciliation remains hosted, so these push-only
-routes do not solve follow-up publication capacity. No `workflow_run` trigger
-is added. Run the source/fixture regressions with:
+execution/cleanup qualification. npm publish remains hosted with its existing
+trusted-publisher OIDC authority. A push coordinator can defer while Build is
+incomplete. Its scheduled/manual follow-up and the image publishers have the
+separate optional BUILD route below; the push-only control switch does not
+enable that route. No `workflow_run` trigger is added. Run the source/fixture regressions with:
 
 ```bash
 node --test scripts/check-public-release-workflows.test.mjs scripts/check-expanded-ci-routing.test.mjs
 ```
+
+`TRUSTED_AMD64_BUILD_RUNNER_MODE=self-hosted` independently selects the
+organization group `instafy-trusted-build` and static labels
+`self-hosted`, `Linux`, `X64`, `instafy-build` for all four jobs in each exact-main
+image publisher, plus scheduled/manual image reconciliation. The canonical
+repository ID must still be private; main must be protected and the workflow
+ref and source SHA must match. Manual requests must name that same source SHA.
+PRs, forks, public visibility, other refs and a disabled/unset switch retain
+their original hosted runners. The existing isolated ARM64 push coordinator
+route takes precedence and is unchanged. This BUILD route uses trusted,
+ephemeral jobs with the existing Docker-capable build profile; its static labels
+are placement, not a claim of VM or network isolation.
+
+The seven service cells, four runtime flavor/architecture cells, original
+30/75-minute limits, approval, scan-before-login gates, immutable manifests,
+GitHub-token permissions and provenance settings are unchanged. Runtime builds
+still produce both amd64 and ARM64 images; on BUILD the scanner uses the existing
+pinned x64 Trivy binary rather than the target image's architecture. Hosted
+runner matrix selections and scanner pins are unchanged. The five-minute
+coordinator never waits for child publishers, so it releases a shared BUILD
+runner before those jobs need it.
+
+Before enabling this route, an operator must deliberately enroll this repository
+and these three exact `@refs/heads/main` workflow refs in the BUILD group's
+protected workflow allowlist and its existing registration policy. Qualify actual
+Buildx builds and Trivy scans for both platforms, at least 20 GiB free disk,
+artifact commands and ephemeral cleanup on that profile. Source tests do not
+prove physical capacity or successful image publication. Disable the switch to
+restore hosted selection for new runs; queued jobs do not move automatically.
 
 The version freshness regressions use credential-free Bash fixtures and an offline
 `jq` projection of inert branch responses; both tools must be installed locally.
