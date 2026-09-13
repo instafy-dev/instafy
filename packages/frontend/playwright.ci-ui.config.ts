@@ -72,7 +72,7 @@ export default defineConfig({
   },
   webServer: {
     command:
-      `pnpm exec vite --config ./vite.browser-ui-ci.config.ts ` +
+      `pnpm exec vite --config ./vite.ci-ui.config.ts ` +
       `--host 127.0.0.1 --port ${PORT} --strictPort`,
     url: BASE_URL,
     reuseExistingServer: false,

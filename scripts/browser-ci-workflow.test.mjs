@@ -1,5 +1,6 @@
 import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -178,7 +179,7 @@ test("required browser lanes execute without secret or production authority", ()
 });
 
 test("standalone configs do not import the authenticated development harness", () => {
-  for (const file of ["playwright.personal-ci.config.ts", "playwright.browser-ui-ci.config.ts", "playwright.shared-studio-ci.config.ts"]) {
+  for (const file of ["playwright.personal-ci.config.ts", "playwright.ci-ui.config.ts", "playwright.shared-studio-ci.config.ts"]) {
     const config = read(`packages/frontend/${file}`);
     assert.match(config, /forbidOnly: true/);
     assert.match(config, /workers: 1/);
@@ -186,7 +187,7 @@ test("standalone configs do not import the authenticated development harness", (
     assert.match(config, /required-browser-reporter\.mjs/);
     assert.doesNotMatch(config, /globalSetup:|globalTeardown:|playwright\.config|playwright-test\.mjs|dotenv|privateEnv/);
   }
-  const vite = read("packages/frontend/vite.browser-ui-ci.config.ts");
+  const vite = read("packages/frontend/vite.ci-ui.config.ts");
   assert.match(vite, /envFile: false/);
   assert.match(vite, /cacheDir: path\.join\(frontendRoot, "node_modules", "\.vite-browser-ui-ci"\)/);
   // The history fixtures use the real Router; a clean lane must optimize it
@@ -196,6 +197,33 @@ test("standalone configs do not import the authenticated development harness", (
   assert.doesNotMatch(vite, /from ["']\.\/vite\.config|loadEnv\(/);
   const resolver = read("packages/frontend/tests/playwright/component/viteComponentDependencies.ts");
   assert.ok(resolver.includes("\\.vite(?:-browser-ui-ci)?"));
+});
+
+test("UI config basenames avoid pinned Brotli name detection without changing coverage", () => {
+  // Gitleaks 8.30.1 uses archives 0.1.2, whose Brotli.Match treats any
+  // case-insensitive ".br" substring as an archive when given a filename.
+  const configNames = ["playwright.ci-ui.config.ts", "vite.ci-ui.config.ts"];
+  for (const name of configNames) {
+    assert.equal(name.toLowerCase().includes(".br"), false);
+    assert.ok(fs.statSync(path.join(root, "packages/frontend", name)).isFile());
+  }
+  for (const name of ["playwright.browser-ui-ci.config.ts", "vite.browser-ui-ci.config.ts"]) {
+    assert.equal(fs.existsSync(path.join(root, "packages/frontend", name)), false);
+  }
+  const sha256 = value => createHash("sha256").update(value).digest("hex");
+  const playwright = read("packages/frontend/playwright.ci-ui.config.ts");
+  assert.equal((playwright.match(/vite\.ci-ui\.config\.ts/g) ?? []).length, 1);
+  assert.equal(sha256(playwright.replace("vite.ci-ui.config.ts", "vite.browser-ui-ci.config.ts")),
+    "70863a90987ac414c1cffa5514f6e2361ec46d07f2c93f9bcf132546e5a8bcbc");
+  assert.equal(sha256(read("packages/frontend/vite.ci-ui.config.ts")),
+    "7fd8f1f3cab96803c64793bae1e0f1cc8b1563adeb5479105cac66058a1ac580");
+  assert.match(read("packages/frontend/scripts/browser-ci.mjs"),
+    /"browser-ui": "playwright\.ci-ui\.config\.ts"/);
+  for (const name of ["playwright.notifications-ci.config.ts", "playwright.support-ci.config.ts"]) {
+    const consumer = read(`packages/frontend/${name}`);
+    assert.equal((consumer.match(/--config \.\/vite\.ci-ui\.config\.ts/g) ?? []).length, 1);
+    assert.doesNotMatch(consumer, /vite\.browser-ui-ci\.config\.ts/);
+  }
 });
 
 test("the required browser UI job includes the real co-browsing protocol fixture", () => {
@@ -215,7 +243,7 @@ test("the required browser UI job includes the real co-browsing protocol fixture
 });
 
 test("the expanded browser UI inventory has a bounded suite budget without relaxing test gates", () => {
-  const config = read("packages/frontend/playwright.browser-ui-ci.config.ts");
+  const config = read("packages/frontend/playwright.ci-ui.config.ts");
   assert.match(config, /^\s+globalTimeout: 360_000,$/m);
   assert.match(config, /^\s+timeout: 30_000,$/m);
   assert.match(config, /^\s+workers: 1,$/m);
