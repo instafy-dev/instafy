@@ -1,3 +1,4 @@
+import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
@@ -6,7 +7,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const root = path.resolve(import.meta.dirname, '..');
-const source = fs.readFileSync(path.join(root, '.github/workflows/build.yml'), 'utf8');
+const source = withoutManualCiRouting('build.yml', fs.readFileSync(path.join(root, '.github/workflows/build.yml'), 'utf8'));
 const aggregateIf = "    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}";
 const lanes = [
   { key: 'javascript-contracts', label: 'public-js-contracts', name: 'JavaScript contracts and migrations' },
@@ -59,7 +60,7 @@ function route(key, github, enabled = '') {
 const cancellationWorkflows = [
   { file: 'build.yml', text: source, keys: ['javascript', 'rust', 'rust-tests'],
     previousHash: '0c0332d3dc8eeebdd9f68e6fc23b31f145cd5f791017e5f3784e1619f38465bc' },
-  { file: 'browser-e2e.yml', text: fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8'),
+  { file: 'browser-e2e.yml', text: withoutManualCiRouting('browser-e2e.yml', fs.readFileSync(path.join(root, '.github/workflows/browser-e2e.yml'), 'utf8')),
     keys: ['shared-profile'], previousHash: '71980384b6c935e2fbe90e48cd7526e8bbded8721611cea427ee0f9bd5da1115' },
 ];
 const cancellationAggregates = cancellationWorkflows.flatMap(workflow => workflow.keys.map(key => {

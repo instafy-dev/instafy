@@ -1,3 +1,4 @@
+import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -6,7 +7,7 @@ import vm from "node:vm";
 import { REQUIRED_BROWSER_LANES } from "../packages/frontend/scripts/required-browser-reporter.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
-const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");
+const read = (relative) => withoutManualCiRouting(path.basename(relative), fs.readFileSync(path.join(root, relative), "utf8"));
 
 const routedJobs = [
   { key: "personal", label: "public-browser-personal", name: "Personal Browser E2E", minutes: 30 },

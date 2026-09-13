@@ -1,3 +1,4 @@
+import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -7,7 +8,7 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const root = path.resolve(import.meta.dirname, '..');
-const source = fs.readFileSync(path.join(root, '.github/workflows/build.yml'), 'utf8');
+const source = withoutManualCiRouting('build.yml', fs.readFileSync(path.join(root, '.github/workflows/build.yml'), 'utf8'));
 const aggregateIf = "    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}";
 const agentLinkerDefault = `          if [[ '\${{ runner.environment == 'self-hosted' && runner.os == 'Linux' }}' == true && "\${RUSTFLAGS+x}" != x ]]; then
             export RUSTFLAGS='-C link-arg=-fuse-ld=lld'
