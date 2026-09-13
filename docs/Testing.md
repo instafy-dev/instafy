@@ -107,6 +107,15 @@ the pinned Gitleaks 8.30.1 archive for either Linux x64 or ARM64 and rejects
 unsupported architectures. Remove or disable the switch to restore hosted
 routing; no runner credentials or host configuration belong in this tree.
 
+The standalone UI configs are `packages/frontend/playwright.ci-ui.config.ts`
+and `packages/frontend/vite.ci-ui.config.ts`. Avoid `.br` inside these source
+basenames: the pinned scanner's [archive matcher](https://github.com/mholt/archives/blob/v0.1.2/brotli.go)
+treats that substring as Brotli, including ordinary `.browser` names.
+The rename preserves the browser lane, fixture inventory and Vite cache path;
+scanner rules, archive depth and unexpected-read failure behavior are unchanged.
+`node --test scripts/browser-ci-workflow.test.mjs` covers the names, all consumers
+and the existing browser-lane behavior.
+
 The independent, default-off `CI_EXPANDED_SELF_HOSTED=true` switch covers only
 four additional short jobs. It does not replace the boundary switch:
 
