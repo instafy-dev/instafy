@@ -34,12 +34,12 @@ export const MANUAL_CI_JOBS = [
   {"file":"npm-release.yml","key":"pack","toggle":"CI_PUBLIC_CONTROL_SELF_HOSTED","label":"public-npm-pack","hosted":"ubuntu-24.04"},
 ];
 export const MANUAL_CI_BASELINES = {
-  "build.yml": "50dc11f4e96d43a883119d868e4f5ae846f82065c33bc5ee5f0addb94b80d0d6",
-  "browser-e2e.yml": "5a227820568dfe71f344bd816f77fe41c4d1d8980041937792de09ab956c121b",
-  "auth-email.yml": "198c97e67fe98118e3ee90c1f70dff088e2c00935f13dbf7e41eefad4d431e8a",
-  "controller-db-tests.yml": "465d5f037751932001abdc9956dba92327ab8483de91af47a627eae3d3b5d5e3",
-  "git-conflict-canary.yml": "8c7e5c51772e998058fba924e3eff5fb166d5b012856f56b2bcf6d208a47de3b",
-  "npm-release.yml": "07f5c41b6ed624ce3d511dd43eda470573aefafd334996cfd76c8a072407612b"
+  "build.yml": { sha256: "50dc11f4e96d43a883119d868e4f5ae846f82065c33bc5ee5f0addb94b80d0d6" },
+  "browser-e2e.yml": { sha256: "5a227820568dfe71f344bd816f77fe41c4d1d8980041937792de09ab956c121b" },
+  "auth-email.yml": { sha256: "198c97e67fe98118e3ee90c1f70dff088e2c00935f13dbf7e41eefad4d431e8a" },
+  "controller-db-tests.yml": { sha256: "465d5f037751932001abdc9956dba92327ab8483de91af47a627eae3d3b5d5e3" },
+  "git-conflict-canary.yml": { sha256: "8c7e5c51772e998058fba924e3eff5fb166d5b012856f56b2bcf6d208a47de3b" },
+  "npm-release.yml": { sha256: "07f5c41b6ed624ce3d511dd43eda470573aefafd334996cfd76c8a072407612b" }
 };
 
 export function manualCiBranch(job) {
