@@ -38,6 +38,16 @@ jobs:
             && github.ref == 'refs/heads/main'
             && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-deterministic-conflict","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_GIT_CONFLICT_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/git-conflict-canary.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-deterministic-conflict","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 5
 

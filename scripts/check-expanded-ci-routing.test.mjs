@@ -1,3 +1,5 @@
+import "./check-manual-ci-routing.test.mjs";
+import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -5,7 +7,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 const root = path.resolve(import.meta.dirname, "..");
-const read = name => fs.readFileSync(path.join(root, ".github/workflows", name), "utf8");
+const read = name => withoutManualCiRouting(name, fs.readFileSync(path.join(root, ".github/workflows", name), "utf8"));
 const jobs = [
   { file: "build.yml", key: "secret-scan", label: "public-secret-scan", name: "Secret scan", minutes: 10, hosted: "ubuntu-latest", events: ["push"] },
   { file: "build.yml", key: "go", label: "public-go", name: "Go packages", minutes: 20, hosted: "ubuntu-latest", events: ["pull_request", "push"] },

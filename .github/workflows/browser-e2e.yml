@@ -23,6 +23,16 @@ jobs:
                && github.event.pull_request.head.repo.fork == false)
               || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{3}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-browser-personal","instafy-ci-trust-{3}"]}}', github.repository_id, github.run_id, github.run_attempt, github.event_name == 'push' && 'main' || 'pr'))
+          || (vars.CI_BROWSER_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && (github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main' || github.workflow_ref == 'instafy-dev/instafy/.github/workflows/browser-e2e.yml@refs/heads/main')
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-browser-personal","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-24.04' }}
     timeout-minutes: 30
     steps:
@@ -104,6 +114,16 @@ jobs:
                && github.event.pull_request.head.repo.fork == false)
               || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{3}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-browser-ui","instafy-ci-trust-{3}"]}}', github.repository_id, github.run_id, github.run_attempt, github.event_name == 'push' && 'main' || 'pr'))
+          || (vars.CI_BROWSER_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && (github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main' || github.workflow_ref == 'instafy-dev/instafy/.github/workflows/browser-e2e.yml@refs/heads/main')
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-browser-ui","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-24.04' }}
     timeout-minutes: 30
     steps:
@@ -181,6 +201,16 @@ jobs:
                && github.event.pull_request.head.repo.fork == false)
               || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{3}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-shared-browser-aggregate","instafy-ci-trust-{3}"]}}', github.repository_id, github.run_id, github.run_attempt, github.event_name == 'push' && 'main' || 'pr'))
+          || (vars.CI_SHARED_BROWSER_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && (github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main' || github.workflow_ref == 'instafy-dev/instafy/.github/workflows/browser-e2e.yml@refs/heads/main')
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-shared-browser-aggregate","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-24.04' }}
     timeout-minutes: 5
     steps:
@@ -232,6 +262,16 @@ jobs:
                && github.event.pull_request.head.repo.fork == false)
               || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{3}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-shared-browser-profile","instafy-ci-trust-{3}"]}}', github.repository_id, github.run_id, github.run_attempt, github.event_name == 'push' && 'main' || 'pr'))
+          || (vars.CI_SHARED_BROWSER_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && (github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main' || github.workflow_ref == 'instafy-dev/instafy/.github/workflows/browser-e2e.yml@refs/heads/main')
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-shared-browser-profile","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-24.04' }}
     timeout-minutes: 30
     env:
@@ -374,6 +414,16 @@ jobs:
                && github.event.pull_request.head.repo.fork == false)
               || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{3}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-shared-browser-studio","instafy-ci-trust-{3}"]}}', github.repository_id, github.run_id, github.run_attempt, github.event_name == 'push' && 'main' || 'pr'))
+          || (vars.CI_SHARED_BROWSER_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && (github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main' || github.workflow_ref == 'instafy-dev/instafy/.github/workflows/browser-e2e.yml@refs/heads/main')
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-shared-browser-studio","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-24.04' }}
     timeout-minutes: 30
     env:

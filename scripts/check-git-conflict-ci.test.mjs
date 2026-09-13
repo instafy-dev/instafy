@@ -1,3 +1,4 @@
+import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -8,7 +9,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 const root = path.resolve(import.meta.dirname, "..");
-const source = fs.readFileSync(path.join(root, ".github/workflows/git-conflict-canary.yml"), "utf8");
+const source = withoutManualCiRouting("git-conflict-canary.yml", fs.readFileSync(path.join(root, ".github/workflows/git-conflict-canary.yml"), "utf8"));
 const fixture = source.slice(source.indexOf("      - name: Verify conflict-resolution fixture\n"));
 const tools = ["bash", "git", "curl", "tar", "sha256sum", "unzip", "grep", "mktemp", "rm"];
 
