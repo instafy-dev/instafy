@@ -1,3 +1,4 @@
+import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
@@ -6,7 +7,7 @@ import test from "node:test";
 import vm from "node:vm";
 
 const root = path.resolve(import.meta.dirname, "..");
-const workflow = fs.readFileSync(path.join(root, ".github/workflows/browser-e2e.yml"), "utf8");
+const workflow = withoutManualCiRouting("browser-e2e.yml", fs.readFileSync(path.join(root, ".github/workflows/browser-e2e.yml"), "utf8"));
 const aggregateIf = "    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}";
 // Only historical byte-reconstruction proofs use the former aggregate guard.
 const previousAggregateWorkflow = workflow.replace(aggregateIf, "    if: ${{ always() }}");
