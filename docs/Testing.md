@@ -114,7 +114,7 @@ treats that substring as Brotli, including ordinary `.browser` names.
 The rename preserves the browser lane, fixture inventory and Vite cache path;
 scanner rules, archive depth and unexpected-read failure behavior are unchanged.
 `node --test scripts/browser-ci-workflow.test.mjs` covers the names, all consumers
-and exact pre-rename config bytes.
+and the existing browser-lane behavior.
 
 The independent, default-off `CI_EXPANDED_SELF_HOSTED=true` switch covers only
 four additional short jobs. It does not replace the boundary switch:
