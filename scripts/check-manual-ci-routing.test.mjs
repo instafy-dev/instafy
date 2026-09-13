@@ -37,7 +37,7 @@ function select(job, github, source = read(job.file), toggle) {
   }, { timeout: 1000 });
   return JSON.parse(JSON.stringify(result));
 }
-for (const [file, hash] of Object.entries(MANUAL_CI_BASELINES)) test(`manual routing reconstructs the complete original ${file}`, () => {
+for (const [file, { sha256: hash }] of Object.entries(MANUAL_CI_BASELINES)) test(`manual routing reconstructs the complete original ${file}`, () => {
   const source = read(file);
   for (const job of MANUAL_CI_JOBS.filter(item => item.file === file)) assert.equal(source.split(manualCiBranch(job)).length, 2);
   assert.equal(createHash('sha256').update(withoutManualCiRouting(file, source)).digest('hex'), hash);
