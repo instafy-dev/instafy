@@ -7,7 +7,7 @@ const frontendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 const require = createRequire(path.join(frontendRoot, "package.json"));
 const configs = Object.freeze({
   personal: "playwright.personal-ci.config.ts",
-  "browser-ui": "playwright.browser-ui-ci.config.ts",
+  "browser-ui": "playwright.ci-ui.config.ts",
 });
 
 // This runner deliberately does not import playwright-test.mjs, the normal
