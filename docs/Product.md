@@ -157,7 +157,8 @@ team has a persistent side marker as well as its background highlight.
 The team chip opens an anchored menu for Switch team, Team overview and Team settings.
 The space chip beside it changes the working space. Less frequent tools, personal AI
 connections and Credits appear in navigation when space permits, with remaining destinations
-available through More. The desktop space picker shows only
+available through More. Desktop and mobile both use available height; no destination is
+permanently kept in More. The desktop space picker shows only
 the selected team's spaces; Browse teams retains the full team-and-space directory.
 Home hides the team-specific desktop sidebar. Personal settings opened alongside a space keep
 the sidebar and its saved expanded/compact state, while profile changes remain account-wide.

@@ -254,11 +254,12 @@ export function StudioSidebar({
     () => moreItems?.filter((item): item is StudioNavItem => Boolean(item)) ?? [],
     [moreItems],
   );
-  const alwaysCollapsedMoreItemIds = useMemo(() => new Set<StudioPanel>(["secrets"]), []);
   const hasRecentChats = Boolean(onSelectConversation);
-  // Desktop has a header and space selector, plus a team-menu icon when
-  // compact. Home/account controls live in the separate global rail.
-  const fixedEntryCount = (desktopRail ? showLabels ? 2 : 3 : showLabels ? pathControls ? 1 : 2 : 4) + items.length + (onOpenConversationHistory && !hasRecentChats ? 1 : 0);
+  // External context already contains the space selector. Only compact
+  // desktop navigation needs a second row for New chat below its toggle.
+  const desktopHeaderRows = externalHeader ? showLabels ? 1 : 2 : pathHeader ? 1 : showLabels ? 2 : 3;
+  const mobileHeaderRows = showLabels ? pathControls ? 1 : 2 : 4;
+  const fixedEntryCount = (desktopRail ? desktopHeaderRows : mobileHeaderRows) + items.length + (onOpenConversationHistory && !hasRecentChats ? 1 : 0);
   const recentChatsReservePx = hasRecentChats && showLabels && recentChatsExpanded
     ? Math.max(1, Math.min(recentConversations.length, SIDEBAR_RECENT_CHAT_LIMIT)) * 40 + 56
     : 0;
@@ -278,23 +279,17 @@ export function StudioSidebar({
           ),
         )
       : 0;
-  const spillableMoreItems = useMemo(
-    () => desktopRail ? resolvedMoreItems.filter((item) => !alwaysCollapsedMoreItemIds.has(item.id)) : resolvedMoreItems,
-    [alwaysCollapsedMoreItemIds, desktopRail, resolvedMoreItems],
-  );
-  const needsMoreButton =
-    resolvedMoreItems.length > 0 &&
-    (resolvedMoreItems.length !== spillableMoreItems.length ||
-      spillableMoreItems.length > secondaryRowCapacity);
+  const needsMoreButton = resolvedMoreItems.length > secondaryRowCapacity;
   const measuredInlineMoreCapacity = Math.max(0, secondaryRowCapacity - (needsMoreButton ? 1 : 0));
-  const mobileMoreAllocationRef = useRef({ capacity: 0, open: false, overflowIds: [] as StudioPanel[] });
-  // A resize must not remove the active drill-in or its Back destination.
-  const inlineMoreCapacity = !isLargeScreen && moreMobileViewOpen
-    ? mobileMoreAllocationRef.current.capacity
+  const moreViewOpen = isLargeScreen ? moreMenuOpen : moreMobileViewOpen;
+  const moreAllocationRef = useRef({ capacity: 0, open: false, overflowIds: [] as StudioPanel[] });
+  // Keep an open menu/drill-in stable until dismissal, even if every tool now fits.
+  const inlineMoreCapacity = moreViewOpen
+    ? moreAllocationRef.current.capacity
     : measuredInlineMoreCapacity;
   const inlineMoreItems = useMemo(
-    () => spillableMoreItems.slice(0, inlineMoreCapacity),
-    [inlineMoreCapacity, spillableMoreItems],
+    () => resolvedMoreItems.slice(0, inlineMoreCapacity),
+    [inlineMoreCapacity, resolvedMoreItems],
   );
   const inlineMoreItemIds = useMemo(() => new Set(inlineMoreItems.map((item) => item.id)), [inlineMoreItems]);
   const collapsedMoreItems = useMemo(
@@ -366,17 +361,17 @@ export function StudioSidebar({
     // Resizing the rail can move secondary tools between inline rows and
     // More. An old popover must not reappear on the next width change.
     setMoreMenuOpen(false);
-  }, [isExpanded]);
+  }, [isExpanded, isLargeScreen]);
 
   useEffect(() => {
-    const previous = mobileMoreAllocationRef.current;
-    mobileMoreAllocationRef.current = {
+    const previous = moreAllocationRef.current;
+    moreAllocationRef.current = {
       capacity: inlineMoreCapacity,
-      open: moreMobileViewOpen,
+      open: moreViewOpen,
       overflowIds: collapsedMoreItems.map((item) => item.id),
     };
-    if (isLargeScreen || !previous.open || moreMobileViewOpen || collapsedMoreItems.length > 0) return;
-    // After returning on a taller screen, More may have become inline tools.
+    if (!previous.open || moreViewOpen || collapsedMoreItems.length > 0) return;
+    // After dismissal on a taller screen, More may have become inline tools.
     // Restore focus to the first of those tools instead of a removed trigger.
     const frame = requestAnimationFrame(() => {
       const nav = navRef.current;
@@ -391,7 +386,7 @@ export function StudioSidebar({
       }
     });
     return () => cancelAnimationFrame(frame);
-  }, [collapsedMoreItems, inlineMoreCapacity, isLargeScreen, moreMobileViewOpen]);
+  }, [collapsedMoreItems, inlineMoreCapacity, moreViewOpen]);
   useEffect(() => {
     if (collapsedMoreItems.length > 0) {
       return;
