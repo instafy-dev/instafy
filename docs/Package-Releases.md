@@ -52,9 +52,12 @@ Publishing never runs from `pull_request` or `pull_request_target`. Every extern
 to an immutable commit.
 
 The independently default-off `CI_PUBLIC_CONTROL_SELF_HOSTED` switch can route
-the protected-main push **Select**, **Version** and **Pack** jobs to authenticated disposable
-Linux ARM64 runners while the canonical repository remains private. Other
-triggers retain hosted routing. Version retains Select's version mode and the existing
+the protected-main push and exact-current-main manual **Select**, **Version** and **Pack**
+jobs to authenticated disposable Linux ARM64 runners while the canonical repository
+remains private. Other sources and events retain hosted routing. Manual runs require
+the defining workflow SHA to match the event SHA and independent current-main
+admission; see [protected-main manual CI](Testing.md#protected-main-manual-ci).
+Version retains Select's version mode and the existing
 repository-only bot credential in its two original steps; it is not credential-free.
 Its isolated-runner preflight precedes checkout, and a fresh protected-main and
 checkout-SHA check immediately precedes bot authorization. The earlier Select

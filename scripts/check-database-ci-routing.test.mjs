@@ -1,3 +1,4 @@
+import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
@@ -10,7 +11,7 @@ const jobs = [
   { file: 'controller-db-tests.yml', key: 'controller-db-tests', label: 'public-controller-db', name: 'Controller database tests', minutes: 30 },
   { file: 'auth-email.yml', key: 'auth-email', label: 'public-auth-email', name: 'signup -> email -> activate', minutes: 25 },
 ];
-const source = job => fs.readFileSync(path.join(root, '.github/workflows', job.file), 'utf8');
+const source = job => withoutManualCiRouting(job.file, fs.readFileSync(path.join(root, '.github/workflows', job.file), 'utf8'));
 function step(job, name) {
   const text = source(job), marker = `      - name: ${name}\n`, start = text.indexOf(marker);
   assert.ok(start >= 0, `missing ${job.file}/${name}`);
@@ -76,7 +77,7 @@ test('public repositories, forks, unprotected refs and unsupported events stay h
 
 test('only two unchanged check identities opt in, with existing timeouts and read-only source access', () => {
   for (const file of fs.readdirSync(path.join(root, '.github/workflows')).filter(name => /\.ya?ml$/u.test(name))) {
-    const value = fs.readFileSync(path.join(root, '.github/workflows', file), 'utf8');
+    const value = withoutManualCiRouting(file, fs.readFileSync(path.join(root, '.github/workflows', file), 'utf8'));
     assert.equal((value.match(/vars\.CI_DATABASE_SELF_HOSTED/g) ?? []).length, jobs.filter(job => job.file === file).length);
   }
   for (const job of jobs) {

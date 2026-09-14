@@ -1,3 +1,4 @@
+import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -7,7 +8,8 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const root = path.resolve(import.meta.dirname, '..');
-const source = fs.readFileSync(path.join(root, '.github/workflows/build.yml'), 'utf8');
+const source = withoutManualCiRouting('build.yml', fs.readFileSync(path.join(root, '.github/workflows/build.yml'), 'utf8'));
+const aggregateIf = "    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}";
 const agentLinkerDefault = `          if [[ '\${{ runner.environment == 'self-hosted' && runner.os == 'Linux' }}' == true && "\${RUSTFLAGS+x}" != x ]]; then
             export RUSTFLAGS='-C link-arg=-fuse-ld=lld'
           fi
@@ -77,7 +79,7 @@ test('both existing Rust contexts are strict five-minute aggregates over every f
     assert.match(text, new RegExp(`^    name: ${item.name}$`, 'mu'));
     const needs = text.match(/    needs:\n((?:      - .+\n)+)/u)?.[1].trim().split('\n').map(line => line.trim().slice(2));
     assert.deepEqual(needs, item.children.map(child => child.key));
-    assert.match(text, /^    if: \$\{\{ always\(\) \}\}$/mu);
+    assert.ok(text.includes(aggregateIf + '\n'));
     assert.match(text, /^    timeout-minutes: 5$/mu);
     assert.match(text, /^    permissions: \{\}$/mu);
     assert.match(text, /RUST_RESULTS: \$\{\{ toJSON\(needs\) \}\}/u);
@@ -302,7 +304,9 @@ test('only self-hosted Rust children use restore-only caches while hosted saves 
 
 test('the restore-only mitigation preserves every other byte of the reviewed Build workflow', () => {
   assert.equal((source.match(/ -o DPkg::Lock::Timeout=120/g) ?? []).length,10);
-  let normalized = source.replaceAll(' -o DPkg::Lock::Timeout=120','').replace(agentLinkerDefault, '');
+  // Undo only the separately tested cancelled-main aggregate guards as well.
+  let normalized = source.replaceAll(aggregateIf, '    if: ${{ always() }}')
+    .replaceAll(' -o DPkg::Lock::Timeout=120','').replace(agentLinkerDefault, '');
   for (const item of children) {
     const restore = step(item.key, 'Restore cargo cache without saving');
     const hosted = step(item.key, 'Restore cargo cache');
