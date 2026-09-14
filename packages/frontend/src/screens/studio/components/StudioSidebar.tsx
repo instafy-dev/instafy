@@ -1020,7 +1020,7 @@ export function StudioSidebar({
   };
   const canStartHeaderChat = externalHeader && showChatActions && selectedTeamHasActiveSpace &&
     Boolean(onStartNewConversation) && activePanel !== "home" && !hideContext &&
-    navigationPage !== "home" && navigationPage !== "account";
+    navigationPage !== "home";
   const runHeaderChatAction = (action: () => void) => {
     if (!canStartHeaderChat || !onStartNewConversation) return;
     resetWorkspaceSwitcher();

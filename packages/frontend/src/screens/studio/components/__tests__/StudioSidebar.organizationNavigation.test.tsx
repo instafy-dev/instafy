@@ -279,8 +279,15 @@ describe("StudioSidebar organization navigation", () => {
     expect(fixture.onStartNewConversation).toHaveBeenCalledTimes(1);
   });
 
-  it.each([false, true])("creates a chat from the external-header sidebar while keeping its fixed toggle (collapsed=%s)", async (collapsed) => {
-    await render({ navigationHeaderPortalTarget: headerPortal, collapsed });
+  it.each([
+    ["chat", false], ["chat", true],
+    ["settings", false], ["settings", true],
+    ["code", false], ["automations", true],
+  ] as const)("creates a chat from the external-header sidebar on %s while keeping its fixed toggle (collapsed=%s)", async (activePanel, collapsed) => {
+    fixture.navigationPage = activePanel === "settings" ? "account" : "workspace";
+    await render({ navigationHeaderPortalTarget: headerPortal, collapsed, activePanel,
+      hideContext: usesGlobalNavigationContext(fixture.navigationPage, fixture.activeProjectId),
+    });
     const header = container.querySelector('[data-testid="sidebar-team-header"]')!;
     const toggle = header.querySelector('[data-testid="sidebar-drawer-toggle"]')!;
     const newChat = container.querySelector<HTMLButtonElement>('[data-testid="sidebar-new-chat"]')!;
@@ -301,29 +308,38 @@ describe("StudioSidebar organization navigation", () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 
-  it.each(["unavailable", "hidden", "empty-team", "other-team", "missing-space", "home", "account"])("withholds external-header New chat when %s", async (scenario) => {
+  it.each(["unavailable", "hidden", "hidden-context", "empty-team", "other-team", "missing-space", "home", "no-space"])("withholds external-header New chat when %s", async (scenario) => {
     // Mobile still mounts its sidebar on global pages, so exercise the gate
     // rather than relying on desktop Home hiding the entire context column.
     fixture.desktop = false;
     fixture.newChatAvailable = scenario !== "unavailable";
     fixture.showChatActions = scenario !== "hidden";
-    fixture.navigationPage = scenario === "home" ? "home" : scenario === "account" ? "account" : "workspace";
+    fixture.navigationPage = scenario === "home" ? "home" : "account";
     if (scenario === "missing-space") fixture.activeProjectId = "missing-space";
+    if (scenario === "no-space") fixture.activeProjectId = null;
     await render({ navigationHeaderPortalTarget: headerPortal, mobileOverlay: true,
       selectedOrgKey: scenario === "empty-team" ? "org-b" : scenario === "other-team" ? "org-c" : "org-a",
-      activePanel: scenario === "home" ? "home" : scenario === "account" ? "settings" : "chat",
-      hideContext: scenario === "account",
+      activePanel: scenario === "home" ? "home" : "settings",
+      hideContext: scenario === "hidden-context" || usesGlobalNavigationContext(fixture.navigationPage, fixture.activeProjectId),
     });
     expect(container.querySelector('[data-testid="sidebar-team-header"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="sidebar-new-chat"]')).toBeNull();
     expect(fixture.onStartNewConversation).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])("retains private chat creation through the shared picker when collapsed=%s", async collapsed => {
+  it.each([
+    { collapsed: false, mobile: false },
+    { collapsed: true, mobile: false },
+    { collapsed: false, mobile: true },
+  ])("retains private chat creation from Settings through the shared picker (collapsed=$collapsed, mobile=$mobile)", async ({ collapsed, mobile }) => {
+    fixture.desktop = !mobile;
+    fixture.navigationPage = "account";
     fixture.privateChatAvailable = true;
     let pendingAction: (() => void) | undefined;
     const runSidebarAction = vi.fn((action: () => void) => { pendingAction = action; });
-    await render({ navigationHeaderExternal: true, collapsed, runSidebarAction });
+    await render({ navigationHeaderExternal: true, collapsed, runSidebarAction, activePanel: "settings", mobileOverlay: mobile,
+      hideContext: usesGlobalNavigationContext(fixture.navigationPage, fixture.activeProjectId),
+    });
     await click("sidebar-new-chat");
     expect(document.querySelector('[data-testid="chat-new-chat-private"]')).not.toBeNull();
     await click("chat-new-chat-private");
@@ -331,7 +347,12 @@ describe("StudioSidebar organization navigation", () => {
     await click("chat-private-chat-target-teammate-id");
     expect(runSidebarAction).toHaveBeenCalledOnce();
     expect(fixture.onStartPrivateConversation).not.toHaveBeenCalled();
-    await act(async () => pendingAction!());
+    expect(onRequestClose).not.toHaveBeenCalled();
+    await act(async () => {
+      if (mobile) onRequestClose();
+      pendingAction!();
+    });
+    if (mobile) expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(fixture.onStartPrivateConversation.mock.invocationCallOrder[0]);
     expect(fixture.onStartPrivateConversation).toHaveBeenCalledExactlyOnceWith({ userId: "teammate-id", displayName: "Teammate" });
     expect(fixture.onStartNewConversation).not.toHaveBeenCalled();
   });
@@ -365,13 +386,15 @@ describe("StudioSidebar organization navigation", () => {
     expect(container.querySelector('[data-testid="sidebar-new-chat"]')).toBeNull();
   });
 
-  it("closes mobile navigation before creating a chat and keeps the action inert beneath a drill-in", async () => {
+  it.each(["chat", "settings", "code", "automations"] as const)("closes mobile navigation on %s before creating a chat and keeps the action inert beneath a drill-in", async activePanel => {
     fixture.desktop = false;
+    fixture.navigationPage = activePanel === "settings" ? "account" : "workspace";
     const navigation = { view: "sidebar", openView: vi.fn(), back: vi.fn() };
     let afterClose: (() => void) | undefined;
     const runSidebarAction = vi.fn((action: () => void) => { afterClose = action; });
-    const props = { navigationHeaderPortalTarget: headerPortal, mobileOverlay: true,
+    const props = { navigationHeaderPortalTarget: headerPortal, mobileOverlay: true, activePanel,
       mobileNavigation: navigation as never, runSidebarAction,
+      hideContext: usesGlobalNavigationContext(fixture.navigationPage, fixture.activeProjectId),
     };
     await render(props);
     const header = container.querySelector('[data-testid="sidebar-team-header"]')!;

@@ -76,6 +76,8 @@ field above the workspace contains selectable team and space chips separated by 
 It stays in place when the inner sidebar collapses or search opens. The adjacent sidebar
 contains recent chats and workspace tools. Its expand/collapse control stays at the same
 position in either width, with **New chat** beside it when expanded and below it when compact.
+New chat stays available for the active accessible space when another tab, including personal
+Settings, is selected. It is unavailable on Home or when no space in the selected team is active.
 Existing saved collapse preferences are preserved.
 
 Narrow layouts keep Home, the team/space path, Search and the signed-in profile in the context
