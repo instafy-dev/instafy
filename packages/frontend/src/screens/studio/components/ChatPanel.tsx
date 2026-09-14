@@ -25,6 +25,15 @@ import {
   clampFloatingSurfacePositionToStudioViewport,
 } from "../../../utils/floatingSurfacePosition";
 import { ChatGettingStartedCard } from "./ChatGettingStartedCard";
+import { ConnectSheet } from "./ConnectSheet";
+import { SkillsImportModal } from "./SkillsImportModal";
+import type { Connector, SkillConnector } from "./connectors";
+import { routeConnectorSelection } from "./connectorRouting";
+import { requestSkillsDiscovery } from "./skillsDiscoveryRequest";
+import { useConnectSheetState } from "./useConnectSheetState";
+import { useInstalledSkillNames } from "./useInstalledSkillNames";
+import { useSkillsImportFlow } from "./useSkillsImportFlow";
+import { buildSkillStartMessage } from "../../../conversations/skillCommands";
 import { type ChatInputHandle } from "./chat-input/ChatInput";
 import { formatConversationTranscript, resolveCopyableMessageContent } from "./chatTranscriptCopy";
 import {
@@ -3763,6 +3772,91 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     onInputChange,
     runtimeControllerEnabled,
   });
+  // Connect: one sheet (browse and confirm stages) shared by the composer
+  // sub-view, the getting-started card and the "Paste a skill link" modal.
+  // Every send lands in the current conversation as a new turn; nothing here
+  // creates a conversation or switches tabs.
+  const installedSkills = useInstalledSkillNames({
+    projectId: activeProjectId,
+    runtimeId: effectiveRuntimeId ?? null,
+  });
+  const skillsImport = useSkillsImportFlow({
+    activeConversationId,
+    assistantEnabled,
+    onSubmit,
+    showStatus,
+    loadSkills: installedSkills.refresh,
+  });
+  const connectSheet = useConnectSheetState();
+  const connectSheetOpen = connectSheet.state !== null;
+  const { handleOpenAddSkillModal: openAddSkillModal, queueSkillImportTask } = skillsImport;
+  const { openBrowse: openConnectBrowse, openConfirm: openConnectConfirm, back: backConnectSheet, close: closeConnectSheet } = connectSheet;
+  const handleSelectConnector = useCallback(
+    (connector: Connector) => {
+      routeConnectorSelection(connector, {
+        openConfirm: openConnectConfirm,
+        leaveSheet: closeConnectSheet,
+        openImportModal: openAddSkillModal,
+        beginGithubImport,
+      });
+    },
+    [beginGithubImport, closeConnectSheet, openAddSkillModal, openConnectConfirm],
+  );
+  const handleConnectPasteLink = useCallback(() => {
+    closeConnectSheet();
+    openAddSkillModal();
+  }, [closeConnectSheet, openAddSkillModal]);
+  // The typed query travels to the Skills panel's Discover tab; the panel
+  // consumes it on mount (openPanelTab mounts it) or at once when already open.
+  const handleConnectSearchAllSkills = useCallback(
+    (query: string) => {
+      closeConnectSheet();
+      requestSkillsDiscovery(query);
+      openPanelTab("skills", { activate: true });
+    },
+    [closeConnectSheet, openPanelTab],
+  );
+  const handleConnectConfirm = useCallback(
+    async (connector: SkillConnector) => {
+      const queued = await queueSkillImportTask({
+        source: connector.source,
+        skillName: connector.skillName,
+        overwrite: false,
+        label: connector.name,
+      });
+      if (queued) {
+        closeConnectSheet();
+      }
+    },
+    [closeConnectSheet, queueSkillImportTask],
+  );
+  // "Set up again" prefills the composer, but focusing it from inside the
+  // sheet's press is undone by the dialog's focus containment and then by its
+  // restore-focus frame once the sheet unmounts. Hand the composer focus only
+  // after the sheet is gone, two frames later so it runs after that restore.
+  const pendingComposerFocusRef = useRef(false);
+  const handleConnectSetUpAgain = useCallback(
+    (connector: SkillConnector) => {
+      onInputChange(activeConversationId, `${buildSkillStartMessage(connector.skillName)} `, null);
+      pendingComposerFocusRef.current = true;
+      closeConnectSheet();
+    },
+    [activeConversationId, closeConnectSheet, onInputChange],
+  );
+  useEffect(() => {
+    if (!pendingComposerFocusRef.current || connectSheetOpen) {
+      return;
+    }
+    pendingComposerFocusRef.current = false;
+    let inner = 0;
+    const outer = requestAnimationFrame(() => {
+      inner = requestAnimationFrame(() => focusInput({ force: true }));
+    });
+    return () => {
+      cancelAnimationFrame(outer);
+      cancelAnimationFrame(inner);
+    };
+  }, [connectSheetOpen, focusInput]);
   const {
     managedAiOffer: gettingStartedManagedAiOffer,
     selectedAi: gettingStartedSelectedAi,
@@ -5536,6 +5630,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
                   mode={gettingStartedMode}
                   onSelectMode={handleGettingStartedModeChange}
                   onSelectAction={handleGettingStartedAction}
+                  onSelectConnector={handleSelectConnector}
+                  onBrowseConnectors={openConnectBrowse}
+                  installedSkillNames={installedSkills.names}
+                  showConnectTools={!projectWriteDisabled}
                   managedAiOffer={gettingStartedManagedAiOffer}
                   selectedAi={gettingStartedSelectedAi}
                   aiViewState={gettingStartedAiViewState}
@@ -5849,6 +5947,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           onOpenNewBrowser: handlePrepareNewBrowserSession,
           onOpenInvite: () => setAddMenuOpen(true),
           onImportGithubRepo: beginGithubImport,
+          onSelectConnector: handleSelectConnector,
+          onBrowseConnectors: openConnectBrowse,
+          installedSkillNames: installedSkills.names,
           onInsertCommand: handleInsertSlashCommand,
           onQueueMessage: () => {
             void invokeSubmitMessage(undefined, { intent: "queue" });
@@ -5925,6 +6026,39 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           sharingPermissionsLoading:
             orgMembersLoading || projectCapabilitiesResolved === false,
           onOpenProjectSettings,
+        }}
+      />
+      <ConnectSheet
+        isOpen={connectSheetOpen}
+        stage={connectSheet.state?.stage ?? "browse"}
+        target={connectSheet.state?.target ?? null}
+        showBack={connectSheet.state?.openedFromBrowse ?? false}
+        installedSkillNames={installedSkills.names}
+        pending={skillsImport.importPending}
+        onSelect={handleSelectConnector}
+        onBack={backConnectSheet}
+        onPasteLink={handleConnectPasteLink}
+        onSearchAllSkills={handleConnectSearchAllSkills}
+        onConnect={(connector) => {
+          void handleConnectConfirm(connector);
+        }}
+        onSetUpAgain={handleConnectSetUpAgain}
+        onClose={closeConnectSheet}
+      />
+      <SkillsImportModal
+        isOpen={skillsImport.addSkillModalOpen}
+        onOpenChange={skillsImport.setAddSkillModalOpen}
+        importPending={skillsImport.importPending}
+        importSource={skillsImport.importSource}
+        onImportSourceChange={skillsImport.setImportSource}
+        importName={skillsImport.importName}
+        onImportNameChange={skillsImport.setImportName}
+        importOverwrite={skillsImport.importOverwrite}
+        onImportOverwriteChange={skillsImport.setImportOverwrite}
+        hasProject={Boolean(activeProjectId)}
+        onBrowseSkills={() => openPanelTab("skills", { activate: true })}
+        onSubmitImport={() => {
+          void skillsImport.handleSubmitImport({ closeModalOnSuccess: true });
         }}
       />
       {agentProfileModalHandle ? (

@@ -8,7 +8,8 @@
 // mobile (≤sm) geometry is intentionally coherent — so editing a tier here
 // re-tunes every bubble of that kind at once. Any *rationalisation* of the
 // values (fewer distinct widths) is a deliberate visual change and should be
-// made here with a design pass, not ad hoc at a call site.
+// made here with a design pass, not ad hoc at a call site. The getting-started
+// card uses the card tier (its private intro tier was removed: one tier fewer).
 export const CHAT_BUBBLE_MAX_WIDTH = {
   /** User message bubble (hugs its content). */
   message: "max-w-[min(92%,56rem)]",
@@ -26,6 +27,4 @@ export const CHAT_BUBBLE_MAX_WIDTH = {
   activity: "max-w-full sm:max-w-[26rem]",
   /** Inline activity bubble (peer side). */
   activityPeer: "max-w-[60%]",
-  /** Getting-started intro card. */
-  intro: "max-w-none sm:max-w-[min(560px,90%)]",
 } as const;
