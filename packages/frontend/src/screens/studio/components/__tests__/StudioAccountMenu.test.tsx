@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppReleaseMetadata } from "../../../../updates/releaseMetadata";
 import type { DevDiagnosticsMenu } from "../DevDiagnosticsMenu";
 import { StudioAccountMenu } from "../StudioAccountMenu";
+import { resolveHumanAvatarColors } from "../../../../utils/humanAvatar";
 
 const mocks = vi.hoisted(() => ({
   metadata: null as AppReleaseMetadata | null,
@@ -20,6 +21,7 @@ vi.mock("../../workspaceControls", () => ({ useWorkspaceControls: () => ({
 }) }));
 vi.mock("../../useStudioDesktopLayout", () => ({ useStudioDesktopLayout: () => mocks.large }));
 vi.mock("../../../../profile/ProfileProvider", () => ({ useProfile: () => ({ profile: { fullName: "Alex Reader" } }) }));
+vi.mock("../../../../providers/AuthProvider", () => ({ useAuth: () => ({ user: { id: "reader-user-id" } }) }));
 vi.mock("../../../../projects/useProjects", () => ({ useProjects: () => ({ activeProjectId: "active-space" }) }));
 vi.mock("../../../../runtime/useRuntimeMenu", () => ({ useRuntimeMenuOptions: () => ({ runtime: { copyTunnelDetails: mocks.copyTunnel }, runtimeOptions: [] }) }));
 vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus: mocks.showStatus }) }));
@@ -100,6 +102,16 @@ describe("shared Studio account controller", () => {
     expect(mocks.showStatus).toHaveBeenCalledWith("Network unavailable", "error", 3500);
     expect(mocks.install).not.toHaveBeenCalled();
     expect(mocks.nativeBack).toHaveBeenCalledWith(true, expect.any(Function), 260);
+  });
+
+  it("uses the authenticated user ID for the same header and account-menu avatar", async () => {
+    await render();
+    const headerAvatar = container.querySelector<HTMLElement>("[data-human-avatar]")!;
+    expect(headerAvatar.textContent).toBe("AR");
+    expect(headerAvatar.style.getPropertyValue("--human-avatar-background")).toBe(resolveHumanAvatarColors("reader-user-id").background);
+    await click("topbar-profile-button");
+    const menuAvatar = document.querySelector<HTMLElement>('[data-testid="profile-account-sheet"] [data-human-avatar]')!;
+    expect(menuAvatar.getAttribute("style")).toBe(headerAvatar.getAttribute("style"));
   });
 
   it("consumes native Back while an update is pending and dismisses only after it finishes", async () => {

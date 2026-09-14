@@ -24,6 +24,7 @@ vi.mock("../../../../projects/useMergedControllerProjects", () => ({ useMergedCo
 vi.mock("../../../../runtime/useRuntimeMenu", () => ({ useRuntimeMenuOptions: () => ({ runtime: {}, runtimeOptions: [] }) }));
 vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus: vi.fn() }) }));
 vi.mock("../../../../profile/ProfileProvider", () => ({ useProfile: () => ({ profile: null }) }));
+vi.mock("../../../../providers/AuthProvider", () => ({ useAuth: () => ({ user: { id: "qa-user", email: "qa@example.test" } }) }));
 vi.mock("../../../../theme/ThemeProvider", () => ({ useTheme: () => ({ resolvedTheme: "light", setThemeMode: vi.fn() }) }));
 vi.mock("../../../../debug/useAppLogs", () => ({ useAppLogs: () => ({ logs: [], hasLogs: false, hasErrors: false, clearLogs: vi.fn() }) }));
 vi.mock("../../../../updates/useAppUpdateMetadata", () => ({ useAppUpdateMetadata: () => ({ metadata: null, refresh: vi.fn() }) }));

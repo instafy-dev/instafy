@@ -2,7 +2,8 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type React
 import { useNavigate } from "react-router-dom";
 import type { HomeNotifications } from "../../../notifications/useNotificationCenter";
 import { useStudioNavigation } from "../../../navigation/useStudioNavigation";
-import { ChatLines, Check, Clock, Group, Plus, User, WarningTriangle } from "iconoir-react";
+import { ChatLines, Check, Clock, Group, Plus, WarningTriangle } from "iconoir-react";
+import { HumanAvatar } from "../../../components/HumanAvatar";
 import { AttentionBadge } from "../../../components/AttentionBadge";
 import { Button, IconButton } from "../../../components/Button";
 import { FeedRow } from "../../../components/FeedRow";
@@ -63,12 +64,6 @@ function usablePreview(value: string | null | undefined): string | null {
     return null;
   }
   return /^\d{1,3}$/.test(trimmed) ? null : trimmed;
-}
-
-function initialsFor(name: string | null | undefined): string {
-  const parts = (name ?? "").trim().split(/\s+/).filter(Boolean).slice(0, 2);
-  const initials = parts.map((part) => part[0]?.toUpperCase() ?? "").join("");
-  return initials || "?";
 }
 
 function TeamChip({
@@ -169,15 +164,10 @@ function EventIcon({ event }: { event: HomeFeedEvent }) {
     );
   }
   if (event.actor?.kind === "user") {
-    // A person: their initials, or a plain figure when no name is on file.
-    const initials = initialsFor(event.actor.displayName);
+    const actor = event.source.type === "activity" ? event.source.item.actor : null;
     return (
-      <span
-        className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-slate-200 text-xxs font-medium text-slate-700 dark:bg-slate-700 dark:text-slate-200"
-        aria-hidden="true"
-      >
-        {initials === "?" ? <User className="h-4 w-4" aria-hidden="true" /> : initials}
-      </span>
+      <HumanAvatar userId={actor?.kind === "user" ? actor.userId : null}
+        displayName={event.actor.displayName} className="h-7 w-7 text-xxs" />
     );
   }
   if (event.kind === "running") {

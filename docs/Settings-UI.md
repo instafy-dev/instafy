@@ -16,6 +16,22 @@ Keep account identity in the avatar menu. Personal settings should not repeat an
 their categories. Team and space settings retain their scope because it identifies whose
 configuration is being changed.
 
+On first use, a missing personal profile is initialized from the sign-in provider's
+nonempty name, falling back to its username, plus its photo when supplied. Email addresses
+are not turned into default public names. Initialization inserts without replacing an
+existing row and rereads the saved result, so another tab's edit wins. Existing profiles,
+including deliberately cleared fields, are never reseeded by login or provider changes.
+Accounts with no supplied name keep an empty, editable Display name field.
+
+Use `HumanAvatar` for human identities. A supplied photo takes precedence; otherwise show
+initials on a muted color derived from the stable user ID. With no name, use the neutral
+person icon. Color stays consistent through renaming and photo removal, and has a matching
+light/dark palette. Do not derive initials from email addresses or generic labels such as
+“You”. Chat, presence and member surfaces use the identity data their contracts supply;
+some currently expose only a name and user ID, so those surfaces render the shared fallback
+without a photo. Agent/Octo identities and shared-browser cursor colors retain their own
+treatments.
+
 Simple forms use `SettingsFormLayout`: a bounded reading width on the page surface, with
 spacing between sections and outlines on individual controls. Profile, personal preferences
 and team profile share this layout. Reserve cards for distinct collections, summaries,

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { HumanAvatar } from "../../../components/HumanAvatar";
 import { Cpu, Cube, NavArrowRight, Xmark } from "iconoir-react";
 import {
   Button as AriaButton,
@@ -48,14 +49,6 @@ import { formatReset, windowLabel } from "./subscriptionUsageFormat";
  * one box, and becomes per-machine group headers only when real topology
  * exists (several machines / native / dedicated).
  */
-
-function humanInitials(label: string): string {
-  const parts = label.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return "?";
-  const first = parts[0]?.[0] ?? "";
-  const last = parts.length > 1 ? (parts[parts.length - 1]?.[0] ?? "") : "";
-  return `${first}${last}`.toUpperCase() || first.toUpperCase();
-}
 
 function AgentAvatar({ agent }: { agent: ParticipantAgent }) {
   return (
@@ -720,9 +713,7 @@ export function ParticipantsDrawer({
                 key={human.userId}
                 className="flex items-center gap-2.5 py-1.5"
               >
-                <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-slate-500 text-3xs font-semibold text-white dark:bg-slate-600">
-                  {humanInitials(human.label)}
-                </span>
+                <HumanAvatar userId={human.userId} displayName={human.label} className="h-7 w-7 text-xxs" />
                 <Text
                   as="div"
                   variant="caption"

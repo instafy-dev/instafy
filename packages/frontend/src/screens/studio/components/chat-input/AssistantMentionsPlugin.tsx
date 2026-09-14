@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
+import { HumanAvatar } from "../../../../components/HumanAvatar";
 import { LexicalTypeaheadMenuPlugin, MenuOption, useBasicTypeaheadTriggerMatch } from "@lexical/react/LexicalTypeaheadMenuPlugin";
 import { useLexicalComposerContext } from "@lexical/react/LexicalComposerContext";
 import { useLexicalTextEntity } from "@lexical/react/useLexicalTextEntity";
@@ -414,8 +415,7 @@ function AssistantMentionsMenu({
                   </span>
                 );
               }
-              const userInitial = option.label.trim().slice(0, 1).toUpperCase() || "@";
-              return userInitial;
+              return <HumanAvatar userId={option.userId} displayName={option.displayName} className="h-full w-full text-3xs" />;
             })()}
           </span>
           <span className="min-w-0 flex-1">

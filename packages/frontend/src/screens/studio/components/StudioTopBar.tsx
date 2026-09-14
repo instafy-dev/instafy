@@ -19,6 +19,7 @@ import { Text } from "../../../components/Text";
 import { OctoMark } from "../../../components/OctoMark";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import { useProfile } from "../../../profile/ProfileProvider";
+import { HumanAvatar } from "../../../components/HumanAvatar";
 import { getOrgInitials } from "../../../org/orgNaming";
 import { useAuth } from "../../../providers/AuthProvider";
 import { MobileStudioNavigationHeader } from "./MobileStudioNavigationHeader";
@@ -82,7 +83,6 @@ export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, conte
     navigationPage = "workspace",
     activeTeamName,
     activeTeamAvatarUrl,
-    userEmail,
     topbarLocationOverride,
   } = useWorkspaceControls();
   const { activeProjectId } = useProjects();
@@ -294,8 +294,6 @@ export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, conte
   const hasDesktopTabs = useDesktopTabChrome && workspaceTabs.length > 0;
   const resolvedProjectName = activeProjectName || "Untitled Space";
   const resolvedTeamName = activeTeamName?.trim() || "Team & spaces";
-  const profileInitials = (profile?.fullName?.trim() || userEmail?.trim() || "Account")
-    .split(/\s+/).slice(0, 2).map((part) => part[0]).join("").toUpperCase();
   const projectNameText = (
     <Text as="span" variant="bodyStrong" tone="primary" className="truncate">
       {resolvedProjectName}
@@ -543,9 +541,7 @@ export function StudioTopBar({ mobileNavigation, newChatInSidebar = false, conte
               data-testid="topbar-profile-button"
               className="!min-h-12 !min-w-12 shrink-0 p-1"
             >
-              <span className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full bg-slate-200 text-xs font-semibold text-slate-700 dark:bg-white/10 dark:text-slate-200" aria-hidden="true">
-                {profile?.avatarUrl ? <img src={profile.avatarUrl} alt="" className="h-full w-full object-cover" /> : profileInitials}
-              </span>
+              <HumanAvatar userId={user?.id} displayName={profile?.fullName} avatarUrl={profile?.avatarUrl} />
             </IconButton>
           </div>
         </div>

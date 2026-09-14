@@ -1,6 +1,6 @@
 import { useMemo } from "react";
-import { User } from "iconoir-react";
 import { OctoMark } from "../../../components/OctoMark";
+import { HumanAvatar } from "../../../components/HumanAvatar";
 import {
   OCTO_AVATAR_SRC,
   resolveAgentAvatarGradient,
@@ -60,6 +60,7 @@ export function ChatMessageAvatar({
   metadata,
   agent,
   label,
+  avatarUrl,
   motion = "idle",
   scrollReactive = false,
   seed,
@@ -69,6 +70,7 @@ export function ChatMessageAvatar({
   metadata?: unknown;
   agent?: ChatMessageAgentAvatarOverride | null;
   label?: string | null;
+  avatarUrl?: string | null;
   motion?: AssistantAvatarMotion;
   scrollReactive?: boolean;
   seed?: string | null;
@@ -97,18 +99,11 @@ export function ChatMessageAvatar({
       : "border-slate-200 text-white dark:border-slate-800";
 
   const gradientStyle = useMemo(() => {
-    if (kind === "human") {
-      const value = typeof seed === "string" && seed.trim().length > 0 ? seed.trim() : "human";
-      return { backgroundImage: resolveAgentAvatarGradient(value) };
-    }
     if (kind !== "assistant" || usesAssistantImageAvatar || !agentIdentity) {
       return undefined;
     }
     return { backgroundImage: resolveAgentAvatarGradient(agentIdentity.avatarSeed) };
-  }, [agentIdentity, kind, seed, usesAssistantImageAvatar]);
-
-  const humanLabel = typeof label === "string" ? label.trim() : "";
-  const humanText = humanLabel ? resolveAgentAvatarText({ displayName: humanLabel }) : null;
+  }, [agentIdentity, kind, usesAssistantImageAvatar]);
 
   // "2xs" exists for ambient presence surfaces (the top-bar conversation
   // roster), where a transcript-sized face reads far too loud.
@@ -120,15 +115,12 @@ export function ChatMessageAvatar({
         : size === "xs"
           ? "h-7 w-7"
           : "h-8 w-8";
-  const iconClassName =
-    size === "lg"
-      ? "h-6 w-6"
-      : size === "2xs"
-        ? "h-3 w-3"
-        : size === "xs"
-          ? "h-3.5 w-3.5"
-          : "h-4 w-4";
   const textClassName = size === "lg" ? "text-sm" : size === "2xs" ? "text-xxs" : "text-xs";
+
+  if (kind === "human") {
+    return <HumanAvatar userId={seed} displayName={label} avatarUrl={avatarUrl}
+      data-testid={testId} className={`${sizeClassName} ${textClassName} shadow-sm`} />;
+  }
 
   return (
     <div
@@ -137,8 +129,7 @@ export function ChatMessageAvatar({
       className={`flex ${sizeClassName} shrink-0 items-center justify-center overflow-hidden rounded-full border shadow-sm ${wrapperClass}`}
       style={gradientStyle}
     >
-      {kind === "assistant" ? (
-        usesCanonicalOctoAvatar ? (
+      {usesCanonicalOctoAvatar ? (
           <span className="flex h-full w-full items-center justify-center bg-white">
             <OctoMark
               className="h-[85%] w-[85%] text-brand-ink"
@@ -159,11 +150,6 @@ export function ChatMessageAvatar({
           <span className={`${textClassName} font-semibold`}>
             {resolveAgentAvatarText({ handle: agentIdentity?.handle ?? "agent" })}
           </span>
-        )
-      ) : humanText ? (
-        <span className={`${textClassName} font-semibold`}>{humanText}</span>
-      ) : (
-        <User className={iconClassName} aria-hidden="true" />
       )}
     </div>
   );

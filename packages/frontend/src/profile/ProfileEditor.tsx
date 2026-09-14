@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
 import { Camera, Trash } from "iconoir-react";
 import { Button } from "../components/Button";
 import { SettingsFormLayout } from "../components/SettingsFormLayout";
 import { Field } from "../components/Field";
 import { Input } from "../components/Input";
+import { HumanAvatar } from "../components/HumanAvatar";
 import { Text } from "../components/Text";
 import { useAuth } from "../providers/AuthProvider";
 import { useStatus } from "../status/useStatus";
@@ -14,21 +15,9 @@ interface ProfileEditorProps {
   onDone?: () => void;
 }
 
-function resolveInitials(value: string | null | undefined): string {
-  const trimmed = value?.trim() ?? "";
-  if (!trimmed) {
-    return "U";
-  }
-  const parts = trimmed.split(/\s+/).filter(Boolean);
-  if (parts.length >= 2) {
-    return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
-  }
-  return parts[0].slice(0, 2).toUpperCase();
-}
-
 export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps) {
   const { user } = useAuth();
-  const { profile, updateProfile, loading } = useProfile();
+  const { profile, updateProfile, loading, error, refresh } = useProfile();
   const { showStatus } = useStatus();
   const [displayName, setDisplayName] = useState("");
   const [avatarUrl, setAvatarUrl] = useState("");
@@ -42,13 +31,12 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
     setAvatarUrl(profile?.avatarUrl ?? "");
   }, [profile?.avatarUrl, profile?.fullName]);
 
-  const baseName = displayName.trim() || user?.email || "";
-  const initials = useMemo(() => resolveInitials(baseName), [baseName]);
   const avatarPreview = avatarUrl.trim() || null;
   const hasChanges =
     displayName.trim() !== (profile?.fullName ?? "") ||
     avatarUrl.trim() !== (profile?.avatarUrl ?? "");
   const compact = variant === "menu";
+  const profileUnavailable = loading || (!profile && Boolean(error));
 
   const handleFileUpload = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -110,15 +98,24 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
           </Text>
         </div>
       ) : null}
+      {error ? (
+        <div className="space-y-2">
+          <Text as="p" role="alert" variant="caption" tone="danger">{error}</Text>
+          <Button variant="outline" size="sm" onPress={() => { void refresh({ force: true }); }}>
+            Retry loading profile
+          </Button>
+        </div>
+      ) : null}
       <div className="flex flex-col gap-4">
         <div className="flex flex-wrap items-center gap-4">
-          <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-slate-50 text-base font-semibold text-slate-700 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-raised-control)] dark:text-slate-100">
-            {avatarPreview ? (
-              <img src={avatarPreview} alt="Profile photo preview" className="h-full w-full object-cover" />
-            ) : (
-              initials
-            )}
-          </div>
+          <HumanAvatar
+            userId={user?.id}
+            displayName={displayName}
+            avatarUrl={avatarPreview}
+            photoAlt="Profile photo preview"
+            className="h-16 w-16 text-base"
+            data-testid="profile-avatar-preview"
+          />
           <div className="flex flex-wrap items-center gap-2">
             <input
               ref={fileInputRef}
@@ -192,6 +189,7 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
           <Input
             id="profile-display-name"
             type="text"
+            disabled={profileUnavailable}
             value={displayName}
             onChange={(event) => setDisplayName(event.target.value)}
           />
@@ -202,7 +200,7 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
           </Text>
           <Button
             onPress={handleSave}
-            isDisabled={!hasChanges || saving}
+            isDisabled={!hasChanges || saving || profileUnavailable}
             variant="primary"
             size="sm"
             radius="xl"

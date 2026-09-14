@@ -11,6 +11,7 @@ import {
 import { Capacitor } from "@capacitor/core";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { useProfile } from "../../../profile/ProfileProvider";
+import { useAuth } from "../../../providers/AuthProvider";
 import { useProjects } from "../../../projects/useProjects";
 import { useRuntimeMenuOptions } from "../../../runtime/useRuntimeMenu";
 import type { TunnelCopyMode } from "../../../runtime/components/RuntimeTunnelDetails";
@@ -73,6 +74,7 @@ export function StudioAccountMenu({
   const onOpenBugReportInbox = onSupport ?? controls.onOpenBugReportInbox;
   const handleSignOut = onSignOut ?? controls.onSignOut;
   const { profile } = useProfile();
+  const { user } = useAuth();
   const { activeProjectId } = useProjects();
   const { runtime: runtimeContext, runtimeOptions } = useRuntimeMenuOptions();
   const { showStatus } = useStatus();
@@ -116,17 +118,6 @@ export function StudioAccountMenu({
     return email;
   })();
   const avatarUrl = profile?.avatarUrl?.trim() || null;
-  const initials = (() => {
-    const base = displayName.trim();
-    if (!base) {
-      return "U";
-    }
-    const parts = base.split(/\s+/).filter(Boolean);
-    if (parts.length >= 2) {
-      return `${parts[0][0]}${parts[1][0]}`.toUpperCase();
-    }
-    return parts[0].slice(0, 2).toUpperCase();
-  })();
   const updateEntrySupported = desktopUpdaterBridgeAvailable() || otaIsSupportedOnThisClient();
   const {
     metadata: updateMetadata,
@@ -308,7 +299,7 @@ export function StudioAccountMenu({
       profileMenuOpen={profileMenuOpen}
       onProfileMenuOpenChange={setProfileMenuOpen}
       avatarUrl={avatarUrl}
-      initials={initials}
+      userId={user?.id ?? null}
       displayName={displayName}
       accountSubtitle={accountSubtitle}
       installEntry={installEntry}

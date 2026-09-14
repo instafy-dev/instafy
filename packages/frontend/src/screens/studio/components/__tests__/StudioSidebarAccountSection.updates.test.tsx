@@ -60,7 +60,7 @@ describe("StudioSidebarAccountSection update indicator", () => {
           profileMenuOpen={open}
           onProfileMenuOpenChange={setOpen}
           avatarUrl={null}
-          initials="EU"
+          userId="taylor-user"
           displayName="Example User"
           accountSubtitle="user@example.com"
           installEntry={input.installEntry === undefined ? { kind: "desktop", version: "0.2.0" } : input.installEntry}

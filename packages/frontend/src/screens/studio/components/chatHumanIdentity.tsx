@@ -20,7 +20,7 @@ export function resolveHumanChatIdentity(
   const humanAuthorId = authorId || clientUserId;
   const speakerKey = (humanAuthorId || clientSessionId || "teammate").trim() || "teammate";
   return {
-    avatarSeed: humanAuthorId || clientSessionId || null,
+    avatarSeed: humanAuthorId || null,
     groupIdentity: `user:${speakerKey}`,
     label: humanAuthorId ? humanLabelByUserId.get(humanAuthorId) ?? "Teammate" : "Teammate",
   };

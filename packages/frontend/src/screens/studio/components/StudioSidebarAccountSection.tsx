@@ -2,6 +2,7 @@ import { ChatBubble, Download, LogOut, Refresh, Settings, SmartphoneDevice, User
 import { DialogTrigger } from "react-aria-components";
 import { useId, type MouseEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import { Button, IconButton } from "../../../components/Button";
+import { HumanAvatar } from "../../../components/HumanAvatar";
 import { ControlChevron } from "../../../components/ControlChevron";
 import { MenuItemContent } from "../../../components/MenuItemContent";
 import { Text } from "../../../components/Text";
@@ -24,7 +25,7 @@ type StudioSidebarAccountSectionProps = {
   profileMenuOpen: boolean;
   onProfileMenuOpenChange: (open: boolean) => void;
   avatarUrl: string | null;
-  initials: string;
+  userId?: string | null;
   displayName: string;
   accountSubtitle: string | null;
   installEntry: { kind: "desktop"; version: string } | { kind: "mobile-soon" } | null;
@@ -50,7 +51,7 @@ type StudioSidebarAccountSectionProps = {
 };
 
 function avatarShellClassName(sizeClass: string) {
-  return `relative flex ${sizeClass} items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-slate-50 text-sm font-medium text-slate-700 dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-[var(--color-studio-dark-raised-control)] dark:text-slate-200`;
+  return `relative flex ${sizeClass} items-center justify-center rounded-full`;
 }
 
 function ProfileUpdateIndicator({
@@ -89,7 +90,7 @@ export function StudioSidebarAccountSection({
   profileMenuOpen,
   onProfileMenuOpenChange,
   avatarUrl,
-  initials,
+  userId,
   displayName,
   accountSubtitle,
   installEntry,
@@ -129,11 +130,7 @@ export function StudioSidebarAccountSection({
     <>
       <div className="flex items-center gap-3 pr-1">
         <div className={`${avatarShellClassName("h-10 w-10")} shrink-0`}>
-          {avatarUrl ? (
-            <img src={avatarUrl} alt="" className="h-full w-full object-cover" />
-          ) : (
-            initials
-          )}
+          <HumanAvatar userId={userId} displayName={displayName} avatarUrl={avatarUrl} className="h-full w-full text-sm" />
         </div>
         <div className="min-w-0">
           <Text
@@ -313,7 +310,7 @@ export function StudioSidebarAccountSection({
             data-testid="topbar-profile-button" aria-describedby={profileStatusDescriptionIds}
             className="!min-h-12 !min-w-11 shrink-0 p-1">
             <span className={avatarShellClassName("h-8 w-8")} aria-hidden="true">
-              {avatarUrl ? <img src={avatarUrl} alt="" draggable={false} className="h-full w-full object-cover" /> : initials}
+              <HumanAvatar userId={userId} displayName={displayName} avatarUrl={avatarUrl} className="h-full w-full text-xs" />
               {shouldRenderUpdateEntry ? <ProfileUpdateIndicator presentation={updatePresentation} /> : null}
             </span>
           </IconButton>
@@ -329,11 +326,7 @@ export function StudioSidebarAccountSection({
             aria-describedby={profileStatusDescriptionIds}
           >
             <span className={avatarShellClassName("h-9 w-9")}>
-              {avatarUrl ? (
-                <img src={avatarUrl} alt="" className="h-full w-full object-cover" />
-              ) : (
-                initials
-              )}
+              <HumanAvatar userId={userId} displayName={displayName} avatarUrl={avatarUrl} className="h-full w-full text-xs" />
               {shouldRenderUpdateEntry ? (
                 <ProfileUpdateIndicator presentation={updatePresentation} />
               ) : null}
@@ -360,11 +353,7 @@ export function StudioSidebarAccountSection({
             aria-label="Open profile menu"
             aria-describedby={profileStatusDescriptionIds}
           >
-            {avatarUrl ? (
-              <img src={avatarUrl} alt="" className="h-full w-full object-cover" />
-            ) : (
-              initials
-            )}
+            <HumanAvatar userId={userId} displayName={displayName} avatarUrl={avatarUrl} className="h-full w-full text-xs" />
             {shouldRenderUpdateEntry ? (
               <ProfileUpdateIndicator presentation={updatePresentation} />
             ) : null}

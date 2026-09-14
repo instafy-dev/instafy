@@ -11,12 +11,16 @@ const mocks = vi.hoisted(() => ({
     avatarUrl: string | null;
   },
   updateProfile: vi.fn(),
-  showStatus: vi.fn()
+  showStatus: vi.fn(),
+  error: null as string | null,
+  loading: false,
+  refresh: vi.fn()
 }));
 
 vi.mock("../../providers/AuthProvider", () => ({ useAuth: () => ({ user: mocks.user }) }));
 vi.mock("../ProfileProvider", () => ({
-  useProfile: () => ({ profile: mocks.profile, updateProfile: mocks.updateProfile, loading: false })
+  useProfile: () => ({ profile: mocks.profile, updateProfile: mocks.updateProfile, loading: mocks.loading,
+    error: mocks.error, refresh: mocks.refresh })
 }));
 vi.mock("../../status/useStatus", () => ({ useStatus: () => ({ showStatus: mocks.showStatus }) }));
 
@@ -30,6 +34,9 @@ describe("ProfileEditor", () => {
     mocks.profile = { fullName: "Alex Teammate", avatarUrl: "https://example.test/photo.png" };
     mocks.updateProfile.mockReset().mockResolvedValue({ success: true });
     mocks.showStatus.mockReset();
+    mocks.error = null;
+    mocks.loading = false;
+    mocks.refresh.mockReset().mockResolvedValue(undefined);
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -180,5 +187,35 @@ describe("ProfileEditor", () => {
     expect(onDone).not.toHaveBeenCalled();
     expect(container.querySelector<HTMLInputElement>("#profile-display-name")?.value).toBe("New name");
     expect(button("Save profile").disabled).toBe(false);
+  });
+
+  it("shows profile-load failures with a retry action", async () => {
+    mocks.error = "Unable to load your profile.";
+    await render();
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(mocks.error);
+    await click("Retry loading profile");
+    expect(mocks.refresh).toHaveBeenCalledExactlyOnceWith({ force: true });
+  });
+
+  it("does not invite editing while the initial profile is loading", async () => {
+    mocks.loading = true;
+    await render();
+    expect(container.querySelector<HTMLInputElement>("#profile-display-name")?.disabled).toBe(true);
+    expect(button("Save profile").disabled).toBe(true);
+  });
+
+  it("uses a stable avatar color while changing the display name or removing a photo", async () => {
+    await render();
+    await click("Remove photo");
+    const avatar = container.querySelector<HTMLElement>('[data-testid="profile-avatar-preview"]')!;
+    const color = avatar.style.getPropertyValue("--human-avatar-background");
+    expect(avatar.textContent).toBe("AT");
+    await type("profile-display-name", "Jamie Example");
+    expect(avatar.textContent).toBe("JE");
+    expect(avatar.style.getPropertyValue("--human-avatar-background")).toBe(color);
+    await type("profile-display-name", "");
+    expect(avatar.textContent).toBe("");
+    expect(avatar.querySelector("svg")).not.toBeNull();
+    expect(avatar.style.getPropertyValue("--human-avatar-background")).toBe(color);
   });
 });
