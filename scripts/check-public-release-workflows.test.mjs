@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import "./check-hosted-sdk-cleanup.test.mjs";
+import "./check-image-coordinator.test.mjs";
+import "./check-public-control-ci.test.mjs";
+import "./check-image-build-routing.test.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "..");
 const workflowRoot = path.join(repositoryRoot, ".github", "workflows");
@@ -57,7 +61,7 @@ test("every external public workflow action is pinned to an exact commit", () =>
   }
 });
 
-test("protected main publishes both exact image manifests only after CI", () => {
+test("protected main reconciles exact image publication without occupying a waiting worker", () => {
   const source = readWorkflow("continuous-image-publication.yml");
 
   assert.match(source, /\n  push:\n    branches:\n      - main\n/u);
@@ -66,7 +70,11 @@ test("protected main publishes both exact image manifests only after CI", () => 
   assert.match(source, /actions: write/u);
   assert.match(source, /contents: read/u);
   assert.match(source, /cancel-in-progress: false/u);
-  assert.match(source, /timeout-minutes: 180/u);
+  assert.match(source, /timeout-minutes: 5/u);
+  assert.doesNotMatch(source, /\bsleep\b|\bdeadline\b|wait_for_run/u);
+  assert.match(source, /steps\.ci\.outputs\.ready == 'true'/u);
+  assert.match(source, /steps\.freshness\.outputs\.pending == 'false'/u);
+  assert.match(source, /dispatched, not yet verified/u);
   assert.match(source, /github\.repository == 'instafy-dev\/instafy'/u);
   assert.match(source, /github\.ref == 'refs\/heads\/main'/u);
   assert.match(source, /REQUESTED_COMMIT" != "\$GITHUB_SHA"/u);
@@ -78,7 +86,7 @@ test("protected main publishes both exact image manifests only after CI", () => 
   assert.match(source, /\.head_sha == \$sha/u);
   assert.match(source, /production-service-release-manifest/u);
   assert.match(source, /runtime-agent-release-manifest/u);
-  assert.match(source, /Check exact manifest freshness/u);
+  assert.match(source, /Reconcile exact publishers and manifest freshness/u);
   assert.match(source, /14 \* 24 \* 60 \* 60/u);
   assert.match(source, /services_publish=\$services_publish/u);
   assert.match(source, /runtime_publish=\$runtime_publish/u);
@@ -86,10 +94,10 @@ test("protected main publishes both exact image manifests only after CI", () => 
   assert.match(source, /PUBLISH_SERVICES: \$\{\{ steps\.freshness\.outputs\.services_publish \}\}/u);
   assert.match(source, /PUBLISH_RUNTIME: \$\{\{ steps\.freshness\.outputs\.runtime_publish \}\}/u);
   const dispatchStart = source.indexOf(
-    "      - name: Dispatch stale immutable image publishers\n",
+    "      - name: Dispatch missing immutable image publishers without waiting\n",
   );
   const dispatchEnd = source.indexOf(
-    "      - name: Require both exact image manifests\n",
+    "      - name: Report requested immutable image publication\n",
   );
   assert.ok(dispatchStart >= 0 && dispatchEnd > dispatchStart);
   const dispatch = source.slice(dispatchStart, dispatchEnd);
@@ -109,20 +117,20 @@ test("protected main publishes both exact image manifests only after CI", () => 
   assert.doesNotMatch(source, /^\s+pull_request_target:|^\s+workflow_run:/mu);
   assert.equal(
     [...source.matchAll(/publish-production-services\.yml/gu)].length,
-    3,
+    2,
   );
   assert.equal(
     [...source.matchAll(/publish-runtime-agent\.yml/gu)].length,
-    3,
+    2,
   );
   assertOrdered(
     source,
     "Authorize the exact current protected-main commit",
-    "Wait for exact protected-main CI",
+    "Inspect exact protected-main CI without waiting",
     "Recheck protected main before publication",
-    "Check exact manifest freshness",
-    "Dispatch stale immutable image publishers",
-    "Require both exact image manifests",
+    "Reconcile exact publishers and manifest freshness",
+    "Dispatch missing immutable image publishers without waiting",
+    "Report requested immutable image publication",
   );
 });
 
@@ -169,6 +177,15 @@ test("Changesets separates pull-request, version, pack, and npm publish authorit
   assert.doesNotMatch(version, /id-token: write/u);
   assert.doesNotMatch(version, /NPM_TOKEN|NODE_AUTH_TOKEN/u);
   assert.doesNotMatch(version, /cache:/u);
+  assertOrdered(
+    version,
+    "Qualify isolated protected-main control runner",
+    "Checkout the exact protected-main event commit",
+    "Install the exact dependency graph without lifecycle scripts",
+    "Require exact current protected main before bot authorization",
+    "Require the dedicated instafy-bot credential",
+    "Create or update the Changesets version pull request",
+  );
 
   assert.match(pack, /needs\.select\.outputs\.publish-plan-artifact-id/u);
   assert.match(pack, /pnpm --filter @instafy\/cli test:package/u);
@@ -263,11 +280,12 @@ test("runtime images publish only exact protected main from a fixed namespace", 
   assert.match(approval, /permissions: \{\}/u);
   assert.doesNotMatch(approval, /packages: write/u);
 
-  // Every flavor×architecture cell builds natively — no QEMU emulation.
+  // Hosted native cells remain the fallback. BUILD's two-platform daemon is
+  // qualified separately; this workflow does not install emulation or binfmt.
   assert.doesNotMatch(source, /setup-qemu/u);
   assert.doesNotMatch(source, /binfmt/u);
   assert.match(publish, /- release-approval/u);
-  assert.match(publish, /runs-on: \$\{\{ matrix\.runner \}\}/u);
+  assert.match(publish, /\|\| matrix\.runner \}\}/u);
   assert.match(publish, /runner: ubuntu-24\.04\n/u);
   assert.match(publish, /runner: ubuntu-24\.04-arm\n/u);
   assert.match(publish, /trivy_asset: Linux-64bit/u);

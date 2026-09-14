@@ -1,3 +1,4 @@
+import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -6,7 +7,7 @@ import vm from "node:vm";
 import { REQUIRED_BROWSER_LANES } from "../packages/frontend/scripts/required-browser-reporter.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
-const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");
+const read = (relative) => withoutManualCiRouting(path.basename(relative), fs.readFileSync(path.join(root, relative), "utf8"));
 
 const routedJobs = [
   { key: "personal", label: "public-browser-personal", name: "Personal Browser E2E", minutes: 30 },
@@ -133,6 +134,19 @@ test("only the self-hosted Personal job installs its documented GTK3 dependency 
   assert.doesNotMatch(personal, /--no-sandbox|--allow-unauthenticated|--ignore-scripts|NODE_TLS_REJECT_UNAUTHORIZED/u);
 });
 
+test("Personal CI installs its locked Electron binary before the scrubbed test process", () => {
+  const personal = jobSource("personal");
+  const install = "      - name: Install the locked Electron binary\n        timeout-minutes: 5\n        env:\n          NODE_USE_ENV_PROXY: \"1\"\n        run: pnpm --filter @instafy/desktop-app exec install-electron\n";
+  assert.ok(personal.includes(install));
+  assert.ok(personal.indexOf(install) > personal.indexOf("run: pnpm install --frozen-lockfile"));
+  assert.ok(personal.indexOf(install) < personal.indexOf("Run real Personal Browser cookie and ownership E2E"));
+  assert.equal((read(".github/workflows/browser-e2e.yml").match(/exec install-electron/g) ?? []).length, 1);
+  assert.doesNotMatch(personal, /npx|pnpm dlx|electron@latest|ELECTRON_OVERRIDE_DIST_PATH|electron_use_remote_checksums|NODE_TLS_REJECT_UNAUTHORIZED/u);
+  const runner = read("packages/frontend/scripts/browser-ci.mjs");
+  assert.doesNotMatch(runner, /NODE_USE_ENV_PROXY|HTTP_PROXY|HTTPS_PROXY|ELECTRON_GET_USE_PROXY/u,
+    "download proxy support must not enter either scrubbed test environment");
+});
+
 test("Public Build includes browser verification in its existing release result", () => {
   const build = read(".github/workflows/build.yml");
   assert.match(build, /\n  pull_request:/);
@@ -164,7 +178,7 @@ test("required browser lanes execute without secret or production authority", ()
 });
 
 test("standalone configs do not import the authenticated development harness", () => {
-  for (const file of ["playwright.personal-ci.config.ts", "playwright.browser-ui-ci.config.ts", "playwright.shared-studio-ci.config.ts"]) {
+  for (const file of ["playwright.personal-ci.config.ts", "playwright.ci-ui.config.ts", "playwright.shared-studio-ci.config.ts"]) {
     const config = read(`packages/frontend/${file}`);
     assert.match(config, /forbidOnly: true/);
     assert.match(config, /workers: 1/);
@@ -172,7 +186,7 @@ test("standalone configs do not import the authenticated development harness", (
     assert.match(config, /required-browser-reporter\.mjs/);
     assert.doesNotMatch(config, /globalSetup:|globalTeardown:|playwright\.config|playwright-test\.mjs|dotenv|privateEnv/);
   }
-  const vite = read("packages/frontend/vite.browser-ui-ci.config.ts");
+  const vite = read("packages/frontend/vite.ci-ui.config.ts");
   assert.match(vite, /envFile: false/);
   assert.match(vite, /cacheDir: path\.join\(frontendRoot, "node_modules", "\.vite-browser-ui-ci"\)/);
   // The history fixtures use the real Router; a clean lane must optimize it
@@ -182,6 +196,28 @@ test("standalone configs do not import the authenticated development harness", (
   assert.doesNotMatch(vite, /from ["']\.\/vite\.config|loadEnv\(/);
   const resolver = read("packages/frontend/tests/playwright/component/viteComponentDependencies.ts");
   assert.ok(resolver.includes("\\.vite(?:-browser-ui-ci)?"));
+});
+
+test("UI config basenames avoid pinned Brotli name detection without changing coverage", () => {
+  // Gitleaks 8.30.1 uses archives 0.1.2, whose Brotli.Match treats any
+  // case-insensitive ".br" substring as an archive when given a filename.
+  const configNames = ["playwright.ci-ui.config.ts", "vite.ci-ui.config.ts"];
+  for (const name of configNames) {
+    assert.equal(name.toLowerCase().includes(".br"), false);
+    assert.ok(fs.statSync(path.join(root, "packages/frontend", name)).isFile());
+  }
+  for (const name of ["playwright.browser-ui-ci.config.ts", "vite.browser-ui-ci.config.ts"]) {
+    assert.equal(fs.existsSync(path.join(root, "packages/frontend", name)), false);
+  }
+  const playwright = read("packages/frontend/playwright.ci-ui.config.ts");
+  assert.equal((playwright.match(/vite\.ci-ui\.config\.ts/g) ?? []).length, 1);
+  assert.match(read("packages/frontend/scripts/browser-ci.mjs"),
+    /"browser-ui": "playwright\.ci-ui\.config\.ts"/);
+  for (const name of ["playwright.notifications-ci.config.ts", "playwright.support-ci.config.ts"]) {
+    const consumer = read(`packages/frontend/${name}`);
+    assert.equal((consumer.match(/--config \.\/vite\.ci-ui\.config\.ts/g) ?? []).length, 1);
+    assert.doesNotMatch(consumer, /vite\.browser-ui-ci\.config\.ts/);
+  }
 });
 
 test("the required browser UI job includes the real co-browsing protocol fixture", () => {
@@ -201,7 +237,7 @@ test("the required browser UI job includes the real co-browsing protocol fixture
 });
 
 test("the expanded browser UI inventory has a bounded suite budget without relaxing test gates", () => {
-  const config = read("packages/frontend/playwright.browser-ui-ci.config.ts");
+  const config = read("packages/frontend/playwright.ci-ui.config.ts");
   assert.match(config, /^\s+globalTimeout: 360_000,$/m);
   assert.match(config, /^\s+timeout: 30_000,$/m);
   assert.match(config, /^\s+workers: 1,$/m);

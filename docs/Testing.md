@@ -45,6 +45,30 @@ including its downstream release-workflow result. Repository administrators
 must also require the emitted browser job checks in branch protection; adding
 workflow YAML does not change repository protection settings.
 
+The four summary checks (`JavaScript packages`, `Rust packages`, `Rust tests`
+and `Shared Browser profile E2E`) retain `always()` behavior for pull requests,
+manual dispatches and other contexts. Only a canceled workflow from a protected
+`main` push in the canonical repository may skip those aggregates, so an obsolete
+Build need not retain workers for its summaries. An uncanceled Build still runs
+the summaries and rejects every failed, canceled, skipped or missing child.
+This exception does not change test commands, step-level artifact/stack cleanup,
+runner routing or branch protection. Canceled/skipped Build runs are not successful
+release evidence. Do not broaden this to PRs: GitHub can count a condition-skipped
+required job as successful. See [workflow cancellation](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-cancellation)
+and [required-check semantics](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/troubleshooting-required-status-checks).
+`node --test scripts/check-javascript-ci.test.mjs` covers all four predicates,
+actual aggregate gates and complete workflow-byte preservation; these source
+regressions do not prove GitHub scheduler behavior. The guard relies on GitHub's
+native boolean [`github.ref_protected` context](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#github-context), not a caller-supplied string or
+number; the fixtures also model Actions' numeric coercion for synthetic values.
+
+System SDK and tool-cache reclamation is limited to GitHub-hosted runners.
+Self-hosted runners retain their installed toolchains. Runtime image publication
+checks its minimum 20 GiB free disk separately on every runner; skipping SDK
+reclamation cannot skip that prerequisite. This safeguard does not select a
+runner or enable publication. `node --test scripts/check-public-release-workflows.test.mjs`
+includes the cleanup inventory and executable free-disk regression checks.
+
 Pull requests are leak-gated by the separate
 `Public boundary (trusted base)` check. Its `pull_request_target` workflow owns
 the scanner, policy, and Gitleaks configuration from protected `main`, checks
@@ -83,6 +107,15 @@ the pinned Gitleaks 8.30.1 archive for either Linux x64 or ARM64 and rejects
 unsupported architectures. Remove or disable the switch to restore hosted
 routing; no runner credentials or host configuration belong in this tree.
 
+The standalone UI configs are `packages/frontend/playwright.ci-ui.config.ts`
+and `packages/frontend/vite.ci-ui.config.ts`. Avoid `.br` inside these source
+basenames: the pinned scanner's [archive matcher](https://github.com/mholt/archives/blob/v0.1.2/brotli.go)
+treats that substring as Brotli, including ordinary `.browser` names.
+The rename preserves the browser lane, fixture inventory and Vite cache path;
+scanner rules, archive depth and unexpected-read failure behavior are unchanged.
+`node --test scripts/browser-ci-workflow.test.mjs` covers the names, all consumers
+and the existing browser-lane behavior.
+
 The independent, default-off `CI_EXPANDED_SELF_HOSTED=true` switch covers only
 four additional short jobs. It does not replace the boundary switch:
 
@@ -93,8 +126,9 @@ four additional short jobs. It does not replace the boundary switch:
 | Require reviewed Changeset release intent | Same-repository PR to `main` | `public-npm-policy` |
 | Rust formatting | Same-repository PR to `main`; protected `main` push | `public-rust-fmt` |
 
-All four require this repository to remain private; forks, public visibility,
-manual dispatches and other events keep their existing hosted selection.
+All four require this repository to remain private; forks, public visibility
+and unsupported events keep their existing hosted selection. The three
+non-PR-policy jobs also support the exact-main manual route described below.
 Each disposable Linux ARM64 runner uses the same trust-specific organization
 group and unique `instafy-ci-bootstrap-<repository-id>-<run-id>-<attempt>-<suffix>`
 label format as the boundary lane, without an ordinary role label. Labels are
@@ -114,6 +148,130 @@ expanded switch to restore hosted routing for new runs; already queued jobs
 do not automatically move pools. Run `node --test scripts/check-expanded-ci-routing.test.mjs`
 for routing regressions. These tests are not real ARM64 workload or teardown
 qualification, which is required before enabling the switch.
+
+### Protected-main manual CI
+
+The existing lane-specific switches also cover 31 job definitions on an explicit
+`workflow_dispatch` of protected, current `main`: 20 direct Public Build jobs,
+the five Browser jobs, Auth Email, Controller database tests, the Git conflict
+fixture, and npm Select, Version and Pack. No new switch enables unrelated lanes.
+These manual routes require the canonical repository and ID, private visibility,
+the exact defining workflow ref on main, and workflow SHA equal to the event SHA.
+Other branches, public visibility, unrelated callers and disabled switches retain
+the original hosted selection.
+
+Browser permits either its direct manual workflow or the existing exact Public
+Build caller. GitHub's [reusable-workflow context](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations#github-context)
+belongs to the caller; these two cases therefore have different run paths and job
+names. Admission must distinguish them explicitly and retain exact-attempt callee
+metadata and both workflow pins for the Build case.
+
+Every manual job uses the existing Linux ARM64 main group and unique
+repository/run/attempt/job label, with its unchanged commands, resource profile,
+timeout and cleanup. The manager must independently re-read protected main and
+reject a dispatch whose event SHA is no longer current; inputs cannot choose an
+alternate source. The six reviewed workflow pins and exact manual tuples must be
+enrolled before activation, including the standalone Browser workflow identity.
+Source tests are not a cold workload or cleanup qualification.
+
+Npm Version retains its existing exact-main freshness check before exposing the
+version bot credential; this route is not credential-free. Npm Publish still uses
+its original hosted runner and trusted-publisher OIDC. Image publication retains
+its independent BUILD route. No schedule, PR, automatic route or release authority
+is broadened by these manual additions.
+
+`node --test scripts/check-manual-ci-routing.test.mjs` exercises the real selectors
+and npm preflights and reconstructs all six complete preceding workflows.
+It is also imported by the existing expanded-CI test entrypoint. The preceding
+automatic-route tests use only that finite inverse; their original expectations
+and byte hashes remain, alongside raw old/new selector equivalence checks.
+
+The separate, default-off `CI_PUBLIC_CONTROL_SELF_HOSTED=true` switch covers
+four protected-`main` push jobs: npm `select` (15 minutes, suffix
+`public-npm-select`), npm `version` (15 minutes, suffix `public-npm-version`),
+npm `pack` (25 minutes, suffix `public-npm-pack`) and the
+image coordinator (5 minutes, suffix `public-image-coordinator`). All require the
+canonical private repository and repository ID, a protected main ref and their exact main workflow ref. They use
+the disposable Linux ARM64 main group and per-run/attempt labels above. Public
+visibility, PRs, forks, schedules and unsupported events retain
+`ubuntu-24.04`. The three npm jobs also support the manual route above;
+the image coordinator's scheduled/manual BUILD route is separate.
+
+This source routing is not runner admission or a successful publication proof.
+Before enabling it, provisioning must independently authenticate each exact
+workflow/job/event tuple, install and qualify its baseline tools (`gh` for
+Select, Version and the coordinator, plus `jq` and GNU `date -d` for the coordinator), and prove cold job
+execution and teardown. The first steps fail closed on missing tools, wrong
+source identity or a nonisolated runner; they do not install dependencies.
+The npm selector retains read-only repository access. The coordinator retains
+its existing GitHub-token `actions: write` permission to dispatch the two fixed
+publishers, without receiving package, registry or production credentials.
+Pack retains read-only actions/repository permissions and its exact selected
+publish plan, package tests, pack verification and immutable artifact upload.
+Its non-root Node22 preflight requires only the existing baseline tools; the
+unchanged setup step then selects Node24 for the pack commands. It does not
+receive npm OIDC or the version bot's credential. Version retains its existing
+bot credential only in its two original steps, so this lane is not credential-free.
+Before those steps, a fresh read must prove the event SHA is still protected main
+and the checkout is exactly that SHA. API failure, source drift or failed runner
+qualification prevents bot exposure. The original hosted fallback is unchanged.
+This source-only route still needs exact runner admission and real cold
+execution/cleanup qualification. npm publish remains hosted with its existing
+trusted-publisher OIDC authority. A push coordinator can defer while Build is
+incomplete. Its scheduled/manual follow-up and the image publishers have the
+separate optional BUILD route below; the push-only control switch does not
+enable that route. No `workflow_run` trigger is added. Run the source/fixture regressions with:
+
+```bash
+node --test scripts/check-public-release-workflows.test.mjs scripts/check-expanded-ci-routing.test.mjs
+```
+
+`TRUSTED_AMD64_BUILD_RUNNER_MODE=self-hosted` independently selects the
+organization group `instafy-trusted-build` and static labels
+`self-hosted`, `Linux`, `X64`, `instafy-build` for all four jobs in each exact-main
+image publisher, plus scheduled/manual image reconciliation. The canonical
+repository ID must still be private; main must be protected and the workflow
+ref and source SHA must match. Manual requests must name that same source SHA.
+PRs, forks, public visibility, other refs and a disabled/unset switch retain
+their original hosted runners. The existing isolated ARM64 push coordinator
+route takes precedence and is unchanged. This BUILD route uses trusted,
+ephemeral jobs with the existing Docker-capable build profile; its static labels
+are placement, not a claim of VM or network isolation.
+
+The seven service cells, four runtime flavor/architecture cells, original
+30/75-minute limits, approval, scan-before-login gates, immutable manifests,
+GitHub-token permissions and provenance settings are unchanged. Runtime builds
+still produce both amd64 and ARM64 images; on BUILD the scanner uses the existing
+pinned x64 Trivy binary rather than the target image's architecture. Hosted
+runner matrix selections and scanner pins are unchanged. The five-minute
+coordinator never waits for child publishers, so it releases a shared BUILD
+runner before those jobs need it.
+
+Before enabling this route, an operator must deliberately enroll this repository
+and these three exact `@refs/heads/main` workflow refs in the BUILD group's
+protected workflow allowlist and its existing registration policy. Qualify actual
+Buildx builds and Trivy scans for both platforms, at least 20 GiB free disk,
+artifact commands and ephemeral cleanup on that profile. Source tests do not
+prove physical capacity or successful image publication. Disable the switch to
+restore hosted selection for new runs; queued jobs do not move automatically.
+
+The version freshness regressions use credential-free Bash fixtures and an offline
+`jq` projection of inert branch responses; both tools must be installed locally.
+
+The path-filtered `Public Git Conflict Contract` has its own default-off
+`CI_GIT_CONFLICT_SELF_HOSTED=true` switch. Only same-repository, non-fork PRs to
+`main` and protected `main` pushes while this repository is private may select
+the disposable Linux ARM64 pool. Exact-main manual runs use the route above;
+public visibility, forks and unsupported events retain `ubuntu-latest`.
+It uses the same trust-specific groups and
+per-run/attempt label format above, with literal suffix `deterministic-conflict`.
+The first step checks the isolated runner prerequisites before an exact-event,
+non-persistent checkout. The five-minute `Deterministic conflict fixture` keeps
+its read-only permission and original local Git conflict/rebase/push assertions.
+Run `node --test scripts/check-git-conflict-ci.test.mjs` for routing and fixture
+regressions; the workflow runs these tests as well. Enabling this switch still
+requires independently reviewed exact-workflow admission and an actual cold
+job/cleanup proof. It enables no release job.
 
 The trusted gate rejects unreviewed environment templates, live
 environment/auth files, private-only package/product markers, personal paths,
@@ -146,9 +304,10 @@ require a security maintainer to inspect the bytes or object, update the policy,
 and use the explicit protected-branch break-glass path. Normal source
 contributions do not require that manual security review.
 
-The required `JavaScript packages` context is an always-run aggregate over four
-independent jobs. Each child has a 30-minute limit, checks out the same exact
-event commit and recursive submodules, and performs its own unfiltered frozen
+The required `JavaScript packages` context is a strict aggregate over four
+independent jobs, subject only to the canceled-main exception above. Each child
+has a 30-minute limit, checks out the same exact event commit and recursive
+submodules, and performs its own unfiltered frozen
 monorepo installation on Node20. No existing check is removed:
 
 | Child | Checks | Runner-label suffix |
@@ -168,8 +327,9 @@ All five jobs default to hosted Ubuntu. The independent
 `CI_JAVASCRIPT_SELF_HOSTED=true` switch selects isolated Linux ARM64 workers
 only for private, same-repository PRs to main and protected-main pushes, using
 the same group and per-job identity rules above. Neither the bootstrap switch
-nor the expanded four-job switch enables these jobs. Manual dispatches, forks
-and public visibility stay hosted. Use canonical lowercase switch values.
+nor the expanded four-job switch enables these jobs. Exact-main manual dispatches
+use the route above; other manual refs, forks and public visibility stay hosted.
+Use canonical lowercase switch values.
 
 Do not enable this switch until the manager admits all five exact job names,
 labels and time budgets from the reviewed protected-main workflow. Its
@@ -197,7 +357,8 @@ the same exact event commit and recursive submodules, and has a 30-minute
 limit. Missing, skipped, cancelled or failed children fail the corresponding
 aggregate. Aggregates have no repository permissions or checkout and are
 scheduled only after their children finish; they do not hold a worker while
-waiting for other workers.
+waiting for other workers. Only the canceled-main exception above skips them;
+pull requests and manual runs retain always-run, fail-closed aggregation.
 
 | Child | Preserved commands | Runner-label suffix |
 | --- | --- | --- |
@@ -218,8 +379,26 @@ installation, including the pinned Playwright fixture required by agent tests.
 Stable native Rust and debug-info settings are unchanged. Each child has its
 own target directory; Cargo caches are partitioned by job, operating system,
 CPU architecture and the exact workspace Cargo lockfiles, with no cross-arch
-or old-lock fallback. The existing unused-toolchain disk cleanup runs only on
+or old-lock fallback. Self-hosted Rust compile/test children restore these caches
+with the pinned restore-only action; they do not upload caches in a post-job step.
+This keeps an optional large cache save from exhausting the job after its Cargo
+checks pass. A cache miss still runs every command cold and must fit the same
+30-minute limit. GitHub-hosted children retain the original restore/save action,
+keys and paths. An uncanceled Build never ignores a test failure, child
+cancellation or aggregate failure.
+The existing unused-toolchain disk cleanup runs only on
 GitHub-hosted images, never against a self-hosted host or guest image.
+
+Only the self-hosted Linux `Rust test runtime agent` Cargo step defaults unset
+`RUSTFLAGS` to `-C link-arg=-fuse-ld=lld`; its scoped prerequisites already install
+and verify `lld`. Explicit flags, including an empty opt-out, are preserved.
+Hosted and non-Linux execution and other Rust children are unchanged. The default
+retains the existing compiler driver and both full Cargo commands, including
+compilation of every integration target before the database-free tests run.
+It addresses a separately observed default-linker signal9 failure in that broad
+compile path, which does not use the Shared fixture's JavaScript compiler helper.
+Signal9 alone does not prove an out-of-memory cause. Cold completion and memory
+use still require the real job; source regressions are not that qualification.
 
 All twelve jobs default to `ubuntu-latest`. Only the independent
 `CI_RUST_SELF_HOSTED=true` switch may select isolated Linux ARM64 workers, for
@@ -228,8 +407,8 @@ same trust-specific organization groups and per-run, per-attempt, per-job
 labels as the JavaScript split. The aggregate suffixes are
 `public-rust-check-aggregate` and `public-rust-test-aggregate`. Other switches
 do not enable Rust compilation or tests; Rust formatting remains separately
-controlled by `CI_EXPANDED_SELF_HOSTED`. Forks, public visibility, manual
-dispatches and unsupported events keep hosted runners.
+controlled by `CI_EXPANDED_SELF_HOSTED`. Exact-main manual dispatches use the
+route above; forks, public visibility and unsupported contexts keep hosted runners.
 
 Do not enable this switch before independently enrolling the reviewed workflow
 and all twelve exact job identities in the runner manager. Its existing
@@ -240,7 +419,11 @@ no private environment directory, and native Rust/C build tools. Those checks
 do not prove that native libraries, downloads or workload timings are ready.
 Each self-hosted child then installs the fixed missing native package set
 (`clang`, `lld`, `cmake`, `libcap-dev`, `protobuf-compiler`) in a visible,
-five-minute GitHub step inside the unchanged 30-minute job. Hosted jobs and
+five-minute GitHub step inside the unchanged 30-minute job. The package list
+stays unchanged. The install waits at most 120 seconds for the
+DPkg lock if Ubuntu's automatic updater is finishing; it never deletes lock
+files, kills the updater or skips package verification. Lock exhaustion still
+fails within the existing five-minute step. Hosted jobs and
 aggregates do not run that step. The manager must first qualify only APT's
 fixed proxy configuration in the fresh guest; package installation stays in
 the workflow, without changing the base image, repository trust or TLS rules.
@@ -253,6 +436,12 @@ memory/disk use and complete guest teardown first. A split or a warm cache hit
 is not that qualification; never reduce the test selection or ignore a timeout
 to make a job green. No database, provider, signing or release credentials are
 introduced by this lane.
+
+The same restore-only compiler-cache policy applies to the two self-hosted
+Shared Browser children and Controller database tests. Their hosted compiler
+caches and pnpm caches are unchanged. Shared Browser no longer restores the
+standalone migration-image cache (see below). Cache restoration
+is an optimization, not evidence that a cold workload has passed.
 
 Disable the Rust switch to restore hosted selection for new runs; already
 queued jobs retain their selected pools. No required-check rule changes are
@@ -312,7 +501,14 @@ existing developer homes and credentials are not loaded. A fixed invalid token
 sentinel also prevents the CLI from consulting the operating-system keychain.
 Each pull is bounded to three minutes and total preparation to ten minutes inside the existing job
 timeout. Exact-ref local inspection must succeed before startup; failures stop
-without entering the normal startup retry. CLI upgrades require updating and
+without entering the normal startup retry. Failed Docker commands report only
+the fixed preparation stage/image name, bounded exit/signal/error-code fields,
+and fixed hints derived from at most 32 KiB of stderr. Raw output, image tags,
+URLs, paths and credentials are not logged. Hints are Docker-reported symptoms,
+not proof of the underlying cause; a signal is not proof of an out-of-memory
+failure. Missing/oversized/unrecognized diagnostics remain unclassified. This
+does not retry a failed pull, skip an image or change the failure result.
+CLI upgrades require updating and
 testing the pinned ancillary inventory. Run
 `node --test scripts/lib/supabaseSerialPull.test.mjs` for offline regression tests.
 These do not qualify real cold downloads or concurrent connection usage.
@@ -344,8 +540,9 @@ production credentials, an external mailbox, a deployment, or released images.
 
 Only private, same-repository PRs to `main` and protected-main pushes may use
 native Linux ARM64 guests in the corresponding `instafy-ci-pr` or
-`instafy-ci-main` group. Forks, public visibility, manual dispatches and disabled
-switches retain hosted Ubuntu. Exclusive label suffixes are
+`instafy-ci-main` group. Exact-main manual dispatches use the route above;
+forks, public visibility, other manual refs and disabled switches retain hosted
+Ubuntu. Exclusive label suffixes are
 `public-controller-db` and `public-auth-email`, prefixed with the repository ID,
 run ID and attempt as in the other bounded lanes. Separate source authentication,
 exact job assignment, complete guest destruction and credential revocation are
@@ -363,7 +560,7 @@ or interrupted cleanup still requires destruction of the whole guest.
 Run `node --test scripts/check-database-ci-routing.test.mjs` for selector,
 command-parity, prerequisite and cache regressions. These are not real cold ARM
 workload qualification. Before enabling the switch, the manager must admit both
-exact workflow identities, all four PR/push tuples and the 25-minute Listener
+exact workflow identities, their PR/push/manual tuples and the 25-minute Listener
 budget, then prove both complete workloads and cleanup within the unchanged
 bounded worker lifecycle. Disable the switch for hosted routing of new runs;
 already queued runs do not move pools automatically.
@@ -405,8 +602,9 @@ The independent, default-off `CI_BROWSER_SELF_HOSTED=true` switch covers only
 `Browser verification / Browser UI rendering` and
 `Browser verification / Personal Browser E2E`, called by Public
 Build. It requires private visibility, a same-repository PR to `main` or a
-protected-main push, and the exact `build.yml` caller. Forks, public visibility,
-manual runs and other callers retain `ubuntu-24.04`; Shared Browser has its
+protected-main push, and the exact `build.yml` caller. The manual route above
+also permits the direct Browser workflow. Forks, public visibility, other
+manual refs and unrelated callers retain `ubuntu-24.04`; Shared Browser has its
 own independent switch below. Both short browser jobs have a 30-minute
 limit, including their hosted fallback, to leave room for cold workspace,
 browser and system-package installation. This is a conservative capacity bound,
@@ -425,6 +623,13 @@ Node22, Xvfb and xauth before checkout; the unchanged
 Playwright installation obtains Chromium and system libraries. The self-hosted
 Personal job also explicitly installs Ubuntu24.04's GTK3 runtime package for
 Electron before building its fixture. Restricted
+workers also prepare the exact locked Electron binary with
+`pnpm --filter @instafy/desktop-app exec install-electron` before the test process.
+[Electron 42 and newer download lazily](https://www.electronjs.org/blog/electron-42-0), so a successful package install alone
+does not prove that binary exists. The five-minute preparation step enables
+Node's environment-proxy support (available since Node 22.21); it uses the installed package and its bundled
+checksums, not an unpinned `npx` download. Proxy settings still do not enter the
+scrubbed Playwright or Electron fixture environments. Restricted
 workers must configure the disposable guest's APT proxy too: sudo does not
 preserve the browser installer's proxy environment. Keep TLS and browser
 sandbox protections intact. No template, host paths or proxy credentials belong
@@ -436,8 +641,9 @@ not a substitute for real browser execution and teardown.
 ### Bounded Shared Browser CI
 
 `Browser verification / Shared Browser profile E2E` retains its required name
-as an always-run five-minute aggregate. It succeeds only when both fixed
-children finish successfully; missing, skipped, cancelled or failed children
+as a strict five-minute aggregate, with only the canceled-main exception above.
+It succeeds only when both fixed children finish successfully; missing, skipped,
+cancelled or failed children
 fail the aggregate. It has no repository permissions or checkout and starts
 only after the children end, without holding a worker while waiting.
 
@@ -453,9 +659,28 @@ stack teardown. The profile-only script still permits a separately provisioned
 migrated loopback database; the signed-in Studio journey needs real local
 GoTrue. No fixture command, scenario, receipt, cleanup or safety check is
 replaced by the aggregate. Only the same fixed credential-free receipt paths
-are uploaded, separately per child. Image and compiler cache keys include the
+are uploaded, separately per child. Compiler cache keys include the
 operating system and architecture; compiler targets are child-specific with
 no old-lock or cross-architecture fallback.
+
+The two self-hosted compiler restores set `SEGMENT_DOWNLOAD_TIMEOUT_MINS=2`.
+For the pinned action's Azure SDK downloader, this limits each 128 MiB segment
+to two minutes of wall time, even if bytes are arriving. It is not a total
+restore/job or inactivity timeout; legacy/non-Azure download paths do not use
+this setting. A segment timeout aborts that download and continues as a cache
+miss; migrations, compilation and both full fixtures still run. The 30-minute
+job limit remains, so cold compilation must fit it. Hosted restores, cache keys
+and paths are unchanged. See the
+[cache action's timeout guidance](https://github.com/actions/cache/blob/55cc8345863c7cc4c66a329aec7e433d2d1c52a9/tips-and-workarounds.md#cache-segment-restore-timeout).
+
+The children use `pnpm supabase:up` to prepare their actual CLI-selected images
+and apply migrations. They do not restore `~/.instafy-image-cache` or run
+`ensure-supabase-postgres-image.mjs`: that helper prepares a digest-derived local
+tag consumed by the separate empty-database migration test, not by CLI startup.
+The standalone migration lane retains its image cache and helper. Removing this
+extra archive transfer/load/save leaves browser image pulls, compiler caches,
+authentication, assertions and teardown intact. Docker layers can overlap, so
+measure both complete cold child jobs before claiming an end-to-end speedup.
 
 Both children explicitly set `SUPABASE_BROWSER_TEST=1` only for startup. This
 fixed profile excludes **only Edge Runtime**, using `supabase start --exclude
@@ -482,7 +707,8 @@ All three jobs default to hosted Ubuntu24.04. The separate, default-off
 `CI_SHARED_BROWSER_SELF_HOSTED=true` switch uses the same private, same-repository
 PR/protected-main and exact Public Build caller guards as the other browser
 lanes. Its aggregate suffix is `public-shared-browser-aggregate`. Forks, public
-visibility, manual runs and other callers stay hosted. The manager must pin
+visibility, other manual refs and unrelated callers stay hosted; exact-main
+manual runs follow the route above. The manager must pin
 both caller and callee source at the same tested commit and protected main and
 authenticate exact-attempt reusable-workflow metadata before issuing a runner.
 Neither the ordinary browser switch nor another CI switch enables this lane.
@@ -502,6 +728,16 @@ compiler environment. Database commands, display probes, production runtime
 helpers, controller services and browser processes retain their existing
 proxy/credential scrubbing. No general inherited environment, bypass list,
 private endpoint, credential or TLS override is added to the public source.
+
+On Linux, the four Cargo fixture builds default to `RUSTFLAGS="-C link-arg=-fuse-ld=lld"`
+only when `RUSTFLAGS` is unset. This keeps the existing compiler driver and
+requires `lld` on the build host; both Shared workflow children already install
+it. Every explicit `RUSTFLAGS` string, including an empty opt-out, is preserved
+byte-for-byte. Other platforms and the two Go builds retain their existing
+compiler environment. The default aims to reduce peak linker memory without
+changing Cargo arguments, features, fixture assertions or runtime environments.
+A warm final-link result alone does not qualify cold end-to-end CI or its memory
+and time budgets.
 
 Cold ARM64 completion within 30 minutes is unproven: prior hosted timings or
 warm caches do not qualify these split jobs. Keep activation supervised until
@@ -657,6 +893,30 @@ actual X-display connection after the long builds. A failed profile fixture
 retains only fixed diagnostic categories from at most the last 64 KiB of its
 owned Chromium log, never raw log lines. Categories are observations, not a
 root-cause diagnosis; missing or unrecognized evidence remains explicit.
+
+The four Shared fixture Cargo builds keep JSON artifact discovery unchanged.
+On a failed build they report at most eight compiler-error headings and bounded
+repository-relative Rust source locations. Quoted payloads, URLs, absolute
+paths and credential-like headings are redacted; source snippets, linker
+arguments, build-script environment, other JSON records and arbitrary child
+stdout are not printed. Each JSON record is limited to 256 KiB for diagnostics;
+oversized or unrecognized records are omitted, not inferred. This diagnostic
+path does not make a failing compiler or missing executable pass. Crate-relative
+locations use the fixed agent/controller callsite context only when Cargo's
+manifest matches that exact checkout crate; dependency locations are omitted.
+Absolute, Windows and escaping span paths are refused. Reproduce
+the complete fixture on disposable Linux to obtain the real compiler error;
+passing parser tests alone does not qualify the browser workload.
+
+Compiler child notes can add only fixed observed categories: `linker-failed`,
+`linker-killed`, `missing-library`, `undefined-symbol`, `disk-full`, or
+`allocation-failed`. No matched note, command, environment, symbol or library
+name is printed. Notes are explicitly `absent`, `unclassified`, `matched`,
+`limited`, or `invalid`. The reader examines at most 16 direct notes, each at
+most 64 KiB UTF-8, 128 lines and 2048 bytes per line; it never recurses. The
+existing eight-error/256-KiB-record limits remain. Credential/URL/command-shaped
+lines are ignored. These categories report compiler text, not proven causes:
+in particular, linker SIGKILL is **not proof of an out-of-memory kill**.
 
 The standard hosted workflow uses Docker to provision disposable migrated
 Supabase (Postgres and local authentication); Chromium and runtime/controller

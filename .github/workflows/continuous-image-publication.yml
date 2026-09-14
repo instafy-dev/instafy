@@ -2,8 +2,9 @@ name: Publish images after protected main
 
 # The latest protected-main commit gets both immutable image manifests after
 # its exact CI succeeds. If main advances, older queued runs yield to the newer
-# cumulative source; a private composition pinned to an unpublished
-# intermediate commit fails closed until its reviewed pin advances.
+# cumulative source. Each pass reconciles once without waiting for Build or
+# child publishers; the six-hour schedule reconciles deferred work. A successful
+# coordinator is not publication proof: consumers require sealed child manifests.
 on:
   push:
     branches:
@@ -31,10 +32,87 @@ jobs:
     if: >-
       github.repository == 'instafy-dev/instafy' &&
       github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    runs-on: >-
+      ${{ vars.CI_PUBLIC_CONTROL_SELF_HOSTED == 'true'
+          && github.repository == 'instafy-dev/instafy'
+          && github.repository_id == '1309636737'
+          && github.event.repository.private == true
+          && github.event_name == 'push'
+          && github.ref == 'refs/heads/main'
+          && github.ref_protected == true
+          && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/continuous-image-publication.yml@refs/heads/main'
+          && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-image-coordinator","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt))
+          || vars.TRUSTED_AMD64_BUILD_RUNNER_MODE == 'self-hosted'
+          && github.repository == 'instafy-dev/instafy'
+          && github.repository_id == '1309636737'
+          && github.event.repository.private == true
+          && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+          && github.ref == 'refs/heads/main'
+          && github.ref_protected == true
+          && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/continuous-image-publication.yml@refs/heads/main'
+          && github.workflow_sha == github.sha
+          && (github.event_name == 'schedule' || inputs.commit_sha == github.sha)
+          && fromJSON('{"group":"org/instafy-trusted-build","labels":["self-hosted","Linux","X64","instafy-build"]}')
+          || 'ubuntu-24.04' }}
+    timeout-minutes: 5
 
     steps:
+      - name: Qualify isolated protected-main control runner
+        if: runner.environment == 'self-hosted' && github.event_name == 'push'
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const { execFileSync } = require('node:child_process');
+          assert.equal(process.env.GITHUB_REPOSITORY, 'instafy-dev/instafy');
+          assert.equal(process.env.GITHUB_REPOSITORY_ID, '1309636737');
+          assert.equal(process.env.GITHUB_EVENT_NAME, 'push');
+          assert.equal(process.env.GITHUB_REF, 'refs/heads/main');
+          assert.equal(process.env.GITHUB_REF_PROTECTED, 'true');
+          assert.equal(process.env.GITHUB_WORKFLOW_REF, 'instafy-dev/instafy/.github/workflows/continuous-image-publication.yml@refs/heads/main');
+          assert.match(process.env.GITHUB_SHA, /^[0-9a-f]{40}$/);
+          assert.equal(process.platform, 'linux');
+          assert.equal(process.arch, 'arm64');
+          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
+          assert.equal(process.versions.node.split('.')[0], '22');
+          assert.equal(process.env.RUNNER_OS, 'Linux');
+          assert.equal(process.env.RUNNER_ARCH, 'ARM64');
+          assert.equal(process.env.INSTAFY_CI_JOB_ISOLATION, 'ephemeral');
+          assert.ok(!process.env.INSTAFY_ENV_DIR);
+          for (const tool of ['bash', 'gh', 'jq', 'date']) {
+            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'public-control-preflight', tool], { timeout: 1000, stdio: 'ignore' });
+          }
+          assert.equal(execFileSync('date', ['-u', '-d', '1970-01-01T00:00:00Z', '+%s'], { timeout: 1000, encoding: 'utf8' }).trim(), '0');
+          NODE
+
+      - name: Qualify trusted image reconciliation runner
+        if: runner.environment == 'self-hosted' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        shell: bash
+        run: |
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const { execFileSync } = require('node:child_process');
+          assert.equal(process.env.GITHUB_REPOSITORY, 'instafy-dev/instafy');
+          assert.equal(process.env.GITHUB_REPOSITORY_ID, '1309636737');
+          assert.ok(['schedule', 'workflow_dispatch'].includes(process.env.GITHUB_EVENT_NAME));
+          assert.equal(process.env.GITHUB_REF, 'refs/heads/main');
+          assert.equal(process.env.GITHUB_REF_PROTECTED, 'true');
+          assert.equal(process.env.GITHUB_WORKFLOW_REF, 'instafy-dev/instafy/.github/workflows/continuous-image-publication.yml@refs/heads/main');
+          assert.match(process.env.GITHUB_SHA, /^[0-9a-f]{40}$/);
+          assert.equal(process.env.GITHUB_WORKFLOW_SHA, process.env.GITHUB_SHA);
+          assert.equal(process.platform, 'linux');
+          assert.equal(process.arch, 'x64');
+          assert.ok(Number.isSafeInteger(process.getuid()) && process.getuid() > 0);
+          assert.equal(process.versions.node.split('.')[0], '22');
+          assert.equal(process.env.RUNNER_OS, 'Linux');
+          assert.equal(process.env.RUNNER_ARCH, 'X64');
+          assert.ok(!process.env.INSTAFY_ENV_DIR);
+          for (const tool of ['bash', 'gh', 'jq', 'date']) {
+            execFileSync('/bin/bash', ['-c', 'command -v "$1" >/dev/null', 'public-image-build-preflight', tool], { timeout: 1000, stdio: 'ignore' });
+          }
+          assert.equal(execFileSync('date', ['-u', '-d', '1970-01-01T00:00:00Z', '+%s'], { timeout: 1000, encoding: 'utf8' }).trim(), '0');
+          NODE
+
       - name: Authorize the exact current protected-main commit
         id: source
         shell: bash
@@ -65,52 +143,44 @@ jobs:
           echo "current=true" >> "$GITHUB_OUTPUT"
           echo "commit_sha=$REQUESTED_COMMIT" >> "$GITHUB_OUTPUT"
 
-      - name: Wait for exact protected-main CI
+      - name: Inspect exact protected-main CI without waiting
         if: ${{ steps.source.outputs.current == 'true' }}
+        id: ci
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_COMMIT: ${{ steps.source.outputs.commit_sha }}
         run: |
           set -euo pipefail
-          deadline=$((SECONDS + 60 * 60))
-          while (( SECONDS < deadline )); do
-            runs="$(
-              gh api \
-                -H 'X-GitHub-Api-Version: 2026-03-10' \
-                "repos/${GITHUB_REPOSITORY}/actions/workflows/build.yml/runs?event=push&head_sha=${RELEASE_COMMIT}&per_page=20"
-            )"
-            conclusion="$(
-              jq -r '
-                [.workflow_runs[] |
-                  select(.head_branch == "main" and .event == "push")] |
-                if length == 0 then "waiting"
-                elif any(.[]; .status != "completed") then "waiting"
-                elif any(.[]; .conclusion == "success") then "success"
-                else "failed"
-                end
-              ' <<<"$runs"
-            )"
-            case "$conclusion" in
-              success) break ;;
-              failed)
-                echo "::error::Public Build did not pass for ${RELEASE_COMMIT}."
-                exit 1
-                ;;
-              waiting) sleep 15 ;;
-              *)
-                echo "::error::Unexpected Public Build state."
-                exit 1
-                ;;
-            esac
-          done
-          if (( SECONDS >= deadline )); then
-            echo "::error::Timed out waiting for Public Build at ${RELEASE_COMMIT}."
-            exit 1
-          fi
+          runs="$(gh api \
+            -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/build.yml/runs?event=push&head_sha=${RELEASE_COMMIT}&per_page=100")"
+          jq -e --arg sha "$RELEASE_COMMIT" '
+            (.total_count | type) == "number" and
+            .total_count == (.workflow_runs | length) and .total_count <= 100 and
+            all(.workflow_runs[];
+              .repository.full_name == "instafy-dev/instafy" and
+              .path == ".github/workflows/build.yml" and
+              .head_sha == $sha and .head_branch == "main" and .event == "push" and
+              (.status | IN("completed", "queued", "in_progress", "waiting", "pending", "requested")))
+          ' <<<"$runs" >/dev/null
+          conclusion="$(jq -r '
+            .workflow_runs |
+            if length == 0 or any(.[]; .status != "completed") then "deferred"
+            elif any(.[]; .conclusion == "success") then "success"
+            else "failed" end
+          ' <<<"$runs")"
+          case "$conclusion" in
+            success) echo "ready=true" >> "$GITHUB_OUTPUT" ;;
+            deferred)
+              echo "ready=false" >> "$GITHUB_OUTPUT"
+              echo "Publication deferred: exact Public Build is not complete; no publishers dispatched." >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *) echo "::error::Public Build did not pass for ${RELEASE_COMMIT}."; exit 1 ;;
+          esac
 
       - name: Recheck protected main before publication
-        if: ${{ steps.source.outputs.current == 'true' }}
+        if: ${{ steps.ci.outputs.ready == 'true' }}
         id: recheck
         shell: bash
         env:
@@ -131,7 +201,7 @@ jobs:
           fi
           echo "current=true" >> "$GITHUB_OUTPUT"
 
-      - name: Check exact manifest freshness
+      - name: Reconcile exact publishers and manifest freshness
         if: ${{ steps.recheck.outputs.current == 'true' }}
         id: freshness
         shell: bash
@@ -152,11 +222,19 @@ jobs:
               "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs" \
               -f event=workflow_dispatch \
               -f head_sha="$RELEASE_COMMIT" \
-              -f status=success \
               -f per_page=100)" || return 2
-            if [[ "$(jq -er '.total_count' <<<"$runs")" -gt 100 ]]; then
-              echo "::error::Exact release history for ${workflow} is unbounded." >&2
-              return 2
+            jq -e --arg sha "$RELEASE_COMMIT" --arg path ".github/workflows/${workflow}" '
+              (.total_count | type) == "number" and
+              .total_count == (.workflow_runs | length) and .total_count <= 100 and
+              ([.workflow_runs[].id] | unique | length) == .total_count and
+              all(.workflow_runs[];
+                (.id | type) == "number" and .id > 0 and .id == (.id | floor) and
+                .repository.full_name == "instafy-dev/instafy" and .path == $path and
+                .head_sha == $sha and .head_branch == "main" and .event == "workflow_dispatch" and
+                (.status | IN("completed", "queued", "in_progress", "waiting", "pending", "requested")))
+            ' <<<"$runs" >/dev/null || return 2
+            if jq -e 'any(.workflow_runs[]; .status != "completed")' <<<"$runs" >/dev/null; then
+              return 3
             fi
             while read -r run_id; do
               [[ -n "$run_id" ]] || continue
@@ -178,8 +256,9 @@ jobs:
                 -H 'X-GitHub-Api-Version: 2026-03-10' \
                 "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts" \
                 -f per_page=100)" || return 2
-              if [[ "$(jq -er '.total_count' <<<"$artifacts")" -gt 100 ]]; then
-                echo "::error::Release run ${run_id} has an unbounded artifact inventory." >&2
+              if ! jq -e '(.total_count | type) == "number" and
+                .total_count == (.artifacts | length) and .total_count <= 100' <<<"$artifacts" >/dev/null; then
+                echo "::error::Release run ${run_id} has an incomplete or unbounded artifact inventory." >&2
                 return 2
               fi
               matches="$(jq -ec --arg name "$artifact_name" \
@@ -201,12 +280,17 @@ jobs:
                   return 0
                 fi
               fi
-            done < <(jq -r '.workflow_runs[].id' <<<"$runs")
+            done < <(jq -r '.workflow_runs[] | select(.conclusion == "success") | .id' <<<"$runs")
+            if jq -e 'any(.workflow_runs[]; .conclusion == "success")' <<<"$runs" >/dev/null; then
+              echo "::error::A sealed ${workflow} publication has no fresh manifest; immutable publication cannot be repeated." >&2
+              return 2
+            fi
             return 1
           }
 
           services_fresh=false
           services_publish=true
+          pending=false
           if manifest_is_fresh \
             publish-production-services.yml \
             production-service-release-manifest; then
@@ -214,7 +298,11 @@ jobs:
             services_publish=false
           else
             status=$?
-            [[ "$status" == "1" ]] || exit "$status"
+            case "$status" in
+              1) ;;
+              3) pending=true; services_publish=false ;;
+              *) exit "$status" ;;
+            esac
           fi
           runtime_fresh=false
           runtime_publish=true
@@ -225,17 +313,25 @@ jobs:
             runtime_publish=false
           else
             status=$?
-            [[ "$status" == "1" ]] || exit "$status"
+            case "$status" in
+              1) ;;
+              3) pending=true; runtime_publish=false ;;
+              *) exit "$status" ;;
+            esac
           fi
           echo "services_publish=$services_publish" >> "$GITHUB_OUTPUT"
           echo "runtime_publish=$runtime_publish" >> "$GITHUB_OUTPUT"
-          if [[ "$services_fresh" == "true" && "$runtime_fresh" == "true" ]]; then
+          echo "pending=$pending" >> "$GITHUB_OUTPUT"
+          if [[ "$pending" == "true" ]]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Publication deferred: an exact publisher is still active; no duplicate publishers dispatched." >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$services_fresh" == "true" && "$runtime_fresh" == "true" ]]; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
           else
             echo "publish=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Dispatch stale immutable image publishers
+      - name: Dispatch missing immutable image publishers without waiting
         if: >-
           steps.recheck.outputs.current == 'true' &&
           steps.freshness.outputs.publish == 'true'
@@ -248,6 +344,12 @@ jobs:
           PUBLISH_RUNTIME: ${{ steps.freshness.outputs.runtime_publish }}
         run: |
           set -euo pipefail
+          current_main="$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' \
+            "repos/${GITHUB_REPOSITORY}/commits/main" --jq .sha)"
+          if [[ "$current_main" != "$RELEASE_COMMIT" ]]; then
+            echo "Publication deferred: protected main advanced before dispatch." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           dispatch() {
             local workflow="$1"
             local inputs="$2"
@@ -299,92 +401,11 @@ jobs:
             echo "runtime_run_id=$runtime_run_id"
             echo "services_url=$services_url"
             echo "runtime_url=$runtime_url"
+            echo "dispatched=true"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Require both exact image manifests
-        if: >-
-          steps.recheck.outputs.current == 'true' &&
-          steps.freshness.outputs.publish == 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_COMMIT: ${{ steps.source.outputs.commit_sha }}
-          PUBLISH_SERVICES: ${{ steps.freshness.outputs.services_publish }}
-          PUBLISH_RUNTIME: ${{ steps.freshness.outputs.runtime_publish }}
-          SERVICES_RUN_ID: ${{ steps.dispatch.outputs.services_run_id }}
-          RUNTIME_RUN_ID: ${{ steps.dispatch.outputs.runtime_run_id }}
-        run: |
-          set -euo pipefail
-          wait_for_run() {
-            local run_id="$1"
-            local expected_path="$2"
-            local expected_artifact="$3"
-            local deadline=$((SECONDS + 2 * 60 * 60))
-            local payload status conclusion
-            while (( SECONDS < deadline )); do
-              payload="$(
-                gh api \
-                  -H 'X-GitHub-Api-Version: 2026-03-10' \
-                  "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}"
-              )"
-              if ! jq -e \
-                --arg path ".github/workflows/${expected_path}" \
-                --arg sha "$RELEASE_COMMIT" '
-                  .event == "workflow_dispatch" and
-                  .head_branch == "main" and
-                  .head_sha == $sha and
-                  .path == $path
-                ' <<<"$payload" >/dev/null; then
-                echo "::error::Child run ${run_id} has unexpected provenance."
-                exit 1
-              fi
-              status="$(jq -r .status <<<"$payload")"
-              conclusion="$(jq -r '.conclusion // ""' <<<"$payload")"
-              if [[ "$status" == "completed" ]]; then
-                if [[ "$conclusion" != "success" ]]; then
-                  echo "::error::Child run ${run_id} completed with ${conclusion}."
-                  exit 1
-                fi
-                break
-              fi
-              sleep 20
-            done
-            if (( SECONDS >= deadline )); then
-              echo "::error::Timed out waiting for child run ${run_id}."
-              exit 1
-            fi
-
-            artifacts="$(
-              gh api \
-                -H 'X-GitHub-Api-Version: 2026-03-10' \
-                "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100"
-            )"
-            if ! jq -e --arg name "$expected_artifact" '
-              [.artifacts[] | select(.name == $name and .expired == false)] |
-              length == 1
-            ' <<<"$artifacts" >/dev/null; then
-              echo "::error::Child run ${run_id} did not produce one live ${expected_artifact}."
-              exit 1
-            fi
-          }
-
-          if [[ "$PUBLISH_SERVICES" == "true" ]]; then
-            wait_for_run \
-              "$SERVICES_RUN_ID" \
-              publish-production-services.yml \
-              production-service-release-manifest
-          fi
-          if [[ "$PUBLISH_RUNTIME" == "true" ]]; then
-            wait_for_run \
-              "$RUNTIME_RUN_ID" \
-              publish-runtime-agent.yml \
-              runtime-agent-release-manifest
-          fi
-
-      - name: Report immutable image publication
-        if: >-
-          steps.recheck.outputs.current == 'true' &&
-          steps.freshness.outputs.publish == 'true'
+      - name: Report requested immutable image publication
+        if: ${{ steps.dispatch.outputs.dispatched == 'true' }}
         shell: bash
         env:
           RELEASE_COMMIT: ${{ steps.source.outputs.commit_sha }}
@@ -396,7 +417,7 @@ jobs:
           RUNTIME_URL: ${{ steps.dispatch.outputs.runtime_url }}
         run: |
           {
-            echo "### Immutable production images published"
+            echo "### Immutable image publication dispatched, not yet verified"
             echo
             echo "- Public core: \`${RELEASE_COMMIT}\`"
             if [[ "$PUBLISH_SERVICES" == "true" ]]; then
@@ -410,12 +431,15 @@ jobs:
               echo "- Runtime agent: retained the existing fresh manifest"
             fi
             echo "- Mutable channel tags were not moved."
+            echo "- Child publishers must still pass their build, scan and immutable manifest gates."
+            echo "- A later reconciliation checks sealed manifests; this coordinator does not wait or certify publication."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Report fresh immutable manifests
         if: >-
           steps.recheck.outputs.current == 'true' &&
-          steps.freshness.outputs.publish == 'false'
+          steps.freshness.outputs.publish == 'false' &&
+          steps.freshness.outputs.pending == 'false'
         shell: bash
         env:
           RELEASE_COMMIT: ${{ steps.source.outputs.commit_sha }}

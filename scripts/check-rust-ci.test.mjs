@@ -1,12 +1,19 @@
+import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import vm from 'node:vm';
 
 const root = path.resolve(import.meta.dirname, '..');
-const source = fs.readFileSync(path.join(root, '.github/workflows/build.yml'), 'utf8');
+const source = withoutManualCiRouting('build.yml', fs.readFileSync(path.join(root, '.github/workflows/build.yml'), 'utf8'));
+const aggregateIf = "    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}";
+const agentLinkerDefault = `          if [[ '\${{ runner.environment == 'self-hosted' && runner.os == 'Linux' }}' == true && "\${RUSTFLAGS+x}" != x ]]; then
+            export RUSTFLAGS='-C link-arg=-fuse-ld=lld'
+          fi
+`;
 const checks = [
   ['controller', 'runtime controller', 'runtime-controller'],
   ['agent', 'runtime agent', 'runtime-agent'],
@@ -72,7 +79,7 @@ test('both existing Rust contexts are strict five-minute aggregates over every f
     assert.match(text, new RegExp(`^    name: ${item.name}$`, 'mu'));
     const needs = text.match(/    needs:\n((?:      - .+\n)+)/u)?.[1].trim().split('\n').map(line => line.trim().slice(2));
     assert.deepEqual(needs, item.children.map(child => child.key));
-    assert.match(text, /^    if: \$\{\{ always\(\) \}\}$/mu);
+    assert.ok(text.includes(aggregateIf + '\n'));
     assert.match(text, /^    timeout-minutes: 5$/mu);
     assert.match(text, /^    permissions: \{\}$/mu);
     assert.match(text, /RUST_RESULTS: \$\{\{ toJSON\(needs\) \}\}/u);
@@ -164,7 +171,9 @@ test('only self-hosted Rust children install the fixed missing native packages w
     assert.match(install,/^        timeout-minutes: 5$/mu);assert.match(text,/^    timeout-minutes: 30$/mu);
     assert.match(install,/^        shell: bash$/mu);assert.match(install,/set -euo pipefail/u);
     assert.match(install,/sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update/u);
-    assert.match(install,/sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler/u);
+    assert.match(install,/sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler/u);
+    assert.equal((install.match(/DPkg::Lock::Timeout=120/g) ?? []).length,1);
+    assert.doesNotMatch(install,/kill|systemctl|rm .*lock|DPkg::Lock::Timeout=-1/u);
     assert.match(install,/for package in clang lld cmake libcap-dev protobuf-compiler; do/u);
     assert.match(install,/dpkg-query --show --showformat='\$\{Status\}'/u);assert.match(install,/pkg-config --exists libcap/u);
     for(const tool of ['clang','ld.lld','cmake','protoc'])assert(install.includes(`          ${tool} --version\n`));
@@ -187,7 +196,7 @@ test('the full original five check and six test commands and working directories
       const part = step(item.key, stepName);
       assert.doesNotMatch(part, /^        (?:if|continue-on-error|timeout-minutes|env|shell):/mu);
       assert.match(part, /        run: \|\n/u);
-      const afterRun = part.split('        run: |\n')[1];
+      const afterRun = part.replace(agentLinkerDefault, '').split('        run: |\n')[1];
       const block = afterRun.match(/^(?:          .*(?:\n|$))+/u)?.[0];
       assert.ok(block);
       // A following job's top-level comment is not part of this YAML block.
@@ -220,14 +229,94 @@ test('test children preserve unfiltered frozen Node20 installation and host-only
   for (const item of checks) assert.doesNotMatch(job(item.key), /pnpm install|Free runner disk space/u);
 });
 
+test('only the runtime-agent Cargo step defaults self-hosted Linux linking, with no job-wide environment mutation', () => {
+  const agent = step('rust-test-agent', 'Run database-free Rust test suite');
+  assert.equal(source.split(agentLinkerDefault).length, 2);
+  assert.ok(agent.includes(agentLinkerDefault));
+  assert.doesNotMatch(agent, /GITHUB_ENV|GITHUB_OUTPUT|continue-on-error|linker=clang|\|\| true/u);
+  for (const item of children.filter(item => item.key !== 'rust-test-agent')) assert.ok(!job(item.key).includes(agentLinkerDefault));
+  assert.ok(step('rust-test-agent', 'Install scoped Rust native prerequisites').includes('ld.lld --version'));
+});
+
+test('actual runtime-agent Bash defaults only unset flags on self-hosted Linux and preserves both Cargo invocations', () => {
+  const script = step('rust-test-agent', 'Run database-free Rust test suite').split('        run: |\n')[1]
+    .trimEnd().split('\n').map(line => line.slice(10)).join('\n');
+  const expression = "${{ runner.environment == 'self-hosted' && runner.os == 'Linux' }}";
+  assert.equal(script.split(expression).length, 2);
+  const commands = [
+    ['test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--no-run'],
+    ['test', '--manifest-path', 'packages/runtime-agent/Cargo.toml', '--lib', '--test', 'controller_client', '--', '--test-threads=1'],
+  ];
+  const fixture = `cargo() { printf 'CALL\\0%s\\0%s\\0' "\${RUSTFLAGS+x}" "\${RUSTFLAGS-}"; printf '%s\\0' "$@"; return "\${CARGO_FIXTURE_STATUS:-0}"; }\n`;
+  for (const environment of ['self-hosted', 'github-hosted', '', 'unknown']) for (const os of ['Linux', 'macOS', 'Windows', '']) {
+    const selected = vm.runInNewContext("runner.environment == 'self-hosted' && runner.os == 'Linux'", { runner: { environment, os } });
+    for (const flags of [undefined, '', '-C opt-level=1', '  -C target-cpu=native  ', '$(false);\nINERT_CHOICE']) {
+      const env = { PATH: '/usr/bin:/bin', ...(flags === undefined ? {} : { RUSTFLAGS: flags }) };
+      const result = spawnSync('/bin/bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', fixture + script.replace(expression, String(selected))], { env, timeout:5000 });
+      assert.equal(result.status,0);assert.equal(result.stderr.toString(),'');
+      const expected = flags === undefined && selected ? '-C link-arg=-fuse-ld=lld' : flags;
+      const tokens = result.stdout.toString().split('\0');tokens.pop();
+      assert.deepEqual(tokens, commands.flatMap(args => ['CALL', expected === undefined ? '' : 'x', expected ?? '', ...args]));
+      assert.deepEqual(env, { PATH: '/usr/bin:/bin', ...(flags === undefined ? {} : { RUSTFLAGS: flags }) });
+    }
+  }
+  const failed = spawnSync('/bin/bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', fixture + script.replace(expression, 'true')], {
+    env: { PATH: '/usr/bin:/bin', CARGO_FIXTURE_STATUS: '7' }, timeout:5000,
+  });
+  assert.equal(failed.status,7);assert.equal(failed.stderr.toString(),'');
+  assert.equal(failed.stdout.toString().split('CALL').length,2);
+});
+
 test('cargo caches cannot cross OS, CPU architecture, crate lane or lockfile inventory', () => {
   for (const item of children) {
-    const cache = step(item.key, 'Restore cargo cache');
-    assert.match(cache, /actions\/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9/u);
-    assert.ok(cache.includes(`key: rust-ci-v3-\${{ runner.os }}-\${{ runner.arch }}-${item.label}-\${{ hashFiles('packages/*/Cargo.lock') }}`));
-    assert.match(cache, /~\/\.cargo\/registry\n            ~\/\.cargo\/git\n            \.cargo-target/u);
-    assert.doesNotMatch(cache, /restore-keys:|rust-tests-v2|if:|enableCrossOsArchive/u);
+    for (const name of ['Restore cargo cache', 'Restore cargo cache without saving']) {
+      const cache = step(item.key, name);
+      assert.ok(cache.includes(`key: rust-ci-v3-\${{ runner.os }}-\${{ runner.arch }}-${item.label}-\${{ hashFiles('packages/*/Cargo.lock') }}`));
+      assert.match(cache, /~\/\.cargo\/registry\n            ~\/\.cargo\/git\n            \.cargo-target/u);
+      assert.doesNotMatch(cache, /restore-keys:|rust-tests-v2|enableCrossOsArchive/u);
+    }
   }
+});
+
+test('only self-hosted Rust children use restore-only caches while hosted saves remain intact', () => {
+  const pin = '55cc8345863c7cc4c66a329aec7e433d2d1c52a9';
+  for (const item of children) {
+    const restore = step(item.key, 'Restore cargo cache without saving');
+    const hosted = step(item.key, 'Restore cargo cache');
+    assert.match(restore, /^        if: runner\.environment == 'self-hosted'$/mu);
+    assert.match(hosted, /^        if: runner\.environment == 'github-hosted'$/mu);
+    assert.ok(restore.includes(`        uses: actions/cache/restore@${pin} # v6.1.0\n`));
+    assert.ok(hosted.includes(`        uses: actions/cache@${pin} # v6.1.0\n`));
+    assert.equal(restore.split('        with:\n')[1], hosted.split('        with:\n')[1]);
+    assert.equal((job(item.key).match(/uses: actions\/cache(?:\/\w+)?@/gu) ?? []).length, 2);
+    assert.doesNotMatch(job(item.key), /actions\/cache\/save@|continue-on-error|save-always|lookup-only/u);
+    const enabled = (text, environment) => vm.runInNewContext(
+      text.match(/^        if: (.+)$/mu)[1], { runner: { environment } }, { timeout: 1000 });
+    for (const environment of ['self-hosted', 'github-hosted', '', 'unknown']) {
+      assert.equal(enabled(restore, environment), environment === 'self-hosted');
+      assert.equal(enabled(hosted, environment), environment === 'github-hosted');
+    }
+    const cargoStep = item.key.startsWith('rust-check-') ? 'Check public Rust package' : 'Run database-free Rust test suite';
+    assert.ok(job(item.key).indexOf(restore) < job(item.key).indexOf(step(item.key, cargoStep)));
+  }
+  assert.equal((source.match(/uses: actions\/cache\/restore@/gu) ?? []).length, 10);
+});
+
+test('the restore-only mitigation preserves every other byte of the reviewed Build workflow', () => {
+  assert.equal((source.match(/ -o DPkg::Lock::Timeout=120/g) ?? []).length,10);
+  // Undo only the separately tested cancelled-main aggregate guards as well.
+  let normalized = source.replaceAll(aggregateIf, '    if: ${{ always() }}')
+    .replaceAll(' -o DPkg::Lock::Timeout=120','').replace(agentLinkerDefault, '');
+  for (const item of children) {
+    const restore = step(item.key, 'Restore cargo cache without saving');
+    const hosted = step(item.key, 'Restore cargo cache');
+    normalized = normalized.replace(restore + '\n', '').replace(hosted,
+      hosted.replace("        if: runner.environment == 'github-hosted'\n", ''));
+  }
+  // Full build.yml at the reviewed combined source 2ef4dde: includes all original
+  // functional commands, aggregate guards, routing, permissions and other jobs.
+  assert.equal(createHash('sha256').update(normalized).digest('hex'),
+    'cfbf699d139a325d9d2add3add71ec8d3db4d4ca737925bc3963871706d7fa4a');
 });
 
 test('actual inline runner qualification rejects wrong native identity, ambient private env and missing compilers', () => {

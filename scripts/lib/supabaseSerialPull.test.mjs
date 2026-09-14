@@ -268,6 +268,90 @@ test("total preparation budget is finite and cannot reset between images", (t) =
   assert.equal(h.calls.length, 3);
 });
 
+test("Docker failures retain fixed symptom hints without logging raw output", (t) => {
+  for (const [stderr, hint] of [
+    ["toomanyrequests: too many requests", "rate-limit"],
+    ["unauthorized: authentication required", "registry-auth"],
+    ["manifest unknown", "manifest-missing"],
+    ["no matching manifest for linux/arm64", "platform-missing"],
+    ["proxyconnect tcp: Forbidden", "proxy-denied"],
+    ["x509: certificate signed by unknown authority", "tls"],
+    ["lookup registry: no such host", "dns"],
+    ["context deadline exceeded", "network-timeout"],
+    ["read: connection reset by peer", "network-reset"],
+    ["write: no space left on device", "disk-full"],
+    ["Cannot connect to the Docker daemon", "daemon-unavailable"],
+  ]) {
+    const h = harness(t); const logs = []; let pulls = 0;
+    assert.throws(() => h.run({ authOnly: true, log: (line) => logs.push(line), execute: (binary, args, options) => {
+      if (args[0] !== "pull") return h.execute(binary, args, options);
+      pulls += 1;
+      return { status: 1, stdout: "never-log-stdout", stderr: `${stderr}\nhttps://user:secret@host.invalid/path?token=never-log\n/private/never-log` };
+    } }), /^Error: supabase-serial-pull-failed$/);
+    assert.equal(pulls, 1);
+    assert.deepEqual(logs, ["[supabase-stack] Serial image preparation 1/7",
+      `[supabase-stack] Docker preparation failed stage=pull image=postgres exit=1 signal=none-or-unknown error=none-or-unknown hints=${hint}`]);
+    assert.equal(fs.existsSync(h.calls[0].options.env.HOME), false);
+  }
+});
+
+test("Docker failure metadata is bounded, unknown output stays private, and no failure advances", (t) => {
+  for (const [result, suffix] of [
+    [{ status: 1, stderr: "unrecognized never-log" }, "exit=1 signal=none-or-unknown error=none-or-unknown hints=unclassified"],
+    [{ status: null, signal: "SIGKILL", error: { code: "ETIMEDOUT", message: "never-log" } }, "exit=unknown signal=SIGKILL error=ETIMEDOUT hints=unclassified"],
+    [{ error: { code: "ENOBUFS" } }, "exit=unknown signal=none-or-unknown error=ENOBUFS hints=unclassified"],
+    [{ status: "never-log", signal: "never-log", error: { code: "never-log" } }, "exit=unknown signal=none-or-unknown error=none-or-unknown hints=unclassified"],
+    [{ status: 256, stderr: "no such host" + "é".repeat(16_384) }, "exit=unknown signal=none-or-unknown error=none-or-unknown hints=unclassified"],
+    [undefined, "exit=unknown signal=none-or-unknown error=none-or-unknown hints=unclassified"],
+  ]) {
+    const h = harness(t); const logs = [];
+    assert.throws(() => h.run({ log: (line) => logs.push(line), execute: (binary, args, options) => args[0] === "pull" ? result : h.execute(binary, args, options) }), /^Error: supabase-serial-pull-failed$/);
+    assert.equal(logs.at(-1), `[supabase-stack] Docker preparation failed stage=pull image=postgres ${suffix}`);
+    assert.equal(h.calls.length, 3);
+    assert.equal(fs.existsSync(h.calls[0].options.env.HOME), false);
+  }
+});
+
+test("thrown Docker spawn errors and readback failures preserve stage and exact failure", (t) => {
+  const h = harness(t); const logs = [];
+  assert.throws(() => h.run({ log: (line) => logs.push(line), execute: (binary, args, options) => {
+    if (binary === "docker") throw Object.assign(new Error("never-log"), { code: "ENOENT" });
+    return h.execute(binary, args, options);
+  } }), /^Error: supabase-serial-inspect-failed$/);
+  assert.equal(logs.at(-1), "[supabase-stack] Docker preparation failed stage=inspect image=postgres exit=unknown signal=none-or-unknown error=ENOENT hints=unclassified");
+  assert.equal(h.calls.length, 2);
+  const readback = harness(t);
+  assert.throws(() => readback.run({ log: (line) => logs.push(line), execute: (binary, args, options) => {
+    if (binary === "docker" && args[0] === "image" && readback.cached.size) return { status: 1, stderr: "never-log" };
+    return readback.execute(binary, args, options);
+  } }), /^Error: supabase-serial-readback-failed$/);
+  assert.match(logs.at(-1), /stage=readback image=postgres exit=1 /);
+});
+
+test("successful or cache-missing Docker commands do not emit failure diagnostics", (t) => {
+  const h = harness(t); const logs = [];
+  h.run({ databaseOnly: true, log: (line) => logs.push(line) });
+  h.run({ databaseOnly: true, log: (line) => logs.push(line) });
+  assert.ok(logs.every((line) => !line.includes("Docker preparation failed")));
+});
+
+test("a seventh-image failure identifies Mailpit without retries or masking cleanup", (t) => {
+  for (const throwingLogger of [false, true]) {
+    const h = harness(t); const logs = [];
+    assert.throws(() => h.run({ authOnly: true, log: (line) => {
+      logs.push(line);
+      if (throwingLogger && line.includes("Docker preparation failed")) throw new Error("never-log");
+    }, execute: (binary, args, options) => {
+      if (args[0] === "pull" && args.at(-1).includes("/mailpit:")) return { status: 1, stderr: "unexpected EOF" };
+      return h.execute(binary, args, options);
+    } }), /^Error: supabase-serial-pull-failed$/);
+    assert.equal(h.cached.size, 6);
+    assert.equal(logs.length, 8);
+    assert.equal(logs.at(-1), "[supabase-stack] Docker preparation failed stage=pull image=mailpit exit=1 signal=none-or-unknown error=none-or-unknown hints=network-reset");
+    assert.equal(fs.existsSync(h.calls[0].options.env.HOME), false);
+  }
+});
+
 test("startup integration preserves commands and keeps preparation outside the retry catch", () => {
   const source = fs.readFileSync(new URL("../supabase-stack.mjs", import.meta.url), "utf8");
   assert.match(source, /prepareSupabaseSerialPull\(\{ repoRoot, databaseOnly, authOnly, browserTest \}\);[\s\S]*?try \{\n    runSupabase\(startArgs\);/);

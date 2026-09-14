@@ -1,3 +1,4 @@
+import { withoutManualCiRouting } from "./lib/manualCiRoutingTestBaseline.mjs";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
@@ -6,13 +7,68 @@ import test from "node:test";
 import vm from "node:vm";
 
 const root = path.resolve(import.meta.dirname, "..");
-const workflow = fs.readFileSync(path.join(root, ".github/workflows/browser-e2e.yml"), "utf8");
+const workflow = withoutManualCiRouting("browser-e2e.yml", fs.readFileSync(path.join(root, ".github/workflows/browser-e2e.yml"), "utf8"));
+const aggregateIf = "    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}";
+// Only historical byte-reconstruction proofs use the former aggregate guard.
+const previousAggregateWorkflow = workflow.replace(aggregateIf, "    if: ${{ always() }}");
 const jobs = [
   { key: "shared-profile", label: "public-shared-browser-aggregate", name: "Shared Browser profile E2E", minutes: 5 },
   { key: "shared-profile-lifecycle", label: "public-shared-browser-profile", name: "Shared Browser profile lifecycle", minutes: 30, script: "browser-profile-e2e.mjs" },
   { key: "shared-studio", label: "public-shared-browser-studio", name: "Shared Browser Studio journey", minutes: 30, script: "shared-browser-studio-e2e.mjs" },
 ];
 const section = key => workflow.split(`\n  ${key}:\n`)[1].split(/\n  [\w-]+:\n/u)[0];
+const compilerSegmentTimeout = '        env:\n          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"\n';
+const withoutCompilerSegmentTimeout = text => text.replaceAll(compilerSegmentTimeout, "");
+// Reconstruct only the removed standalone migration-image preparation for
+// the existing whole-workflow scope proofs, excluding the separately proven
+// segment-timeout opt-ins. Do not loosen their baselines.
+function withStandaloneMigrationImagePreparation(text) {
+  text = withoutCompilerSegmentTimeout(text);
+  const cache = [
+    "      - name: Restore Supabase Postgres image cache",
+    "        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0",
+    "        with:",
+    "          path: ~/.instafy-image-cache",
+    "          key: shared-browser-image-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/test-supabase-migrations-empty-db.mjs') }}",
+    "",
+  ].join("\n");
+  const compilerStep = "      - name: Restore compiler cache without saving\n";
+  const startup = '          SUPABASE_BROWSER_TEST: "1"\n        run: |\n';
+  assert.equal(text.split(compilerStep).length - 1, 2);
+  assert.equal(text.split(startup).length - 1, 2);
+  return text.replaceAll(compilerStep, cache + compilerStep)
+    .replaceAll(startup, startup + "          node scripts/ensure-supabase-postgres-image.mjs\n");
+}
+function cacheStep(key, name) {
+  const text = section(key), marker = `      - name: ${name}\n`, start = text.indexOf(marker);
+  assert.ok(start >= 0);
+  const end = text.indexOf('\n      - name: ', start + marker.length);
+  return text.slice(start, end < 0 ? text.length : end);
+}
+function withoutRestoreOnlyCaches(text) {
+  for (const job of jobs.filter(job => job.script)) {
+    const restore = withoutCompilerSegmentTimeout(cacheStep(job.key, 'Restore compiler cache without saving'));
+    const hosted = cacheStep(job.key, 'Restore architecture-specific compiler cache');
+    text = text.replace(restore + '\n', '').replace(hosted,
+      hosted.replace("        if: runner.environment == 'github-hosted'\n", ''));
+  }
+  return text;
+}
+function withoutCargoLinkerDefault(source) {
+  const helper = [
+    "// Linux fixture Cargo builds default to LLD through the existing compiler",
+    "// driver. Preserve every explicit RUSTFLAGS value, including an empty opt-out.",
+    "export function fixtureCargoEnvironment(env, platform = process.platform) {",
+    "  const compiler = fixtureCompilerEnvironment(env);",
+    '  if (platform === "linux" && compiler.RUSTFLAGS === undefined) compiler.RUSTFLAGS = "-C link-arg=-fuse-ld=lld";',
+    "  return compiler;",
+    "}", "", "",
+  ].join("\n");
+  return source.replace(helper, "")
+    .replace("fixtureCompilerEnvironment, fixtureCargoEnvironment,", "fixtureCompilerEnvironment,")
+    .replace("  const cargoEnv = fixtureCargoEnvironment(process.env);\n", "")
+    .replaceAll(/(await run\("cargo",[^\n]+\{ env: )cargoEnv/g, "$1compilerEnv");
+}
 function context(event = "pull_request") {
   const ref = event === "pull_request" ? "refs/pull/11/merge" : "refs/heads/main";
   return { repository: "instafy-dev/instafy", repository_id: "1001", run_id: "2002", run_attempt: "3",
@@ -75,7 +131,7 @@ test("each Shared child preserves a complete independent dependency, migrated au
     const source = section(job.key);
     for (const text of ["persist-credentials: false", "submodules: recursive", 'node-version: "22"', 'go-version: "1.26.x"',
       "rustup toolchain install stable --profile minimal", "rustup default stable", "pnpm install --frozen-lockfile",
-      "playwright install --with-deps chromium", "node scripts/ensure-supabase-postgres-image.mjs", "pnpm supabase:up",
+      "playwright install --with-deps chromium", "pnpm supabase:up",
       "node --test scripts/browser-profile-e2e.test.mjs scripts/shared-browser-studio-e2e.test.mjs scripts/lib/sharedStudioProvider.test.mjs",
       "if-no-files-found: error", "retention-days: 7", 'CARGO_BUILD_JOBS: "2"', 'CARGO_INCREMENTAL: "0"', 'CARGO_PROFILE_DEV_DEBUG: "0"',
       "TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres"])
@@ -89,20 +145,43 @@ test("each Shared child preserves a complete independent dependency, migrated au
   }
   assert.doesNotMatch(workflow, /secrets:|secrets\.|NODE_OPTIONS|NODE_TLS_REJECT_UNAUTHORIZED|HTTP_PROXY:|HTTPS_PROXY:/u);
 });
+function withoutPersonalElectronPreparation(source) {
+  const step = "      - name: Install the locked Electron binary\n        timeout-minutes: 5\n        env:\n          NODE_USE_ENV_PROXY: \"1\"\n        run: pnpm --filter @instafy/desktop-app exec install-electron\n";
+  assert.equal(source.split(step).length - 1, 1);
+  return source.replace(step, "");
+}
 test("only the two Shared startup steps select the browser-test profile; all previous workflow bytes remain", () => {
   const originalStartup = "      - name: Start disposable migrated Supabase and local authentication\n";
   const selectedStartup = `${originalStartup}        env:\n          SUPABASE_BROWSER_TEST: "1"\n`;
   assert.equal(workflow.split(selectedStartup).length - 1, 2);
   assert.equal((workflow.match(/SUPABASE_BROWSER_TEST/g) ?? []).length, 2);
   for (const job of jobs) {
-    if (job.script) assert.ok(section(job.key).includes(`${selectedStartup}        run: |\n          node scripts/ensure-supabase-postgres-image.mjs\n          pnpm supabase:up\n`));
+    if (job.script) assert.ok(section(job.key).includes(`${selectedStartup}        run: |\n          pnpm supabase:up\n`));
     else assert.doesNotMatch(section(job.key), /SUPABASE_BROWSER_TEST/u);
   }
   // Normalize only the explicit profile opt-ins. All commands, permissions,
   // selectors, timeouts, assertions, cleanup and aggregate bytes stay intact.
-  const original = workflow.replaceAll(selectedStartup, originalStartup);
+  const original = withoutPersonalElectronPreparation(withoutRestoreOnlyCaches(withStandaloneMigrationImagePreparation(previousAggregateWorkflow))).replaceAll(selectedStartup, originalStartup);
   assert.equal(createHash("sha256").update(original).digest("hex"),
     "39492b8b3c32d931444180ac4e7e52d77b6aa8eed9937b55d6d5bad7ee8aa0ec");
+});
+test("the Cargo default changes only four compiler environments and its exact helper, not fixture behavior", () => {
+  const reviewed = {
+    "scripts/browser-profile-e2e.mjs": "134b841a2fbc0a59b64bd05a3ef6b9a4421c0eff7c8dce431d3923743974fd51",
+    "scripts/shared-browser-studio-e2e.mjs": "be9b5ed601a895f6ae275f2ab5697d042cf5d7e97508cb38819f0709bb1f172e",
+  };
+  for (const [relative, hash] of Object.entries(reviewed)) {
+    const source = fs.readFileSync(path.join(root, relative), "utf8");
+    assert.equal((source.match(/env: cargoEnv/g) ?? []).length, 2);
+    assert.equal((source.match(/const cargoEnv = fixtureCargoEnvironment\(process\.env\);/g) ?? []).length, 1);
+    const original = withoutCargoLinkerDefault(source);
+    assert.doesNotMatch(original, /fixtureCargoEnvironment|cargoEnv/);
+    assert.equal(createHash("sha256").update(original).digest("hex"), hash, relative);
+  }
+  for (const job of jobs.filter(job => job.script)) {
+    assert.match(section(job.key), /install --yes --no-install-recommends x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld cmake libcap-dev protobuf-compiler/);
+    assert.match(section(job.key), /for package in x11-utils sqlite3 postgresql-client build-essential pkg-config libssl-dev clang lld cmake libcap-dev protobuf-compiler/);
+  }
 });
 test("the reviewed fixtures need no Edge Functions and retain their exact assertions and global stack configuration", () => {
   const reviewed = {
@@ -112,7 +191,15 @@ test("the reviewed fixtures need no Edge Functions and retain their exact assert
   };
   for (const [relative, hash] of Object.entries(reviewed)) {
     const source = fs.readFileSync(path.join(root, relative), "utf8");
-    assert.equal(createHash("sha256").update(source).digest("hex"), hash, `re-review browser service dependencies when changing ${relative}`);
+    // Remove only the exact Cargo default and opt-in compiler diagnostics to
+    // retain the original proof for assertions, commands, services and cleanup.
+    const original = withoutCargoLinkerDefault(source)
+      .replace(/\/\/ Opt-in for the secret-free fixture compiler calls only,[\s\S]*?(?=export function fixtureChildEnvironment)/u, "")
+      .replace("onOutput, onFailure }", "onOutput }")
+      .replace("    if (status !== 0) onFailure?.(output);\n", "")
+      .replaceAll(/, onFailure: output => reportCargoCompilerErrors\(output, "packages\/runtime-(?:agent|controller)"\)/g, "")
+      .replace("preflightFixtureDisplay, reportCargoCompilerErrors, runOwnedProcess", "preflightFixtureDisplay, runOwnedProcess");
+    assert.equal(createHash("sha256").update(original).digest("hex"), hash, `re-review browser service dependencies when changing ${relative}`);
     assert.doesNotMatch(source, /functions\.invoke|\/functions\/v1|^\[functions\./mu);
   }
   for (const relative of ["supabase/functions", "supabase/supabase/functions"]) {
@@ -123,13 +210,65 @@ test("the reviewed fixtures need no Edge Functions and retain their exact assert
     assert.match(config, new RegExp(`^\\[${service}\\]\\nenabled = true$`, "m"));
   }
 });
-test("Shared caches isolate operating system, architecture and child compiler targets without fallback keys", () => {
+test("Shared startup omits only standalone migration-image preparation, retaining the full CLI stack", () => {
+  assert.doesNotMatch(workflow, /instafy-image-cache|shared-browser-image-v1|ensure-supabase-postgres-image/u);
+  for (const job of jobs.filter(job => job.script)) {
+    assert.ok(section(job.key).includes('SUPABASE_BROWSER_TEST: "1"\n        run: |\n          pnpm supabase:up\n'));
+  }
+  assert.equal(createHash("sha256").update(withStandaloneMigrationImagePreparation(previousAggregateWorkflow)).digest("hex"),
+    "48e8ed7ce8e931e7679290199102717cc65de943dcdc3eacf63b61eacacef2f1");
+  // The standalone migration lane really consumes this cache; keep it there.
+  const build = fs.readFileSync(path.join(root, ".github/workflows/build.yml"), "utf8");
+  assert.match(build, /path: ~\/\.instafy-image-cache/u);
+  assert.match(build, /run: node scripts\/ensure-supabase-postgres-image\.mjs/u);
+  assert.match(build, /run: node scripts\/test-supabase-migrations-empty-db\.mjs/u);
+});
+test("Shared compiler caches isolate operating system, architecture and child targets without fallback keys", () => {
   for (const job of jobs.filter(job => job.script)) {
     const source = section(job.key);
-    assert.ok(source.includes("key: shared-browser-image-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/test-supabase-migrations-empty-db.mjs') }}"));
     assert.ok(source.includes(`key: shared-browser-cargo-v1-\${{ runner.os }}-\${{ runner.arch }}-${job.label}-\${{ hashFiles('packages/*/Cargo.lock') }}`));
     assert.doesNotMatch(source, /restore-keys:|supabase-postgres-image-\$\{/u);
   }
+});
+test("only self-hosted Shared compiler restores bound segment waits without changing required work", () => {
+  assert.equal(workflow.split(compilerSegmentTimeout).length - 1, 2);
+  assert.equal((workflow.match(/SEGMENT_DOWNLOAD_TIMEOUT_MINS/g) ?? []).length, 2);
+  for (const job of jobs.filter(job => job.script)) {
+    const restore = cacheStep(job.key, "Restore compiler cache without saving");
+    const hosted = cacheStep(job.key, "Restore architecture-specific compiler cache");
+    assert.match(restore, /^        if: runner\.environment == 'self-hosted'$/mu);
+    assert.ok(restore.includes(compilerSegmentTimeout));
+    assert.doesNotMatch(hosted, /SEGMENT_DOWNLOAD_TIMEOUT_MINS/u);
+    assert.doesNotMatch(restore, /timeout-minutes:|continue-on-error|fail-on-cache-miss|lookup-only/u);
+    assert.doesNotMatch(section(job.key), /cache-hit|continue-on-error/u);
+  }
+  // Exact merged baseline: both complete fixtures, migrations, cleanup, hosted
+  // restores, keys, paths, job budgets and aggregate remain byte-for-byte intact.
+  assert.equal(createHash("sha256").update(withoutCompilerSegmentTimeout(previousAggregateWorkflow)).digest("hex"),
+    "5c97291dd95421be8b8311413589a975c3fdc0c8dc831a3416f82c8b3bb441ff");
+});
+test('Shared self-hosted compiler caches restore only, preserving all other reviewed workflow bytes', () => {
+  for (const job of jobs.filter(job => job.script)) {
+    const restore = cacheStep(job.key, 'Restore compiler cache without saving');
+    const hosted = cacheStep(job.key, 'Restore architecture-specific compiler cache');
+    assert.match(restore, /^        if: runner\.environment == 'self-hosted'$/mu);
+    assert.match(hosted, /^        if: runner\.environment == 'github-hosted'$/mu);
+    assert.match(restore, /^        uses: actions\/cache\/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0$/mu);
+    assert.match(hosted, /^        uses: actions\/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6\.1\.0$/mu);
+    assert.equal(restore.split('        with:\n')[1].trimEnd(), hosted.split('        with:\n')[1].trimEnd());
+    for (const environment of ['self-hosted', 'github-hosted', '', 'unknown']) {
+      for (const [part, selected] of [[restore, 'self-hosted'], [hosted, 'github-hosted']]) {
+        assert.equal(vm.runInNewContext(part.match(/^        if: (.+)$/mu)[1], { runner: { environment } }, { timeout: 1000 }), environment === selected);
+      }
+    }
+    assert.equal((section(job.key).match(/uses: actions\/cache(?:\/\w+)?@/gu) ?? []).length, 2);
+    assert.doesNotMatch(section(job.key), /actions\/cache\/save@|continue-on-error|save-always|lookup-only/u);
+  }
+  assert.equal((workflow.match(/uses: actions\/cache\/restore@/gu) ?? []).length, 2);
+  // Complete browser-e2e.yml at combined source 2ef4dde, including image caches,
+  // every fixture/assertion, strict aggregate and the ordinary browser lanes.
+  assert.equal(createHash('sha256').update(withoutPersonalElectronPreparation(withoutRestoreOnlyCaches(withStandaloneMigrationImagePreparation(previousAggregateWorkflow)))).digest('hex'),
+    '1e3cc8932d4cc78e1eb64ce389bd2b959362bb22bbaa92d155cf6743c5fd19c8');
 });
 function qualify(job, mutate = () => {}, badDaemon) {
   const source = section(job.key), programs = [...source.matchAll(/          node <<'NODE'\n([\s\S]*?)          NODE\n/gu)];
@@ -162,7 +301,7 @@ test("Shared prerequisites prove nonroot Linux ARM64 Node22 and real Docker only
 });
 test("the required Shared aggregate waits for both exact children and accepts only full success", () => {
   const source = section("shared-profile");
-  assert.ok(source.includes("needs:\n      - shared-profile-lifecycle\n      - shared-studio\n    if: ${{ always() }}"));
+  assert.ok(source.includes("needs:\n      - shared-profile-lifecycle\n      - shared-studio\n" + aggregateIf));
   assert.match(source, /    permissions: \{\}/u);
   assert.doesNotMatch(source, /actions\/checkout|actions\/setup|pnpm install|docker|apt-get|CARGO_|TEST_DATABASE_URL/u);
   const program = [...source.matchAll(/          node <<'NODE'\n([\s\S]*?)          NODE\n/gu)].at(-1)[1];

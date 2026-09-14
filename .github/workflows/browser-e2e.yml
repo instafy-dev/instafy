@@ -23,6 +23,16 @@ jobs:
                && github.event.pull_request.head.repo.fork == false)
               || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{3}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-browser-personal","instafy-ci-trust-{3}"]}}', github.repository_id, github.run_id, github.run_attempt, github.event_name == 'push' && 'main' || 'pr'))
+          || (vars.CI_BROWSER_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && (github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main' || github.workflow_ref == 'instafy-dev/instafy/.github/workflows/browser-e2e.yml@refs/heads/main')
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-browser-personal","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-24.04' }}
     timeout-minutes: 30
     steps:
@@ -61,6 +71,11 @@ jobs:
           cache: pnpm
       - name: Install locked dependencies
         run: pnpm install --frozen-lockfile
+      - name: Install the locked Electron binary
+        timeout-minutes: 5
+        env:
+          NODE_USE_ENV_PROXY: "1"
+        run: pnpm --filter @instafy/desktop-app exec install-electron
       - name: Install browser and display dependencies
         run: pnpm --filter @instafy/frontend exec playwright install --with-deps chromium
       - name: Install Linux Electron runtime dependency
@@ -99,6 +114,16 @@ jobs:
                && github.event.pull_request.head.repo.fork == false)
               || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{3}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-browser-ui","instafy-ci-trust-{3}"]}}', github.repository_id, github.run_id, github.run_attempt, github.event_name == 'push' && 'main' || 'pr'))
+          || (vars.CI_BROWSER_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && (github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main' || github.workflow_ref == 'instafy-dev/instafy/.github/workflows/browser-e2e.yml@refs/heads/main')
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-browser-ui","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-24.04' }}
     timeout-minutes: 30
     steps:
@@ -161,7 +186,7 @@ jobs:
     needs:
       - shared-profile-lifecycle
       - shared-studio
-    if: ${{ always() }}
+    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}
     permissions: {}
     runs-on: >-
       ${{ vars.CI_SHARED_BROWSER_SELF_HOSTED == 'true'
@@ -176,6 +201,16 @@ jobs:
                && github.event.pull_request.head.repo.fork == false)
               || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{3}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-shared-browser-aggregate","instafy-ci-trust-{3}"]}}', github.repository_id, github.run_id, github.run_attempt, github.event_name == 'push' && 'main' || 'pr'))
+          || (vars.CI_SHARED_BROWSER_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && (github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main' || github.workflow_ref == 'instafy-dev/instafy/.github/workflows/browser-e2e.yml@refs/heads/main')
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-shared-browser-aggregate","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-24.04' }}
     timeout-minutes: 5
     steps:
@@ -227,6 +262,16 @@ jobs:
                && github.event.pull_request.head.repo.fork == false)
               || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{3}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-shared-browser-profile","instafy-ci-trust-{3}"]}}', github.repository_id, github.run_id, github.run_attempt, github.event_name == 'push' && 'main' || 'pr'))
+          || (vars.CI_SHARED_BROWSER_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && (github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main' || github.workflow_ref == 'instafy-dev/instafy/.github/workflows/browser-e2e.yml@refs/heads/main')
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-shared-browser-profile","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-24.04' }}
     timeout-minutes: 30
     env:
@@ -309,12 +354,20 @@ jobs:
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
           pkg-config --exists libcap openssl
-      - name: Restore Supabase Postgres image cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore compiler cache without saving
+        if: runner.environment == 'self-hosted'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"
         with:
-          path: ~/.instafy-image-cache
-          key: shared-browser-image-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/test-supabase-migrations-empty-db.mjs') }}
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .cargo-target
+          key: shared-browser-cargo-v1-${{ runner.os }}-${{ runner.arch }}-public-shared-browser-profile-${{ hashFiles('packages/*/Cargo.lock') }}
+
       - name: Restore architecture-specific compiler cache
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -326,7 +379,6 @@ jobs:
         env:
           SUPABASE_BROWSER_TEST: "1"
         run: |
-          node scripts/ensure-supabase-postgres-image.mjs
           pnpm supabase:up
       - name: Test fixture safety guards
         run: node --test scripts/browser-profile-e2e.test.mjs scripts/shared-browser-studio-e2e.test.mjs scripts/lib/sharedStudioProvider.test.mjs scripts/check-shared-browser-ci.test.mjs
@@ -362,6 +414,16 @@ jobs:
                && github.event.pull_request.head.repo.fork == false)
               || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{3}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-shared-browser-studio","instafy-ci-trust-{3}"]}}', github.repository_id, github.run_id, github.run_attempt, github.event_name == 'push' && 'main' || 'pr'))
+          || (vars.CI_SHARED_BROWSER_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && (github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main' || github.workflow_ref == 'instafy-dev/instafy/.github/workflows/browser-e2e.yml@refs/heads/main')
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-shared-browser-studio","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-24.04' }}
     timeout-minutes: 30
     env:
@@ -444,12 +506,20 @@ jobs:
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
           pkg-config --exists libcap openssl
-      - name: Restore Supabase Postgres image cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore compiler cache without saving
+        if: runner.environment == 'self-hosted'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"
         with:
-          path: ~/.instafy-image-cache
-          key: shared-browser-image-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/test-supabase-migrations-empty-db.mjs') }}
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .cargo-target
+          key: shared-browser-cargo-v1-${{ runner.os }}-${{ runner.arch }}-public-shared-browser-studio-${{ hashFiles('packages/*/Cargo.lock') }}
+
       - name: Restore architecture-specific compiler cache
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -461,7 +531,6 @@ jobs:
         env:
           SUPABASE_BROWSER_TEST: "1"
         run: |
-          node scripts/ensure-supabase-postgres-image.mjs
           pnpm supabase:up
       - name: Test fixture safety guards
         run: node --test scripts/browser-profile-e2e.test.mjs scripts/shared-browser-studio-e2e.test.mjs scripts/lib/sharedStudioProvider.test.mjs scripts/check-shared-browser-ci.test.mjs

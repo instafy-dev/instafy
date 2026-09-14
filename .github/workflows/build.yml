@@ -35,6 +35,16 @@ jobs:
           && github.ref == 'refs/heads/main'
           && github.ref_protected == true
           && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-secret-scan","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_EXPANDED_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-secret-scan","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 10
 
@@ -179,7 +189,7 @@ jobs:
       - javascript-frontend
       - javascript-cli
       - javascript-desktop
-    if: ${{ always() }}
+    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}
     runs-on: >-
       ${{ vars.CI_JAVASCRIPT_SELF_HOSTED == 'true'
           && github.repository == 'instafy-dev/instafy'
@@ -193,6 +203,16 @@ jobs:
                   && github.ref == 'refs/heads/main'
                   && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-js-aggregate","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_JAVASCRIPT_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-js-aggregate","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions: {}
@@ -248,6 +268,16 @@ jobs:
                   && github.ref == 'refs/heads/main'
                   && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-js-contracts","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_JAVASCRIPT_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-js-contracts","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
@@ -350,6 +380,16 @@ jobs:
                   && github.ref == 'refs/heads/main'
                   && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-js-frontend","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_JAVASCRIPT_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-js-frontend","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
@@ -422,6 +462,16 @@ jobs:
                   && github.ref == 'refs/heads/main'
                   && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-js-cli","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_JAVASCRIPT_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-js-cli","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
@@ -495,6 +545,16 @@ jobs:
                   && github.ref == 'refs/heads/main'
                   && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-js-desktop","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_JAVASCRIPT_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-js-desktop","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
@@ -566,6 +626,16 @@ jobs:
                   && github.ref == 'refs/heads/main'
                   && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-go","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_EXPANDED_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-go","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 20
 
@@ -618,7 +688,7 @@ jobs:
       - rust-check-git
       - rust-check-provider
       - rust-check-tunnel
-    if: ${{ always() }}
+    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}
     runs-on: >-
       ${{ vars.CI_RUST_SELF_HOSTED == 'true'
           && github.repository == 'instafy-dev/instafy'
@@ -632,6 +702,16 @@ jobs:
                   && github.ref == 'refs/heads/main'
                   && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-rust-check-aggregate","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_RUST_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-rust-check-aggregate","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions: {}
@@ -687,6 +767,16 @@ jobs:
                   && github.ref == 'refs/heads/main'
                   && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-rust-check-controller","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_RUST_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-rust-check-controller","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
@@ -734,7 +824,7 @@ jobs:
           [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
           [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
           for package in clang lld cmake libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
@@ -749,7 +839,18 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
+      - name: Restore cargo cache without saving
+        if: runner.environment == 'self-hosted'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .cargo-target
+          key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-check-controller-${{ hashFiles('packages/*/Cargo.lock') }}
+
       - name: Restore cargo cache
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -777,6 +878,16 @@ jobs:
                   && github.ref == 'refs/heads/main'
                   && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-rust-check-agent","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_RUST_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-rust-check-agent","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
@@ -824,7 +935,7 @@ jobs:
           [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
           [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
           for package in clang lld cmake libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
@@ -839,7 +950,18 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
+      - name: Restore cargo cache without saving
+        if: runner.environment == 'self-hosted'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .cargo-target
+          key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-check-agent-${{ hashFiles('packages/*/Cargo.lock') }}
+
       - name: Restore cargo cache
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -867,6 +989,16 @@ jobs:
                   && github.ref == 'refs/heads/main'
                   && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-rust-check-git","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_RUST_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-rust-check-git","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
@@ -914,7 +1046,7 @@ jobs:
           [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
           [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
           for package in clang lld cmake libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
@@ -929,7 +1061,18 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
+      - name: Restore cargo cache without saving
+        if: runner.environment == 'self-hosted'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .cargo-target
+          key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-check-git-${{ hashFiles('packages/*/Cargo.lock') }}
+
       - name: Restore cargo cache
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -957,6 +1100,16 @@ jobs:
                   && github.ref == 'refs/heads/main'
                   && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-rust-check-provider","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_RUST_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-rust-check-provider","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
@@ -1004,7 +1157,7 @@ jobs:
           [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
           [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
           for package in clang lld cmake libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
@@ -1019,7 +1172,18 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
+      - name: Restore cargo cache without saving
+        if: runner.environment == 'self-hosted'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .cargo-target
+          key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-check-provider-${{ hashFiles('packages/*/Cargo.lock') }}
+
       - name: Restore cargo cache
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1047,6 +1211,16 @@ jobs:
                   && github.ref == 'refs/heads/main'
                   && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-rust-check-tunnel","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_RUST_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-rust-check-tunnel","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
@@ -1094,7 +1268,7 @@ jobs:
           [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
           [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
           for package in clang lld cmake libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
@@ -1109,7 +1283,18 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
+      - name: Restore cargo cache without saving
+        if: runner.environment == 'self-hosted'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .cargo-target
+          key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-check-tunnel-${{ hashFiles('packages/*/Cargo.lock') }}
+
       - name: Restore cargo cache
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1141,6 +1326,16 @@ jobs:
                   && github.ref == 'refs/heads/main'
                   && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-rust-fmt","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_EXPANDED_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-rust-fmt","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 10
 
@@ -1202,7 +1397,7 @@ jobs:
       - rust-test-proxy
       - rust-test-origin
       - rust-test-git
-    if: ${{ always() }}
+    if: ${{ always() && !(github.repository == 'instafy-dev/instafy' && github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true && cancelled()) }}
     runs-on: >-
       ${{ vars.CI_RUST_SELF_HOSTED == 'true'
           && github.repository == 'instafy-dev/instafy'
@@ -1216,6 +1411,16 @@ jobs:
                   && github.ref == 'refs/heads/main'
                   && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-rust-test-aggregate","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_RUST_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-rust-test-aggregate","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions: {}
@@ -1271,6 +1476,16 @@ jobs:
                   && github.ref == 'refs/heads/main'
                   && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-rust-test-contracts","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_RUST_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-rust-test-contracts","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
@@ -1334,7 +1549,7 @@ jobs:
           [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
           [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
           for package in clang lld cmake libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
@@ -1357,7 +1572,18 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
 
+      - name: Restore cargo cache without saving
+        if: runner.environment == 'self-hosted'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .cargo-target
+          key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-test-contracts-${{ hashFiles('packages/*/Cargo.lock') }}
+
       - name: Restore cargo cache
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1385,6 +1611,16 @@ jobs:
                   && github.ref == 'refs/heads/main'
                   && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-rust-test-agent","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_RUST_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-rust-test-agent","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
@@ -1448,7 +1684,7 @@ jobs:
           [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
           [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
           for package in clang lld cmake libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
@@ -1471,7 +1707,18 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
 
+      - name: Restore cargo cache without saving
+        if: runner.environment == 'self-hosted'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .cargo-target
+          key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-test-agent-${{ hashFiles('packages/*/Cargo.lock') }}
+
       - name: Restore cargo cache
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1482,6 +1729,9 @@ jobs:
 
       - name: Run database-free Rust test suite
         run: |
+          if [[ '${{ runner.environment == 'self-hosted' && runner.os == 'Linux' }}' == true && "${RUSTFLAGS+x}" != x ]]; then
+            export RUSTFLAGS='-C link-arg=-fuse-ld=lld'
+          fi
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --no-run
           cargo test --manifest-path packages/runtime-agent/Cargo.toml --lib --test controller_client -- --test-threads=1
 
@@ -1500,6 +1750,16 @@ jobs:
                   && github.ref == 'refs/heads/main'
                   && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-rust-test-proxy","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_RUST_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-rust-test-proxy","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
@@ -1563,7 +1823,7 @@ jobs:
           [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
           [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
           for package in clang lld cmake libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
@@ -1586,7 +1846,18 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
 
+      - name: Restore cargo cache without saving
+        if: runner.environment == 'self-hosted'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .cargo-target
+          key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-test-proxy-${{ hashFiles('packages/*/Cargo.lock') }}
+
       - name: Restore cargo cache
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1614,6 +1885,16 @@ jobs:
                   && github.ref == 'refs/heads/main'
                   && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-rust-test-origin","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_RUST_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-rust-test-origin","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
@@ -1677,7 +1958,7 @@ jobs:
           [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
           [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
           for package in clang lld cmake libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
@@ -1700,7 +1981,18 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
 
+      - name: Restore cargo cache without saving
+        if: runner.environment == 'self-hosted'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .cargo-target
+          key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-test-origin-${{ hashFiles('packages/*/Cargo.lock') }}
+
       - name: Restore cargo cache
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -1728,6 +2020,16 @@ jobs:
                   && github.ref == 'refs/heads/main'
                   && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-rust-test-git","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_RUST_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/build.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-rust-test-git","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
@@ -1791,7 +2093,7 @@ jobs:
           [[ "$RUNNER_OS" == Linux && "$RUNNER_ARCH" == ARM64 ]]
           [[ "${INSTAFY_CI_JOB_ISOLATION:-}" == ephemeral ]]
           sudo -n apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
-          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
+          sudo -n env DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=120 -o Acquire::Retries=2 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install --yes --no-install-recommends clang lld cmake libcap-dev protobuf-compiler
           for package in clang lld cmake libcap-dev protobuf-compiler; do
             [[ "$(dpkg-query --show --showformat='${Status}' "$package")" == 'install ok installed' ]]
           done
@@ -1814,7 +2116,18 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
 
+      - name: Restore cargo cache without saving
+        if: runner.environment == 'self-hosted'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .cargo-target
+          key: rust-ci-v3-${{ runner.os }}-${{ runner.arch }}-public-rust-test-git-${{ hashFiles('packages/*/Cargo.lock') }}
+
       - name: Restore cargo cache
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

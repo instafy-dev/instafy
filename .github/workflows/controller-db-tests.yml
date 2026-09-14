@@ -38,6 +38,16 @@ jobs:
                && github.event.pull_request.head.repo.fork == false)
               || (github.event_name == 'push' && github.ref == 'refs/heads/main' && github.ref_protected == true))
           && fromJSON(format('{{"group":"org/instafy-ci-{0}","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{1}-{2}-{3}-public-controller-db","instafy-ci-trust-{0}"]}}', github.event_name == 'pull_request' && 'pr' || 'main', github.repository_id, github.run_id, github.run_attempt))
+          || (vars.CI_DATABASE_SELF_HOSTED == 'true'
+              && github.repository == 'instafy-dev/instafy'
+              && github.repository_id == '1309636737'
+              && github.event.repository.private == true
+              && github.event_name == 'workflow_dispatch'
+              && github.ref == 'refs/heads/main'
+              && github.ref_protected == true
+              && github.workflow_ref == 'instafy-dev/instafy/.github/workflows/controller-db-tests.yml@refs/heads/main'
+              && github.workflow_sha == github.sha
+              && fromJSON(format('{{"group":"org/instafy-ci-main","labels":["self-hosted","Linux","ARM64","instafy-ci-bootstrap-{0}-{1}-{2}-public-controller-db","instafy-ci-trust-main"]}}', github.repository_id, github.run_id, github.run_attempt)))
           || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
@@ -101,7 +111,18 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
+      - name: Restore compiler cache without saving
+        if: runner.environment == 'self-hosted'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            packages/runtime-controller/target
+          key: controller-db-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packages/runtime-controller/Cargo.lock') }}
+
       - name: Cache controller Cargo dependencies and build
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

@@ -25,7 +25,7 @@ export default defineConfig({
   reporter: [["list"]],
   use: { ...devices["Desktop Chrome"], baseURL, channel: channel || undefined, headless: true, trace: "retain-on-failure" },
   webServer: {
-    command: `${quote(process.execPath)} ${quote(vite)} --config ./vite.browser-ui-ci.config.ts --host 127.0.0.1 --port ${port} --strictPort`,
+    command: `${quote(process.execPath)} ${quote(vite)} --config ./vite.ci-ui.config.ts --host 127.0.0.1 --port ${port} --strictPort`,
     url: baseURL,
     reuseExistingServer: false,
     timeout: 60_000,
