@@ -1,4 +1,4 @@
-import { Plus } from "iconoir-react";
+import { MoreHoriz } from "iconoir-react";
 import type { RefObject } from "react";
 import { DialogTrigger } from "react-aria-components";
 import { Button } from "../../../components/Button";
@@ -148,7 +148,7 @@ export function StudioSidebarMorePanels({
                 aria-haspopup="dialog"
               >
                 <span className={getSidebarNavIconClass(moreSwitcherOpen || isMorePanelActive)}>
-                  <Plus className="text-base" aria-hidden="true" />
+                  <MoreHoriz className="text-base" aria-hidden="true" />
                   {renderIndicator(moreIndicator, "sidebar-nav-more-indicator")}
                 </span>
                 {showLabels ? (
@@ -211,7 +211,7 @@ export function StudioSidebarMorePanels({
               aria-haspopup="dialog"
             >
               <span className={getSidebarNavIconClass(moreSwitcherOpen || isMorePanelActive)}>
-                <Plus className="text-base" aria-hidden="true" />
+                <MoreHoriz className="text-base" aria-hidden="true" />
                 {renderIndicator(moreIndicator, "sidebar-nav-more-indicator")}
               </span>
               {showLabels ? (

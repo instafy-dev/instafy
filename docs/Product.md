@@ -82,8 +82,10 @@ Narrow layouts keep Home, the team/space path, Search and the signed-in profile 
 header. Home remains available from a workspace, and team/space controls remain available on
 Home. Workspace history, tab selection and secondary actions remain in the working header
 below it. Global pages provide an explicit Open navigation control. The navigation drawer
-shares the same team/space path and has a separate Close/New chat row; directories and More
-remain drill-ins with Back, without stacking navigation drawers. Opening navigation does not
+shares the same team/space path and uses the sidebar-close icon in the fixed Close/New chat
+row. Expanded drawers show secondary destinations directly when their measured height allows
+it. On shorter screens, remaining destinations use an ellipsis-labelled More entry. Directories
+and overflow remain drill-ins with Back, without stacking navigation drawers. Opening navigation does not
 change the page behind it. Team overview/settings do not replace a space's remembered work.
 
 Navigation uses a solid warm off-white surface in light mode and the dark rail
@@ -150,7 +152,8 @@ team has a persistent side marker as well as its background highlight.
 
 The team chip opens an anchored menu for Switch team, Team overview and Team settings.
 The space chip beside it changes the working space. Less frequent tools, personal AI
-connections and Credits remain available through More. The desktop space picker shows only
+connections and Credits appear in navigation when space permits, with remaining destinations
+available through More. The desktop space picker shows only
 the selected team's spaces; Browse teams retains the full team-and-space directory.
 Home and account pages hide the team-specific desktop sidebar.
 

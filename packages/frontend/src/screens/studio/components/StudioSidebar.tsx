@@ -12,7 +12,6 @@ import { DESKTOP_TITLE_BAR_HEIGHT_PX, desktopTitleBarFree } from "../../../lib/d
 import {
   SidebarCollapse,
   SidebarExpand,
-  Xmark,
   Plus,
 } from "iconoir-react";
 import { ChatsIcon } from "../../../components/AppIcons";
@@ -259,7 +258,7 @@ export function StudioSidebar({
   const hasRecentChats = Boolean(onSelectConversation);
   // Desktop has a header and space selector, plus a team-menu icon when
   // compact. Home/account controls live in the separate global rail.
-  const fixedEntryCount = (desktopRail ? showLabels ? 2 : 3 : showLabels ? 2 : 4) + items.length + (onOpenConversationHistory && !hasRecentChats ? 1 : 0);
+  const fixedEntryCount = (desktopRail ? showLabels ? 2 : 3 : showLabels ? pathControls ? 1 : 2 : 4) + items.length + (onOpenConversationHistory && !hasRecentChats ? 1 : 0);
   const recentChatsReservePx = hasRecentChats && showLabels && recentChatsExpanded
     ? Math.max(1, Math.min(recentConversations.length, SIDEBAR_RECENT_CHAT_LIMIT)) * 40 + 56
     : 0;
@@ -268,9 +267,9 @@ export function StudioSidebar({
     ? Math.ceil(SIDEBAR_RECENT_SPACE_LIMIT / 3) * 96 + 48
     : 0;
   const estimatedChromeReservePx = 24;
-  const effectiveFooterReservePx = desktopRail ? 0 : Math.max(estimatedFooterReservePx, footerHeight);
-  const desktopSecondaryRowCapacity =
-    isLargeScreen
+  const effectiveFooterReservePx = desktopRail ? 0 : footerHeight || estimatedFooterReservePx;
+  const secondaryRowCapacity =
+    isLargeScreen || isExpanded
       ? Math.max(
           0,
           Math.floor(
@@ -279,46 +278,28 @@ export function StudioSidebar({
           ),
         )
       : 0;
-  const spillableDesktopMoreItems = useMemo(
-    () => resolvedMoreItems.filter((item) => !alwaysCollapsedMoreItemIds.has(item.id)),
-    [alwaysCollapsedMoreItemIds, resolvedMoreItems],
+  const spillableMoreItems = useMemo(
+    () => desktopRail ? resolvedMoreItems.filter((item) => !alwaysCollapsedMoreItemIds.has(item.id)) : resolvedMoreItems,
+    [alwaysCollapsedMoreItemIds, desktopRail, resolvedMoreItems],
   );
-  const desktopNeedsMoreButton =
-    isLargeScreen &&
+  const needsMoreButton =
     resolvedMoreItems.length > 0 &&
-    (resolvedMoreItems.length !== spillableDesktopMoreItems.length ||
-      spillableDesktopMoreItems.length > desktopSecondaryRowCapacity);
-  const desktopInlineMoreCapacity = isLargeScreen
-    ? Math.max(0, desktopSecondaryRowCapacity - (desktopNeedsMoreButton ? 1 : 0))
-    : 0;
+    (resolvedMoreItems.length !== spillableMoreItems.length ||
+      spillableMoreItems.length > secondaryRowCapacity);
+  const measuredInlineMoreCapacity = Math.max(0, secondaryRowCapacity - (needsMoreButton ? 1 : 0));
+  const mobileMoreAllocationRef = useRef({ capacity: 0, open: false, overflowIds: [] as StudioPanel[] });
+  // A resize must not remove the active drill-in or its Back destination.
+  const inlineMoreCapacity = !isLargeScreen && moreMobileViewOpen
+    ? mobileMoreAllocationRef.current.capacity
+    : measuredInlineMoreCapacity;
   const inlineMoreItems = useMemo(
-    () =>
-      !isLargeScreen
-        ? isExpanded && !hasRecentChats
-          ? resolvedMoreItems
-          : []
-        : spillableDesktopMoreItems.slice(
-            0,
-            Math.min(spillableDesktopMoreItems.length, desktopInlineMoreCapacity),
-          ),
-    [
-      desktopInlineMoreCapacity,
-      hasRecentChats,
-      isExpanded,
-      isLargeScreen,
-      resolvedMoreItems,
-      spillableDesktopMoreItems,
-    ],
+    () => spillableMoreItems.slice(0, inlineMoreCapacity),
+    [inlineMoreCapacity, spillableMoreItems],
   );
   const inlineMoreItemIds = useMemo(() => new Set(inlineMoreItems.map((item) => item.id)), [inlineMoreItems]);
   const collapsedMoreItems = useMemo(
-    () =>
-      !isLargeScreen
-        ? isExpanded && !hasRecentChats
-          ? []
-          : resolvedMoreItems
-        : resolvedMoreItems.filter((item) => !inlineMoreItemIds.has(item.id)),
-    [hasRecentChats, inlineMoreItemIds, isExpanded, isLargeScreen, resolvedMoreItems],
+    () => resolvedMoreItems.filter((item) => !inlineMoreItemIds.has(item.id)),
+    [inlineMoreItemIds, resolvedMoreItems],
   );
   const showInlineMoreItems = inlineMoreItems.length > 0;
   const sidebarMobileDrillInOpen = workspaceSwitcherOpen || moreMobileViewOpen;
@@ -388,11 +369,29 @@ export function StudioSidebar({
   }, [isExpanded]);
 
   useEffect(() => {
-    if (!showInlineMoreItems) {
-      return;
-    }
-    setMoreMobileViewOpen(false);
-  }, [showInlineMoreItems]);
+    const previous = mobileMoreAllocationRef.current;
+    mobileMoreAllocationRef.current = {
+      capacity: inlineMoreCapacity,
+      open: moreMobileViewOpen,
+      overflowIds: collapsedMoreItems.map((item) => item.id),
+    };
+    if (isLargeScreen || !previous.open || moreMobileViewOpen || collapsedMoreItems.length > 0) return;
+    // After returning on a taller screen, More may have become inline tools.
+    // Restore focus to the first of those tools instead of a removed trigger.
+    const frame = requestAnimationFrame(() => {
+      const nav = navRef.current;
+      const focused = document.activeElement;
+      if (!nav || nav.closest("[inert]") || (focused !== document.body && !nav.contains(focused))) return;
+      for (const id of previous.overflowIds) {
+        const target = nav.querySelector<HTMLButtonElement>(`[data-testid="sidebar-more-item-${id}"]`);
+        if (target) {
+          target.focus();
+          break;
+        }
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [collapsedMoreItems, inlineMoreCapacity, isLargeScreen, moreMobileViewOpen]);
   useEffect(() => {
     if (collapsedMoreItems.length > 0) {
       return;
@@ -1266,9 +1265,10 @@ export function StudioSidebar({
           </>}
           <IconButton variant="ghost" size="sm"
             aria-label={onRequestClose ? "Close navigation" : showLabels ? "Collapse sidebar" : "Expand sidebar"}
+            title={onRequestClose ? "Close navigation" : showLabels ? "Collapse sidebar" : "Expand sidebar"}
             data-testid="sidebar-drawer-toggle" onPress={onRequestClose ?? onToggleSidebar}
             isDisabled={!onRequestClose && !onToggleSidebar} className="!min-h-12 !min-w-12 shrink-0">
-            {onRequestClose ? <Xmark className="h-4 w-4" /> : showLabels ? <SidebarCollapse className="h-4 w-4" /> : <SidebarExpand className="h-4 w-4" />}
+            {onRequestClose || showLabels ? <SidebarCollapse className="h-[18px] w-[18px]" aria-hidden="true" /> : <SidebarExpand className="h-[18px] w-[18px]" aria-hidden="true" />}
           </IconButton>
         </div> : null}
         <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto overflow-x-hidden pb-2" data-testid="sidebar-context-scroll"

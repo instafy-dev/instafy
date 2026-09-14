@@ -107,6 +107,33 @@ describe("StudioSidebar organization navigation", () => {
     await click(`sidebar-team-menu-${action}`);
     expect(document.querySelector('[data-testid="sidebar-team-menu"]')).toBeNull();
   };
+  const secondaryNavigationProps = (): Partial<ComponentProps<typeof StudioSidebar>> => ({
+    mobileOverlay: true,
+    navigationHeaderExternal: true,
+    onSelectConversation: vi.fn(),
+    items: [
+      { id: "chat", label: "Chats" }, { id: "automations", label: "Automations" },
+      { id: "code", label: "Files" }, { id: "sourceControl", label: "Changes" },
+    ].map(item => ({ ...item, icon: () => <span />, accent: "" })) as ComponentProps<typeof StudioSidebar>["items"],
+    moreItems: [
+      { id: "extensions", label: "Extensions" }, { id: "secrets", label: "Secrets" },
+      { id: "skills", label: "Skills" }, { id: "ai", label: "Your AI" },
+      { id: "machines", label: "Machines" }, { id: "credits", label: "Credits" },
+    ].map(item => ({ ...item, icon: () => <span />, accent: "" })) as ComponentProps<typeof StudioSidebar>["moreItems"],
+  });
+  const mockSidebarHeight = (initialHeight: number) => {
+    let height = initialHeight;
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      return new DOMRect(0, 0, 352, this.dataset.testid === "sidebar-context-navigation" ? height : 72);
+    });
+    return async (nextHeight: number) => {
+      height = nextHeight;
+      await act(async () => window.dispatchEvent(new Event("resize")));
+    };
+  };
+  const visibleSecondaryIds = (scope: ParentNode = container) =>
+    Array.from(scope.querySelectorAll('[data-testid^="sidebar-more-item-"]'), item =>
+      item.getAttribute("data-testid")!.replace("sidebar-more-item-", ""));
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     localStorage.clear();
@@ -802,6 +829,68 @@ describe("StudioSidebar organization navigation", () => {
     expect(document.querySelector('[data-testid="sidebar-more-menu"]')).toBeNull();
     expect(onRequestClose).not.toHaveBeenCalled();
     expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it.each([787, 1067])("shows every permitted tool in an expanded mobile drawer with %ipx available height", async height => {
+    fixture.desktop = false;
+    mockSidebarHeight(height);
+    await render(secondaryNavigationProps());
+    expect(visibleSecondaryIds()).toEqual(["extensions", "secrets", "skills", "ai", "machines", "credits"]);
+    expect(container.querySelector('[data-testid="sidebar-nav-more"]')).toBeNull();
+    await click("sidebar-more-item-secrets");
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith("secrets");
+    expect(onRequestClose.mock.invocationCallOrder[0]).toBeLessThan(onSelect.mock.invocationCallOrder[0]);
+  });
+
+  it("keeps only overflowing mobile tools in More and reallocates them after a height change", async () => {
+    fixture.desktop = false;
+    const resize = mockSidebarHeight(580);
+    await render(secondaryNavigationProps());
+    expect(visibleSecondaryIds()).toEqual(["extensions"]);
+    expect(container.querySelector('[data-testid="sidebar-context-scroll"]')?.classList.contains("overflow-y-auto")).toBe(true);
+    await click("sidebar-nav-more");
+    const more = document.querySelector('[data-testid="sidebar-more-menu"]')!;
+    expect(visibleSecondaryIds(more)).toEqual(["secrets", "skills", "ai", "machines", "credits"]);
+    await click("sidebar-more-back");
+    await resize(1067);
+    expect(visibleSecondaryIds()).toEqual(["extensions", "secrets", "skills", "ai", "machines", "credits"]);
+    expect(container.querySelector('[data-testid="sidebar-nav-more"]')).toBeNull();
+    await resize(580);
+    expect(visibleSecondaryIds()).toEqual(["extensions"]);
+    expect(container.querySelector('[data-testid="sidebar-nav-more"]')).not.toBeNull();
+  });
+
+  it("keeps an open mobile More view stable during resize and returns focus to its newly inline tools", async () => {
+    fixture.desktop = false;
+    const resize = mockSidebarHeight(580);
+    const navigation = { view: "sidebar", openView: vi.fn(), back: vi.fn() };
+    const props = { ...secondaryNavigationProps(), mobileNavigation: navigation as never };
+    await render(props);
+    await click("sidebar-nav-more");
+    expect(navigation.openView).toHaveBeenCalledExactlyOnceWith("more");
+    navigation.view = "more";
+    await render(props);
+    await resize(1067);
+    const more = document.querySelector('[data-testid="sidebar-more-menu"]')!;
+    expect(visibleSecondaryIds(more)).toEqual(["secrets", "skills", "ai", "machines", "credits"]);
+    expect(container.querySelector('[data-testid="sidebar-nav-more"]')).not.toBeNull();
+    await click("sidebar-more-back");
+    expect(navigation.back).toHaveBeenCalledOnce();
+    navigation.view = "sidebar";
+    await render(props);
+    await act(async () => { await new Promise(resolve => requestAnimationFrame(resolve)); });
+    expect(document.querySelector('[data-testid="sidebar-more-menu"]')).toBeNull();
+    expect(container.querySelector('[data-testid="sidebar-nav-more"]')).toBeNull();
+    expect(document.activeElement).toBe(container.querySelector('[data-testid="sidebar-more-item-secrets"]'));
+    expect(onRequestClose).not.toHaveBeenCalled();
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("retains the desktop Secrets overflow policy when other tools fit", async () => {
+    mockSidebarHeight(1067);
+    await render({ ...secondaryNavigationProps(), mobileOverlay: false });
+    expect(visibleSecondaryIds()).toEqual(["extensions", "skills", "ai", "machines", "credits"]);
+    expect(container.querySelector('[data-testid="sidebar-nav-more"]')).not.toBeNull();
   });
 
   it.each(["org-b", "personal"])("keeps narrow %s scope isolated from the previous space", async (selectedOrgKey) => {
