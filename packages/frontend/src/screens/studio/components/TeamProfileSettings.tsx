@@ -3,10 +3,10 @@ import { Button } from "../../../components/Button";
 import { Field } from "../../../components/Field";
 import { Input } from "../../../components/Input";
 import { Text } from "../../../components/Text";
+import { SettingsFormLayout } from "../../../components/SettingsFormLayout";
 import { updateControllerOrganization, type ControllerOrgSummary } from "../../../services/runtimeController/projects";
 import { OrgAvatarEditor } from "./OrgAvatarEditor";
 import { SettingsSection } from "./SettingsSection";
-import { SettingsSurface } from "./SettingsSurface";
 import { notifyTeamProfileUpdated } from "./teamAvatar";
 
 export function TeamProfileSettings({ organization, role, onCreateSpace }: {
@@ -47,9 +47,9 @@ export function TeamProfileSettings({ organization, role, onCreateSpace }: {
     }
   };
   return (
-    <SettingsSection title="Team profile" description="Choose the name and picture people see when they select this team."
-      data-testid="org-settings-profile">
-      <SettingsSurface>
+    <SettingsFormLayout>
+      <SettingsSection title="Team profile" description="Choose the name and picture people see when they select this team."
+        data-testid="org-settings-profile">
         <div className="space-y-5">
           <div className="space-y-2">
             <Text variant="caption" tone="muted">Team picture</Text>
@@ -79,7 +79,7 @@ export function TeamProfileSettings({ organization, role, onCreateSpace }: {
             </div>
           ) : null}
         </div>
-      </SettingsSurface>
-    </SettingsSection>
+      </SettingsSection>
+    </SettingsFormLayout>
   );
 }

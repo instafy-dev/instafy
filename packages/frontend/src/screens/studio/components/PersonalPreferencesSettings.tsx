@@ -1,9 +1,9 @@
 import { Checkbox } from "../../../components/Checkbox";
 import { SegmentedControl } from "../../../components/SegmentedControl";
 import { Text } from "../../../components/Text";
+import { SettingsFormLayout } from "../../../components/SettingsFormLayout";
 import { useTheme, type ThemeMode } from "../../../theme/ThemeProvider";
 import { SettingsSection } from "./SettingsSection";
-import { SettingsSurface } from "./SettingsSurface";
 
 interface PersonalPreferencesSettingsProps {
   gitAutoSyncAfterApply: boolean;
@@ -13,7 +13,7 @@ interface PersonalPreferencesSettingsProps {
 export function PersonalPreferencesSettings({ gitAutoSyncAfterApply, onGitAutoSyncChange }: PersonalPreferencesSettingsProps) {
   const { themeMode, setThemeMode } = useTheme();
   return (
-    <SettingsSurface className="space-y-6" data-testid="personal-preferences-settings">
+    <SettingsFormLayout data-testid="personal-preferences-settings">
       <SettingsSection title="Appearance" description="Choose how Instafy looks on this device.">
         <div role="group" aria-label="Theme" className="max-w-sm">
           <SegmentedControl<ThemeMode>
@@ -29,7 +29,7 @@ export function PersonalPreferencesSettings({ gitAutoSyncAfterApply, onGitAutoSy
           />
         </div>
       </SettingsSection>
-      <SettingsSection title="Assistant file changes">
+      <SettingsSection title="Assistant file changes" className="border-t border-slate-200/70 pt-6 dark:border-[color:var(--color-studio-dark-divider)]">
         <Checkbox
           isSelected={gitAutoSyncAfterApply}
           onChange={onGitAutoSyncChange}
@@ -41,6 +41,6 @@ export function PersonalPreferencesSettings({ gitAutoSyncAfterApply, onGitAutoSy
           If auto-save fails, the run stays complete and you can finish from Changes.
         </Text>
       </SettingsSection>
-    </SettingsSurface>
+    </SettingsFormLayout>
   );
 }

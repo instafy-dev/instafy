@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { SettingsShell } from "../SettingsShell";
 
 describe("SettingsShell", () => {
-  it("renders mobile category and child pickers instead of stacked tab strips", () => {
+  it("renders one compact category path for nested settings", () => {
     const html = renderToStaticMarkup(
       <SettingsShell
         title="Space settings"
@@ -28,7 +28,7 @@ describe("SettingsShell", () => {
     );
 
     expect(html).toContain("data-testid=\"settings-category-nav-picker\"");
-    expect(html).toContain("data-testid=\"settings-category-nav-child-picker\"");
+    expect(html).not.toContain("data-testid=\"settings-category-nav-child-picker\"");
     expect(html).toContain("Speech provider");
     expect(html).not.toContain("data-testid=\"settings-shell-subtitle\"");
     expect(html).not.toContain("data-testid=\"settings-category-nav-scroll-left\"");

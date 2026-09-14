@@ -1,5 +1,5 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type FocusEvent, type ReactNode } from "react";
-import { MenuTrigger } from "react-aria-components";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type FocusEvent, type ReactNode } from "react";
+import { DialogTrigger } from "react-aria-components";
 import { ControlChevron } from "../../../components/ControlChevron";
 import { Button } from "../../../components/Button";
 import { pickerListRowTextClassName } from "../../../components/listRowStyles";
@@ -7,7 +7,8 @@ import { EntityRow } from "../../../components/EntityRow";
 import { Heading } from "../../../components/Heading";
 import { Text } from "../../../components/Text";
 import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
-import { StudioPopover } from "../../../components/aria/StudioPopover";
+import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
+import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
 import { DARK_DIVIDER_BORDER_CLASS } from "../../../theme/darkSurfaces";
 
@@ -32,7 +33,7 @@ interface SettingsShellProps {
   actions?: ReactNode;
   categories?: SettingsCategory[];
   activeCategoryId?: string;
-  onCategoryChange?: (categoryId: string) => void;
+  onCategoryChange?: (categoryId: string, childCategoryId?: string) => void;
   activeChildCategoryId?: string | null;
   onChildCategoryChange?: (categoryId: string) => void;
   children: ReactNode;
@@ -41,7 +42,7 @@ interface SettingsShellProps {
   testId?: string;
   navTestId?: string;
   /** A small, flat category set can remain visible when a sidebar won't fit. */
-  compactCategoryNavigation?: "picker" | "tabs";
+  compactCategoryNavigation?: "auto" | "picker" | "tabs";
 }
 
 export function SettingsShell({
@@ -63,7 +64,7 @@ export function SettingsShell({
   navLabel = "Categories",
   testId = "settings-shell",
   navTestId = "settings-category-nav",
-  compactCategoryNavigation = "picker",
+  compactCategoryNavigation = "auto",
 }: SettingsShellProps) {
   const isLargeScreen = useStudioDesktopLayout();
   const shellRef = useRef<HTMLDivElement | null>(null);
@@ -71,7 +72,7 @@ export function SettingsShell({
   const navigationFocusRef = useRef<HTMLElement | null>(null);
   const wideContainerRef = useRef(false);
   const useSideNavigation = isLargeScreen && hasWideContainer;
-  const useCompactTabs = compactCategoryNavigation === "tabs" && Boolean(categories?.length && categories.length <= 3 && categories.every(category => !category.children?.length));
+  const useCompactTabs = compactCategoryNavigation !== "picker" && Boolean(categories?.length && categories.length <= 3 && categories.every(category => !category.children?.length));
 
   useLayoutEffect(() => {
     const shell = shellRef.current;
@@ -106,7 +107,6 @@ export function SettingsShell({
   const showScope = Boolean(scope && scopeAllowed);
   const showHeader = showTitle || showSubtitle || showScope || Boolean(actions);
   const mobileCategoryTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const mobileChildTriggerRef = useRef<HTMLButtonElement | null>(null);
   const handleNavigationFocus = useCallback((event: FocusEvent<HTMLElement>) => {
     navigationFocusRef.current = event.target;
   }, []);
@@ -127,7 +127,7 @@ export function SettingsShell({
       const selectedLocation = navigation?.querySelector<HTMLButtonElement>('[aria-current="location"]:not(:disabled)');
       (selectedPage ?? selectedLocation)?.focus();
     } else {
-      (mobileChildTriggerRef.current ?? mobileCategoryTriggerRef.current)?.focus();
+      mobileCategoryTriggerRef.current?.focus();
     }
   }, [useCompactTabs, useSideNavigation]);
 
@@ -156,7 +156,7 @@ export function SettingsShell({
                 surface={active ? "selected" : "interactive"}
                 density="compact"
                 className={[
-                  "min-h-10",
+                  "min-h-10 pointer-coarse:min-h-11",
                   active
                     ? "focus-visible:!border-primary-300 focus-visible:!ring-0 focus-visible:!ring-offset-0 dark:focus-visible:!border-primary-500/70"
                     : "",
@@ -182,7 +182,7 @@ export function SettingsShell({
                       surface={child.id === activeChildCategoryId ? "selected" : "interactive"}
                       density="compact"
                       className={[
-                        "min-h-9",
+                        "min-h-9 pointer-coarse:min-h-11",
                         child.id === activeChildCategoryId
                           ? "focus-visible:!border-primary-300 focus-visible:!ring-0 focus-visible:!ring-offset-0 dark:focus-visible:!border-primary-500/70"
                           : "",
@@ -240,121 +240,16 @@ export function SettingsShell({
       );
     }
     return (
-      <MenuTrigger>
-        <EntityRow
-          ref={mobileCategoryTriggerRef}
-          title={activeCategory.label}
-          start={
-            activeCategory.icon ? (
-              <activeCategory.icon className="h-4 w-4 text-slate-400 dark:text-slate-500" aria-hidden={true} />
-            ) : null
-          }
-          end={<ControlChevron />}
-          pressable
-          isDisabled={categories.every((category) => category.disabled)}
-          data-testid={`${navTestId}-picker`}
-          surface="outlined"
-          density="compact"
-          className="min-h-10"
-          aria-label={`${navLabel}: ${activeCategory.label}`}
-        />
-        <StudioPopover
-          triggerRef={mobileCategoryTriggerRef}
-          placement="bottom start"
-          offset={6}
-          className="min-w-[var(--trigger-width)] p-2"
-        >
-          <StudioMenu
-            aria-label={navLabel}
-            selectionMode="single"
-            selectedKeys={activeCategoryId ? [activeCategoryId] : []}
-            onAction={(key) => onCategoryChange?.(String(key))}
-          >
-            {categories.map((category) => {
-              const Icon = category.icon;
-              return (
-                <StudioMenuItem
-                  key={category.id}
-                  id={category.id}
-                  data-testid={category.testId ?? `settings-category-${category.id}`}
-                  isDisabled={category.disabled}
-                >
-                  <span className="flex items-center gap-2">
-                    {Icon ? <Icon className="h-4 w-4" aria-hidden={true} /> : null}
-                    <span>{category.label}</span>
-                  </span>
-                </StudioMenuItem>
-              );
-            })}
-          </StudioMenu>
-        </StudioPopover>
-      </MenuTrigger>
-    );
-  }, [
-    activeCategoryId,
-    categories,
-    hasCategories,
-    useSideNavigation,
-    useCompactTabs,
-    navLabel,
-    navTestId,
-    onCategoryChange,
-  ]);
-
-  const mobileChildNavContent = useMemo(() => {
-    if (!hasCategories || !categories || useSideNavigation || !activeCategoryId || !onChildCategoryChange) {
-      return null;
-    }
-    const activeCategory = categories.find((category) => category.id === activeCategoryId) ?? null;
-    if (!activeCategory?.children || activeCategory.children.length === 0) {
-      return null;
-    }
-    const activeChildCategory =
-      activeCategory.children.find((child) => child.id === activeChildCategoryId) ??
-      activeCategory.children[0] ??
-      null;
-    if (!activeChildCategory) {
-      return null;
-    }
-    return (
-      <MenuTrigger>
-        <EntityRow
-          ref={mobileChildTriggerRef}
-          title={activeChildCategory.label}
-          end={<ControlChevron />}
-          pressable
-          isDisabled={activeCategory.children.every((child) => child.disabled)}
-          data-testid={`${navTestId}-child-picker`}
-          surface="outlined"
-          density="compact"
-          className="min-h-10"
-          aria-label={`${activeCategory.label} section`}
-        />
-        <StudioPopover
-          triggerRef={mobileChildTriggerRef}
-          placement="bottom start"
-          offset={6}
-          className="min-w-[var(--trigger-width)] p-2"
-        >
-          <StudioMenu
-            aria-label={`${activeCategory.label} sections`}
-            selectionMode="single"
-            selectedKeys={activeChildCategoryId ? [activeChildCategoryId] : []}
-            onAction={(key) => onChildCategoryChange(String(key))}
-          >
-            {activeCategory.children.map((child) => (
-              <StudioMenuItem
-                key={`${activeCategory.id}:${child.id}`}
-                id={child.id}
-                data-testid={child.testId ?? `settings-category-${activeCategory.id}-${child.id}`}
-                isDisabled={child.disabled}
-              >
-                {child.label}
-              </StudioMenuItem>
-            ))}
-          </StudioMenu>
-        </StudioPopover>
-      </MenuTrigger>
+      <SettingsCategoryPicker
+        categories={categories}
+        activeCategoryId={activeCategoryId}
+        activeChildCategoryId={activeChildCategoryId}
+        onCategoryChange={onCategoryChange}
+        onChildCategoryChange={onChildCategoryChange}
+        navLabel={navLabel}
+        navTestId={navTestId}
+        triggerRef={mobileCategoryTriggerRef}
+      />
     );
   }, [
     activeCategoryId,
@@ -362,21 +257,23 @@ export function SettingsShell({
     categories,
     hasCategories,
     useSideNavigation,
+    useCompactTabs,
+    navLabel,
     navTestId,
+    onCategoryChange,
     onChildCategoryChange,
   ]);
 
   const mobileNavGroup = useMemo(() => {
-    if (!mobileNavContent && !mobileChildNavContent) {
+    if (!mobileNavContent) {
       return null;
     }
     return (
       <nav aria-label={`${title} ${navLabel.toLowerCase()}`} data-settings-navigation className="space-y-2" onFocusCapture={handleNavigationFocus} onBlurCapture={handleNavigationBlur}>
         {mobileNavContent}
-        {mobileChildNavContent}
       </nav>
     );
-  }, [handleNavigationBlur, handleNavigationFocus, mobileChildNavContent, mobileNavContent, navLabel, title]);
+  }, [handleNavigationBlur, handleNavigationFocus, mobileNavContent, navLabel, title]);
 
   return (
     <div
@@ -438,5 +335,160 @@ export function SettingsShell({
         <div className="@container/settings-content min-w-0 space-y-4">{children}</div>
       )}
     </div>
+  );
+}
+
+
+/** Browse nested categories in one anchored surface; only destinations change the route. */
+function SettingsCategoryPicker({
+  categories,
+  activeCategoryId,
+  activeChildCategoryId,
+  onCategoryChange,
+  onChildCategoryChange,
+  navLabel,
+  navTestId,
+  triggerRef,
+}: Pick<SettingsShellProps, "activeCategoryId" | "activeChildCategoryId" | "onCategoryChange" | "onChildCategoryChange"> & {
+  categories: SettingsCategory[];
+  navLabel: string;
+  navTestId: string;
+  triggerRef: { current: HTMLButtonElement | null };
+}) {
+  const [open, setOpen] = useState(false);
+  const [parentId, setParentId] = useState<string | null>(null);
+  const paneRef = useRef<HTMLDivElement | null>(null);
+  const previouslyOpenRef = useRef(false);
+  const returnParentFocusIdRef = useRef<string | null>(null);
+  const activeCategory = categories.find(category => category.id === activeCategoryId) ?? categories[0];
+  const activeChild = activeCategory?.children?.find(child => child.id === activeChildCategoryId)
+    ?? activeCategory?.children?.[0];
+  const parent = categories.find(category => category.id === parentId && category.children?.length);
+  const items = parent?.children ?? categories;
+  const selectedId = parent
+    ? parent.id === activeCategoryId ? activeChild?.id : undefined
+    : activeCategoryId;
+  const goBack = () => {
+    if (parent) {
+      returnParentFocusIdRef.current = parent.id;
+      setParentId(null);
+    } else setOpen(false);
+  };
+  useNativeBackButtonAction(open, goBack, 240);
+
+  useEffect(() => {
+    const wasOpen = previouslyOpenRef.current;
+    previouslyOpenRef.current = open;
+    if (!open) {
+      if (!wasOpen) return;
+      const frame = requestAnimationFrame(() => {
+        if (document.activeElement === document.body && triggerRef.current?.isConnected) triggerRef.current.focus();
+      });
+      return () => cancelAnimationFrame(frame);
+    }
+    // Replacing a menu level unmounts its focus scope. Complete that handoff
+    // after the old scope restores focus, once the new collection is mounted.
+    const frame = requestAnimationFrame(() => {
+      const pane = paneRef.current;
+      if (!pane) return;
+      const returnParent = parentId === null && returnParentFocusIdRef.current
+        ? [...pane.querySelectorAll<HTMLElement>('[role^="menuitem"]:not([aria-disabled="true"])')]
+          .find(item => item.dataset.key === returnParentFocusIdRef.current)
+        : null;
+      returnParentFocusIdRef.current = null;
+      const selected = pane.querySelector<HTMLElement>('[role^="menuitem"][data-selected]:not([aria-disabled="true"])');
+      const first = pane.querySelector<HTMLElement>('[role^="menuitem"]:not([aria-disabled="true"])');
+      (returnParent ?? selected ?? first ?? pane.querySelector<HTMLButtonElement>("button:not(:disabled)"))?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [open, parentId, triggerRef]);
+
+  const onOpenChange = (nextOpen: boolean) => {
+    if (nextOpen) {
+      returnParentFocusIdRef.current = null;
+      setParentId(activeCategory?.children?.length ? activeCategory.id : null);
+    }
+    setOpen(nextOpen);
+  };
+  const select = (itemId: string) => {
+    const item = items.find(candidate => candidate.id === itemId);
+    if (!item || item.disabled || parent?.disabled) return;
+    if (!parent && item.children?.length) {
+      setParentId(item.id);
+      return;
+    }
+    setOpen(false);
+    if (parent) {
+      if (parent.id === activeCategoryId && onChildCategoryChange) onChildCategoryChange(item.id);
+      else onCategoryChange?.(parent.id, item.id);
+    } else onCategoryChange?.(item.id);
+  };
+  if (!activeCategory) return null;
+  const activeLabel = activeChild ? `${activeCategory.label} / ${activeChild.label}` : activeCategory.label;
+  return (
+    <DialogTrigger isOpen={open} onOpenChange={onOpenChange}>
+      <EntityRow
+        ref={triggerRef}
+        title={activeChild ? (
+          <span className="flex min-w-0 items-center gap-2">
+            <span className="truncate font-normal text-slate-500 dark:text-slate-400">{activeCategory.label}</span>
+            <span aria-hidden="true" className="font-normal text-slate-400">/</span>
+            <span className="truncate">{activeChild.label}</span>
+          </span>
+        ) : activeCategory.label}
+        start={activeCategory.icon ? <activeCategory.icon className="h-4 w-4 text-slate-400 dark:text-slate-500" aria-hidden={true} /> : null}
+        end={<ControlChevron />}
+        pressable
+        isDisabled={categories.every(category => category.disabled)}
+        data-testid={`${navTestId}-picker`}
+        surface="outlined"
+        density="compact"
+        className="min-h-11"
+        aria-label={`${navLabel}: ${activeLabel}`}
+      />
+      <StudioDialogPopover triggerRef={triggerRef} placement="bottom start" offset={6}
+        className="min-w-[var(--trigger-width)] max-w-[calc(100vw-1.5rem)] p-2"
+        data-testid={`${navTestId}-popover`}>
+        <div ref={paneRef} onKeyDownCapture={event => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            goBack();
+          }
+        }}>
+          {parent ? (
+            <Button variant="ghost" size="sm" radius="lg" onPress={goBack}
+              aria-label={`Back to ${navLabel.toLowerCase()}`} data-testid={`${navTestId}-back`}
+              className="mb-1 min-h-11 w-full justify-start !gap-2 !px-2.5">
+              <ControlChevron direction="left" /><span>Back</span>
+            </Button>
+          ) : null}
+          <Heading slot="title" level={4} className="px-2.5 pb-2 pt-1 text-sm font-semibold text-slate-700 dark:text-slate-200">
+            {parent?.label ?? navLabel}
+          </Heading>
+          <StudioMenu key={parent?.id ?? "root"} aria-label={parent ? `${parent.label} sections` : navLabel}
+            autoFocus selectionMode="single" selectedKeys={selectedId ? [selectedId] : []}
+            onAction={key => select(String(key))}
+            // Parent rows browse this surface; destination selection and Escape own dismissal.
+            onClose={() => undefined} className="space-y-1">
+            {items.map(item => {
+              const Icon = item.icon;
+              return (
+                <StudioMenuItem key={item.id} id={item.id} textValue={item.label}
+                  data-testid={item.testId ?? `settings-category-${parent ? `${parent.id}-` : ""}${item.id}`}
+                  isDisabled={item.disabled || parent?.disabled}
+                  className={`min-h-11 ${item.danger ? "text-rose-600 dark:text-rose-400" : ""}`}>
+                  <span className="flex min-w-0 items-center gap-2">
+                    {Icon ? <Icon className="h-4 w-4 shrink-0" aria-hidden={true} /> : null}
+                    <span className="truncate">{item.label}</span>
+                  </span>
+                  {!parent && item.children?.length ? <ControlChevron direction="right" /> : null}
+                </StudioMenuItem>
+              );
+            })}
+          </StudioMenu>
+        </div>
+      </StudioDialogPopover>
+    </DialogTrigger>
   );
 }

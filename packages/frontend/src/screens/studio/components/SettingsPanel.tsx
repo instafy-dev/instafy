@@ -967,11 +967,7 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
                 : "Preferences";
 
   const settingsScope =
-    activeTab === "profile" ? (
-      <Text variant="caption" tone="muted">
-        {user?.email ?? "Guest"}
-      </Text>
-    ) : activeTab === "org" ? (
+    activeTab === "profile" ? null : activeTab === "org" ? (
       <div className="flex flex-wrap items-end gap-3">
         {runtimeControllerEnabled && orgSelectOptions.length > 0 ? (
           <div className="min-w-[240px]">
@@ -1581,7 +1577,6 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
       hideTitle={!isLargeScreen}
       scope={settingsScope}
       categories={categories}
-      compactCategoryNavigation={activeTab === "profile" ? "tabs" : "picker"}
       activeCategoryId={activeCategoryId}
       onCategoryChange={handleCategoryChange}
       activeChildCategoryId={

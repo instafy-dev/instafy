@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { Camera, Trash } from "iconoir-react";
 import { Button } from "../components/Button";
-import { Card } from "../components/Card";
+import { SettingsFormLayout } from "../components/SettingsFormLayout";
 import { Field } from "../components/Field";
 import { Input } from "../components/Input";
 import { Text } from "../components/Text";
@@ -99,16 +99,10 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
   }, [avatarUrl, displayName, onDone, showStatus, updateProfile, user]);
 
   return (
-    <Card
-      tone="default"
-      radius="2xl"
-      shadow="none"
-      padding="sm"
-      className="@container/profile-editor"
-    >
+    <SettingsFormLayout className="@container/profile-editor" data-testid="profile-editor">
       {!compact ? (
-        <div className="mb-4">
-          <Text variant="bodyStrong" tone="secondary">
+        <div>
+          <Text as="h3" variant="bodyStrong" tone="primary">
             Profile
           </Text>
           <Text variant="caption" tone="muted" className="mt-1">
@@ -219,6 +213,6 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
           </Button>
         </div>
       </div>
-    </Card>
+    </SettingsFormLayout>
   );
 }
