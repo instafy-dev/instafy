@@ -72,6 +72,12 @@ mod notification_conversation_read_tests;
 #[path = "project_identity_tests.rs"]
 mod project_identity_tests;
 
+#[path = "human_profile_http_tests.rs"]
+mod human_profile_http_tests;
+
+#[path = "agent_profile_http_tests.rs"]
+mod agent_profile_http_tests;
+
 #[path = "message_search_http_tests.rs"]
 mod message_search_http_tests;
 

@@ -58,16 +58,38 @@ describe.each([false, true])("ProfileProvider (server configured: %s)", (server)
     });
   }
 
-  function expectStored(fullName: string | null, avatarUrl: string | null) {
-    expect(current.profile).toEqual({ fullName, avatarUrl });
+  function expectStored(fullName: string | null, avatarUrl: string | null, bio: string | null = null) {
+    expect(current.profile).toEqual({ fullName, avatarUrl, bio });
     if (server) {
       expect(mocks.upsert).toHaveBeenLastCalledWith({
-        user_id: "profile-user", full_name: fullName, avatar_url: avatarUrl
+        user_id: "profile-user", full_name: fullName, avatar_url: avatarUrl, bio
       }, { onConflict: "user_id" });
     } else {
-      expect(JSON.parse(localStorage.getItem("instafy.profile.profile-user")!)).toEqual({ fullName, avatarUrl });
+      expect(JSON.parse(localStorage.getItem("instafy.profile.profile-user")!)).toEqual({ fullName, avatarUrl, bio });
     }
   }
+
+  it("saves a public bio, preserves it through a name edit, and supports clearing it", async () => {
+    await update({ bio: "I help with builds.\nAsk me about releases." });
+    expectStored("Alex Teammate", "https://example.test/photo.png", "I help with builds.\nAsk me about releases.");
+    await update({ fullName: "Avery" });
+    expectStored("Avery", "https://example.test/photo.png", "I help with builds.\nAsk me about releases.");
+    await update({ bio: null });
+    expectStored("Avery", "https://example.test/photo.png", null);
+  });
+
+  it("allows 500 Unicode characters but rejects longer bios before persistence", async () => {
+    await update({ bio: "🛠".repeat(500) });
+    expectStored("Alex Teammate", "https://example.test/photo.png", "🛠".repeat(500));
+    const calls = mocks.upsert.mock.calls.length;
+    await act(async () => {
+      expect(await current.updateProfile({ bio: "x".repeat(501) })).toEqual({
+        success: false, error: "About must be 500 characters or fewer."
+      });
+    });
+    expect(mocks.upsert.mock.calls.length).toBe(calls);
+    expect(current.profile?.bio).toBe("🛠".repeat(500));
+  });
 
   it("persists explicit photo removal without overwriting an omitted name", async () => {
     await update({ avatarUrl: null });
@@ -127,9 +149,9 @@ describe("ProfileProvider first-use defaults", () => {
     mocks.limit.mockResolvedValueOnce(empty()).mockResolvedValue(saved("alex-dev", "https://example.test/alex.png"));
     await render();
     expect(mocks.upsert).toHaveBeenCalledExactlyOnceWith({
-      user_id: "new-user", full_name: "alex-dev", avatar_url: "https://example.test/alex.png"
+      user_id: "new-user", full_name: "alex-dev", avatar_url: "https://example.test/alex.png", bio: null
     }, { onConflict: "user_id", ignoreDuplicates: true });
-    expect(current.profile).toEqual({ fullName: "alex-dev", avatarUrl: "https://example.test/alex.png" });
+    expect(current.profile).toEqual({ fullName: "alex-dev", avatarUrl: "https://example.test/alex.png", bio: null });
     await act(async () => current.refresh());
     expect(mocks.upsert).toHaveBeenCalledTimes(1);
   });
@@ -138,13 +160,13 @@ describe("ProfileProvider first-use defaults", () => {
     mocks.limit.mockResolvedValue(saved(null));
     await render();
     expect(mocks.upsert).not.toHaveBeenCalled();
-    expect(current.profile).toEqual({ fullName: null, avatarUrl: null });
+    expect(current.profile).toEqual({ fullName: null, avatarUrl: null, bio: null });
   });
 
   it("uses a concurrent profile winner rather than replacing it with provider data", async () => {
     mocks.limit.mockResolvedValueOnce(empty()).mockResolvedValueOnce(saved("Chosen name"));
     await render();
-    expect(current.profile).toEqual({ fullName: "Chosen name", avatarUrl: null });
+    expect(current.profile).toEqual({ fullName: "Chosen name", avatarUrl: null, bio: null });
     expect(mocks.upsert.mock.calls[0][1].ignoreDuplicates).toBe(true);
   });
 
@@ -182,7 +204,7 @@ describe("ProfileProvider first-use defaults", () => {
     await render();
     await act(async () => current.updateProfile({ fullName: "My chosen name", avatarUrl: null }));
     await act(async () => reread.resolve(saved("alex-dev", "https://example.test/alex.png")));
-    expect(current.profile).toEqual({ fullName: "My chosen name", avatarUrl: null });
+    expect(current.profile).toEqual({ fullName: "My chosen name", avatarUrl: null, bio: null });
   });
 
   it("hides the previous account's identity while the next account is loading", async () => {
@@ -233,7 +255,7 @@ describe("ProfileProvider first-use defaults", () => {
     await act(async () => current.updateProfile({ fullName: "Chosen name", avatarUrl: null }));
     mocks.user!.user_metadata = { full_name: "Provider changed", avatar_url: "https://example.test/new.png" };
     await render();
-    expect(current.profile).toEqual({ fullName: "Chosen name", avatarUrl: null });
+    expect(current.profile).toEqual({ fullName: "Chosen name", avatarUrl: null, bio: null });
     expect(mocks.upsert).not.toHaveBeenCalled();
   });
 });

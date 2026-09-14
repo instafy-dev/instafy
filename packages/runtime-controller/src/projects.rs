@@ -165,6 +165,10 @@ pub(crate) fn router() -> Router<AppState> {
         )
         .route("/projects/:project_id/members", get(list_project_members))
         .route(
+            "/projects/:project_id/members/:user_id/profile",
+            get(get_project_member_profile),
+        )
+        .route(
             "/projects/:project_id/members/:user_id",
             patch(update_project_member).delete(remove_project_member),
         )
@@ -2003,6 +2007,123 @@ async fn list_project_members(
     })?;
 
     Ok(Json(ProjectMembersResponse { members }))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HumanProfileResponse {
+    user_id: Uuid,
+    display_name: Option<String>,
+    avatar_url: Option<String>,
+    bio: Option<String>,
+}
+
+// Match the browser profile defaults' JavaScript trim()/\s normalization,
+// including the byte-order mark, without treating JSON numbers as names.
+fn is_profile_metadata_whitespace(character: char) -> bool {
+    matches!(character,
+        '\u{0009}'..='\u{000d}' | '\u{0020}' | '\u{00a0}' | '\u{1680}'
+        | '\u{2000}'..='\u{200a}' | '\u{2028}' | '\u{2029}' | '\u{202f}'
+        | '\u{205f}' | '\u{3000}' | '\u{feff}')
+}
+
+fn human_profile_metadata_defaults(
+    metadata: &serde_json::Value,
+) -> (Option<String>, Option<String>) {
+    let values = metadata.as_object();
+    let string_claim = |key: &str| {
+        values
+            .and_then(|values| values.get(key))
+            .and_then(serde_json::Value::as_str)
+    };
+    let display_name = [
+        "full_name",
+        "name",
+        "display_name",
+        "user_name",
+        "preferred_username",
+        "username",
+    ]
+    .into_iter()
+    .filter_map(string_claim)
+    .map(|value| {
+        value
+            .split(is_profile_metadata_whitespace)
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    })
+    .find(|name| !name.is_empty() && !name.contains('@'));
+    let avatar_url = ["avatar_url", "picture"]
+        .into_iter()
+        .filter_map(string_claim)
+        .map(|value| value.trim_matches(is_profile_metadata_whitespace))
+        .find(|value| !value.is_empty())
+        .map(str::to_owned);
+    (display_name, avatar_url)
+}
+
+async fn get_project_member_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((project_id_raw, user_id_raw)): Path<(String, String)>,
+) -> Result<Json<HumanProfileResponse>, (StatusCode, Json<ApiError>)> {
+    let context = authenticate_request(&state.config, &headers).await?;
+    crate::auth::require_user_session(&context)?;
+    let project_id = parse_uuid_param(project_id_raw, "project_id")?;
+    let user_id = parse_uuid_param(user_id_raw, "user_id")?;
+    let mut connection = state
+        .pool
+        .get()
+        .await
+        .map_err(|error| database_unavailable("Member profile", error))?;
+    let transaction = connection
+        .transaction()
+        .await
+        .map_err(|error| database_unavailable("Member profile", error))?;
+
+    let project = load_project_record(&transaction, &project_id).await?;
+    ensure_project_read_access(&transaction, &project, &context, None).await?;
+    // The target must still be able to read this exact space. A shared team
+    // elsewhere or a historical conversation appearance is not sufficient.
+    let target_context = RequestContext {
+        user_id: Some(user_id),
+        is_service_role: false,
+        scoped_claims: None,
+    };
+    ensure_project_read_access(&transaction, &project, &target_context, None).await?;
+
+    let row = transaction
+        .query_opt(
+            "select u.id as user_id,
+                    p.user_id is not null as has_saved_profile,
+                    p.full_name as display_name, p.avatar_url, p.bio,
+                    case when p.user_id is null then u.raw_user_meta_data
+                    end as fallback_metadata
+             from auth.users u
+             left join profiles p on p.user_id = u.id
+             where u.id = $1",
+            &[&user_id],
+        )
+        .await
+        .map_err(|error| internal_error(format!("failed to load member profile: {error}")))?
+        .ok_or_else(|| not_found("member profile not found"))?;
+    let (display_name, avatar_url) = if row.get::<_, bool>("has_saved_profile") {
+        (row.get("display_name"), row.get("avatar_url"))
+    } else {
+        let metadata: Option<serde_json::Value> = row.get("fallback_metadata");
+        human_profile_metadata_defaults(metadata.as_ref().unwrap_or(&serde_json::Value::Null))
+    };
+    let profile = HumanProfileResponse {
+        user_id: row.get("user_id"),
+        display_name,
+        avatar_url,
+        bio: row.get("bio"),
+    };
+    transaction.commit().await.map_err(|error| {
+        internal_error(format!("failed to finalize member profile read: {error}"))
+    })?;
+    Ok(Json(profile))
 }
 
 async fn update_project_member(

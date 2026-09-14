@@ -1,3 +1,4 @@
+import { PROFILE_BIO_MAX_LENGTH } from "@instafy/sdk/human-profiles";
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { Brain, CheckCircle, Cpu, EditPencil, MoreHoriz, Trash, Upload, WarningTriangle, Xmark } from "iconoir-react";
 import { MenuTrigger } from "react-aria-components";
@@ -329,10 +330,13 @@ export function CredentialsSettingsCard() {
   const [agentHandleDraft, setAgentHandleDraft] = useState("");
   const [agentNameDraft, setAgentNameDraft] = useState("");
   const [agentAvatarUrlDraft, setAgentAvatarUrlDraft] = useState("");
+  const [agentBioDraft, setAgentBioDraft] = useState("");
   const [agentDescriptionDraft, setAgentDescriptionDraft] = useState("");
   const [agentCredentialDraft, setAgentCredentialDraft] = useState<string | null>(null);
   const [agentProviderDraft, setAgentProviderDraft] = useState<AiProviderId>("openai");
   const [agentModelDraft, setAgentModelDraft] = useState<string | null>(null);
+  const [agentCredentialDirty, setAgentCredentialDirty] = useState(false);
+  const [agentModelDirty, setAgentModelDirty] = useState(false);
   const [credentialTestPendingId, setCredentialTestPendingId] = useState<string | null>(null);
   const [credentialTestFeedback, setCredentialTestFeedback] = useState<Record<string, CredentialTestFeedback>>({});
   const [mobileCredentialMenuId, setMobileCredentialMenuId] = useState<string | null>(null);
@@ -674,9 +678,12 @@ export function CredentialsSettingsCard() {
     setAgentNameDraft("");
     setAgentAvatarUrlDraft("");
     setAgentDescriptionDraft("");
+    setAgentBioDraft("");
     setAgentCredentialDraft(null);
     setAgentProviderDraft("openai");
     setAgentModelDraft(null);
+    setAgentCredentialDirty(false);
+    setAgentModelDirty(false);
   }, []);
 
   const defaultCodexCredential = useMemo(() => {
@@ -773,16 +780,21 @@ export function CredentialsSettingsCard() {
     setAgentNameDraft("");
     setAgentAvatarUrlDraft("");
     setAgentDescriptionDraft("");
+    setAgentBioDraft("");
     setAgentCredentialDraft(credentialId);
     setAgentProviderDraft(provider);
     setAgentModelDraft(modelOptionsForProvider(provider)[0]?.id ?? null);
+    setAgentCredentialDirty(false);
+    setAgentModelDirty(false);
   }, [credentialsById]);
 
   const handleAgentCredentialChange = useCallback(
     (credentialId: string) => {
       setAgentCredentialDraft(credentialId);
+      setAgentCredentialDirty(true);
       const credential = credentialsById.get(credentialId) ?? null;
       const provider = credential ? resolveCredentialProviderId(credential) : "openai";
+      if (provider !== agentProviderDraft) setAgentModelDirty(true);
       setAgentProviderDraft(provider);
       setAgentModelDraft((prev) => {
         const options = modelOptionsForProvider(provider);
@@ -803,11 +815,14 @@ export function CredentialsSettingsCard() {
   );
 
   const openEditBotModal = useCallback((agent: ControllerAgentProfile) => {
+    setAgentCredentialDirty(false);
+    setAgentModelDirty(false);
     setAgentProfileModal({ mode: "edit", agentId: agent.id });
     setAgentHandleDraft(`@${agent.handle}`);
     setAgentNameDraft(agent.displayName ?? "");
     setAgentAvatarUrlDraft(resolveAgentAvatarUrlDraftFromSeed(agent.avatarSeed));
     setAgentDescriptionDraft(agent.description ?? "");
+    setAgentBioDraft(agent.bio ?? "");
     const resolvedCredentialId = agent.credentialId ?? defaultCredentialId ?? null;
     setAgentCredentialDraft(resolvedCredentialId);
     const credential = resolvedCredentialId ? credentialsById.get(resolvedCredentialId) ?? null : null;
@@ -825,11 +840,14 @@ export function CredentialsSettingsCard() {
   }, [credentialsById, defaultCredentialId]);
 
   const openOctoProfileModal = useCallback((agent: ControllerAgentProfile) => {
+    setAgentCredentialDirty(false);
+    setAgentModelDirty(false);
     setAgentProfileModal({ mode: "octo", agentId: agent.id });
     setAgentHandleDraft("@octo");
     setAgentNameDraft(agent.displayName ?? "Octo");
     setAgentAvatarUrlDraft(resolveAgentAvatarUrlDraftFromSeed(agent.avatarSeed));
     setAgentDescriptionDraft(agent.description ?? "");
+    setAgentBioDraft(agent.bio ?? "");
     const resolvedCredentialId = agent.credentialId ?? defaultCredentialId ?? null;
     setAgentCredentialDraft(resolvedCredentialId);
     const credential = resolvedCredentialId ? credentialsById.get(resolvedCredentialId) ?? null : null;
@@ -880,6 +898,11 @@ export function CredentialsSettingsCard() {
       return;
     }
 
+    if (Array.from(agentBioDraft).length > PROFILE_BIO_MAX_LENGTH) {
+      showStatus(`About must be ${PROFILE_BIO_MAX_LENGTH} characters or fewer.`, "error", 4500);
+      return;
+    }
+    const trimmedBio = agentBioDraft.trim();
     const trimmedName = agentNameDraft.trim();
     const trimmedDescription = agentDescriptionDraft.trim();
     const rawAvatarUrl = agentAvatarUrlDraft.trim();
@@ -913,6 +936,7 @@ export function CredentialsSettingsCard() {
           displayName: trimmedName.length > 0 ? trimmedName : undefined,
           avatarSeed: normalizedAvatarUrl ?? undefined,
           description: trimmedDescription.length > 0 ? trimmedDescription : undefined,
+          bio: trimmedBio || undefined,
           model: agentModelDraft,
         });
         if (!result.success || !result.agent) {
@@ -951,7 +975,7 @@ export function CredentialsSettingsCard() {
     const handleForRequest = normalizedHandle ?? undefined;
 
     const credentialId = (agentCredentialDraft ?? "").trim();
-    const credentialSelectionRequired = codexCredentials.length > 0;
+    const credentialSelectionRequired = agentCredentialDirty && codexCredentials.length > 0;
     if (credentialSelectionRequired && !credentialId) {
       showStatus("Select a credential to power this agent.", "error", 4500);
       return;
@@ -964,8 +988,11 @@ export function CredentialsSettingsCard() {
         displayName: trimmedName.length > 0 ? trimmedName : null,
         avatarSeed: nextAvatarSeed,
         description: trimmedDescription.length > 0 ? trimmedDescription : null,
-        credentialId: credentialId.length > 0 ? credentialId : undefined,
-        model: agentModelDraft,
+        bio: trimmedBio || null,
+        // The picker displays effective defaults for inherited/unknown values.
+        // Saving profile text must not turn those display defaults into pins.
+        ...(agentCredentialDirty ? { credentialId: credentialId || null } : {}),
+        ...(agentModelDirty ? { model: agentModelDraft } : {}),
       });
       if (!result.success || !result.agent) {
         showStatus(result.error ?? "Unable to update bot.", "error", 4500);
@@ -985,11 +1012,14 @@ export function CredentialsSettingsCard() {
     agentActionPendingId,
     agentAvatarUrlDraft,
     agentCredentialDraft,
+    agentCredentialDirty,
     codexCredentials.length,
     agents,
     agentDescriptionDraft,
+    agentBioDraft,
     agentHandleDraft,
     agentModelDraft,
+    agentModelDirty,
     agentNameDraft,
     agentProfileModal,
     closeAgentProfileModal,
@@ -1053,8 +1083,8 @@ export function CredentialsSettingsCard() {
             const credential = credentialId ? credentialsById.get(credentialId) ?? null : null;
             const label = credential ? resolveCredentialLabel(credential) : null;
             return label
-              ? `Powered by ${label}. Used when @octo is asked to introduce itself.`
-              : "Used when @octo is asked to introduce itself.";
+              ? `Powered by ${label}.`
+              : "Your agent’s public profile and response preferences.";
           })()
         : undefined;
 
@@ -1096,6 +1126,10 @@ export function CredentialsSettingsCard() {
 
   const handleAgentProviderChange = useCallback(
     (provider: AiProviderId) => {
+      if (provider !== agentProviderDraft) {
+        setAgentCredentialDirty(true);
+        setAgentModelDirty(true);
+      }
       setAgentProviderDraft(provider);
       setAgentCredentialDraft((prev) => {
         const list = credentialsByProvider.get(provider) ?? [];
@@ -1115,7 +1149,7 @@ export function CredentialsSettingsCard() {
         return allowed ? normalizedPrev : null;
       });
     },
-    [credentialsByProvider]
+    [agentProviderDraft, credentialsByProvider]
   );
 
   const handleCreateBotFromManager = useCallback(() => {
@@ -1156,7 +1190,7 @@ export function CredentialsSettingsCard() {
         onProviderChange={handleAgentProviderChange}
         modelId={agentModelDraft}
         modelOptions={agentModelOptions}
-        onModelChange={setAgentModelDraft}
+        onModelChange={(modelId) => { setAgentModelDraft(modelId); setAgentModelDirty(true); }}
         handle={agentHandleDraft}
         onHandleChange={setAgentHandleDraft}
         handleDisabled={agentProfileModalMode === "octo"}
@@ -1170,6 +1204,8 @@ export function CredentialsSettingsCard() {
         onDisplayNameChange={setAgentNameDraft}
         avatarImageUrl={agentAvatarUrlDraft}
         onAvatarImageUrlChange={setAgentAvatarUrlDraft}
+        bio={agentBioDraft}
+        onBioChange={setAgentBioDraft}
         description={agentDescriptionDraft}
         onDescriptionChange={setAgentDescriptionDraft}
         onClose={closeAgentProfileModal}

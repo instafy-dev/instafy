@@ -3,6 +3,7 @@ export * from "./capabilities";
 export * from "./controllerClient";
 export * from "./conversationSearch";
 export * from "./projectIdentity";
+export * from "./humanProfiles";
 export * from "./featureModules.js";
 export * from "./hardwareProvider";
 export * from "./providerProjectBinding";

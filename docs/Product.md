@@ -369,6 +369,25 @@ Settings cards use the shared Studio surfaces and control styling. Lists own one
 gutter, invitation counts stay beside their heading, and narrow profile forms place Save
 below the helper text. Secrets has a labeled **Create secret** action.
 
+Personal profiles include a display name, picture and optional **About** introduction (up to
+500 Unicode characters). About is plain text, saved explicitly with the other profile fields,
+and can be cleared. A teammate's avatar or name in a conversation or the participants list
+opens their profile card; the card shows public profile fields only after the controller
+confirms both people still have access to the selected space. Narrow screens use the shared
+compact profile dialog, while desktop uses an anchored card. Profile cards are not a public
+user directory and do not expose email addresses.
+
+Agent profiles have the same optional **About** introduction. Their separate **Style guidance**
+field continues to influence responses; About never enters runtime prompts. Agent profile
+cards fetch public fields by exact agent ID and space, with current access required for both
+the viewer and the agent owner. A cleared bio disappears from the card.
+
+The Studio corner-radius scale uses 6px for compact search scope chips, 8px for menu rows,
+12px for form controls and profile actions, and 16px for cards and dialogs. Avatars remain
+circular and settings category tabs retain their flat underline. Default selects match input
+heights: 44px for narrow/touch layouts and 38px for wider fine-pointer layouts; explicit
+compact selects keep their existing size.
+
 On mobile, installed skill titles open the skill file directly, the enable toggle remains
 visible, and other actions live in the row menu. Skill discovery keeps search on one row
 and folds source, category and sort controls into **Filters**; closing the controls keeps

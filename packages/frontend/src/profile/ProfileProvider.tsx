@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { hasSupabaseConfig, supabase } from "../lib/supabaseClient";
 import { useAuth } from "../providers/AuthProvider";
+import { PROFILE_BIO_MAX_LENGTH } from "@instafy/sdk/human-profiles";
 import { resolveProfileDefaults } from "./profileDefaults";
 
 const LOCAL_PROFILE_PREFIX = "instafy.profile.";
@@ -8,11 +9,13 @@ const LOCAL_PROFILE_PREFIX = "instafy.profile.";
 export interface UserProfile {
   fullName: string | null;
   avatarUrl: string | null;
+  bio: string | null;
 }
 
 export interface ProfileUpdateInput {
   fullName?: string | null;
   avatarUrl?: string | null;
+  bio?: string | null;
 }
 
 interface ProfileContextValue {
@@ -37,7 +40,8 @@ function readLocalProfile(userId: string): UserProfile | null {
     const parsed = JSON.parse(raw) as UserProfile;
     return {
       fullName: typeof parsed.fullName === "string" ? parsed.fullName : null,
-      avatarUrl: typeof parsed.avatarUrl === "string" ? parsed.avatarUrl : null
+      avatarUrl: typeof parsed.avatarUrl === "string" ? parsed.avatarUrl : null,
+      bio: typeof parsed.bio === "string" ? parsed.bio : null
     };
   } catch {
     return null;
@@ -98,7 +102,7 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
       try {
         if (!hasSupabaseConfig) {
           const stored = readLocalProfile(userId);
-          const localProfile = stored ?? { fullName: defaultName, avatarUrl: defaultAvatar };
+          const localProfile = stored ?? { fullName: defaultName, avatarUrl: defaultAvatar, bio: null };
           if (!stored) writeLocalProfile(userId, localProfile);
           setProfileState({ userId, profile: localProfile });
           setError(null);
@@ -106,7 +110,7 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
         }
         const readProfile = () => supabase
           .from("profiles")
-          .select("full_name, avatar_url")
+          .select("full_name, avatar_url, bio")
           .eq("user_id", userId)
           .limit(1);
         const { data, error: fetchError } = await readProfile();
@@ -122,7 +126,8 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
           const { error: insertError } = await supabase.from("profiles").upsert({
             user_id: userId,
             full_name: defaultName,
-            avatar_url: defaultAvatar
+            avatar_url: defaultAvatar,
+            bio: null
           }, { onConflict: "user_id", ignoreDuplicates: true });
           if (!isCurrent()) return;
           if (insertError) {
@@ -143,7 +148,8 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
         }
         setProfileState({ userId, profile: {
           fullName: row.full_name ?? null,
-          avatarUrl: row.avatar_url ?? null
+          avatarUrl: row.avatar_url ?? null,
+          bio: row.bio ?? null
         } });
         setError(null);
       } catch (cause) {
@@ -163,6 +169,9 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
       if (!userId || activeUserIdRef.current !== userId) {
         return { success: false, error: "Sign in to update your profile." };
       }
+      if (updates.bio && Array.from(updates.bio).length > PROFILE_BIO_MAX_LENGTH) {
+        return { success: false, error: `About must be ${PROFILE_BIO_MAX_LENGTH} characters or fewer.` };
+      }
       // A pending initialization/refresh must not overwrite this explicit edit.
       const version = ++saveVersionRef.current;
       const accountVersion = accountVersionRef.current;
@@ -172,10 +181,11 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
       requestVersionRef.current += 1;
       inflightRef.current = null;
       setLoading(false);
-      const baseProfile = profile ?? { fullName: defaultName, avatarUrl: defaultAvatar };
+      const baseProfile = profile ?? { fullName: defaultName, avatarUrl: defaultAvatar, bio: null };
       const nextProfile: UserProfile = {
         fullName: updates.fullName === undefined ? baseProfile.fullName : updates.fullName,
-        avatarUrl: updates.avatarUrl === undefined ? baseProfile.avatarUrl : updates.avatarUrl
+        avatarUrl: updates.avatarUrl === undefined ? baseProfile.avatarUrl : updates.avatarUrl,
+        bio: updates.bio === undefined ? baseProfile.bio : updates.bio
       };
 
       try {
@@ -192,7 +202,8 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
             {
               user_id: userId,
               full_name: nextProfile.fullName ?? null,
-              avatar_url: nextProfile.avatarUrl ?? null
+              avatar_url: nextProfile.avatarUrl ?? null,
+              bio: nextProfile.bio ?? null
             },
             { onConflict: "user_id" }
           );

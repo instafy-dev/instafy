@@ -26,6 +26,7 @@ import {
 } from "./AssistantSpeakerIdentityPill";
 import { normalizeAssistantHandleLabel } from "./assistantSpeakerIdentity";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
+import { HumanProfilePopover } from "../../../profile/HumanProfilePopover";
 import { extractAgentJobId } from "./chatMessagePresentation";
 import { resolveThreadRunStatusFromMessages } from "./threadPreviewHelpers";
 import { resolveSpineToneFromStatus } from "./ThreadSpine";
@@ -486,17 +487,20 @@ export function ConversationMessageRows({
             : isLeftAligned
               ? isGroupHead && humanIdentity
                 ? (
-                    <ChatMessageAvatar
-                      kind="human"
-                      seed={humanIdentity.avatarSeed}
-                      label={humanIdentity.label}
-                    />
+                    <HumanProfilePopover projectId={projectId} userId={humanIdentity.avatarSeed} displayName={humanIdentity.label}>
+                      <ChatMessageAvatar
+                        kind="human"
+                        seed={humanIdentity.avatarSeed}
+                        label={humanIdentity.label}
+                      />
+                    </HumanProfilePopover>
                   )
                 : assistantAvatarPlaceholder
               : null;
         const humanSpeakerIdentity =
           message.role === "user" && !isOwnUserMessage && isGroupHead && humanIdentity ? (
             <HumanSpeakerIdentityLabel
+              projectId={projectId}
               avatarSeed={humanIdentity.avatarSeed}
               label={humanIdentity.label}
               timestamp={message.timestamp}

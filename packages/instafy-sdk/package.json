@@ -12,6 +12,7 @@
     "./controller-client": "./src/controllerClient.ts",
     "./conversation-search": "./src/conversationSearch.ts",
     "./project-identity": "./src/projectIdentity.ts",
+    "./human-profiles": "./src/humanProfiles.ts",
     "./feature-modules": {
       "types": "./src/featureModules.d.ts",
       "default": "./src/featureModules.js"

@@ -19,5 +19,5 @@ export function resolveProfileDefaults(metadata: unknown): UserProfile {
   const avatarUrl = [values.avatar_url, values.picture]
     .find((value): value is string => typeof value === "string" && Boolean(value.trim()))
     ?.trim() ?? null;
-  return { fullName, avatarUrl };
+  return { fullName, avatarUrl, bio: null };
 }

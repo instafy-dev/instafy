@@ -2,6 +2,7 @@ import type { ChatMessage } from "../types";
 import { extractChatClientIdentity } from "./chatMessageDetailHelpers";
 import { ChatMessageAvatar } from "./ChatMessageAvatar";
 import { formatSpeakerTimestamp } from "./chatSpeakerTimestamp";
+import { HumanProfilePopover } from "../../../profile/HumanProfilePopover";
 
 export type HumanChatIdentity = {
   avatarSeed: string | null;
@@ -54,10 +55,12 @@ export function HumanSpeakerIdentityLabel({
   label,
   timestamp,
   avatarVisibility = "always",
+  projectId,
 }: {
   avatarSeed: string | null;
   label: string;
   timestamp?: number | null;
+  projectId?: string | null;
   /**
    * "narrow" hides the label's own avatar at sm+ where the message row's
    * avatar gutter shows the face instead, so name and body share one left
@@ -71,17 +74,19 @@ export function HumanSpeakerIdentityLabel({
       className="inline-flex max-w-full items-center gap-2 text-xs text-slate-500 dark:text-slate-400"
       data-testid="chat-human-speaker-label"
     >
-      <span className={`flex-none ${avatarVisibility === "narrow" ? "sm:hidden" : ""}`.trim()}>
-        <ChatMessageAvatar
-          kind="human"
-          seed={avatarSeed}
-          label={label}
-          size="xs"
-        />
-      </span>
-      <span className="min-w-0 truncate font-semibold text-slate-600 dark:text-slate-300">
-        {label}
-      </span>
+      <HumanProfilePopover projectId={projectId} userId={avatarSeed} displayName={label} className="inline-flex min-w-0 items-center gap-2 rounded-lg text-left">
+        <span className={`flex-none ${avatarVisibility === "narrow" ? "sm:hidden" : ""}`.trim()}>
+          <ChatMessageAvatar
+            kind="human"
+            seed={avatarSeed}
+            label={label}
+            size="xs"
+          />
+        </span>
+        <span className="min-w-0 truncate font-semibold text-slate-600 dark:text-slate-300">
+          {label}
+        </span>
+      </HumanProfilePopover>
       {timestampInfo ? (
         <time
           className="flex-none text-xxs font-medium text-slate-400 dark:text-slate-500"

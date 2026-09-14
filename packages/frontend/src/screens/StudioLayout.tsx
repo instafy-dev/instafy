@@ -2254,6 +2254,7 @@ function StudioLayoutInner() {
               </div>
               {isChatSurfaceVisible && participantsDrawerOpen ? (
                 <ParticipantsDrawer
+                  projectId={activeProjectId}
                   onClose={() => setParticipantsDrawerOpen(false)}
                   onOpenMachine={(runtimeId) => {
                     // Deep-link: focus that machine on the Machines page, then

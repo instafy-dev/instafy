@@ -44,13 +44,26 @@ between label, control and helper text. Explicit extra-small fields keep a compa
 The label should identify the field without relying on placeholder text; omit placeholders
 that only repeat the label, such as “Add your name” under “Display name”.
 
-`Input` defaults to the medium form size: 16px text on narrow screens and 14px on wider
+`Input` and `Select` default to the medium form size: 16px text on narrow screens and 14px on wider
 screens. Controls have a 44px minimum height on narrow screens or coarse pointers, and
 a 38px minimum height on wider fine-pointer screens. Explicit small/extra-small controls
 retain their compact sizing, and unstyled inputs retain their host layout. Preserve the
 existing thin outline, 12px default radius
 and visible keyboard focus treatment. Profile's Save action follows the same 44px mobile
 target and uses a compact 36px height on wider fine-pointer screens.
+
+Use a small, consistent radius scale: 6px for compact search scope chips, 8px for navigation
+and menu rows, 12px for form controls and profile actions, and 16px for cards, dialogs and
+popovers. Avatars remain circular and settings category tabs remain flat with an underline.
+Do not turn every action into a pill.
+
+People and bots have an optional **About** field using `ProfileBioField`: a persistent label,
+plain multiline text, a 500-character counter and a validation error for longer text. Count
+Unicode code points consistently with the database. Save and clear it explicitly with the
+profile. Bot **Style guidance** remains a separate field and keeps its existing runtime
+meaning; a public bio must not become an instruction. Profile cards fetch current public
+fields in the selected space and preserve saved empty values. They must not show email,
+credentials or bot instructions, or reuse a previous account/person's response.
 
 Compact category controls are at least 44 pixels tall. Shared menu items also use a 44-pixel
 minimum for coarse pointers while preserving desktop density. Popovers scroll within their

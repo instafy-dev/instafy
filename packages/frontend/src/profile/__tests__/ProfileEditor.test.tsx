@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   profile: { fullName: "Alex Teammate", avatarUrl: "https://example.test/photo.png" } as {
     fullName: string | null;
     avatarUrl: string | null;
+    bio?: string | null;
   },
   updateProfile: vi.fn(),
   showStatus: vi.fn(),
@@ -64,8 +65,8 @@ describe("ProfileEditor", () => {
 
   async function type(id: string, value: string) {
     await act(async () => {
-      const input = container.querySelector<HTMLInputElement>(`#${id}`)!;
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value);
+      const input = container.querySelector<HTMLInputElement | HTMLTextAreaElement>(`#${id}`)!;
+      Object.getOwnPropertyDescriptor(input instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype, "value")!.set!.call(input, value);
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
   }
@@ -77,6 +78,36 @@ describe("ProfileEditor", () => {
       input.dispatchEvent(new Event("change", { bubbles: true }));
     });
   }
+
+  it("saves and clears the optional About text without changing the name or photo", async () => {
+    await render();
+    await type("profile-bio", "  Builds and releases.\nHappy to help.  ");
+    expect(mocks.updateProfile).not.toHaveBeenCalled();
+    await click("Save profile");
+    expect(mocks.updateProfile).toHaveBeenLastCalledWith({
+      fullName: "Alex Teammate", avatarUrl: mocks.profile.avatarUrl,
+      bio: "Builds and releases.\nHappy to help."
+    });
+    mocks.profile.bio = "Existing bio";
+    await render();
+    await type("profile-bio", "");
+    await click("Save profile");
+    expect(mocks.updateProfile).toHaveBeenLastCalledWith({
+      fullName: "Alex Teammate", avatarUrl: mocks.profile.avatarUrl, bio: null
+    });
+  });
+
+  it("shows a character count and blocks an overlong bio while allowing 500 emoji", async () => {
+    await render();
+    await type("profile-bio", "🛠".repeat(500));
+    expect(button("Save profile").disabled).toBe(false);
+    expect(container.querySelector("#profile-bio-count")?.textContent).toBe("500/500");
+    await type("profile-bio", "x".repeat(501));
+    expect(button("Save profile").disabled).toBe(true);
+    expect(container.querySelector("#profile-bio")?.getAttribute("aria-invalid")).toBe("true");
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("500 characters");
+    expect(mocks.updateProfile).not.toHaveBeenCalled();
+  });
 
   it("shows photo actions without exposing its stored URL, and reveals an accessible optional URL field", async () => {
     await render();
@@ -108,7 +139,7 @@ describe("ProfileEditor", () => {
     await click("Hide image URL");
     await click("Save profile");
     expect(mocks.updateProfile).toHaveBeenCalledExactlyOnceWith({
-      fullName: "Avery Example", avatarUrl: "https://example.test/replacement.png"
+      fullName: "Avery Example", avatarUrl: "https://example.test/replacement.png", bio: null
     });
     expect(onDone).toHaveBeenCalledOnce();
     expect(mocks.showStatus).toHaveBeenCalledWith("Profile updated.", "success", 2500);
@@ -122,7 +153,7 @@ describe("ProfileEditor", () => {
     expect(button("Upload photo")).toBeDefined();
     expect(mocks.updateProfile).not.toHaveBeenCalled();
     await click("Save profile");
-    expect(mocks.updateProfile).toHaveBeenCalledExactlyOnceWith({ fullName: "Alex Teammate", avatarUrl: null });
+    expect(mocks.updateProfile).toHaveBeenCalledExactlyOnceWith({ fullName: "Alex Teammate", avatarUrl: null, bio: null });
   });
 
   it("does not expose uploaded image data when the optional URL field is opened", async () => {
@@ -134,7 +165,7 @@ describe("ProfileEditor", () => {
     expect(button("Save profile").disabled).toBe(true);
     await type("profile-display-name", "Updated name");
     await click("Save profile");
-    expect(mocks.updateProfile).toHaveBeenCalledWith({ fullName: "Updated name", avatarUrl: mocks.profile.avatarUrl });
+    expect(mocks.updateProfile).toHaveBeenCalledWith({ fullName: "Updated name", avatarUrl: mocks.profile.avatarUrl, bio: null });
   });
 
   it("opens the native photo picker and previews a valid upload without showing encoded data", async () => {
@@ -153,7 +184,7 @@ describe("ProfileEditor", () => {
     expect(container.querySelector('input[type="url"]')).toBeNull();
     expect(mocks.updateProfile).not.toHaveBeenCalled();
     await click("Save profile");
-    expect(mocks.updateProfile).toHaveBeenCalledWith({ fullName: "Alex Teammate", avatarUrl: "data:image/png;base64,bmV3" });
+    expect(mocks.updateProfile).toHaveBeenCalledWith({ fullName: "Alex Teammate", avatarUrl: "data:image/png;base64,bmV3", bio: null });
   });
 
   it("announces invalid files and keeps the existing photo", async () => {

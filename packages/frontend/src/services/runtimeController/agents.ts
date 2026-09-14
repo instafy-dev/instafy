@@ -1,21 +1,39 @@
+import { createControllerReadBudget } from "./readBudget";
+import { readControllerError, resolveControllerRequestContext } from "./core";
 import {
   controllerJsonRequest,
 } from "./client";
 
-export interface ControllerAgentProfile {
-  id: string;
-  handle: string;
-  displayName: string | null;
-  description: string | null;
-  avatarSeed: string;
-  provider: string;
-  model: string | null;
-  /** Per-agent reasoning effort (minimal|low|medium|high), or null to inherit. */
-  reasoningEffort: string | null;
-  credentialId: string | null;
-  runtimeId: string | null;
-  createdAt: string;
-  updatedAt: string;
+export type { ControllerAgentProfile } from "@instafy/sdk/agents";
+import {
+  type ControllerAgentProfile, type CreateMyAgentInput, type UpdateMyAgentInput,
+  type ControllerPublicAgentProfile, getProjectAgentProfile,
+} from "@instafy/sdk/agents";
+
+export async function getPublicAgentProfile(projectId: string, agentId: string, params?: { accessToken?: string | null; signal?: AbortSignal }) {
+  const budget = createControllerReadBudget(params?.signal);
+  try {
+    const context = await budget.wait(() => resolveControllerRequestContext(params?.accessToken ?? null));
+    if (!context.baseUrl || !context.accessToken) throw new Error("Sign in to view this profile.");
+    const profile = await getProjectAgentProfile(async (path, init) => {
+      const response = await budget.wait(() => fetch(`${context.baseUrl}${path}`, {
+        method: init.method, headers: { authorization: `Bearer ${context.accessToken}`, accept: "application/json" },
+        signal: budget.signal,
+      }));
+      if (!response.ok) throw new Error(await budget.wait(() => readControllerError(response, "Unable to load agent profile.", context)));
+      const value = await budget.wait(() => response.json()) as ControllerPublicAgentProfile;
+      if (!value || value.id !== agentId || typeof value.handle !== "string" || typeof value.avatarSeed !== "string"
+        || ![value.displayName, value.bio].every((field) => field === null || typeof field === "string")) {
+        throw new Error("Invalid agent profile response.");
+      }
+      return { id: value.id, handle: value.handle, displayName: value.displayName, avatarSeed: value.avatarSeed, bio: value.bio };
+    }, { projectId, agentId, signal: budget.signal });
+    return { success: true as const, value: profile };
+  } catch (error) {
+    return { success: false as const, error: error instanceof Error ? error.message : "Unable to load agent profile." };
+  } finally {
+    budget.dispose();
+  }
 }
 
 export interface ListMyAgentsResult {
@@ -55,6 +73,7 @@ function mapAgentPayload(payload: Record<string, unknown>): ControllerAgentProfi
     handle,
     displayName: typeof payload.displayName === "string" ? payload.displayName : null,
     description: typeof payload.description === "string" ? payload.description : null,
+    bio: typeof payload.bio === "string" ? payload.bio : null,
     avatarSeed: typeof payload.avatarSeed === "string" ? payload.avatarSeed : id,
     provider: typeof payload.provider === "string" ? payload.provider : "openai",
     model: typeof payload.model === "string" ? payload.model : null,
@@ -95,16 +114,7 @@ export async function listMyAgents(params?: {
 }
 
 export async function createMyAgent(
-  body: {
-    credentialId?: string;
-    handle?: string;
-    displayName?: string;
-    description?: string;
-    avatarSeed?: string;
-    provider?: string;
-    model?: string | null;
-    reasoningEffort?: string | null;
-  },
+  body: CreateMyAgentInput,
   params?: { accessToken?: string | null }
 ): Promise<CreateMyAgentResult> {
   const response = await controllerJsonRequest<Record<string, unknown>>({
@@ -129,17 +139,7 @@ export async function createMyAgent(
 
 export async function updateMyAgent(
   agentId: string,
-  body: {
-    handle?: string;
-    displayName?: string | null;
-    description?: string | null;
-    avatarSeed?: string;
-    credentialId?: string | null;
-    model?: string | null;
-    reasoningEffort?: string | null;
-    projectId?: string;
-    runtimeId?: string | null;
-  },
+  body: UpdateMyAgentInput,
   params?: { accessToken?: string | null }
 ): Promise<UpdateMyAgentResult> {
   const normalizedId = agentId.trim();

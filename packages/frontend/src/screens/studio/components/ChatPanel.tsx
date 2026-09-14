@@ -1753,19 +1753,25 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
     window.addEventListener("instafy:focus-composer", handler);
     return () => window.removeEventListener("instafy:focus-composer", handler);
   }, [focusInput]);
-  // Anchor-less profile opens: inline mention chips and narrow speaker labels
-  // dispatch a handle; this panel owns agent resolution, so it hosts the card.
-  const [agentProfileModalHandle, setAgentProfileModalHandle] = useState<string | null>(null);
+  // Carry the observed ID across the mobile/mention entrypoint; handles alone
+  // cannot identify another user's bot. An open card belongs to this account/space.
+  const [agentProfileTarget, setAgentProfileTarget] = useState<{
+    identity: OpenAgentProfileDetail; projectId: string | null; userId: string | null;
+  } | null>(null);
+  const agentProfileModal = agentProfileTarget && agentProfileTarget.projectId === activeProjectId &&
+    agentProfileTarget.userId === currentUserId ? agentProfileTarget.identity : null;
   useEffect(() => {
+    setAgentProfileTarget(null);
     const handler = (event: Event) => {
-      const handle = (event as CustomEvent<OpenAgentProfileDetail>).detail?.handle;
+      const detail = (event as CustomEvent<OpenAgentProfileDetail>).detail;
+      const handle = detail?.handle;
       if (typeof handle === "string" && handle) {
-        setAgentProfileModalHandle(handle);
+        setAgentProfileTarget({ identity: detail, projectId: activeProjectId, userId: currentUserId });
       }
     };
     window.addEventListener(OPEN_AGENT_PROFILE_EVENT, handler);
     return () => window.removeEventListener(OPEN_AGENT_PROFILE_EVENT, handler);
-  }, []);
+  }, [activeProjectId, currentUserId]);
   // This identity belongs to one mounted Shared Browser surface. Keeping it in
   // memory avoids duplicate tabs or side-by-side surfaces replacing each other,
   // while remaining stable across transport and network reconnects.
@@ -2665,7 +2671,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       const displayName =
         getBuiltInAssistantDisplayName(handle) ??
         (profile?.displayName?.trim() ? profile.displayName.trim() : `@${handle}`);
-      rosterAgents.push({ handle, displayName, avatarSeed });
+      rosterAgents.push({ handle, displayName, avatarSeed, agentId: profile?.id ?? null });
     }
     return rosterAgents;
   }, [agentByHandle, agentHandles]);
@@ -4550,7 +4556,9 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       };
     };
     return conversationRosterAgents.map((rosterAgent) => {
-      const profile = agentByHandle.get(rosterAgent.handle) ?? null;
+      const profile = rosterAgent.agentId
+        ? availableAgents.find((candidate) => candidate.id === rosterAgent.agentId) ?? null
+        : null;
       const providerRaw = (profile?.provider ?? "").trim().toLowerCase();
       const providerId: AiProviderId =
         !providerRaw || providerRaw === "assistant"
@@ -4558,10 +4566,10 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           : normalizeAiProviderId(providerRaw);
       // Explicit model, or the provider's default (the first option in
       // modelOptionsForProvider) when the agent pins none.
-      const model =
-        normalizeAiModelId(providerId, profile?.model) ??
+      const model = profile ?
+        normalizeAiModelId(providerId, profile.model) ??
         modelOptionsForProvider(providerId)[0]?.id ??
-        null;
+        null : null;
       let credentialLabel: string | null = null;
       let credentialState: ParticipantCredentialState = "none";
       // The credential whose live usage applies to this agent: the pinned one
@@ -4580,7 +4588,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           credentialLabel = resolveCredentialLabel(pinned);
           effectiveCredential = pinned;
         }
-      } else if (defaultAiCredential) {
+      } else if (profile && defaultAiCredential) {
         credentialState = "default";
         credentialLabel = resolveCredentialLabel(defaultAiCredential);
         effectiveCredential = defaultAiCredential;
@@ -4593,12 +4601,13 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       );
       return {
         ...rosterAgent,
-        agentId: profile?.id ?? null,
+        agentId: rosterAgent.agentId ?? null,
+        canEditProfile: Boolean(profile),
         providerId,
         model,
         reasoningEffort: profile?.reasoningEffort ?? null,
-        runtime: resolveRuntime(profile?.runtimeId ?? null),
-        providerLabel: formatProviderLabel(providerId),
+        runtime: profile ? resolveRuntime(profile.runtimeId ?? null) : null,
+        providerLabel: profile ? formatProviderLabel(providerId) : null,
         credentialId: effectiveCredential?.id ?? null,
         credentialLabel,
         credentialKind: effectiveCredential?.kind ?? null,
@@ -4607,7 +4616,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
       };
     });
   }, [
-    agentByHandle,
+    availableAgents,
     availableCredentials,
     conversationRosterAgents,
     defaultAiCredential,
@@ -5373,6 +5382,7 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
               const humanSpeakerIdentity =
                 message.role === "user" && !isOwnUserMessage && isGroupHead && humanIdentity ? (
                   <HumanSpeakerIdentityLabel
+                    projectId={activeProjectId}
                     avatarSeed={humanIdentity.avatarSeed}
                     label={humanIdentity.label}
                     timestamp={message.timestamp}
@@ -6007,22 +6017,26 @@ export function ChatPanel({ jobThread }: { jobThread?: ChatPanelJobThread | null
           onOpenProjectSettings,
         }}
       />
-      {agentProfileModalHandle ? (
-        // By-handle profile opens (mention chips, narrow speaker labels) have
+      {agentProfileModal ? (
+        // Event-driven profile opens (mention chips, narrow speaker labels) have
         // no anchor, so the card presents as a centered modal at every width.
         <StudioDialogModal
           isOpen
           isDismissable
           onOpenChange={(open) => {
-            if (!open) setAgentProfileModalHandle(null);
+            if (!open) setAgentProfileTarget(null);
           }}
           className="h-[100dvh] min-h-0 overflow-hidden"
           modalClassName="min-h-0 max-h-full w-full max-w-sm overflow-y-auto overscroll-contain"
-          dialogAriaLabel={`Agent profile: @${agentProfileModalHandle}`}
+          dialogAriaLabel={`Agent profile: @${agentProfileModal.handle}`}
         >
           <AgentProfileCardContent
-            {...resolveAgentProfileCardProps(agentProfileModalHandle)}
-            onRequestClose={() => setAgentProfileModalHandle(null)}
+            {...resolveAgentProfileCardProps(agentProfileModal.handle, {
+              handle: agentProfileModal.handle,
+              id: agentProfileModal.agentId,
+              avatarSeed: agentProfileModal.avatarSeed || agentProfileModal.handle,
+            })}
+            onRequestClose={() => setAgentProfileTarget(null)}
           />
         </StudioDialogModal>
       ) : null}

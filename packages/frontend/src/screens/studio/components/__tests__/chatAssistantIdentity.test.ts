@@ -3,6 +3,8 @@ import type { ChatMessage } from "../../types";
 import {
   shouldShowAssistantAvatarForMessage,
   shouldShowAssistantIdentityForMessage,
+  extractAgentIdentityFromMetadata,
+  resolveObservedAgentIdentity,
 } from "../chatAssistantIdentity";
 
 function createAssistantMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
@@ -22,6 +24,18 @@ function createAssistantMessage(overrides: Partial<ChatMessage> = {}): ChatMessa
 }
 
 describe("chatAssistantIdentity", () => {
+  it("keeps exact observed IDs rather than identifying bots by handle", () => {
+    expect(extractAgentIdentityFromMetadata({ agent: { id: " peer-bot ", handle: "@Build", avatarSeed: "peer-photo" } }))
+      .toEqual({ id: "peer-bot", handle: "build", avatarSeed: "peer-photo" });
+    expect(resolveObservedAgentIdentity(
+      { handle: "build", avatarSeed: "display-photo" },
+      { id: "peer-bot", handle: "build", avatarSeed: "metadata-photo" },
+    )).toEqual({ id: "peer-bot", handle: "build", avatarSeed: "display-photo" });
+    expect(resolveObservedAgentIdentity(
+      { handle: "build", avatarSeed: "build" },
+      { id: "other-bot", handle: "review", avatarSeed: "review" },
+    )?.id).toBeUndefined();
+  });
   it("keeps assistant avatars visible even when repeated identity labels are grouped", () => {
     const message = createAssistantMessage();
 

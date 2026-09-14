@@ -104,7 +104,7 @@ export function OrgAvatarEditor({
           <Button
             variant="outline"
             size="xs"
-            radius="full"
+            radius="xl"
             isDisabled={pending}
             data-testid="org-avatar-change"
             onPress={() => fileInputRef.current?.click()}
@@ -115,7 +115,7 @@ export function OrgAvatarEditor({
             <Button
               variant="ghost"
               size="xs"
-              radius="full"
+              radius="xl"
               isDisabled={pending}
               data-testid="org-avatar-remove"
               onPress={() => void handleRemove()}
