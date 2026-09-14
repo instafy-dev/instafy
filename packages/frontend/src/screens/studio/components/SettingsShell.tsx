@@ -225,14 +225,19 @@ export function SettingsShell({
                 aria-current={active ? "page" : undefined}
                 data-testid={category.testId ?? `settings-category-${category.id}`}
                 className={[
-                  "-mb-px min-h-11 min-w-0 flex-1 whitespace-nowrap border-b-2 !px-2",
+                  "group/settings-tab -mb-px min-h-11 min-w-0 flex-auto whitespace-nowrap border-b-2 !px-0 !py-0",
+                  // The underline owns selection. Limit hover feedback to the
+                  // rounded label rather than filling the entire tab rectangle.
+                  "hover:!bg-transparent data-[hovered]:!bg-transparent data-[pressed]:!bg-transparent data-[pressed]:!translate-y-0 data-[pressed]:!scale-100",
                   pickerListRowTextClassName(active),
                   active
                     ? "border-primary-500 dark:border-primary-400"
                     : "border-transparent",
                 ].join(" ")}
               >
-                {category.label}
+                <span className="max-w-full truncate rounded-lg px-2 py-1.5 transition-colors group-hover/settings-tab:bg-slate-100/60 group-data-[hovered]/settings-tab:bg-slate-100/60 dark:group-hover/settings-tab:bg-white/[0.04] dark:group-data-[hovered]/settings-tab:bg-white/[0.04]">
+                  {category.label}
+                </span>
               </Button>
             );
           })}

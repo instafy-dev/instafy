@@ -55,7 +55,13 @@ target and uses a compact 36px height on wider fine-pointer screens.
 Use a small, consistent radius scale: 6px for compact search scope chips, 8px for navigation
 and menu rows, 12px for form controls and profile actions, and 16px for cards, dialogs and
 popovers. Avatars remain circular and settings category tabs remain flat with an underline.
-Do not turn every action into a pill.
+Do not turn every action into a pill. Compact category tabs keep selection in the underline
+and use a small rounded hover treatment around the label, rather than a filled rectangular tab.
+
+In the personal profile form, keep the circular photo and Display name beside each other,
+including on narrow screens. The photo is a labelled button with a pencil badge that opens
+the image file picker; do not expose a separate image-URL editor. Show Remove photo only
+when a photo exists. Uploads and removals remain previews until Save profile is pressed.
 
 People and bots have an optional **About** field using `ProfileBioField`: a persistent label,
 plain multiline text, a 500-character counter and a validation error for longer text. Count

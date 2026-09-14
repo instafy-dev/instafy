@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
-import { Camera, Trash } from "iconoir-react";
+import { EditPencil } from "iconoir-react";
 import { Button } from "../components/Button";
 import { SettingsFormLayout } from "../components/SettingsFormLayout";
 import { Field } from "../components/Field";
@@ -24,7 +24,6 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
   const [displayName, setDisplayName] = useState("");
   const [bio, setBio] = useState("");
   const [avatarUrl, setAvatarUrl] = useState("");
-  const [showImageUrl, setShowImageUrl] = useState(false);
   const [saving, setSaving] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -59,7 +58,6 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
       const result = typeof reader.result === "string" ? reader.result : null;
       if (result) {
         setAvatarUrl(result);
-        setShowImageUrl(false);
         setUploadError(null);
       } else {
         setUploadError("Unable to read image.");
@@ -115,93 +113,68 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
         </div>
       ) : null}
       <div className="flex flex-col gap-4">
-        <div className="flex flex-wrap items-center gap-4">
-          <HumanAvatar
-            userId={user?.id}
-            displayName={displayName}
-            avatarUrl={avatarPreview}
-            photoAlt="Profile photo preview"
-            className="h-16 w-16 text-base"
-            data-testid="profile-avatar-preview"
+        <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-4">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            aria-label="Choose profile photo"
+            onChange={handleFileUpload}
+            disabled={profileUnavailable || saving}
+            className="hidden"
           />
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              aria-label="Choose profile photo"
-              onChange={handleFileUpload}
-              className="hidden"
+          <Button
+            onPress={() => fileInputRef.current?.click()}
+            aria-label={avatarPreview ? "Change profile photo" : "Upload profile photo"}
+            title={avatarPreview ? "Change profile photo" : "Upload profile photo"}
+            isDisabled={profileUnavailable || saving}
+            variant="ghost"
+            size="icon"
+            radius="full"
+            className="group relative h-16 w-16 shrink-0"
+          >
+            <HumanAvatar
+              userId={user?.id}
+              displayName={displayName}
+              avatarUrl={avatarPreview}
+              photoAlt="Profile photo preview"
+              className="h-16 w-16 text-base"
+              data-testid="profile-avatar-preview"
             />
-            <Button
-              onPress={() => fileInputRef.current?.click()}
-              variant="outline"
-              size="sm"
-              radius="xl"
-              className="gap-2"
-            >
-              <Camera className="text-base" aria-hidden="true" />
-              {avatarPreview ? "Change photo" : "Upload photo"}
-            </Button>
-            {avatarPreview ? (
-              <Button
-                onPress={() => {
-                  setAvatarUrl("");
-                  setUploadError(null);
-                }}
-                variant="ghost"
-                size="sm"
-                radius="xl"
-                className="gap-2"
-              >
-                <Trash className="text-base" aria-hidden="true" />
-                Remove photo
-              </Button>
-            ) : null}
-          </div>
+            <span aria-hidden="true" className="absolute -bottom-0.5 -right-0.5 flex h-6 w-6 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-700 shadow-sm group-hover:bg-slate-50 dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-[var(--color-studio-dark-raised-control)] dark:text-slate-100 dark:group-hover:bg-[var(--color-studio-dark-control-hover)]">
+              <EditPencil className="h-3.5 w-3.5" />
+            </span>
+          </Button>
+          <Field label="Display name" htmlFor="profile-display-name" className="min-w-0">
+            <Input
+              id="profile-display-name"
+              type="text"
+              disabled={profileUnavailable}
+              value={displayName}
+              onChange={(event) => setDisplayName(event.target.value)}
+            />
+          </Field>
         </div>
+        {avatarPreview ? (
+          <Button
+            onPress={() => {
+              setAvatarUrl("");
+              setUploadError(null);
+            }}
+            isDisabled={profileUnavailable || saving}
+            variant="ghost"
+            size="sm"
+            radius="xl"
+            className="self-start"
+          >
+            Remove photo
+          </Button>
+        ) : null}
         {uploadError ? (
           <Text as="p" role="alert" variant="caption" tone="danger" className="font-medium">
             {uploadError}
           </Text>
         ) : null}
-        <div className="space-y-2">
-          <Button
-            onPress={() => setShowImageUrl((visible) => !visible)}
-            aria-expanded={showImageUrl}
-            aria-controls="profile-image-url-field"
-            variant="ghost"
-            size="sm"
-            radius="xl"
-          >
-            {showImageUrl ? "Hide image URL" : "Use image URL"}
-          </Button>
-          {showImageUrl ? (
-            <div id="profile-image-url-field">
-              <Field label="Image URL" htmlFor="profile-avatar-url" hint="Paste an image link to replace your photo.">
-                <Input
-                  id="profile-avatar-url"
-                  type="url"
-                  value={avatarUrl.trim().startsWith("data:") ? "" : avatarUrl}
-                  onChange={(event) => {
-                    setAvatarUrl(event.target.value);
-                    setUploadError(null);
-                  }}
-                  placeholder="https://"
-                />
-              </Field>
-            </div>
-          ) : null}
-        </div>
-        <Field label="Display name" htmlFor="profile-display-name">
-          <Input
-            id="profile-display-name"
-            type="text"
-            disabled={profileUnavailable}
-            value={displayName}
-            onChange={(event) => setDisplayName(event.target.value)}
-          />
-        </Field>
         <ProfileBioField id="profile-bio" value={bio} onChange={setBio} disabled={profileUnavailable} />
         <div className="flex flex-col gap-3 border-t border-slate-200/70 pt-3 dark:border-[color:var(--color-studio-dark-divider)] @min-[32rem]/profile-editor:flex-row @min-[32rem]/profile-editor:items-center @min-[32rem]/profile-editor:justify-between">
           <Text as="p" variant="caption" tone="muted">

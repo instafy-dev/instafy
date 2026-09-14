@@ -54,7 +54,7 @@ describe("ProfileEditor", () => {
   }
 
   function button(label: string) {
-    const found = Array.from(container.querySelectorAll("button")).find((item) => item.textContent?.trim() === label);
+    const found = Array.from(container.querySelectorAll("button")).find((item) => (item.getAttribute("aria-label") ?? item.textContent?.trim()) === label);
     expect(found, label).toBeDefined();
     return found!;
   }
@@ -109,37 +109,24 @@ describe("ProfileEditor", () => {
     expect(mocks.updateProfile).not.toHaveBeenCalled();
   });
 
-  it("shows photo actions without exposing its stored URL, and reveals an accessible optional URL field", async () => {
+  it("offers an accessible avatar upload action without an image URL field", async () => {
     await render();
     expect(container.querySelector('img[alt="Profile photo preview"]')?.getAttribute("src")).toBe(mocks.profile.avatarUrl);
-    expect(button("Change photo")).toBeDefined();
+    expect(button("Change profile photo").contains(container.querySelector("img"))).toBe(true);
     expect(button("Remove photo")).toBeDefined();
     expect(container.querySelector('input[type="url"]')).toBeNull();
-    expect(button("Use image URL").getAttribute("aria-expanded")).toBe("false");
+    expect(container.textContent).not.toContain("Use image URL");
     expect(button("Save profile").disabled).toBe(true);
-
-    await click("Use image URL");
-    const disclosure = button("Hide image URL");
-    expect(disclosure.getAttribute("aria-expanded")).toBe("true");
-    expect(document.getElementById(disclosure.getAttribute("aria-controls")!)).not.toBeNull();
-    expect(container.querySelector('label[for="profile-avatar-url"]')?.textContent).toBe("Image URL");
-    expect(container.querySelector<HTMLInputElement>("#profile-avatar-url")?.value).toBe(mocks.profile.avatarUrl);
-    expect(button("Save profile").disabled).toBe(true);
-    await click("Hide image URL");
-    expect(container.querySelector('input[type="url"]')).toBeNull();
   });
 
-  it("saves a trimmed name and optional image link only on Save", async () => {
+  it("saves a trimmed name only on Save, preserving an existing photo", async () => {
     const onDone = vi.fn();
     await render(onDone);
-    await click("Use image URL");
-    await type("profile-avatar-url", "https://example.test/replacement.png");
     await type("profile-display-name", "  Avery Example  ");
     expect(mocks.updateProfile).not.toHaveBeenCalled();
-    await click("Hide image URL");
     await click("Save profile");
     expect(mocks.updateProfile).toHaveBeenCalledExactlyOnceWith({
-      fullName: "Avery Example", avatarUrl: "https://example.test/replacement.png", bio: null
+      fullName: "Avery Example", avatarUrl: mocks.profile.avatarUrl, bio: null
     });
     expect(onDone).toHaveBeenCalledOnce();
     expect(mocks.showStatus).toHaveBeenCalledWith("Profile updated.", "success", 2500);
@@ -150,17 +137,16 @@ describe("ProfileEditor", () => {
     await click("Remove photo");
     expect(container.querySelector("img")).toBeNull();
     expect(container.textContent).toContain("AT");
-    expect(button("Upload photo")).toBeDefined();
+    expect(button("Upload profile photo")).toBeDefined();
     expect(mocks.updateProfile).not.toHaveBeenCalled();
     await click("Save profile");
     expect(mocks.updateProfile).toHaveBeenCalledExactlyOnceWith({ fullName: "Alex Teammate", avatarUrl: null, bio: null });
   });
 
-  it("does not expose uploaded image data when the optional URL field is opened", async () => {
+  it("preserves an uploaded photo when changing only the display name", async () => {
     mocks.profile.avatarUrl = "data:image/png;base64,cGhvdG8=";
     await render();
-    await click("Use image URL");
-    expect(container.querySelector<HTMLInputElement>("#profile-avatar-url")?.value).toBe("");
+    expect(container.querySelector('input[type="url"]')).toBeNull();
     expect(container.querySelector("img")?.getAttribute("src")).toBe(mocks.profile.avatarUrl);
     expect(button("Save profile").disabled).toBe(true);
     await type("profile-display-name", "Updated name");
@@ -172,9 +158,8 @@ describe("ProfileEditor", () => {
     await render();
     const input = container.querySelector<HTMLInputElement>('input[type="file"]')!;
     const picker = vi.spyOn(input, "click");
-    await click("Change photo");
+    await click("Change profile photo");
     expect(picker).toHaveBeenCalledOnce();
-    await click("Use image URL");
     vi.spyOn(FileReader.prototype, "readAsDataURL").mockImplementation(function (this: FileReader) {
       Object.defineProperty(this, "result", { value: "data:image/png;base64,bmV3" });
       this.dispatchEvent(new ProgressEvent("load"));
@@ -233,6 +218,8 @@ describe("ProfileEditor", () => {
     await render();
     expect(container.querySelector<HTMLInputElement>("#profile-display-name")?.disabled).toBe(true);
     expect(button("Save profile").disabled).toBe(true);
+    expect(button("Change profile photo").disabled).toBe(true);
+    expect(button("Remove photo").disabled).toBe(true);
   });
 
   it("uses a stable avatar color while changing the display name or removing a photo", async () => {
