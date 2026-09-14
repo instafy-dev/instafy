@@ -58,7 +58,7 @@ export function MobileStudioNavigationHeader({
         data-testid="mobile-header-picker"
         onPress={onOpenPicker}
       >
-        <SidebarExpand className="h-4 w-4 shrink-0" aria-hidden="true" />
+        <SidebarExpand className="h-[18px] w-[18px] shrink-0" aria-hidden="true" />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm font-semibold" data-testid="mobile-header-title">{title}</span>
           {showSpaceName ? <span className="block truncate text-xs font-normal text-slate-600 dark:text-slate-400" data-testid="mobile-header-space">{spaceName}</span> : null}

@@ -2222,8 +2222,8 @@ function StudioLayoutInner() {
             inert={search.open || showMobileLeftDrawerOverlay || undefined}
           >
             {!isLargeScreen ? mobileContextHeader() : null}
-            {isLargeScreen || navigationScope.page === "workspace" ? <StudioTopBar newChatInSidebar={isLargeScreen} contextHeaderAbove mobileNavigation={mobileTopbarNavigation} /> : <div className="flex min-h-12 items-center gap-2 border-b border-slate-200/70 px-1 dark:border-[color:var(--color-studio-dark-divider)]">
-              <IconButton variant="ghost" aria-label="Open navigation" data-testid="topbar-sidebar-toggle" onPress={handleToggleSidebar} className="!min-h-12 !min-w-12"><SidebarExpand className="h-4 w-4" /></IconButton>
+            {isLargeScreen || navigationScope.page === "workspace" ? <StudioTopBar newChatInSidebar={isLargeScreen} contextHeaderAbove mobileNavigation={mobileTopbarNavigation} /> : <div className="flex min-h-14 shrink-0 items-center gap-2 border-b border-slate-200/70 px-1 py-1 dark:border-[color:var(--color-studio-dark-divider)]">
+              <IconButton variant="ghost" aria-label="Open navigation" data-testid="topbar-sidebar-toggle" onPress={handleToggleSidebar} className="!min-h-12 !min-w-12"><SidebarExpand className="h-[18px] w-[18px]" aria-hidden="true" /></IconButton>
               <span className="min-w-0 flex-1 truncate text-sm text-slate-500 dark:text-slate-400">{navigationScope.page === "account" ? "Your settings" : topbarLocationOverride?.title ?? (contextHomeActive ? "Home" : activeTeamName)}</span>
             </div>}
             <ProjectAccessRecoveryBanner />
