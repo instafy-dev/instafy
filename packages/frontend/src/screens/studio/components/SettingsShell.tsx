@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type FocusEvent, type ReactNode } from "react";
-import { DialogTrigger } from "react-aria-components";
+import { Button as AriaButton, DialogTrigger } from "react-aria-components";
 import { ControlChevron } from "../../../components/ControlChevron";
 import { Button } from "../../../components/Button";
 import { pickerListRowTextClassName } from "../../../components/listRowStyles";
@@ -214,31 +214,28 @@ export function SettingsShell({
           {categories.map(category => {
             const active = category.id === activeCategoryId;
             return (
-              <Button
+              <AriaButton
                 key={category.id}
                 type="button"
-                variant="ghost"
-                size="sm"
-                radius="none"
                 isDisabled={category.disabled}
                 onPress={() => onCategoryChange?.(category.id)}
                 aria-current={active ? "page" : undefined}
                 data-testid={category.testId ?? `settings-category-${category.id}`}
                 className={[
-                  "group/settings-tab -mb-px min-h-11 min-w-0 flex-auto whitespace-nowrap border-b-2 !px-0 !py-0",
-                  // The underline owns selection. Limit hover feedback to the
-                  // rounded label rather than filling the entire tab rectangle.
-                  "hover:!bg-transparent data-[hovered]:!bg-transparent data-[pressed]:!bg-transparent data-[pressed]:!translate-y-0 data-[pressed]:!scale-100",
+                  // Navigation has one selection underline, without the hover
+                  // surface, press transform or full-control ring of an action button.
+                  "group/settings-tab -mb-px inline-flex min-h-11 min-w-0 flex-auto items-center justify-center whitespace-nowrap border-b-2 bg-transparent p-0 text-sm font-medium outline-none touch-manipulation [-webkit-tap-highlight-color:transparent] data-[disabled]:pointer-events-none data-[disabled]:opacity-60",
                   pickerListRowTextClassName(active),
+                  "data-[hovered]:text-slate-950 dark:data-[hovered]:text-white",
                   active
                     ? "border-primary-500 dark:border-primary-400"
                     : "border-transparent",
                 ].join(" ")}
               >
-                <span className="max-w-full truncate rounded-lg px-2 py-1.5 transition-colors group-hover/settings-tab:bg-slate-100/60 group-data-[hovered]/settings-tab:bg-slate-100/60 dark:group-hover/settings-tab:bg-white/[0.04] dark:group-data-[hovered]/settings-tab:bg-white/[0.04]">
+                <span className="max-w-full truncate rounded-sm px-2 py-1.5 transition-colors group-data-[focus-visible]/settings-tab:outline-2 group-data-[focus-visible]/settings-tab:outline-offset-2 group-data-[focus-visible]/settings-tab:outline-primary-600 dark:group-data-[focus-visible]/settings-tab:outline-primary-400">
                   {category.label}
                 </span>
-              </Button>
+              </AriaButton>
             );
           })}
         </div>
