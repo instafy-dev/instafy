@@ -108,6 +108,21 @@ describe("StudioSidebar organization navigation", () => {
     await click(`sidebar-team-menu-${action}`);
     expect(document.querySelector('[data-testid="sidebar-team-menu"]')).toBeNull();
   };
+  it("routes rail context actions to the clicked team without switching its space first", async () => {
+    await render({ navigationPresentation: "path", navigationHeaderExternal: true });
+    const open = async () => {
+      await act(async () => document.querySelector('[data-testid="sidebar-team-org-b"]')!.dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 })));
+    };
+    await open(); await click("sidebar-org-context-settings");
+    expect(fixture.onSettings).toHaveBeenLastCalledWith("org-b", "profile");
+    await open(); await click("sidebar-org-context-members");
+    expect(fixture.onSettings).toHaveBeenLastCalledWith("org-b", "members");
+    await open(); await click("sidebar-org-context-overview");
+    expect(onOpenTeam).toHaveBeenLastCalledWith("org-b");
+    expect(fixture.switchProject).not.toHaveBeenCalled();
+    expect(onActivateProject).not.toHaveBeenCalled();
+  });
   const secondaryNavigationProps = (): Partial<ComponentProps<typeof StudioSidebar>> => ({
     mobileOverlay: true,
     navigationHeaderExternal: true,

@@ -88,6 +88,12 @@ without losing focus or creating extra route visits.
 
 ## Team identity
 
+Right-click a team icon in the desktop organization rail for Team overview, Team settings
+and Members. Shift+F10 or the keyboard menu key opens the same anchored menu; Escape
+dismisses it and returns focus to the icon. Actions target the clicked team, including
+teams with no spaces, without first switching the active space. The mobile header's team
+menu remains the visible touch entry point.
+
 Team profile settings and new-team onboarding offer a shared color alongside the name and
 picture. Use `OrgIdentity` for team avatars and `TeamAccentPicker` for the fixed palette:
 neutral, blue, violet, pink, red, orange, green and teal. A picture takes precedence over

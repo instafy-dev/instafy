@@ -1002,21 +1002,23 @@ export function StudioSidebar({
     runDestination(() => onOpenOrgSettings?.(created.id));
   }, [onOpenOrgSettings, resetWorkspaceSwitcher, runDestination]);
 
-  const openSelectedTeam = () => {
+  const openTeamOverview = (orgKey: string) => {
     onNavigationHeaderAction?.();
     resetWorkspaceSwitcher();
     closeMoreMenu();
     runDestination(() => {
-      if (onOpenTeam) onOpenTeam(activeOrgKey);
+      if (onOpenTeam) onOpenTeam(orgKey);
       else onSelect("team");
     });
   };
-  const openSelectedTeamSettings = () => {
+  const openSelectedTeam = () => openTeamOverview(activeOrgKey);
+  const openTeamSettings = (orgKey: string, category?: "profile" | "members") => {
     onNavigationHeaderAction?.();
     resetWorkspaceSwitcher();
     closeMoreMenu();
-    runDestination(() => onOpenOrgSettings?.(activeOrgKey));
+    runDestination(() => category ? onOpenOrgSettings?.(orgKey, category) : onOpenOrgSettings?.(orgKey));
   };
+  const openSelectedTeamSettings = () => openTeamSettings(activeOrgKey);
   const canStartHeaderChat = externalHeader && showChatActions && selectedTeamHasActiveSpace &&
     Boolean(onStartNewConversation) && activePanel !== "home" && !hideContext &&
     navigationPage !== "home";
@@ -1179,6 +1181,8 @@ export function StudioSidebar({
         orgAttentionCounts={homeAttentionByOrg} titleBarFree={titleBarFree}
         onHome={() => { resetWorkspaceSwitcher(); closeMoreMenu(); runDestination(() => onSelect("home")); }}
         onSelectOrganization={handleWorkspaceOrgChange}
+        onOpenOrganizationOverview={onOpenTeam ? openTeamOverview : undefined}
+        onOpenOrganizationSettings={onOpenOrgSettings ? openTeamSettings : undefined}
         onCreateOrganization={runtimeControllerEnabled ? () => { resetWorkspaceSwitcher(); setNewTeamOpen(true); } : undefined}
         onBrowseOrganizations={() => openWorkspaceSwitcher()}
         browseButtonRef={browseTriggerRef} account={accountSection}

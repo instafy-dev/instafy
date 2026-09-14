@@ -15,12 +15,15 @@ describe("StudioOrganizationRail", () => {
   let root: Root;
   const onHome = vi.fn();
   const onSelectOrganization = vi.fn();
+  const onOpenOrganizationOverview = vi.fn();
+  const onOpenOrganizationSettings = vi.fn();
   const onCreateOrganization = vi.fn();
   const onBrowseOrganizations = vi.fn();
   const render = async (props: Partial<ComponentProps<typeof StudioOrganizationRail>> = {}) => {
     await act(async () => root.render(<StudioOrganizationRail organizations={organizations}
       selectedOrgKey="one" homeActive={false} titleBarFree={false}
       onHome={onHome} onSelectOrganization={onSelectOrganization}
+      onOpenOrganizationOverview={onOpenOrganizationOverview} onOpenOrganizationSettings={onOpenOrganizationSettings}
       onCreateOrganization={onCreateOrganization} onBrowseOrganizations={onBrowseOrganizations}
       browseButtonRef={createRef<HTMLButtonElement>()} account={<button data-testid="account">Account</button>}
       {...props} />));
@@ -29,6 +32,8 @@ describe("StudioOrganizationRail", () => {
   beforeEach(() => {
     (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
     vi.clearAllMocks();
+    // JSDOM lacks the CSS.escape API React Aria uses for menu keyboard focus.
+    vi.stubGlobal("CSS", { escape: (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, "\\$&") });
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -37,6 +42,7 @@ describe("StudioOrganizationRail", () => {
     await act(async () => root.unmount());
     container.remove();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("keeps Home and footer actions outside the scrolling team list, including empty teams", async () => {
@@ -130,6 +136,61 @@ describe("StudioOrganizationRail", () => {
     await render({ homeActive: true });
     expect(container.querySelector('[data-testid="sidebar-home-button"]')?.getAttribute("aria-current")).toBe("page");
     expect(container.querySelector('[data-testid="sidebar-team-one"]')?.hasAttribute("aria-current")).toBe(false);
+  });
+
+  const openContextMenu = async (key: string) => {
+    const button = container.querySelector<HTMLButtonElement>(`[data-testid="sidebar-team-${key}"]`)!;
+    const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 });
+    await act(async () => { button.dispatchEvent(event); });
+    expect(event.defaultPrevented).toBe(true);
+    return button;
+  };
+  const contextAction = async (action: string) => {
+    await act(async () => document.querySelector<HTMLElement>(`[data-testid="sidebar-org-context-${action}"]`)!.click());
+  };
+
+  it("opens settings and members for the right-clicked inactive or empty team without selecting it first", async () => {
+    await render();
+    await openContextMenu("empty");
+    expect(onSelectOrganization).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="menu"]')?.getAttribute("aria-label")).toBe("Team actions: Empty");
+    await contextAction("settings");
+    expect(onOpenOrganizationSettings).toHaveBeenLastCalledWith("empty", "profile");
+    expect(document.querySelector('[data-testid="sidebar-org-context-menu"]')).toBeNull();
+    await openContextMenu("three"); await contextAction("members");
+    expect(onOpenOrganizationSettings).toHaveBeenLastCalledWith("three", "members");
+    await openContextMenu("empty"); await contextAction("overview");
+    expect(onOpenOrganizationOverview).toHaveBeenCalledExactlyOnceWith("empty");
+    expect(onSelectOrganization).not.toHaveBeenCalled();
+  });
+
+  it("supports Shift+F10 and the menu key, and Escape restores icon focus without navigation", async () => {
+    await render();
+    const trigger = container.querySelector<HTMLButtonElement>('[data-testid="sidebar-team-empty"]')!;
+    for (const init of [{ key: "F10", shiftKey: true }, { key: "ContextMenu" }]) {
+      await act(async () => { trigger.focus(); trigger.dispatchEvent(new KeyboardEvent("keydown", { ...init, bubbles: true, cancelable: true })); });
+      expect(document.querySelector('[data-testid="sidebar-org-context-menu"]')).not.toBeNull();
+      await act(async () => { document.activeElement!.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); });
+      expect(document.querySelector('[data-testid="sidebar-org-context-menu"]')).toBeNull();
+      await act(async () => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
+      expect(document.activeElement).toBe(trigger);
+    }
+    expect(onSelectOrganization).not.toHaveBeenCalled();
+    expect(onOpenOrganizationOverview).not.toHaveBeenCalled();
+    expect(onOpenOrganizationSettings).not.toHaveBeenCalled();
+  });
+
+  it("dismisses stale menus on team changes and omits unavailable settings actions", async () => {
+    await render(); await openContextMenu("empty");
+    await render({ organizations: [organizations[0]] });
+    expect(document.querySelector('[data-testid="sidebar-org-context-menu"]')).toBeNull();
+    await render({ onOpenOrganizationSettings: undefined });
+    expect(document.querySelector('[data-testid="sidebar-org-context-menu"]')).toBeNull();
+    await openContextMenu("one");
+    expect(document.querySelector('[data-testid="sidebar-org-context-settings"]')).toBeNull();
+    expect(document.querySelector('[data-testid="sidebar-org-context-members"]')).toBeNull();
+    await render({ selectedOrgKey: "three" });
+    expect(document.querySelector('[data-testid="sidebar-org-context-menu"]')).toBeNull();
   });
 
 });
