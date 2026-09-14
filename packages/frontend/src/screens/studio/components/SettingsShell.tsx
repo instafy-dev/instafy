@@ -1,6 +1,7 @@
 import { useCallback, useLayoutEffect, useMemo, useRef, useState, type ComponentType, type FocusEvent, type ReactNode } from "react";
 import { MenuTrigger } from "react-aria-components";
 import { ControlChevron } from "../../../components/ControlChevron";
+import { Button } from "../../../components/Button";
 import { pickerListRowTextClassName } from "../../../components/listRowStyles";
 import { EntityRow } from "../../../components/EntityRow";
 import { Heading } from "../../../components/Heading";
@@ -8,6 +9,7 @@ import { Text } from "../../../components/Text";
 import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
 import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
+import { DARK_DIVIDER_BORDER_CLASS } from "../../../theme/darkSurfaces";
 
 export type SettingsCategory = {
   id: string;
@@ -38,6 +40,8 @@ interface SettingsShellProps {
   navLabel?: string;
   testId?: string;
   navTestId?: string;
+  /** A small, flat category set can remain visible when a sidebar won't fit. */
+  compactCategoryNavigation?: "picker" | "tabs";
 }
 
 export function SettingsShell({
@@ -59,6 +63,7 @@ export function SettingsShell({
   navLabel = "Categories",
   testId = "settings-shell",
   navTestId = "settings-category-nav",
+  compactCategoryNavigation = "picker",
 }: SettingsShellProps) {
   const isLargeScreen = useStudioDesktopLayout();
   const shellRef = useRef<HTMLDivElement | null>(null);
@@ -66,6 +71,7 @@ export function SettingsShell({
   const navigationFocusRef = useRef<HTMLElement | null>(null);
   const wideContainerRef = useRef(false);
   const useSideNavigation = isLargeScreen && hasWideContainer;
+  const useCompactTabs = compactCategoryNavigation === "tabs" && Boolean(categories?.length && categories.length <= 3 && categories.every(category => !category.children?.length));
 
   useLayoutEffect(() => {
     const shell = shellRef.current;
@@ -115,7 +121,7 @@ export function SettingsShell({
     if (!previousFocus || previousFocus.isConnected) return;
     navigationFocusRef.current = null;
     if (document.activeElement && document.activeElement !== document.body) return;
-    if (useSideNavigation) {
+    if (useSideNavigation || useCompactTabs) {
       const navigation = shellRef.current?.querySelector("[data-settings-navigation]");
       const selectedPage = navigation?.querySelector<HTMLButtonElement>('[aria-current="page"]:not(:disabled)');
       const selectedLocation = navigation?.querySelector<HTMLButtonElement>('[aria-current="location"]:not(:disabled)');
@@ -123,7 +129,7 @@ export function SettingsShell({
     } else {
       (mobileChildTriggerRef.current ?? mobileCategoryTriggerRef.current)?.focus();
     }
-  }, [useSideNavigation]);
+  }, [useCompactTabs, useSideNavigation]);
 
   const desktopNavContent = useMemo(() => {
     if (!hasCategories || !categories) {
@@ -202,6 +208,37 @@ export function SettingsShell({
     if (!activeCategory) {
       return null;
     }
+    if (useCompactTabs) {
+      return (
+        <div className={`flex min-w-0 gap-1 border-b border-slate-200 ${DARK_DIVIDER_BORDER_CLASS}`} data-testid={`${navTestId}-tabs`}>
+          {categories.map(category => {
+            const active = category.id === activeCategoryId;
+            return (
+              <Button
+                key={category.id}
+                type="button"
+                variant="ghost"
+                size="sm"
+                radius="none"
+                isDisabled={category.disabled}
+                onPress={() => onCategoryChange?.(category.id)}
+                aria-current={active ? "page" : undefined}
+                data-testid={category.testId ?? `settings-category-${category.id}`}
+                className={[
+                  "-mb-px min-h-11 min-w-0 flex-1 whitespace-nowrap border-b-2 !px-2",
+                  pickerListRowTextClassName(active),
+                  active
+                    ? "border-primary-500 dark:border-primary-400"
+                    : "border-transparent",
+                ].join(" ")}
+              >
+                {category.label}
+              </Button>
+            );
+          })}
+        </div>
+      );
+    }
     return (
       <MenuTrigger>
         <EntityRow
@@ -258,6 +295,7 @@ export function SettingsShell({
     categories,
     hasCategories,
     useSideNavigation,
+    useCompactTabs,
     navLabel,
     navTestId,
     onCategoryChange,

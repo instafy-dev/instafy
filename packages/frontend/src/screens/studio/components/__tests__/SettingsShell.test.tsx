@@ -62,4 +62,19 @@ describe("SettingsShell", () => {
     expect(html).not.toContain("Extensions");
     expect(html).toContain("Body");
   });
+
+  it("keeps a picker for larger or nested category sets even if compact tabs are requested", () => {
+    for (const categories of [
+      ["one", "two", "three", "four"].map(id => ({ id, label: id })),
+      [{ id: "one", label: "One", children: [{ id: "child", label: "Child" }] }],
+    ]) {
+      const html = renderToStaticMarkup(
+        <SettingsShell title="Settings" compactCategoryNavigation="tabs" categories={categories} activeCategoryId="one" onCategoryChange={() => undefined}>
+          <p>Body</p>
+        </SettingsShell>,
+      );
+      expect(html).toContain('data-testid="settings-category-nav-picker"');
+      expect(html).not.toContain('data-testid="settings-category-nav-tabs"');
+    }
+  });
 });

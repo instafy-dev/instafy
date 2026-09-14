@@ -32,6 +32,7 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
   const { showStatus } = useStatus();
   const [displayName, setDisplayName] = useState("");
   const [avatarUrl, setAvatarUrl] = useState("");
+  const [showImageUrl, setShowImageUrl] = useState(false);
   const [saving, setSaving] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -51,6 +52,7 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
 
   const handleFileUpload = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
+    event.target.value = "";
     if (!file) {
       return;
     }
@@ -63,6 +65,7 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
       const result = typeof reader.result === "string" ? reader.result : null;
       if (result) {
         setAvatarUrl(result);
+        setShowImageUrl(false);
         setUploadError(null);
       } else {
         setUploadError("Unable to read image.");
@@ -109,15 +112,15 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
             Profile
           </Text>
           <Text variant="caption" tone="muted" className="mt-1">
-            Set a name and avatar that appear across the studio.
+            Your name and photo appear to teammates across the studio.
           </Text>
         </div>
       ) : null}
       <div className="flex flex-col gap-4">
         <div className="flex flex-wrap items-center gap-4">
-          <div className="flex h-14 w-14 items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-slate-50 text-sm font-semibold text-slate-700 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-raised-control)] dark:text-slate-100">
+          <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-full border border-slate-200 bg-slate-50 text-base font-semibold text-slate-700 dark:border-[color:var(--color-studio-dark-panel-border)] dark:bg-[var(--color-studio-dark-raised-control)] dark:text-slate-100">
             {avatarPreview ? (
-              <img src={avatarPreview} alt="" className="h-full w-full object-cover" />
+              <img src={avatarPreview} alt="Profile photo preview" className="h-full w-full object-cover" />
             ) : (
               initials
             )}
@@ -127,38 +130,70 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
               ref={fileInputRef}
               type="file"
               accept="image/*"
+              aria-label="Choose profile photo"
               onChange={handleFileUpload}
               className="hidden"
             />
             <Button
               onPress={() => fileInputRef.current?.click()}
               variant="outline"
-              size="xs"
+              size="sm"
               radius="full"
               className="gap-2"
             >
               <Camera className="text-base" aria-hidden="true" />
-              Upload photo
+              {avatarPreview ? "Change photo" : "Upload photo"}
             </Button>
             {avatarPreview ? (
               <Button
-                onPress={() => setAvatarUrl("")}
-                variant="outline"
-                size="xs"
+                onPress={() => {
+                  setAvatarUrl("");
+                  setUploadError(null);
+                }}
+                variant="ghost"
+                size="sm"
                 radius="full"
                 className="gap-2"
               >
                 <Trash className="text-base" aria-hidden="true" />
-                Remove
+                Remove photo
               </Button>
             ) : null}
           </div>
         </div>
         {uploadError ? (
-          <Text as="p" variant="caption" tone="danger" className="font-medium">
+          <Text as="p" role="alert" variant="caption" tone="danger" className="font-medium">
             {uploadError}
           </Text>
         ) : null}
+        <div className="space-y-2">
+          <Button
+            onPress={() => setShowImageUrl((visible) => !visible)}
+            aria-expanded={showImageUrl}
+            aria-controls="profile-image-url-field"
+            variant="ghost"
+            size="sm"
+            radius="lg"
+          >
+            {showImageUrl ? "Hide image URL" : "Use image URL"}
+          </Button>
+          {showImageUrl ? (
+            <div id="profile-image-url-field">
+              <Field label="Image URL" htmlFor="profile-avatar-url" hint="Paste an image link to replace your photo.">
+                <Input
+                  id="profile-avatar-url"
+                  type="url"
+                  value={avatarUrl.trim().startsWith("data:") ? "" : avatarUrl}
+                  onChange={(event) => {
+                    setAvatarUrl(event.target.value);
+                    setUploadError(null);
+                  }}
+                  placeholder="https://"
+                />
+              </Field>
+            </div>
+          ) : null}
+        </div>
         <Field label="Display name" htmlFor="profile-display-name">
           <Input
             id="profile-display-name"
@@ -166,15 +201,6 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
             value={displayName}
             onChange={(event) => setDisplayName(event.target.value)}
             placeholder="Add your name"
-          />
-        </Field>
-        <Field label="Avatar URL" htmlFor="profile-avatar-url">
-          <Input
-            id="profile-avatar-url"
-            type="url"
-            value={avatarUrl}
-            onChange={(event) => setAvatarUrl(event.target.value)}
-            placeholder="https://"
           />
         </Field>
         <div className="flex flex-col gap-3 border-t border-slate-200/70 pt-3 dark:border-[color:var(--color-studio-dark-divider)] @min-[32rem]/profile-editor:flex-row @min-[32rem]/profile-editor:items-center @min-[32rem]/profile-editor:justify-between">

@@ -9,11 +9,24 @@ import type { ProjectListItem } from "../../../../projects/useProjects";
 const mocks = vi.hoisted(() => ({
   user: { email: "reader@example.test" } as { email: string } | null,
   profile: { fullName: "Alex Morgan", avatarUrl: "https://example.test/avatar.png" } as { fullName: string; avatarUrl: string | null } | null,
+  refresh: vi.fn(async () => null),
   recency: vi.fn(() => ({ current: 100, sibling: 90, foreign: 80 })),
 }));
 vi.mock("../../../../providers/AuthProvider", () => ({ useAuth: () => ({ user: mocks.user }) }));
 vi.mock("../../../../profile/ProfileProvider", () => ({ useProfile: () => ({ profile: mocks.profile }) }));
 vi.mock("../../../../projects/useProjectRecency", () => ({ useProjectRecency: mocks.recency }));
+
+vi.mock("../../workspaceControls", () => ({ useWorkspaceControls: () => ({ userEmail: mocks.user?.email }) }));
+vi.mock("../../useStudioDesktopLayout", () => ({ useStudioDesktopLayout: () => false }));
+vi.mock("../../../../projects/useProjects", () => ({ useProjects: () => ({ activeProjectId: "current" }) }));
+vi.mock("../../../../runtime/useRuntimeMenu", () => ({ useRuntimeMenuOptions: () => ({ runtime: {}, runtimeOptions: [] }) }));
+vi.mock("../../../../status/useStatus", () => ({ useStatus: () => ({ showStatus: vi.fn() }) }));
+vi.mock("../../../../debug/useAppLogs", () => ({ useAppLogs: () => ({ logs: [], hasLogs: false, hasErrors: false, clearLogs: vi.fn() }) }));
+vi.mock("../../../../updates/useAppUpdateMetadata", () => ({ useAppUpdateMetadata: () => ({ metadata: null, refresh: mocks.refresh }) }));
+vi.mock("../../../../updates/useDesktopReleaseLookup", () => ({ useDesktopReleaseLookup: () => ({ lookup: { status: "idle" } }) }));
+vi.mock("../../../../updates/desktopAcquisition", () => ({ getAppAcquisitionTarget: () => "mobile" }));
+vi.mock("../DevDiagnosticsMenu", () => ({ DevDiagnosticsMenu: () => null }));
+vi.mock("../BuildLogOverlay", () => ({ BuildLogOverlay: () => null }));
 
 const makeProject = (id: string, name: string, orgId: string | null): ProjectListItem => ({
   id, name, orgId, orgName: orgId ?? "Personal", state: {} as ProjectListItem["state"],
@@ -40,11 +53,13 @@ describe("StudioMobileContextHeader", () => {
       searchRef: createRef<HTMLButtonElement>(),
       onHome: vi.fn(), onSearch: vi.fn(), onProfile: vi.fn(), onTeam: vi.fn(), onSettings: vi.fn(),
       onSwitchTeam: vi.fn(), onBrowseSpaces: vi.fn(), onSpace: vi.fn(),
+      onSupport: vi.fn(), onSignOut: vi.fn(),
     };
   });
 
   afterEach(async () => {
     await act(async () => root.unmount());
+    await act(async () => new Promise<void>(resolve => requestAnimationFrame(() => resolve())));
     container.remove();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -64,7 +79,7 @@ describe("StudioMobileContextHeader", () => {
     await act(async () => button(testId).click());
   }
 
-  it("keeps Home, search and profile actions separate and returns the visible search trigger", async () => {
+  it("opens the shared account sheet without navigating and keeps Home and search separate", async () => {
     await render();
     expect(document.querySelectorAll('[aria-label="Home — all teams"]')).toHaveLength(1);
     expect(button("topbar-home-button").getAttribute("aria-current")).toBe("page");
@@ -77,8 +92,30 @@ describe("StudioMobileContextHeader", () => {
     await click("topbar-profile-button");
     expect(props.onHome).toHaveBeenCalledOnce();
     expect(props.onSearch).toHaveBeenCalledOnce();
+    expect(props.onProfile).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-testid="profile-account-sheet"]')).not.toBeNull();
+    expect(button("profile-settings-button").textContent).toBe("Your settings");
+    expect(button("profile-install-button").getAttribute("href")).toBe("/install#mobile");
+    expect(mocks.refresh).toHaveBeenCalled();
+    await click("profile-settings-button");
     expect(props.onProfile).toHaveBeenCalledOnce();
+    expect(document.querySelector('[data-testid="profile-account-sheet"]')).toBeNull();
     expect(props.onSwitchTeam).not.toHaveBeenCalled();
+  });
+
+  it("uses the same Support and sign-out actions in the compact account sheet", async () => {
+    await render();
+    await click("topbar-profile-button");
+    await click("profile-support-button");
+    expect(props.onSupport).toHaveBeenCalledOnce();
+    expect(props.onProfile).not.toHaveBeenCalled();
+    expect(document.querySelector('[data-testid="profile-account-sheet"]')).toBeNull();
+    await click("topbar-profile-button");
+    const signOut = Array.from(document.querySelectorAll<HTMLElement>('[role="menuitem"]')).find(item => item.textContent === "Sign out");
+    expect(signOut).toBeDefined();
+    await act(async () => signOut!.click());
+    expect(props.onSignOut).toHaveBeenCalledOnce();
+    expect(document.querySelector('[data-testid="profile-account-sheet"]')).toBeNull();
   });
 
   it("uses singular update wording for Home and the current space", async () => {
@@ -133,9 +170,11 @@ describe("StudioMobileContextHeader", () => {
   it("uses the signed-in profile and changes initials when the account profile changes", async () => {
     await render();
     expect(button("topbar-profile-button").querySelector("img")?.src).toBe("https://example.test/avatar.png");
+    await click("topbar-profile-button");
     mocks.profile = { fullName: "Sam Rivera", avatarUrl: null };
     mocks.user = { email: "sam@example.test" };
     await render({ ...props, homeActive: false, homeAttentionCount: 0 });
+    expect(document.querySelector('[data-testid="profile-account-sheet"]')).toBeNull();
     expect(button("topbar-profile-button").querySelector("img")).toBeNull();
     expect(button("topbar-profile-button").textContent).toBe("SR");
     expect(mocks.recency).toHaveBeenLastCalledWith("sam@example.test");

@@ -35,13 +35,18 @@ describe("SettingsShell available-pane navigation", () => {
     disconnect: ReturnType<typeof vi.fn>;
   }> = [];
 
-  function Harness({ initialCategory = "people" }: { initialCategory?: string }) {
+  function Harness({ initialCategory = "people", personal = false }: { initialCategory?: string; personal?: boolean }) {
     const [category, setCategory] = useState(initialCategory);
     const [childCategory, setChildCategory] = useState("speech");
     return (
       <SettingsShell
-        title="Space settings"
-        categories={categories}
+        title={personal ? "Your settings" : "Space settings"}
+        categories={personal ? [
+          { id: "account", label: "Profile" },
+          { id: "preferences", label: "Preferences" },
+          { id: "notifications", label: "Notifications" },
+        ] : categories}
+        compactCategoryNavigation={personal ? "tabs" : "picker"}
         activeCategoryId={category}
         activeChildCategoryId={childCategory}
         onCategoryChange={(next) => {
@@ -169,6 +174,37 @@ describe("SettingsShell available-pane navigation", () => {
     expect(get("settings-category-nav-picker")).toBeNull();
     expect(get("settings-category-overview")?.getAttribute("aria-current")).toBe("page");
     expect(get("settings-category-people")?.hasAttribute("aria-current")).toBe(false);
+  });
+
+  it("shows all three personal categories on a phone and selects the existing account route", async () => {
+    viewportWidth = 390;
+    paneWidth = 390;
+    await act(async () => root.render(<Harness initialCategory="preferences" personal />));
+    expect(get("settings-category-nav-tabs")).not.toBeNull();
+    expect(get("settings-category-nav-picker")).toBeNull();
+    expect([...get("settings-category-nav-tabs")!.querySelectorAll("button")].map(button => button.textContent)).toEqual([
+      "Profile", "Preferences", "Notifications",
+    ]);
+    expect(get("settings-category-preferences")?.getAttribute("aria-current")).toBe("page");
+    await click("settings-category-account");
+    expect(onCategoryChange).toHaveBeenCalledExactlyOnceWith("account");
+    expect(get("active-content")?.textContent).toBe("account");
+    expect(get("settings-category-account")?.getAttribute("aria-current")).toBe("page");
+  });
+
+  it("keeps focus on the selected personal category across the sidebar and compact tabs", async () => {
+    await act(async () => root.render(<Harness initialCategory="notifications" personal />));
+    expect(get("settings-category-nav")).not.toBeNull();
+    await act(async () => get("settings-category-notifications")?.focus());
+    await resizePane(390);
+    expect(get("settings-category-nav-tabs")).not.toBeNull();
+    expect(document.activeElement).toBe(get("settings-category-notifications"));
+    await click("settings-category-preferences");
+    await act(async () => get("settings-category-preferences")?.focus());
+    await resizePane(1080);
+    expect(get("settings-category-nav-tabs")).toBeNull();
+    expect(document.activeElement).toBe(get("settings-category-preferences"));
+    expect(get("active-content")?.textContent).toBe("preferences");
   });
 
   it("measures a shell revealed after an initially hidden layout without resetting its category", async () => {

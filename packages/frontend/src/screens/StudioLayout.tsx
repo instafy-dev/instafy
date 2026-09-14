@@ -1669,7 +1669,7 @@ function StudioLayoutInner() {
   const handleOpenProfileSettings = useCallback(() => {
     runStudioNavigation(() => {
       setPanelTabMeta("settings", {
-        title: "Profile settings",
+        title: "Your settings",
         icon: <User className="text-[16px]" aria-hidden="true" />
       });
       navigateToDestination({ kind: "panel", panel: "settings", settingsTab: "profile", teamId: navigationScope.orgKey });
@@ -2043,6 +2043,8 @@ function StudioLayoutInner() {
     projects={projectList} activeProjectId={activeProjectId} attentionCounts={homeAttentionByProject}
     homeActive={contextHomeActive} homeAttentionCount={homeAttentionCount} searchRef={overlay ? overlaySearchTriggerRef : mobileSearchTriggerRef}
     onHome={handleOpenHome} onSearch={search.openSearch} onProfile={handleOpenProfileSettings}
+    onSupport={() => runStudioNavigation(bugReportController.onOpenBugReportInbox)}
+    onSignOut={() => runStudioNavigation(() => { void handleSignOut(); })}
     onTeam={() => handleOpenTeam(navigationScope.orgKey)}
     onSettings={navigationScope.orgKey === "personal" ? undefined : () => handleOpenOrgSettings(navigationScope.orgKey)}
     onSwitchTeam={() => openMobileContextDirectory("teams-and-spaces")}
@@ -2222,7 +2224,7 @@ function StudioLayoutInner() {
             {!isLargeScreen ? mobileContextHeader() : null}
             {isLargeScreen || navigationScope.page === "workspace" ? <StudioTopBar newChatInSidebar={isLargeScreen} contextHeaderAbove mobileNavigation={mobileTopbarNavigation} /> : <div className="flex min-h-12 items-center gap-2 border-b border-slate-200/70 px-1 dark:border-[color:var(--color-studio-dark-divider)]">
               <IconButton variant="ghost" aria-label="Open navigation" data-testid="topbar-sidebar-toggle" onPress={handleToggleSidebar} className="!min-h-12 !min-w-12"><SidebarExpand className="h-4 w-4" /></IconButton>
-              <span className="min-w-0 flex-1 truncate text-sm text-slate-500 dark:text-slate-400">{topbarLocationOverride?.title ?? (contextHomeActive ? "Home" : activeTeamName)}</span>
+              <span className="min-w-0 flex-1 truncate text-sm text-slate-500 dark:text-slate-400">{navigationScope.page === "account" ? "Your settings" : topbarLocationOverride?.title ?? (contextHomeActive ? "Home" : activeTeamName)}</span>
             </div>}
             <ProjectAccessRecoveryBanner />
             {/* relative: the participants drawer overlays the right edge of the

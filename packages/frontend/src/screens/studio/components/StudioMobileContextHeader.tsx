@@ -3,11 +3,11 @@ import { Search } from "iconoir-react";
 import { AttentionBadge } from "../../../components/AttentionBadge";
 import { IconButton } from "../../../components/Button";
 import { OctoMark } from "../../../components/OctoMark";
-import { useProfile } from "../../../profile/ProfileProvider";
 import { useAuth } from "../../../providers/AuthProvider";
 import { useProjectRecency } from "../../../projects/useProjectRecency";
 import type { ProjectListItem } from "../../../projects/useProjects";
 import { StudioRecentSpaces } from "./StudioRecentSpaces";
+import { StudioAccountMenu } from "./StudioAccountMenu";
 import { StudioSidebarTeamMenu } from "./StudioSidebarTeamMenu";
 import { unreadUpdatesDescription } from "../homeUpdateLabels";
 
@@ -24,6 +24,8 @@ export interface StudioMobileContextHeaderProps {
   onHome: () => void;
   onSearch: () => void;
   onProfile: () => void;
+  onSupport?: () => void;
+  onSignOut?: () => void;
   onTeam: () => void;
   onSettings?: () => void;
   onSwitchTeam: () => void;
@@ -45,6 +47,8 @@ export function StudioMobileContextHeader({
   onHome,
   onSearch,
   onProfile,
+  onSupport,
+  onSignOut,
   onTeam,
   onSettings,
   onSwitchTeam,
@@ -52,16 +56,12 @@ export function StudioMobileContextHeader({
   onSpace,
 }: StudioMobileContextHeaderProps) {
   const { user } = useAuth();
-  const { profile } = useProfile();
   const recency = useProjectRecency(user?.email);
   const homeAttentionId = useId();
   const spaces = projects
     .filter(project => (project.orgId ?? "personal") === teamId)
     .map(project => ({ id: project.id, name: project.name, icon: project.projectIcon, color: project.projectColor }));
   const selectedSpaceId = spaces.some(space => space.id === activeProjectId) ? activeProjectId : null;
-  const profileInitials = (profile?.fullName?.trim() || user?.email?.trim() || "Account")
-    .split(/\s+/).slice(0, 2).map(part => part[0]).join("").toUpperCase();
-  const avatarUrl = profile?.avatarUrl?.trim() || null;
   const unreadCount = Number.isFinite(homeAttentionCount) && homeAttentionCount > 0 ? Math.floor(homeAttentionCount) : 0;
 
   return (
@@ -115,15 +115,12 @@ export function StudioMobileContextHeader({
       >
         <Search className="h-[18px] w-[18px]" aria-hidden="true" />
       </IconButton>
-      <IconButton
-        variant="ghost" radius="full" onPress={onProfile}
-        aria-label="Open profile settings" title="Open profile settings" data-testid="topbar-profile-button"
-        className="!min-h-12 !min-w-11 shrink-0 p-1"
-      >
-        <span className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full bg-slate-200 text-xs font-semibold text-slate-700 dark:bg-[var(--color-studio-dark-active)] dark:text-slate-200" aria-hidden="true">
-          {avatarUrl ? <img src={avatarUrl} alt="" draggable={false} className="h-full w-full object-cover" /> : profileInitials}
-        </span>
-      </IconButton>
+      <StudioAccountMenu
+        presentation="header"
+        onProfile={onProfile}
+        onSupport={onSupport}
+        onSignOut={onSignOut}
+      />
     </header>
   );
 }

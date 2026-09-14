@@ -111,8 +111,8 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
         return { success: false, error: "Sign in to update your profile." };
       }
       const nextProfile: UserProfile = {
-        fullName: updates.fullName ?? profile?.fullName ?? null,
-        avatarUrl: updates.avatarUrl ?? profile?.avatarUrl ?? null
+        fullName: updates.fullName === undefined ? profile?.fullName ?? null : updates.fullName,
+        avatarUrl: updates.avatarUrl === undefined ? profile?.avatarUrl ?? null : updates.avatarUrl
       };
 
       if (!hasSupabaseConfig) {

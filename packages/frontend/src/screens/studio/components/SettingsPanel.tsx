@@ -5,7 +5,6 @@ import { Coins, Cpu, Group, NavArrowDown, Settings, Xmark } from "iconoir-react"
 import { MenuTrigger } from "react-aria-components";
 import { Button } from "../../../components/Button";
 import { Card } from "../../../components/Card";
-import { Checkbox } from "../../../components/Checkbox";
 import { EntityRow } from "../../../components/EntityRow";
 import { Text } from "../../../components/Text";
 import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
@@ -30,6 +29,7 @@ import { getOrgDisplayName, isPersonalOrgName } from "../../../org/orgNaming";
 import { useStatus } from "../../../status/useStatus";
 import { ProfileEditor } from "../../../profile/ProfileEditor";
 import { NotificationPreferencesSettings } from "../../../notifications/NotificationPreferencesSettings";
+import { PersonalPreferencesSettings } from "./PersonalPreferencesSettings";
 import { SettingsSection } from "./SettingsSection";
 import { TeamProfileSettings } from "./TeamProfileSettings";
 import { useSettingsOrganization } from "./useSettingsOrganization";
@@ -932,7 +932,7 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
 
   const settingsTitle =
     activeTab === "profile"
-      ? "Profile settings"
+      ? "Your settings"
       : activeTab === "project"
         ? "Space settings"
         : activeOrgIsPersonal
@@ -961,7 +961,7 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
                 ? "Voice & audio"
                 : "Danger zone"
             : profileCategory === "account"
-              ? "Account"
+              ? "Profile"
               : profileCategory === "notifications"
                 ? "Notifications"
                 : "Preferences";
@@ -1298,7 +1298,7 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
       ];
     }
     return [
-      { id: "account", label: "Account", testId: "settings-category-profile-account" },
+      { id: "account", label: "Profile", testId: "settings-category-profile-account" },
       { id: "preferences", label: "Preferences", testId: "settings-category-profile-preferences" },
       { id: "notifications", label: "Notifications", testId: "settings-category-profile-notifications" },
     ];
@@ -1581,6 +1581,7 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
       hideTitle={!isLargeScreen}
       scope={settingsScope}
       categories={categories}
+      compactCategoryNavigation={activeTab === "profile" ? "tabs" : "picker"}
       activeCategoryId={activeCategoryId}
       onCategoryChange={handleCategoryChange}
       activeChildCategoryId={
@@ -1616,23 +1617,7 @@ export function SettingsPanel({ activeTab: fallbackTab, organizationId, onOrgani
           ) : profileCategory === "notifications" ? (
             <NotificationPreferencesSettings userId={user?.id ?? null} accessToken={session?.access_token ?? null} />
           ) : (
-            <Card tone="default" radius="2xl" shadow="none" padding="sm" className="py-2.5">
-              <Text variant="bodyStrong" tone="secondary">
-                Preferences
-              </Text>
-              <div className="mt-3 space-y-2">
-                <Checkbox
-                  isSelected={gitAutoSyncAfterApply}
-                  onChange={handleGitAutoSyncChange}
-                  label="Auto-save assistant file changes"
-                  description="When enabled, assistant edits are synced to the canonical workspace after each run."
-                  data-testid="profile-preference-git-auto-sync"
-                />
-                <Text variant="caption" tone="muted" className="pl-6">
-                  If auto-save fails, the run stays complete and you can finish from Changes.
-                </Text>
-              </div>
-            </Card>
+            <PersonalPreferencesSettings gitAutoSyncAfterApply={gitAutoSyncAfterApply} onGitAutoSyncChange={handleGitAutoSyncChange} />
           )}
         </div>
         ) : activeTab === "project" ? (

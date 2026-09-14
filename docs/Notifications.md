@@ -5,7 +5,7 @@ replies, support replies and resolutions, failed runs, and automation outcomes u
 one event ledger and delivery queue. Home combines conversation attention, support
 updates and automation outcomes in one account-wide feed. Octo/Home is the catch-up
 entry point; alert preferences live in
-Settings → Profile → Notifications. Source cursors and the event ledger are reconciled
+Your settings → Notifications. Source cursors and the event ledger are reconciled
 using explicit observed snapshots, rather than clearing whatever arrived most recently.
 
 ## Storage and transaction boundaries
@@ -169,6 +169,14 @@ boundary as new activity arrives. Failed loads remain retryable and are not
 presented as an empty account. There is no
 separate notification bell or notification dialog. Existing external alerts and
 toasts continue to use the controller-owned event ledger and preferences.
+
+The profile picture opens an account popover on desktop and a compact sheet on
+narrow screens. Both offer Your settings, Support and Sign out. Support unread
+badges stay in Home rather than also appearing on the profile picture. Device
+alert permission and channel controls live together under Your settings →
+Notifications; the account menu does not toggle device permissions. Profile,
+Preferences and Notifications remain visible as category tabs on narrow screens.
+Appearance choices (System, Light and Dark) live under Preferences.
 
 The server owns monotonic seen/read/archive timestamps; a stale device cannot
 unread or unarchive a notification. Existing API read-all/archive operations
