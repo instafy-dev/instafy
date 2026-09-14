@@ -506,7 +506,11 @@ the fixed preparation stage/image name, bounded exit/signal/error-code fields,
 and fixed hints derived from at most 32 KiB of stderr. Raw output, image tags,
 URLs, paths and credentials are not logged. Hints are Docker-reported symptoms,
 not proof of the underlying cause; a signal is not proof of an out-of-memory
-failure. Missing/oversized/unrecognized diagnostics remain unclassified. This
+failure. The `tls` hint retains compatible classification, with additional
+`tls-certificate`, `tls-handshake-timeout` or `tls-handshake-rejected` hints
+when Docker reports that specific symptom. Do not treat a certificate failure
+as a network timeout or disable verification to make the pull succeed.
+Missing/oversized/unrecognized diagnostics remain unclassified. This
 does not retry a failed pull, skip an image or change the failure result.
 CLI upgrades require updating and
 testing the pinned ancillary inventory. Run
