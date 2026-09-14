@@ -15,6 +15,7 @@ export interface StudioMobileContextHeaderProps {
   teamName: string;
   teamAvatarUrl: string | null;
   teamId: string;
+  accentColor?: string | null;
   projects: readonly ProjectListItem[];
   activeProjectId: string | null;
   attentionCounts: Record<string, number>;
@@ -38,6 +39,7 @@ export function StudioMobileContextHeader({
   teamName,
   teamAvatarUrl,
   teamId,
+  accentColor,
   projects,
   activeProjectId,
   attentionCounts,
@@ -90,7 +92,7 @@ export function StudioMobileContextHeader({
       <div className="flex min-w-0 flex-1 items-center gap-[3px]" role="group" aria-label="Team and space">
         <StudioSidebarTeamMenu
           key={teamId}
-          teamName={teamName} teamAvatarUrl={teamAvatarUrl}
+          teamName={teamName} teamAvatarUrl={teamAvatarUrl} accentColor={accentColor}
           compact={false} active={false} presentation="path" mobile
           rowClassName="" iconClassName=""
           onOpenOverview={onTeam} onOpenSettings={onSettings} onSwitchTeam={onSwitchTeam}

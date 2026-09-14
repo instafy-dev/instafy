@@ -4,7 +4,8 @@ import { AttentionBadge } from "../../../components/AttentionBadge";
 import { IconButton } from "../../../components/Button";
 import { OctoMark } from "../../../components/OctoMark";
 import { DESKTOP_TITLE_BAR_HEIGHT_PX } from "../../../lib/desktopShell";
-import { getOrgInitials } from "../../../org/orgNaming";
+import { OrgIdentity } from "../../../components/OrgIdentity";
+import { normalizeOrgAccent } from "../../../org/orgAccent";
 import { DARK_RAIL_SURFACE_CLASS } from "../../../theme/darkSurfaces";
 import type { SidebarWorkspaceOrgOption } from "./StudioSidebarWorkspaceSwitcher";
 import { unreadUpdatesDescription } from "../homeUpdateLabels";
@@ -99,12 +100,12 @@ export function StudioOrganizationRail({
             variant="ghost" size="sm" radius="lg" onPress={() => onSelectOrganization(org.key)}
             aria-label={`${org.label}${attention > 0 ? `, ${unreadUpdatesDescription(attention)}` : ""}`}
             title={org.label} aria-current={selected && !homeActive ? "page" : undefined}
+            data-org-accent={normalizeOrgAccent(org.accentColor) ?? "slate"}
             aria-busy={pending || undefined} data-testid={`sidebar-team-${org.key}`}
-            className="relative h-11 w-11 shrink-0 aria-[current=page]:bg-primary-50 aria-[current=page]:text-primary-600 dark:aria-[current=page]:bg-primary-500/10 dark:aria-[current=page]:text-primary-400">
-            {selected && !homeActive ? <span aria-hidden="true" className={SELECTION_MARKER_CLASS} /> : null}
-            <span className={`flex h-8 w-8 items-center justify-center overflow-hidden rounded-lg bg-slate-200 text-xs font-medium text-slate-700 dark:bg-slate-700 dark:text-slate-100 ${pending ? "animate-pulse" : ""}`}>
-              {org.avatarUrl ? <img src={org.avatarUrl} alt="" draggable={false} className="h-full w-full object-cover" /> : getOrgInitials(org.name)}
-            </span>
+            className="org-accent-selection relative h-11 w-11 shrink-0">
+            {selected && !homeActive ? <span aria-hidden="true" className="org-accent-marker pointer-events-none absolute -left-2 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-r-full" /> : null}
+            <OrgIdentity name={org.name} avatarUrl={org.avatarUrl} accentColor={org.accentColor}
+              className={`h-8 w-8 text-xs ${pending ? "animate-pulse" : ""}`} />
             <AttentionBadge count={attention} aria-hidden testId={`sidebar-team-attention-${org.key}`}
               title={unreadUpdatesDescription(attention)}
               className="absolute right-0 top-0 ring-2 ring-slate-50 dark:ring-[color:var(--color-studio-dark-rail)]" />

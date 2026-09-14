@@ -638,6 +638,8 @@ struct OrgSummary {
     org_name: String,
     #[serde(rename = "avatarUrl", skip_serializing_if = "Option::is_none")]
     avatar_url: Option<String>,
+    #[serde(rename = "accentColor", skip_serializing_if = "Option::is_none")]
+    accent_color: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     role: Option<String>,
 }
@@ -663,6 +665,7 @@ struct CreateOrgBody {
     org_name: Option<String>,
     #[serde(default, rename = "ownerUserId", alias = "owner_user_id")]
     owner_user_id: Option<String>,
+    accent_color: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -671,6 +674,7 @@ struct CreateOrgResponse {
     org_id: Uuid,
     org_slug: String,
     org_name: String,
+    accent_color: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1280,7 +1284,8 @@ async fn list_organizations(
         transaction
             .query(
                 "select o.id, o.slug, o.name, null as role,
-                        to_jsonb(o) ->> 'avatar_url' as avatar_url
+                        to_jsonb(o) ->> 'avatar_url' as avatar_url,
+                        to_jsonb(o) ->> 'accent_color' as accent_color
                  from organizations o",
                 &[],
             )
@@ -1290,7 +1295,8 @@ async fn list_organizations(
         transaction
             .query(
                 "select o.id, o.slug, o.name, m.role,
-                        to_jsonb(o) ->> 'avatar_url' as avatar_url
+                        to_jsonb(o) ->> 'avatar_url' as avatar_url,
+                        to_jsonb(o) ->> 'accent_color' as accent_color
                  from organizations o
                  join org_memberships m on m.org_id = o.id
                  where m.user_id = $1",
@@ -1321,6 +1327,7 @@ async fn list_organizations(
                     org_slug: slug,
                     org_name: name,
                     avatar_url: row.get::<_, Option<String>>("avatar_url"),
+                    accent_color: row.get::<_, Option<String>>("accent_color"),
                     role: row.get::<_, Option<String>>("role"),
                 })
             } else {
@@ -1344,6 +1351,7 @@ async fn create_organization(
         ));
     }
 
+    validate_org_accent(body.accent_color.as_deref())?;
     let requested_owner = parse_optional_uuid_param(body.owner_user_id, "ownerUserId")?;
     let owner_user_id = if let Some(owner) = requested_owner {
         if !context.is_service_role && Some(owner) != context.user_id {
@@ -1470,20 +1478,18 @@ async fn create_organization(
     }
 
     let mut final_slug = resolved_slug.clone();
-    let (org_id, org_name) =
+    let (org_id, org_name, created) =
         match upsert_org(&transaction, &resolved_slug, &resolved_name, owner_user_id).await? {
-            OrgUpsertOutcome::Created(id, name) | OrgUpsertOutcome::Existing(id, name) => {
-                (id, name)
-            }
+            OrgUpsertOutcome::Created(id, name) => (id, name, true),
+            OrgUpsertOutcome::Existing(id, name) => (id, name, false),
             OrgUpsertOutcome::SlugTakenByOthers if !slug_is_explicit => {
                 // The display-name-derived slug belongs to somebody else's
                 // org: mint a fresh unique slug instead of joining theirs.
                 let suffix = Uuid::new_v4().simple().to_string();
                 final_slug = format!("{resolved_slug}-{}", &suffix[..8]);
                 match upsert_org(&transaction, &final_slug, &resolved_name, owner_user_id).await? {
-                    OrgUpsertOutcome::Created(id, name) | OrgUpsertOutcome::Existing(id, name) => {
-                        (id, name)
-                    }
+                    OrgUpsertOutcome::Created(id, name) => (id, name, true),
+                    OrgUpsertOutcome::Existing(id, name) => (id, name, false),
                     OrgUpsertOutcome::SlugTakenByOthers => {
                         return Err(internal_error(
                             "failed to allocate a unique organization slug".to_string(),
@@ -1504,6 +1510,23 @@ async fn create_organization(
             }
         };
 
+    // Idempotent creation must not recolor an existing organization.
+    if created {
+        if let Some(color) = body.accent_color.as_deref() {
+            transaction
+                .execute(
+                    "update organizations set accent_color = $2 where id = $1",
+                    &[&org_id, &color],
+                )
+                .await
+                .map_err(|error| {
+                    internal_error(format!("failed to save organization color: {error}"))
+                })?;
+        }
+    }
+    let accent_color = transaction.query_one("select to_jsonb(o) ->> 'accent_color' as accent_color from organizations o where id = $1", &[&org_id])
+        .await.map_err(|error| internal_error(format!("failed to read organization color: {error}")))?.get("accent_color");
+
     if let Err(error) =
         crate::billing::service::ensure_default_org_subscription(&transaction, &org_id).await
     {
@@ -1523,6 +1546,7 @@ async fn create_organization(
         org_id,
         org_slug: final_slug,
         org_name,
+        accent_color,
     }))
 }
 
@@ -4146,9 +4170,25 @@ async fn accept_org_invitation(
 struct UpdateOrgBody {
     name: Option<String>,
     avatar_url: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_identity_patch")]
+    accent_color: Option<Option<String>>,
 }
 
-/// Owner/manager-editable org profile: display name and avatar. The avatar is
+fn validate_org_accent(color: Option<&str>) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if color.is_some_and(|value| {
+        ![
+            "slate", "blue", "violet", "pink", "red", "orange", "green", "teal",
+        ]
+        .contains(&value)
+    }) {
+        return Err(bad_request(
+            "accentColor must be one of the supported team colors",
+        ));
+    }
+    Ok(())
+}
+
+/// Owner/admin-editable org profile: display name, avatar and accent. The avatar is
 /// an https image URL (typically a Supabase storage public URL); an empty
 /// string clears it.
 async fn update_organization(
@@ -4181,7 +4221,12 @@ async fn update_organization(
         }
         None => None,
     };
-    if name.is_none() && avatar_url.is_none() {
+    validate_org_accent(
+        body.accent_color
+            .as_ref()
+            .and_then(|color| color.as_deref()),
+    )?;
+    if name.is_none() && avatar_url.is_none() && body.accent_color.is_none() {
         return Err(bad_request("nothing to update"));
     }
 
@@ -4227,6 +4272,18 @@ async fn update_organization(
             .await
             .map_err(|error| {
                 internal_error(format!("failed to update organization avatar: {error}"))
+            })?;
+    }
+
+    if let Some(color) = body.accent_color {
+        transaction
+            .execute(
+                "update organizations set accent_color = $2, updated_at = now() where id = $1",
+                &[&org_id, &color],
+            )
+            .await
+            .map_err(|error| {
+                internal_error(format!("failed to update organization color: {error}"))
             })?;
     }
 

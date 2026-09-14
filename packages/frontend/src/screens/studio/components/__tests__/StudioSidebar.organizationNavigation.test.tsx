@@ -216,7 +216,7 @@ describe("StudioSidebar organization navigation", () => {
     await render({ navigationHeaderPortalTarget: headerPortal, collapsed });
     const team = headerPortal.querySelector('[data-testid="sidebar-team-menu-trigger"]')!;
     const space = headerPortal.querySelector('[data-testid="sidebar-space-button"]')!;
-    expect(team.textContent).toBe("Alpha");
+    expect(team.querySelector("[data-testid=org-identity]")).not.toBeNull();
     expect(team.getAttribute("aria-label")).toBe("Team menu: Alpha");
     expect(space.textContent).toContain("Core");
     expect(space.getAttribute("aria-label")).toBe("Choose space: Core");
@@ -424,7 +424,7 @@ describe("StudioSidebar organization navigation", () => {
   it.each(["home", "settings"] as const)("keeps external team and space destinations available on %s", async (activePanel) => {
     await render({ navigationHeaderPortalTarget: headerPortal, activePanel, hideContext: activePanel === "settings" });
     expect(container.querySelector('[data-testid="sidebar-context-navigation"]')).toBeNull();
-    expect(headerPortal.querySelector('[data-testid="sidebar-team-menu-trigger"]')?.textContent).toBe("Alpha");
+    expect(headerPortal.querySelector('[data-testid="sidebar-team-menu-trigger"]')?.getAttribute("aria-label")).toBe("Team menu: Alpha");
     expect(headerPortal.querySelector('[data-testid="sidebar-space-button"]')?.textContent).toContain("Core");
     await chooseTeamAction("overview");
     expect(onOpenTeam).toHaveBeenCalledExactlyOnceWith("org-a");
@@ -1299,12 +1299,12 @@ describe("StudioSidebar organization navigation", () => {
   it("publishes resolved selected-team metadata only when its identity changes", async () => {
     const onActiveTeamChange = vi.fn();
     await render({ onActiveTeamChange });
-    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-a", name: "Alpha", avatarUrl: null });
+    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-a", name: "Alpha", accentColor: null, avatarUrl: null });
     const initialCalls = onActiveTeamChange.mock.calls.length;
     await render({ collapsed: true, onActiveTeamChange });
     expect(onActiveTeamChange).toHaveBeenCalledTimes(initialCalls);
     await render({ selectedOrgKey: "org-b", onActiveTeamChange });
-    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-b", name: "Empty team", avatarUrl: null });
+    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-b", name: "Empty team", accentColor: null, avatarUrl: null });
     expect(onActiveTeamChange).toHaveBeenCalledTimes(initialCalls + 1);
   });
 
@@ -1312,21 +1312,21 @@ describe("StudioSidebar organization navigation", () => {
     const onActiveTeamChange = vi.fn();
     fixture.orgs = fixture.orgs.map((org) => ({ ...org, avatarUrl: `https://images.example.test/${org.id}.png` }));
     await render({ onActiveTeamChange });
-    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-a", name: "Alpha", avatarUrl: "https://images.example.test/org-a.png" });
+    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-a", name: "Alpha", accentColor: null, avatarUrl: "https://images.example.test/org-a.png" });
     const initialCalls = onActiveTeamChange.mock.calls.length;
     await render({ collapsed: true, onActiveTeamChange });
     expect(onActiveTeamChange).toHaveBeenCalledTimes(initialCalls);
     fixture.orgs = fixture.orgs.map((org) => ({ ...org, avatarUrl: org.id === "org-a" ? "https://images.example.test/updated.png" : org.avatarUrl }));
     await act(async () => { window.dispatchEvent(new Event("instafy:orgs-updated")); });
-    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-a", name: "Alpha", avatarUrl: "https://images.example.test/updated.png" });
+    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-a", name: "Alpha", accentColor: null, avatarUrl: "https://images.example.test/updated.png" });
     expect(onActiveTeamChange).toHaveBeenCalledTimes(initialCalls + 1);
     fixture.orgs = fixture.orgs.map((org) => ({ ...org, avatarUrl: org.id === "org-a" ? null : org.avatarUrl }));
     await act(async () => { window.dispatchEvent(new Event("instafy:orgs-updated")); });
-    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-a", name: "Alpha", avatarUrl: null });
+    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-a", name: "Alpha", accentColor: null, avatarUrl: null });
     await render({ selectedOrgKey: "org-b", onActiveTeamChange });
-    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-b", name: "Empty team", avatarUrl: "https://images.example.test/org-b.png" });
+    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-b", name: "Empty team", accentColor: null, avatarUrl: "https://images.example.test/org-b.png" });
     await render({ selectedOrgKey: "org-unknown", onActiveTeamChange });
-    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-unknown", name: "Team", avatarUrl: null });
+    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-unknown", name: "Team", accentColor: null, avatarUrl: null });
     await render({ selectedOrgKey: "personal", onActiveTeamChange });
     expect(onActiveTeamChange).toHaveBeenLastCalledWith(expect.objectContaining({ key: "personal", avatarUrl: null }));
   });
@@ -1342,7 +1342,7 @@ describe("StudioSidebar organization navigation", () => {
     const nextAccountCalls = onActiveTeamChange.mock.calls.slice(previousCalls);
     expect(nextAccountCalls.length).toBeGreaterThan(0);
     expect(nextAccountCalls.every(([team]) => team.avatarUrl === null)).toBe(true);
-    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-a", name: "Alpha", avatarUrl: null });
+    expect(onActiveTeamChange).toHaveBeenLastCalledWith({ key: "org-a", name: "Alpha", accentColor: null, avatarUrl: null });
   });
 
   it("reveals a failed rail switch with Retry, preserves its scope, and respects dismissal", async () => {

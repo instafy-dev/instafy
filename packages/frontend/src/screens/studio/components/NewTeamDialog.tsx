@@ -6,6 +6,8 @@ import { Text } from "../../../components/Text";
 import { StudioDialogBody, StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import { controllerClient, type ControllerOrgSummary } from "../../../sdk/instafy";
+import { TeamAccentPicker } from "./TeamAccentPicker";
+import type { OrgAccent } from "../../../org/orgAccent";
 import { TeamPicturePicker } from "./TeamPicturePicker";
 import { notifyTeamProfileUpdated, saveTeamAvatar } from "./teamAvatar";
 
@@ -23,6 +25,7 @@ export function NewTeamDialog({ open, ...props }: NewTeamDialogProps) {
 
 function NewTeamDialogForm({ onClose, onCreated, allowCustomSlug = false }: Omit<NewTeamDialogProps, "open">) {
   const [name, setName] = useState("");
+  const [color, setColor] = useState<OrgAccent | null>(null);
   const [slug, setSlug] = useState("");
   const nameId = allowCustomSlug ? "project-launcher-org-name-input" : "sidebar-new-team-name";
   const [file, setFile] = useState<File | null>(null);
@@ -50,7 +53,7 @@ function NewTeamDialogForm({ onClose, onCreated, allowCustomSlug = false }: Omit
     let organization = created;
     try {
       if (!organization) {
-        organization = await controllerClient.organizations.create({ orgName: name.trim(), ...(slug.trim() ? { orgSlug: slug.trim() } : {}) });
+        organization = await controllerClient.organizations.create({ orgName: name.trim(), ...(color ? { accentColor: color } : {}), ...(slug.trim() ? { orgSlug: slug.trim() } : {}) });
         if (!organization) throw new Error("Couldn't create the team. Try again in a moment.");
         setCreated(organization);
         notifyTeamProfileUpdated();
@@ -85,7 +88,8 @@ function NewTeamDialogForm({ onClose, onCreated, allowCustomSlug = false }: Omit
             <Input id="project-launcher-org-slug-input" value={slug} onChange={(event) => setSlug(event.target.value)}
               placeholder="my-team" disabled={pending || Boolean(created)} data-testid="project-launcher-org-slug-input" />
           </Field> : null}
-          <TeamPicturePicker name={name} file={file} onChange={setFile} disabled={pending} />
+          <TeamPicturePicker name={name} file={file} accentColor={created ? created.accentColor : color} onChange={setFile} disabled={pending} />
+          <TeamAccentPicker value={created ? created.accentColor : color} onChange={setColor} disabled={pending || Boolean(created)} />
           {error ? <Text as="p" role="alert" variant="body" tone="danger">{error}</Text> : null}
           <div className="flex flex-wrap items-center justify-end gap-2">
             <Button type="button" variant="ghost" size="sm" radius="full" onPress={close} isDisabled={pending}>

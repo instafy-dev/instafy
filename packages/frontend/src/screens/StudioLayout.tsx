@@ -292,9 +292,9 @@ function StudioLayoutInner() {
   const searchHistory = useStudioSearchHistory(currentUserId, getStudioVisitKey(location), searchKey,
     currentUserId ? `${currentUserId}:${activeProjectId ?? "no-project"}` : null);
 
-  const [navigationTeam, setNavigationTeam] = useState<{ userId: string | null; key: string; name: string; avatarUrl: string | null } | null>(null);
-  const handleActiveTeamChange = useCallback((team: { key: string; name: string; avatarUrl: string | null }) => {
-    setNavigationTeam((current) => current?.userId === currentUserId && current.key === team.key && current.name === team.name && current.avatarUrl === team.avatarUrl
+  const [navigationTeam, setNavigationTeam] = useState<{ userId: string | null; key: string; name: string; avatarUrl: string | null; accentColor?: string | null } | null>(null);
+  const handleActiveTeamChange = useCallback((team: { key: string; name: string; avatarUrl: string | null; accentColor?: string | null }) => {
+    setNavigationTeam((current) => current?.userId === currentUserId && current.key === team.key && current.name === team.name && current.avatarUrl === team.avatarUrl && current.accentColor === team.accentColor
       ? current : { userId: currentUserId, ...team });
   }, [currentUserId]);
   const selectedTeamMetadata = navigationTeam?.userId === currentUserId && navigationTeam.key === navigationScope.orgKey
@@ -2039,7 +2039,7 @@ function StudioLayoutInner() {
   useNativeBackButtonAction(search.open, () => search.closeSearch(), 200);
   const contextHomeActive = navigationScope.page === "home";
   const mobileContextHeader = (overlay = false) => <StudioMobileContextHeader
-    teamName={activeTeamName} teamAvatarUrl={activeTeamAvatarUrl} teamId={navigationScope.orgKey}
+    teamName={activeTeamName} teamAvatarUrl={activeTeamAvatarUrl} accentColor={selectedTeamMetadata?.accentColor} teamId={navigationScope.orgKey}
     projects={projectList} activeProjectId={activeProjectId} attentionCounts={homeAttentionByProject}
     homeActive={contextHomeActive} homeAttentionCount={homeAttentionCount} searchRef={overlay ? overlaySearchTriggerRef : mobileSearchTriggerRef}
     onHome={handleOpenHome} onSearch={search.openSearch} onProfile={handleOpenProfileSettings}

@@ -40,7 +40,7 @@ describe("team profile editing", () => {
     try {
       await render(role); await changeName(); await submit();
       expect(mocks.update).toHaveBeenCalledExactlyOnceWith("empty-team", { name: "Renamed team" });
-      expect(container.querySelector('[role="status"]')?.textContent).toBe("Team name saved.");
+      expect(container.querySelector('[role="status"]')?.textContent).toBe("Team profile saved.");
       expect(updated).toHaveBeenCalledTimes(1);
     } finally { window.removeEventListener("instafy:orgs-updated", updated); }
   });
@@ -99,4 +99,43 @@ describe("team profile editing", () => {
     await act(async () => root.render(<TeamProfileSettings organization={{ ...organization, name: "Another update" }} role="owner" />));
     expect(container.querySelector<HTMLInputElement>('[data-testid="team-profile-name"]')?.value).toBe("Renamed team");
   });
+  async function chooseColor(color: string) {
+    await act(async () => container.querySelector<HTMLInputElement>(`input[type="radio"][value="${color}"]`)!.click());
+  }
+  it("previews a color immediately and saves only the changed identity fields", async () => {
+    await render(); await chooseColor("violet");
+    expect(container.querySelector('[data-testid="org-avatar-preview"] [data-org-accent]')?.getAttribute("data-org-accent")).toBe("violet");
+    expect(mocks.update).not.toHaveBeenCalled();
+    await submit();
+    expect(mocks.update).toHaveBeenCalledExactlyOnceWith("empty-team", { accentColor: "violet" });
+    expect(container.querySelector('[role="status"]')?.textContent).toBe("Team profile saved.");
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="team-profile-save"]')?.disabled).toBe(true);
+  });
+  it("retains unsaved color on a picture/name refresh and clears it on an org switch", async () => {
+    await render(); await chooseColor("teal");
+    await act(async () => root.render(<TeamProfileSettings organization={{ ...organization, accentColor: "pink" }} role="owner" />));
+    expect(container.querySelector<HTMLInputElement>('input[value="teal"]')?.checked).toBe(true);
+    await act(async () => root.render(<TeamProfileSettings organization={{ ...organization, id: "other", accentColor: "orange" }} role="owner" />));
+    expect(container.querySelector<HTMLInputElement>('input[value="orange"]')?.checked).toBe(true);
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="team-profile-save"]')?.disabled).toBe(true);
+  });
+  it("refreshes a pristine color without losing a dirty name", async () => {
+    await render(); await changeName();
+    await act(async () => root.render(<TeamProfileSettings organization={{ ...organization, accentColor: "green" }} role="owner" />));
+    expect(container.querySelector<HTMLInputElement>('input[value="green"]')?.checked).toBe(true);
+    await submit();
+    expect(mocks.update).toHaveBeenCalledExactlyOnceWith("empty-team", { name: "Renamed team" });
+  });
+  it("keeps failed color edits retryable and prevents non-admin color changes", async () => {
+    await render("viewer");
+    expect(container.querySelector<HTMLFieldSetElement>('[data-testid="team-accent-picker"]')?.disabled).toBe(true);
+    await render("owner"); await chooseColor("blue");
+    mocks.update.mockResolvedValueOnce(false);
+    await submit();
+    expect(container.querySelector('[role="status"]')).toBeNull();
+    expect(container.querySelector<HTMLInputElement>('input[value="blue"]')?.checked).toBe(true);
+    await submit();
+    expect(mocks.update).toHaveBeenCalledTimes(2);
+  });
+
 });

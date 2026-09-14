@@ -3,7 +3,8 @@ import { MenuTrigger } from "react-aria-components";
 import { Group, Settings } from "iconoir-react";
 import { Button } from "../../../components/Button";
 import { ControlChevron } from "../../../components/ControlChevron";
-import { getOrgInitials } from "../../../org/orgNaming";
+import { OrgIdentity } from "../../../components/OrgIdentity";
+import { normalizeOrgAccent } from "../../../org/orgAccent";
 import { MenuItemContent } from "../../../components/MenuItemContent";
 import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu";
 import { StudioPopover } from "../../../components/aria/StudioPopover";
@@ -11,6 +12,7 @@ import { StudioPopover } from "../../../components/aria/StudioPopover";
 interface StudioSidebarTeamMenuProps {
   teamName: string;
   teamAvatarUrl?: string | null;
+  accentColor?: string | null;
   presentation?: "standard" | "path";
   compact: boolean;
   active: boolean;
@@ -30,6 +32,7 @@ const MENU_ICON_CLASS = "shrink-0 text-slate-600 dark:text-slate-300 [&>svg]:h-4
 export function StudioSidebarTeamMenu({
   teamName,
   teamAvatarUrl,
+  accentColor,
   presentation = "standard",
   compact,
   active,
@@ -52,19 +55,20 @@ export function StudioSidebarTeamMenu({
         variant="ghost" size="sm" radius="lg" fullWidth={compact}
         data-testid="sidebar-team-menu-trigger"
         aria-label={`Team menu: ${teamName}`} title={`Team menu: ${teamName}`}
+        data-org-accent={normalizeOrgAccent(accentColor) ?? "slate"}
         aria-haspopup="menu"
-        className={`${path ? `shrink-0 !px-0 ${mobile || touchTargets ? "!min-w-11 !w-11" : "!min-w-8 !w-8"}` : compact ? rowClassName : "min-w-0 flex-1 justify-between gap-1 py-2 pl-2 pr-3"} ${mobile ? "!min-h-12" : touchTargets ? "!min-h-11" : ""} data-[pressed]:!translate-y-0 data-[pressed]:!scale-100`}
+        className={`${path ? "org-accent-chip" : ""} ${path ? `shrink-0 !px-0 ${mobile || touchTargets ? "!min-w-11 !w-11" : "!min-w-8 !w-8"}` : compact ? rowClassName : "min-w-0 flex-1 justify-between gap-1 py-2 pl-2 pr-3"} ${mobile ? "!min-h-12" : touchTargets ? "!min-h-11" : ""} data-[pressed]:!translate-y-0 data-[pressed]:!scale-100`}
       >
         {path ? (
-          <span aria-hidden="true" className={`flex shrink-0 items-center justify-center overflow-hidden rounded-md bg-slate-200 font-medium text-slate-700 dark:bg-slate-700 dark:text-slate-100 ${mobile ? "h-7 w-7 text-xs" : "h-6 w-6 text-[11px]"}`}>
-            {teamAvatarUrl ? <img src={teamAvatarUrl} alt="" draggable={false} className="h-full w-full object-cover" /> : getOrgInitials(teamName)}
-          </span>
+          <OrgIdentity name={teamName} avatarUrl={teamAvatarUrl} accentColor={accentColor}
+            className={mobile ? "h-7 w-7 text-xs" : "h-6 w-6 text-[11px]"} />
         ) : compact ? (
           <span className={iconClassName} data-active={active || undefined}>
             <Group className="h-5 w-5" aria-hidden="true" />
           </span>
         ) : (
           <>
+            <OrgIdentity name={teamName} avatarUrl={teamAvatarUrl} accentColor={accentColor} className="h-5 w-5 text-[10px]" />
             <span className="min-w-0 truncate text-sm font-medium">{teamName}</span>
             <ControlChevron direction="down" />
           </>

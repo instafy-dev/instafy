@@ -102,4 +102,26 @@ describe("new team picture onboarding", () => {
     expect(mocks.upload).toHaveBeenCalledTimes(1);
     expect(onCreated).toHaveBeenCalledTimes(1);
   });
+  it("includes the chosen accent in creation and previews it before saving", async () => {
+    await render();
+    await act(async () => container.querySelector<HTMLInputElement>('input[value="violet"]')!.click());
+    expect(container.querySelector('[data-testid="new-team-picture"] [data-org-accent]')?.getAttribute("data-org-accent")).toBe("violet");
+    mocks.create.mockResolvedValue({ ...created, accentColor: "violet" });
+    await submit();
+    expect(mocks.create).toHaveBeenCalledExactlyOnceWith({ orgName: "New team", accentColor: "violet" });
+    expect(onCreated).toHaveBeenCalledExactlyOnceWith({ ...created, accentColor: "violet" });
+  });
+  it("shows the saved color during picture retry when idempotent creation returns an existing neutral team", async () => {
+    mocks.create.mockResolvedValue({ ...created, accentColor: null });
+    mocks.upload.mockRejectedValueOnce(new Error("Upload failed"));
+    await render();
+    await act(async () => container.querySelector<HTMLInputElement>('input[value="violet"]')!.click());
+    await choose(); await submit();
+    expect(container.querySelector<HTMLInputElement>('input[value="slate"]')!.checked).toBe(true);
+    expect(container.querySelector<HTMLFieldSetElement>('[data-testid="team-accent-picker"]')!.disabled).toBe(true);
+    await submit();
+    expect(mocks.create).toHaveBeenCalledTimes(1);
+    expect(onCreated).toHaveBeenCalledExactlyOnceWith({ ...created, accentColor: null, avatarUrl: "https://example.test/team.png" });
+  });
+
 });

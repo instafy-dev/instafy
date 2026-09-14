@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "../../../components/Button";
 import { Text } from "../../../components/Text";
-import { getOrgInitials } from "../../../org/orgNaming";
+import { OrgIdentity } from "../../../components/OrgIdentity";
 import { validateTeamAvatar } from "./teamAvatar";
 
 export function TeamPicturePicker({
-  name, file, onChange, disabled = false, testId = "new-team-picture",
+  name, file, accentColor, onChange, disabled = false, testId = "new-team-picture",
 }: {
   name: string;
+  accentColor?: string | null;
   file: File | null;
   onChange: (file: File | null) => void;
   disabled?: boolean;
@@ -26,9 +27,7 @@ export function TeamPicturePicker({
     <div className="space-y-2" data-testid={testId}>
       <Text variant="caption" tone="muted">Team picture (optional)</Text>
       <div className="flex flex-wrap items-center gap-3">
-        <span className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-slate-200/80 text-sm font-semibold text-slate-600 dark:bg-white/[0.08] dark:text-slate-300">
-          {preview ? <img src={preview} alt="Selected team picture" className="h-full w-full object-cover" /> : getOrgInitials(name)}
-        </span>
+        <OrgIdentity name={name} avatarUrl={preview} accentColor={accentColor} className="h-12 w-12 text-sm" />
         <input ref={input} type="file" accept="image/*" className="hidden" disabled={disabled}
           data-testid={`${testId}-input`} onChange={(event) => {
             const next = event.target.files?.[0];

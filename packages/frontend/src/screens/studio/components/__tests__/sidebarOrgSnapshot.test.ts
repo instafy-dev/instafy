@@ -191,3 +191,14 @@ describe("readSidebarOrgSnapshot", () => {
     }
   });
 });
+
+
+it("keeps valid org accents across reloads and discards unsupported cached values", () => {
+  writeSidebarOrgSnapshot(USER, [{ ...ORGS[0], accentColor: "teal" }, { ...ORGS[1], accentColor: "url(unsafe)" }], 2);
+  expect(readCachedControllerOrgs(USER)[0].accentColor).toBe("teal");
+  expect(readCachedControllerOrgs(USER)[1].accentColor).toBeUndefined();
+  const stored = JSON.parse(window.localStorage.getItem(KEY)!);
+  stored.orgs[0].accentColor = "#fff";
+  window.localStorage.setItem(KEY, JSON.stringify(stored));
+  expect(readCachedControllerOrgs(USER)[0].accentColor).toBeUndefined();
+});

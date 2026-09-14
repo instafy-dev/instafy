@@ -54,7 +54,8 @@ target and uses a compact 36px height on wider fine-pointer screens.
 
 Use a small, consistent radius scale: 6px for compact search scope chips, 8px for navigation
 and menu rows, 12px for form controls and profile actions, and 16px for cards, dialogs and
-popovers. Avatars remain circular. Do not turn every action into a pill.
+popovers. Human avatars remain circular; team identities use rounded squares. Do not turn
+every action into a pill.
 
 Compact category navigation and single-choice settings share the same segmented selector
 styles: a quiet group with 12px corners, 8px options and one filled selected option. Hover
@@ -84,3 +85,25 @@ available height, with a stable background and space for keyboard focus indicato
 Check settings with long labels, both themes, narrow and wide containers, and keyboard
 navigation. In particular, verify nested destination selection, dismissal, and resizing
 without losing focus or creating extra route visits.
+
+## Team identity
+
+Team profile settings and new-team onboarding offer a shared color alongside the name and
+picture. Use `OrgIdentity` for team avatars and `TeamAccentPicker` for the fixed palette:
+neutral, blue, violet, pink, red, orange, green and teal. A picture takes precedence over
+initials; the accent still identifies the selected team in its rail marker and breadcrumb
+background. These colors adapt to light and dark mode. Keep workspace surfaces, primary
+actions and notification counts on their existing semantic colors.
+
+Color choices have 44px targets, native radio keyboard behavior and a selected border, so
+selection does not depend on hue alone. The selector preview reflects unsaved name and color
+edits. Save profile persists those changes; existing picture upload behavior is independent.
+Only owners and admins can update team identity. Personal and existing teams without a
+chosen accent use neutral styling.
+
+The controller accepts optional `accentColor` on organization creation and profile updates,
+and returns it in organization summaries. Omitted updates preserve the value; explicit
+`null` clears it. Idempotent creation preserves an existing organization's saved color.
+Apply the additive `20260914180000_org_accent.sql` migration before enabling color writes.
+Older clients remain compatible and organization reads tolerate an unmigrated database;
+the database and controller both reject values outside the palette.

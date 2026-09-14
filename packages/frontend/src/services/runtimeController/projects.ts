@@ -41,6 +41,7 @@ export interface ControllerOrgSummary {
   slug: string;
   name: string;
   avatarUrl?: string | null;
+  accentColor?: string | null;
   role?: string | null;
 }
 
@@ -184,6 +185,7 @@ export interface ControllerOrgInviteLink {
 }
 
 type ControllerOrganizationCreateParams = {
+  accentColor?: string | null;
   orgSlug?: string | null;
   orgName?: string | null;
 };
@@ -197,6 +199,7 @@ async function createControllerOrganizationWithContext(
     return null;
   }
   const payload: Record<string, unknown> = {};
+  if (params?.accentColor) payload.accentColor = params.accentColor;
   if (params?.orgSlug) {
     payload.orgSlug = params.orgSlug;
   }
@@ -221,6 +224,7 @@ async function createControllerOrganizationWithContext(
       throw new Error(message);
     }
     const body = (await response.json().catch(() => null)) as {
+      accentColor?: string | null;
       orgId?: string | null;
       orgSlug?: string | null;
       orgName?: string | null;
@@ -234,7 +238,7 @@ async function createControllerOrganizationWithContext(
     if (!orgId || !orgSlug || !orgName) {
       return null;
     }
-    return { id: orgId, slug: orgSlug, name: orgName };
+    return { id: orgId, slug: orgSlug, name: orgName, accentColor: body?.accentColor ?? null };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn("[runtime-controller] createControllerOrganization error:", message);
@@ -1099,7 +1103,7 @@ export async function listControllerOrganizations(
  */
 export async function updateControllerOrganization(
   orgId: string,
-  updates: { name?: string; avatarUrl?: string },
+  updates: { name?: string; avatarUrl?: string; accentColor?: string | null },
 ): Promise<boolean> {
   if (!runtimeControllerEnabled) {
     return false;

@@ -120,4 +120,16 @@ describe("StudioOrganizationRail", () => {
     expect(nav.querySelector("[data-rail-surface]")).toBeNull();
     expect(nav.className).toContain("pt-[var(--instafy-safe-area-inset-top)]");
   });
+  it("carries org color through selection without changing unread counts or logo", async () => {
+    await render({ organizations: organizations.map(org => ({ ...org, accentColor: "violet" })), selectedOrgKey: "three", orgAttentionCounts: { three: 2 } });
+    const selected = container.querySelector('[data-testid="sidebar-team-three"]')!;
+    expect(selected.getAttribute("data-org-accent")).toBe("violet");
+    expect(selected.getAttribute("aria-current")).toBe("page");
+    expect(selected.querySelector('img')?.getAttribute("src")).toBe("https://example.test/three.png");
+    expect(container.querySelector('[data-testid="sidebar-team-attention-three"]')?.textContent).toBe("2");
+    await render({ homeActive: true });
+    expect(container.querySelector('[data-testid="sidebar-home-button"]')?.getAttribute("aria-current")).toBe("page");
+    expect(container.querySelector('[data-testid="sidebar-team-one"]')?.hasAttribute("aria-current")).toBe(false);
+  });
+
 });

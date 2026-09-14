@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "../../../components/Button";
 import { Text } from "../../../components/Text";
-import { getOrgInitials } from "../../../org/orgNaming";
+import { OrgIdentity } from "../../../components/OrgIdentity";
 import {
   updateControllerOrganization,
 } from "../../../services/runtimeController/projects";
@@ -16,11 +16,13 @@ import { notifyTeamProfileUpdated, saveTeamAvatar, validateTeamAvatar } from "./
 export function OrgAvatarEditor({
   orgId,
   orgName,
+  accentColor,
   canEdit,
   avatarUrl: initialAvatarUrl,
 }: {
   orgId: string;
   orgName: string;
+  accentColor?: string | null;
   canEdit: boolean;
   avatarUrl: string | null;
 }) {
@@ -73,15 +75,8 @@ export function OrgAvatarEditor({
 
   return (
     <div className="flex flex-wrap items-center gap-3" data-testid="org-avatar-editor">
-      <span
-        className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-slate-200/80 text-sm font-semibold text-slate-600 dark:bg-white/[0.08] dark:text-slate-300"
-        data-testid="org-avatar-preview"
-      >
-        {avatarUrl ? (
-          <img src={avatarUrl} alt={`${orgName} avatar`} className="h-12 w-12 object-cover" />
-        ) : (
-          getOrgInitials(orgName)
-        )}
+      <span data-testid="org-avatar-preview">
+        <OrgIdentity name={orgName} avatarUrl={avatarUrl} accentColor={accentColor} className="h-12 w-12 text-sm" />
       </span>
       {canEdit ? (
         <div className="space-y-2">
