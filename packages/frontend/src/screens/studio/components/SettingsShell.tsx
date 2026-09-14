@@ -2,6 +2,11 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { Button as AriaButton, DialogTrigger } from "react-aria-components";
 import { ControlChevron } from "../../../components/ControlChevron";
 import { Button } from "../../../components/Button";
+import {
+  segmentedControlGroupClassName,
+  segmentedControlOptionClassName,
+  SEGMENTED_CONTROL_LABEL_CLASS,
+} from "../../../components/segmentedControlStyles";
 import { pickerListRowTextClassName } from "../../../components/listRowStyles";
 import { EntityRow } from "../../../components/EntityRow";
 import { Heading } from "../../../components/Heading";
@@ -10,7 +15,6 @@ import { StudioMenu, StudioMenuItem } from "../../../components/aria/StudioMenu"
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import { useNativeBackButtonAction } from "../../../native/useNativeBackButtonAction";
 import { useStudioDesktopLayout } from "../useStudioDesktopLayout";
-import { DARK_DIVIDER_BORDER_CLASS } from "../../../theme/darkSurfaces";
 
 export type SettingsCategory = {
   id: string;
@@ -210,7 +214,7 @@ export function SettingsShell({
     }
     if (useCompactTabs) {
       return (
-        <div className={`flex min-w-0 gap-1 border-b border-slate-200 ${DARK_DIVIDER_BORDER_CLASS}`} data-testid={`${navTestId}-tabs`}>
+        <div className={`flex min-w-0 ${segmentedControlGroupClassName()}`} data-testid={`${navTestId}-tabs`}>
           {categories.map(category => {
             const active = category.id === activeCategoryId;
             return (
@@ -222,17 +226,11 @@ export function SettingsShell({
                 aria-current={active ? "page" : undefined}
                 data-testid={category.testId ?? `settings-category-${category.id}`}
                 className={[
-                  // Navigation has one selection underline, without the hover
-                  // surface, press transform or full-control ring of an action button.
-                  "group/settings-tab -mb-px inline-flex min-h-11 min-w-0 flex-auto items-center justify-center whitespace-nowrap border-b-2 bg-transparent p-0 text-sm font-medium outline-none touch-manipulation [-webkit-tap-highlight-color:transparent] data-[disabled]:pointer-events-none data-[disabled]:opacity-60",
-                  pickerListRowTextClassName(active),
-                  "data-[hovered]:text-slate-950 dark:data-[hovered]:text-white",
-                  active
-                    ? "border-primary-500 dark:border-primary-400"
-                    : "border-transparent",
+                  segmentedControlOptionClassName(active),
+                  "min-h-11 flex-auto whitespace-nowrap text-sm",
                 ].join(" ")}
               >
-                <span className="max-w-full truncate rounded-sm px-2 py-1.5 transition-colors group-data-[focus-visible]/settings-tab:outline-2 group-data-[focus-visible]/settings-tab:outline-offset-2 group-data-[focus-visible]/settings-tab:outline-primary-600 dark:group-data-[focus-visible]/settings-tab:outline-primary-400">
+                <span className={SEGMENTED_CONTROL_LABEL_CLASS}>
                   {category.label}
                 </span>
               </AriaButton>

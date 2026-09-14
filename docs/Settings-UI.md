@@ -54,10 +54,15 @@ target and uses a compact 36px height on wider fine-pointer screens.
 
 Use a small, consistent radius scale: 6px for compact search scope chips, 8px for navigation
 and menu rows, 12px for form controls and profile actions, and 16px for cards, dialogs and
-popovers. Avatars remain circular and settings category tabs remain flat with an underline.
-Do not turn every action into a pill. Compact category tabs keep selection in the underline. Hover changes text contrast without
-adding a second surface. Keyboard focus outlines the label using React Aria’s focus-visible
-state; pointer clicks must not draw a second frame around the full tab.
+popovers. Avatars remain circular. Do not turn every action into a pill.
+
+Compact category navigation and single-choice settings share the same segmented selector
+styles: a quiet group with 12px corners, 8px options and one filled selected option. Hover
+changes text contrast without looking selected. Keyboard focus outlines the label using
+React Aria’s focus-visible state; pointer clicks must not draw a second frame around the
+whole option. Share these styles through `segmentedControlStyles` while preserving each
+control’s meaning: category navigation uses `aria-current`, and value choices use
+`aria-pressed`. Keep category routes and immediate preference updates independent.
 
 In the personal profile form, keep the circular photo and Display name beside each other,
 including on narrow screens. The photo is a labelled button with a pencil badge that opens
