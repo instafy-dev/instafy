@@ -194,7 +194,6 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
             type="text"
             value={displayName}
             onChange={(event) => setDisplayName(event.target.value)}
-            placeholder="Add your name"
           />
         </Field>
         <div className="flex flex-col gap-3 border-t border-slate-200/70 pt-3 dark:border-[color:var(--color-studio-dark-divider)] @min-[32rem]/profile-editor:flex-row @min-[32rem]/profile-editor:items-center @min-[32rem]/profile-editor:justify-between">
@@ -207,7 +206,7 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
             variant="primary"
             size="sm"
             radius="xl"
-            className="w-full shrink-0 @min-[32rem]/profile-editor:w-auto"
+            className="min-h-11 w-full shrink-0 sm:pointer-fine:min-h-9 @min-[32rem]/profile-editor:w-auto"
           >
             {saving ? "Saving…" : "Save profile"}
           </Button>

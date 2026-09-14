@@ -22,6 +22,20 @@ and team profile share this layout. Reserve cards for distinct collections, summ
 warnings or other content that needs grouping; do not wrap an entire ordinary form in a
 second rounded surface.
 
+Use `Field` for persistent labels above controls. Default labels are 13px medium-weight
+secondary text; hints stay 12px muted text. A vertical layout provides an actual 8px gap
+between label, control and helper text. Explicit extra-small fields keep a compact 6px gap.
+The label should identify the field without relying on placeholder text; omit placeholders
+that only repeat the label, such as “Add your name” under “Display name”.
+
+`Input` defaults to the medium form size: 16px text on narrow screens and 14px on wider
+screens. Controls have a 44px minimum height on narrow screens or coarse pointers, and
+a 38px minimum height on wider fine-pointer screens. Explicit small/extra-small controls
+retain their compact sizing, and unstyled inputs retain their host layout. Preserve the
+existing thin outline, 12px default radius
+and visible keyboard focus treatment. Profile's Save action follows the same 44px mobile
+target and uses a compact 36px height on wider fine-pointer screens.
+
 Compact category controls are at least 44 pixels tall. Shared menu items also use a 44-pixel
 minimum for coarse pointers while preserving desktop density. Popovers scroll within their
 available height, with a stable background and space for keyboard focus indicators.
