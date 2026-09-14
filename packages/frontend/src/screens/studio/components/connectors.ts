@@ -10,6 +10,14 @@ import { FreeFinanceMark, NotionMark, SlackMark } from "./connectorMarks";
 
 export type ConnectorKind = "skill" | "github" | "other";
 
+/**
+ * "available" routes and confirms as usual. "soon" renders greyed with a
+ * "Soon" Badge everywhere the connector appears (card chip, sheet row, menu
+ * row) and is never pressable: routeConnectorSelection returns without
+ * action, so the confirm stage is unreachable for it.
+ */
+export type ConnectorAvailability = "available" | "soon";
+
 export type ConnectorCategoryId = "chat" | "docs" | "code" | "finance" | "email" | "files";
 
 export type ConnectorCategory = {
@@ -41,6 +49,8 @@ type ConnectorBase = {
 
 type ProductConnectorBase = ConnectorBase & {
   category: ConnectorCategoryId;
+  /** See ConnectorAvailability. A skill is "soon" until its pack repo is published. */
+  availability: ConnectorAvailability;
   /**
    * Curated, not measured: a featured connector sits in the sheet's "Popular"
    * row, in the composer's Connect rows and (skills only) as a card chip.
@@ -85,6 +95,8 @@ export type Connector = ProductConnector | OtherConnector;
 export const CONNECTORS: readonly Connector[] = [
   {
     id: "slack",
+    // Flip to "available" when the instafy-dev/team-integrations pack repo is published.
+    availability: "soon",
     name: "Slack",
     mark: SlackMark,
     kind: "skill",
@@ -98,6 +110,8 @@ export const CONNECTORS: readonly Connector[] = [
   },
   {
     id: "notion",
+    // Flip to "available" when the instafy-dev/team-integrations pack repo is published.
+    availability: "soon",
     name: "Notion",
     mark: NotionMark,
     kind: "skill",
@@ -111,6 +125,8 @@ export const CONNECTORS: readonly Connector[] = [
   },
   {
     id: "discord",
+    // Flip to "available" when the instafy-dev/team-integrations pack repo is published.
+    availability: "soon",
     name: "Discord",
     mark: Discord,
     kind: "skill",
@@ -124,6 +140,8 @@ export const CONNECTORS: readonly Connector[] = [
   },
   {
     id: "freefinance",
+    // Flip to "available" when the instafy-dev/bookkeeping-pack repo is published.
+    availability: "soon",
     name: "FreeFinance",
     mark: FreeFinanceMark,
     kind: "skill",
@@ -138,6 +156,7 @@ export const CONNECTORS: readonly Connector[] = [
   },
   {
     id: "github",
+    availability: "available",
     name: "GitHub",
     mark: Github,
     kind: "github",
@@ -155,14 +174,33 @@ export function isProductConnector(connector: Connector): connector is ProductCo
 /** Every product connector in list order; the paste link is not one. */
 export const PRODUCT_CONNECTORS: readonly ProductConnector[] = CONNECTORS.filter(isProductConnector);
 
-/** The curated "Popular" row and the composer's Connect rows, in list order. */
+/**
+ * True when the connector can be selected today. The paste link is always
+ * available; a product connector is available unless its pack is still "soon".
+ */
+export function isConnectorAvailable(connector: Connector): boolean {
+  return connector.kind === "other" || connector.availability === "available";
+}
+
+/**
+ * The composer's Connect rows, in list order. "soon" entries stay in here so
+ * they render greyed with their Badge rather than vanish.
+ */
 export const FEATURED_CONNECTORS: readonly ProductConnector[] = PRODUCT_CONNECTORS.filter(
   (connector) => connector.featured,
 );
 
 /**
- * The getting-started card's chips: featured skills only. GitHub is not a
- * chip because the card already carries the "Import a GitHub repo" button.
+ * The sheet's "Popular" row: featured entries that can be selected today. The
+ * row hides itself while fewer than two are available.
+ */
+export const AVAILABLE_FEATURED_CONNECTORS: readonly ProductConnector[] =
+  FEATURED_CONNECTORS.filter(isConnectorAvailable);
+
+/**
+ * The getting-started card's chips: featured skills only, "soon" ones
+ * included (they render disabled). GitHub is not a chip because the card
+ * already carries the "Import a GitHub repo" button.
  */
 export const CARD_CHIP_CONNECTORS: readonly SkillConnector[] = FEATURED_CONNECTORS.filter(
   (connector): connector is SkillConnector => connector.kind === "skill",

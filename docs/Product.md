@@ -284,6 +284,9 @@ card of an empty space, followed by a **More tools** link. Both open the Connect
 **Search tools** box, a **Popular** row of bare marks (a curated list, not a measurement), and
 every first-party tool grouped by category (Chat and community, Docs and notes, Code, Finance
 and bookkeeping, and so on), with **connected** or a region such as Austria as the row's meta.
+Tools whose skill pack is not published yet show a **Soon** badge and cannot be selected, on
+the card, in the menu and in the sheet, and the Popular row appears only once at least two of
+its tools are available.
 Typing filters the rows by name, keyword, category or region and hides the Popular row; when
 nothing matches, **Search all skills** opens the Skills panel's Discover tab with the same
 query. **Paste a skill link** lives in the sheet's footer. Choosing a skill opens the confirm stage, which says which skill is added

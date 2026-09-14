@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { routeConnectorSelection, type ConnectorRoutingActions } from "../connectorRouting";
-import { CONNECTORS, type Connector, type SkillConnector } from "../connectors";
+import { CONNECTORS, isConnectorAvailable, type Connector, type SkillConnector } from "../connectors";
 
 function actions(): ConnectorRoutingActions & Record<keyof ConnectorRoutingActions, ReturnType<typeof vi.fn>> {
   return {
@@ -15,10 +15,16 @@ function connector(id: string): Connector {
   return CONNECTORS.find((entry) => entry.id === id)!;
 }
 
+// Every shipped skill is "soon" today; an available skill is a fixture.
+const availableSlack: SkillConnector = {
+  ...(connector("slack") as SkillConnector),
+  availability: "available",
+};
+
 describe("routeConnectorSelection", () => {
-  it("opens the confirm stage for a skill and nothing else", () => {
+  it("opens the confirm stage for an available skill and nothing else", () => {
     const acts = actions();
-    const slack = connector("slack") as SkillConnector;
+    const slack = availableSlack;
     routeConnectorSelection(slack, acts);
 
     expect(acts.openConfirm).toHaveBeenCalledTimes(1);
@@ -52,11 +58,25 @@ describe("routeConnectorSelection", () => {
     expect(acts.openImportModal).not.toHaveBeenCalled();
   });
 
-  it("routes every static skill connector to the confirm stage only", () => {
-    for (const entry of CONNECTORS.filter((item) => item.kind === "skill")) {
+  it("does nothing for a soon connector, so the confirm stage stays unreachable", () => {
+    const soon = CONNECTORS.filter((item) => !isConnectorAvailable(item));
+    expect(soon.map((item) => item.id)).toEqual(["slack", "notion", "discord", "freefinance"]);
+    for (const entry of soon) {
       const acts = actions();
       routeConnectorSelection(entry, acts);
-      expect(acts.openConfirm).toHaveBeenCalledWith(entry);
+      expect(acts.openConfirm).not.toHaveBeenCalled();
+      expect(acts.leaveSheet).not.toHaveBeenCalled();
+      expect(acts.openImportModal).not.toHaveBeenCalled();
+      expect(acts.beginGithubImport).not.toHaveBeenCalled();
+    }
+  });
+
+  it("routes every static skill connector to the confirm stage only once it is available", () => {
+    for (const entry of CONNECTORS.filter((item): item is SkillConnector => item.kind === "skill")) {
+      const acts = actions();
+      const available: SkillConnector = { ...entry, availability: "available" };
+      routeConnectorSelection(available, acts);
+      expect(acts.openConfirm).toHaveBeenCalledWith(available);
       expect(acts.leaveSheet).not.toHaveBeenCalled();
       expect(acts.openImportModal).not.toHaveBeenCalled();
       expect(acts.beginGithubImport).not.toHaveBeenCalled();

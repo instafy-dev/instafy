@@ -265,7 +265,24 @@ describe("ComposerActionMenu", () => {
     expect(container.textContent).not.toContain("Connected");
     expect(container.textContent).not.toContain("\u2014");
 
-    // Arrow keys move between rows like a menu, wrapping at both ends.
+    // Soon rows (pack not published) are disabled with the Soon Badge in the
+    // end slot; GitHub and Browse all tools stay live.
+    for (const id of ["slack", "notion", "discord"]) {
+      const row = container.querySelector<HTMLButtonElement>(`[data-testid="composer-action-menu-connect-${id}"]`)!;
+      expect(row.disabled).toBe(true);
+      expect(row.textContent).toContain("Soon");
+      expect(row.querySelector("span.rounded-full")?.textContent).toBe("Soon");
+      expect(row.parentElement?.getAttribute("title")).toBe("Coming soon");
+    }
+    const githubRow = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect-github"]')!;
+    expect(githubRow.disabled).toBe(false);
+    expect(githubRow.textContent).toBe("GitHub");
+    expect(githubRow.parentElement?.getAttribute("title")).toBeNull();
+    expect(container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect-browse"]')?.disabled).toBe(false);
+    expect(container.textContent).not.toContain("please");
+
+    // Arrow keys move between the enabled rows like a menu, wrapping at both
+    // ends and skipping the soon rows.
     const pressKey = (element: Element | null | undefined, key: string) =>
       act(async () => {
         element?.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
@@ -274,7 +291,7 @@ describe("ComposerActionMenu", () => {
     expect(document.activeElement).toBe(back);
     await pressKey(back, "ArrowDown");
     expect((document.activeElement as HTMLElement | null)?.dataset.testid).toBe(
-      "composer-action-menu-connect-slack",
+      "composer-action-menu-connect-github",
     );
     await pressKey(document.activeElement, "ArrowUp");
     expect(document.activeElement).toBe(back);
@@ -333,7 +350,7 @@ describe("ComposerActionMenu", () => {
     expect(container.querySelector('[data-testid="composer-action-menu-connect-browse"]')).toBeNull();
   });
 
-  it("reports the pressed connector row and closes the menu", async () => {
+  it("reports the pressed available row and closes the menu, while a soon row does nothing", async () => {
     const onSelectConnector = vi.fn();
     await renderMenu(true, true, { onSelectConnector, installedSkillNames: new Set(["notion"]) });
 
@@ -345,18 +362,35 @@ describe("ComposerActionMenu", () => {
       container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect"]')?.click(),
     );
 
-    // Installed rows carry the Badge; the others carry no end slot.
+    // Soon wins over the installed state: an installed folder does not make
+    // an unpublished pack selectable, so the Badge reads Soon, not Connected.
     const notion = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect-notion"]')!;
     const slack = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect-slack"]')!;
-    expect(notion.textContent).toContain("Connected");
-    expect(slack.textContent).not.toContain("Connected");
+    expect(notion.textContent).toContain("Soon");
+    expect(notion.textContent).not.toContain("Connected");
+    expect(notion.disabled).toBe(true);
+    expect(slack.textContent).toContain("Soon");
     expect(container.querySelector('[data-testid="composer-action-menu-connect-github"]')?.textContent).not.toContain(
       "Connected",
     );
 
+    // A soon row is disabled: no click reaches it, and even synthetic input
+    // reports nothing and leaves the menu open on the connect view.
     await act(async () => slack.click());
+    await act(async () => {
+      slack.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      slack.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      slack.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      slack.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true }));
+    });
+    expect(onSelectConnector).not.toHaveBeenCalled();
+    expect(menuState.dataset.open).toBe("true");
+    expect(container.querySelector('[data-testid="composer-action-menu-connect-slack"]')).not.toBeNull();
+
+    const github = container.querySelector<HTMLButtonElement>('[data-testid="composer-action-menu-connect-github"]')!;
+    await act(async () => github.click());
     expect(onSelectConnector).toHaveBeenCalledTimes(1);
-    expect(onSelectConnector.mock.calls[0][0]).toBe(CONNECTORS.find((entry) => entry.id === "slack"));
+    expect(onSelectConnector.mock.calls[0][0]).toBe(CONNECTORS.find((entry) => entry.id === "github"));
     // closeMenu() flipped the controlled open state to false and reset the view.
     expect(menuState.dataset.open).toBe("false");
     expect(container.querySelector('[data-testid="composer-action-menu-import-github"]')).not.toBeNull();

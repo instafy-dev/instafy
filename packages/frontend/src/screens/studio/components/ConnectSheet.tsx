@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { NavArrowLeft } from "iconoir-react";
+import { Badge } from "../../../components/Badge";
 import { Button, IconButton } from "../../../components/Button";
 import { Input } from "../../../components/Input";
 import { Spinner } from "../../../components/Spinner";
@@ -7,10 +8,11 @@ import { Text } from "../../../components/Text";
 import { StudioDialogHeader } from "../../../components/aria/StudioDialogLayout";
 import { StudioDialogModal } from "../../../components/aria/StudioModal";
 import {
+  AVAILABLE_FEATURED_CONNECTORS,
   CONNECTOR_CATEGORIES,
-  FEATURED_CONNECTORS,
   FEATURED_CONNECTOR_LIMIT,
   filterConnectors,
+  isConnectorAvailable,
   type ProductConnector,
   type SkillConnector,
 } from "./connectors";
@@ -19,7 +21,9 @@ import type { ConnectSheetStage } from "./useConnectSheetState";
 // The one Connect dialog. Stage "browse" (from "More tools" on the card or
 // "Browse all tools" in the composer menu) is a search box, a curated
 // "Popular" row of bare marks and the full list in category sections; a row
-// only reports the connector. Stage "confirm" is the per-skill confirm whose
+// only reports the connector. A "soon" connector (pack not published yet)
+// stays listed, greyed and disabled with a "Soon" Badge, and is left out of
+// Popular. Stage "confirm" is the per-skill confirm whose
 // "Connect" button is the only sending control in the whole flow. Cancel,
 // Close, Escape, Back, "Paste a skill link", "Search all skills" and
 // "Set up again" never send.
@@ -56,6 +60,11 @@ const FOOTER_CLASS =
 // drop focus on the first tabbable control, the header Close, so a second
 // Enter would dismiss the sheet.
 const STAGE_ROOT_CLASS = "space-y-3 p-4 outline-none";
+// Popular is worth a row only once it can offer a choice.
+const POPULAR_MIN_AVAILABLE = 2;
+// Shown on hover over a disabled row. It sits on the list item because the
+// disabled Button has pointer-events none, so the pointer reaches the item.
+const SOON_TITLE = "Coming soon";
 
 function joinNeeds(needs: readonly string[]): string {
   if (needs.length <= 1) {
@@ -143,7 +152,8 @@ function BrowseStage({
       })).filter((section) => section.connectors.length > 0),
     [matches],
   );
-  const popular = FEATURED_CONNECTORS.slice(0, FEATURED_CONNECTOR_LIMIT);
+  const popular = AVAILABLE_FEATURED_CONNECTORS.slice(0, FEATURED_CONNECTOR_LIMIT);
+  const showPopular = trimmedQuery.length === 0 && popular.length >= POPULAR_MIN_AVAILABLE;
 
   return (
     <div ref={rootRef} tabIndex={-1} className={STAGE_ROOT_CLASS} data-testid="connect-browse-stage">
@@ -163,7 +173,7 @@ function BrowseStage({
       <p role="status" aria-live="polite" className="sr-only" data-testid="connect-search-status">
         {searchStatus(trimmedQuery, matches.length)}
       </p>
-      {trimmedQuery.length === 0 ? (
+      {showPopular ? (
         <div data-testid="connect-popular">
           {/* "Popular" is the curated featured flag on connectors.ts, not a measurement. */}
           <Text as="p" id="connect-popular-label" variant="caption" tone="muted">
@@ -211,30 +221,51 @@ function BrowseStage({
               <ul className="mt-1 -mx-1 space-y-0.5">
                 {connectors.map((connector) => {
                   const Mark = connector.mark;
-                  const connected = isConnected(connector, installedSkillNames);
-                  const meta = connected ? "connected" : connector.region ?? null;
+                  const soon = !isConnectorAvailable(connector);
+                  // "Soon" wins over the installed state and the region: the
+                  // pack is not published, so the row cannot lead anywhere yet.
+                  // The name keeps the primary tone; the disabled Button's
+                  // opacity greys the whole row, as on the chip and menu row,
+                  // and a muted tone on top would blend the name too far.
+                  const connected = !soon && isConnected(connector, installedSkillNames);
+                  const meta = soon ? null : connected ? "connected" : connector.region ?? null;
+                  const metaTestId = `connect-row-${connector.id}-meta`;
                   return (
-                    <li key={connector.id}>
+                    <li key={connector.id} title={soon ? SOON_TITLE : undefined}>
                       <Button
                         variant="ghost"
                         size="sm"
                         radius="xl"
                         className="w-full justify-start px-2.5 text-left"
-                        onPress={() => onSelect(connector)}
+                        isDisabled={soon}
+                        onPress={() => {
+                          if (!soon) {
+                            onSelect(connector);
+                          }
+                        }}
                         data-testid={`connect-row-${connector.id}`}
                       >
                         <span className="flex w-full min-w-0 items-center gap-2.5">
                           <Mark className={MARK_CLASS} aria-hidden="true" />
-                          <Text as="span" variant="body" tone="primary" className="min-w-0 flex-1 truncate">
+                          <Text
+                            as="span"
+                            variant="body"
+                            tone="primary"
+                            className="min-w-0 flex-1 truncate"
+                          >
                             {connector.name}
                           </Text>
-                          {meta ? (
+                          {soon ? (
+                            <Badge tone="neutral" size="xs" className="flex-none" data-testid={metaTestId}>
+                              Soon
+                            </Badge>
+                          ) : meta ? (
                             <Text
                               as="span"
                               variant="caption"
                               tone="muted"
                               className="flex-none"
-                              data-testid={`connect-row-${connector.id}-meta`}
+                              data-testid={metaTestId}
                             >
                               {meta}
                             </Text>

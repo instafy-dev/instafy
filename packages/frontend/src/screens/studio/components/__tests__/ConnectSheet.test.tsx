@@ -6,9 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConnectSheet } from "../ConnectSheet";
 import { routeConnectorSelection } from "../connectorRouting";
 import {
+  AVAILABLE_FEATURED_CONNECTORS,
   CONNECTOR_CATEGORIES,
   CONNECTORS,
-  FEATURED_CONNECTORS,
+  PRODUCT_CONNECTORS,
+  isConnectorAvailable,
   type Connector,
   type ProductConnector,
   type SkillConnector,
@@ -17,9 +19,16 @@ import { useConnectSheetState, type ConnectSheetState } from "../useConnectSheet
 
 const EM_DASH = "—";
 
-const slack = CONNECTORS.find(
+// Every shipped skill is "soon" today (its pack is not published), so the
+// browse rows are all disabled and the confirm stage is reached through the
+// harness with this available fixture, the way a published skill's row would.
+const soonSlack = CONNECTORS.find(
   (entry): entry is SkillConnector => entry.kind === "skill" && entry.id === "slack",
 )!;
+const slack: SkillConnector = { ...soonSlack, availability: "available" };
+const SOON_IDS = PRODUCT_CONNECTORS.filter((entry) => !isConnectorAvailable(entry)).map(
+  (entry) => entry.id,
+);
 
 type HarnessSpies = {
   onConnect: ReturnType<typeof vi.fn>;
@@ -85,6 +94,10 @@ function Harness({
     });
 
   return (
+    <>
+      {/* Stand-ins for a published skill's row (and a soon one) reaching the router. */}
+      <button type="button" data-testid="harness-route-available" onClick={() => route(slack)} />
+      <button type="button" data-testid="harness-route-soon" onClick={() => route(soonSlack)} />
     <ConnectSheet
       isOpen={state !== null}
       stage={state?.stage ?? "browse"}
@@ -109,6 +122,7 @@ function Harness({
         close();
       }}
     />
+    </>
   );
 }
 
@@ -195,7 +209,7 @@ describe("ConnectSheet", () => {
   }
 
   describe("browse stage", () => {
-    it("renders the search box, the Popular row as bare marks and every category in order", async () => {
+    it("renders the search box, no Popular row while only one tool is available, and every category in order", async () => {
       const s = spies();
       await render({ initial: "browse", spies: s });
 
@@ -204,30 +218,13 @@ describe("ConnectSheet", () => {
       expect(search?.getAttribute("placeholder")).toBe("Search tools");
       expect(search?.value).toBe("");
 
-      // Popular = the curated featured entries, in list order, marks only.
-      const popular = queryAll<HTMLButtonElement>('[data-testid^="connect-popular-"]').filter(
-        (element) => element instanceof HTMLButtonElement,
-      );
-      expect(popular.map((button) => button.dataset.testid)).toEqual(
-        FEATURED_CONNECTORS.map((entry) => `connect-popular-${entry.id}`),
-      );
-      expect(popular.map((button) => button.getAttribute("aria-label"))).toEqual(
-        FEATURED_CONNECTORS.map((entry) => entry.name),
-      );
-      expect(popular.map((button) => button.getAttribute("title"))).toEqual(
-        FEATURED_CONNECTORS.map((entry) => entry.name),
-      );
-      expect(popular.length).toBeLessThanOrEqual(8);
-      for (const button of popular) {
-        expect(button.textContent).toBe("");
-        expect(button.querySelectorAll("svg")).toHaveLength(1);
-        expect(button.querySelector("img")).toBeNull();
-        // Geometry from IconButton size "md": 36 px, 44 px on coarse pointers.
-        expect(button.className).toContain("h-9 w-9");
-        expect(button.className).toContain("pointer-coarse:min-h-11");
-      }
-      expect(query('[data-testid="connect-popular-freefinance"]')).toBeNull();
-      expect(query('[data-testid="connect-popular-row"]')?.className).toContain("flex-wrap");
+      // Popular shows only tools that can be selected today, and only once
+      // there are at least two of them; GitHub alone is not a choice.
+      expect(AVAILABLE_FEATURED_CONNECTORS.map((entry) => entry.id)).toEqual(["github"]);
+      expect(query('[data-testid="connect-popular"]')).toBeNull();
+      expect(query('[data-testid="connect-popular-row"]')).toBeNull();
+      expect(queryAll('[data-testid^="connect-popular-"]')).toHaveLength(0);
+      expect(document.body.textContent).not.toContain("Popular");
 
       // Categories: only the ones with entries, in CONNECTOR_CATEGORIES order,
       // each with one row per connector in list order.
@@ -265,21 +262,46 @@ describe("ConnectSheet", () => {
       expect(rowsIn("finance")).toEqual(["connect-row-freefinance"]);
       expect(query('[data-testid="connect-row-other"]')).toBeNull();
 
-      // Rows: mark plus name, region as muted meta, nothing else.
+      // Rows: mark plus name, then the meta. A soon row is disabled (the
+      // Button's disabled opacity greys it; the name keeps the primary tone,
+      // as on the chip and menu row) and its meta is the Soon Badge in place
+      // of the region.
+      expect(SOON_IDS).toEqual(["slack", "notion", "discord", "freefinance"]);
       const freefinance = query<HTMLButtonElement>('[data-testid="connect-row-freefinance"]')!;
       expect(freefinance.querySelectorAll("svg")).toHaveLength(1);
       // The mark is aria-hidden; the row reads as the name plus the meta.
       expect(freefinance.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
       expect(freefinance.querySelectorAll("span span")[0]?.textContent).toBe("FreeFinance");
-      expect(query('[data-testid="connect-row-freefinance-meta"]')?.textContent).toBe("Austria");
+      expect(freefinance.disabled).toBe(true);
+      expect(query('[data-testid="connect-row-freefinance-meta"]')?.textContent).toBe("Soon");
+      expect(document.body.textContent).not.toContain("Austria");
       // No aria-label: the visible text names the row, meta included.
       expect(freefinance.getAttribute("aria-label")).toBeNull();
-      expect(accessibleText(freefinance)).toBe("FreeFinance Austria");
-      // Meta is the muted token (slate-600), not subtle (slate-400): 12 px
-      // text needs the contrast.
+      expect(accessibleText(freefinance)).toBe("FreeFinance Soon");
+      // Meta keeps the muted token (slate-600), not subtle (slate-400): 12 px
+      // text needs the contrast; the Badge's neutral tone carries it.
       expect(query('[data-testid="connect-row-freefinance-meta"]')?.className).toContain("text-slate-600");
-      expect(query('[data-testid="connect-row-slack-meta"]')).toBeNull();
-      expect(query<HTMLButtonElement>('[data-testid="connect-row-slack"]')?.textContent).toBe("Slack");
+      expect(query('[data-testid="connect-row-freefinance-meta"]')?.className).toContain("rounded-full");
+      for (const id of SOON_IDS) {
+        const row = query<HTMLButtonElement>(`[data-testid="connect-row-${id}"]`)!;
+        expect(row.disabled).toBe(true);
+        expect(row.getAttribute("data-disabled")).toBe("true");
+        expect(row.className).toContain("data-[disabled]:opacity-60");
+        expect(row.querySelectorAll("span span")[0]?.className).not.toContain("text-slate-600");
+        expect(row.querySelectorAll("span span")[0]?.className).toContain("text-midnight");
+        expect(query(`[data-testid="connect-row-${id}-meta"]`)?.textContent).toBe("Soon");
+        // Hover reads "Coming soon" from the list item: the disabled Button
+        // has pointer-events none, so the pointer lands on the item.
+        expect(row.parentElement?.getAttribute("title")).toBe("Coming soon");
+      }
+      const github = query<HTMLButtonElement>('[data-testid="connect-row-github"]')!;
+      expect(github.disabled).toBe(false);
+      expect(github.parentElement?.getAttribute("title")).toBeNull();
+      expect(github.querySelectorAll("span span")[0]?.className).not.toContain("text-slate-600");
+      expect(query('[data-testid="connect-row-github-meta"]')).toBeNull();
+      expect(github.textContent).toBe("GitHub");
+      expect(query<HTMLButtonElement>('[data-testid="connect-row-slack"]')?.textContent).toBe("SlackSoon");
+      expect(document.body.textContent).not.toContain("please");
       // Both stage footers share the header's hairline token.
       expect(query('[data-testid="connect-paste-link"]')?.parentElement?.className).toContain(
         "dark:border-[color:var(--color-studio-dark-divider)]",
@@ -296,21 +318,51 @@ describe("ConnectSheet", () => {
       expect(s.onConnect).not.toHaveBeenCalled();
     });
 
-    it("marks installed rows connected instead of showing their region", async () => {
+    it("keeps a soon row soon even when its skill folder is installed", async () => {
+      // An installed folder does not make an unpublished pack selectable: the
+      // Soon Badge wins over the connected meta and the row stays disabled.
       const s = spies();
       await render({ initial: "browse", installedSkillNames: new Set(["freefinance", "slack"]), spies: s });
 
-      expect(query('[data-testid="connect-row-freefinance-meta"]')?.textContent).toBe("connected");
-      expect(query('[data-testid="connect-row-slack-meta"]')?.textContent).toBe("connected");
-      expect(query('[data-testid="connect-row-slack-meta"]')?.className).toContain("text-slate-600");
+      expect(query('[data-testid="connect-row-freefinance-meta"]')?.textContent).toBe("Soon");
+      expect(query('[data-testid="connect-row-slack-meta"]')?.textContent).toBe("Soon");
+      expect(document.body.textContent).not.toContain("connected");
       const slackRow = query<HTMLButtonElement>('[data-testid="connect-row-slack"]');
+      expect(slackRow?.disabled).toBe(true);
       expect(slackRow?.getAttribute("aria-label")).toBeNull();
-      expect(accessibleText(slackRow)).toBe("Slack connected");
-      expect(query('[data-testid="connect-row-notion-meta"]')).toBeNull();
+      expect(accessibleText(slackRow)).toBe("Slack Soon");
+      expect(query('[data-testid="connect-row-notion-meta"]')?.textContent).toBe("Soon");
       expect(query('[data-testid="connect-row-github-meta"]')).toBeNull();
     });
 
-    it("filters rows by the query, hiding Popular and empty categories", async () => {
+    it("never reaches the confirm stage from a soon row, pressed or routed", async () => {
+      const s = spies();
+      await render({ initial: "browse", spies: s });
+
+      const slackRow = query<HTMLButtonElement>('[data-testid="connect-row-slack"]')!;
+      await act(async () => slackRow.click());
+      await act(async () => {
+        slackRow.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+        slackRow.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+        slackRow.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+        slackRow.dispatchEvent(new KeyboardEvent("keyup", { key: "Enter", bubbles: true }));
+      });
+      expect(lastState(s)?.stage).toBe("browse");
+      expect(query('[data-testid="connect-confirm-stage"]')).toBeNull();
+      expect(query('[data-testid="connect-browse-stage"]')).not.toBeNull();
+
+      // Even a soon connector handed straight to the router goes nowhere.
+      await act(async () => query<HTMLButtonElement>('[data-testid="harness-route-soon"]')?.click());
+      expect(lastState(s)).toEqual({ stage: "browse", target: null, openedFromBrowse: false });
+      expect(query('[data-testid="connect-confirm-stage"]')).toBeNull();
+      expect(query('[data-testid="connect-confirm-submit"]')).toBeNull();
+      expect(s.onConnect).not.toHaveBeenCalled();
+      expect(s.beginGithubImport).not.toHaveBeenCalled();
+      expect(s.openImportModal).not.toHaveBeenCalled();
+      expect(s.onClose).not.toHaveBeenCalled();
+    });
+
+    it("filters rows by the query, listing soon tools greyed and hiding empty categories", async () => {
       const s = spies();
       await render({ initial: "browse", spies: s });
 
@@ -321,18 +373,32 @@ describe("ConnectSheet", () => {
         (element) => element.getAttribute("role") === "group",
       );
       expect(sections.map((section) => section.dataset.testid)).toEqual(["connect-category-finance"]);
-      expect(query('[data-testid="connect-row-freefinance"]')).not.toBeNull();
+      // A soon tool still shows up in the results, disabled with its Badge.
+      const freefinance = query<HTMLButtonElement>('[data-testid="connect-row-freefinance"]');
+      expect(freefinance).not.toBeNull();
+      expect(freefinance?.disabled).toBe(true);
+      expect(query('[data-testid="connect-row-freefinance-meta"]')?.textContent).toBe("Soon");
       expect(query('[data-testid="connect-row-slack"]')).toBeNull();
       expect(query('[data-testid="connect-empty"]')).toBeNull();
+
+      await typeQuery("chat");
+      expect(queryAll('[data-testid^="connect-row-"]').filter((el) => el instanceof HTMLButtonElement).map((el) => el.dataset.testid)).toEqual([
+        "connect-row-slack",
+        "connect-row-discord",
+      ]);
+      expect(query<HTMLButtonElement>('[data-testid="connect-row-slack"]')?.disabled).toBe(true);
+      expect(query('[data-testid="connect-row-slack-meta"]')?.textContent).toBe("Soon");
 
       await typeQuery("Code");
       expect(queryAll('[data-testid^="connect-row-"]').filter((el) => el instanceof HTMLButtonElement).map((el) => el.dataset.testid)).toEqual([
         "connect-row-github",
       ]);
+      expect(query<HTMLButtonElement>('[data-testid="connect-row-github"]')?.disabled).toBe(false);
 
-      // Clearing the query brings Popular and every category back.
+      // Clearing the query brings every category back (Popular stays hidden
+      // while only one featured tool is available).
       await typeQuery("");
-      expect(query('[data-testid="connect-popular"]')).not.toBeNull();
+      expect(query('[data-testid="connect-popular"]')).toBeNull();
       expect(query('[data-testid="connect-row-slack"]')).not.toBeNull();
       expect(query('[data-testid="connect-row-freefinance"]')).not.toBeNull();
       expect(s.onConnect).not.toHaveBeenCalled();
@@ -359,12 +425,14 @@ describe("ConnectSheet", () => {
       expect(s.openImportModal).not.toHaveBeenCalled();
     });
 
-    it("moves a skill row to the confirm stage without sending, with Back returning to the kept query", async () => {
+    it("moves an available skill row to the confirm stage without sending, with Back returning to the kept query", async () => {
       const s = spies();
       await render({ initial: "browse", spies: s });
 
       await typeQuery("sla");
-      await act(async () => query<HTMLButtonElement>('[data-testid="connect-row-slack"]')?.click());
+      // The routed press of a published skill's row (no shipped row is
+      // pressable today).
+      await act(async () => query<HTMLButtonElement>('[data-testid="harness-route-available"]')?.click());
       expect(lastState(s)).toEqual({ stage: "confirm", target: slack, openedFromBrowse: true });
       expect(query('[role="dialog"]')?.getAttribute("aria-label")).toBe("Connect Slack");
       expect(query('[data-testid="connect-confirm-stage"]')).not.toBeNull();
@@ -409,7 +477,7 @@ describe("ConnectSheet", () => {
       const s = spies();
       await render({ initial: "browse", spies: s });
 
-      await act(async () => query<HTMLButtonElement>('[data-testid="connect-row-slack"]')?.click());
+      await act(async () => query<HTMLButtonElement>('[data-testid="harness-route-available"]')?.click());
       const confirmStage = query<HTMLElement>('[data-testid="connect-confirm-stage"]');
       expect(confirmStage).not.toBeNull();
       expect(confirmStage?.contains(document.activeElement)).toBe(true);
@@ -432,24 +500,13 @@ describe("ConnectSheet", () => {
       window.matchMedia = ((mediaQuery: string) =>
         ({ matches: mediaQuery === "(pointer: fine)", media: mediaQuery }) as MediaQueryList) as typeof window.matchMedia;
       await render({ initial: "browse", spies: s });
-      await act(async () => query<HTMLButtonElement>('[data-testid="connect-popular-slack"]')?.click());
+      await act(async () => query<HTMLButtonElement>('[data-testid="harness-route-available"]')?.click());
       expect(query('[data-testid="connect-confirm-stage"]')?.contains(document.activeElement)).toBe(true);
       await act(async () => query<HTMLButtonElement>('[data-testid="connect-confirm-back"]')?.click());
       expect(document.activeElement).toBe(query('[data-testid="connect-search"]'));
     });
 
-    it("moves a Popular mark to the confirm stage the same way", async () => {
-      const s = spies();
-      await render({ initial: "browse", spies: s });
-
-      await act(async () => query<HTMLButtonElement>('[data-testid="connect-popular-notion"]')?.click());
-      expect(lastState(s)?.stage).toBe("confirm");
-      expect(lastState(s)?.target?.id).toBe("notion");
-      expect(query('[data-testid="connect-confirm-back"]')).not.toBeNull();
-      expect(s.onConnect).not.toHaveBeenCalled();
-    });
-
-    it("closes and starts the GitHub import flow from the GitHub row and mark", async () => {
+    it("closes and starts the GitHub import flow from the GitHub row", async () => {
       const s = spies();
       await render({ initial: "browse", spies: s });
 
@@ -459,11 +516,6 @@ describe("ConnectSheet", () => {
       expect(lastState(s)).toBeNull();
       expect(s.onConnect).not.toHaveBeenCalled();
       expect(s.openImportModal).not.toHaveBeenCalled();
-
-      await render({ initial: "browse", spies: s });
-      await act(async () => query<HTMLButtonElement>('[data-testid="connect-popular-github"]')?.click());
-      expect(s.beginGithubImport).toHaveBeenCalledTimes(2);
-      expect(query('[role="dialog"]')).toBeNull();
     });
 
     it("closes and opens the import modal from Paste a skill link", async () => {
@@ -519,7 +571,85 @@ describe("ConnectSheet", () => {
 
       await render({ initial: "browse", spies: s });
       expect(query<HTMLInputElement>('[data-testid="connect-search"]')?.value).toBe("");
-      expect(query('[data-testid="connect-popular"]')).not.toBeNull();
+      expect(query('[data-testid="connect-row-slack"]')).not.toBeNull();
+    });
+
+    it("shows the Popular row of available marks once two featured tools are selectable", async () => {
+      // The show branch of the Popular row (>= 2 available featured tools)
+      // is unreachable with the shipped data, so the sheet is re-evaluated
+      // against a connectors module where Notion's pack counts as published.
+      vi.resetModules();
+      vi.doMock("../connectors", async (importOriginal) => {
+        const mod = await importOriginal<typeof import("../connectors")>();
+        return {
+          ...mod,
+          AVAILABLE_FEATURED_CONNECTORS: mod.FEATURED_CONNECTORS.filter(
+            (entry) => entry.id === "github" || entry.id === "notion",
+          ),
+        };
+      });
+      try {
+        const { ConnectSheet: FreshConnectSheet } = await import("../ConnectSheet");
+        const onSelect = vi.fn();
+        const s = spies();
+        await act(async () => {
+          root.render(
+            <FreshConnectSheet
+              isOpen
+              stage="browse"
+              target={null}
+              showBack={false}
+              installedSkillNames={new Set<string>()}
+              pending={false}
+              onSelect={onSelect}
+              onBack={vi.fn()}
+              onPasteLink={s.openImportModal}
+              onSearchAllSkills={s.openSkillsPanel}
+              onConnect={s.onConnect}
+              onSetUpAgain={s.onSetUpAgain}
+              onClose={s.onClose}
+            />,
+          );
+        });
+
+        // Exactly the available featured marks, in featured order; Slack and
+        // Discord stay soon and never reach the row.
+        expect(query('[data-testid="connect-popular"]')).not.toBeNull();
+        expect(query('#connect-popular-label')?.textContent).toBe("Popular");
+        const marks = queryAll<HTMLButtonElement>('[data-testid="connect-popular-row"] [data-testid^="connect-popular-"]');
+        expect(marks.map((mark) => mark.dataset.testid)).toEqual([
+          "connect-popular-notion",
+          "connect-popular-github",
+        ]);
+        expect(query('[data-testid="connect-popular-slack"]')).toBeNull();
+        expect(query('[data-testid="connect-popular-discord"]')).toBeNull();
+        for (const mark of marks) {
+          expect(mark.disabled).toBe(false);
+          // Bare marks at the IconButton md size, with the touch floor.
+          expect(mark.className).toContain("h-9 w-9");
+          expect(mark.className).toContain("pointer-coarse:min-h-11");
+          expect(mark.querySelector("svg")?.getAttribute("aria-hidden")).toBe("true");
+        }
+        expect(query<HTMLButtonElement>('[data-testid="connect-popular-github"]')?.getAttribute("aria-label")).toBe("GitHub");
+        expect(query<HTMLButtonElement>('[data-testid="connect-popular-notion"]')?.getAttribute("title")).toBe("Notion");
+
+        // A mark only reports its connector; nothing sends.
+        await act(async () => query<HTMLButtonElement>('[data-testid="connect-popular-github"]')?.click());
+        expect(onSelect).toHaveBeenCalledTimes(1);
+        expect(onSelect.mock.calls[0]?.[0]?.id).toBe("github");
+        expect(s.onConnect).not.toHaveBeenCalled();
+
+        // Typing hides the row; clearing the query brings it back.
+        await typeQuery("git");
+        expect(query('[data-testid="connect-popular"]')).toBeNull();
+        expect(queryAll('[data-testid^="connect-popular-"]')).toHaveLength(0);
+        await typeQuery("");
+        expect(query('[data-testid="connect-popular-row"]')).not.toBeNull();
+        expect(document.body.textContent).not.toContain(EM_DASH);
+      } finally {
+        vi.doUnmock("../connectors");
+        vi.resetModules();
+      }
     });
   });
 

@@ -1,11 +1,17 @@
 import { Check } from "iconoir-react";
+import { Badge } from "../../../components/Badge";
 import { Button } from "../../../components/Button";
-import { CARD_CHIP_CONNECTORS, type SkillConnector } from "./connectors";
+import { CARD_CHIP_CONNECTORS, isConnectorAvailable, type SkillConnector } from "./connectors";
 
 // Presentational: the getting-started card's "Connect a tool" strip. One
 // hairline pill chip per featured skill (bare mark plus name) and a trailing
 // "More tools" text link that opens the browse sheet. A press only reports
-// the connector; nothing is sent.
+// the connector; nothing is sent. A "soon" skill (pack not published yet)
+// renders as a disabled chip with a "Soon" Badge and reports nothing.
+
+// Shown on hover over a disabled chip. It sits on the list item because the
+// disabled Button has pointer-events none, so the pointer reaches the item.
+const SOON_TITLE = "Coming soon";
 
 type ConnectChipStripProps = {
   installedSkillNames: ReadonlySet<string>;
@@ -31,24 +37,40 @@ export function ConnectChipStrip({
     >
       {CARD_CHIP_CONNECTORS.map((connector) => {
         const Mark = connector.mark;
-        const connected = installedSkillNames.has(connector.skillName);
+        const soon = !isConnectorAvailable(connector);
+        // "Soon" wins over the installed state: the pack is not published, so
+        // the chip cannot lead anywhere yet.
+        const connected = !soon && installedSkillNames.has(connector.skillName);
         // The visible chip is mark plus name; the accessible name adds the
-        // verb, or the installed state in place of it.
-        const accessibleName = connected ? `${connector.name}, connected` : `Connect ${connector.name}`;
+        // verb, or the state in place of it.
+        const accessibleName = soon
+          ? `${connector.name}, coming soon`
+          : connected
+            ? `${connector.name}, connected`
+            : `Connect ${connector.name}`;
         return (
-          <li key={connector.id}>
+          <li key={connector.id} title={soon ? SOON_TITLE : undefined}>
             <Button
               variant="outline"
               size="xs"
               radius="full"
               className="gap-1.5 px-2.5 shadow-none"
               aria-label={accessibleName}
-              onPress={() => onSelect(connector)}
+              isDisabled={soon}
+              onPress={() => {
+                if (!soon) {
+                  onSelect(connector);
+                }
+              }}
               data-testid={`connect-chip-${connector.id}`}
             >
               <Mark className="h-4 w-4" aria-hidden="true" />
               <span className="text-xs font-medium">{connector.name}</span>
-              {connected ? (
+              {soon ? (
+                <Badge tone="neutral" size="xs" data-testid={`connect-chip-${connector.id}-soon`}>
+                  Soon
+                </Badge>
+              ) : connected ? (
                 <Check
                   className="h-3 w-3 text-primary-600 dark:text-primary-300"
                   aria-hidden="true"

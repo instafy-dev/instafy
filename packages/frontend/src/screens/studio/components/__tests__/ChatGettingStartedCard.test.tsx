@@ -223,40 +223,47 @@ describe("ChatGettingStartedCard", () => {
     // No em-dash anywhere on the card.
     expect(container.textContent).not.toContain("—");
 
-    // A chip press reports the connector and nothing else: no onboarding action.
+    // Every shipped chip is a soon skill (pack not published): disabled, with
+    // the Soon Badge after the name and "coming soon" in its accessible name.
+    for (const chip of chips) {
+      expect(chip.disabled).toBe(true);
+      expect(chip.getAttribute("aria-label")).toMatch(/, coming soon$/);
+      expect(chip.querySelector(`[data-testid="${chip.dataset.testid}-soon"]`)?.textContent).toBe("Soon");
+    }
+    expect(container.querySelector('[data-testid="connect-chip-slack"]')?.textContent).toBe("SlackSoon");
+
+    // A soon chip press reports nothing: no connector, no onboarding action.
     await act(async () => {
       chips[0]?.click();
     });
-    expect(onSelectConnector).toHaveBeenCalledTimes(1);
-    expect(onSelectConnector.mock.calls[0][0]).toMatchObject({
-      id: "slack",
-      kind: "skill",
-      skillName: "slack",
-    });
+    expect(onSelectConnector).not.toHaveBeenCalled();
     expect(onSelectAction).toHaveBeenCalledTimes(2);
 
     expect(onBrowseConnectors).not.toHaveBeenCalled();
 
     // "More tools" opens the sheet's browse stage; it reports no connector.
+    expect(moreTools?.disabled).toBe(false);
     await act(async () => {
       moreTools?.click();
     });
     expect(onBrowseConnectors).toHaveBeenCalledTimes(1);
-    expect(onSelectConnector).toHaveBeenCalledTimes(1);
+    expect(onSelectConnector).not.toHaveBeenCalled();
     expect(onSelectAction).toHaveBeenCalledTimes(2);
   });
 
-  it("marks a chip connected when its skill folder is installed", async () => {
+  it("keeps a soon chip soon when its skill folder is installed", async () => {
     await act(async () => {
       root.render(
         <ChatGettingStartedCard {...baseProps({ installedSkillNames: new Set(["slack"]) })} />,
       );
     });
 
-    expect(container.querySelector('[data-testid="connect-chip-slack-connected"]')).not.toBeNull();
+    // An installed folder does not make an unpublished pack selectable.
+    expect(container.querySelector('[data-testid="connect-chip-slack-connected"]')).toBeNull();
+    expect(container.querySelector('[data-testid="connect-chip-slack-soon"]')?.textContent).toBe("Soon");
     expect(
       container.querySelector('[data-testid="connect-chip-slack"]')?.getAttribute("aria-label"),
-    ).toBe("Slack, connected");
+    ).toBe("Slack, coming soon");
     expect(container.querySelector('[data-testid="connect-chip-notion-connected"]')).toBeNull();
   });
 

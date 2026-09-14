@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  AVAILABLE_FEATURED_CONNECTORS,
   CARD_CHIP_CONNECTORS,
   CONNECTOR_CATEGORIES,
   CONNECTORS,
@@ -9,6 +10,7 @@ import {
   buildConnectorImportMessage,
   connectorCategoryLabel,
   filterConnectors,
+  isConnectorAvailable,
   type SkillConnector,
 } from "../connectors";
 import { ONBOARDING_PATHS } from "../onboardingPlaybook";
@@ -30,12 +32,13 @@ describe("CONNECTORS", () => {
     expect(github?.name).toBe("GitHub");
   });
 
-  it("gives every product connector a valid category, keywords and the featured flag", () => {
+  it("gives every product connector a valid category, keywords, the featured flag and an availability", () => {
     const categoryIds = new Set(CONNECTOR_CATEGORIES.map((category) => category.id));
     expect(PRODUCT_CONNECTORS.length).toBeGreaterThan(0);
     for (const entry of PRODUCT_CONNECTORS) {
       expect(categoryIds.has(entry.category)).toBe(true);
       expect(typeof entry.featured).toBe("boolean");
+      expect(["available", "soon"]).toContain(entry.availability);
       expect(entry.keywords.length).toBeGreaterThan(0);
       for (const keyword of entry.keywords) {
         expect(keyword).toBe(keyword.toLowerCase().trim());
@@ -63,6 +66,58 @@ describe("CONNECTORS", () => {
     expect(FEATURED_CONNECTORS).toEqual(PRODUCT_CONNECTORS.filter((entry) => entry.featured));
     expect(ids(FEATURED_CONNECTORS)).toEqual(["slack", "notion", "discord", "github"]);
     expect(ids(FEATURED_CONNECTORS)).not.toContain("freefinance");
+  });
+
+  it("marks the unpublished packs soon and only GitHub available today", () => {
+    // Flip an entry to "available" once its pack repo is published; until
+    // then it stays listed everywhere, greyed with a "Soon" Badge.
+    const availability = Object.fromEntries(
+      PRODUCT_CONNECTORS.map((entry) => [entry.id, entry.availability]),
+    );
+    expect(availability).toEqual({
+      slack: "soon",
+      notion: "soon",
+      discord: "soon",
+      freefinance: "soon",
+      github: "available",
+    });
+    for (const entry of CONNECTORS) {
+      expect(isConnectorAvailable(entry)).toBe(entry.kind === "other" || entry.id === "github");
+    }
+    // The paste link is always available: it has no pack to wait for.
+    const other = CONNECTORS.find((entry) => entry.id === "other")!;
+    expect(isConnectorAvailable(other)).toBe(true);
+    expect("availability" in other).toBe(false);
+  });
+
+  it("keeps soon entries in the featured and chip lists but out of the available Popular list", () => {
+    // Soon entries render greyed rather than vanish, so the featured and chip
+    // lists keep them; only the sheet's Popular row is limited to what can be
+    // selected today.
+    expect(ids(FEATURED_CONNECTORS)).toEqual(expect.arrayContaining(["slack", "notion", "discord"]));
+    expect(ids(CARD_CHIP_CONNECTORS)).toEqual(["slack", "notion", "discord"]);
+    expect(AVAILABLE_FEATURED_CONNECTORS).toEqual(FEATURED_CONNECTORS.filter(isConnectorAvailable));
+    expect(ids(AVAILABLE_FEATURED_CONNECTORS)).toEqual(["github"]);
+    for (const entry of AVAILABLE_FEATURED_CONNECTORS) {
+      expect(entry.featured).toBe(true);
+      expect(entry.availability).toBe("available");
+    }
+  });
+
+  it("keeps soon entries valid data so flipping them needs no other change", () => {
+    const soon = PRODUCT_CONNECTORS.filter((entry) => entry.availability === "soon");
+    expect(soon.length).toBeGreaterThan(0);
+    for (const entry of soon) {
+      expect(entry.kind).toBe("skill");
+      if (entry.kind === "skill") {
+        expect(entry.source).toMatch(/^https:\/\/github\.com\//);
+        expect(entry.source.split("/").pop()).toBe(entry.skillName);
+        expect(entry.needs.length).toBeGreaterThan(0);
+        expect(buildConnectorImportMessage(entry)).toContain(`--name ${entry.skillName} --start`);
+      }
+      // Search still lists them, greyed.
+      expect(ids(filterConnectors(entry.name))).toContain(entry.id);
+    }
   });
 
   it("keeps GitHub and unfeatured tools out of the card chips", () => {

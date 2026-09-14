@@ -24,7 +24,7 @@ import { Button, IconButton } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import { StudioDialogPopover } from "../../../components/aria/StudioPopover";
 import { CHAT_SLASH_COMMANDS } from "../../../conversations/slashCommands";
-import { FEATURED_CONNECTORS, type ProductConnector } from "./connectors";
+import { FEATURED_CONNECTORS, isConnectorAvailable, type ProductConnector } from "./connectors";
 
 type ComposerActionMenuView = "main" | "commands" | "connect";
 
@@ -71,6 +71,7 @@ function ActionRow({
   end,
   testId,
   disabled = false,
+  hoverTitle,
 }: {
   icon: ReactNode;
   title: string;
@@ -78,8 +79,14 @@ function ActionRow({
   end?: ReactNode;
   testId?: string;
   disabled?: boolean;
+  /**
+   * Native tooltip for a disabled row. It sits on a wrapper because the
+   * disabled Button has pointer-events none, so the pointer reaches the
+   * wrapper instead.
+   */
+  hoverTitle?: string;
 }) {
-  return (
+  const row = (
     <Button
       type="button"
       variant="ghost"
@@ -103,6 +110,7 @@ function ActionRow({
       </span>
     </Button>
   );
+  return hoverTitle ? <div title={hoverTitle}>{row}</div> : row;
 }
 
 export function ComposerActionMenu({
@@ -148,7 +156,8 @@ export function ComposerActionMenu({
   // "Connect a tool" opens a sub-view of the featured connector rows plus
   // "Browse all tools"; a row press closes the menu and reports the connector,
   // the last row closes the menu and opens the Connect sheet's browse stage.
-  // Nothing here sends or prefills.
+  // A "soon" connector (pack not published yet) renders disabled with a
+  // "Soon" Badge and reports nothing. Nothing here sends or prefills.
   onSelectConnector?: (connector: ProductConnector) => void;
   onBrowseConnectors?: () => void;
   installedSkillNames?: ReadonlySet<string>;
@@ -262,21 +271,33 @@ export function ComposerActionMenu({
             </Button>
             {FEATURED_CONNECTORS.map((connector) => {
               const Mark = connector.mark;
+              const soon = !isConnectorAvailable(connector);
+              // "Soon" wins over the installed state: the pack is not
+              // published, so the row cannot lead anywhere yet.
               const installed =
-                connector.kind === "skill" && installedSkillNames.has(connector.skillName);
+                !soon && connector.kind === "skill" && installedSkillNames.has(connector.skillName);
               return (
                 <ActionRow
                   key={connector.id}
                   icon={<Mark className="h-4 w-4" aria-hidden="true" />}
                   title={connector.name}
                   end={
-                    installed ? (
+                    soon ? (
+                      <Badge tone="neutral" size="xs">
+                        Soon
+                      </Badge>
+                    ) : installed ? (
                       <Badge tone="success" size="xs">
                         Connected
                       </Badge>
                     ) : undefined
                   }
+                  disabled={soon}
+                  hoverTitle={soon ? "Coming soon" : undefined}
                   onPress={() => {
+                    if (soon) {
+                      return;
+                    }
                     closeMenu();
                     onSelectConnector(connector);
                   }}
