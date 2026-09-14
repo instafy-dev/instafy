@@ -455,6 +455,45 @@ enum TerminalCommandAction {
     Run(String),
 }
 
+/// What the skills lane produced before the model turn of a `--start` import or a
+/// `/skills start`: the report already streamed (when streaming was active) and the
+/// artifacts to merge into the final execution.
+struct SkillsKickoff {
+    messages: Vec<JobMessage>,
+    artifacts: Vec<JsonValue>,
+    names: Vec<String>,
+}
+
+/// Fold the skills lane report into a model execution's messages so a model failure after a
+/// successful import cannot lose the "Imported ..." report. When streaming is active the
+/// report was already sent through the progress channel and streamed executions skip
+/// `messages`. The lane artifacts are not handled here: they join the run's artifact list as
+/// soon as it exists (see `skills_kickoff_artifacts`) so every failure path carries them.
+fn merge_skills_kickoff_into_execution(
+    kickoff: Option<SkillsKickoff>,
+    streaming_active: bool,
+    messages: Vec<JobMessage>,
+) -> Vec<JobMessage> {
+    let Some(kickoff) = kickoff else {
+        return messages;
+    };
+    if streaming_active {
+        return messages;
+    }
+    let mut merged = kickoff.messages;
+    merged.extend(messages);
+    merged
+}
+
+/// The `skills/import` artifacts of a pending kickoff, to prepend to a run's artifact list the
+/// moment it is built so a `JobFailureWithArtifacts` after the import still records what was
+/// written.
+fn skills_kickoff_artifacts(kickoff: Option<&SkillsKickoff>) -> Vec<JsonValue> {
+    kickoff
+        .map(|kickoff| kickoff.artifacts.clone())
+        .unwrap_or_default()
+}
+
 async fn run_agents_memory_snapshot(
     workspace_dir: &Path,
     progress_sender: Option<JobMessageSender>,
@@ -4871,8 +4910,31 @@ impl JobProcessor {
             .await;
         }
 
+        let mut skills_kickoff: Option<SkillsKickoff> = None;
         if let Some(request) = skills_request {
-            return Ok(skills::build_skills_execution(request, &workspace_dir).await);
+            match skills::resolve_skills_lane(request, &workspace_dir).await {
+                skills::SkillsLaneOutcome::Execution(execution) => return Ok(execution),
+                skills::SkillsLaneOutcome::Kickoff {
+                    report,
+                    artifacts,
+                    names,
+                    prompt,
+                } => {
+                    let mut lane_messages = Vec::new();
+                    if let Some(report) = report {
+                        if let Some(progress) = progress_sender.as_ref() {
+                            let _ = progress.sender.send(report.clone());
+                        }
+                        lane_messages.push(report);
+                    }
+                    prompt_override = Some(prompt);
+                    skills_kickoff = Some(SkillsKickoff {
+                        messages: lane_messages,
+                        artifacts,
+                        names,
+                    });
+                }
+            }
         }
 
         if let Some(request) = mcp_request {
@@ -4929,6 +4991,17 @@ impl JobProcessor {
         let codex = match self.codex_for_project(&project_id, &workspace_dir) {
             Ok(codex) => codex,
             Err(error) => {
+                if let Some(kickoff) = skills_kickoff.take() {
+                    // The skills are installed; without an AI the report still lands and the
+                    // user is told how to start them once an AI is connected.
+                    let mut execution = skills::build_no_ai_kickoff_execution(
+                        kickoff.messages.into_iter().next(),
+                        kickoff.artifacts,
+                        &kickoff.names,
+                    );
+                    execution.messages_streamed = streaming_active;
+                    return Ok(execution);
+                }
                 if matches!(
                     learn_request,
                     Some(learn::LearnRequest {
@@ -4948,10 +5021,9 @@ impl JobProcessor {
             }
         };
 
-        let routing_preflight = if should_run_agent_routing_preflight_for_execution(
-            job,
-            prompt_text,
-        ) {
+        let routing_preflight = if skills_kickoff.is_none()
+            && should_run_agent_routing_preflight_for_execution(job, prompt_text)
+        {
             let active_plan_group_id = latest_plan_group_id_from_payload(&job.payload);
             let preflight_prompt = build_agent_routing_preflight_prompt(
                 &workspace_dir,
@@ -5446,7 +5518,8 @@ impl JobProcessor {
             let base = if base.is_empty() { trimmed } else { base };
             outcome.summary = format!("{base}. See `{}`.", learn::INSTAFY_FILENAME);
         }
-        let mut artifacts = build_codex_artifacts(&output, &outcome);
+        let mut artifacts = skills_kickoff_artifacts(skills_kickoff.as_ref());
+        artifacts.extend(build_codex_artifacts(&output, &outcome));
         if let Some(observation) = scoped_worker_path_observation.as_ref() {
             artifacts.push(observation.artifact.clone());
         }
@@ -5984,7 +6057,8 @@ impl JobProcessor {
                 && retry_reported_files_len > 0
                 && retry_normalized_files_len == 0;
 
-            let mut retry_artifacts = build_codex_artifacts(&retry_output, &retry_outcome);
+            let mut retry_artifacts = skills_kickoff_artifacts(skills_kickoff.as_ref());
+            retry_artifacts.extend(build_codex_artifacts(&retry_output, &retry_outcome));
             if let Some(observation) = scoped_worker_path_observation.as_ref() {
                 retry_artifacts.push(observation.artifact.clone());
             }
@@ -6403,6 +6477,11 @@ impl JobProcessor {
                 ));
             }
 
+            let retry_messages = merge_skills_kickoff_into_execution(
+                skills_kickoff.take(),
+                streaming_active,
+                retry_messages,
+            );
             return Ok(JobExecution {
                 summary: retry_outcome.summary,
                 suggested_replies: retry_outcome.suggested_replies,
@@ -6591,6 +6670,11 @@ impl JobProcessor {
             ));
         }
 
+        let interim_messages = merge_skills_kickoff_into_execution(
+            skills_kickoff.take(),
+            streaming_active,
+            interim_messages,
+        );
         Ok(JobExecution {
             summary: outcome.summary,
             suggested_replies: outcome.suggested_replies,
