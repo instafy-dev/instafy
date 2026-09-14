@@ -9,7 +9,7 @@ const fixture = vi.hoisted(() => ({
     { id: "space-a", name: "Core", orgId: "org-a", orgName: "Alpha", state: null, isRemoteOnly: false },
     { id: "space-c", name: "Design", orgId: "org-c", orgName: "Charlie", state: null, isRemoteOnly: false },
   ],
-  activeProjectId: "space-a",
+  activeProjectId: "space-a" as string | null,
   homeAttentionCount: 0,
   homeAttentionByProject: {} as Record<string, number>,
   orgs: [
@@ -76,6 +76,7 @@ import { StudioSidebar } from "../StudioSidebar";
 import { StudioSearchContext } from "../StudioSearchContext";
 import { useStudioSearch } from "../useStudioSearch";
 import { recordProjectOpened } from "../../../../projects/projectRecency";
+import { usesGlobalNavigationContext } from "../../teamNavigation";
 
 describe("StudioSidebar organization navigation", () => {
   let container: HTMLDivElement;
@@ -174,14 +175,41 @@ describe("StudioSidebar organization navigation", () => {
     vi.unstubAllGlobals();
   });
 
-  it("keeps the global rail and account while Home and account pages hide context", async () => {
-    await render({ activePanel: "home" });
+  it.each([
+    ["home", "space-a"],
+    ["home", null],
+    ["account", null],
+  ] as const)("keeps the global rail and account while %s with active space %s hides context", async (page, projectId) => {
+    fixture.navigationPage = page;
+    fixture.activeProjectId = projectId;
+    await render({ activePanel: page === "home" ? "home" : "settings", hideContext: usesGlobalNavigationContext(page, projectId) });
     expect(container.querySelector('[data-testid="sidebar-organization-rail"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="sidebar-profile-menu"]')).not.toBeNull();
-    expect(container.querySelector('[data-testid="sidebar-context-navigation"]')).toBeNull();
-    await render({ activePanel: "settings", hideContext: true });
     expect(container.querySelector('[data-testid="sidebar-context-navigation"]')).toBeNull();
     expect(container.querySelectorAll('[data-testid="sidebar-profile-menu"]')).toHaveLength(1);
+  });
+
+  it.each([false, true])("retains the active space's sidebar and context controls when opening personal Settings (collapsed=%s)", async (collapsed) => {
+    await render({ collapsed, navigationHeaderPortalTarget: headerPortal });
+    const navigation = container.querySelector('[data-testid="sidebar-context-navigation"]');
+    const toggle = container.querySelector('[data-testid="sidebar-drawer-toggle"]');
+    expect(navigation).not.toBeNull();
+    expect(toggle).not.toBeNull();
+    fixture.navigationPage = "account";
+    await render({
+      activePanel: "settings", collapsed, navigationHeaderPortalTarget: headerPortal,
+      hideContext: usesGlobalNavigationContext(fixture.navigationPage, fixture.activeProjectId),
+    });
+    expect(container.querySelector('[data-testid="sidebar-context-navigation"]')).toBe(navigation);
+    expect(container.querySelector('[data-testid="sidebar-drawer-toggle"]')).toBe(toggle);
+    expect(toggle?.getAttribute("aria-label")).toBe(collapsed ? "Expand sidebar" : "Collapse sidebar");
+    expect(headerPortal.querySelector('[data-testid="sidebar-team-menu-trigger"]')?.getAttribute("aria-label")).toBe("Team menu: Alpha");
+    expect(headerPortal.querySelector('[data-testid="sidebar-space-button"]')?.getAttribute("aria-label")).toBe("Choose space: Core");
+    expect(document.querySelectorAll('[data-testid="sidebar-team-menu-trigger"]')).toHaveLength(1);
+    expect(document.querySelectorAll('[data-testid="sidebar-space-button"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[data-testid="sidebar-profile-menu"]')).toHaveLength(1);
+    await click("sidebar-nav-chat");
+    expect(onSelect).toHaveBeenCalledExactlyOnceWith("chat");
+    expect(fixture.switchProject).not.toHaveBeenCalled();
   });
 
   it.each([false, true])("keeps external context controls labeled without duplicates when the sidebar is collapsed=%s", async (collapsed) => {

@@ -132,7 +132,7 @@ import { controllerBaseUrl } from "../services/runtimeController/core";
 import { useAutoDesktopSpeechTunnel } from "../desktop/voiceTunnel/useAutoDesktopSpeechTunnel";
 import { useStudioLayoutChromeState } from "./useStudioLayoutChromeState";
 import { useStudioLayoutWorkspaceRouting } from "./useStudioLayoutWorkspaceRouting";
-import { canRememberTeamWorkspace, resolveTeamNavigationScope } from "./studio/teamNavigation";
+import { canRememberTeamWorkspace, resolveTeamNavigationScope, usesGlobalNavigationContext } from "./studio/teamNavigation";
 import { readCachedControllerOrgs } from "./studio/components/sidebarOrgSnapshot";
 import { StudioPanelPerformance } from "../telemetry/StudioPanelPerformance";
 
@@ -2003,9 +2003,9 @@ function StudioLayoutInner() {
   const [mobileContextTarget, setMobileContextTarget] = useState<HTMLDivElement | null>(null);
   const mobileSearchTriggerRef = useRef<HTMLButtonElement | null>(null);
   const overlaySearchTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const globalSearch = navigationScope.page === "home" || navigationScope.page === "account";
-  const searchOrg = globalSearch ? null : { id: navigationScope.orgKey, name: activeTeamName };
-  const searchSpace = !globalSearch && activeProjectId && activeProjectOrgKey === navigationScope.orgKey && !projectAccessBlocked
+  const globalNavigationContext = usesGlobalNavigationContext(navigationScope.page, activeProjectId);
+  const searchOrg = globalNavigationContext ? null : { id: navigationScope.orgKey, name: activeTeamName };
+  const searchSpace = !globalNavigationContext && activeProjectId && activeProjectOrgKey === navigationScope.orgKey && !projectAccessBlocked
     ? { id: activeProjectId, name: activeProjectName } : null;
   const searchNavigation = useStudioSearchNavigation({
     viewerUserId: currentUserId, location, activeProjectId,
@@ -2095,7 +2095,7 @@ function StudioLayoutInner() {
             hasLogs: hasBuildLogs,
             buildLogs,
             sidebarCollapsed,
-            sidebarOpen: isLargeScreen ? !sidebarCollapsed && navigationScope.page !== "home" && navigationScope.page !== "account" : mobileSidebarOpen,
+            sidebarOpen: isLargeScreen ? !sidebarCollapsed && !globalNavigationContext : mobileSidebarOpen,
             navigationPage: showMobileLeftDrawerOverlay ? "workspace" : navigationScope.page,
             activeTeamName,
             activeTeamAvatarUrl,
@@ -2142,7 +2142,7 @@ function StudioLayoutInner() {
                 onReturnToTeam={handleReturnToTeam}
                 onActivateProject={handleActivateProject}
                 onActiveTeamChange={handleActiveTeamChange}
-                hideContext={navigationScope.page === "account"}
+                hideContext={globalNavigationContext}
                 onOpenConversationHistory={handleOpenConversationHistory}
                 recentConversations={recentConversations}
                 activeConversationId={visibleChatId}
@@ -2285,7 +2285,7 @@ function StudioLayoutInner() {
                 navigationHeaderExternal
                 navigationHeaderPortalTarget={mobileContextTarget}
                 mobileOverlay
-                hideContext={navigationScope.page === "account"}
+                hideContext={globalNavigationContext}
                 mobileNavigation={mobileSidebarOpen ? mobileSidebarNavigation : undefined}
                 runSidebarAction={runStudioNavigation}
                 items={sidebarItems}

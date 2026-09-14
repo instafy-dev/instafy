@@ -122,7 +122,9 @@ also closes search. Selecting a result opens its normal Studio destination.
 
 Search starts within the working space. Empty Backspace broadens it to the team, then all
 teams; chip removal buttons and the Scope selector provide the same controls. These changes
-do not switch the working space. Home/account start across teams. Clicking a team/space chip's
+do not switch the working space. Home starts across teams. Personal settings opened with an
+active space retain its navigation and default search context; without a space, they start
+across teams. Clicking a team/space chip's
 picker still performs normal navigation. Desktop dismissal clears the query and restores the
 working scope.
 
@@ -155,7 +157,9 @@ The space chip beside it changes the working space. Less frequent tools, persona
 connections and Credits appear in navigation when space permits, with remaining destinations
 available through More. The desktop space picker shows only
 the selected team's spaces; Browse teams retains the full team-and-space directory.
-Home and account pages hide the team-specific desktop sidebar.
+Home hides the team-specific desktop sidebar. Personal settings opened alongside a space keep
+the sidebar and its saved expanded/compact state, while profile changes remain account-wide.
+Personal settings without an active space use only the global rail.
 
 An empty team's overview and settings can be selected independently of the
 current project. They do not display the previous team's space tools or activity.

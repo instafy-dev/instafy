@@ -2,6 +2,11 @@ import { isUUID } from "../../utils/uuid";
 
 export type StudioNavigationPage = "home" | "team" | "account" | "workspace";
 
+/** Account settings remain personal while preserving the surrounding space's navigation. */
+export function usesGlobalNavigationContext(page: StudioNavigationPage, activeProjectId: string | null) {
+  return page === "home" || (page === "account" && !activeProjectId);
+}
+
 export function readTeamNavigationKey(value: string | null): string | null {
   return value === "personal" || (value !== null && isUUID(value)) ? value : null;
 }

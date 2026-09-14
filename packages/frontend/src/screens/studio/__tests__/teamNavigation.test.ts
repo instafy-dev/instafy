@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildStudioDestinationSearch } from "../../../navigation/studioNavigation";
-import { canRememberTeamWorkspace, resolveTeamNavigationScope } from "../teamNavigation";
+import { canRememberTeamWorkspace, resolveTeamNavigationScope, usesGlobalNavigationContext } from "../teamNavigation";
 
 const teamA = "11111111-1111-4111-8111-111111111111";
 const teamB = "22222222-2222-4222-8222-222222222222";
@@ -21,6 +21,25 @@ describe("team navigation scope", () => {
     expect(resolveTeamNavigationScope(`?panel=settings&settingsTab=org&settingsOrgId=${teamB}`, teamA)).toEqual({ page: "team", orgKey: teamB });
     expect(resolveTeamNavigationScope(`?panel=settings&settingsTab=profile&teamId=${teamB}`, teamA)).toEqual({ page: "account", orgKey: teamB });
     expect(resolveTeamNavigationScope(`?panel=automations&teamId=${teamB}`, teamA)).toEqual({ page: "workspace", orgKey: teamA });
+  });
+  it.each([
+    ["home", "space-a", true],
+    ["home", null, true],
+    ["account", "space-a", false],
+    ["account", null, true],
+    ["workspace", "space-a", false],
+    ["workspace", null, false],
+    ["team", "space-a", false],
+    ["team", null, false],
+  ] as const)("uses global navigation for %s with active space %s: %s", (page, projectId, expected) => {
+    expect(usesGlobalNavigationContext(page, projectId)).toBe(expected);
+  });
+  it("keeps personal settings classified as account without replacing remembered work when space navigation remains visible", () => {
+    const search = "?projectId=space-a&panel=settings&settingsTab=profile";
+    const scope = resolveTeamNavigationScope(search, teamA);
+    expect(scope).toEqual({ page: "account", orgKey: teamA });
+    expect(usesGlobalNavigationContext(scope.page, "space-a")).toBe(false);
+    expect(canRememberTeamWorkspace(search, "space-a", teamA)).toBe(false);
   });
   it("does not save a transient project switch or foreign team as the prior team's work", () => {
     expect(canRememberTeamWorkspace("?projectId=space-b&panel=chat", "space-a", teamA)).toBe(false);
