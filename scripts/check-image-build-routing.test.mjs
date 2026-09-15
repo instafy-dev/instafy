@@ -151,7 +151,45 @@ test("Trivy follows the actual BUILD runner while both hosted matrix binaries an
   assert.match(source, /platforms: \$\{\{ matrix\.platform \}\}/u);
 });
 
-test("removing only the finite routing and scanner-host delta reconstructs every original workflow byte", () => {
+test("only self-hosted x86 image builds select the pinned x86 BuildKit instead of the ARM daemon's QEMU fallback", () => {
+  const pinned = "image=moby/buildkit@sha256:040d34121c27906c4ff9ac152a30d52bf2c5d328d3bb748916bb3d2743c02528";
+  for (const file of files.slice(0, 2)) {
+    const options = [...read(file).matchAll(/^          driver-opts: (.+)$/gmu)];
+    assert.equal(options.length, 1, "only the image-build job overrides BuildKit");
+    const build = sections(file).find(job => job.key === (file === files[0] ? "publish" : "build-scan-push"));
+    assert.ok(build.source.includes(options[0][0]));
+    for (const environment of ["self-hosted", "github-hosted", "", undefined]) {
+      for (const architecture of ["amd64", "arm64"]) {
+        const value = expression(options[0][1], { runner: { environment }, matrix: { architecture } });
+        const x86Build = file === files[0] || architecture === "amd64";
+        assert.equal(value, environment === "self-hosted" && x86Build ? pinned : "");
+      }
+    }
+    assert.throws(() => withoutImageBuildRouting(file, read(file).replace(pinned, "image=moby/buildkit:latest")));
+  }
+});
+
+test("only self-hosted image cache exports are bounded and optional, without retaining builder volumes", () => {
+  const services = read(files[0]);
+  const runtime = read(files[1]);
+  const serviceExpression = services.match(/^          CACHE_EXPORT_OPTIONS: (.+)$/mu)[1];
+  const runtimeExpression = runtime.match(/^          cache-to: .*(\$\{\{ runner.environment .*\}\})$/mu)[1];
+  for (const environment of ["self-hosted", "SELF-HOSTED", "github-hosted", "", undefined]) {
+    const values = { runner: { environment } };
+    const expected = environment?.toLowerCase() === "self-hosted" ? ",timeout=2m,ignore-error=true" : "";
+    assert.equal(expression(serviceExpression, values), expected);
+    assert.equal(expression(runtimeExpression, values), expected);
+  }
+  assert.ok(services.includes('--cache-to "type=gha,scope=production-${CACHE_KEY},mode=max${CACHE_EXPORT_OPTIONS}"'));
+  for (const file of files.slice(0, 2)) {
+    assert.doesNotMatch(read(file), /keep-state:|cleanup: false|continue-on-error:/u);
+    assert.throws(() => withoutImageBuildRouting(file, read(file).replace("timeout=2m", "timeout=20m")));
+    assert.notEqual(withoutImageBuildRouting(file, read(file).replace("--exit-code 1", "--exit-code 0")),
+      withoutImageBuildRouting(file, read(file)), "the inverse must not erase a weakened security scan");
+  }
+});
+
+test("removing only the finite routing, builder, cache and scanner-host delta reconstructs every original workflow byte", () => {
   const pins = ["bf62fdc525afaa581c15984a6aa1f5c93376b3df7809fd33ce846230a82bf7a5",
     "4e9a90476ec106fa63f9e3fbaa7324102bb4513e27d3aca59ecf18142d321e16", "155bcac7d887060def84b8bec489190b9dd04090bb7fabbb5e5ff73ead16cd2a"];
   for (const [index, file] of files.entries()) assert.equal(createHash("sha256").update(withoutImageBuildRouting(file, read(file))).digest("hex"), pins[index]);

@@ -146,6 +146,25 @@ test("runtime image inputs reject the vulnerable Chromium and Go crypto baseline
   );
 });
 
+test("base runtime explicitly refreshes inherited gzip, PCRE2 and SQLite and rejects obsolete versions", () => {
+  const source = read("docker/runtime/Dockerfile");
+  const defaults = argumentDefaults(source);
+  const runtime = dockerfileStage(source, "runtime");
+  const packages = [
+    ["gzip", "GZIP_MIN_VERSION", "1.13-1+deb13u1"],
+    ["libpcre2-8-0", "PCRE2_MIN_VERSION", "10.46-1~deb13u2"],
+    ["libsqlite3-0", "SQLITE3_MIN_VERSION", "3.46.1-7+deb13u2"],
+  ];
+  for (const [name, argument, minimum] of packages) {
+    assert.equal(defaults.get(argument), minimum);
+    assert.ok(runtime.includes(`ARG ${argument}\n`));
+    assertOrdered(runtime, name, "apt-get update", "apt-get install -y --no-install-recommends",
+      `      ${name} \\\n`, `test -n "\${${argument}}"`,
+      `dpkg --compare-versions "$(dpkg-query -W -f='\${Version}' ${name})" ge "\${${argument}}"`,
+      "rm -rf /var/lib/apt/lists/*");
+  }
+});
+
 test("affected runtime images refresh every util-linux security binary", () => {
   const expectedStages = new Map([
     ["docker/git-edge/Dockerfile", ["runtime"]],

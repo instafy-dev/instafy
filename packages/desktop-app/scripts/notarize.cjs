@@ -143,11 +143,15 @@ const TRANSIENT_NOTARIZATION_PATTERNS = [
   /network (is )?(unreachable|down)/i,
   /timed? ?out/i,
   /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket hang up/i,
-  /502|503|504|Bad Gateway|Service Unavailable|Gateway Time-?out/i,
+  /Bad Gateway|Service Unavailable|Gateway Time-?out/i,
+  // A bare status number can instead be part of a fixture path or submission ID.
+  /(?<![\w/\\.-])HTTP(?:\/\d(?:\.\d)?)?(?:\s+(?:error|status(?:\s+code)?))?(?:\s*[:=]\s*|\s+)50[234](?![\w/\\.-])/i,
+  /(?<![\w/\\.-])status(?:Code|\s+code)(?:\s*[:=]\s*|\s+)(?:Optional\(\s*)?50[234](?![\w/\\.-])/i,
 ];
 
 function isTransientNotarizationFailure(error) {
-  const text = `${error?.message ?? ""} ${error?.stack ?? ""}`;
+  // notarytool diagnostics are in message; caller stack paths are not errors.
+  const text = String(error?.message ?? "");
   return TRANSIENT_NOTARIZATION_PATTERNS.some((pattern) => pattern.test(text));
 }
 

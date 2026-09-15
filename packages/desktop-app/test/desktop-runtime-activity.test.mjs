@@ -319,8 +319,11 @@ test("ambient refresh stays bound to the runtime's originating user", () => {
   );
 });
 
-test("withDesktopRuntimeTimeout bounds a renderer session read that never settles", async () => {
-  await assert.rejects(
+test("withDesktopRuntimeTimeout bounds a renderer session read that never settles", async (t) => {
+  // The production timeout is intentionally unreferenced. Advance its clock
+  // explicitly so this isolated Node test cannot exit before it fires.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const rejected = assert.rejects(
     withDesktopRuntimeTimeout(
       new Promise(() => undefined),
       5,
@@ -328,6 +331,8 @@ test("withDesktopRuntimeTimeout bounds a renderer session read that never settle
     ),
     /timed out/i,
   );
+  t.mock.timers.tick(5);
+  await rejected;
 });
 
 test("a coalesced second quit request can force or cancel one hung wait", async () => {
