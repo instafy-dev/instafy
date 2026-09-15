@@ -8,6 +8,15 @@ import { useWorkspaceStore } from "../../../../store";
 const api = vi.hoisted(() => ({ getSummary: vi.fn(), updateIdentity: vi.fn() }));
 vi.mock("../../../../sdk/instafy", () => ({ controllerClient: { projects: api } }));
 import { SpaceIdentityEditor } from "../SpaceIdentityEditor";
+import { StudioRecentSpaces } from "../StudioRecentSpaces";
+
+function SavedSpaceBreadcrumb({ projectId }: { projectId: string }) {
+  const metadata = useWorkspaceStore(state => state.projects[projectId]?.metadata);
+  return <StudioRecentSpaces presentation="path"
+    spaces={[{ id: projectId, name: "Autofix", icon: metadata?.projectIcon, color: metadata?.projectColor }]}
+    activeProjectId={projectId} recency={{}} collapsed={false} expanded={false}
+    onExpandedChange={() => {}} onSelectSpace={() => {}} onBrowseAll={() => {}} rowClassName="" iconClassName="" />;
+}
 
 describe("space identity", () => {
   const initial = useWorkspaceStore.getState();
@@ -47,6 +56,19 @@ describe("space identity", () => {
     expect(api.updateIdentity).toHaveBeenCalledWith({ projectId, projectIcon: "🌱", projectColor: "green" });
     expect(useWorkspaceStore.getState().state.metadata.projectIcon).toBe("🌱");
     expect(container.textContent).toContain("Space appearance saved.");
+  });
+  it("updates the mounted breadcrumb only after appearance is saved, without reloading", async () => {
+    await act(async () => root.render(<>
+      <SpaceIdentityEditor projectId={projectId} name="Autofix" canWrite enabled />
+      <SavedSpaceBreadcrumb projectId={projectId} />
+    </>));
+    const identity = () => container.querySelector('[data-testid="sidebar-space-button"] [data-testid="space-identity"]')!;
+    expect(identity().textContent).toBe("🚀");
+    await act(async () => { button("Books").click(); button("Pink color").click(); });
+    expect(identity().textContent).toBe("🚀");
+    await act(async () => button("Save appearance").click());
+    expect(identity().textContent).toBe("📚");
+    expect(identity().className).toContain("bg-pink-100");
   });
   it("clears persisted identity explicitly and cancel restores saved choices", async () => {
     await render();

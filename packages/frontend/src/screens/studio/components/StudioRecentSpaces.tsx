@@ -168,6 +168,10 @@ export function StudioRecentSpaces({
       onPress={usePopover ? undefined : () => onExpandedChange(!expanded)}
       className={`group/item relative min-w-0 py-1.5 transition focus-visible:ring-offset-0 data-[pressed]:!translate-y-0 data-[pressed]:!scale-100 ${rowClassName}`}
     >
+      {pathPresentation && currentSpace ? <SpaceIdentity
+        name={spaceName(currentSpace)} icon={currentSpace.icon} color={currentSpace.color}
+        className="!h-5 !w-5 !rounded-md !text-xs"
+      /> : null}
       {!pathPresentation ? <span className={`relative ${iconClassName}`}>
         {currentSpace ? <SpaceIdentity name={spaceName(currentSpace)} icon={currentSpace.icon} color={currentSpace.color}
           />

@@ -88,6 +88,11 @@ without losing focus or creating extra route visits.
 
 ## Team identity
 
+The space segment of the organization/space breadcrumb uses `SpaceIdentity`, including
+the saved icon and color, on both desktop and mobile. It follows confirmed appearance saves
+and falls back to initials when cleared. Draft choices remain confined to the editor until
+saved; a missing current space shows the Choose space prompt without a stale identity.
+
 Right-click a team icon in the desktop organization rail for Team overview, Team settings
 and Members. Shift+F10 or the keyboard menu key opens the same anchored menu; Escape
 dismisses it and returns focus to the icon. Actions target the clicked team, including
