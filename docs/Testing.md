@@ -465,6 +465,24 @@ Environment-gated suites remain non-required:
 - private GitHub / secrets-dependent flows
 - other packaged-release Desktop and hardware-specific smokes
 
+### Published controller image startup
+
+The existing protected-main service-image publisher runs three isolated startup
+checks against the exact controller digest after push and before recording a
+successful image. A temporary workflow token downloads it; the fixture receives
+no registry or deployment credentials and has no external network or database.
+It verifies existing-user lookup, missing-user creation and explicit-ID bypass,
+then intentionally stops at database-URL parsing. It is a packaged startup
+regression check, not a full database lifecycle or live deployment check.
+
+The `controller-startup-smoke` artifact retains only fixed-field results and
+source/image/fixture identity. A failed, skipped or incomplete fixture cannot
+produce the controller image record or sealed service manifest. Public PR CI
+runs the fixture's unit tests and Docker-runner/workflow contract tests without
+registry permissions; it does not publish or download a private controller image.
+See [controller startup verification](../packages/runtime-controller/README.md#startup-service-identity)
+for the local command. Existing seven-case Rust startup coverage remains unchanged.
+
 Stripe-backed payment tests are opt-in and require test-mode Stripe credentials. They are not part
 of the default public CI gate.
 
