@@ -10297,7 +10297,7 @@ async fn provider_device_heartbeat_records_presence_and_lists_by_family() -> any
                             "transport": "native_camera",
                             "identifier": "ios-test-device",
                             "address": "ios-test-device",
-                            "name": "Marcus iPhone",
+                            "name": "Taylor iPhone",
                             "nativePlatform": "ios"
                         }
                     })),
@@ -10332,7 +10332,7 @@ async fn provider_device_heartbeat_records_presence_and_lists_by_family() -> any
                     json!({
                         "providerId": provider_id,
                         "deviceId": "ios-test-device",
-                        "deviceLabel": "Marcus iPhone",
+                        "deviceLabel": "Taylor iPhone",
                         "platform": "ios",
                         "status": "ready",
                         "connectionType": "native_runtime",
@@ -10477,7 +10477,7 @@ async fn project_integration_routes_round_trip_provider_family_selection_metadat
                                     "transport": "native_camera",
                                     "identifier": "ios-remote-device",
                                     "address": "ios-remote-device",
-                                    "name": "Marcus iPhone",
+                                    "name": "Taylor iPhone",
                                     "nativePlatform": "ios"
                                 },
                                 "updatedAt": "2026-04-04T10:10:00.000Z"
@@ -10526,7 +10526,7 @@ async fn project_integration_routes_round_trip_provider_family_selection_metadat
             .and_then(|value| value.get("preferredDevice"))
             .and_then(|value| value.get("name"))
             .and_then(serde_json::Value::as_str),
-        Some("Marcus iPhone")
+        Some("Taylor iPhone")
     );
 
     {

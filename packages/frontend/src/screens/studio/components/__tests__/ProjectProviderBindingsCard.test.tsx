@@ -83,7 +83,7 @@ function createHardwareBindingStore(): LocalHardwareBindingStore {
         providerId: "hardware.serial",
         projectId: "project-1",
         runtimeHostId: "runtime-local",
-        runtimeHostLabel: "Marcus MacBook",
+        runtimeHostLabel: "Taylor MacBook",
         grantedCapabilities: ["hardware_serial_list", "hardware_serial_probe"],
         grantedResources: [
           {
@@ -155,7 +155,7 @@ describe("ProjectProviderBindingsCard", () => {
     readProjectHardwareBindingStoreMock.mockResolvedValue({ version: 1, bindings: {} });
     runtimeStateMock.localWorkspace = {
       deviceId: "device-local",
-      hostname: "Marcus MacBook",
+      hostname: "Taylor MacBook",
       path: "/home/example/.instafy/workspace/project-1",
       runtimeId: "runtime-local",
       status: "online",
@@ -177,7 +177,7 @@ describe("ProjectProviderBindingsCard", () => {
         pendingConversationMessages: [],
         localWorkspace: {
           deviceId: "device-local",
-          hostname: "Marcus MacBook",
+          hostname: "Taylor MacBook",
           path: "/home/example/.instafy/workspace/project-1",
           runtimeId: "runtime-local",
           status: "online",
@@ -191,7 +191,7 @@ describe("ProjectProviderBindingsCard", () => {
             isLocal: true,
             isPreferred: true,
             health: "online",
-            displayName: "Marcus MacBook",
+            displayName: "Taylor MacBook",
           },
         ],
         preferredRuntimeId: "runtime-local",
@@ -299,13 +299,13 @@ describe("ProjectProviderBindingsCard", () => {
     expect(container.textContent).toContain(
       "Stored in Instafy. Desktop and runtimes work on synced copies.",
     );
-    expect(container.textContent).toContain("Copy on Marcus MacBook");
+    expect(container.textContent).toContain("Copy on Taylor MacBook");
     expect(container.textContent).toContain("/home/example/.instafy/workspace/project-1");
     expect(container.textContent).toContain("Project providers");
     expect(container.textContent).toContain("Local hardware");
     expect(container.textContent).toContain("Current host");
-    expect(container.textContent).toContain("Marcus MacBook");
-    expect(container.textContent).toContain("Grants apply to Marcus MacBook.");
+    expect(container.textContent).toContain("Taylor MacBook");
+    expect(container.textContent).toContain("Grants apply to Taylor MacBook.");
     const openDesktopLink = container.querySelector<HTMLAnchorElement>(
       '[data-testid="project-hardware-open-desktop"]',
     );
@@ -344,7 +344,7 @@ describe("ProjectProviderBindingsCard", () => {
       projectId: "project-1",
       providerId: "hardware.serial",
       runtimeHostId: "runtime-local",
-      runtimeHostLabel: "Marcus MacBook",
+      runtimeHostLabel: "Taylor MacBook",
       purpose:
         "Allow a local Instafy runtime to discover and probe host USB serial devices.",
       grantedCapabilities: ["hardware_serial_list", "hardware_serial_probe"],
@@ -358,7 +358,7 @@ describe("ProjectProviderBindingsCard", () => {
       ],
     });
     expect(showStatusMock).toHaveBeenCalledWith(
-      "Granted serial access for Marcus MacBook.",
+      "Granted serial access for Taylor MacBook.",
       "success",
       2500,
     );
@@ -393,7 +393,7 @@ describe("ProjectProviderBindingsCard", () => {
     expect(container.querySelector('[data-testid="project-hardware-bindings-panel"]')).not.toBeNull();
     expect(container.textContent).toContain("Project providers");
     expect(container.textContent).toContain("Local hardware");
-    expect(container.textContent).toContain("Marcus MacBook");
+    expect(container.textContent).toContain("Taylor MacBook");
     expect(container.textContent).not.toContain("Storage: .instafy/providers/demo/");
   });
 
@@ -416,7 +416,7 @@ describe("ProjectProviderBindingsCard", () => {
     expect(
       container.querySelector('[data-testid="project-hardware-host-group-runtime-workshop"]'),
     ).not.toBeNull();
-    expect(container.textContent).toContain("Marcus MacBook");
+    expect(container.textContent).toContain("Taylor MacBook");
     expect(container.textContent).toContain("cu.usbserial-130");
     expect(container.textContent).toContain("Workshop mini PC");
     expect(container.textContent).toContain("COM4");
@@ -541,7 +541,7 @@ describe("ProjectProviderBindingsCard", () => {
   it("hides the local copy path when the workspace presence has expired", async () => {
     runtimeStateMock.localWorkspace = {
       deviceId: "device-local",
-      hostname: "Marcus MacBook",
+      hostname: "Taylor MacBook",
       path: "/home/example/.instafy/workspace/project-1",
       runtimeId: "runtime-local",
       status: "expired",
@@ -556,7 +556,7 @@ describe("ProjectProviderBindingsCard", () => {
     });
 
     expect(container.textContent).toContain("No local copy connected");
-    expect(container.textContent).not.toContain("Copy on Marcus MacBook");
+    expect(container.textContent).not.toContain("Copy on Taylor MacBook");
     expect(
       container.querySelector('[data-testid="project-workspace-local-path"]'),
     ).toBeNull();
@@ -568,7 +568,7 @@ describe("ProjectProviderBindingsCard", () => {
       notify: vi.fn(),
       localHardwareHostStatus: vi.fn().mockResolvedValue({
         runtimeHostId: "desktop-host-1",
-        runtimeHostLabel: "Desktop on Marcus MacBook",
+        runtimeHostLabel: "Desktop on Taylor MacBook",
         platform: "darwin",
         providerIds: ["hardware.serial"],
         supportedCapabilities: ["hardware_serial_list", "hardware_serial_probe"],
@@ -627,7 +627,7 @@ describe("ProjectProviderBindingsCard", () => {
       ...createHardwareBindingStore().bindings["hardware.serial@runtime-local"],
       bindingId: "hardware.serial@desktop-host-1",
       runtimeHostId: "desktop-host-1",
-      runtimeHostLabel: "Desktop on Marcus MacBook",
+      runtimeHostLabel: "Desktop on Taylor MacBook",
     });
 
     await act(async () => {
@@ -637,7 +637,7 @@ describe("ProjectProviderBindingsCard", () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain("Desktop on Marcus MacBook");
+    expect(container.textContent).toContain("Desktop on Taylor MacBook");
     expect(container.textContent).toContain("Grants apply to this Desktop app.");
     expect(container.textContent).not.toContain("This runtime");
     expect(container.textContent).not.toContain("Check BLE status");
@@ -690,7 +690,7 @@ describe("ProjectProviderBindingsCard", () => {
       projectId: "project-1",
       providerId: "hardware.serial",
       runtimeHostId: "desktop-host-1",
-      runtimeHostLabel: "Desktop on Marcus MacBook",
+      runtimeHostLabel: "Desktop on Taylor MacBook",
       purpose:
         "Allow a local Instafy runtime to discover and probe host USB serial devices.",
       grantedCapabilities: ["hardware_serial_list", "hardware_serial_probe"],
@@ -739,7 +739,7 @@ describe("ProjectProviderBindingsCard", () => {
     });
 
     expect(window.confirm).toHaveBeenCalledWith(
-      "Revoke local device access for Marcus MacBook?",
+      "Revoke local device access for Taylor MacBook?",
     );
     expect(revokeProjectHardwareBindingMock).toHaveBeenCalledWith({
       projectId: "project-1",
@@ -748,7 +748,7 @@ describe("ProjectProviderBindingsCard", () => {
       runtimeHostId: "runtime-local",
     });
     expect(showStatusMock).toHaveBeenCalledWith(
-      "Revoked local device access for Marcus MacBook.",
+      "Revoked local device access for Taylor MacBook.",
       "success",
       2500,
     );

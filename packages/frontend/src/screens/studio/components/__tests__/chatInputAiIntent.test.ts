@@ -165,7 +165,7 @@ describe("resolveChatInputCanRunAmbientParticipationPreflight", () => {
     > = {},
   ) {
     return resolveChatInputCanRunAmbientParticipationPreflight({
-      inputValue: "Marcus, should we choose option A?",
+      inputValue: "Taylor, should we choose option A?",
       hasImageAttachments: false,
       fallbackSuggestion: null,
       activeConversationControllerId: "controller-1",
@@ -191,7 +191,7 @@ describe("resolveChatInputCanRunAmbientParticipationPreflight", () => {
 
   it("allows a human greeting after Shared Browser was opened but the chat tab is active", () => {
     const hasBrowserTask = resolveChatInputHasBrowserTask({
-      inputValue: "Hi Marcus, what do you think?",
+      inputValue: "Hi Taylor, what do you think?",
       hasImageAttachments: false,
       fallbackSuggestion: null,
       personalBrowserActive: false,
@@ -203,7 +203,7 @@ describe("resolveChatInputCanRunAmbientParticipationPreflight", () => {
     expect(hasBrowserTask).toBe(false);
     expect(
       resolveCandidate({
-        inputValue: "Hi Marcus, what do you think?",
+        inputValue: "Hi Taylor, what do you think?",
         hasBrowserTask,
       }),
     ).toBe(true);

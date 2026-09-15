@@ -11,40 +11,40 @@ describe("cameraRemoteRequestPresentation", () => {
   it("formats a queued timeline label with the selected phone", () => {
     expect(
       formatCameraRequestTimelineLabel({
-        deviceLabel: "Marcus phone",
+        deviceLabel: "Taylor phone",
         requestState: "pending",
         presenceStatus: "online",
       }),
-    ).toBe("Waiting on Marcus phone");
+    ).toBe("Waiting on Taylor phone");
   });
 
   it("formats an offline queued timeline label clearly", () => {
     expect(
       formatCameraRequestTimelineLabel({
-        deviceLabel: "Marcus phone",
+        deviceLabel: "Taylor phone",
         requestState: "pending",
         presenceStatus: "offline",
       }),
-    ).toBe("Marcus phone is offline");
+    ).toBe("Taylor phone is offline");
   });
 
   it("formats a recent failure timeline label with the device name", () => {
     expect(
       formatCameraRequestTimelineLabel({
-        deviceLabel: "Marcus phone",
+        deviceLabel: "Taylor phone",
         hasRecentFailure: true,
       }),
-    ).toBe("Last capture on Marcus phone failed");
+    ).toBe("Last capture on Taylor phone failed");
   });
 
   it("resolves a loading timeline presentation for active capture", () => {
     expect(
       resolveCameraRequestTimelinePresentation({
-        deviceLabel: "Marcus phone",
+        deviceLabel: "Taylor phone",
         requestState: "in_progress",
       }),
     ).toEqual({
-      label: "Marcus phone is capturing",
+      label: "Taylor phone is capturing",
       tone: "secondary",
       showSpinner: true,
     });
@@ -53,12 +53,12 @@ describe("cameraRemoteRequestPresentation", () => {
   it("resolves a warning timeline presentation for offline waiting", () => {
     expect(
       resolveCameraRequestTimelinePresentation({
-        deviceLabel: "Marcus phone",
+        deviceLabel: "Taylor phone",
         requestState: "pending",
         presenceStatus: "offline",
       }),
     ).toEqual({
-      label: "Marcus phone is offline",
+      label: "Taylor phone is offline",
       tone: "warning",
       showSpinner: true,
     });
@@ -70,7 +70,7 @@ describe("cameraRemoteRequestPresentation", () => {
         transport: "native_camera",
         identifier: "camera-device-1",
         address: "camera-device-1",
-        name: "Marcus phone",
+        name: "Taylor phone",
       },
       requests: [
         {
@@ -93,13 +93,13 @@ describe("cameraRemoteRequestPresentation", () => {
     expect(summary).toEqual({
       tone: "secondary",
       compactText: "Capturing now.",
-      deviceLabel: "Marcus phone",
+      deviceLabel: "Taylor phone",
       hasActiveRequest: true,
       requestState: "in_progress",
       presenceStatus: null,
       requiresPermission: false,
       hasRecentFailure: false,
-      text: "Marcus phone is capturing now.",
+      text: "Taylor phone is capturing now.",
     });
   });
 
@@ -109,14 +109,14 @@ describe("cameraRemoteRequestPresentation", () => {
         transport: "native_camera",
         identifier: "camera-device-1",
         address: "camera-device-1",
-        name: "Marcus phone",
+        name: "Taylor phone",
       },
       device: {
         projectId: "project-1",
         providerId: "camera:camera-device-1",
         providerFamilyId: "camera",
         deviceId: "camera-device-1",
-        deviceLabel: "Marcus phone",
+        deviceLabel: "Taylor phone",
         platform: "android",
         status: "ready",
         connectionType: "native_runtime",
@@ -142,13 +142,13 @@ describe("cameraRemoteRequestPresentation", () => {
     expect(summary).toEqual({
       tone: "secondary",
       compactText: "Latest capture · front lens · 3024×4032.",
-      deviceLabel: "Marcus phone",
+      deviceLabel: "Taylor phone",
       hasActiveRequest: false,
       requestState: null,
       presenceStatus: "online",
       requiresPermission: false,
       hasRecentFailure: false,
-      text: "Ready on Marcus phone · latest capture front lens · 3024×4032.",
+      text: "Ready on Taylor phone · latest capture front lens · 3024×4032.",
     });
   });
 
@@ -158,14 +158,14 @@ describe("cameraRemoteRequestPresentation", () => {
         transport: "native_camera",
         identifier: "camera-device-1",
         address: "camera-device-1",
-        name: "Marcus phone",
+        name: "Taylor phone",
       },
       device: {
         projectId: "project-1",
         providerId: "camera:camera-device-1",
         providerFamilyId: "camera",
         deviceId: "camera-device-1",
-        deviceLabel: "Marcus phone",
+        deviceLabel: "Taylor phone",
         platform: "ios",
         status: "permission_required",
         connectionType: "native_runtime",
@@ -184,13 +184,13 @@ describe("cameraRemoteRequestPresentation", () => {
     expect(summary).toEqual({
       tone: "warning",
       compactText: "Needs camera access.",
-      deviceLabel: "Marcus phone",
+      deviceLabel: "Taylor phone",
       hasActiveRequest: false,
       requestState: null,
       presenceStatus: "online",
       requiresPermission: true,
       hasRecentFailure: false,
-      text: "Marcus phone needs camera access before it can take new photos.",
+      text: "Taylor phone needs camera access before it can take new photos.",
     });
   });
 
@@ -200,7 +200,7 @@ describe("cameraRemoteRequestPresentation", () => {
         transport: "native_camera",
         identifier: "camera-device-1",
         address: "camera-device-1",
-        name: "Marcus phone",
+        name: "Taylor phone",
       },
       requests: [],
     });
@@ -208,13 +208,13 @@ describe("cameraRemoteRequestPresentation", () => {
     expect(summary).toEqual({
       tone: "warning",
       compactText: "Offline. Open Instafy on this device.",
-      deviceLabel: "Marcus phone",
+      deviceLabel: "Taylor phone",
       hasActiveRequest: false,
       requestState: null,
       presenceStatus: "offline",
       requiresPermission: false,
       hasRecentFailure: false,
-      text: "Marcus phone is offline. Open Instafy there to use Camera.",
+      text: "Taylor phone is offline. Open Instafy there to use Camera.",
     });
   });
 
@@ -226,7 +226,7 @@ describe("cameraRemoteRequestPresentation", () => {
           transport: "native_camera",
           identifier: "camera-device-1",
           address: "camera-device-1",
-          name: "Marcus phone",
+          name: "Taylor phone",
           nativePlatform: "android",
         },
         device: {
@@ -234,7 +234,7 @@ describe("cameraRemoteRequestPresentation", () => {
           providerId: "camera:camera-device-1",
           providerFamilyId: "camera",
           deviceId: "camera-device-1",
-          deviceLabel: "Marcus phone",
+          deviceLabel: "Taylor phone",
           platform: "android",
           status: "ready",
           connectionType: "native_runtime",
@@ -255,7 +255,7 @@ describe("cameraRemoteRequestPresentation", () => {
         },
       }),
     ).toEqual({
-      label: "Marcus phone",
+      label: "Taylor phone",
       presenceStatus: "online",
       platformLabel: "Android",
       stateText: "Latest capture · rear lens · 4032×3024.",
@@ -271,13 +271,13 @@ describe("cameraRemoteRequestPresentation", () => {
           transport: "native_camera",
           identifier: "camera-device-1",
           address: "camera-device-1",
-          name: "Marcus phone",
+          name: "Taylor phone",
           nativePlatform: "ios",
           lastConnectedAt: "2026-04-01T12:02:00.000Z",
         },
       }),
     ).toEqual({
-      label: "Marcus phone",
+      label: "Taylor phone",
       presenceStatus: "offline",
       platformLabel: "iPhone",
       stateText: "Offline. Open Instafy on this device.",
@@ -292,7 +292,7 @@ describe("cameraRemoteRequestPresentation", () => {
         transport: "native_camera",
         identifier: "camera-device-1",
         address: "camera-device-1",
-        name: "Marcus phone",
+        name: "Taylor phone",
       },
       requests: [
         {
@@ -316,13 +316,13 @@ describe("cameraRemoteRequestPresentation", () => {
     expect(summary).toEqual({
       tone: "warning",
       compactText: "Last request timed out. Open Instafy there and try again.",
-      deviceLabel: "Marcus phone",
+      deviceLabel: "Taylor phone",
       hasActiveRequest: false,
       requestState: null,
       presenceStatus: null,
       requiresPermission: false,
       hasRecentFailure: true,
-      text: "Marcus phone did not answer the rear photo request. Open Instafy there and try again.",
+      text: "Taylor phone did not answer the rear photo request. Open Instafy there and try again.",
     });
   });
 
@@ -332,14 +332,14 @@ describe("cameraRemoteRequestPresentation", () => {
         transport: "native_camera",
         identifier: "camera-device-1",
         address: "camera-device-1",
-        name: "Marcus phone",
+        name: "Taylor phone",
       },
       device: {
         projectId: "project-1",
         providerId: "camera:camera-device-1",
         providerFamilyId: "camera",
         deviceId: "camera-device-1",
-        deviceLabel: "Marcus phone",
+        deviceLabel: "Taylor phone",
         platform: "android",
         status: "ready",
         connectionType: "native_runtime",
@@ -371,13 +371,13 @@ describe("cameraRemoteRequestPresentation", () => {
     expect(summary).toEqual({
       tone: "secondary",
       compactText: "Waiting for the rear photo request.",
-      deviceLabel: "Marcus phone",
+      deviceLabel: "Taylor phone",
       hasActiveRequest: true,
       requestState: "pending",
       presenceStatus: "online",
       requiresPermission: false,
       hasRecentFailure: false,
-      text: "Waiting for Marcus phone to accept the rear photo request.",
+      text: "Waiting for Taylor phone to accept the rear photo request.",
     });
   });
 
@@ -390,11 +390,11 @@ describe("cameraRemoteRequestPresentation", () => {
           transport: "native_camera",
           identifier: "camera-device-1",
           address: "camera-device-1",
-          name: "Marcus phone",
+          name: "Taylor phone",
         },
       }),
     ).toBe(
-      "Octo did not hear back from Camera on Marcus phone. Open Instafy there and try again.",
+      "Octo did not hear back from Camera on Taylor phone. Open Instafy there and try again.",
     );
   });
 });

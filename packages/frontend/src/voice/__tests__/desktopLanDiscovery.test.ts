@@ -21,7 +21,7 @@ describe("desktopLanDiscovery", () => {
     expect(
       deriveDiscoveredDesktopLanSpeechRoutes(projectRoutes, [
         {
-          serviceName: "Instafy Marcus",
+          serviceName: "Instafy Taylor",
           serviceType: "_instafy-speech._tcp.",
           host: "instafy-macbook.local",
           port: 8796,
@@ -98,7 +98,7 @@ describe("desktopLanDiscovery", () => {
 
     const routes = deriveDiscoveredDesktopLanSpeechRoutes(projectRoutes, [
       {
-        serviceName: "Instafy Marcus",
+        serviceName: "Instafy Taylor",
         serviceType: "_instafy-speech._tcp.",
         host: "instafy-macbook.local",
         port: 8796,
@@ -109,7 +109,7 @@ describe("desktopLanDiscovery", () => {
         updatedAt: "2026-04-14T10:05:00.000Z",
       },
       {
-        serviceName: "Instafy Marcus duplicate",
+        serviceName: "Instafy Taylor duplicate",
         serviceType: "_instafy-speech._tcp.",
         host: "instafy-macbook.local",
         port: 8796,

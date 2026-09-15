@@ -94,7 +94,7 @@ The matrix asserts user-observable outcomes. For "stays silent" rows the invaria
 | One human asks `What is 1+1?` | Octo answers `2` immediately. | One dispatch and one Octo answer. |
 | Two humans; one asks `What is 1+1?` | Octo answers immediately. | Both humans see the same single answer. |
 | Two humans; one asks an open factual or technical question (`Who won the match?`, `Why is the login redirect looping?`) | Octo answers or claims immediately. | One dispatch, one visible answer, no artificial delay. |
-| Two humans; one addresses the other (`Marcus, why is the build failing?`, `Did Sarah approve the release?`) | Octo stays silent. | No visible Octo output, no typing indicator, no debit. |
+| Two humans; one addresses the other (`Taylor, why is the build failing?`, `Did Sarah approve the release?`) | Octo stays silent. | No visible Octo output, no typing indicator, no debit. |
 | Two humans discuss `Should the button be blue or green?` | Octo stays silent unless explicitly invited. | No visible Octo output. |
 | A message includes `@octo` while ambient turns are otherwise declined | Octo responds. | Explicit address dispatches immediately with full presence. |
 | An owner or invitee opens an empty human-only shared conversation before the peer has opened it | The human chat stays primary. | No **Choose your AI** card, including while participants, project peers, or an authorized org directory load; direct-project guests do not enumerate that directory; `@octo` still invokes setup if AI is not connected. |

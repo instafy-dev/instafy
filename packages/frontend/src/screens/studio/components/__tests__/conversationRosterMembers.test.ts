@@ -45,7 +45,7 @@ describe("resolveConversationRosterHumans", () => {
     const humans = resolveConversationRosterHumans(
       createInput({
         humanLabelByUserId: new Map([
-          ["user-self", "Marcus"],
+          ["user-self", "Taylor"],
           ["user-peer", "Ada"],
         ]),
         humanPeerContext: { hasHumanPeer: true, resolved: true },
@@ -54,7 +54,7 @@ describe("resolveConversationRosterHumans", () => {
     );
 
     expect(humans).toEqual([
-      { userId: "user-self", label: "Marcus", isSelf: true },
+      { userId: "user-self", label: "Taylor", isSelf: true },
       { userId: "user-peer", label: "Ada", isSelf: false },
     ]);
   });

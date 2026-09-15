@@ -9,8 +9,8 @@ export function queuedMentionComposer(suffix = " please check the page", selecte
   editor.update(() => {
     $getRoot().append($createParagraphNode().append(
       selected
-        ? $createUserMentionNode({ userId: QUEUED_MENTION_USER_ID, handle: "marcus", displayName: "Marcus" })
-        : $createTextNode("@marcus"),
+        ? $createUserMentionNode({ userId: QUEUED_MENTION_USER_ID, handle: "taylor", displayName: "Taylor" })
+        : $createTextNode("@taylor"),
       $createTextNode(suffix),
     ));
   }, { discrete: true });

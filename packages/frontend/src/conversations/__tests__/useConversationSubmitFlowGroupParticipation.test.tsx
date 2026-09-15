@@ -195,7 +195,7 @@ describe("useConversationSubmitFlow group participation", () => {
     });
 
     await act(async () => {
-      await flow!.handleSubmit("conversation-local", "Marcus, take a photo.");
+      await flow!.handleSubmit("conversation-local", "Taylor, take a photo.");
     });
 
     expect(resolveParticipationMock).toHaveBeenCalledTimes(1);
@@ -291,8 +291,8 @@ describe("useConversationSubmitFlow group participation", () => {
 
     const result = await flow!.resolveGroupParticipationBeforeSubmit({
       conversationId: "conversation-local",
-      displayPrompt: "Marcus, take a photo.",
-      dispatchPrompt: "Marcus, take a photo.",
+      displayPrompt: "Taylor, take a photo.",
+      dispatchPrompt: "Taylor, take a photo.",
       metadata: null,
       agentSelection: {
         activeHandles: ["octo"],
@@ -319,7 +319,7 @@ describe("useConversationSubmitFlow group participation", () => {
     resolveLocalCapabilityHandleMock.mockReturnValue("octo");
 
     await act(async () => {
-      await flow!.handleSubmit("conversation-local", "Marcus, take a photo.", {
+      await flow!.handleSubmit("conversation-local", "Taylor, take a photo.", {
         metadata: {
           groupParticipation: {
             decision: "silent",

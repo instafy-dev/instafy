@@ -57,7 +57,7 @@ describe("ConversationRoster", () => {
 
   it("stacks humans before agents and reports the member count", async () => {
     await renderRoster(
-      [human("user-self", "Marcus", true), human("user-peer", "Ada")],
+      [human("user-self", "Taylor", true), human("user-peer", "Ada")],
       [agent("octo", "Octo", "octo")],
     );
 
@@ -77,7 +77,7 @@ describe("ConversationRoster", () => {
   it("collapses members past five into a +N overflow", async () => {
     await renderRoster(
       [
-        human("user-self", "Marcus", true),
+        human("user-self", "Taylor", true),
         human("user-a", "Ada"),
         human("user-b", "Grace"),
         human("user-c", "Alan"),
@@ -97,7 +97,7 @@ describe("ConversationRoster", () => {
   });
 
   it("toggles the participants drawer when pressed", async () => {
-    await renderRoster([human("user-self", "Marcus", true)], [agent("octo", "Octo", "octo")]);
+    await renderRoster([human("user-self", "Taylor", true)], [agent("octo", "Octo", "octo")]);
     const trigger = container.querySelector<HTMLButtonElement>(
       '[data-testid="conversation-roster"]',
     );
@@ -134,7 +134,7 @@ describe("ConversationRoster", () => {
 
   it("renders each agent with its own avatar seed", async () => {
     await renderRoster(
-      [human("user-self", "Marcus", true)],
+      [human("user-self", "Taylor", true)],
       [
         agent("octo", "Octo", "octo"),
         agent("scout", "Scout", "seed-scout"),
@@ -183,7 +183,7 @@ describe("ConversationRoster", () => {
   });
 
   it("keeps the trigger ambient: no panel background, border, shadow or blur", async () => {
-    await renderRoster([human("user-self", "Marcus", true)], [agent("octo", "Octo", "octo")]);
+    await renderRoster([human("user-self", "Taylor", true)], [agent("octo", "Octo", "octo")]);
     const triggerClass =
       container.querySelector('[data-testid="conversation-roster"]')?.getAttribute("class") ?? "";
     expect(triggerClass).toContain("bg-transparent");

@@ -56,7 +56,7 @@ before sending.
 Human mentions use the composer picker's selected user IDs. The controller
 accepts at most 32 UUIDs in message metadata `mentionedUserIds`, normalizes and
 deduplicates them, and preserves the same source key for human-only and agent
-dispatch messages. Plain text such as `@marcus` without a selected person is not
+dispatch messages. Plain text such as `@taylor` without a selected person is not
 a globally resolvable username; display handles can be ambiguous.
 
 Private-chat creation accepts `initialParticipantUserIds` and verifies each

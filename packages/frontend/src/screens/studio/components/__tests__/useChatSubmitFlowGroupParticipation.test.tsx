@@ -61,7 +61,7 @@ function createOptions(
     imageFiles: [],
     isAssistantTyping: true,
     inputEditorState: null,
-    inputValue: "Marcus, should we choose option A?",
+    inputValue: "Taylor, should we choose option A?",
     interruptConversationRuns: vi.fn(async () => []),
     invitePrompt: null,
     listConversationParticipants: vi.fn(async () => []),

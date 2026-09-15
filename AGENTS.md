@@ -131,6 +131,9 @@ its credentials, decide production rollout policy or bypass the exact-commit man
 
 ## Code conventions
 
+- Use fictional sample people, account handles and device labels in documentation and test
+  fixtures (for example, Taylor and Taylor's phone). Do not copy a contributor's personal
+  identity, device names or filesystem paths into public examples.
 - Frontend code uses React, TypeScript, Vite and the existing component primitives. Preserve
   responsive behavior, keyboard access and stable `data-testid` selectors.
 - Keep files focused. Extract shared logic when it has more than one real consumer, not in

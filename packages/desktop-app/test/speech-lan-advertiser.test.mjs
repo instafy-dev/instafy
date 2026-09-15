@@ -34,7 +34,7 @@ test("desktop speech LAN advertiser starts dns-sd with the expected Instafy spee
   });
 
   const status = await advertiser.ensureRunning({
-    serviceName: "Instafy Marcus",
+    serviceName: "Instafy Taylor",
     port: 8796,
     tokenHint: "abcd…wxyz",
     authRequired: true,
@@ -46,7 +46,7 @@ test("desktop speech LAN advertiser starts dns-sd with the expected Instafy spee
       command: "dns-sd",
       args: [
         "-R",
-        "Instafy Marcus",
+        "Instafy Taylor",
         "_instafy-speech._tcp",
         "local.",
         "8796",

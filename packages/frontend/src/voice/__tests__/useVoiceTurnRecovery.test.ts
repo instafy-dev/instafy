@@ -16,12 +16,12 @@ function createSession(overrides?: Partial<HostAudioSessionState>): HostAudioSes
     interruptionReason: null,
     routeChangeReason: null,
     routeKind: "bluetooth",
-    preferredOutputLabel: "Marcus’s AirPods Pro",
+    preferredOutputLabel: "Taylor’s AirPods Pro",
     microphonePermission: "granted",
     captureReady: true,
     playbackReady: true,
     recommendedPlaybackRoute: "bluetooth",
-    routeHint: "Likely headset route: Marcus’s AirPods Pro",
+    routeHint: "Likely headset route: Taylor’s AirPods Pro",
     warnings: [],
     ...overrides,
   };
@@ -190,7 +190,7 @@ describe("useVoiceTurnRecovery helpers", () => {
       }),
       currentSession: createSession({
         routeKind: "bluetooth",
-        preferredOutputLabel: "Marcus’s AirPods Pro",
+        preferredOutputLabel: "Taylor’s AirPods Pro",
         routeChangeReason: "new device available",
       }),
       voiceState: "starting",
@@ -199,7 +199,7 @@ describe("useVoiceTurnRecovery helpers", () => {
     expectNoticeKind(notice, "route_change");
     expect(notice?.cancelActiveTurn).toBe(false);
     expect(notice?.tone).toBe("info");
-    expect(notice?.message).toContain("Marcus’s AirPods Pro");
+    expect(notice?.message).toContain("Taylor’s AirPods Pro");
   });
 
   it("ignores route hydration while manual voice is idle", () => {

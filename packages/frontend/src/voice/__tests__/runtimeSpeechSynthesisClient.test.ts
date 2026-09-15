@@ -96,7 +96,7 @@ describe("synthesizeRuntimeSpeech", () => {
 
     await expect(
       synthesizeRuntimeSpeech({
-        text: "Hello Marcus",
+        text: "Hello Taylor",
         format: "wav",
         env: {
           VITE_INSTAFY_SYNTHESIS_URL: "https://speech.example.com/synthesize",
@@ -122,7 +122,7 @@ describe("synthesizeRuntimeSpeech", () => {
 
     await expect(
       synthesizeRuntimeSpeech({
-        text: "Hello Marcus",
+        text: "Hello Taylor",
         format: "wav",
         env: {
           VITE_INSTAFY_SYNTHESIS_URL: "http://127.0.0.1:8796/synthesize",
@@ -148,7 +148,7 @@ describe("synthesizeRuntimeSpeech", () => {
 
     await expect(
       synthesizeRuntimeSpeech({
-        text: "Hello Marcus",
+        text: "Hello Taylor",
         format: "wav",
         env: {
           VITE_INSTAFY_SYNTHESIS_URL: "http://192.168.1.25:8796/synthesize",
@@ -164,7 +164,7 @@ describe("synthesizeRuntimeSpeech", () => {
       url: "http://192.168.1.25:8796/synthesize",
       authToken: "local-token",
       body: {
-        text: "Hello Marcus",
+        text: "Hello Taylor",
         voice: null,
         language: null,
         rate: null,
@@ -197,7 +197,7 @@ describe("synthesizeRuntimeSpeech", () => {
 
     await expect(
       synthesizeRuntimeSpeech({
-        text: "Hello Marcus",
+        text: "Hello Taylor",
         format: "wav",
         env: {
           VITE_INSTAFY_SYNTHESIS_URL: "http://127.0.0.1:8796/synthesize",

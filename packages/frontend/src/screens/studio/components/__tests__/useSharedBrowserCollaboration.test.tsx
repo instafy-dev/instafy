@@ -110,7 +110,7 @@ describe("useSharedBrowserCollaboration", () => {
           participants: [
             {
               id: "self",
-              displayName: "Marcus",
+              displayName: "Taylor",
               color: "#0ea5e9",
               pageId: "page-1",
               cursor: null,
@@ -187,8 +187,8 @@ describe("useSharedBrowserCollaboration", () => {
   it("clears local authority while reconnecting, then releases and leaves using the current socket", async () => {
     vi.useFakeTimers();
     const participants = [
-      { id: "self", displayName: "Marcus", canControl: true },
-      { id: "same-account-device", displayName: "Marcus", canControl: true },
+      { id: "self", displayName: "Taylor", canControl: true },
+      { id: "same-account-device", displayName: "Taylor", canControl: true },
       { id: "viewer", displayName: "Anna", canControl: false },
     ].map((participant) => ({
       ...participant,

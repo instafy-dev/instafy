@@ -133,7 +133,7 @@ describe("InviteAcceptPage", () => {
     mocks.previewInvitation.mockResolvedValue({
       kind: "invitation", orgId: "o", orgSlug: "acme", orgName: "Acme",
       role: "builder", invitedEmailMasked: "m\u2026@example.com",
-      inviterName: "Marcus", inviterEmail: null,
+      inviterName: "Taylor", inviterEmail: null,
       projectId: "p", projectName: "Website", conversationId: null,
       conversationName: null, expiresAt: null,
     });
@@ -145,7 +145,7 @@ describe("InviteAcceptPage", () => {
       );
     });
     await flushAsyncWork();
-    expect(document.body.textContent).toContain("Marcus invited you to join Acme");
+    expect(document.body.textContent).toContain("Taylor invited you to join Acme");
     expect(document.body.textContent).toContain("Project: Website");
     expect(document.body.textContent).toContain("Edit access");
     expect(document.body.textContent).toContain("Invite sent to m\u2026@example.com");

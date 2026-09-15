@@ -92,7 +92,7 @@ describe("getRuntimeTranscriptionBackendLabel", () => {
 
 describe("extractRuntimeTranscriptionText", () => {
   it("accepts plain text responses", () => {
-    expect(extractRuntimeTranscriptionText(" hello Marcus ")).toBe("hello Marcus");
+    expect(extractRuntimeTranscriptionText(" hello Taylor ")).toBe("hello Taylor");
   });
 
   it("accepts json text responses", () => {
@@ -112,7 +112,7 @@ describe("transcribeRuntimeAudio", () => {
   it("uses the native speech bridge for loopback routes on native platforms", async () => {
     nativeSpeechBridgeMock.nativeSpeechBridgeAvailable.mockReturnValue(true);
     nativeSpeechBridgeMock.nativeSpeechBridgeTranscribe.mockResolvedValue({
-      payload: { text: "hello marcus" },
+      payload: { text: "hello taylor" },
       contentType: "application/json",
       statusCode: 200,
     });
@@ -134,7 +134,7 @@ describe("transcribeRuntimeAudio", () => {
           VITE_INSTAFY_TRANSCRIPTION_TOKEN: " local-token ",
         },
       }),
-    ).resolves.toBe("hello marcus");
+    ).resolves.toBe("hello taylor");
 
     expect(nativeSpeechBridgeMock.nativeSpeechBridgeTranscribe).toHaveBeenCalledWith({
       url: "http://127.0.0.1:8796/transcribe",
@@ -152,7 +152,7 @@ describe("transcribeRuntimeAudio", () => {
     nativeSpeechBridgeMock.nativeSpeechBridgeAvailable.mockReturnValue(true);
     nativeSpeechBridgeMock.shouldUseNativeSpeechBridgeForUrl.mockReturnValue(true);
     nativeSpeechBridgeMock.nativeSpeechBridgeTranscribe.mockResolvedValue({
-      payload: { text: "hello marcus" },
+      payload: { text: "hello taylor" },
       contentType: "application/json",
       statusCode: 200,
     });
@@ -174,7 +174,7 @@ describe("transcribeRuntimeAudio", () => {
           VITE_INSTAFY_TRANSCRIPTION_TOKEN: " local-token ",
         },
       }),
-    ).resolves.toBe("hello marcus");
+    ).resolves.toBe("hello taylor");
 
     expect(nativeSpeechBridgeMock.nativeSpeechBridgeTranscribe).toHaveBeenCalledWith({
       url: "http://192.168.1.25:8796/transcribe",

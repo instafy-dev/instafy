@@ -4686,14 +4686,14 @@ mod tests {
             &json!({})
         ));
         assert!(ambient_gate_for(
-            "@Marcus should the button be blue?",
+            "@Taylor should the button be blue?",
             "feature",
             &json!({})
         ));
         assert!(ambient_gate_for(
-            "@Marcus should the button be blue?",
+            "@Taylor should the button be blue?",
             "feature",
-            &json!({ "agentSelection": { "active": ["octo"], "mentions": ["marcus"] } })
+            &json!({ "agentSelection": { "active": ["octo"], "mentions": ["taylor"] } })
         ));
         assert!(!ambient_gate_for_with_verified_agent(
             "@reviewer please inspect this",
@@ -4728,12 +4728,12 @@ mod tests {
             &json!({ "controllerDispatch": { "fromSendQueue": true } })
         ));
         assert!(ambient_gate_for(
-            "Marcus, does this padding look right?",
+            "Taylor, does this padding look right?",
             "feature",
             &json!({ "attachments": [{ "name": "phone.png" }] })
         ));
         assert!(ambient_gate_for(
-            "Marcus, should we keep the blue version?",
+            "Taylor, should we keep the blue version?",
             "feature",
             &json!({ "goal": { "id": "goal-1", "status": "active" } })
         ));

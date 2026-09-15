@@ -118,7 +118,7 @@ describe("cameraBridgeClient", () => {
       platform: "ios",
       backend: "phone_camera",
       deviceId: "iphone-main",
-      deviceLabel: "Marcus iPhone",
+      deviceLabel: "Taylor iPhone",
       providerId: "camera",
       permission: "granted",
       permissionGranted: true,
@@ -256,7 +256,7 @@ describe("cameraBridgeClient", () => {
               transport: "native_camera",
               identifier: "iphone-main",
               address: "iphone-main",
-              name: "Marcus iPhone",
+              name: "Taylor iPhone",
               nativePlatform: "ios",
             },
           },
@@ -277,7 +277,7 @@ describe("cameraBridgeClient", () => {
         platform: "ios",
         backend: "phone_camera",
         deviceId: "iphone-main",
-        deviceLabel: "Marcus iPhone",
+        deviceLabel: "Taylor iPhone",
         providerId: "camera",
         permission: "granted",
         permissionGranted: true,
@@ -348,7 +348,7 @@ describe("cameraBridgeClient", () => {
               transport: "native_camera",
               identifier: "android-test-device",
               address: "android-test-device",
-              name: "Marcus phone",
+              name: "Taylor phone",
               nativePlatform: "android",
             },
           },
@@ -366,7 +366,7 @@ describe("cameraBridgeClient", () => {
         providerId: "camera:android-test-device",
         providerFamilyId: "camera",
         deviceId: "android-test-device",
-        deviceLabel: "Marcus phone",
+        deviceLabel: "Taylor phone",
         platform: "android",
         status: "ready",
         connectionType: "native_runtime",
@@ -406,7 +406,7 @@ describe("cameraBridgeClient", () => {
             lens: "front",
           },
           status: "claimed",
-          claimedByDeviceLabel: "Marcus phone",
+          claimedByDeviceLabel: "Taylor phone",
           createdAt: "2026-04-01T12:00:00.000Z",
           claimedAt: "2026-04-01T12:00:02.000Z",
           updatedAt: "2026-04-01T12:00:02.000Z",
@@ -425,10 +425,10 @@ describe("cameraBridgeClient", () => {
 
     await vi.advanceTimersByTimeAsync(10);
     expect(listControllerProviderRequestsMock).toHaveBeenCalled();
-    expect(summaries).toContain("Waiting for Marcus phone to accept the front selfie request.");
+    expect(summaries).toContain("Waiting for Taylor phone to accept the front selfie request.");
 
     await vi.advanceTimersByTimeAsync(1_300);
-    expect(summaries).toContain("Marcus phone is capturing now.");
+    expect(summaries).toContain("Taylor phone is capturing now.");
 
     const completeToolCall = resolveToolCall as ((value: unknown) => void) | null;
     if (!completeToolCall) {
@@ -444,7 +444,7 @@ describe("cameraBridgeClient", () => {
         platform: "android",
         backend: "phone_camera",
         deviceId: "android-test-device",
-        deviceLabel: "Marcus phone",
+        deviceLabel: "Taylor phone",
         providerId: "camera:android-test-device",
         permission: "granted",
         permissionGranted: true,

@@ -30,7 +30,7 @@ function client(overrides: Partial<SharedBrowserCollaborationClientState> = {}) 
     participantId: "self",
     state: {
       revision: 1,
-      participants: [participant("self", "Marcus"), participant("peer", "Anna")],
+      participants: [participant("self", "Taylor"), participant("peer", "Anna")],
       controlOwner: { kind: "human" as const, participantId: "self" },
       requests: [],
     },
@@ -73,7 +73,7 @@ describe("SharedBrowserCollaborationControls", () => {
     });
 
     expect(container.querySelector('[data-testid="shared-browser-participants"]')?.getAttribute("aria-label"))
-      .toContain("Marcus, Anna");
+      .toContain("Taylor, Anna");
     expect(
       container.querySelector('[data-testid="shared-browser-participants"]')?.className,
     ).not.toContain("max-[540px]:hidden");
@@ -98,7 +98,7 @@ describe("SharedBrowserCollaborationControls", () => {
       state: {
         ...client().state!,
         participants: [
-          participant("self", "Marcus"),
+          participant("self", "Taylor"),
           participant("peer", "Anna"),
           participant("third", "Grace"),
         ],
@@ -121,7 +121,7 @@ describe("SharedBrowserCollaborationControls", () => {
     const participants = container.querySelector<HTMLElement>(
       '[data-testid="shared-browser-participants"]',
     )!;
-    expect(participants.getAttribute("aria-label")).toContain("Marcus, Anna, Grace");
+    expect(participants.getAttribute("aria-label")).toContain("Taylor, Anna, Grace");
     expect(participants.className).toContain("flex");
     expect(participants.querySelectorAll('[aria-hidden="true"]')).toHaveLength(2);
     expect(participants.textContent).toContain("+2");
@@ -333,8 +333,8 @@ describe("SharedBrowserCollaborationControls", () => {
     const onGrantControl = vi.fn();
     const onRequestControl = vi.fn();
     const participants = [
-      participant("self", "Marcus"),
-      participant("second-device", "Marcus"),
+      participant("self", "Taylor"),
+      participant("second-device", "Taylor"),
       participant("viewer", "Anna", false),
     ];
     const renderDevice = async (participantId: string, ownerId: string) => {
@@ -369,7 +369,7 @@ describe("SharedBrowserCollaborationControls", () => {
 
     await renderDevice("self", "second-device");
     expect(container.textContent).not.toContain("You control");
-    expect(container.textContent).toContain("Marcus controls");
+    expect(container.textContent).toContain("Taylor controls");
     const request = container.querySelector<HTMLButtonElement>(
       '[data-testid="shared-browser-collaboration-control-action"]',
     )!;
@@ -395,7 +395,7 @@ describe("SharedBrowserCollaborationControls", () => {
         client={client({
           state: {
             revision: 1,
-            participants: [participant("self", "Anna", false), participant("peer", "Marcus")],
+            participants: [participant("self", "Anna", false), participant("peer", "Taylor")],
             controlOwner: ownerId ? { kind: "human", participantId: ownerId } : null,
             requests: [],
           },
@@ -408,7 +408,7 @@ describe("SharedBrowserCollaborationControls", () => {
         onTakeControl={vi.fn()}
       />,
     ));
-    expect(container.textContent).toContain(ownerId ? "Marcus controls" : "Control available");
+    expect(container.textContent).toContain(ownerId ? "Taylor controls" : "Control available");
     expect(container.querySelector('[data-testid="shared-browser-collaboration-control-action"]')).toBeNull();
   });
 });

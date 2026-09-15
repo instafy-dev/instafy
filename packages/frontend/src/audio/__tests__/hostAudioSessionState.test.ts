@@ -27,8 +27,8 @@ function createDiagnostics(): HostAudioDiagnostics {
       labelsVisible: true,
       inputCount: 1,
       outputCount: 2,
-      bluetoothLikeOutputLabels: ["Marcus’s AirPods Pro"],
-      preferredOutputLabel: "Marcus’s AirPods Pro",
+      bluetoothLikeOutputLabels: ["Taylor’s AirPods Pro"],
+      preferredOutputLabel: "Taylor’s AirPods Pro",
       inputs: [],
       outputs: [],
     },
@@ -76,7 +76,7 @@ describe("hostAudioSessionState", () => {
     );
 
     expect(description).toContain("Voice session transcribing");
-    expect(description).toContain("Marcus’s AirPods Pro");
+    expect(description).toContain("Taylor’s AirPods Pro");
   });
 
   it("surfaces native interruptions and earpiece route warnings", () => {

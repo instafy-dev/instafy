@@ -11,7 +11,7 @@ import type { NativeHostAudioSessionSnapshot } from "../nativeAudioSessionBridge
 
 describe("audioSessionDiagnostics", () => {
   it("detects bluetooth-like output labels", () => {
-    expect(isBluetoothLikeAudioLabel("Marcus’s AirPods Pro")).toBe(true);
+    expect(isBluetoothLikeAudioLabel("Taylor’s AirPods Pro")).toBe(true);
     expect(isBluetoothLikeAudioLabel("Bluetooth Headset")).toBe(true);
     expect(isBluetoothLikeAudioLabel("MacBook Pro Speakers")).toBe(false);
   });
@@ -19,10 +19,10 @@ describe("audioSessionDiagnostics", () => {
   it("prefers bluetooth-like outputs when available", () => {
     const outputs: HostAudioDeviceSummary[] = [
       { id: "built-in", label: "MacBook Pro Speakers", kind: "output", bluetoothLike: false },
-      { id: "airpods", label: "Marcus’s AirPods Pro", kind: "output", bluetoothLike: true },
+      { id: "airpods", label: "Taylor’s AirPods Pro", kind: "output", bluetoothLike: true },
     ];
 
-    expect(selectPreferredAudioOutputLabel(outputs)).toBe("Marcus’s AirPods Pro");
+    expect(selectPreferredAudioOutputLabel(outputs)).toBe("Taylor’s AirPods Pro");
   });
 
   it("builds a readable host audio summary", () => {
@@ -45,15 +45,15 @@ describe("audioSessionDiagnostics", () => {
         labelsVisible: true,
         inputCount: 1,
         outputCount: 2,
-        bluetoothLikeOutputLabels: ["Marcus’s AirPods Pro"],
-        preferredOutputLabel: "Marcus’s AirPods Pro",
+        bluetoothLikeOutputLabels: ["Taylor’s AirPods Pro"],
+        preferredOutputLabel: "Taylor’s AirPods Pro",
         inputs: [],
         outputs: [],
       },
     };
 
     expect(describeHostAudioDiagnostics(diagnostics)).toContain("Mic permission granted");
-    expect(describeHostAudioDiagnostics(diagnostics)).toContain("Marcus’s AirPods Pro");
+    expect(describeHostAudioDiagnostics(diagnostics)).toContain("Taylor’s AirPods Pro");
   });
 
   it("prefers native iOS route snapshots over browser device heuristics", () => {
@@ -93,9 +93,9 @@ describe("audioSessionDiagnostics", () => {
       interruptionReason: null,
       routeChangeReason: "new device available",
       inputLabels: ["iPhone Microphone"],
-      outputLabels: ["Marcus’s AirPods Pro"],
-      preferredOutputLabel: "Marcus’s AirPods Pro",
-      bluetoothLikeOutputLabels: ["Marcus’s AirPods Pro"],
+      outputLabels: ["Taylor’s AirPods Pro"],
+      preferredOutputLabel: "Taylor’s AirPods Pro",
+      bluetoothLikeOutputLabels: ["Taylor’s AirPods Pro"],
       routeKind: "bluetooth",
       reason: "refresh",
       updatedAt: "2026-04-07T12:34:56.000Z",
@@ -104,7 +104,7 @@ describe("audioSessionDiagnostics", () => {
     const merged = applyNativeHostAudioSessionSnapshot(diagnostics, nativeSnapshot);
 
     expect(merged.capture.microphonePermission).toBe("granted");
-    expect(merged.devices.preferredOutputLabel).toBe("Marcus’s AirPods Pro");
+    expect(merged.devices.preferredOutputLabel).toBe("Taylor’s AirPods Pro");
     expect(merged.devices.outputCount).toBe(1);
     expect(merged.nativeSession?.routeKind).toBe("bluetooth");
   });

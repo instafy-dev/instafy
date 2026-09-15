@@ -187,7 +187,7 @@ describe("conversationAutoTitle", () => {
               id: "user-silent",
               role: "user",
               authorId: "user-1",
-              content: "Marcus, do you prefer option A?",
+              content: "Taylor, do you prefer option A?",
               timestamp: Date.now(),
               files: null,
               messageType: "user",

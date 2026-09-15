@@ -1564,7 +1564,7 @@ mod tests {
     #[tokio::test]
     async fn first_controller_auto_acquires_and_can_grant_control() {
         let hub = test_hub();
-        let first = claims("session-first", Some("Marcus"), true);
+        let first = claims("session-first", Some("Taylor"), true);
         let second = claims("session-second", Some("Anna"), true);
         let first_join = hub
             .join(&first, "session-first", Some("PAGE1"))
@@ -1815,7 +1815,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("tempdir");
         let marker_path = directory.path().join("agent-control.json");
         let hub = BrowserCollaborationHub::new_with_agent_control_path(marker_path.clone());
-        let controller = claims("human-session", Some("Marcus"), true);
+        let controller = claims("human-session", Some("Taylor"), true);
         hub.join(&controller, "human-session", Some("PAGE1"))
             .await
             .expect("human joins first");
@@ -1876,7 +1876,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("tempdir");
         let marker_path = directory.path().join("agent-control.json");
         let hub = BrowserCollaborationHub::new_with_agent_control_path(marker_path.clone());
-        let controller = claims("human-session", Some("Marcus"), true);
+        let controller = claims("human-session", Some("Taylor"), true);
         let controller_id = participant_id_for_claims(
             &controller,
             controller.browser_session_id.as_deref().expect("session"),

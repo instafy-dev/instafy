@@ -70,7 +70,7 @@ describe("useAmbientCredentialGatePresentation", () => {
       credentialGateStateForBubble: "missing",
       fallbackSuggestion: null,
       inputCanRunAmbientParticipationPreflight: true,
-      inputValue: "Marcus, what do you think?",
+      inputValue: "Taylor, what do you think?",
       pinCredentialGateToBottom,
     };
 
@@ -174,7 +174,7 @@ describe("useAmbientCredentialGatePresentation", () => {
       activeConversationId: "conversation-1",
       credentialGateState: "missing",
       credentialGateStateForBubble: "missing",
-      fallbackSuggestion: "Ask Marcus for a decision",
+      fallbackSuggestion: "Ask Taylor for a decision",
       inputCanRunAmbientParticipationPreflight: true,
       inputValue: "",
       pinCredentialGateToBottom,

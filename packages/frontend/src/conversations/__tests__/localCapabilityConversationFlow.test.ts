@@ -455,12 +455,12 @@ describe("local capability conversation flow", () => {
   it("surfaces and then clears structured camera request status metadata", async () => {
     dispatchLocalBuiltInCapabilityPromptMock.mockImplementation(async (options) => {
       options.onStatus?.({
-        text: "Waiting for Marcus phone to accept the front selfie request.",
+        text: "Waiting for Taylor phone to accept the front selfie request.",
         metadata: {
           cameraRequest: {
-            text: "Waiting for Marcus phone to accept the front selfie request.",
+            text: "Waiting for Taylor phone to accept the front selfie request.",
             tone: "secondary",
-            deviceLabel: "Marcus phone",
+            deviceLabel: "Taylor phone",
             requestState: "pending",
             presenceStatus: "online",
             requiresPermission: false,
@@ -536,10 +536,10 @@ describe("local capability conversation flow", () => {
     expect(updates).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          content: "Waiting for Marcus phone to accept the front selfie request.",
+          content: "Waiting for Taylor phone to accept the front selfie request.",
           metadata: expect.objectContaining({
             cameraRequest: expect.objectContaining({
-              deviceLabel: "Marcus phone",
+              deviceLabel: "Taylor phone",
               requestState: "pending",
             }),
           }),
@@ -696,7 +696,7 @@ describe("local capability conversation flow", () => {
   it("preserves device-aware camera success text when the selected phone is known", async () => {
     dispatchLocalBuiltInCapabilityPromptMock.mockResolvedValue({
       handled: true,
-      responseText: "Octo captured a front photo on Marcus phone.",
+      responseText: "Octo captured a front photo on Taylor phone.",
       metadata: {
         localCapability: {
           id: "camera_observation",
@@ -731,7 +731,7 @@ describe("local capability conversation flow", () => {
       .mockResolvedValueOnce({
         id: "controller-assistant-device-success",
         role: "assistant",
-        content: "Octo captured a front photo on Marcus phone.",
+        content: "Octo captured a front photo on Taylor phone.",
         timestamp: 3,
         messageType: "status",
         metadata: {
@@ -756,7 +756,7 @@ describe("local capability conversation flow", () => {
     expect(recordMessageToController).toHaveBeenNthCalledWith(
       2,
       "conversation-camera-device-success",
-      "Octo captured a front photo on Marcus phone.",
+      "Octo captured a front photo on Taylor phone.",
       expect.objectContaining({
         localCapability: {
           id: "camera_observation",
@@ -770,7 +770,7 @@ describe("local capability conversation flow", () => {
         expect.objectContaining({
           id: "controller-assistant-device-success",
           role: "assistant",
-          content: "Octo captured a front photo on Marcus phone.",
+          content: "Octo captured a front photo on Taylor phone.",
         }),
       ]),
     );

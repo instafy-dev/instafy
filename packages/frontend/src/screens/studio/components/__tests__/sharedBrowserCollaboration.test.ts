@@ -23,7 +23,7 @@ describe("Shared Browser collaboration protocol", () => {
         participants: [
           {
             id: "participant-1",
-            displayName: "Marcus",
+            displayName: "Taylor",
             color: "#0ea5e9",
             pageId: "page-1",
             cursor: { x: 0.4, y: 0.2 },
@@ -47,7 +47,7 @@ describe("Shared Browser collaboration protocol", () => {
       participants: [
         {
           id: "participant-1",
-          displayName: "Marcus",
+          displayName: "Taylor",
           color: "#0ea5e9",
           pageId: "page-1",
           cursor: { x: 0.4, y: 0.2 },
@@ -76,7 +76,7 @@ describe("Shared Browser collaboration protocol", () => {
         participants: [
           {
             id: "participant-1",
-            displayName: "Marcus",
+            displayName: "Taylor",
             color: "red",
             pageId: "page-1",
             cursor: { x: "secret", y: 0.5 },
@@ -155,7 +155,7 @@ describe("Shared Browser collaboration protocol", () => {
         participants: [
           {
             id: "participant-1",
-            displayName: "Marcus",
+            displayName: "Taylor",
             color: "#0ea5e9",
             pageId: "page-1",
             cursor: null,

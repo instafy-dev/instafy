@@ -3986,8 +3986,8 @@ mod conversation_notification_metadata_tests {
         normalize_human_mention_metadata(&mut metadata).unwrap();
         assert_eq!(metadata["mentionedUserIds"], json!([user_id]));
         for value in [
-            json!("@marcus"),
-            json!(["@marcus"]),
+            json!("@taylor"),
+            json!(["@taylor"]),
             json!([null]),
             json!(vec![user_id; 33]),
         ] {

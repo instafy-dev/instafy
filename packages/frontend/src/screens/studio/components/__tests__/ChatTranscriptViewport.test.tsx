@@ -14,7 +14,7 @@ const assistantSpeaker: StickyChatSpeaker = {
 
 const humanSpeaker: StickyChatSpeaker = {
   kind: "human",
-  label: "Marcus",
+  label: "Taylor",
   avatarSeed: "user-1",
 };
 
@@ -163,7 +163,7 @@ describe("ChatSpeakerStickyOverlay", () => {
 
     const human = await renderOverlay(humanSpeaker);
     expect(human.overlay.querySelector('[data-testid="chat-human-speaker-pill"]')?.textContent).toContain(
-      "Marcus",
+      "Taylor",
     );
 
     const hidden = await renderOverlay(null);

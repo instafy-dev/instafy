@@ -14,7 +14,7 @@ function snapshot(overrides: Partial<ChatParticipantsSnapshot> = {}): ChatPartic
   return {
     conversationId: "conv-1",
     humans: [
-      { userId: "u1", label: "Marcus", isSelf: true },
+      { userId: "u1", label: "Taylor", isSelf: true },
       { userId: "u2", label: "Kim Larsen", isSelf: false },
     ],
     agents: [
@@ -105,7 +105,7 @@ describe("ParticipantsDrawer", () => {
 
     const drawer = container.querySelector('[data-testid="participants-drawer"]');
     expect(drawer).not.toBeNull();
-    expect(drawer?.textContent).toContain("Marcus");
+    expect(drawer?.textContent).toContain("Taylor");
     expect(drawer?.textContent).toContain("@octo");
     expect(drawer?.textContent).toContain("gpt-5.5");
     // Silence rules: the healthy default credential says nothing, the reset

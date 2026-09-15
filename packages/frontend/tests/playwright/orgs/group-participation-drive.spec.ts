@@ -583,7 +583,7 @@ test.describe("Group participation live drive", () => {
       const turn1 = await sendExpectingSilence(
         memberPage,
         conversationId,
-        `Marcus, do you approve the release notes? ${Date.now()}`,
+        `Taylor, do you approve the release notes? ${Date.now()}`,
       );
       const turn2 = await sendExpectingSilence(
         page,
@@ -593,7 +593,7 @@ test.describe("Group participation live drive", () => {
       const turn3 = await sendExpectingSilence(
         memberPage,
         conversationId,
-        `Marcus, thanks for confirming the release plan. ${Date.now()}`,
+        `Taylor, thanks for confirming the release plan. ${Date.now()}`,
       );
       console.log("[drive] silent streak outcomes:", { turn1, turn2, turn3 });
       for (const [label, outcome] of [

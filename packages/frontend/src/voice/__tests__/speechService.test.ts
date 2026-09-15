@@ -754,7 +754,7 @@ describe("speechService", () => {
 
     await expect(
       speakTextWithSpeechService({
-        text: "Hello Marcus",
+        text: "Hello Taylor",
       }),
     ).resolves.toEqual({
       spoken: true,
@@ -792,7 +792,7 @@ describe("speechService", () => {
 
     await expect(
       speakTextWithSpeechService({
-        text: "Hello Marcus",
+        text: "Hello Taylor",
         backendPreference: "browser",
       }),
     ).resolves.toEqual({
@@ -852,7 +852,7 @@ describe("speechService", () => {
 
     await expect(
       speakTextWithSpeechService({
-        text: "Hello Marcus",
+        text: "Hello Taylor",
         backendPreference: "provider",
       }),
     ).resolves.toEqual({
@@ -863,7 +863,7 @@ describe("speechService", () => {
 
     expect(synthesizeRuntimeSpeechMock).toHaveBeenCalledWith(
       expect.objectContaining({
-        text: "Hello Marcus",
+        text: "Hello Taylor",
         format: "wav",
       }),
     );

@@ -35,7 +35,7 @@ Environment overrides:
   TRI_CLIENT_CAMERA_FLOW=phone-provider|desktop-provider
   TRI_CLIENT_SERIAL=<adb-serial>
   TRI_CLIENT_PROMPT='@octo capture a front selfie'
-  TRI_CLIENT_EXPECTED_RESPONSE='Octo captured a front photo on Marcus phone.'
+  TRI_CLIENT_EXPECTED_RESPONSE='Octo captured a front photo on Taylor phone.'
   TRI_CLIENT_SECOND_PROMPT='@octo capture another front selfie'`);
 }
 

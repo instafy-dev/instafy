@@ -61,7 +61,7 @@ describe("SharedBrowserParticipantPointers", () => {
     const participants: SharedBrowserCollaborationParticipant[] = [
       {
         id: "self",
-        displayName: "Marcus",
+        displayName: "Taylor",
         color: "#0ea5e9",
         pageId: "page-1",
         cursor: { x: 0.1, y: 0.1 },
