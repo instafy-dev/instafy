@@ -136,7 +136,8 @@ describe("ChatGettingStartedCard", () => {
     expect(container.querySelector('[data-testid="onboarding-use-managed-ai"]')).toBeNull();
     expect(container.querySelector('[data-testid="onboarding-connect-own-ai"]')).toBeNull();
     expect(container.textContent).toContain("What should your agent work on?");
-    expect(container.textContent).toContain("hosted git repo");
+    expect(container.textContent).not.toContain("hosted git repo");
+    expect(container.textContent).not.toContain("desktop app");
     // The card shares the bubble scale: the card tier, not a private width.
     expect(
       container.querySelector('[data-testid="onboarding-getting-started"]')?.className,

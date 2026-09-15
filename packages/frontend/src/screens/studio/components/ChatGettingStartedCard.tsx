@@ -5,7 +5,6 @@ import { Input } from "../../../components/Input";
 import { Spinner } from "../../../components/Spinner";
 import { Surface } from "../../../components/Surface";
 import { Text } from "../../../components/Text";
-import { INSTAFY_DESKTOP_INSTALL_URL } from "../../../desktop/install";
 import { controllerClient } from "../../../sdk/instafy";
 import { openExternalUrl } from "../../../utils/openExternalUrl";
 import { CHAT_BUBBLE_MAX_WIDTH } from "./chatBubbleWidth";
@@ -325,21 +324,6 @@ export function ChatGettingStartedCard({
                 tone="primary"
               >
                 What should your agent work on?
-              </Text>
-              <Text as="p" variant="caption" tone="muted" className="mt-0.5">
-                Your agent works in a hosted git repo, so every change is a commit you can revert.
-                Prefer a local folder? Use the{" "}
-                <a
-                  href={INSTAFY_DESKTOP_INSTALL_URL}
-                  className="underline underline-offset-2"
-                  onClick={(event) => {
-                    event.preventDefault();
-                    void openExternalUrl(INSTAFY_DESKTOP_INSTALL_URL);
-                  }}
-                >
-                  desktop app
-                </a>
-                .
               </Text>
               <div className="mt-2 grid gap-2 @sm:grid-cols-2">
                 {importGithubAction ? (
