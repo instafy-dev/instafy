@@ -111,6 +111,23 @@ The focused downloader tests run with `node --test test/speech-bootstrap-proxy.t
 from this package. They need OpenSSL to generate an ephemeral local HTTPS certificate;
 all proxy fixtures use loopback connections and need no external service or credentials.
 
+## Notarization retry checks
+
+Notarization retries use transport failures reported in the error message, never
+stack-trace paths or line numbers. Numeric 502/503/504 messages must identify an
+HTTP response or status code; unrelated file paths and submission IDs do not make
+an invalid bundle or authentication rejection retryable. Existing attempt limits,
+deadlines and retry backoff remain unchanged.
+
+Run the focused, credential-free tests from this package without building Desktop:
+
+```bash
+NOTARIZE_BACKOFF_MS=1 node --test test/notarize.test.mjs test/notarize-bounds.test.mjs
+```
+
+The short backoff applies only to this test invocation. Its injected notarization
+functions do not contact Apple, sign an app or publish an artifact.
+
 ## Building the runtime binary (dev)
 
 The desktop runtime launcher expects a locally-built `runtime-agent` binary:
