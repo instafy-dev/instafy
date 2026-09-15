@@ -10,8 +10,8 @@ export function validateIdentityImage(file: File): string | null {
   return null;
 }
 
-/** User-authenticated upload. The bucket policies enforce identity permissions. */
-export async function uploadIdentityImage(kind: "orgs" | "spaces", id: string, file: File): Promise<string> {
+/** User-authenticated upload. Agent paths use the owner user ID; other paths use the identity ID. */
+export async function uploadIdentityImage(kind: "orgs" | "spaces" | "agents", id: string, file: File): Promise<string> {
   const invalid = validateIdentityImage(file);
   if (invalid) throw new Error(invalid);
   if (!/^[\da-f]{8}(-[\da-f]{4}){3}-[\da-f]{12}$/i.test(id)) throw new Error("Invalid picture destination.");

@@ -5,7 +5,7 @@ import { uploadIdentityImage, validateIdentityImage } from "../identityImages";
 
 describe("identity image upload", () => {
   beforeEach(() => { storage.upload.mockReset().mockResolvedValue({ error: null }); storage.getPublicUrl.mockReturnValue({ data: { publicUrl: "https://storage.example/picture.webp" } }); });
-  it.each(["orgs", "spaces"] as const)("uses an immutable scoped %s path and safe extension", async kind => {
+  it.each(["orgs", "spaces", "agents"] as const)("uses an immutable scoped %s path and safe extension", async kind => {
     const file = new File(["picture"], "../../private.svg", { type: "image/webp" });
     await uploadIdentityImage(kind, "11111111-1111-4111-8111-111111111111", file);
     expect(storage.upload).toHaveBeenCalledWith(expect.stringMatching(new RegExp(`^${kind}/11111111-1111-4111-8111-111111111111/[0-9a-f-]{36}\\.webp$`)), file,

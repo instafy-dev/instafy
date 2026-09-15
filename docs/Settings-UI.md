@@ -113,8 +113,8 @@ the saved picture, icon and color, on both desktop and mobile. It follows confir
 and falls back to the chosen emoji, then initials, when a picture is removed or unavailable. Draft choices remain confined to the editor until
 saved; a missing current space shows the Choose space prompt without a stale identity.
 
-People, teams and spaces share `IdentityPhotoButton`: a labeled photo button with a pencil
-badge opens the native file picker. People stay circular and team/space pictures use rounded
+People, bots, teams and spaces share `IdentityPhotoButton`: a labeled photo button with a pencil
+badge opens the native file picker. People and bots stay circular and team/space pictures use rounded
 squares. Removing a space picture preserves its fallback icon and color. Space uploads are
 previewed locally until Save appearance; Cancel discards the draft. Team uploads follow the
 same draft behavior: name, picture and color save together through Save profile. Cancel
@@ -162,3 +162,25 @@ and returns it in organization summaries. Omitted updates preserve the value; ex
 Apply the additive `20260914180000_org_accent.sql` migration before enabling color writes.
 Older clients remain compatible and organization reads tolerate an unmigrated database;
 the database and controller both reject values outside the palette.
+
+## Bot profiles
+
+Bot creation and editing use the same `SettingsIdentityRow`, persistent fields and
+`SettingsFormActions` as personal profiles: picture beside Display name, then Handle and
+About. Keep provider, credential, model and Style guidance in a separate Bot behavior
+section. Changing a public profile must not pin or change inherited runtime defaults.
+
+Bot pictures use the shared PNG/JPEG/WebP validation and 2 MB limit. Native file selection
+creates a local preview; Save profile uploads and then saves the URL. Cancel discards the
+draft, removal restores the bot's fallback identity, and failed metadata saves reuse the
+uploaded picture on retry. Disable editing and dismissal during a save. Reset drafts on
+account changes and do not save a completed upload into a different account's bot.
+`AgentAvatar` renders the same saved or draft identity in the editor and bot list, including
+the themed Octo mark and a fallback for unavailable images.
+
+Apply `20260915110000_agent_identity_images.sql` after the identity-image migration. Bot
+uploads use `agents/<owner-user-id>/<random-uuid>.<extension>` in the public `identity-images`
+bucket, which also permits uploading before a new bot has an ID. Only that user can upload
+or delete objects in their directory; overwrite is not allowed. The existing controller
+checks bot ownership when saving `avatarSeed`. Existing saved image URLs remain readable,
+but the editor uses the native file picker rather than an image-URL field.
