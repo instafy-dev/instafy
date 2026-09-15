@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { IdentityPhotoButton } from "../../../components/IdentityPhotoButton";
+import { IDENTITY_IMAGE_ACCEPT } from "../../../lib/identityImages";
+import { useEffect, useState } from "react";
 import { Button } from "../../../components/Button";
 import { Text } from "../../../components/Text";
 import { OrgIdentity } from "../../../components/OrgIdentity";
@@ -27,7 +29,6 @@ export function OrgAvatarEditor({
   avatarUrl: string | null;
 }) {
   const { showStatus } = useStatus();
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [avatarUrl, setAvatarUrl] = useState<string | null>(initialAvatarUrl);
   const [pending, setPending] = useState(false);
 
@@ -75,42 +76,19 @@ export function OrgAvatarEditor({
 
   return (
     <div className="flex flex-wrap items-center gap-3" data-testid="org-avatar-editor">
-      <span data-testid="org-avatar-preview">
-        <OrgIdentity name={orgName} avatarUrl={avatarUrl} accentColor={accentColor} className="h-12 w-12 text-sm" />
-      </span>
+      {canEdit ? <IdentityPhotoButton square disabled={pending} accept={IDENTITY_IMAGE_ACCEPT}
+        label={pending ? "Saving team picture" : avatarUrl ? "Change team picture" : "Upload team picture"}
+        onSelect={file => void handleFileChosen(file)} testId="org-avatar-change" inputTestId="org-avatar-file-input">
+        <span data-testid="org-avatar-preview"><OrgIdentity name={orgName} avatarUrl={avatarUrl} accentColor={accentColor} className="h-16 w-16 text-base" /></span>
+      </IdentityPhotoButton> : <span data-testid="org-avatar-preview"><OrgIdentity name={orgName} avatarUrl={avatarUrl} accentColor={accentColor} className="h-16 w-16 text-base" /></span>}
       {canEdit ? (
         <div className="space-y-2">
           <div className="flex flex-wrap items-center gap-2">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            className="hidden"
-            disabled={pending}
-            data-testid="org-avatar-file-input"
-            onChange={(event) => {
-              const file = event.target.files?.[0];
-              event.target.value = "";
-              if (file) {
-                void handleFileChosen(file);
-              }
-            }}
-          />
-          <Button
-            variant="outline"
-            size="xs"
-            radius="xl"
-            isDisabled={pending}
-            data-testid="org-avatar-change"
-            onPress={() => fileInputRef.current?.click()}
-          >
-            {pending ? "Saving…" : avatarUrl ? "Change picture" : "Add picture"}
-          </Button>
           {avatarUrl ? (
             <Button
               variant="ghost"
               size="xs"
-              radius="xl"
+              radius="lg"
               isDisabled={pending}
               data-testid="org-avatar-remove"
               onPress={() => void handleRemove()}
@@ -119,11 +97,11 @@ export function OrgAvatarEditor({
             </Button>
           ) : null}
           </div>
-          <Text variant="caption" tone="muted">Images up to 2 MB. Shown in the team list.</Text>
+          <Text variant="caption" tone="muted">PNG, JPEG or WebP, up to 2 MB.</Text>
         </div>
       ) : (
         <Text variant="caption" tone="muted">
-          Shown in the team list.
+          Shown wherever this team appears.
         </Text>
       )}
     </div>

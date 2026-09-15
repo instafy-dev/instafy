@@ -89,9 +89,31 @@ without losing focus or creating extra route visits.
 ## Team identity
 
 The space segment of the organization/space breadcrumb uses `SpaceIdentity`, including
-the saved icon and color, on both desktop and mobile. It follows confirmed appearance saves
-and falls back to initials when cleared. Draft choices remain confined to the editor until
+the saved picture, icon and color, on both desktop and mobile. It follows confirmed appearance saves
+and falls back to the chosen emoji, then initials, when a picture is removed or unavailable. Draft choices remain confined to the editor until
 saved; a missing current space shows the Choose space prompt without a stale identity.
+
+People, teams and spaces share `IdentityPhotoButton`: a labeled photo button with a pencil
+badge opens the native file picker. People stay circular and team/space pictures use rounded
+squares. Removing a space picture preserves its fallback icon and color. Space uploads are
+previewed locally until Save appearance; Cancel discards the draft. Team uploads retain their
+existing immediate-save behavior and do not discard unfinished name/color edits.
+
+Team and space uploads accept PNG, JPEG and WebP up to 2 MB. They use the public
+`identity-images` Supabase Storage bucket with immutable random filenames; these pictures
+are public display assets, not private workspace files. Only owners/admins upload team
+pictures. Space owners, builders and inherited writable team members can upload space
+pictures. The controller rechecks metadata write access, validates picture URLs and returns
+`projectAvatarUrl` in space summaries; omission preserves it and null removes it. Network
+URLs are persisted, while local preview blobs never enter workspace metadata.
+
+Apply `20260915100000_identity_images.sql` before enabling picture writes. It adds the space
+image field and provisions the bucket's size/MIME limits and upload/delete policies. For a
+controller-only database without Supabase Storage, metadata migration still succeeds with
+an explicit notice; install Storage and rerun that migration to enable uploads. HTTPS
+image URLs remain supported. HTTP image URLs are allowed only under the configured Supabase
+public identity-image storage origin, so local/self-hosted previews work without relaxing
+external image URL validation.
 
 Right-click a team icon in the desktop organization rail for Team overview, Team settings
 and Members. Shift+F10 or the keyboard menu key opens the same anchored menu; Escape

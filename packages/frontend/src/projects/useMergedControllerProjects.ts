@@ -1,4 +1,4 @@
-import { normalizeSpaceIcon, normalizeSpaceColor, type ProjectIdentity } from "@instafy/sdk/project-identity";
+import { normalizeSpaceAvatarUrl, normalizeSpaceIcon, normalizeSpaceColor, type ProjectIdentity } from "@instafy/sdk/project-identity";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getOrgDisplayName } from "../org/orgNaming";
 import { useAuth } from "../providers/AuthProvider";
@@ -53,6 +53,7 @@ export function mergeControllerProjects(
       name,
       projectIcon: project.projectIcon === undefined ? local?.projectIcon : normalizeSpaceIcon(project.projectIcon),
       projectColor: project.projectColor === undefined ? local?.projectColor : normalizeSpaceColor(project.projectColor),
+      projectAvatarUrl: project.projectAvatarUrl === undefined ? local?.projectAvatarUrl : normalizeSpaceAvatarUrl(project.projectAvatarUrl),
       orgId,
       orgName,
       state: local?.state ?? existing?.state ?? null,

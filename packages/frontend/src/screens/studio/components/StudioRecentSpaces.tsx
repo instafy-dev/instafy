@@ -16,6 +16,7 @@ export interface RecentSpace {
   name: string;
   icon?: string | null;
   color?: string | null;
+  avatarUrl?: string | null;
 }
 
 const spaceName = (space: RecentSpace) => space.name.trim() || "Untitled space";
@@ -120,7 +121,7 @@ export function StudioRecentSpaces({
                   className="min-h-[88px] min-w-0 flex-col !justify-start gap-1.5 px-1 pb-1.5 pt-2.5 focus-visible:ring-offset-0 data-[pressed]:!translate-y-0 data-[pressed]:!scale-100 aria-[current=page]:bg-primary-50 dark:aria-[current=page]:bg-primary-500/10"
                 >
                   <span className="relative inline-flex shrink-0">
-                    <SpaceIdentity name={name} icon={space.icon} color={space.color} className="!h-8 !w-8" />
+                    <SpaceIdentity name={name} icon={space.icon} color={space.color} avatarUrl={space.avatarUrl} className="!h-8 !w-8" />
                     <AttentionBadge count={attention} aria-hidden testId={`sidebar-recent-space-attention-${space.id}`}
                       title={unreadDescription(attention)} className="absolute -right-1.5 -top-1.5" />
                   </span>
@@ -169,11 +170,11 @@ export function StudioRecentSpaces({
       className={`group/item relative min-w-0 py-1.5 transition focus-visible:ring-offset-0 data-[pressed]:!translate-y-0 data-[pressed]:!scale-100 ${rowClassName}`}
     >
       {pathPresentation && currentSpace ? <SpaceIdentity
-        name={spaceName(currentSpace)} icon={currentSpace.icon} color={currentSpace.color}
+        name={spaceName(currentSpace)} icon={currentSpace.icon} color={currentSpace.color} avatarUrl={currentSpace.avatarUrl}
         className="!h-5 !w-5 !rounded-md !text-xs"
       /> : null}
       {!pathPresentation ? <span className={`relative ${iconClassName}`}>
-        {currentSpace ? <SpaceIdentity name={spaceName(currentSpace)} icon={currentSpace.icon} color={currentSpace.color}
+        {currentSpace ? <SpaceIdentity name={spaceName(currentSpace)} icon={currentSpace.icon} color={currentSpace.color} avatarUrl={currentSpace.avatarUrl}
           />
           : <Folder className="h-5 w-5" aria-hidden="true" />}
         <AttentionBadge count={currentAttention} aria-hidden testId="sidebar-current-space-attention"

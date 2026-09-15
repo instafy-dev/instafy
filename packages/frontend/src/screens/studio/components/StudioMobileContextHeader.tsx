@@ -62,7 +62,7 @@ export function StudioMobileContextHeader({
   const homeAttentionId = useId();
   const spaces = projects
     .filter(project => (project.orgId ?? "personal") === teamId)
-    .map(project => ({ id: project.id, name: project.name, icon: project.projectIcon, color: project.projectColor }));
+    .map(project => ({ id: project.id, name: project.name, icon: project.projectIcon, color: project.projectColor, avatarUrl: project.projectAvatarUrl }));
   const selectedSpaceId = spaces.some(space => space.id === activeProjectId) ? activeProjectId : null;
   const unreadCount = Number.isFinite(homeAttentionCount) && homeAttentionCount > 0 ? Math.floor(homeAttentionCount) : 0;
 

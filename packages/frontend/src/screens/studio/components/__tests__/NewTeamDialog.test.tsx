@@ -86,7 +86,7 @@ describe("new team picture onboarding", () => {
   it("rejects unsupported and oversized files before any upload", async () => {
     await render();
     await choose(new File(["text"], "team.txt", { type: "text/plain" }));
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain("must be an image");
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("PNG, JPEG or WebP");
     await choose(new File([new Uint8Array(2 * 1024 * 1024 + 1)], "big.png", { type: "image/png" }));
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("2 MB or smaller");
     expect(mocks.upload).not.toHaveBeenCalled();

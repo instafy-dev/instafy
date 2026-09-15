@@ -1,4 +1,4 @@
-import { normalizeSpaceIcon, normalizeSpaceColor, type ProjectIdentity, type ProjectIdentityUpdate } from "@instafy/sdk/project-identity";
+import { normalizeSpaceAvatarUrl, normalizeSpaceIcon, normalizeSpaceColor, type ProjectIdentity, type ProjectIdentityUpdate } from "@instafy/sdk/project-identity";
 import {
   ControllerApiError,
   normalizeUuidParam,
@@ -717,15 +717,15 @@ export async function updateControllerProjectIdentity(params: ProjectIdentityUpd
   const projectId = normalizeUuidParam(params.projectId);
   if (!projectId) return null;
   const payload: ProjectIdentity = {};
-  for (const key of ["projectIcon", "projectColor"] as const) {
+  for (const key of ["projectIcon", "projectColor", "projectAvatarUrl"] as const) {
     if (params[key] === undefined) continue;
-    const normalize = key === "projectIcon" ? normalizeSpaceIcon : normalizeSpaceColor;
+    const normalize = key === "projectIcon" ? normalizeSpaceIcon : key === "projectColor" ? normalizeSpaceColor : normalizeSpaceAvatarUrl;
     if (params[key] !== null && normalize(params[key]) === null) {
       throw new Error(`Unsupported ${key}.`);
     }
     Object.assign(payload, { [key]: params[key] });
   }
-  if (Object.keys(payload).length === 0) throw new Error("Choose an icon or color to update.");
+  if (Object.keys(payload).length === 0) throw new Error("Choose a picture, icon or color to update.");
   const context = await resolveControllerRequestContext(null);
   if (!context.accessToken) return null;
   const response = await fetch(`${context.baseUrl}/projects/${encodeURIComponent(projectId)}`, {

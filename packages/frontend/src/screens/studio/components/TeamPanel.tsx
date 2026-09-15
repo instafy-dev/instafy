@@ -79,7 +79,7 @@ export function TeamPanel({ organizationId: requestedOrganizationId }: TeamPanel
         {personalSpaces.length === 0 ? <p>No personal spaces are loaded yet.</p> : (
           <ul className="space-y-2">{personalSpaces.map((space) => <li key={space.id}>
             <Button variant="ghost" size="sm" className="max-w-full justify-start text-left" onPress={() => navigate(`/studio?${new URLSearchParams({ projectId: space.id })}`)}>
-              <SpaceIdentity name={space.name} icon={space.projectIcon} color={space.projectColor} className="h-7 w-7 shrink-0" />
+              <SpaceIdentity name={space.name} icon={space.projectIcon} color={space.projectColor} avatarUrl={space.projectAvatarUrl} className="h-7 w-7 shrink-0" />
               <span className="truncate">{space.name || "Untitled space"}</span>
             </Button>
           </li>)}</ul>
@@ -170,7 +170,7 @@ export function TeamPanel({ organizationId: requestedOrganizationId }: TeamPanel
               {spaces.length === 0 ? <p className="text-sm text-slate-600 dark:text-slate-400">No spaces for this team are loaded in this workspace.</p> : (
                 <ul className="space-y-2">{spaces.map((space) => <li key={space.id}>
                   <button type="button" className="flex items-center gap-2 text-sm text-primary-600 dark:text-primary-400" onClick={() => navigate(`/studio?${new URLSearchParams({ projectId: space.id, panel: "automations" })}`)}>
-                    <SpaceIdentity name={space.name} icon={space.projectIcon} color={space.projectColor} className="h-7 w-7" />
+                    <SpaceIdentity name={space.name} icon={space.projectIcon} color={space.projectColor} avatarUrl={space.projectAvatarUrl} className="h-7 w-7" />
                     {space.name || "Untitled space"}<span className="text-xs text-slate-600 dark:text-slate-400">· Automations</span>
                   </button>
                 </li>)}</ul>

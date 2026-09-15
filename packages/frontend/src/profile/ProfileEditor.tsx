@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
-import { EditPencil } from "iconoir-react";
+import { useCallback, useEffect, useState } from "react";
+import { IdentityPhotoButton } from "../components/IdentityPhotoButton";
 import { Button } from "../components/Button";
 import { SettingsFormLayout } from "../components/SettingsFormLayout";
 import { Field } from "../components/Field";
@@ -26,7 +26,6 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
   const [avatarUrl, setAvatarUrl] = useState("");
   const [saving, setSaving] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     setDisplayName(profile?.fullName ?? "");
@@ -43,12 +42,7 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
   const compact = variant === "menu";
   const profileUnavailable = loading || (!profile && Boolean(error));
 
-  const handleFileUpload = useCallback((event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (!file) {
-      return;
-    }
+  const handleFileUpload = useCallback((file: File) => {
     if (!file.type.startsWith("image/")) {
       setUploadError("Choose an image file.");
       return;
@@ -114,25 +108,8 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
       ) : null}
       <div className="flex flex-col gap-4">
         <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-4">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            aria-label="Choose profile photo"
-            onChange={handleFileUpload}
-            disabled={profileUnavailable || saving}
-            className="hidden"
-          />
-          <Button
-            onPress={() => fileInputRef.current?.click()}
-            aria-label={avatarPreview ? "Change profile photo" : "Upload profile photo"}
-            title={avatarPreview ? "Change profile photo" : "Upload profile photo"}
-            isDisabled={profileUnavailable || saving}
-            variant="ghost"
-            size="icon"
-            radius="full"
-            className="group relative h-16 w-16 shrink-0"
-          >
+          <IdentityPhotoButton label={avatarPreview ? "Change profile photo" : "Upload profile photo"}
+            disabled={profileUnavailable || saving} onSelect={handleFileUpload}>
             <HumanAvatar
               userId={user?.id}
               displayName={displayName}
@@ -141,10 +118,7 @@ export function ProfileEditor({ variant = "panel", onDone }: ProfileEditorProps)
               className="h-16 w-16 text-base"
               data-testid="profile-avatar-preview"
             />
-            <span aria-hidden="true" className="absolute -bottom-0.5 -right-0.5 flex h-6 w-6 items-center justify-center rounded-full border border-slate-200 bg-white text-slate-700 shadow-sm group-hover:bg-slate-50 dark:border-[color:var(--color-studio-dark-raised-control-border)] dark:bg-[var(--color-studio-dark-raised-control)] dark:text-slate-100 dark:group-hover:bg-[var(--color-studio-dark-control-hover)]">
-              <EditPencil className="h-3.5 w-3.5" />
-            </span>
-          </Button>
+          </IdentityPhotoButton>
           <Field label="Display name" htmlFor="profile-display-name" className="min-w-0">
             <Input
               id="profile-display-name"

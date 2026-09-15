@@ -678,7 +678,7 @@ export function StudioSidebar({
   // the authenticated project snapshot.
   const recentSpaceCandidates = useMemo(() => activeTeamMetadataReady
     ? mergedProjects.filter((project) => (project.orgId ?? "personal") === activeOrgKey)
-      .map((project) => ({ id: project.id, name: project.name, icon: project.projectIcon, color: project.projectColor }))
+      .map((project) => ({ id: project.id, name: project.name, icon: project.projectIcon, color: project.projectColor, avatarUrl: project.projectAvatarUrl }))
     : [], [activeOrgKey, activeTeamMetadataReady, mergedProjects]);
   const filteredOrgProjects = useMemo(() => {
     const needle = workspaceProjectQuery.trim().toLowerCase();

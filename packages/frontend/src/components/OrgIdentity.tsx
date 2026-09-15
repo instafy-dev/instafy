@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { normalizeOrgAccent } from "../org/orgAccent";
 import { getOrgInitials } from "../org/orgNaming";
 import "./OrgIdentity.css";
@@ -9,8 +10,9 @@ export function OrgIdentity({ name, avatarUrl, accentColor, className = "" }: {
   accentColor?: string | null;
   className?: string;
 }) {
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
   return <span aria-hidden="true" data-testid="org-identity" data-org-accent={normalizeOrgAccent(accentColor) ?? "slate"}
     className={`org-accent-avatar inline-flex shrink-0 items-center justify-center overflow-hidden rounded-lg font-medium ${className}`}>
-    {avatarUrl ? <img src={avatarUrl} alt="" draggable={false} className="h-full w-full object-cover" /> : getOrgInitials(name)}
+    {avatarUrl && avatarUrl !== failedUrl ? <img src={avatarUrl} alt="" draggable={false} onError={() => setFailedUrl(avatarUrl)} className="h-full w-full object-cover" /> : getOrgInitials(name)}
   </span>;
 }

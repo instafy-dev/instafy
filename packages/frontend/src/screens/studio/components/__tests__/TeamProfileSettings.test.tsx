@@ -61,6 +61,12 @@ describe("team profile editing", () => {
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("could not be saved");
     expect(container.querySelector('[role="status"]')).toBeNull();
   });
+  it("falls back to team initials when an uploaded picture is unavailable", async () => {
+    await render();
+    await act(async () => container.querySelector('[data-testid="org-avatar-preview"] img')!.dispatchEvent(new Event("error")));
+    expect(container.querySelector('[data-testid="org-avatar-preview"] img')).toBeNull();
+    expect(container.querySelector('[data-testid="org-avatar-preview"]')?.textContent).toBe("ET");
+  });
   it("retains the current picture when removal is not saved", async () => {
     mocks.update.mockResolvedValue(false);
     await render();

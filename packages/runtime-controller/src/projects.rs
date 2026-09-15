@@ -687,6 +687,7 @@ struct ProjectSummary {
     project_name: Option<String>,
     project_icon: Option<String>,
     project_color: Option<String>,
+    project_avatar_url: Option<String>,
     owner_user_id: Option<Uuid>,
     project_type: Option<String>,
     status: Option<String>,
@@ -1801,7 +1802,7 @@ async fn get_project_summary(
 
     let row = transaction
         .query_opt(
-            "select p.id, p.org_id, p.name, p.icon, p.color, p.owner_user_id, p.project_type, p.status,
+            "select p.id, p.org_id, p.name, p.icon, p.color, to_jsonb(p) ->> 'avatar_url' as avatar_url, p.owner_user_id, p.project_type, p.status,
                     o.slug as org_slug, o.name as org_name
              from projects p
              left join organizations o on o.id = p.org_id
@@ -1831,6 +1832,36 @@ struct ProjectUpdateRequest {
     project_icon: Option<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_identity_patch")]
     project_color: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_identity_patch")]
+    project_avatar_url: Option<Option<String>>,
+}
+
+// Public uploads on the configured self-hosted storage origin may use HTTP.
+// External images must use HTTPS; credentials and executable URL schemes are rejected.
+fn validate_identity_image_url(
+    value: &str,
+    storage_origin: &str,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let url =
+        reqwest::Url::parse(value).map_err(|_| bad_request("Picture must be a valid image URL"))?;
+    let local_storage = reqwest::Url::parse(storage_origin)
+        .ok()
+        .is_some_and(|storage| {
+            url.origin() == storage.origin()
+                && url
+                    .path()
+                    .starts_with("/storage/v1/object/public/identity-images/")
+        });
+    if value.len() > 2048
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || !(url.scheme() == "https" || (url.scheme() == "http" && local_storage))
+    {
+        return Err(bad_request(
+            "Picture must use HTTPS or the configured image storage",
+        ));
+    }
+    Ok(())
 }
 
 fn deserialize_identity_patch<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
@@ -1845,9 +1876,10 @@ impl ProjectUpdateRequest {
         if self.project_name.is_none()
             && self.project_icon.is_none()
             && self.project_color.is_none()
+            && self.project_avatar_url.is_none()
         {
             return Err(bad_request(
-                "Provide a projectName, projectIcon or projectColor",
+                "Provide a projectName, projectIcon, projectColor or projectAvatarUrl",
             ));
         }
         if let Some(name) = &mut self.project_name {
@@ -1894,6 +1926,9 @@ async fn update_project(
     let project_id = parse_uuid_param(project_id_raw, "project_id")?;
 
     body.validate()?;
+    if let Some(Some(url)) = &body.project_avatar_url {
+        validate_identity_image_url(url, &state.config._supabase_project_url)?;
+    }
 
     let mut connection = state
         .pool
@@ -1914,6 +1949,7 @@ async fn update_project(
             "update projects set name = coalesce($2, name),
                  icon = case when $3 then $4 else icon end,
                  color = case when $5 then $6 else color end,
+                 avatar_url = case when $7 then $8 else avatar_url end,
                  updated_at = now() where id = $1",
             &[
                 &project_id,
@@ -1922,6 +1958,8 @@ async fn update_project(
                 &body.project_icon.clone().flatten(),
                 &body.project_color.is_some(),
                 &body.project_color.clone().flatten(),
+                &body.project_avatar_url.is_some(),
+                &body.project_avatar_url.clone().flatten(),
             ],
         )
         .await
@@ -1929,7 +1967,7 @@ async fn update_project(
 
     let row = transaction
         .query_one(
-            "select p.id, p.org_id, p.name, p.icon, p.color, p.owner_user_id, p.project_type, p.status,
+            "select p.id, p.org_id, p.name, p.icon, p.color, to_jsonb(p) ->> 'avatar_url' as avatar_url, p.owner_user_id, p.project_type, p.status,
                     o.slug as org_slug, o.name as org_name
              from projects p
              left join organizations o on o.id = p.org_id
@@ -2278,7 +2316,7 @@ async fn list_org_projects(
     let request_user_id = context.user_id;
     let rows = transaction
         .query(
-            "select p.id, p.org_id, p.name, p.icon, p.color, p.owner_user_id, p.project_type, p.status,
+            "select p.id, p.org_id, p.name, p.icon, p.color, to_jsonb(p) ->> 'avatar_url' as avatar_url, p.owner_user_id, p.project_type, p.status,
                     o.slug as org_slug, o.name as org_name,
                     access_pm.role as project_member_role,
                     access_om.role as org_member_role
@@ -2336,7 +2374,7 @@ async fn list_accessible_projects(
     let rows = if context.is_service_role {
         transaction
             .query(
-                "select p.id, p.org_id, p.name, p.icon, p.color, p.owner_user_id, p.project_type, p.status,
+                "select p.id, p.org_id, p.name, p.icon, p.color, to_jsonb(p) ->> 'avatar_url' as avatar_url, p.owner_user_id, p.project_type, p.status,
                         o.slug as org_slug, o.name as org_name,
                         null::text as project_member_role,
                         null::text as org_member_role
@@ -2368,7 +2406,7 @@ async fn list_accessible_projects(
                    join projects p on p.org_id = om.org_id
                    where om.user_id = $1
                  )
-                 select p.id, p.org_id, p.name, p.icon, p.color, p.owner_user_id, p.project_type, p.status,
+                 select p.id, p.org_id, p.name, p.icon, p.color, to_jsonb(p) ->> 'avatar_url' as avatar_url, p.owner_user_id, p.project_type, p.status,
                         o.slug as org_slug, o.name as org_name,
                         access_pm.role as project_member_role,
                         access_om.role as org_member_role
@@ -4211,12 +4249,7 @@ async fn update_organization(
     let avatar_url = match body.avatar_url.as_deref().map(str::trim) {
         Some("") => Some(None),
         Some(value) => {
-            if value.len() > 2048 {
-                return Err(bad_request("avatarUrl must be 2048 characters or fewer"));
-            }
-            if !value.starts_with("https://") {
-                return Err(bad_request("avatarUrl must be an https URL"));
-            }
+            validate_identity_image_url(value, &state.config._supabase_project_url)?;
             Some(Some(value.to_string()))
         }
         None => None,
@@ -5430,6 +5463,7 @@ fn map_project_summary(row: tokio_postgres::Row) -> ProjectSummary {
         project_name: row.get("name"),
         project_icon: row.get("icon"),
         project_color: row.get("color"),
+        project_avatar_url: row.get("avatar_url"),
         owner_user_id: row.get("owner_user_id"),
         project_type: row.get("project_type"),
         status: row.get("status"),
